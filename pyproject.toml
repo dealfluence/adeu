@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "adeu"
+version = "0.1.0"
+description = "Automated DOCX Redlining Engine"
+authors = ["Mikko Korpela"]
+readme = "spec.md"
+packages = [{include = "adeu", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+python-docx = "*"
+markitdown = {version = "*", extras = ["docx"]}
+structlog = "*"
+pydantic = "*"
+lxml = "*"
+diff-match-patch = "*" 
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+ruff = "*"
+mypy = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
