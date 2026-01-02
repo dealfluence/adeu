@@ -20,3 +20,7 @@ class ComplianceEdit(BaseModel):
     thought_process: Optional[str] = None
     # Source policy quote (optional)
     verbatim_policy_quote: Optional[str] = None
+
+    # EXACT LOCATION (Optional, used by Diff engine)
+    # The 0-based character index in the extraction string where this edit begins.
+    match_start_index: Optional[int] = None

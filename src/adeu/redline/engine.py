@@ -85,25 +85,29 @@ class RedlineEngine:
     def apply_edits(self, edits: List[ComplianceEdit]):
         """
         Applies a list of ComplianceEdits to the document.
-        Sorts edits by length (descending) to minimize index shift collisions
-        (though Mapper rebuilds help).
+        Sorts indexed edits DESCENDING to prevent index shifting.
         """
-        for e in edits:
-            logger.debug(f"Edit: {e.operation} '{repr(e.target_text_to_change_or_anchor)}' -> '{repr(e.proposed_new_text)}'")
-    
-        # Sort by length of target text to handle specific matches before general ones
-        sorted_edits = sorted(
-            edits, 
-            key=lambda x: len(x.target_text_to_change_or_anchor), 
-            reverse=True
-        )
+        indexed_edits = [e for e in edits if e.match_start_index is not None]
+        unindexed_edits = [e for e in edits if e.match_start_index is None]
         
-        logger.info(f"Applying {len(sorted_edits)} edits.")
+        # 1. Apply Indexed Edits (Reverse Order)
+        indexed_edits.sort(key=lambda x: x.match_start_index, reverse=True)
+        
+        logger.info(f"Applying {len(indexed_edits)} indexed edits (Reverse Order).")
+        for edit in indexed_edits:
+            self._apply_single_edit_indexed(edit)
 
-        for edit in sorted_edits:
-            self._apply_single_edit(edit)
-            
-    def _apply_single_edit(self, edit: ComplianceEdit):
+        # 2. Apply Unindexed Edits (Heuristic Fallback)
+        if unindexed_edits:
+            unindexed_edits.sort(key=lambda x: len(x.target_text_to_change_or_anchor), reverse=True)
+            logger.info(f"Applying {len(unindexed_edits)} unindexed edits (Heuristic).")
+            # Rebuild map as safety measure
+            self.mapper._build_map()
+            for edit in unindexed_edits:
+                self._apply_single_edit_heuristic(edit)
+
+    def _apply_single_edit_heuristic(self, edit: ComplianceEdit):
+        """Legacy logic using string search"""
         target_text = edit.target_text_to_change_or_anchor
         target_runs = self.mapper.find_target_runs(target_text)
 
@@ -162,10 +166,60 @@ class RedlineEngine:
             # Do NOT automatically prepend space. Trust the Diff engine.
             ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=last_run)
             parent.insert(index + 1, ins_elem)
+
+    def _apply_single_edit_indexed(self, edit: ComplianceEdit):
+        """
+        Applies edit using exact index coordinates.
+        """
+        start_idx = edit.match_start_index
+        target_text = edit.target_text_to_change_or_anchor
+        length = len(target_text) if target_text else 0
+        
+        logger.debug(f"Applying Edit at [{start_idx}:{start_idx+length}] Op={edit.operation}")
+
+        if edit.operation == EditOperationType.INSERTION:
+            anchor_run = self.mapper.get_insertion_anchor(start_idx)
+            if not anchor_run:
+                logger.warning(f"Could not find anchor for insertion at {start_idx}")
+                return
             
-        # Debug: Log change
-        after_xml = parent_p.xml
-        logger.debug(f"XML Change for '{edit.proposed_new_text or 'DEL'}':\nBEFORE: {before_xml}\nAFTER:  {after_xml}")
+            parent = anchor_run._element.getparent()
+            index = parent.index(anchor_run._element)
+            
+            # Special case: Insert At Start (Index 0)
+            if start_idx == 0:
+                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
+                 parent.insert(index, ins_elem)
+            else:
+                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
+                 parent.insert(index + 1, ins_elem)
+            return
+
+        # For DEL/MOD, we need to identify the runs to delete
+        target_runs = self.mapper.find_target_runs_by_index(start_idx, length)
+        
+        if not target_runs:
+             logger.warning(f"Target runs not found for index {start_idx}")
+             return
+
+        if edit.operation == EditOperationType.DELETION:
+            for run in target_runs:
+                self.track_delete_run(run)
+
+        elif edit.operation == EditOperationType.MODIFICATION:
+            last_del_element = None
+            for run in target_runs:
+                last_del_element = self.track_delete_run(run)
+            
+            if last_del_element is not None and edit.proposed_new_text:
+                parent = last_del_element.getparent()
+                del_index = parent.index(last_del_element)
+                
+                ins_elem = self.track_insert(
+                    edit.proposed_new_text, 
+                    anchor_run=Run(target_runs[-1]._element, None) 
+                )
+                parent.insert(del_index + 1, ins_elem)
 
     def save_to_stream(self) -> BytesIO:
         output = BytesIO()

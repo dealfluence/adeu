@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -71,20 +71,28 @@ class DocumentMapper:
 
     def find_target_runs(self, target_text: str) -> List[Run]:
         """
-        Locates the runs corresponding to target_text. 
-        Splits runs if the target starts/ends in the middle of a run.
-        Rebuilds the map after splitting.
+        Legacy string-search lookup. Prefer find_target_runs_by_index if possible.
         """
         logger.debug(f"Searching for target: '{target_text[:50]}...' (Length: {len(target_text)})")
         start_idx = self.full_text.find(target_text)
         if start_idx == -1:
-            # Try to handle potential whitespace mismatches roughly?
-            # For now, strict match.
             logger.warning("Target text not found", target=target_text[:20])
             return []
 
-        end_idx = start_idx + len(target_text)
-        logger.debug(f"Found match at indices [{start_idx}:{end_idx}]")
+        return self._resolve_runs_at_range(start_idx, start_idx + len(target_text))
+
+    def find_target_runs_by_index(self, start_index: int, length: int) -> List[Run]:
+        """
+        Locates runs based on exact indices.
+        """
+        end_index = start_index + length
+        return self._resolve_runs_at_range(start_index, end_index)
+
+    def _resolve_runs_at_range(self, start_idx: int, end_idx: int) -> List[Run]:
+        """
+        Internal helper to find/split runs given a validated start/end range.
+        """
+        logger.debug(f"Resolving range [{start_idx}:{end_idx}]")
 
         affected_spans = [
             s for s in self.spans if s.end > start_idx and s.start < end_idx
@@ -126,6 +134,36 @@ class DocumentMapper:
 
         return working_runs
 
+    def get_insertion_anchor(self, index: int) -> Optional[Run]:
+        """
+        Finds a Run suitable for anchoring an insertion at a specific index.
+        """
+        # 1. Exact match run ending at index (Insert After)
+        preceding = [s for s in self.spans if s.end == index]
+        if preceding:
+            return preceding[-1].run
+            
+        # 2. Run containing index (Split required)
+        containing = [s for s in self.spans if s.start < index < s.end]
+        if containing:
+            # We need to split this run to insert in the middle
+            span = containing[0]
+            offset = index - span.start
+            left, _ = self._split_run_at_index(span.run, offset)
+            return left # Insert after left
+            
+        # 3. Start of doc
+        if index == 0 and self.spans:
+             # Return the first run; Engine must handle "Insert Before" logic
+             return self.spans[0].run
+             
+        # 4. Whitespace gap? Return the nearest preceding run
+        preceding_gap = [s for s in self.spans if s.end < index]
+        if preceding_gap:
+            return preceding_gap[-1].run
+            
+        return None
+
     def _split_run_at_index(self, run: Run, split_index: int) -> Tuple[Run, Run]:
         """
         Splits a run at a specific character index using raw XML manipulation.
@@ -153,9 +191,8 @@ class DocumentMapper:
         new_r_element.append(new_t)
 
         # 3. Insert into tree
-        parent = run._element.getparent()
-        current_idx = parent.index(run._element)
-        parent.insert(current_idx + 1, new_r_element)
+        # Use lxml addnext to ensure it goes immediately after, regardless of other siblings
+        run._element.addnext(new_r_element)
 
         # 4. Wrap
         new_run = Run(new_r_element, run._parent)

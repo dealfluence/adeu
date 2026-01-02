@@ -17,17 +17,13 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
     
     edits = []
     
-    # We need to track context (previous text) to anchor insertions
-    # dmp.diff_main returns list of tuples: (operation, text)
-    # 0 = Equal, 1 = Insert, -1 = Delete
-    
-    last_equal_text = ""
+    # Track the cursor position in the ORIGINAL text
+    current_original_index = 0
     
     for i, (op, text) in enumerate(diffs):
         if op == 0: # Equal
-            # Keep track of the last known "stable" text to use as anchor
-            # We only need the last few words to be safe, but storing it all is fine for now
-            last_equal_text = text
+            # Move cursor forward
+            current_original_index += len(text)
             
         elif op == -1: # Delete
             # Create Deletion Edit
@@ -35,19 +31,23 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
                 operation=EditOperationType.DELETION,
                 target_text_to_change_or_anchor=text,
                 proposed_new_text=None,
-                thought_process="Diff: Text deleted"
+                thought_process="Diff: Text deleted",
+                match_start_index=current_original_index
             ))
+            # Move cursor forward because this text WAS in the original
+            current_original_index += len(text)
             
         elif op == 1: # Insert
             # Create Insertion Edit
-            # We anchor it to the END of the last_equal_text
-            # Note: This is a simplification. A robust engine handles start-of-file inserts.
+            # For insertions, target_text is usually the anchor.
+            # But if we use indices, we can leave target_text empty or symbolic.
+            # We maintain the "Anchor" semantic for fallback/debug.
             
-            anchor = last_equal_text[-50:] if last_equal_text else ""
+            anchor_start = max(0, current_original_index - 50)
+            anchor = original_text[anchor_start:current_original_index]
             
-            logger.debug(f"Diff Insert: {repr(text)} Anchor (Tail): {repr(anchor[-20:])}")
-            
-            if not anchor:
+            # Legacy Start-of-Document Logic (fallback)
+            if not anchor and current_original_index == 0:
                 # Handle Start-of-Document Insertion
                 # Look ahead for context
                 if i + 1 < len(diffs) and diffs[i+1][0] == 0:
@@ -62,19 +62,20 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
                             operation=EditOperationType.MODIFICATION,
                             target_text_to_change_or_anchor=anchor_target,
                             proposed_new_text=text + anchor_target,
-                            thought_process="Diff: Start-of-doc insertion (converted to modification)"
+                            thought_process="Diff: Start-of-doc insertion (converted to modification)",
+                            match_start_index=current_original_index
                         ))
+                        current_original_index += len(anchor_target) # Important!
                         continue
-
-                logger.warning(f"Insertion at start of file or without context ignored: '{text[:20]}...'")
-                continue
 
             edits.append(ComplianceEdit(
                 operation=EditOperationType.INSERTION,
                 target_text_to_change_or_anchor=anchor,
                 proposed_new_text=text,
-                thought_process="Diff: Text inserted"
+                thought_process="Diff: Text inserted",
+                match_start_index=current_original_index
             ))
+            # Do NOT move original cursor (this text was never in original)
             
     # Optimization: Merge adjacent DELETE + INSERT into MODIFICATION?
     # This helps the engine by giving it a specific target to replace.
@@ -107,7 +108,8 @@ def _merge_diffs(edits: List[ComplianceEdit]) -> List[ComplianceEdit]:
                     operation=EditOperationType.MODIFICATION,
                     target_text_to_change_or_anchor=current.target_text_to_change_or_anchor,
                     proposed_new_text=next_edit.proposed_new_text,
-                    thought_process="Diff: Replacement"
+                    thought_process="Diff: Replacement",
+                    match_start_index=current.match_start_index # Use start of deletion
                 ))
                 i += 2 # Skip both
                 continue

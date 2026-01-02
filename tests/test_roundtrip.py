@@ -310,3 +310,41 @@ def test_overlapping_run_boundaries():
     
     assert len(runs) == 1
     assert runs[0].text == "HELLO"
+
+def test_split_run_ordering_repro():
+    """
+    Reproduction of 'END0' bug.
+    Original: 'e0'.
+    Edit 1: Delete 'e'.
+    Edit 2: Insert ' END' at end.
+    """
+    doc = Document()
+    # Ensure clean slate
+    if len(doc.paragraphs) == 1 and not doc.paragraphs[0].text:
+        p = doc.paragraphs[0]._element
+        p.getparent().remove(p)
+        
+    p = doc.add_paragraph()
+    p.add_run("e0")
+    
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    
+    # Indices: e=0, 0=1. End=2.
+    e1 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="", proposed_new_text=" END", match_start_index=2)
+    e2 = ComplianceEdit(operation=EditOperationType.DELETION, target_text_to_change_or_anchor="e", proposed_new_text=None, match_start_index=0)
+    
+    engine = RedlineEngine(stream)
+    # Engine sorts by index DESC, so e1 (2) applied first, then e2 (0).
+    engine.apply_edits([e2, e1])
+    
+    result_stream = engine.save_to_stream()
+    doc = Document(result_stream)
+    xml = doc.element.xml
+    
+    # Expected: <del>e</del> <r>0</r> <ins> END</ins>
+    idx_0 = xml.find(">0</w:t>")
+    idx_ins = xml.find("> END</w:t>")
+    
+    assert idx_0 < idx_ins, f"0 ({idx_0}) should be before END ({idx_ins})"
