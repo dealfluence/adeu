@@ -1,7 +1,7 @@
 import datetime
 from copy import deepcopy
 from io import BytesIO
-from typing import List
+from typing import List, Optional
 
 import structlog
 from docx import Document
@@ -161,10 +161,19 @@ class RedlineEngine:
             last_run = target_runs[-1]
             parent = last_run._r.getparent()
             index = parent.index(last_run._r)
+            
+            # Determine style source
+            next_run = self._get_next_run(last_run)
+            style_run = self._determine_style_source(
+                prev_run=last_run, 
+                next_run=next_run, 
+                insert_text=edit.proposed_new_text
+            )
+            
             logger.debug(f"Insert Index: {index+1}. Parent len: {len(parent)}")
 
             # Do NOT automatically prepend space. Trust the Diff engine.
-            ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=last_run)
+            ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
             parent.insert(index + 1, ins_elem)
 
     def _apply_single_edit_indexed(self, edit: ComplianceEdit):
@@ -191,7 +200,14 @@ class RedlineEngine:
                  ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
                  parent.insert(index, ins_elem)
             else:
-                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
+                 # Resolve style inheritance (Prev vs Next)
+                 next_run = self._get_next_run(anchor_run)
+                 style_run = self._determine_style_source(
+                     prev_run=anchor_run,
+                     next_run=next_run,
+                     insert_text=edit.proposed_new_text
+                 )
+                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
                  parent.insert(index + 1, ins_elem)
             return
 
@@ -220,6 +236,34 @@ class RedlineEngine:
                     anchor_run=Run(target_runs[-1]._element, None) 
                 )
                 parent.insert(del_index + 1, ins_elem)
+
+    def _get_next_run(self, run: Run) -> Optional[Run]:
+        """
+        Returns the next sibling Run element, skipping non-run elements.
+        """
+        curr = run._element
+        while True:
+            curr = curr.getnext()
+            if curr is None:
+                return None
+            if curr.tag == qn("w:r"):
+                return Run(curr, run._parent)
+
+    def _determine_style_source(self, prev_run: Run, next_run: Optional[Run], insert_text: str) -> Run:
+        """
+        Heuristic to decide whether insertion should inherit style from 
+        the previous run (standard) or the next run (e.g. prepending to a bold sentence).
+        """
+        if not next_run:
+            return prev_run
+            
+        # Heuristic 1: If text ends with space (e.g. "Very "), it is likely an adjective/start 
+        # of the NEXT phrase. Inherit NEXT style.
+        if insert_text and insert_text.endswith(" "):
+            return next_run
+            
+        # Default: Inherit from PREV (standard typing behavior)
+        return prev_run
 
     def save_to_stream(self) -> BytesIO:
         output = BytesIO()

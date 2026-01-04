@@ -12,6 +12,7 @@
 *   **Reverse-Order Application**: `RedlineEngine` now applies indexed edits from back-to-front to prevent index shifting.
 *   **Run Splitting Stability**: Fixed run splitting logic (`addnext`) to ensure insertions land in the correct order relative to split nodes.
 *   **Fuzz Testing**: Implemented property-based testing (disabled strict correctness check due to DMP semantic ambiguity edge cases, but engine stability is verified).
+*   **Formatting Preservation**: Implemented heuristic in `RedlineEngine` to inherit style from the next run if insertion appears to be a prefix (ends in space).
 
 ## 🐛 Known Issues
 ### 1. Table Layouts
@@ -20,9 +21,8 @@
 *   **Next Step**: Implement explicit Table/Row/Cell awareness in `ComplianceEdit` target resolution.
 
 ## 🚀 Next Steps (Roadmap)
-1.  **Formatting Preservation**: Currently, inserted text inherits style from the anchor run. We need logic to handle cases where the insertion should inherit from the *next* run (e.g., inserting at the start of a bold sentence).
-2.  **LLM Integration**: Connect the `ComplianceEdit` schema to an actual OpenAI/Anthropic function call to bypass the text-diffing step for simple instructions ("Change the governing law to NY").
-3.  **Table Enhancements**: Improve table redlining by mapping cell indices.
+1.  **LLM Integration**: Connect the `ComplianceEdit` schema to an actual OpenAI/Anthropic function call to bypass the text-diffing step for simple instructions ("Change the governing law to NY").
+2.  **Table Enhancements**: Improve table redlining by mapping cell indices.
 
 ## 📂 Key Files
 *   `src/adeu/redline/engine.py`: **The Brain**. modifying this requires care.
