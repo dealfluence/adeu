@@ -1,5 +1,6 @@
+import re
 from diff_match_patch import diff_match_patch
-from typing import List
+from typing import List, Dict, Tuple
 from adeu.models import ComplianceEdit, EditOperationType
 import structlog
 
@@ -8,12 +9,27 @@ logger = structlog.get_logger(__name__)
 def generate_edits_from_text(original_text: str, modified_text: str) -> List[ComplianceEdit]:
     """
     Compares original and modified text to generate structured ComplianceEdit objects.
+    Uses Word-Level diffing to ensure natural, readable redlines.
     """
     dmp = diff_match_patch()
     
-    # 1. Compute Diff (Semantic Cleanup makes it human-readable)
-    diffs = dmp.diff_main(original_text, modified_text)
-    dmp.diff_cleanupSemantic(diffs)
+    # 1. Word-Level Tokenization & Encoding
+    # We convert words to single characters so DMP treats them as atomic units.
+    chars1, chars2, token_array = _words_to_chars(original_text, modified_text)
+    
+    # 2. Compute Diff on the Encoded Strings
+    # This finds the shortest edit path in terms of *words*, not characters.
+    diffs_encoded = dmp.diff_main(chars1, chars2, False)
+    
+    # 3. Semantic Cleanup (On Tokens)
+    # Perform cleanup while still in token-space to group adjacent word edits
+    # without breaking word boundaries (e.g. "Solutions" vs "Services").
+    dmp.diff_cleanupSemantic(diffs_encoded)
+
+    # 4. Decode back to Text
+    # Maps the Unicode characters back to the original word tokens.
+    dmp.diff_charsToLines(diffs_encoded, token_array)
+    diffs = diffs_encoded # diffs_encoded is modified in-place by charsToLines
     
     edits = []
     
@@ -118,3 +134,38 @@ def _merge_diffs(edits: List[ComplianceEdit]) -> List[ComplianceEdit]:
         i += 1
         
     return merged
+
+def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:
+    """
+    Splits text into words/tokens and encodes them as unique Unicode characters.
+    This mimics diff_match_patch.diff_linesToChars but for words.
+    """
+    token_array = []  # Maps char_code -> token_string
+    token_hash = {}   # Maps token_string -> char_code
+    
+    # Regex to split: (Whitespace | Word chars | Non-word/Non-space)
+    # This ensures "Word," -> ["Word", ","]
+    # We use a capturing group () to keep the delimiters in the list
+    split_pattern = r'(\s+|\w+|[^\w\s])'
+    
+    def encode_text(text: str) -> str:
+        # filter(None, ...) removes empty strings resulting from the split
+        tokens = [t for t in re.split(split_pattern, text) if t]
+        
+        encoded_chars = []
+        for token in tokens:
+            if token in token_hash:
+                encoded_chars.append(chr(token_hash[token]))
+            else:
+                # Assign new code
+                # We start a bit higher than 0 to avoid control char issues if any
+                code = len(token_array)
+                token_hash[token] = code
+                token_array.append(token)
+                encoded_chars.append(chr(code))
+                
+        return "".join(encoded_chars)
+
+    chars1 = encode_text(text1)
+    chars2 = encode_text(text2)
+    return chars1, chars2, token_array
