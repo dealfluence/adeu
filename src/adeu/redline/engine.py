@@ -10,6 +10,7 @@ from docx.oxml.ns import qn
 from docx.text.run import Run
 
 from adeu.models import ComplianceEdit, EditOperationType
+from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import normalize_docx, create_element, create_attribute
 
@@ -30,6 +31,9 @@ class RedlineEngine:
         
         # Initialize mapper
         self.mapper = DocumentMapper(self.doc)
+        
+        # Initialize Comments Manager
+        self.comments_manager = CommentsManager(self.doc)
 
     def _get_next_id(self):
         self.current_id += 1
@@ -81,6 +85,44 @@ class RedlineEngine:
 
         run._r.getparent().replace(run._r, del_tag)
         return del_tag
+
+    def _attach_comment(self, parent_element, start_element, end_element, text: str):
+        """
+        Wraps the range [start_element, end_element] with w:commentRangeStart/End
+        and appends a w:commentReference.
+        """
+        if not text:
+            return
+
+        # 1. Create Comment in comments.xml
+        comment_id = self.comments_manager.add_comment(self.author, text)
+
+        # 2. Create Anchors
+        range_start = create_element("w:commentRangeStart")
+        create_attribute(range_start, "w:id", comment_id)
+
+        range_end = create_element("w:commentRangeEnd")
+        create_attribute(range_end, "w:id", comment_id)
+
+        # 3. Create Reference (Visual Bubble)
+        # Usually placed immediately after the range end
+        ref_run = create_element("w:r")
+        ref = create_element("w:commentReference")
+        create_attribute(ref, "w:id", comment_id)
+        ref_run.append(ref)
+
+        # 4. Insert into DOM
+        # Insert Start before start_element
+        start_index = parent_element.index(start_element)
+        parent_element.insert(start_index, range_start)
+
+        # Insert End after end_element (account for shift by start tag)
+        # If start==end (single element), index is now start_index + 1
+        end_index = parent_element.index(end_element)
+        parent_element.insert(end_index + 1, range_end)
+
+        # Insert Reference after End
+        parent_element.insert(end_index + 2, ref_run)
 
     def apply_edits(self, edits: List[ComplianceEdit]):
         """
@@ -153,6 +195,10 @@ class RedlineEngine:
                     anchor_run=Run(target_runs[-1]._element, None) # Wraps the deleted element essentially
                 )
                 parent.insert(del_index + 1, ins_elem)
+                
+                # Insert Comment if present
+                if edit.thought_process:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
 
         elif edit.operation == EditOperationType.INSERTION:
             if not edit.proposed_new_text:
@@ -175,6 +221,10 @@ class RedlineEngine:
             # Do NOT automatically prepend space. Trust the Diff engine.
             ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
             parent.insert(index + 1, ins_elem)
+            
+            # Insert Comment if present
+            if edit.thought_process:
+                self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
 
     def _apply_single_edit_indexed(self, edit: ComplianceEdit):
         """
@@ -199,6 +249,10 @@ class RedlineEngine:
             if start_idx == 0:
                  ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
                  parent.insert(index, ins_elem)
+                 
+                 if edit.thought_process:
+                     self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
+
             else:
                  # Resolve style inheritance (Prev vs Next)
                  next_run = self._get_next_run(anchor_run)
@@ -209,6 +263,10 @@ class RedlineEngine:
                  )
                  ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
                  parent.insert(index + 1, ins_elem)
+                 
+                 # Insert Comment
+                 if edit.thought_process:
+                     self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
             return
 
         # For DEL/MOD, we need to identify the runs to delete
@@ -236,6 +294,10 @@ class RedlineEngine:
                     anchor_run=Run(target_runs[-1]._element, None) 
                 )
                 parent.insert(del_index + 1, ins_elem)
+                
+                # Insert Comment
+                if edit.thought_process:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
         """

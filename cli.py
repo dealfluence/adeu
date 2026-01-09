@@ -1,11 +1,14 @@
 import sys
+import json
 import argparse
 from pathlib import Path
 from io import BytesIO
+from typing import List
 
 from adeu.ingest import extract_text_from_stream
 from adeu.redline.engine import RedlineEngine
 from adeu.diff import generate_edits_from_text
+from adeu.models import ComplianceEdit, EditOperationType
 
 def get_original_text(docx_path: Path) -> str:
     with open(docx_path, "rb") as f:
@@ -13,6 +16,41 @@ def get_original_text(docx_path: Path) -> str:
         stream = BytesIO(content)
         stream.name = docx_path.name
         return extract_text_from_stream(stream, filename=docx_path.name)
+
+def load_edits_from_json(json_path: Path) -> List[ComplianceEdit]:
+    """
+    Parses a JSON file with structure:
+    [
+        {"original": "Text", "replace": "New Text", "comment": "Reasoning"},
+        ...
+    ]
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    
+    edits = []
+    for item in data:
+        original = item.get("original", "")
+        replace = item.get("replace", "")
+        comment = item.get("comment", None)
+        
+        # Determine Operation Type
+        if original and replace:
+            op = EditOperationType.MODIFICATION
+        elif original and not replace:
+            op = EditOperationType.DELETION
+        elif not original and replace:
+            op = EditOperationType.INSERTION
+        else:
+            continue # Skip empty
+            
+        edits.append(ComplianceEdit(
+            operation=op,
+            target_text_to_change_or_anchor=original,
+            proposed_new_text=replace,
+            thought_process=comment
+        ))
+    return edits
 
 def mode_extract(docx_path: Path):
     print(f"📄 Extracting text from: {docx_path}")
@@ -24,26 +62,26 @@ def mode_extract(docx_path: Path):
     
     print(f"✅ Saved to: {output_md}")
 
-def mode_redline(docx_path: Path, md_path: Path):
-    print(f"🔄 Redlining '{docx_path}' using changes from '{md_path}'...")
+def mode_redline(docx_path: Path, changes_path: Path):
+    print(f"🔄 Redlining '{docx_path}'...")
     
-    # 1. Get Original Text
-    original_text = get_original_text(docx_path)
+    edits = []
     
-    # 2. Get Modified Text
-    if not md_path.exists():
-        print(f"❌ Error: Markdown file {md_path} not found.")
-        sys.exit(1)
-        
-    with open(md_path, "r", encoding="utf-8") as f:
-        modified_text = f.read()
-        
-    # 3. Compute Diffs
-    print("🔍 Computing differences...")
-    edits = generate_edits_from_text(original_text, modified_text)
-    print(f"   Found {len(edits)} changes.")
+    # 1. Determine Input Type (JSON vs Markdown)
+    if changes_path.suffix.lower() == ".json":
+        print(f"   📂 Loading structured changes from {changes_path}")
+        edits = load_edits_from_json(changes_path)
+    else:
+        # Markdown Diff Mode
+        print(f"   📝 Calculating diffs from {changes_path}")
+        original_text = get_original_text(docx_path)
+        with open(changes_path, "r", encoding="utf-8") as f:
+            modified_text = f.read()
+        edits = generate_edits_from_text(original_text, modified_text)
+
+    print(f"   Found {len(edits)} edits to apply.")
     
-    # 4. Apply Edits
+    # 2. Apply Edits
     print("✏️  Applying redlines...")
     with open(docx_path, "rb") as f:
         stream = BytesIO(f.read())
@@ -51,7 +89,7 @@ def mode_redline(docx_path: Path, md_path: Path):
     engine = RedlineEngine(stream)
     engine.apply_edits(edits)
     
-    # 5. Save
+    # 3. Save
     output_docx = docx_path.with_name(f"{docx_path.stem}_redlined.docx")
     result_stream = engine.save_to_stream()
     
@@ -61,9 +99,9 @@ def mode_redline(docx_path: Path, md_path: Path):
     print(f"✅ Success! Redlined file saved to: {output_docx}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Adeu: DOCX <-> Markdown Workflow")
+    parser = argparse.ArgumentParser(description="Adeu: DOCX Redlining Engine")
     parser.add_argument("docx_file", type=Path, help="Path to input .docx file")
-    parser.add_argument("md_file", type=Path, nargs="?", help="Path to modified .md file (Optional)")
+    parser.add_argument("changes_file", type=Path, nargs="?", help="Path to modified .md OR .json file")
     
     args = parser.parse_args()
     
@@ -71,11 +109,9 @@ def main():
         print(f"Error: File {args.docx_file} not found.")
         sys.exit(1)
         
-    if args.md_file:
-        # Mode 2: Redline
-        mode_redline(args.docx_file, args.md_file)
+    if args.changes_file:
+        mode_redline(args.docx_file, args.changes_file)
     else:
-        # Mode 1: Extract
         mode_extract(args.docx_file)
 
 if __name__ == "__main__":
