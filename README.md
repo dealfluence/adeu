@@ -40,6 +40,14 @@ poetry run python cli.py contracts/my_contract.docx contracts/my_contract.md
 # Output: contracts/my_contract_redlined.docx
 ```
 
+## 🤖 MCP Server
+
+Adeu includes a Model Context Protocol (MCP) server. This allows AI agents (like Claude Desktop) to directly read, analyze, and redline DOCX iles on your local machine.
+
+### Tools Exposed
+* read_docx(path): Reads a document and returns its text content (for the AI to analyze).
+* apply_structured_edits(original_path, edits, output_path): The AI generates structured JSON edits, and the server injects them as Track Changes.
+
 ## 📦 Library Usage
 
 ```python
