@@ -2,17 +2,22 @@
 
 ## 1. Architectural Overview
 
-Adeu operates on a **Reference-Based Injection** strategy. Instead of converting a document to an intermediate format (like Markdown) and trying to rebuild it, Adeu keeps the original XML structure intact and surgically injects `w:ins` (insert) and `w:del` (delete) tags.
+Adeu operates on a **Document Reconciliation** strategy (Virtual DOM). Instead of converting a document to an intermediate format and trying to rebuild it from scratch, Adeu keeps the original XML structure intact and surgically injects `w:ins` (insert) and `w:del` (delete) tags based on differences found in a lightweight proxy (Markdown/Text).
 
-### The Pipeline
+ ### The Pipeline
 
 ```mermaid
 graph LR
-    A[Original DOCX] -->|Ingestion| B(Raw Text)
-    B -->|LLM / Agent| C{AI Reasoning}
-    C -->|Structured Edits| D[DocumentEdit Objects]
-    D -->|Mapping Engine| E[XML DOM Index]
-    E -->|Redline Engine| F[Redlined DOCX]
+    subgraph "Real DOM"
+    A[Original DOCX] -->|Load| B[XML Object Tree]
+    end
+    subgraph "Virtual DOM"
+    B -->|Render| C[Markdown/Text Proxy]
+    C -->|LLM Reasoning| D[Edited Proxy]
+    end
+    D -->|Diff| E[Patches]
+    E -->|Reconcile| B
+    B -->|Save| F[Redlined DOCX]
 ```
 
 ## 2. Component Detail

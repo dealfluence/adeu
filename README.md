@@ -1,8 +1,7 @@
 # Adeu: Agentic DOCX Redlining Engine
 
-Adeu is a specialized Python engine designed to allow AI Agents and LLMs to redline Microsoft Word documents (`.docx`) without corrupting them.
-
-Unlike standard text converters, Adeu solves the **Round-Trip Problem**: it allows an AI to read a document, propose specific edits, and "inject" those changes back into the original binary file as native Track Changes (`w:ins`, `w:del`) and Comments.
+Adeu Open Source project is a Python engine designed to allow AI Agents and LLMs to redline Microsoft Word documents (`.docx`).
+It visualizes the Word documents as markdown to the LLM and maps back changes to the Word document.
 
 ## 🤖 Model Context Protocol (MCP) Server
 
