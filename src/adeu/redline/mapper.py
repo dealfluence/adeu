@@ -17,7 +17,7 @@ class TextSpan:
     start: int
     end: int
     text: str
-    run: Run
+    run: Optional[Run]
     paragraph: Paragraph
 
 class DocumentMapper:
@@ -67,6 +67,13 @@ class DocumentMapper:
 
             # Add virtual newlines to match ingestion logic (usually \n\n for markdown paragraphs)
             # NOTE: ingest.py joins with "\n\n", so we must match that here.
+            self.spans.append(TextSpan(
+                start=current_offset,
+                end=current_offset + 2,
+                text="\n\n",
+                run=None,
+                paragraph=p,
+            ))
             self.full_text += "\n\n"
             current_offset += 2
             
@@ -118,7 +125,10 @@ class DocumentMapper:
         if not affected_spans:
             return []
 
-        working_runs = [s.run for s in affected_spans]
+        working_runs = [s.run for s in affected_spans if s.run is not None]
+        
+        if not working_runs:
+            return []
         
         # We need to track if we modified the DOM, so we can rebuild the map
         dom_modified = False
@@ -127,7 +137,7 @@ class DocumentMapper:
         first_span = affected_spans[0]
         local_start = start_idx - first_span.start
 
-        if local_start > 0:
+        if local_start > 0 and first_span.run is not None:
             _, right_run = self._split_run_at_index(working_runs[0], local_start)
             working_runs[0] = right_run
             dom_modified = True
@@ -139,7 +149,7 @@ class DocumentMapper:
         last_span = affected_spans[-1]
         extra_len = last_span.end - end_idx
 
-        if extra_len > 0:
+        if extra_len > 0 and last_span.run is not None:
             last_run = working_runs[-1]
             split_point = len(last_run.text) - extra_len
             left_run, _ = self._split_run_at_index(last_run, split_point)
