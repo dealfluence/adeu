@@ -22,8 +22,9 @@ structlog.configure(
 # -----------------------------
 
 from adeu.ingest import extract_text_from_stream
+from adeu.diff import generate_edits_from_text
 from adeu.redline.engine import RedlineEngine
-from adeu.models import DocumentEdit
+from adeu.models import DocumentEdit, EditOperationType
 
 # Initialize the MCP Server
 mcp = FastMCP("Adeu Redlining Service")
@@ -55,6 +56,76 @@ def read_docx(file_path: str) -> str:
         return extract_text_from_stream(stream, filename=Path(file_path).name)
     except Exception as e:
         return f"Error reading file: {str(e)}"
+
+@mcp.tool()
+def diff_docx_files(original_path: str, modified_path: str) -> str:
+    """
+    Compares two DOCX files and returns a Semantic Unified Diff.
+    
+    Returns a standard-looking Diff format but optimized for prose (word-level granularity).
+    Use this to understand specific changes without loading the full document text.
+    """
+    try:
+        # 1. Ingest both files to text
+        stream_orig = _read_file_bytes(original_path)
+        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name)
+        
+        stream_mod = _read_file_bytes(modified_path)
+        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name)
+        
+        # 2. Generate Edits
+        edits = generate_edits_from_text(text_orig, text_mod)
+        
+        if not edits:
+            return "No text differences found between the documents."
+            
+        # 3. Format Output as Unified Diff Hunks
+        # We use the computed indices to grab context from the original text.
+        output = [f"--- {Path(original_path).name}", f"+++ {Path(modified_path).name}", ""]
+        
+        CONTEXT_SIZE = 40  # Characters of context
+        
+        for edit in edits:
+            # Calculate context based on the match index found by the diff engine
+            start_idx = getattr(edit, "_match_start_index", 0) or 0
+            
+            # Pre-context
+            pre_start = max(0, start_idx - CONTEXT_SIZE)
+            pre_context = text_orig[pre_start:start_idx]
+            if pre_start > 0:
+                pre_context = "..." + pre_context
+                
+            # Post-context calculation
+            target_len = len(edit.target_text) if edit.target_text else 0
+            
+            # For Insertion, text is added AT the index. For Del/Mod, text is removed FROM the index.
+            if edit.operation == EditOperationType.INSERTION:
+                post_start = start_idx
+            else:
+                post_start = start_idx + target_len
+                
+            post_end = min(len(text_orig), post_start + CONTEXT_SIZE)
+            post_context = text_orig[post_start:post_end]
+            if post_end < len(text_orig):
+                post_context = post_context + "..."
+                
+            # Sanitize newlines for display
+            pre_context = pre_context.replace("\n", " ").replace("\r", "")
+            post_context = post_context.replace("\n", " ").replace("\r", "")
+            
+            output.append("@@ Word Patch @@")
+            output.append(f" {pre_context}")
+            if edit.operation != EditOperationType.INSERTION:
+                output.append(f"- {edit.target_text}")
+            if edit.operation != EditOperationType.DELETION:
+                output.append(f"+ {edit.new_text}")
+            output.append(f" {post_context}")
+            output.append("") # Spacer
+            
+        return "\n".join(output)
+
+    except Exception as e:
+        return f"Error computing diff: {str(e)}"
 
 @mcp.tool()
 def apply_structured_edits(
