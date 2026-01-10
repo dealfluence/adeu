@@ -1,7 +1,7 @@
 import io
 import pytest
 from docx import Document
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 from adeu.redline.engine import RedlineEngine
 
 def _is_element_bold(run_element) -> bool:
@@ -47,12 +47,12 @@ def test_insertion_inherits_next_run_style_heuristic():
     doc.save(stream)
     stream.seek(0)
     
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="", 
-        proposed_new_text="Very ",
-        match_start_index=6
+        target_text="", 
+        new_text="Very ",
     )
+    edit._match_start_index=6
     
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -86,12 +86,12 @@ def test_insertion_defaults_to_prev_run_style_if_no_space():
     doc.save(stream)
     stream.seek(0)
     
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="",
-        proposed_new_text="Big",
-        match_start_index=6
+        target_text="",
+        new_text="Big",
     )
+    edit._match_start_index = 6
     
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])

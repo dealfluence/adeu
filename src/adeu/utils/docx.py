@@ -4,6 +4,7 @@ Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
@@ -16,6 +17,28 @@ def create_element(name: str):
 
 def create_attribute(element, name: str, value: str):
     element.set(qn(name), value)
+
+def get_visible_runs(paragraph: Paragraph):
+    """
+    Iterates over runs in a paragraph, including those inside <w:ins> tags.
+    Effectively returns the 'Accepted Changes' view of the runs.
+    """
+    runs = []
+    # Iterate over all children of the paragraph XML element
+    for child in paragraph._element:
+        tag = child.tag
+        if tag == qn('w:r'):
+            # Standard run
+            runs.append(Run(child, paragraph))
+        elif tag == qn('w:ins'):
+            # Inserted runs (Track Changes)
+            for subchild in child:
+                if subchild.tag == qn('w:r'):
+                    runs.append(Run(subchild, paragraph))
+        # w:del is skipped implies we read the "Future" state (Deletions are gone)
+        # w:hyperlink could be added here if needed, but skipping for MVP
+        
+    return runs
 
 def _are_runs_identical(r1: Run, r2: Run) -> bool:
     """

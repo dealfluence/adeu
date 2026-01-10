@@ -9,6 +9,7 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
+from adeu.utils.docx import get_visible_runs
 logger = structlog.get_logger(__name__)
 
 @dataclass
@@ -48,7 +49,7 @@ class DocumentMapper:
                     all_paragraphs.extend(cell.paragraphs)
 
         for p in all_paragraphs:
-            for run in p.runs:
+            for run in get_visible_runs(p):
                 text_len = len(run.text)
                 if text_len == 0:
                     continue
@@ -68,13 +69,29 @@ class DocumentMapper:
             # NOTE: ingest.py joins with "\n\n", so we must match that here.
             self.full_text += "\n\n"
             current_offset += 2
+            
+    def _replace_smart_quotes(self, text: str) -> str:
+        """
+        Normalizes smart quotes to straight quotes for search.
+        Keeps string length identical to ensure indices remain valid.
+        """
+        return (text.replace("“", '"').replace("”", '"')
+                    .replace("‘", "'").replace("’", "'"))
 
     def find_target_runs(self, target_text: str) -> List[Run]:
         """
         Legacy string-search lookup. Prefer find_target_runs_by_index if possible.
+        Includes a fallback to quote-insensitive search.
         """
         logger.debug(f"Searching for target: '{target_text[:50]}...' (Length: {len(target_text)})")
         start_idx = self.full_text.find(target_text)
+        
+        # Fallback: Smart Quote Normalization
+        if start_idx == -1:
+            norm_full = self._replace_smart_quotes(self.full_text)
+            norm_target = self._replace_smart_quotes(target_text)
+            start_idx = norm_full.find(norm_target)
+            
         if start_idx == -1:
             logger.warning("Target text not found", target=target_text[:20])
             return []

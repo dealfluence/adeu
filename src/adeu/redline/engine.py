@@ -9,7 +9,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import normalize_docx, create_element, create_attribute
@@ -17,13 +17,13 @@ from adeu.utils.docx import normalize_docx, create_element, create_attribute
 logger = structlog.get_logger(__name__)
 
 class RedlineEngine:
-    def __init__(self, doc_stream: BytesIO):
+    def __init__(self, doc_stream: BytesIO, author: str = "Adeu AI"):
         self.doc = Document(doc_stream)
         
         # 1. Normalize immediately to make mapping easier
         normalize_docx(self.doc)
         
-        self.author = "Adeu AI"
+        self.author = author
         self.timestamp = (
             datetime.datetime.now().replace(microsecond=0).isoformat() + "Z"
         )
@@ -83,7 +83,12 @@ class RedlineEngine:
         new_run.append(del_text)
         del_tag.append(new_run)
 
-        run._r.getparent().replace(run._r, del_tag)
+        parent = run._r.getparent()
+        if parent is None:
+            logger.warning(f"Attempted to delete run '{run.text}' but it is detached from DOM.")
+            return None
+
+        parent.replace(run._r, del_tag)
         return del_tag
 
     def _attach_comment(self, parent_element, start_element, end_element, text: str):
@@ -124,54 +129,61 @@ class RedlineEngine:
         # Insert Reference after End
         parent_element.insert(end_index + 2, ref_run)
 
-    def apply_edits(self, edits: List[ComplianceEdit]):
+    def apply_edits(self, edits: List[DocumentEdit]) -> tuple[int, int]:
         """
         Applies a list of ComplianceEdits to the document.
         Sorts indexed edits DESCENDING to prevent index shifting.
+        Returns (applied_count, skipped_count).
         """
-        indexed_edits = [e for e in edits if e.match_start_index is not None]
-        unindexed_edits = [e for e in edits if e.match_start_index is None]
+        indexed_edits = [e for e in edits if e._match_start_index is not None]
+        unindexed_edits = [e for e in edits if e._match_start_index is None]
+        
+        applied = 0
+        skipped = 0
         
         # 1. Apply Indexed Edits (Reverse Order)
-        indexed_edits.sort(key=lambda x: x.match_start_index, reverse=True)
+        indexed_edits.sort(key=lambda x: x._match_start_index, reverse=True)
         
         logger.info(f"Applying {len(indexed_edits)} indexed edits (Reverse Order).")
         for edit in indexed_edits:
-            self._apply_single_edit_indexed(edit)
+            if self._apply_single_edit_indexed(edit):
+                applied += 1
+            else:
+                skipped += 1
 
         # 2. Apply Unindexed Edits (Heuristic Fallback)
         if unindexed_edits:
-            unindexed_edits.sort(key=lambda x: len(x.target_text_to_change_or_anchor), reverse=True)
+            unindexed_edits.sort(key=lambda x: len(x.target_text), reverse=True)
             logger.info(f"Applying {len(unindexed_edits)} unindexed edits (Heuristic).")
             # Rebuild map as safety measure
             self.mapper._build_map()
             for edit in unindexed_edits:
-                self._apply_single_edit_heuristic(edit)
+                if self._apply_single_edit_heuristic(edit):
+                    applied += 1
+                    # IMPORTANT: DOM has changed. Rebuild map so next edits 
+                    # find the correct runs (and don't find deleted ones).
+                    self.mapper._build_map()
+                else:
+                    skipped += 1
+        return applied, skipped
 
-    def _apply_single_edit_heuristic(self, edit: ComplianceEdit):
+    def _apply_single_edit_heuristic(self, edit: DocumentEdit) -> bool:
         """Legacy logic using string search"""
-        target_text = edit.target_text_to_change_or_anchor
+        target_text = edit.target_text
         target_runs = self.mapper.find_target_runs(target_text)
 
         if not target_runs:
             logger.warning(f"Skipping edit: Target '{target_text[:20]}...' not found.")
-            return
+            return False
             
         logger.debug(f"Target runs found: {len(target_runs)}. Last run text: '{target_runs[-1].text}'")
-            
-        # Debug: Capture XML context
-        parent_p = target_runs[0]._element.getparent()
-        while parent_p.tag != qn("w:p") and parent_p.getparent() is not None:
-            parent_p = parent_p.getparent()
-            
-        before_xml = parent_p.xml
-
+        
         if edit.operation == EditOperationType.DELETION:
             for run in target_runs:
                 self.track_delete_run(run)
 
         elif edit.operation == EditOperationType.MODIFICATION:
-            if not edit.proposed_new_text:
+            if not edit.new_text:
                 return
 
             last_del_element = None
@@ -191,17 +203,17 @@ class RedlineEngine:
                 
                 # Use the last run as the style anchor
                 ins_elem = self.track_insert(
-                    edit.proposed_new_text, 
+                    edit.new_text, 
                     anchor_run=Run(target_runs[-1]._element, None) # Wraps the deleted element essentially
                 )
                 parent.insert(del_index + 1, ins_elem)
                 
                 # Insert Comment if present
-                if edit.thought_process:
-                    self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
+                if edit.comment:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
 
         elif edit.operation == EditOperationType.INSERTION:
-            if not edit.proposed_new_text:
+            if not edit.new_text:
                 return
 
             last_run = target_runs[-1]
@@ -213,25 +225,26 @@ class RedlineEngine:
             style_run = self._determine_style_source(
                 prev_run=last_run, 
                 next_run=next_run, 
-                insert_text=edit.proposed_new_text
+                insert_text=edit.new_text
             )
             
             logger.debug(f"Insert Index: {index+1}. Parent len: {len(parent)}")
 
             # Do NOT automatically prepend space. Trust the Diff engine.
-            ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
+            ins_elem = self.track_insert(edit.new_text, anchor_run=style_run)
             parent.insert(index + 1, ins_elem)
             
             # Insert Comment if present
-            if edit.thought_process:
-                self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
+            if edit.comment:
+                self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+        return True
 
-    def _apply_single_edit_indexed(self, edit: ComplianceEdit):
+    def _apply_single_edit_indexed(self, edit: DocumentEdit) -> bool:
         """
         Applies edit using exact index coordinates.
         """
-        start_idx = edit.match_start_index
-        target_text = edit.target_text_to_change_or_anchor
+        start_idx = edit._match_start_index
+        target_text = edit.target_text
         length = len(target_text) if target_text else 0
         
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx+length}] Op={edit.operation}")
@@ -240,18 +253,18 @@ class RedlineEngine:
             anchor_run = self.mapper.get_insertion_anchor(start_idx)
             if not anchor_run:
                 logger.warning(f"Could not find anchor for insertion at {start_idx}")
-                return
+                return False
             
             parent = anchor_run._element.getparent()
             index = parent.index(anchor_run._element)
             
             # Special case: Insert At Start (Index 0)
             if start_idx == 0:
-                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=anchor_run)
+                 ins_elem = self.track_insert(edit.new_text, anchor_run=anchor_run)
                  parent.insert(index, ins_elem)
                  
-                 if edit.thought_process:
-                     self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
+                 if edit.comment:
+                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
 
             else:
                  # Resolve style inheritance (Prev vs Next)
@@ -259,22 +272,22 @@ class RedlineEngine:
                  style_run = self._determine_style_source(
                      prev_run=anchor_run,
                      next_run=next_run,
-                     insert_text=edit.proposed_new_text
+                     insert_text=edit.new_text
                  )
-                 ins_elem = self.track_insert(edit.proposed_new_text, anchor_run=style_run)
+                 ins_elem = self.track_insert(edit.new_text, anchor_run=style_run)
                  parent.insert(index + 1, ins_elem)
                  
                  # Insert Comment
-                 if edit.thought_process:
-                     self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
-            return
+                 if edit.comment:
+                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+            return True
 
         # For DEL/MOD, we need to identify the runs to delete
         target_runs = self.mapper.find_target_runs_by_index(start_idx, length)
         
         if not target_runs:
              logger.warning(f"Target runs not found for index {start_idx}")
-             return
+             return False
 
         if edit.operation == EditOperationType.DELETION:
             for run in target_runs:
@@ -285,19 +298,20 @@ class RedlineEngine:
             for run in target_runs:
                 last_del_element = self.track_delete_run(run)
             
-            if last_del_element is not None and edit.proposed_new_text:
+            if last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 del_index = parent.index(last_del_element)
                 
                 ins_elem = self.track_insert(
-                    edit.proposed_new_text, 
+                    edit.new_text, 
                     anchor_run=Run(target_runs[-1]._element, None) 
                 )
                 parent.insert(del_index + 1, ins_elem)
                 
                 # Insert Comment
-                if edit.thought_process:
-                    self._attach_comment(parent, ins_elem, ins_elem, edit.thought_process)
+                if edit.comment:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+        return True
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
         """

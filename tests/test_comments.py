@@ -4,7 +4,7 @@ import pytest
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from adeu.redline.engine import RedlineEngine
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 
 def test_native_comment_creation_and_linking():
     """
@@ -23,11 +23,11 @@ def test_native_comment_creation_and_linking():
     stream.seek(0)
 
     # 2. Action: Apply edit with comment
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.MODIFICATION,
-        target_text_to_change_or_anchor="quick",
-        proposed_new_text="slow",
-        thought_process="Foxes are not always quick."
+        target_text="quick",
+        new_text="slow",
+        comment="Foxes are not always quick."
     )
 
     engine = RedlineEngine(stream)
@@ -81,17 +81,17 @@ def test_multiple_comments_ids():
     doc.save(stream)
     stream.seek(0)
 
-    edit1 = ComplianceEdit(
+    edit1 = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="First",
-        proposed_new_text="The ",
-        thought_process="Comment One"
+        target_text="First",
+        new_text="The ",
+        comment="Comment One"
     )
-    edit2 = ComplianceEdit(
+    edit2 = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="Second",
-        proposed_new_text="The ",
-        thought_process="Comment Two"
+        target_text="Second",
+        new_text="The ",
+        comment="Comment Two"
     )
 
     engine = RedlineEngine(stream)

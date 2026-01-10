@@ -1,6 +1,7 @@
 import io
 import structlog
 from docx import Document
+from adeu.utils.docx import get_visible_runs
 
 logger = structlog.get_logger(__name__)
 
@@ -20,11 +21,9 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
         
         # 1. Body Paragraphs
         for para in doc.paragraphs:
-            # Replicate Mapper logic: join all runs
-            # Note: Mapper skips empty runs, so we should too for consistency,
-            # or rely on the fact that joining empty strings is fine.
-            # Mapper: if text_len == 0: continue.
-            p_text = "".join([r.text for r in para.runs])
+            # Use the visible runs helper to see <w:ins> content
+            runs = get_visible_runs(para)
+            p_text = "".join([r.text for r in runs])
             full_text.append(p_text)
                 
         # 2. Tables
@@ -33,7 +32,9 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
                 row_parts = []
                 for cell in row.cells:
                     # Cell paragraphs
-                    cell_text = "\n".join(["".join([r.text for r in p.runs]) for p in cell.paragraphs])
+                    cell_text = "\n".join([
+                        "".join([r.text for r in get_visible_runs(p)]) for p in cell.paragraphs
+                    ])
                     if cell_text:
                         row_parts.append(cell_text)
                 

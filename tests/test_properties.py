@@ -143,11 +143,11 @@ def test_fuzz_split_run_mechanics(text):
     
     # Edit: Delete the whole text
     # This tests boundary conditions of runs
-    from adeu.models import ComplianceEdit, EditOperationType
-    edit = ComplianceEdit(
+    from adeu.models import DocumentEdit, EditOperationType
+    edit = DocumentEdit(
         operation=EditOperationType.DELETION,
-        target_text_to_change_or_anchor=text,
-        proposed_new_text=None
+        target_text=text,
+        new_text=None
     )
     
     stream.seek(0)

@@ -8,7 +8,7 @@ from typing import List
 from adeu.ingest import extract_text_from_stream
 from adeu.redline.engine import RedlineEngine
 from adeu.diff import generate_edits_from_text
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 
 def get_original_text(docx_path: Path) -> str:
     with open(docx_path, "rb") as f:
@@ -17,7 +17,7 @@ def get_original_text(docx_path: Path) -> str:
         stream.name = docx_path.name
         return extract_text_from_stream(stream, filename=docx_path.name)
 
-def load_edits_from_json(json_path: Path) -> List[ComplianceEdit]:
+def load_edits_from_json(json_path: Path) -> List[DocumentEdit]:
     """
     Parses a JSON file with structure:
     [
@@ -44,11 +44,11 @@ def load_edits_from_json(json_path: Path) -> List[ComplianceEdit]:
         else:
             continue # Skip empty
             
-        edits.append(ComplianceEdit(
+        edits.append(DocumentEdit(
             operation=op,
-            target_text_to_change_or_anchor=original,
-            proposed_new_text=replace,
-            thought_process=comment
+            target_text=original,
+            new_text=replace,
+            comment=comment
         ))
     return edits
 

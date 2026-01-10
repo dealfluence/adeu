@@ -1,12 +1,12 @@
 import re
 from diff_match_patch import diff_match_patch
 from typing import List, Dict, Tuple
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-def generate_edits_from_text(original_text: str, modified_text: str) -> List[ComplianceEdit]:
+def generate_edits_from_text(original_text: str, modified_text: str) -> List[DocumentEdit]:
     """
     Compares original and modified text to generate structured ComplianceEdit objects.
     Uses Word-Level diffing to ensure natural, readable redlines.
@@ -43,13 +43,14 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
             
         elif op == -1: # Delete
             # Create Deletion Edit
-            edits.append(ComplianceEdit(
+            edit = DocumentEdit(
                 operation=EditOperationType.DELETION,
-                target_text_to_change_or_anchor=text,
-                proposed_new_text=None,
-                thought_process="Diff: Text deleted",
-                match_start_index=current_original_index
-            ))
+                target_text=text,
+                new_text=None,
+                comment="Diff: Text deleted"
+            )
+            edit._match_start_index = current_original_index
+            edits.append(edit)
             # Move cursor forward because this text WAS in the original
             current_original_index += len(text)
             
@@ -74,23 +75,25 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
                     
                     if anchor_target:
                         logger.info(f"Converting start-of-doc insert to modification of '{anchor_target}'")
-                        edits.append(ComplianceEdit(
+                        mod_edit = DocumentEdit(
                             operation=EditOperationType.MODIFICATION,
-                            target_text_to_change_or_anchor=anchor_target,
-                            proposed_new_text=text + anchor_target,
-                            thought_process="Diff: Start-of-doc insertion (converted to modification)",
-                            match_start_index=current_original_index
-                        ))
+                            target_text=anchor_target,
+                            new_text=text + anchor_target,
+                            comment="Diff: Start-of-doc insertion (converted to modification)"
+                        )
+                        mod_edit._match_start_index = current_original_index
+                        edits.append(mod_edit)
                         current_original_index += len(anchor_target) # Important!
                         continue
 
-            edits.append(ComplianceEdit(
+            ins_edit = DocumentEdit(
                 operation=EditOperationType.INSERTION,
-                target_text_to_change_or_anchor=anchor,
-                proposed_new_text=text,
-                thought_process="Diff: Text inserted",
-                match_start_index=current_original_index
-            ))
+                target_text=anchor,
+                new_text=text,
+                comment="Diff: Text inserted"
+            )
+            ins_edit._match_start_index = current_original_index
+            edits.append(ins_edit)
             # Do NOT move original cursor (this text was never in original)
             
     # Optimization: Merge adjacent DELETE + INSERT into MODIFICATION?
@@ -98,7 +101,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Com
     merged_edits = _merge_diffs(edits)
     return merged_edits
 
-def _merge_diffs(edits: List[ComplianceEdit]) -> List[ComplianceEdit]:
+def _merge_diffs(edits: List[DocumentEdit]) -> List[DocumentEdit]:
     """
     Heuristic: If we see DELETE(A) followed immediately by INSERT(Anchor=PrecedingA, Text=B),
     convert to MODIFICATION(Target=A, New=B).
@@ -120,13 +123,14 @@ def _merge_diffs(edits: List[ComplianceEdit]) -> List[ComplianceEdit]:
                 # (Simple heuristic: they happened at the same diff point)
                 # Since we iterate linear diffs, this is usually true if adjacent.
                 
-                merged.append(ComplianceEdit(
+                mod_edit = DocumentEdit(
                     operation=EditOperationType.MODIFICATION,
-                    target_text_to_change_or_anchor=current.target_text_to_change_or_anchor,
-                    proposed_new_text=next_edit.proposed_new_text,
-                    thought_process="Diff: Replacement",
-                    match_start_index=current.match_start_index # Use start of deletion
-                ))
+                    target_text=current.target_text,
+                    new_text=next_edit.new_text,
+                    comment="Diff: Replacement"
+                )
+                mod_edit._match_start_index = current._match_start_index
+                merged.append(mod_edit)
                 i += 2 # Skip both
                 continue
                 

@@ -1,7 +1,7 @@
 import io
 import pytest
 from docx import Document
-from adeu.models import ComplianceEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType
 from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
 from adeu.ingest import extract_text_from_stream
@@ -20,11 +20,11 @@ def test_full_roundtrip_workflow(simple_docx_stream):
 
     # 2. Simulate LLM Response (ComplianceEdit)
     # Let's change "Seller" to "Vendor"
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.MODIFICATION,
-        target_text_to_change_or_anchor="Seller",
-        proposed_new_text="Vendor",
-        thought_process="Standardizing terminology."
+        target_text="Seller",
+        new_text="Vendor",
+        comment="Standardizing terminology."
     )
 
     # 3. Injection (Redlining)
@@ -67,10 +67,10 @@ def test_split_run_behavior():
     doc.save(stream)
     stream.seek(0)
     
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.DELETION,
-        target_text_to_change_or_anchor="brown", # Middle of the run
-        proposed_new_text=None
+        target_text="brown", # Middle of the run
+        new_text=None
     )
     
     engine = RedlineEngine(stream)
@@ -109,18 +109,18 @@ def test_insertion_spacing_between_complex_runs():
     stream.seek(0)
     
     # Edit 1: Insert space after ARTICLE
-    edit1 = ComplianceEdit(
+    edit1 = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="ARTICLE", 
-        proposed_new_text=" "
+        target_text="ARTICLE", 
+        new_text=" "
     )
     
     # Edit 2: Insert space after "3 " (which ends in space)
     # This mimics the "3 FEES" edit if the anchor matched "3 FEES"
-    edit2 = ComplianceEdit(
+    edit2 = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="3 ", 
-        proposed_new_text=" "
+        target_text="3 ", 
+        new_text=" "
     )
     
     engine = RedlineEngine(stream)
@@ -168,10 +168,10 @@ def test_insertion_splits_coalesced_run():
     doc.save(stream)
     stream.seek(0)
     
-    edit = ComplianceEdit(
+    edit = DocumentEdit(
         operation=EditOperationType.INSERTION,
-        target_text_to_change_or_anchor="ARTICLE",
-        proposed_new_text=" "
+        target_text="ARTICLE",
+        new_text=" "
     )
     
     engine = RedlineEngine(stream)
@@ -210,8 +210,8 @@ def test_insertion_at_start_of_document():
     edits = generate_edits_from_text(original_text, modified_text)
     
     assert len(edits) > 0, "Should generate an edit for start-of-doc insertion"
-    assert "Big" in edits[0].proposed_new_text
-    assert edits[0].target_text_to_change_or_anchor in original_text
+    assert "Big" in edits[0].new_text
+    assert edits[0].target_text in original_text
 
 def test_insertion_multiple_splits_same_run():
     """
@@ -228,10 +228,10 @@ def test_insertion_multiple_splits_same_run():
     stream.seek(0)
     
     # 1. Insert after ARTICLE
-    e1 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="ARTICLE", proposed_new_text=" ")
+    e1 = DocumentEdit(operation=EditOperationType.INSERTION, target_text="ARTICLE", new_text=" ")
     # 2. Insert after 3 (Note: "3" is now in a split run if processed second? or first?)
     # Text context is tricky. Anchor is just "3".
-    e2 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="3", proposed_new_text=" ")
+    e2 = DocumentEdit(operation=EditOperationType.INSERTION, target_text="3", new_text=" ")
     
     engine = RedlineEngine(stream)
     engine.apply_edits([e1, e2])
@@ -265,9 +265,9 @@ def test_complex_run_sequence_repro():
     stream.seek(0)
     
     # Edit 1: Insert space after "ARTICLE3 FEES"
-    e1 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="ARTICLE3 FEES", proposed_new_text=" ")
+    e1 = DocumentEdit(operation=EditOperationType.INSERTION, target_text="ARTICLE3 FEES", new_text=" ")
     # Edit 2: Insert space after "AND" (which spans AN + D)
-    e2 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="AND", proposed_new_text=" ")
+    e2 = DocumentEdit(operation=EditOperationType.INSERTION, target_text="AND", new_text=" ")
     
     engine = RedlineEngine(stream)
     engine.apply_edits([e1, e2])
@@ -332,8 +332,10 @@ def test_split_run_ordering_repro():
     stream.seek(0)
     
     # Indices: e=0, 0=1. End=2.
-    e1 = ComplianceEdit(operation=EditOperationType.INSERTION, target_text_to_change_or_anchor="", proposed_new_text=" END", match_start_index=2)
-    e2 = ComplianceEdit(operation=EditOperationType.DELETION, target_text_to_change_or_anchor="e", proposed_new_text=None, match_start_index=0)
+    e1 = DocumentEdit(operation=EditOperationType.INSERTION, target_text="", new_text=" END")
+    e1._match_start_index = 2
+    e2 = DocumentEdit(operation=EditOperationType.DELETION, target_text="e", new_text=None)
+    e2._match_start_index = 0
     
     engine = RedlineEngine(stream)
     # Engine sorts by index DESC, so e1 (2) applied first, then e2 (0).
