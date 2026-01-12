@@ -23,7 +23,6 @@ class CommentsManager:
         """
         # 1. Check if comments part exists via relationships
         try:
-            # Standard access via relationships
             for rel in self.doc.part.rels.values():
                 if rel.reltype == RT.COMMENTS:
                     return rel.target_part
@@ -35,26 +34,18 @@ class CommentsManager:
         partname = package.next_partname("/word/comments%d.xml")
         content_type = CT.WML_COMMENTS
         
-        # Create the XML body
         xml_bytes = (
             f'<w:comments {nsdecls("w")}>\n'
             f'</w:comments>'
         ).encode("utf-8")
         
-        # Use BaseStoryPart or generic Part. 
-        # We can instantiate a generic XmlPart.
         comments_part = XmlPart(partname, content_type, parse_xml(xml_bytes), package)
-        
-        # Add to package
         package.parts.append(comments_part)
-        
-        # Add relationship from Document to Comments
         self.doc.part.relate_to(comments_part, RT.COMMENTS)
         
         return comments_part
 
     def _get_next_comment_id(self) -> int:
-        """Finds the next available ID by scanning existing comments."""
         ids = [0]
         comments = self.comments_part.element.findall(qn("w:comment"))
         for c in comments:
@@ -65,20 +56,15 @@ class CommentsManager:
         return max(ids) + 1
 
     def add_comment(self, author: str, text: str) -> str:
-        """
-        Adds a <w:comment> element to comments.xml and returns its ID.
-        """
         comment_id = str(self.next_id)
         self.next_id += 1
         
         now = datetime.datetime.now().isoformat()
         
-        # Construct the w:comment element
         comment = OxmlElement("w:comment")
         comment.set(qn("w:id"), comment_id)
         comment.set(qn("w:author"), author)
         comment.set(qn("w:date"), now)
-        # Initials are optional, skipping for now
         
         p = OxmlElement("w:p")
         r = OxmlElement("w:r")
