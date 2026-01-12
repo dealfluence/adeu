@@ -154,6 +154,10 @@ class RedlineEngine:
         return applied, skipped
 
     def _apply_single_edit_heuristic(self, edit: DocumentEdit) -> bool:
+        if not edit.target_text:
+            logger.warning("Skipping heuristic edit: target_text is empty.")
+            return False
+
         start_idx = self.mapper.find_match_index(edit.target_text)
 
         if start_idx == -1:

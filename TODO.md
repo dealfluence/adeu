@@ -14,20 +14,28 @@
 *   **Fuzz Testing**: Implemented property-based testing (disabled strict correctness check due to DMP semantic ambiguity edge cases, but engine stability is verified).
 *   **Formatting Preservation**: Implemented heuristic in `RedlineEngine` to inherit style from the next run if insertion appears to be a prefix (ends in space).
 *   **Native Comments**: Replaced simulated colored text with real `w:comment` XML parts and anchors.
+*   **Safety Fixes**: 
+    *   Fixed `IndexError` in context trimming when suffix matches the entire target string.
+    *   Added validation to reject heuristic edits with empty `target_text` to prevent accidental start-of-doc insertions.
 
-## 🐛 Known Issues
-### 1. Table Layouts
+## 🐛 Known Issues & Blind Spots
+### 1. Document Scope (Critical)
+*   **Headers & Footers**: The ingestion engine currently ignores Headers and Footers. Edits targeting these areas will fail.
+*   **Hyperlinks**: Text inside `w:hyperlink` tags is currently skipped during ingestion.
+
+### 2. Table Layouts
 *   **Status**: Basic support. Tables are extracted linearly (`|` separated).
 *   **Limitation**: Edits spanning across cell boundaries (e.g., merging two cells) are NOT supported and will likely throw errors or be ignored.
 *   **Next Step**: Implement explicit Table/Row/Cell awareness in `ComplianceEdit` target resolution.
 
 ## 🚀 Next Steps (Roadmap)
-1.  **LLM Integration**: Connect the `ComplianceEdit` schema to an actual OpenAI/Anthropic function call to bypass the text-diffing step for simple instructions ("Change the governing law to NY").
-2.  **Table Enhancements**: Improve table redlining by mapping cell indices.
+1.  **Header/Footer Support**: Update `ingest.py` and `mapper.py` to iterate through `section.header` and `section.footer` parts.
+2.  **LLM Integration**: Connect the `ComplianceEdit` schema to an actual OpenAI/Anthropic function call to bypass the text-diffing step for simple instructions ("Change the governing law to NY").
+3.  **Table Enhancements**: Improve table redlining by mapping cell indices.
 
 ## 📂 Key Files
-*   `src/adeu/redline/engine.py`: **The Brain**. modifying this requires care.
+*   `src/adeu/redline/engine.py`: **The Brain**. Modifying this requires care.
 *   `src/adeu/redline/mapper.py`: **The Map**. If searching fails, look here.
-*   `tests/test_roundtrip.py`: **The Proof**. Run this before pushing.
-*   `src/adeu/redline/comments.py`: **The Comments**. Handles OXML part relationships.
-*   `tests/test_properties.py`: **The Fuzzer**. Generates random docs to test crash resilience.
+*   `src/adeu/ingest.py`: **The Eyes**. Needs update for Headers/Footers.
+*   `tests/test_context_trimming.py`: Contains regression tests for crash bugs.
+*   `tests/test_safety.py`: Validates input rejection logic.
