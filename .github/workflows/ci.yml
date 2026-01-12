@@ -26,7 +26,10 @@ jobs:
         cache: 'poetry'
 
     - name: Install Dependencies
-      run: poetry install
+      run: |
+        # Ensure lockfile is consistent with pyproject.toml
+        poetry lock --no-update
+        poetry install
 
     - name: Lint (Ruff)
       run: |
