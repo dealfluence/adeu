@@ -146,6 +146,8 @@ def apply_structured_edits(
     except Exception as e:
         return f"Error applying edits: {str(e)}"
 
+def main():
+    mcp.run()
 
 if __name__ == "__main__":
-    mcp.run()
+    main()

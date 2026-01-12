@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "adeu"
-version = "0.1.0"
+version = "0.1.1"
 description = "Automated DOCX Redlining Engine"
 authors = ["Mikko Korpela"]
 readme = "README.md"
@@ -8,6 +8,7 @@ packages = [{include = "adeu", from = "src"}]
 
 [tool.poetry.scripts]
 adeu = "adeu.cli:main"
+adeu-server = "adeu.server:main"
 
 [tool.poetry.dependencies]
 python = ">=3.12"

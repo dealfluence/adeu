@@ -24,12 +24,11 @@ Adeu is primarily designed as an **MCP Server**. This allows AI tools (like Clau
     {
       "mcpServers": {
         "adeu": {
-          "command": "uv",
+          "command": "uvx",
           "args": [
-            "--directory",
-            "/absolute/path/to/adeu",
-            "run",
-            "adeu/server.py"
+            "--from",
+            "adeu",
+            "adeu-server"
           ]
         }
       }
