@@ -5,22 +5,24 @@ from typing import List, Optional
 
 import structlog
 from docx import Document
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
 from adeu.models import DocumentEdit
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
-from adeu.utils.docx import normalize_docx, create_element, create_attribute
+from adeu.utils.docx import create_attribute, create_element, normalize_docx
 
 logger = structlog.get_logger(__name__)
 
+
 class EditOperationType:
     """Internal enum for low-level XML manipulation"""
+
     INSERTION = "INSERTION"
     DELETION = "DELETION"
     MODIFICATION = "MODIFICATION"
+
 
 def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     """
@@ -30,42 +32,41 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     """
     if not target or not new_val:
         return 0, 0
-        
+
     # 1. Prefix with Word Boundary Check
     prefix_len = 0
     limit = min(len(target), len(new_val))
     while prefix_len < limit and target[prefix_len] == new_val[prefix_len]:
         prefix_len += 1
-    
+
     # Backtrack to nearest whitespace if we split a word
     if prefix_len < len(target) and prefix_len < len(new_val):
-        while prefix_len > 0 and not target[prefix_len-1].isspace() and not target[prefix_len].isspace():
+        while prefix_len > 0 and not target[prefix_len - 1].isspace() and not target[prefix_len].isspace():
             prefix_len -= 1
-        
+
     # 2. Suffix with Word Boundary Check
     suffix_len = 0
     target_rem_len = len(target) - prefix_len
     new_rem_len = len(new_val) - prefix_len
-    
+
     limit_suffix = min(target_rem_len, new_rem_len)
-    while suffix_len < limit_suffix and target[-(suffix_len+1)] == new_val[-(suffix_len+1)]:
+    while suffix_len < limit_suffix and target[-(suffix_len + 1)] == new_val[-(suffix_len + 1)]:
         suffix_len += 1
-        
+
     # Backtrack suffix if we split a word
     if suffix_len > 0:
-        while suffix_len > 0 and not target[-(suffix_len+1)].isspace() and not target[-(suffix_len)].isspace():
+        while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
             suffix_len -= 1
-        
+
     return prefix_len, suffix_len
+
 
 class RedlineEngine:
     def __init__(self, doc_stream: BytesIO, author: str = "Adeu AI"):
         self.doc = Document(doc_stream)
         normalize_docx(self.doc)
         self.author = author
-        self.timestamp = (
-            datetime.datetime.now().replace(microsecond=0).isoformat() + "Z"
-        )
+        self.timestamp = datetime.datetime.now().replace(microsecond=0).isoformat() + "Z"
         self.current_id = 0
         self.mapper = DocumentMapper(self.doc)
         self.comments_manager = CommentsManager(self.doc)
@@ -125,7 +126,7 @@ class RedlineEngine:
         ref = create_element("w:commentReference")
         create_attribute(ref, "w:id", comment_id)
         ref_run.append(ref)
-        
+
         start_index = parent_element.index(start_element)
         parent_element.insert(start_index, range_start)
         end_index = parent_element.index(end_element)
@@ -135,10 +136,10 @@ class RedlineEngine:
     def apply_edits(self, edits: List[DocumentEdit]) -> tuple[int, int]:
         indexed_edits = [e for e in edits if e._match_start_index is not None]
         unindexed_edits = [e for e in edits if e._match_start_index is None]
-        
+
         applied = 0
         skipped = 0
-        
+
         # Indexed First (Reverse Order)
         indexed_edits.sort(key=lambda x: x._match_start_index, reverse=True)
         for edit in indexed_edits:
@@ -161,14 +162,14 @@ class RedlineEngine:
 
     def _apply_single_edit_heuristic(self, edit: DocumentEdit) -> bool:
         start_idx = self.mapper.find_match_index(edit.target_text)
-        
+
         if start_idx == -1:
             logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found.")
             return False
-        
+
         effective_new_text = edit.new_text or ""
         effective_target_text = edit.target_text
-        
+
         # Optimization: No Change
         if effective_target_text == effective_new_text:
             return True
@@ -177,20 +178,20 @@ class RedlineEngine:
         # Check for Insertion-with-Context (Claude Bug fix)
         if effective_new_text.startswith(effective_target_text):
             effective_op = EditOperationType.INSERTION
-            final_target = "" 
-            final_new = effective_new_text[len(effective_target_text):]
+            final_target = ""
+            final_new = effective_new_text[len(effective_target_text) :]
             effective_start_idx = start_idx + len(effective_target_text)
         else:
             # Context Trimming
             prefix_len, suffix_len = _trim_common_context(effective_target_text, effective_new_text)
-            
+
             t_end = len(effective_target_text) - suffix_len
             n_end = len(effective_new_text) - suffix_len
-            
+
             final_target = effective_target_text[prefix_len:t_end]
             final_new = effective_new_text[prefix_len:n_end]
             effective_start_idx = start_idx + prefix_len
-            
+
             if not final_target and final_new:
                 effective_op = EditOperationType.INSERTION
             elif final_target and not final_new:
@@ -201,14 +202,10 @@ class RedlineEngine:
                 return True
 
         # Proxy Edit
-        proxy_edit = DocumentEdit(
-            target_text=final_target,
-            new_text=final_new,
-            comment=edit.comment
-        )
+        proxy_edit = DocumentEdit(target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
-        setattr(proxy_edit, "_internal_op", effective_op)
-        
+        proxy_edit._internal_op = effective_op
+
         return self._apply_single_edit_indexed(proxy_edit)
 
     def _apply_single_edit_indexed(self, edit: DocumentEdit) -> bool:
@@ -216,42 +213,45 @@ class RedlineEngine:
         if hasattr(edit, "_internal_op"):
             op = edit._internal_op
         else:
-            if not edit.target_text and edit.new_text: op = EditOperationType.INSERTION
-            elif edit.target_text and not edit.new_text: op = EditOperationType.DELETION
-            else: op = EditOperationType.MODIFICATION
-            
+            if not edit.target_text and edit.new_text:
+                op = EditOperationType.INSERTION
+            elif edit.target_text and not edit.new_text:
+                op = EditOperationType.DELETION
+            else:
+                op = EditOperationType.MODIFICATION
+
         start_idx = edit._match_start_index
         target_text = edit.target_text
         length = len(target_text) if target_text else 0
-        
-        logger.debug(f"Applying Edit at [{start_idx}:{start_idx+length}] Op={op}")
+
+        logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
 
         if op == EditOperationType.INSERTION:
             anchor_run = self.mapper.get_insertion_anchor(start_idx)
             if not anchor_run:
                 return False
-            
+
             parent = anchor_run._element.getparent()
             index = parent.index(anchor_run._element)
-            
+
             if start_idx == 0:
-                 ins_elem = self.track_insert(edit.new_text, anchor_run=anchor_run)
-                 parent.insert(index, ins_elem)
-                 if edit.comment:
-                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+                ins_elem = self.track_insert(edit.new_text, anchor_run=anchor_run)
+                parent.insert(index, ins_elem)
+                if edit.comment:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
             else:
-                 next_run = self._get_next_run(anchor_run)
-                 style_run = self._determine_style_source(anchor_run, next_run, edit.new_text)
-                 ins_elem = self.track_insert(edit.new_text, anchor_run=style_run)
-                 parent.insert(index + 1, ins_elem)
-                 if edit.comment:
-                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+                next_run = self._get_next_run(anchor_run)
+                style_run = self._determine_style_source(anchor_run, next_run, edit.new_text)
+                ins_elem = self.track_insert(edit.new_text, anchor_run=style_run)
+                parent.insert(index + 1, ins_elem)
+                if edit.comment:
+                    self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
             return True
 
         # Deletion / Modification
         target_runs = self.mapper.find_target_runs_by_index(start_idx, length)
         if not target_runs:
-             return False
+            return False
 
         if op == EditOperationType.DELETION:
             for run in target_runs:
@@ -261,14 +261,11 @@ class RedlineEngine:
             last_del_element = None
             for run in target_runs:
                 last_del_element = self.track_delete_run(run)
-            
+
             if last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 del_index = parent.index(last_del_element)
-                ins_elem = self.track_insert(
-                    edit.new_text, 
-                    anchor_run=Run(target_runs[-1]._element, None) 
-                )
+                ins_elem = self.track_insert(edit.new_text, anchor_run=Run(target_runs[-1]._element, None))
                 parent.insert(del_index + 1, ins_elem)
                 if edit.comment:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)

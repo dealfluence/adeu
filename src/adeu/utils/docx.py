@@ -2,21 +2,24 @@
 Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
+
+import structlog
 from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
-import structlog
 
 logger = structlog.get_logger(__name__)
+
 
 def create_element(name: str):
     return OxmlElement(name)
 
+
 def create_attribute(element, name: str, value: str):
     element.set(qn(name), value)
+
 
 def get_visible_runs(paragraph: Paragraph):
     """
@@ -27,18 +30,19 @@ def get_visible_runs(paragraph: Paragraph):
     # Iterate over all children of the paragraph XML element
     for child in paragraph._element:
         tag = child.tag
-        if tag == qn('w:r'):
+        if tag == qn("w:r"):
             # Standard run
             runs.append(Run(child, paragraph))
-        elif tag == qn('w:ins'):
+        elif tag == qn("w:ins"):
             # Inserted runs (Track Changes)
             for subchild in child:
-                if subchild.tag == qn('w:r'):
+                if subchild.tag == qn("w:r"):
                     runs.append(Run(subchild, paragraph))
         # w:del is skipped implies we read the "Future" state (Deletions are gone)
         # w:hyperlink could be added here if needed, but skipping for MVP
-        
+
     return runs
+
 
 def _are_runs_identical(r1: Run, r2: Run) -> bool:
     """
@@ -51,6 +55,7 @@ def _are_runs_identical(r1: Run, r2: Run) -> bool:
     xml2 = rPr2.xml if rPr2 is not None else ""
 
     return xml1 == xml2
+
 
 def _coalesce_runs_in_paragraph(paragraph: Paragraph):
     """
@@ -72,6 +77,7 @@ def _coalesce_runs_in_paragraph(paragraph: Paragraph):
         else:
             i += 1
 
+
 def normalize_docx(doc: DocumentObject):
     """
     Applies normalization to a DOCX document to make text mapping reliable.
@@ -79,7 +85,7 @@ def normalize_docx(doc: DocumentObject):
     2. Coalesces adjacent runs.
     """
     logger.info("Normalizing DOCX structure...")
-    
+
     # Remove proof errors (spelling/grammar tags) via XPath
     for proof_err in doc.element.xpath("//w:proofErr"):
         proof_err.getparent().remove(proof_err)

@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -10,7 +10,9 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.utils.docx import get_visible_runs
+
 logger = structlog.get_logger(__name__)
+
 
 @dataclass
 class TextSpan:
@@ -19,6 +21,7 @@ class TextSpan:
     text: str
     run: Optional[Run]
     paragraph: Paragraph
+
 
 class DocumentMapper:
     def __init__(self, doc: DocumentObject):
@@ -55,24 +58,25 @@ class DocumentMapper:
                 self.full_text += run.text
                 current_offset += text_len
 
-            self.spans.append(TextSpan(
-                start=current_offset,
-                end=current_offset + 2,
-                text="\n\n",
-                run=None,
-                paragraph=p,
-            ))
+            self.spans.append(
+                TextSpan(
+                    start=current_offset,
+                    end=current_offset + 2,
+                    text="\n\n",
+                    run=None,
+                    paragraph=p,
+                )
+            )
             self.full_text += "\n\n"
             current_offset += 2
-        
+
         # Remove trailing newline to match ingest.py
         if self.spans and self.spans[-1].text == "\n\n":
             self.spans.pop()
             self.full_text = self.full_text[:-2]
 
     def _replace_smart_quotes(self, text: str) -> str:
-        return (text.replace("“", '"').replace("”", '"')
-                    .replace("‘", "'").replace("’", "'"))
+        return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
     def find_match_index(self, target_text: str) -> int:
         start_idx = self.full_text.find(target_text)
@@ -93,16 +97,14 @@ class DocumentMapper:
         return self._resolve_runs_at_range(start_index, end_index)
 
     def _resolve_runs_at_range(self, start_idx: int, end_idx: int) -> List[Run]:
-        affected_spans = [
-            s for s in self.spans if s.end > start_idx and s.start < end_idx
-        ]
+        affected_spans = [s for s in self.spans if s.end > start_idx and s.start < end_idx]
         if not affected_spans:
             return []
 
         working_runs = [s.run for s in affected_spans if s.run is not None]
         if not working_runs:
             return []
-        
+
         dom_modified = False
 
         first_span = affected_spans[0]
@@ -120,7 +122,7 @@ class DocumentMapper:
             left_run, _ = self._split_run_at_index(last_run, split_point)
             working_runs[-1] = left_run
             dom_modified = True
-            
+
         if dom_modified:
             self._build_map()
 
@@ -137,7 +139,7 @@ class DocumentMapper:
             left, _ = self._split_run_at_index(span.run, offset)
             return left
         if index == 0 and self.spans:
-             return self.spans[0].run
+            return self.spans[0].run
         preceding_gap = [s for s in self.spans if s.end < index]
         if preceding_gap:
             return preceding_gap[-1].run
