@@ -23,7 +23,6 @@ class CommentsManager:
         """
         # 1. Check if comments part exists via relationships
         try:
-            part = self.doc.part.package.image_parts._parts[-1] # Hacky access to parts? No.
             # Standard access via relationships
             for rel in self.doc.part.rels.values():
                 if rel.reltype == RT.COMMENTS:
@@ -31,18 +30,7 @@ class CommentsManager:
         except Exception:
             pass
 
-        # 2. Check internal lists if python-docx loaded it but didn't expose it easily
-        # (Usually handled by rels above). 
-
-        # 3. Create new part if not found
-        # We need to construct a new XmlPart and register it.
-        # This is complex in python-docx without using internal methods.
-        # We try to use the public API to add a part if possible, 
-        # but often we must rely on the fact that python-docx loads comments 
-        # as a Part if present.
-        
-        # If we are here, we likely need to CREATE it.
-        # Creating a part from scratch using python-docx internals:
+        # 2. Create new part if not found
         package = self.doc.part.package
         partname = package.next_partname("/word/comments%d.xml")
         content_type = CT.WML_COMMENTS

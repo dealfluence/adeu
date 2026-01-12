@@ -77,6 +77,12 @@ class DocumentMapper:
             self.full_text += "\n\n"
             current_offset += 2
             
+        # Remove trailing newline to match ingest.py's "\n\n".join(full_text)
+        # This ensures the map length equals the extracted text length exactly.
+        if self.spans and self.spans[-1].text == "\n\n":
+            self.spans.pop()
+            self.full_text = self.full_text[:-2]
+            
     def _replace_smart_quotes(self, text: str) -> str:
         """
         Normalizes smart quotes to straight quotes for search.

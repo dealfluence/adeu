@@ -3,20 +3,20 @@ name = "adeu"
 version = "0.1.0"
 description = "Automated DOCX Redlining Engine"
 authors = ["Mikko Korpela"]
-readme = "spec.md"
+readme = "README.md"
 packages = [{include = "adeu", from = "src"}]
 
 [tool.poetry.scripts]
 adeu = "adeu.cli:main"
 
 [tool.poetry.dependencies]
-python = "^3.10"
-python-docx = "*"
-structlog = "*"
-pydantic = "*"
-lxml = "*"
-diff-match-patch = "*" 
-mcp = "^1.25.0"
+python = ">=3.10"
+python-docx = ">=1.1.0"
+structlog = ">=24.0.0"
+pydantic = ">=2.0.0"
+lxml = ">=5.0.0"
+diff-match-patch = ">=20230430"
+mcp = ">=1.2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"

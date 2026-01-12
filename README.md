@@ -61,11 +61,11 @@ Adeu includes a standalone CLI for batch processing or manual workflows.
 
 ```bash
 # 1. Extract text for LLM processing
-poetry run python cli.py contracts/agreement.docx
+adeu extract contracts/agreement.docx
 # Output: contracts/agreement.md
 
 # 2. Apply Redlines (from a JSON list of edits or a modified Markdown file)
-poetry run python cli.py contracts/agreement.docx contracts/agreement_modified.md
+adeu apply contracts/agreement.docx contracts/agreement_modified.md
 # Output: contracts/agreement_redlined.docx
 ```
 

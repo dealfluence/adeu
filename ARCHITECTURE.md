@@ -7,7 +7,7 @@ To handle the complexity of Word documents (`.docx`), Adeu uses a **Reconciler P
 
 ## The Workflow
 
-1.  **Render**: We project the Docx into Markdown (using MarkItDown) to create a "snapshot view" for the LLM.
+1.  **Render**: We project the Docx into a text representation (run-aware ingestion) to create a "snapshot view" for the LLM.
 2.  **Edit**: The LLM modifies the Markdown (The "Desired State").
 3.  **Reconcile**: We diff the Desired State against the Original Snapshot to calculate specific patches (Updates/Inserts/Deletes).
 4.  **Commit**: We apply only those patches to the original `python-docx` objects, preserving all surrounding formatting and metadata.
@@ -35,7 +35,7 @@ graph TD
     end
 
     subgraph "The Virtual Layer"
-    B -->|Render / MarkItDown| C[MD Snapshot 'Original']
+    B -->|Ingest / Run-Aware| C[Text Snapshot 'Original']
     C -->|Copy| D[MD Snapshot 'Edited']
     end
 
