@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import structlog
 from diff_match_patch import diff_match_patch
@@ -115,8 +115,8 @@ def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:
     """
     Splits text into words/tokens and encodes them as unique Unicode characters.
     """
-    token_array = []
-    token_hash = {}
+    token_array: List[str] = []
+    token_hash: Dict[str, int] = {}
     split_pattern = r"(\s+|\w+|[^\w\s])"
 
     def encode_text(text: str) -> str:

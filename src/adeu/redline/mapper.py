@@ -136,8 +136,9 @@ class DocumentMapper:
         if containing:
             span = containing[0]
             offset = index - span.start
-            left, _ = self._split_run_at_index(span.run, offset)
-            return left
+            if span.run:
+                left, _ = self._split_run_at_index(span.run, offset)
+                return left
         if index == 0 and self.spans:
             return self.spans[0].run
         preceding_gap = [s for s in self.spans if s.end < index]

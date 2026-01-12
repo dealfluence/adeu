@@ -8,20 +8,12 @@ from docx import Document
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
-from adeu.models import DocumentEdit
+from adeu.models import DocumentEdit, EditOperationType
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, normalize_docx
 
 logger = structlog.get_logger(__name__)
-
-
-class EditOperationType:
-    """Internal enum for low-level XML manipulation"""
-
-    INSERTION = "INSERTION"
-    DELETION = "DELETION"
-    MODIFICATION = "MODIFICATION"
 
 
 def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
@@ -87,7 +79,7 @@ class RedlineEngine:
         if text.strip() != text:
             create_attribute(element, "xml:space", "preserve")
 
-    def track_insert(self, text: str, anchor_run: Run = None):
+    def track_insert(self, text: str, anchor_run: Optional[Run] = None):
         ins = self._create_track_change_tag("w:ins")
         run = create_element("w:r")
         if anchor_run and anchor_run._element.rPr is not None:
@@ -141,7 +133,7 @@ class RedlineEngine:
         skipped = 0
 
         # Indexed First (Reverse Order)
-        indexed_edits.sort(key=lambda x: x._match_start_index, reverse=True)
+        indexed_edits.sort(key=lambda x: x._match_start_index or 0, reverse=True)
         for edit in indexed_edits:
             if self._apply_single_edit_indexed(edit):
                 applied += 1
@@ -209,10 +201,9 @@ class RedlineEngine:
         return self._apply_single_edit_indexed(proxy_edit)
 
     def _apply_single_edit_indexed(self, edit: DocumentEdit) -> bool:
-        # Resolve Op
-        if hasattr(edit, "_internal_op"):
-            op = edit._internal_op
-        else:
+        op = edit._internal_op
+
+        if op is None:
             if not edit.target_text and edit.new_text:
                 op = EditOperationType.INSERTION
             elif edit.target_text and not edit.new_text:
@@ -220,7 +211,7 @@ class RedlineEngine:
             else:
                 op = EditOperationType.MODIFICATION
 
-        start_idx = edit._match_start_index
+        start_idx = edit._match_start_index or 0
         target_text = edit.target_text
         length = len(target_text) if target_text else 0
 
@@ -234,15 +225,17 @@ class RedlineEngine:
             parent = anchor_run._element.getparent()
             index = parent.index(anchor_run._element)
 
+            final_new_text = edit.new_text or ""
+
             if start_idx == 0:
-                ins_elem = self.track_insert(edit.new_text, anchor_run=anchor_run)
+                ins_elem = self.track_insert(final_new_text, anchor_run=anchor_run)
                 parent.insert(index, ins_elem)
                 if edit.comment:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
             else:
                 next_run = self._get_next_run(anchor_run)
-                style_run = self._determine_style_source(anchor_run, next_run, edit.new_text)
-                ins_elem = self.track_insert(edit.new_text, anchor_run=style_run)
+                style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
+                ins_elem = self.track_insert(final_new_text, anchor_run=style_run)
                 parent.insert(index + 1, ins_elem)
                 if edit.comment:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
@@ -265,7 +258,9 @@ class RedlineEngine:
             if last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 del_index = parent.index(last_del_element)
-                ins_elem = self.track_insert(edit.new_text, anchor_run=Run(target_runs[-1]._element, None))
+                ins_elem = self.track_insert(
+                    edit.new_text, anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent)
+                )
                 parent.insert(del_index + 1, ins_elem)
                 if edit.comment:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)

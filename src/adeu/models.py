@@ -3,6 +3,14 @@ from typing import Optional
 from pydantic import BaseModel, Field, PrivateAttr
 
 
+class EditOperationType:
+    """Internal enum for low-level XML manipulation"""
+
+    INSERTION = "INSERTION"
+    DELETION = "DELETION"
+    MODIFICATION = "MODIFICATION"
+
+
 class DocumentEdit(BaseModel):
     """
     Represents a single atomic edit suggested by the LLM.
@@ -33,3 +41,4 @@ class DocumentEdit(BaseModel):
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
+    _internal_op: Optional[str] = PrivateAttr(default=None)
