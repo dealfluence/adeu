@@ -85,3 +85,23 @@ def test_auto_strip_insertion_duplication():
 
     assert xml.count("Liability Cap.") == 1
     assert "SLA Clause." in xml
+
+
+def test_trim_logic_full_suffix_overlap_crash_repro():
+    """
+    Regression test for IndexError when suffix consumes the entire target.
+    Target: "Agreement"
+    New: "New Agreement"
+    Suffix match is "Agreement" (len 9). Accessing target[-(9+1)] is out of bounds.
+    """
+    target = "Agreement"
+    new_val = "New Agreement"
+
+    # This should not raise IndexError
+    p, s = _trim_common_context(target, new_val)
+
+    # Expectation:
+    # Prefix: 0
+    # Suffix: 9 ("Agreement")
+    assert p == 0
+    assert s == 9

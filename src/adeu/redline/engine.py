@@ -46,7 +46,8 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         suffix_len += 1
 
     # Backtrack suffix if we split a word
-    if suffix_len > 0:
+    # We only check for word splitting if we haven't matched the entire target string
+    if suffix_len > 0 and suffix_len < len(target):
         while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
             suffix_len -= 1
 
