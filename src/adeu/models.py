@@ -11,17 +11,24 @@ class DocumentEdit(BaseModel):
 
     target_text: str = Field(
         ...,
-        description="Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context (e.g. 'Section 2: Fee') to ensure the correct instance is matched. For INSERTION, this is the anchor immediately PRECEDING the new content.",
+        description=(
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context "
+            "(e.g. 'Section 2: Fee') to ensure the correct instance is matched. For INSERTION, this is the "
+            "anchor immediately PRECEDING the new content."
+        ),
     )
 
     new_text: Optional[str] = Field(
         "",
-        description="The desired text to replace target_text with. For deletions, leave empty. For insertions, include the anchor context from target_text (e.g. target='Section 1', new='Section 1\\nNew Section').",
+        description=(
+            "The desired text to replace target_text with. For deletions, leave empty. For insertions, include the "
+            "anchor context from target_text (e.g. target='Section 1', new='Section 1\\nNew Section')."
+        ),
     )
 
     comment: Optional[str] = Field(
         None,
-        description="Text to appear in a comment bubble (Review Pane) linked to this edit. Use this to explain the 'why' behind the change.",
+        description="Text to appear in a comment bubble (Review Pane) linked to this edit.",
     )
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.

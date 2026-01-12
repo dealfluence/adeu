@@ -7,6 +7,11 @@ from typing import List, Optional
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+from adeu.diff import generate_edits_from_text
+from adeu.ingest import extract_text_from_stream
+from adeu.models import DocumentEdit
+from adeu.redline.engine import RedlineEngine
+
 # --- LOGGING CONFIGURATION ---
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
 
@@ -14,11 +19,6 @@ structlog.configure(
     processors=[structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer()],
     logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
 )
-
-from adeu.diff import generate_edits_from_text
-from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
-from adeu.redline.engine import RedlineEngine
 
 mcp = FastMCP("Adeu Redlining Service")
 

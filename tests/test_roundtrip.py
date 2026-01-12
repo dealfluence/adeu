@@ -34,7 +34,7 @@ def test_full_roundtrip_workflow(simple_docx_stream):
 def test_split_run_behavior():
     doc = Document()
     p = doc.add_paragraph()
-    run = p.add_run("The quick brown fox.")
+    p.add_run("The quick brown fox.")
 
     stream = io.BytesIO()
     doc.save(stream)
@@ -97,7 +97,7 @@ def test_insertion_spacing_between_complex_runs():
 def test_insertion_splits_coalesced_run():
     doc = Document()
     p = doc.add_paragraph()
-    run = p.add_run("ARTICLE3")
+    p.add_run("ARTICLE3")
 
     stream = io.BytesIO()
     doc.save(stream)
