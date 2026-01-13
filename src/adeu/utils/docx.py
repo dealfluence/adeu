@@ -1,3 +1,4 @@
+# FILE: src/adeu/utils/docx.py
 """
 Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
@@ -21,25 +22,71 @@ def create_attribute(element, name: str, value: str):
     element.set(qn(name), value)
 
 
+def _is_page_instr(instr: str) -> bool:
+    if not instr:
+        return False
+    instr = instr.upper().strip()
+    # Check for PAGE or NUMPAGES keyword at start of instruction
+    parts = instr.split()
+    if not parts:
+        return False
+    return parts[0] in ("PAGE", "NUMPAGES")
+
+
 def get_visible_runs(paragraph: Paragraph):
     """
     Iterates over runs in a paragraph, including those inside <w:ins> tags.
     Effectively returns the 'Accepted Changes' view of the runs.
+    Filters out dynamic page number fields ({PAGE}, {NUMPAGES}).
     """
     runs = []
+
+    # State for complex fields (w:fldChar)
+    in_complex_field = False
+    current_instr = ""
+    hide_result = False
+
+    def process_run_element(r_element):
+        nonlocal in_complex_field, current_instr, hide_result
+
+        # 1. Parse Field Characters (begin/separate/end)
+        for fchar in r_element.findall(qn("w:fldChar")):
+            fld_type = fchar.get(qn("w:fldCharType"))
+            if fld_type == "begin":
+                in_complex_field = True
+                current_instr = ""
+            elif fld_type == "separate":
+                # End of instruction, start of visible result
+                if _is_page_instr(current_instr):
+                    hide_result = True
+            elif fld_type == "end":
+                in_complex_field = False
+                current_instr = ""
+                hide_result = False
+
+        # 2. Accumulate Instruction Text
+        if in_complex_field and not hide_result:
+            for instr in r_element.findall(qn("w:instrText")):
+                if instr.text:
+                    current_instr += instr.text
+
+        # 3. Yield Run (if not hidden)
+        if not hide_result:
+            runs.append(Run(r_element, paragraph))
+
     # Iterate over all children of the paragraph XML element
     for child in paragraph._element:
         tag = child.tag
         if tag == qn("w:r"):
             # Standard run
-            runs.append(Run(child, paragraph))
+            process_run_element(child)
         elif tag == qn("w:ins"):
             # Inserted runs (Track Changes)
             for subchild in child:
                 if subchild.tag == qn("w:r"):
-                    runs.append(Run(subchild, paragraph))
+                    process_run_element(subchild)
         # w:del is skipped implies we read the "Future" state (Deletions are gone)
-        # w:hyperlink could be added here if needed, but skipping for MVP
+        # w:fldSimple is typically skipped here. If supported in future, add logic to check w:instr attribute.
 
     return runs
 
@@ -78,6 +125,46 @@ def _coalesce_runs_in_paragraph(paragraph: Paragraph):
             i += 1
 
 
+def iter_document_parts(doc: DocumentObject):
+    """
+    Yields document parts in a linear order for processing:
+    1. Unique Headers (Primary, First, Even)
+    2. Main Body
+    3. Unique Footers (Primary, First, Even)
+
+    Handles 'Link to Previous' to avoid duplication.
+    """
+
+    def _iter_section_parts(section, part_type_attr):
+        # 1. Primary
+        part = getattr(section, part_type_attr)
+        if not part.is_linked_to_previous:
+            yield part
+
+        # 2. First Page
+        if section.different_first_page_header_footer:
+            first = getattr(section, f"first_page_{part_type_attr}")
+            if not first.is_linked_to_previous:
+                yield first
+
+        # 3. Even Page
+        if doc.settings.odd_and_even_pages_header_footer:
+            even = getattr(section, f"even_page_{part_type_attr}")
+            if not even.is_linked_to_previous:
+                yield even
+
+    # 1. Headers
+    for section in doc.sections:
+        yield from _iter_section_parts(section, "header")
+
+    # 2. Main Body (The Document object itself acts as the container)
+    yield doc
+
+    # 3. Footers
+    for section in doc.sections:
+        yield from _iter_section_parts(section, "footer")
+
+
 def normalize_docx(doc: DocumentObject):
     """
     Applies normalization to a DOCX document to make text mapping reliable.
@@ -90,13 +177,13 @@ def normalize_docx(doc: DocumentObject):
     for proof_err in doc.element.xpath("//w:proofErr"):
         proof_err.getparent().remove(proof_err)
 
-    # Coalesce body paragraphs
-    for p in doc.paragraphs:
-        _coalesce_runs_in_paragraph(p)
+    # Coalesce all parts (Headers, Body, Footers)
+    for part in iter_document_parts(doc):
+        for p in part.paragraphs:
+            _coalesce_runs_in_paragraph(p)
 
-    # Coalesce table paragraphs
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    _coalesce_runs_in_paragraph(p)
+        for table in part.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        _coalesce_runs_in_paragraph(p)

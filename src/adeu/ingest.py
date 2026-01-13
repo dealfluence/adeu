@@ -3,7 +3,7 @@ import io
 import structlog
 from docx import Document
 
-from adeu.utils.docx import get_visible_runs
+from adeu.utils.docx import get_visible_runs, iter_document_parts
 
 logger = structlog.get_logger(__name__)
 
@@ -22,25 +22,26 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
         doc = Document(file_stream)
         full_text = []
 
-        # 1. Body Paragraphs
-        for para in doc.paragraphs:
-            # Use the visible runs helper to see <w:ins> content
-            runs = get_visible_runs(para)
-            p_text = "".join([r.text for r in runs])
-            full_text.append(p_text)
+        for part in iter_document_parts(doc):
+            # 1. Paragraphs
+            for para in part.paragraphs:
+                # Use the visible runs helper to see <w:ins> content
+                runs = get_visible_runs(para)
+                p_text = "".join([r.text for r in runs])
+                full_text.append(p_text)
 
-        # 2. Tables
-        for table in doc.tables:
-            for row in table.rows:
-                row_parts = []
-                for cell in row.cells:
-                    # Cell paragraphs
-                    cell_text = "\n".join(["".join([r.text for r in get_visible_runs(p)]) for p in cell.paragraphs])
-                    if cell_text:
-                        row_parts.append(cell_text)
+            # 2. Tables
+            for table in part.tables:
+                for row in table.rows:
+                    row_parts = []
+                    for cell in row.cells:
+                        # Cell paragraphs
+                        cell_text = "\n".join(["".join([r.text for r in get_visible_runs(p)]) for p in cell.paragraphs])
+                        if cell_text:
+                            row_parts.append(cell_text)
 
-                if row_parts:
-                    full_text.append(" | ".join(row_parts))
+                    if row_parts:
+                        full_text.append(" | ".join(row_parts))
 
         return "\n\n".join(full_text)
 
