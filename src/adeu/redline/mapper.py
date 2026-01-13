@@ -104,13 +104,7 @@ class DocumentMapper:
             if text_len == 0:
                 continue
 
-            span = TextSpan(
-                start=current,
-                end=current + text_len,
-                text=run.text,
-                run=run,
-                paragraph=paragraph
-            )
+            span = TextSpan(start=current, end=current + text_len, text=run.text, run=run, paragraph=paragraph)
             self.spans.append(span)
             self.full_text += run.text
             current += text_len
@@ -121,8 +115,8 @@ class DocumentMapper:
             start=offset,
             end=offset + len(text),
             text=text,
-            run=None, # Virtual
-            paragraph=context_paragraph
+            run=None,  # Virtual
+            paragraph=context_paragraph,
         )
         self.spans.append(span)
         self.full_text += text
