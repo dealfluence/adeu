@@ -75,15 +75,15 @@ class DocumentMapper:
                                 # Add separator from previous cell
                                 self._add_virtual_text(" | ", current_offset, cell_paras[0])
                                 current_offset += 3
-                            
+
                             row_has_content = True
-                            
+
                             for j, p in enumerate(cell_paras):
                                 if j > 0:
                                     # Join paragraphs within cell with \n
                                     self._add_virtual_text("\n", current_offset, p)
                                     current_offset += 1
-                                
+
                                 current_offset = self._map_paragraph_runs(p, current_offset)
 
                     if row_has_content:
@@ -103,7 +103,7 @@ class DocumentMapper:
             text_len = len(run.text)
             if text_len == 0:
                 continue
-            
+
             span = TextSpan(
                 start=current,
                 end=current + text_len,
