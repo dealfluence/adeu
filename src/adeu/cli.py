@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import List
 
+from adeu import __version__
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.models import DocumentEdit
@@ -107,6 +108,7 @@ def handle_apply(args):
 
 def main():
     parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
     p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
