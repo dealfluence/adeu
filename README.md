@@ -1,4 +1,3 @@
-# FILE: README.md
 # Adeu: AI Redlining Engine
 
 **Adeu allows AI Agents and LLMs to "Track Changes" in Microsoft Word documents.**
