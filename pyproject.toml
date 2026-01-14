@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "adeu"
-version = "0.1.2"
+version = "0.2.0"
 description = "Automated DOCX Redlining Engine"
 authors = ["Mikko Korpela"]
 readme = "README.md"
