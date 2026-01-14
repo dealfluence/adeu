@@ -21,7 +21,7 @@ pip install adeu
 ## 🚀 Ways to Use Adeu
 
 ### 1. As MCP Server (No Code Required)
-If you use an agentic systtem such as Claude Desktop, you can connect Adeu directly. This lets you handle contracts in Claude and say: *"Change the Governing Law to Delaware and generate me the redline."*
+If you use an agentic system such as Claude Desktop, you can connect Adeu directly. This lets you handle contracts in Claude and say: *"Change the Governing Law to Delaware and generate me the redline."*
 
 Add this to your `claude_desktop_config.json`:
 
