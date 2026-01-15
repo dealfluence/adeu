@@ -9,7 +9,7 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.utils.docx import get_visible_runs, iter_document_parts
+from adeu.utils.docx import get_paragraph_prefix, get_run_text, get_visible_runs, iter_document_parts
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +44,12 @@ class DocumentMapper:
         for part in iter_document_parts(self.doc):
             # 1. Loose Paragraphs
             for p in part.paragraphs:
+                # Add Header Prefix (Virtual)
+                prefix = get_paragraph_prefix(p)
+                if prefix:
+                    self._add_virtual_text(prefix, current_offset, p)
+                    current_offset += len(prefix)
+
                 current_offset = self._map_paragraph_runs(p, current_offset)
 
                 # Add Paragraph Separator (\n\n)
@@ -54,18 +60,7 @@ class DocumentMapper:
             for table in part.tables:
                 for row in table.rows:
                     row_has_content = False
-                    for i, cell in enumerate(row.cells):
-                        # Check if we need a delimiter before this cell
-                        if i > 0 and row_has_content:
-                            # Previous cell had content, we are adding another.
-                            # Wait, ingest logic is: row_parts.append(cell_text). " | ".join(row_parts).
-                            # So delimiters only exist if MULTIPLE cells have content.
-                            # This is tricky to stream. We'll simplify:
-                            # Ingest filters empty cells? No:
-                            # ingest.py: "if cell_text: row_parts.append(cell_text)"
-                            # So empty cells are skipped in the join.
-                            pass
-
+                    for cell in row.cells:
                         # Map cell paragraphs
                         cell_paras = list(cell.paragraphs)
                         cell_non_empty = any(get_visible_runs(p) for p in cell_paras)
@@ -84,6 +79,13 @@ class DocumentMapper:
                                     self._add_virtual_text("\n", current_offset, p)
                                     current_offset += 1
 
+                                # Add Header Prefix (Virtual) inside table?
+                                # ingest.py does it, so we must too.
+                                prefix = get_paragraph_prefix(p)
+                                if prefix:
+                                    self._add_virtual_text(prefix, current_offset, p)
+                                    current_offset += len(prefix)
+
                                 current_offset = self._map_paragraph_runs(p, current_offset)
 
                     if row_has_content:
@@ -100,13 +102,14 @@ class DocumentMapper:
         current = start_offset
         runs = get_visible_runs(paragraph)
         for run in runs:
-            text_len = len(run.text)
+            text = get_run_text(run)
+            text_len = len(text)
             if text_len == 0:
                 continue
 
-            span = TextSpan(start=current, end=current + text_len, text=run.text, run=run, paragraph=paragraph)
+            span = TextSpan(start=current, end=current + text_len, text=text, run=run, paragraph=paragraph)
             self.spans.append(span)
-            self.full_text += run.text
+            self.full_text += text
             current += text_len
         return current
 
@@ -177,19 +180,29 @@ class DocumentMapper:
     def get_insertion_anchor(self, index: int) -> Optional[Run]:
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
-            return preceding[-1].run
+            if preceding[-1].run:
+                return preceding[-1].run
         containing = [s for s in self.spans if s.start < index < s.end]
         if containing:
             span = containing[0]
-            offset = index - span.start
-            if span.run:
+            if span.run is None:
+                pass
+            else:
+                offset = index - span.start
                 left, _ = self._split_run_at_index(span.run, offset)
                 return left
+
         if index == 0 and self.spans:
-            return self.spans[0].run
+            for s in self.spans:
+                if s.run:
+                    return s.run
+            return None
+
         preceding_gap = [s for s in self.spans if s.end < index]
         if preceding_gap:
-            return preceding_gap[-1].run
+            for s in reversed(preceding_gap):
+                if s.run:
+                    return s.run
         return None
 
     def _split_run_at_index(self, run: Run, split_index: int) -> Tuple[Run, Run]:

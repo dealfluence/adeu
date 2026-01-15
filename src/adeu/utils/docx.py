@@ -1,4 +1,3 @@
-# FILE: src/adeu/utils/docx.py
 """
 Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
@@ -31,6 +30,62 @@ def _is_page_instr(instr: str) -> bool:
     if not parts:
         return False
     return parts[0] in ("PAGE", "NUMPAGES")
+
+
+def get_paragraph_prefix(paragraph: Paragraph) -> str:
+    """
+    Returns the Markdown prefix for a paragraph based on its style.
+    e.g. 'Heading 1' -> '# ', 'Heading 2' -> '## '
+    """
+    # 1. Check Outline Level (Structural Truth)
+    # python-docx outline_level: 0=Level 1, ..., 8=Level 9, 9=Body Text
+    try:
+        lvl = paragraph.paragraph_format.outline_level
+        if lvl is not None and 0 <= lvl <= 8:
+            return "#" * (lvl + 1) + " "
+    except Exception:
+        pass
+
+    if not paragraph.style:
+        return ""
+
+    style_name = paragraph.style.name
+    if not style_name:
+        return ""
+
+    # 2. Check Style Name
+    if style_name.startswith("Heading"):
+        try:
+            level = int(style_name.replace("Heading", "").strip())
+            return "#" * level + " "
+        except ValueError:
+            pass
+
+    if style_name == "Title":
+        return "# "
+
+    # 3. Heuristic for "Normal" style headers (Lazy Lawyer / Manually formatted)
+    # If text is short (<100 chars), All Caps, and Bold -> Likely a Header
+    if style_name == "Normal":
+        text = paragraph.text.strip()
+        if text and len(text) < 100:
+            is_all_caps = text.isupper()
+
+            # Check for Bold (Paragraph style or explicit run formatting)
+            is_bold = False
+            if paragraph.style.font.bold:
+                is_bold = True
+            else:
+                # Check if visible runs are bold
+                # This is a loose check; if the first run is bold, we assume intention
+                runs = [r for r in paragraph.runs if r.text.strip()]
+                if runs and runs[0].bold:
+                    is_bold = True
+
+            if is_all_caps and is_bold:
+                return "## "
+
+    return ""
 
 
 def get_visible_runs(paragraph: Paragraph):
@@ -89,6 +144,24 @@ def get_visible_runs(paragraph: Paragraph):
         # w:fldSimple is typically skipped here. If supported in future, add logic to check w:instr attribute.
 
     return runs
+
+
+def get_run_text(run: Run) -> str:
+    """
+    Extracts text from a run, converting <w:tab/> to spaces and <w:br/> to newlines.
+    Standard run.text ignores these.
+    """
+    text = ""
+    for child in run._element:
+        if child.tag == qn("w:t"):
+            text += child.text or ""
+        elif child.tag == qn("w:tab"):
+            text += " "  # Convert tab to space
+        elif child.tag == qn("w:br"):
+            text += "\n"
+        elif child.tag == qn("w:cr"):
+            text += "\n"
+    return text
 
 
 def _are_runs_identical(r1: Run, r2: Run) -> bool:

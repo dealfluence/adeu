@@ -3,7 +3,7 @@ import io
 import structlog
 from docx import Document
 
-from adeu.utils.docx import get_visible_runs, iter_document_parts
+from adeu.utils.docx import get_paragraph_prefix, get_run_text, get_visible_runs, iter_document_parts
 
 logger = structlog.get_logger(__name__)
 
@@ -27,8 +27,12 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
             for para in part.paragraphs:
                 # Use the visible runs helper to see <w:ins> content
                 runs = get_visible_runs(para)
-                p_text = "".join([r.text for r in runs])
-                full_text.append(p_text)
+                # Use get_run_text to include tabs and breaks
+                p_text = "".join([get_run_text(r) for r in runs])
+
+                # Add Markdown prefix if heading
+                prefix = get_paragraph_prefix(para)
+                full_text.append(prefix + p_text)
 
             # 2. Tables
             for table in part.tables:
@@ -36,7 +40,15 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
                     row_parts = []
                     for cell in row.cells:
                         # Cell paragraphs
-                        cell_text = "\n".join(["".join([r.text for r in get_visible_runs(p)]) for p in cell.paragraphs])
+                        cell_text_parts = []
+                        for p in cell.paragraphs:
+                            # Note: We probably don't want headers inside tables usually,
+                            # but for consistency we should allow it if styled.
+                            prefix = get_paragraph_prefix(p)
+                            p_content = "".join([get_run_text(r) for r in get_visible_runs(p)])
+                            cell_text_parts.append(prefix + p_content)
+
+                        cell_text = "\n".join(cell_text_parts)
                         if cell_text:
                             row_parts.append(cell_text)
 

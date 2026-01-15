@@ -1,4 +1,5 @@
 import datetime
+import re
 from copy import deepcopy
 from io import BytesIO
 from typing import List, Optional
@@ -81,6 +82,75 @@ class RedlineEngine:
             create_attribute(element, "xml:space", "preserve")
 
     def track_insert(self, text: str, anchor_run: Optional[Run] = None):
+        """
+        Inserts text. If text contains newlines, splits into multiple paragraphs
+        injected after the anchor_run's paragraph.
+        Treats one or more newlines as a single paragraph break.
+        """
+        # Split by one or more newlines to avoid creating empty paragraphs for \n\n
+        lines = re.split(r"[\r\n]+", text)
+
+        if not lines:
+            return None
+
+        # 1. Insert First Line Inline
+        first_line = lines[0]
+        ins_elem = self._track_insert_inline(first_line, anchor_run)
+
+        remaining_lines = lines[1:]
+        # Remove trailing empty string from split if it exists (e.g. "Text\n")
+        if remaining_lines and remaining_lines[-1] == "":
+            remaining_lines.pop()
+
+        if remaining_lines:
+            if not anchor_run:
+                logger.warning("No anchor_run provided for multi-line insert. Skipping paragraph injection.")
+                return ins_elem
+
+            # Robustly find parent paragraph.
+            # anchor_run._element.getparent() might be None if the run was replaced by w:del (detached).
+            current_p_element = anchor_run._element.getparent()
+            if current_p_element is None and hasattr(anchor_run, "_parent"):
+                # Fallback to the python-docx Paragraph wrapper
+                current_p_element = getattr(anchor_run._parent, "_element", None)
+
+            if current_p_element is None:
+                logger.warning("Could not determine context paragraph. Skipping multi-line injection.")
+                return ins_elem
+
+            parent_body = current_p_element.getparent()
+            if parent_body is None:
+                logger.warning("Paragraph detached from body. Skipping multi-line injection.")
+                return ins_elem
+
+            try:
+                p_index = parent_body.index(current_p_element)
+            except ValueError:
+                logger.error("Could not find current paragraph in body. Skipping paragraph injection.")
+                return ins_elem
+
+            # 2. Insert Subsequent Lines as New Paragraphs
+            for i, line_text in enumerate(remaining_lines):
+                new_p = create_element("w:p")
+                if current_p_element.pPr is not None:
+                    new_p.append(deepcopy(current_p_element.pPr))
+
+                new_ins = self._create_track_change_tag("w:ins")
+                new_run = create_element("w:r")
+                if anchor_run and anchor_run._element.rPr is not None:
+                    new_run.append(deepcopy(anchor_run._element.rPr))
+
+                t = create_element("w:t")
+                self._set_text_content(t, line_text)
+                new_run.append(t)
+                new_ins.append(new_run)
+                new_p.append(new_ins)
+
+                parent_body.insert(p_index + 1 + i, new_p)
+
+        return ins_elem
+
+    def _track_insert_inline(self, text: str, anchor_run: Optional[Run] = None):
         ins = self._create_track_change_tag("w:ins")
         run = create_element("w:r")
         if anchor_run and anchor_run._element.rPr is not None:
@@ -234,15 +304,17 @@ class RedlineEngine:
 
             if start_idx == 0:
                 ins_elem = self.track_insert(final_new_text, anchor_run=anchor_run)
-                parent.insert(index, ins_elem)
-                if edit.comment:
+                if ins_elem is not None:
+                    parent.insert(index, ins_elem)
+                if edit.comment and ins_elem is not None:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
             else:
                 next_run = self._get_next_run(anchor_run)
                 style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
                 ins_elem = self.track_insert(final_new_text, anchor_run=style_run)
-                parent.insert(index + 1, ins_elem)
-                if edit.comment:
+                if ins_elem is not None:
+                    parent.insert(index + 1, ins_elem)
+                if edit.comment and ins_elem is not None:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
             return True
 
@@ -266,8 +338,9 @@ class RedlineEngine:
                 ins_elem = self.track_insert(
                     edit.new_text, anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent)
                 )
-                parent.insert(del_index + 1, ins_elem)
-                if edit.comment:
+                if ins_elem is not None:
+                    parent.insert(del_index + 1, ins_elem)
+                if edit.comment and ins_elem is not None:
                     self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
         return True
 

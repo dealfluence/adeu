@@ -17,6 +17,10 @@
 *   **Safety Fixes**: 
     *   Fixed `IndexError` in context trimming when suffix matches the entire target string.
     *   Added validation to reject heuristic edits with empty `target_text` to prevent accidental start-of-doc insertions.
+*   **Structural Ingestion**: Ingest now detects Headers (Styles & Outline Levels) and applies Markdown prefixes (`#`).
+*   **Heuristic Detection**: Handles manually formatted (Bold/Caps) headers in "Dirty" documents.
+*   **Layout Preservation**: `RedlineEngine` now supports multi-paragraph insertions by injecting new `w:p` nodes.
+*   **Tab/Break Handling**: Explicitly handles `w:tab` and `w:br` to prevent text merging.
 
 ## 🐛 Known Issues & Blind Spots
 ### 1. Document Scope (Critical)

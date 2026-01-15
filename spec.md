@@ -24,7 +24,8 @@ graph LR
 
 ### 2.1 Ingestion (`src/adeu/ingest.py`)
 **Goal**: Provide text to the LLM that maps 1:1 with the underlying XML runs.
-*   **Mechanism**: It does *not* use `docx.Paragraph.text`. Instead, it iterates over visible XML runs and concatenates them. This ensures that if the LLM sees a space, that space exists in a run, allowing the mapper to find it later.
+*   **Mechanism**: It does *not* use `docx.Paragraph.text`. Instead, it iterates over visible XML runs, resolving `<w:tab/>` and `<w:br/>` tags to prevent text merging.
+*   **Structural Signals**: It detects Paragraph Styles and Outline Levels to inject "Virtual Markdown" (e.g., `# Header`) into the text stream. This gives the LLM structural context without modifying the document content.
 
 ### 2.2 The Mapper (`src/adeu/redline/mapper.py`)
 **Goal**: Translate linear text offsets into XML elements.
@@ -36,6 +37,7 @@ graph LR
 **Goal**: Inject edits into the DOM.
 *   **Indexed Editing**: Applies edits in **reverse order** (by index) to prevent index shifting.
 *   **Style Heuristics**: When inserting text, the engine checks neighboring runs. If inserting a suffix, it mimics the previous run's style. If inserting a prefix (e.g., "Very " before "Important"), it mimics the next run's style.
+*   **DOM Injection**: When inserting multi-line text, the engine splits the content and injects new `w:p` (Paragraph) elements into the document body, cloning the styling of the context paragraph.
 *   **Comments**: Uses `CommentsManager` to manipulate the OPC package relationships, creating `word/comments.xml` if it doesn't exist.
 
 ### 2.4 The Diff Engine (`src/adeu/diff.py`)
