@@ -6,7 +6,6 @@ from typing import List, Optional
 
 import structlog
 from docx import Document
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
@@ -44,13 +43,13 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     # Scan backwards in the matched prefix
     while temp_len > 0:
         char = target[temp_len - 1]
-        if char == '#':
+        if char == "#":
             # Found a hash in the prefix. Backtrack to start of line/block.
             prefix_len = temp_len - 1
-            while prefix_len > 0 and target[prefix_len - 1] != '\n':
+            while prefix_len > 0 and target[prefix_len - 1] != "\n":
                 prefix_len -= 1
             break
-        if char == '\n':
+        if char == "\n":
             # We hit a newline safely without seeing a hash. Stop checking.
             break
         temp_len -= 1
@@ -103,13 +102,17 @@ class RedlineEngine:
         Detects if text starts with markdown header (e.g. '## Title').
         Returns (clean_text, style_name).
         """
-        if text.startswith("# ") or text.startswith("## ") or text.startswith("### "):
+        # Support headers up to Level 6 (standard Markdown) or even 9 (Word max)
+        if text.startswith("#"):
             level = 0
             while text.startswith("#"):
                 level += 1
                 text = text[1:]
-            text = text.strip()
-            return text, f"Heading {level}"
+
+            # Ensure there was a space after the hashes (e.g. "# Title")
+            if text.startswith(" "):
+                return text.strip(), f"Heading {level}"
+
         return text, None
 
     def track_insert(self, text: str, anchor_run: Optional[Run] = None):
@@ -230,7 +233,14 @@ class RedlineEngine:
             p_element.remove(existing_pPr)
         pPr = create_element("w:pPr")
         pStyle = create_element("w:pStyle")
-        create_attribute(pStyle, "w:val", style_name)
+
+        # Resolve Style Name to ID (e.g. "Heading 1" -> "Heading1")
+        try:
+            style_id = self.doc.styles[style_name].style_id
+        except (KeyError, ValueError):
+            style_id = style_name.replace(" ", "")
+
+        create_attribute(pStyle, "w:val", style_id)
         pPr.append(pStyle)
         p_element.insert(0, pPr)
 
