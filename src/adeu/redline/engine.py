@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import structlog
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
@@ -37,6 +38,23 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         while prefix_len > 0 and not target[prefix_len - 1].isspace() and not target[prefix_len].isspace():
             prefix_len -= 1
 
+    # Safety: Backtrack if we consumed a Markdown Header marker (#)
+    # This ensures track_insert sees the '#' and triggers block logic.
+    temp_len = prefix_len
+    # Scan backwards in the matched prefix
+    while temp_len > 0:
+        char = target[temp_len - 1]
+        if char == '#':
+            # Found a hash in the prefix. Backtrack to start of line/block.
+            prefix_len = temp_len - 1
+            while prefix_len > 0 and target[prefix_len - 1] != '\n':
+                prefix_len -= 1
+            break
+        if char == '\n':
+            # We hit a newline safely without seeing a hash. Stop checking.
+            break
+        temp_len -= 1
+
     # 2. Suffix with Word Boundary Check
     suffix_len = 0
     target_rem_len = len(target) - prefix_len
@@ -47,7 +65,6 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         suffix_len += 1
 
     # Backtrack suffix if we split a word
-    # We only check for word splitting if we haven't matched the entire target string
     if suffix_len > 0 and suffix_len < len(target):
         while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
             suffix_len -= 1
@@ -81,58 +98,115 @@ class RedlineEngine:
         if text.strip() != text:
             create_attribute(element, "xml:space", "preserve")
 
+    def _parse_markdown_style(self, text: str) -> tuple[str, str | None]:
+        """
+        Detects if text starts with markdown header (e.g. '## Title').
+        Returns (clean_text, style_name).
+        """
+        if text.startswith("# ") or text.startswith("## ") or text.startswith("### "):
+            level = 0
+            while text.startswith("#"):
+                level += 1
+                text = text[1:]
+            text = text.strip()
+            return text, f"Heading {level}"
+        return text, None
+
     def track_insert(self, text: str, anchor_run: Optional[Run] = None):
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs
         injected after the anchor_run's paragraph.
         Treats one or more newlines as a single paragraph break.
         """
-        # Split by one or more newlines to avoid creating empty paragraphs for \n\n
+        # Split by one or more newlines
         lines = re.split(r"[\r\n]+", text)
-
         if not lines:
             return None
 
-        # 1. Insert First Line Inline
+        # 0. Check if FIRST line implies a block element (Header)
+        first_clean, first_style = self._parse_markdown_style(lines[0])
+
+        if first_style:
+            if not anchor_run:
+                return None
+
+            # Robustly find parent paragraph.
+            current_p = anchor_run._element.getparent()
+            if current_p is None and hasattr(anchor_run, "_parent"):
+                current_p = getattr(anchor_run._parent, "_element", None)
+
+            if current_p is None:
+                return None
+
+            body = current_p.getparent()
+            if body is None:
+                return None
+
+            try:
+                p_index = body.index(current_p)
+            except ValueError:
+                return None
+
+            for i, line_text in enumerate(lines):
+                c_text, s_name = self._parse_markdown_style(line_text)
+                if not c_text and not s_name:
+                    continue
+
+                new_p = create_element("w:p")
+                if s_name:
+                    self._set_paragraph_style(new_p, s_name)
+                elif current_p.pPr is not None:
+                    new_p.append(deepcopy(current_p.pPr))
+
+                new_ins = self._create_track_change_tag("w:ins")
+                new_run = create_element("w:r")
+                if anchor_run and anchor_run._element.rPr is not None:
+                    new_run.append(deepcopy(anchor_run._element.rPr))
+
+                t = create_element("w:t")
+                self._set_text_content(t, c_text)
+                new_run.append(t)
+                new_ins.append(new_run)
+                new_p.append(new_ins)
+
+                body.insert(p_index + 1 + i, new_p)
+
+            return None
+
+        # 1. Inline Logic
         first_line = lines[0]
         ins_elem = self._track_insert_inline(first_line, anchor_run)
 
         remaining_lines = lines[1:]
-        # Remove trailing empty string from split if it exists (e.g. "Text\n")
         if remaining_lines and remaining_lines[-1] == "":
             remaining_lines.pop()
 
         if remaining_lines:
             if not anchor_run:
-                logger.warning("No anchor_run provided for multi-line insert. Skipping paragraph injection.")
                 return ins_elem
 
-            # Robustly find parent paragraph.
-            # anchor_run._element.getparent() might be None if the run was replaced by w:del (detached).
             current_p_element = anchor_run._element.getparent()
             if current_p_element is None and hasattr(anchor_run, "_parent"):
-                # Fallback to the python-docx Paragraph wrapper
                 current_p_element = getattr(anchor_run._parent, "_element", None)
 
             if current_p_element is None:
-                logger.warning("Could not determine context paragraph. Skipping multi-line injection.")
                 return ins_elem
 
             parent_body = current_p_element.getparent()
             if parent_body is None:
-                logger.warning("Paragraph detached from body. Skipping multi-line injection.")
                 return ins_elem
 
             try:
                 p_index = parent_body.index(current_p_element)
             except ValueError:
-                logger.error("Could not find current paragraph in body. Skipping paragraph injection.")
                 return ins_elem
 
-            # 2. Insert Subsequent Lines as New Paragraphs
             for i, line_text in enumerate(remaining_lines):
+                clean_text, style_name = self._parse_markdown_style(line_text)
                 new_p = create_element("w:p")
-                if current_p_element.pPr is not None:
+                if style_name:
+                    self._set_paragraph_style(new_p, style_name)
+                elif current_p_element.pPr is not None:
                     new_p.append(deepcopy(current_p_element.pPr))
 
                 new_ins = self._create_track_change_tag("w:ins")
@@ -141,7 +215,7 @@ class RedlineEngine:
                     new_run.append(deepcopy(anchor_run._element.rPr))
 
                 t = create_element("w:t")
-                self._set_text_content(t, line_text)
+                self._set_text_content(t, clean_text)
                 new_run.append(t)
                 new_ins.append(new_run)
                 new_p.append(new_ins)
@@ -149,6 +223,16 @@ class RedlineEngine:
                 parent_body.insert(p_index + 1 + i, new_p)
 
         return ins_elem
+
+    def _set_paragraph_style(self, p_element, style_name: str):
+        existing_pPr = p_element.find(qn("w:pPr"))
+        if existing_pPr is not None:
+            p_element.remove(existing_pPr)
+        pPr = create_element("w:pPr")
+        pStyle = create_element("w:pStyle")
+        create_attribute(pStyle, "w:val", style_name)
+        pPr.append(pStyle)
+        p_element.insert(0, pPr)
 
     def _track_insert_inline(self, text: str, anchor_run: Optional[Run] = None):
         ins = self._create_track_change_tag("w:ins")
@@ -237,19 +321,15 @@ class RedlineEngine:
         effective_new_text = edit.new_text or ""
         effective_target_text = edit.target_text
 
-        # Optimization: No Change
         if effective_target_text == effective_new_text:
             return True
 
-        # Determine Effective Operation & Strings
-        # Check for Insertion-with-Context (Claude Bug fix)
         if effective_new_text.startswith(effective_target_text):
             effective_op = EditOperationType.INSERTION
             final_target = ""
             final_new = effective_new_text[len(effective_target_text) :]
             effective_start_idx = start_idx + len(effective_target_text)
         else:
-            # Context Trimming
             prefix_len, suffix_len = _trim_common_context(effective_target_text, effective_new_text)
 
             t_end = len(effective_target_text) - suffix_len
@@ -268,7 +348,6 @@ class RedlineEngine:
             else:
                 return True
 
-        # Proxy Edit
         proxy_edit = DocumentEdit(target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op
@@ -335,6 +414,7 @@ class RedlineEngine:
             if last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 del_index = parent.index(last_del_element)
+
                 ins_elem = self.track_insert(
                     edit.new_text, anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent)
                 )
