@@ -8,7 +8,7 @@ It creates a "Virtual DOM" of your document, letting AI apply surgical edits wit
 
 ---
 
-## 📦 Installation
+## Installation
 
 Adeu is available on PyPI.
 
@@ -18,7 +18,7 @@ pip install adeu
 
 ---
 
-## 🚀 Ways to Use Adeu
+## Ways to Use Adeu
 
 ### 1. As MCP Server (No Code Required)
 If you use an agentic system such as Claude Desktop, you can connect Adeu directly. This lets you handle contracts in Claude and say: *"Change the Governing Law to Delaware and generate me the redline."*
@@ -77,13 +77,13 @@ adeu apply agreement.docx edits.json
 
 ---
 
-## ⚖️ Why Adeu?
+## Why Adeu?
 
 *   **Native Redlines**: Generates real Microsoft Word Track Changes. You can "Accept" or "Reject" them in Word.
 *   **Format Safe**: Adeu preserves your complex numbering, headers, footers, and images. It only touches the text you change.
 *   **Native Comments**: Supports adding comments (`Review Pane`) linked to specific text ranges.
 *   **Intelligent Mapping**: Handles the messy internal XML of Word documents (e.g., when "Contract" is split into `["Con", "tract"]` by spellcheck).
 
-## 🛡️ License
+## License
 
 MIT License. Open source and free to use in commercial legal tech applications.
