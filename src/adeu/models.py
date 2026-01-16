@@ -1,3 +1,5 @@
+# FILE: src/adeu/models.py
+
 from typing import Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -20,17 +22,18 @@ class DocumentEdit(BaseModel):
     target_text: str = Field(
         ...,
         description=(
-            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context "
-            "(e.g. 'Section 2: Fee') to ensure the correct instance is matched. For INSERTION, this is the "
-            "anchor immediately PRECEDING the new content."
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
+            "NOTE: The text may contain Markdown formatting for Headers (#), Bold (**), and Italic (_). "
+            "You MUST include these markers if they exist in the text representation."
         ),
     )
 
     new_text: Optional[str] = Field(
         "",
         description=(
-            "The desired text to replace target_text with. For deletions, leave empty. For insertions, include the "
-            "anchor context from target_text (e.g. target='Section 1', new='Section 1\\nNew Section')."
+            "The desired text replacement. You may use Markdown formatting: "
+            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
+            "For insertions, include anchor context from target_text."
         ),
     )
 

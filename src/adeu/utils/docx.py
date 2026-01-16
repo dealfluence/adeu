@@ -1,3 +1,5 @@
+# FILE: src/adeu/utils/docx.py
+
 """
 Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
@@ -86,6 +88,28 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
                 return "## "
 
     return ""
+
+
+def get_run_style_markers(run: Run) -> tuple[str, str]:
+    """
+    Returns markdown prefix/suffix for run formatting (bold/italic).
+    Only returns markers for explicit formatting to avoid clutter.
+    """
+    prefix = ""
+    suffix = ""
+
+    # Nesting order: Bold outer, Italic inner -> **_text_**
+
+    # explicit check for True (ignores None/False)
+    if run.bold:
+        prefix += "**"
+        suffix = "**" + suffix
+
+    if run.italic:
+        prefix += "_"
+        suffix = "_" + suffix
+
+    return prefix, suffix
 
 
 def get_visible_runs(paragraph: Paragraph):

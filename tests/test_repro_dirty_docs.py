@@ -1,3 +1,5 @@
+# FILE: tests/test_repro_dirty_docs.py
+
 import io
 
 from docx import Document
@@ -43,6 +45,8 @@ def test_heuristic_header_detection():
     """
     REPRO: 'Normal' style paragraphs that are BOLD and ALL-CAPS should
     be detected as headers (##) to give the LLM structural context.
+
+    UPDATED: Now includes inline markdown **markers** for bold text.
     """
     doc = Document()
     p = doc.add_paragraph("LIABILITY CAP")
@@ -57,5 +61,6 @@ def test_heuristic_header_detection():
 
     text = extract_text_from_stream(stream)
 
-    # EXPECTATION: "## LIABILITY CAP"
-    assert "## LIABILITY CAP" in text
+    # EXPECTATION: "## **LIABILITY CAP**"
+    # The header heuristic adds ##. The inline processor adds **...**.
+    assert "## **LIABILITY CAP**" in text

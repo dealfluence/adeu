@@ -1,9 +1,17 @@
+# FILE: src/adeu/ingest.py
+
 import io
 
 import structlog
 from docx import Document
 
-from adeu.utils.docx import get_paragraph_prefix, get_run_text, get_visible_runs, iter_document_parts
+from adeu.utils.docx import (
+    get_paragraph_prefix,
+    get_run_style_markers,
+    get_run_text,
+    get_visible_runs,
+    iter_document_parts,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -27,8 +35,15 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
             for para in part.paragraphs:
                 # Use the visible runs helper to see <w:ins> content
                 runs = get_visible_runs(para)
-                # Use get_run_text to include tabs and breaks
-                p_text = "".join([get_run_text(r) for r in runs])
+
+                # Build paragraph text with markers
+                p_text_parts = []
+                for r in runs:
+                    prefix, suffix = get_run_style_markers(r)
+                    text = get_run_text(r)
+                    p_text_parts.append(f"{prefix}{text}{suffix}")
+
+                p_text = "".join(p_text_parts)
 
                 # Add Markdown prefix if heading
                 prefix = get_paragraph_prefix(para)
@@ -45,7 +60,15 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
                             # Note: We probably don't want headers inside tables usually,
                             # but for consistency we should allow it if styled.
                             prefix = get_paragraph_prefix(p)
-                            p_content = "".join([get_run_text(r) for r in get_visible_runs(p)])
+
+                            runs = get_visible_runs(p)
+                            p_content_list = []
+                            for r in runs:
+                                r_pre, r_suf = get_run_style_markers(r)
+                                r_text = get_run_text(r)
+                                p_content_list.append(f"{r_pre}{r_text}{r_suf}")
+
+                            p_content = "".join(p_content_list)
                             cell_text_parts.append(prefix + p_content)
 
                         cell_text = "\n".join(cell_text_parts)

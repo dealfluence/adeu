@@ -1,8 +1,10 @@
+# FILE: src/adeu/redline/engine.py
+
 import datetime
 import re
 from copy import deepcopy
 from io import BytesIO
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from docx import Document
@@ -21,7 +23,8 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     """
     Calculates overlapping prefix/suffix lengths between target and new_val.
     Returns (prefix_len, suffix_len).
-    Ensures that we only trim at word boundaries (whitespace).
+    Ensures that we only trim at word boundaries (whitespace) AND
+    do not split Markdown style delimiters (bold/italic).
     """
     if not target or not new_val:
         return 0, 0
@@ -38,21 +41,53 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
             prefix_len -= 1
 
     # Safety: Backtrack if we consumed a Markdown Header marker (#)
-    # This ensures track_insert sees the '#' and triggers block logic.
     temp_len = prefix_len
-    # Scan backwards in the matched prefix
     while temp_len > 0:
         char = target[temp_len - 1]
         if char == "#":
-            # Found a hash in the prefix. Backtrack to start of line/block.
             prefix_len = temp_len - 1
             while prefix_len > 0 and target[prefix_len - 1] != "\n":
                 prefix_len -= 1
             break
         if char == "\n":
-            # We hit a newline safely without seeing a hash. Stop checking.
             break
         temp_len -= 1
+
+    # Safety: Backtrack if we are inside a Markdown Inline Delimiter (** or _)
+    # We must be "balanced" in the prefix to safely trim it.
+    # If we have an odd number of delimiters, we are likely inside a block.
+    # We backtrack until we are balanced (usually means backtracking to 0 or previous block end).
+
+    def get_unbalanced_index(text_slice: str) -> int:
+        # Check **
+        # We find all occurrences. If count is odd, return index of last occurrence.
+        # Note: This is heuristic. Nested **_..._** might confuse simple counting,
+        # but for trimming "context", we generally want to avoid cutting ANY formatting.
+
+        # Check **
+        bold_indices = [m.start() for m in re.finditer(r"\*\*", text_slice)]
+        if len(bold_indices) % 2 != 0:
+            return bold_indices[-1]
+
+        # Check _
+        # We only care about _ if it's acting as a delimiter.
+        # Ideally we use the same regex as the parser, but counting is a safe conservative proxy.
+        # If we mistakenly backtrack because of a snake_case variable, we just re-write the text.
+        # This is safer than corrupting the doc.
+        underscore_indices = [m.start() for m in re.finditer(r"_", text_slice)]
+        if len(underscore_indices) % 2 != 0:
+            return underscore_indices[-1]
+
+        return -1
+
+    while prefix_len > 0:
+        current_slice = target[:prefix_len]
+        unbalanced_idx = get_unbalanced_index(current_slice)
+        if unbalanced_idx != -1:
+            # Backtrack to BEFORE the unbalanced token
+            prefix_len = unbalanced_idx
+        else:
+            break
 
     # 2. Suffix with Word Boundary Check
     suffix_len = 0
@@ -67,6 +102,31 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     if suffix_len > 0 and suffix_len < len(target):
         while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
             suffix_len -= 1
+
+    # Safety: Backtrack Suffix if unbalanced
+    # For suffix, we check the text segment we are about to trim (from the end).
+    # e.g. target="...end**", suffix="**". Count is 1. Unbalanced.
+    while suffix_len > 0:
+        current_slice = target[len(target) - suffix_len :]
+        unbalanced_idx = get_unbalanced_index(current_slice)
+        if unbalanced_idx != -1:
+            # For suffix, "unbalanced" means we included a delimiter but not its pair.
+            # However, get_unbalanced_index returns index relative to start of slice.
+            # If we are unbalanced, we just shrink suffix_len.
+            # A simple approach: reduce suffix_len by 1 and re-check?
+            # Or reduce until the offending token is excluded.
+
+            # Since get_unbalanced_index returns the *start* of the last token,
+            # we want to trim the suffix so it starts *after* this token.
+            # slice: "foo_bar". Unbalanced at 3 (_).
+            # We want suffix to be "bar" (len 3)? No, that's still inside.
+            # We want to exclude the whole block.
+
+            # Conservative approach: If unbalanced, reduce suffix to 0?
+            # Or reduce linearly. Since this loop is fast for short suffixes:
+            suffix_len -= 1
+        else:
+            break
 
     return prefix_len, suffix_len
 
@@ -115,6 +175,65 @@ class RedlineEngine:
 
         return text, None
 
+    def _parse_inline_markdown(self, text: str, base_style: Dict[str, Any] = None) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Recursively parses bold (**) and italic (_) markdown.
+        Returns a flat list of (text_segment, combined_style_dict).
+        Supports arbitrary nesting.
+        """
+        if base_style is None:
+            base_style = {}
+
+        if not text:
+            return []
+
+        # Combined Regex for "First match wins" (Left-to-Right scanning)
+        # Group 1: Bold (**...**)
+        # Group 2: Italic (_..._)
+        token_pattern = re.compile(r"(\*\*.*?\*\*)|(_.*?_)")
+
+        match = token_pattern.search(text)
+
+        if not match:
+            # No tags found, return clean text
+            return [(text, base_style)]
+
+        start, end = match.span()
+
+        # Determine which group matched
+        if match.group(1):
+            tag_type = "bold"
+            inner_raw = match.group(1)
+        else:
+            tag_type = "italic"
+            inner_raw = match.group(2)
+
+        # Split text: [Pre] [Inner] [Post]
+        pre_text = text[:start]
+        post_text = text[end:]
+
+        results = []
+
+        # 1. Process Pre (with current base style)
+        if pre_text:
+            results.append((pre_text, base_style))
+
+        # 2. Process Inner (Recursively, with added style)
+        new_style = base_style.copy()
+        if tag_type == "bold":
+            inner_content = inner_raw[2:-2]  # strip **
+            new_style["bold"] = True
+        else:
+            inner_content = inner_raw[1:-1]  # strip _
+            new_style["italic"] = True
+
+        results.extend(self._parse_inline_markdown(inner_content, new_style))
+
+        # 3. Process Post (Recursively, with base style)
+        results.extend(self._parse_inline_markdown(post_text, base_style))
+
+        return results
+
     def track_insert(self, text: str, anchor_run: Optional[Run] = None):
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs
@@ -162,16 +281,23 @@ class RedlineEngine:
                     new_p.append(deepcopy(current_p.pPr))
 
                 new_ins = self._create_track_change_tag("w:ins")
-                new_run = create_element("w:r")
-                if anchor_run and anchor_run._element.rPr is not None:
-                    new_run.append(deepcopy(anchor_run._element.rPr))
 
-                t = create_element("w:t")
-                self._set_text_content(t, c_text)
-                new_run.append(t)
-                new_ins.append(new_run)
+                # Handle Inline formatting within the header text
+                segments = self._parse_inline_markdown(c_text)
+
+                for seg_text, seg_props in segments:
+                    new_run = create_element("w:r")
+                    if anchor_run and anchor_run._element.rPr is not None:
+                        new_run.append(deepcopy(anchor_run._element.rPr))
+
+                    self._apply_run_props(new_run, seg_props)
+
+                    t = create_element("w:t")
+                    self._set_text_content(t, seg_text)
+                    new_run.append(t)
+                    new_ins.append(new_run)
+
                 new_p.append(new_ins)
-
                 body.insert(p_index + 1 + i, new_p)
 
             return None
@@ -213,19 +339,46 @@ class RedlineEngine:
                     new_p.append(deepcopy(current_p_element.pPr))
 
                 new_ins = self._create_track_change_tag("w:ins")
-                new_run = create_element("w:r")
-                if anchor_run and anchor_run._element.rPr is not None:
-                    new_run.append(deepcopy(anchor_run._element.rPr))
 
-                t = create_element("w:t")
-                self._set_text_content(t, clean_text)
-                new_run.append(t)
-                new_ins.append(new_run)
+                segments = self._parse_inline_markdown(clean_text)
+                for seg_text, seg_props in segments:
+                    new_run = create_element("w:r")
+                    if anchor_run and anchor_run._element.rPr is not None:
+                        new_run.append(deepcopy(anchor_run._element.rPr))
+
+                    self._apply_run_props(new_run, seg_props)
+
+                    t = create_element("w:t")
+                    self._set_text_content(t, seg_text)
+                    new_run.append(t)
+                    new_ins.append(new_run)
+
                 new_p.append(new_ins)
-
                 parent_body.insert(p_index + 1 + i, new_p)
 
         return ins_elem
+
+    def _apply_run_props(self, run_element, props: Dict[str, Any]):
+        """
+        Applies specific formatting properties to a run element's rPr.
+        """
+        if not props:
+            return
+
+        rPr = run_element.find(qn("w:rPr"))
+        if rPr is None:
+            rPr = create_element("w:rPr")
+            run_element.insert(0, rPr)
+
+        if props.get("bold"):
+            # w:b val="true" or just <w:b/>
+            b = create_element("w:b")
+            rPr.append(b)
+
+        if props.get("italic"):
+            # w:i
+            i = create_element("w:i")
+            rPr.append(i)
 
     def _set_paragraph_style(self, p_element, style_name: str):
         existing_pPr = p_element.find(qn("w:pPr"))
@@ -246,13 +399,25 @@ class RedlineEngine:
 
     def _track_insert_inline(self, text: str, anchor_run: Optional[Run] = None):
         ins = self._create_track_change_tag("w:ins")
-        run = create_element("w:r")
-        if anchor_run and anchor_run._element.rPr is not None:
-            run.append(deepcopy(anchor_run._element.rPr))
-        t = create_element("w:t")
-        self._set_text_content(t, text)
-        run.append(t)
-        ins.append(run)
+
+        # Parse inline markdown (bold/italic)
+        segments = self._parse_inline_markdown(text)
+
+        for seg_text, seg_props in segments:
+            run = create_element("w:r")
+
+            # Inherit from anchor if available
+            if anchor_run and anchor_run._element.rPr is not None:
+                run.append(deepcopy(anchor_run._element.rPr))
+
+            # Apply Markdown Overrides
+            self._apply_run_props(run, seg_props)
+
+            t = create_element("w:t")
+            self._set_text_content(t, seg_text)
+            run.append(t)
+            ins.append(run)
+
         return ins
 
     def track_delete_run(self, run: Run):
@@ -426,7 +591,8 @@ class RedlineEngine:
                 del_index = parent.index(last_del_element)
 
                 ins_elem = self.track_insert(
-                    edit.new_text, anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent)
+                    edit.new_text,
+                    anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
                 )
                 if ins_elem is not None:
                     parent.insert(del_index + 1, ins_elem)

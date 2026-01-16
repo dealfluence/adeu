@@ -1,3 +1,5 @@
+# FILE: src/adeu/redline/mapper.py
+
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -9,7 +11,13 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.utils.docx import get_paragraph_prefix, get_run_text, get_visible_runs, iter_document_parts
+from adeu.utils.docx import (
+    get_paragraph_prefix,
+    get_run_style_markers,
+    get_run_text,
+    get_visible_runs,
+    iter_document_parts,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -102,15 +110,33 @@ class DocumentMapper:
         current = start_offset
         runs = get_visible_runs(paragraph)
         for run in runs:
+            # 1. Check style markers (Virtual)
+            prefix, suffix = get_run_style_markers(run)
+
+            if prefix:
+                self._add_virtual_text(prefix, current, paragraph)
+                current += len(prefix)
+
+            # 2. Real Run Text
             text = get_run_text(run)
             text_len = len(text)
-            if text_len == 0:
-                continue
+            if text_len > 0:
+                span = TextSpan(
+                    start=current,
+                    end=current + text_len,
+                    text=text,
+                    run=run,
+                    paragraph=paragraph,
+                )
+                self.spans.append(span)
+                self.full_text += text
+                current += text_len
 
-            span = TextSpan(start=current, end=current + text_len, text=text, run=run, paragraph=paragraph)
-            self.spans.append(span)
-            self.full_text += text
-            current += text_len
+            # 3. Suffix markers (Virtual)
+            if suffix:
+                self._add_virtual_text(suffix, current, paragraph)
+                current += len(suffix)
+
         return current
 
     def _add_virtual_text(self, text: str, offset: int, context_paragraph: Paragraph):
@@ -156,21 +182,50 @@ class DocumentMapper:
 
         dom_modified = False
 
-        first_span = affected_spans[0]
-        local_start = start_idx - first_span.start
-        if local_start > 0 and first_span.run is not None:
-            _, right_run = self._split_run_at_index(working_runs[0], local_start)
-            working_runs[0] = right_run
-            dom_modified = True
+        # Handle splitting if we partially overlap a real text span
 
-        last_span = affected_spans[-1]
-        extra_len = last_span.end - end_idx
-        if extra_len > 0 and last_span.run is not None:
-            last_run = working_runs[-1]
-            split_point = len(last_run.text) - extra_len
-            left_run, _ = self._split_run_at_index(last_run, split_point)
-            working_runs[-1] = left_run
-            dom_modified = True
+        # 1. Start Split
+        first_real_span = next((s for s in affected_spans if s.run is not None), None)
+        # Track adjustment if we split the run in place
+        start_split_adjustment = 0
+
+        if first_real_span:
+            local_start = start_idx - first_real_span.start
+            if local_start > 0:
+                # We are splitting working_runs[0]
+                # run_to_split = working_runs[0]
+                idx_in_working = 0  # working_runs[0] is always the run for first_real_span
+
+                _, right_run = self._split_run_at_index(working_runs[idx_in_working], local_start)
+                working_runs[idx_in_working] = right_run
+                dom_modified = True
+                start_split_adjustment = local_start
+
+        # 2. End Split
+        last_real_span = next((s for s in reversed(affected_spans) if s.run is not None), None)
+
+        if last_real_span:
+            # We want to split working_runs[-1].
+            # Check if this is the same run we just split.
+            is_same_run = first_real_span is last_real_span
+
+            run_to_split = working_runs[-1]
+
+            overlap_end = min(last_real_span.end, end_idx)
+            local_end = overlap_end - last_real_span.start  # Relative to original span start
+
+            # If we split the start of THIS run, the current 'run_to_split'
+            # contains text starting from 'start_split_adjustment'.
+            # So the index in 'run_to_split' needs to be shifted.
+
+            if is_same_run and start_split_adjustment > 0:
+                local_end -= start_split_adjustment
+
+            # Check validity and split
+            if 0 < local_end < len(run_to_split.text):
+                left_run, _ = self._split_run_at_index(run_to_split, local_end)
+                working_runs[-1] = left_run
+                dom_modified = True
 
         if dom_modified:
             self._build_map()
