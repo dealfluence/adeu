@@ -175,7 +175,9 @@ class RedlineEngine:
 
         return text, None
 
-    def _parse_inline_markdown(self, text: str, base_style: Dict[str, Any] = None) -> List[Tuple[str, Dict[str, Any]]]:
+    def _parse_inline_markdown(
+        self, text: str, base_style: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[str, Dict[str, Any]]]:
         """
         Recursively parses bold (**) and italic (_) markdown.
         Returns a flat list of (text_segment, combined_style_dict).
