@@ -163,7 +163,17 @@ class DocumentMapper:
     def _flush_spans(self, items: List[Tuple], active_ids: Set[str], current_offset: int, paragraph: Paragraph) -> int:
         # 1. Virtual Start
         if active_ids:
-            marker = "{=="
+            # Determine marker type based on active ID context from items
+            # items[0] = (kind, text, run, ins_id, del_id)
+            _, _, _, ins_id, del_id = items[0]
+            
+            if del_id:
+                marker = "{--"
+            elif ins_id:
+                marker = "{++"
+            else:
+                marker = "{=="
+                
             self._add_virtual_text(marker, current_offset, paragraph)
             current_offset += len(marker)
 
@@ -188,7 +198,15 @@ class DocumentMapper:
 
         # 3. Virtual End + Meta
         if active_ids:
-            marker = "==}"
+            # Close with matching marker
+            _, _, _, ins_id, del_id = items[0]
+            if del_id:
+                marker = "--}"
+            elif ins_id:
+                marker = "++}"
+            else:
+                marker = "==}"
+                
             self._add_virtual_text(marker, current_offset, paragraph)
             current_offset += len(marker)
 
