@@ -1,5 +1,3 @@
-# FILE: src/adeu/redline/engine.py
-
 import datetime
 import re
 from copy import deepcopy
@@ -257,11 +255,18 @@ class RedlineEngine:
 
         return results
 
-    def track_insert(self, text: str, anchor_run: Optional[Run] = None):
+    def track_insert(self, text: str, anchor_run: Optional[Run] = None, comment: Optional[str] = None):
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs
         injected after the anchor_run's paragraph.
         Treats one or more newlines as a single paragraph break.
+
+        Args:
+            text: Text to insert.
+            anchor_run: Context run for style inheritance/position.
+            comment: Optional comment text to attach. NOTE: Only used if Block insertion
+                     (e.g. Headers) occurs internally. For Inline insertion, caller
+                     must handle comment attachment on the returned element.
         """
         # Split by one or more newlines
         lines = re.split(r"[\r\n]+", text)
@@ -291,6 +296,8 @@ class RedlineEngine:
                 p_index = body.index(current_p)
             except ValueError:
                 return None
+
+            created_nodes = []  # List of (paragraph_element, ins_element)
 
             for i, line_text in enumerate(lines):
                 c_text, s_name = self._parse_markdown_style(line_text)
@@ -322,6 +329,16 @@ class RedlineEngine:
 
                 new_p.append(new_ins)
                 body.insert(p_index + 1 + i, new_p)
+                created_nodes.append((new_p, new_ins))
+
+            # Handle Comment Attachment for Block Insertions
+            if comment and created_nodes:
+                start_p, start_ins = created_nodes[0]
+                end_p, end_ins = created_nodes[-1]
+                if start_p == end_p:
+                    self._attach_comment(start_p, start_ins, start_ins, comment)
+                else:
+                    self._attach_comment_spanning(start_p, start_ins, end_p, end_ins, comment)
 
             return None
 
@@ -478,6 +495,38 @@ class RedlineEngine:
         parent_element.insert(end_index + 1, range_end)
         parent_element.insert(end_index + 2, ref_run)
 
+    def _attach_comment_spanning(self, start_p, start_el, end_p, end_el, text: str):
+        if not text:
+            return
+        comment_id = self.comments_manager.add_comment(self.author, text)
+
+        range_start = create_element("w:commentRangeStart")
+        create_attribute(range_start, "w:id", comment_id)
+
+        range_end = create_element("w:commentRangeEnd")
+        create_attribute(range_end, "w:id", comment_id)
+
+        ref_run = create_element("w:r")
+        ref = create_element("w:commentReference")
+        create_attribute(ref, "w:id", comment_id)
+        ref_run.append(ref)
+
+        # Insert Start
+        try:
+            idx_start = start_p.index(start_el)
+            start_p.insert(idx_start, range_start)
+        except ValueError:
+            pass
+
+        # Insert End
+        try:
+            idx_end = end_p.index(end_el)
+            # Insert End AFTER end_el
+            end_p.insert(idx_end + 1, range_end)
+            end_p.insert(idx_end + 2, ref_run)
+        except ValueError:
+            pass
+
     def apply_edits(self, edits: List[DocumentEdit]) -> tuple[int, int]:
         indexed_edits = [e for e in edits if e._match_start_index is not None]
         unindexed_edits = [e for e in edits if e._match_start_index is None]
@@ -631,11 +680,12 @@ class RedlineEngine:
                 # 3. Apply the NEW text as a fresh insertion
                 # We use the position of the *first* ins node we found.
                 if edit.new_text:
-                    ins_elem = self.track_insert(edit.new_text, anchor_run=style_source)
+                    ins_elem = self.track_insert(edit.new_text, anchor_run=style_source, comment=edit.comment)
                     if ins_elem is not None:
                         # Insert at the original position
                         parent.insert(index, ins_elem)
 
+                    # For Inline Insertion (track_insert returned elem), we must attach comment here.
                     if edit.comment and ins_elem is not None:
                         self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
 
@@ -652,7 +702,7 @@ class RedlineEngine:
             final_new_text = edit.new_text or ""
 
             if start_idx == 0:
-                ins_elem = self.track_insert(final_new_text, anchor_run=anchor_run)
+                ins_elem = self.track_insert(final_new_text, anchor_run=anchor_run, comment=edit.comment)
                 if ins_elem is not None:
                     parent.insert(index, ins_elem)
                 if edit.comment and ins_elem is not None:
@@ -660,7 +710,7 @@ class RedlineEngine:
             else:
                 next_run = self._get_next_run(anchor_run)
                 style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
-                ins_elem = self.track_insert(final_new_text, anchor_run=style_run)
+                ins_elem = self.track_insert(final_new_text, anchor_run=style_run, comment=edit.comment)
                 if ins_elem is not None:
                     parent.insert(index + 1, ins_elem)
                 if edit.comment and ins_elem is not None:
@@ -688,6 +738,7 @@ class RedlineEngine:
                 ins_elem = self.track_insert(
                     edit.new_text,
                     anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
+                    comment=edit.comment,
                 )
                 if ins_elem is not None:
                     parent.insert(del_index + 1, ins_elem)

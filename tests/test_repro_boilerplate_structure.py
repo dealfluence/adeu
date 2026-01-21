@@ -1,6 +1,7 @@
 import io
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from adeu.ingest import extract_text_from_stream
 from adeu.models import DocumentEdit
@@ -61,3 +62,59 @@ def test_insert_boilerplate_creates_paragraphs():
 
     assert p1_text == "Clause 2: Termination."
     assert p2_text == "Either party may terminate this agreement."
+
+
+def test_insert_boilerplate_with_comment_attaches_correctly():
+    """
+    REGRESSION: Ensure that when track_insert creates new paragraphs (Block path),
+    it attaches the comment to the new content.
+    Previously, track_insert returned None for blocks, bypassing _attach_comment in the caller.
+    """
+    doc = Document()
+    doc.add_paragraph("Old Header.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    # "#### New Header" triggers header detection -> Block insertion logic.
+    edit = DocumentEdit(target_text="Old Header.", new_text="#### New Header", comment="Changed header style.")
+
+    engine = RedlineEngine(stream, author="Tester")
+    applied, skipped = engine.apply_edits([edit])
+
+    assert applied == 1
+
+    result_stream = engine.save_to_stream()
+
+    # Verify via Ingest that Comment Metadata exists
+    text = extract_text_from_stream(result_stream)
+
+    # Should see [Com:X] ... : Changed header style.
+    assert "Changed header style." in text
+
+    # Verify XML structure
+    doc_result = Document(result_stream)
+
+    # Check if comments part exists and has content
+    comments_part = None
+    for rel in doc_result.part.rels.values():
+        if rel.reltype == RT.COMMENTS:
+            comments_part = rel.target_part
+            break
+
+    assert comments_part is not None
+    comments_xml = comments_part.blob.decode("utf-8")
+    assert "Changed header style." in comments_xml
+
+    # Check if the new paragraph contains commentRangeStart/End
+    # The new header is likely the second paragraph (after the deleted "Old Header.")
+    # Or modification replaces content?
+    # Modification: Delete runs in P1. Insert New P (Heading) AFTER P1.
+    # So P1 is now empty (or contains deleted text). P2 is New Header.
+
+    p2 = doc_result.paragraphs[1]  # "New Header"
+    xml = p2._element.xml
+
+    assert "w:commentRangeStart" in xml
+    assert "w:commentRangeEnd" in xml
