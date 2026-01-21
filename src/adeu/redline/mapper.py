@@ -256,11 +256,11 @@ class DocumentMapper:
         # (Since we flush on any event change, there is at most one active ins/del context in items)
         if ins_event:
             auth = ins_event.author or "Unknown"
-            lines.append(f"[ID:{ins_event.id}] {auth}")
+            lines.append(f"[Chg:{ins_event.id}] {auth}")
 
         if del_event:
             auth = del_event.author or "Unknown"
-            lines.append(f"[ID:{del_event.id}] {auth}")
+            lines.append(f"[Chg:{del_event.id}] {auth}")
 
         # 2. Comment Metadata
         sorted_ids = sorted(list(active_ids))
@@ -273,7 +273,7 @@ class DocumentMapper:
             date_str = data["date"]
             resolved = data["resolved"]
 
-            header_parts = [f"[ID:{cid}] {author}"]
+            header_parts = [f"[Com:{cid}] {author}"]
             if date_str:
                 short_date = date_str.split("T")[0]
                 header_parts.append(f"@ {short_date}")

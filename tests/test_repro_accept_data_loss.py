@@ -47,8 +47,14 @@ def test_repro_accept_deletion_keeps_insertion():
     print(f"Mid Text: {text_mid}")
 
     # Assuming ID 1 is the deletion (track_delete_run called first)
+    import re
+
+    # Matches [Chg:1]
+    ids = re.findall(r"\[Chg:(\d+)\]", text_mid)
+    del_id = ids[0] if ids else "1"
+
     engine2 = RedlineEngine(stream_edited, author="Reviewer")
-    action = ReviewAction(action="ACCEPT", target_id="1")
+    action = ReviewAction(action="ACCEPT", target_id=f"Chg:{del_id}")
     engine2.apply_review_actions([action])
 
     stream_final = engine2.save_to_stream()

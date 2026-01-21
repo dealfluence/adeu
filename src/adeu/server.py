@@ -158,7 +158,7 @@ def manage_review_actions(
     Args:
         original_docx_path: Absolute path to the source file.
         actions: List of actions to perform (ACCEPT, REJECT, REPLY).
-                 Target IDs (e.g. "101") come from the CriticMarkup output [ID:101].
+                 Target IDs (e.g. "Chg:1" or "Com:101") come from the CriticMarkup output.
         author_name: Name of the reviewer.
         output_path: Optional output path.
     """

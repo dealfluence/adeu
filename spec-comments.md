@@ -22,7 +22,7 @@ The content inside `{>> ... <<}` follows a structured format to support multiple
 
 **Single Comment:**
 ```text
-{>>[Author Name @ YYYY-MM-DD] Comment text...<<}
+{>>[Com:12] Author Name @ YYYY-MM-DD: Comment text...<<}
 ```
 
 **Threaded/Multiple Comments:**

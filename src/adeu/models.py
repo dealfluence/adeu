@@ -58,7 +58,7 @@ class ReviewAction(BaseModel):
     """
 
     action: ReviewActionType = Field(..., description="ACCEPT, REJECT, or REPLY.")
-    target_id: str = Field(..., description="The ID of the Insertion, Deletion, or Comment (e.g. '101' from [ID:101]).")
+    target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:1' or 'Com:5').")
 
     text: Optional[str] = Field(None, description="For REPLY: The content of the reply body.")
     comment: Optional[str] = Field(None, description="For ACCEPT/REJECT: Optional rationale.")

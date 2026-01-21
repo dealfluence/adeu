@@ -4,6 +4,7 @@
 *   **Core Architecture**: `RedlineEngine` successfully injects `w:ins` and `w:del` tags into existing DOCX files without corrupting them.
 *   **Nested Edit Safety**: The Engine now detects when an edit targets text inside an existing `w:ins`. It automatically converts the operation to a "Reject Old + Insert New" sequence to prevent XML corruption.
 *   **Mapping Engine**: `DocumentMapper` correctly maps linear text offsets to XML DOM nodes, including handling split runs (`_split_run_at_index`).
+*   **ID Namespacing**: Implemented `[Chg:ID]` and `[Com:ID]` prefixes to prevent collisions between Track Changes and Comments, resolving corruption in multi-step negotiation workflows.
 *   **Diff Engine**: `diff-match-patch` integration works to convert full-text rewrites into atomic edits.
 *   **Alignment**: Ingestion logic (`ingest.py`) and Mapper logic are aligned to use raw run concatenation, resolving most "Target Not Found" errors.
 *   **Comments Support**: Implemented **CriticMarkup** style ingestion (`{==Text==}{>>Comment<<}`) with metadata (Author, Date, Resolved). `DocumentMapper` treats these markers as virtual text, allowing edits to text within comments.

@@ -160,16 +160,16 @@ def _format_segment(text, active_ins, active_del, active_comments, comments_map)
     # Ins/Del Metadata
     for i_id, meta in active_ins.items():
         auth = meta.author or "Unknown"
-        meta_lines.append(f"[ID:{i_id}] {auth}")
+        meta_lines.append(f"[Chg:{i_id}] {auth}")
     for d_id, meta in active_del.items():
         auth = meta.author or "Unknown"
-        meta_lines.append(f"[ID:{d_id}] {auth}")
+        meta_lines.append(f"[Chg:{d_id}] {auth}")
 
     # Comment Metadata
     for c_id in sorted(active_comments):
         if c_id in comments_map:
             data = comments_map[c_id]
-            header = f"[ID:{c_id}] {data['author']}"
+            header = f"[Com:{c_id}] {data['author']}"
             if data["date"]:
                 header += f" @ {data['date'].split('T')[0]}"
             meta_lines.append(f"{header}: {data['text']}")

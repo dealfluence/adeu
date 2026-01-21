@@ -54,8 +54,8 @@ def test_ingest_critic_markup_simple():
 
     # Assert
     # Note: **Target** because we bolded it.
-    assert "Start {==**Target**==}{>>[ID:" in text
-    # Matches: [ID:1] Tester @ 2026-01-21: Fix this.
+    assert "Start {==**Target**==}{>>[Com:" in text
+    # Matches: [Com:1] Tester @ 2026-01-21: Fix this.
     assert ": Fix this.<<} End" in text
 
 

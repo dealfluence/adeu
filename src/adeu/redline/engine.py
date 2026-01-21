@@ -722,13 +722,34 @@ class RedlineEngine:
         skipped = 0
 
         for act in actions:
+            raw_id = act.target_id
+            target_id = raw_id
+
+            # Determine type from prefix
+            is_change = False
+            is_comment = False
+
+            if raw_id.startswith("Chg:"):
+                target_id = raw_id[4:]
+                is_change = True
+            elif raw_id.startswith("Com:"):
+                target_id = raw_id[4:]
+                is_comment = True
+            else:
+                # Fallback for legacy/manual inputs
+                is_change = True
+                is_comment = True
+
             success = False
             if act.action == "ACCEPT":
-                success = self._accept_change(act.target_id)
+                if is_change:
+                    success = self._accept_change(target_id)
             elif act.action == "REJECT":
-                success = self._reject_change(act.target_id)
+                if is_change:
+                    success = self._reject_change(target_id)
             elif act.action == "REPLY":
-                success = self._reply_to_comment(act.target_id, act.text or "")
+                if is_comment:
+                    success = self._reply_to_comment(target_id, act.text or "")
 
             if success:
                 applied += 1
