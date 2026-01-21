@@ -727,23 +727,45 @@ class RedlineEngine:
                 self.track_delete_run(run)
 
         elif op == EditOperationType.MODIFICATION:
+            first_del_element = None
             last_del_element = None
             for run in target_runs:
-                last_del_element = self.track_delete_run(run)
+                del_elem = self.track_delete_run(run)
+                if first_del_element is None:
+                    first_del_element = del_elem
+                last_del_element = del_elem
 
             if last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 del_index = parent.index(last_del_element)
 
+                # Style Check: Prevent creating a new paragraph if style matches
+                text_to_insert = edit.new_text
+                clean_text, style_name = self._parse_markdown_style(text_to_insert)
+                if style_name:
+                    anchor_para = target_runs[-1]._parent
+                    # Normalize style names to avoid loose mismatch
+                    if anchor_para.style.name == style_name:
+                        text_to_insert = clean_text  # Strip Markdown Header to force inline
+
                 ins_elem = self.track_insert(
-                    edit.new_text,
+                    text_to_insert,
                     anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
                     comment=edit.comment,
                 )
                 if ins_elem is not None:
                     parent.insert(del_index + 1, ins_elem)
-                if edit.comment and ins_elem is not None:
-                    self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+
+                # If Inline (ins_elem present) and Comment exists, attach to Del+Ins range
+                if edit.comment and ins_elem is not None and first_del_element is not None:
+                    # Check if spans across parents (e.g. paragraph boundary)
+                    start_p = first_del_element.getparent()
+                    end_p = ins_elem.getparent()
+
+                    if start_p == end_p:
+                        self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
+                    else:
+                        self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
         return True
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
