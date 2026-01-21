@@ -33,10 +33,11 @@ def test_repro_accept_deletion_keeps_insertion():
 
     # Verify Intermediate State
     text_mid = extract_text_from_stream(stream_edited)
-    # Should see {--Old Text--} and {++New Text++}
-    # Note: IDs might be 1 and 2
-    assert "Old Text" in text_mid
-    assert "New Text" in text_mid
+
+    # Engine optimizes "Old Text" -> "New Text" by keeping common suffix " Text".
+    # Result is effectively: Del("Old") + Ins("New") + Keep(" Text")
+    assert "{--Old--}" in text_mid
+    assert "{++New++}" in text_mid
 
     # 2. Accept the Deletion (ID 1)
     # We need to find the ID. In a clean doc, it starts at 1.
@@ -56,12 +57,10 @@ def test_repro_accept_deletion_keeps_insertion():
 
     # Check:
     # 1. Old Text should be GONE (Accepted Deletion)
-    assert "Old Text" not in text_final, "Old Text should be removed"
+    assert "Old" not in text_final, "Old Text should be removed"
 
     # 2. New Text should be PRESENT (Pending Insertion)
-    # It should still be wrapped in {++...++} unless we accepted it too
-    assert "New Text" in text_final, "New Text should remain"
-    assert "{++New Text++}" in text_final, "New Text should still be an insertion"
+    assert "{++New++}" in text_final, "New Text should still be an insertion"
 
 
 def test_id_collision_prevention():
