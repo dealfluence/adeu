@@ -138,9 +138,29 @@ class RedlineEngine:
         normalize_docx(self.doc)
         self.author = author
         self.timestamp = datetime.datetime.now().replace(microsecond=0).isoformat() + "Z"
-        self.current_id = 0
+        self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
         self.comments_manager = CommentsManager(self.doc)
+
+    def _scan_existing_ids(self) -> int:
+        """
+        Scans the document body for existing w:id attributes in w:ins and w:del
+        to ensure new IDs do not collide.
+        """
+        max_id = 0
+        # XPath to find all w:ins and w:del tags
+        # Note: comments IDs are separate (handled by CommentsManager)
+        # But track changes IDs must be unique within the document body context.
+        for tag in ["w:ins", "w:del"]:
+            elements = self.doc.element.xpath(f"//{tag}")
+            for el in elements:
+                try:
+                    val = int(el.get(qn("w:id")))
+                    if val > max_id:
+                        max_id = val
+                except (ValueError, TypeError):
+                    pass
+        return max_id
 
     def _get_next_id(self):
         self.current_id += 1
