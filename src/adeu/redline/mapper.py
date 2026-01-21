@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -107,48 +107,108 @@ class DocumentMapper:
         active_ins_event: Optional[DocxEvent] = None
         active_del_event: Optional[DocxEvent] = None
 
-        # We need to buffer Run items because we might wrap them in virtual text
-        # But we need to yield them one by one for the mapper.
+        # Buffers for lookahead flushing
+        deferred_meta_states: List[Tuple] = []
 
-        pending_spans: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
+        items = list(iter_paragraph_content(paragraph))
 
-        for item in iter_paragraph_content(paragraph):
+        for i, item in enumerate(items):
             if isinstance(item, Run):
-                # 1. Prefix
+                # 1. Prepare Content
                 prefix, suffix = get_run_style_markers(item)
-
-                run_items: List[Tuple[str, str, Optional[Run]]] = []
+                run_parts: List[Tuple[str, str, Optional[Run]]] = []
                 if prefix:
-                    run_items.append(("virtual", prefix, None))
-
+                    run_parts.append(("virtual", prefix, None))
                 text = get_run_text(item)
                 if text:
-                    run_items.append(("real", text, item))
-
+                    run_parts.append(("real", text, item))
                 if suffix:
-                    run_items.append(("virtual", suffix, None))
+                    run_parts.append(("virtual", suffix, None))
 
-                # Attach context
-                current_ins_id = active_ins_event.id if active_ins_event else None
-                current_del_id = active_del_event.id if active_del_event else None
+                # Current Context
+                curr_ins_id = active_ins_event.id if active_ins_event else None
+                curr_del_id = active_del_event.id if active_del_event else None
 
-                for k, t, r in run_items:
-                    # Tuple structure: (kind, text, run, ins_id, del_id)
-                    pending_spans.append((k, t, r, current_ins_id, current_del_id))
+                # Check wrapper tokens
+                start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
+
+                # Output Start Token
+                if start_token:
+                    self._add_virtual_text(start_token, current, paragraph)
+                    current += len(start_token)
+
+                # Output Content
+                for kind, txt, r_obj in run_parts:
+                    if kind == "virtual":
+                        self._add_virtual_text(txt, current, paragraph)
+                    else:
+                        span = TextSpan(
+                            start=current,
+                            end=current + len(txt),
+                            text=txt,
+                            run=r_obj,
+                            paragraph=paragraph,
+                            ins_id=curr_ins_id,
+                            del_id=curr_del_id,
+                        )
+                        self.spans.append(span)
+                        self.full_text += txt
+                    current += len(txt)
+
+                # Output End Token
+                if end_token:
+                    self._add_virtual_text(end_token, current, paragraph)
+                    current += len(end_token)
+
+                # Metadata Handling (Deferral Logic)
+                # Snapshot state
+                state_snapshot = (
+                    {active_ins_event.id: active_ins_event} if active_ins_event else {},
+                    {active_del_event.id: active_del_event} if active_del_event else {},
+                    active_ids.copy(),
+                )
+                deferred_meta_states.append(state_snapshot)
+
+                should_defer = False
+                is_redline = bool(curr_ins_id) or bool(curr_del_id)
+
+                if is_redline:
+                    # Lookahead
+                    j = i + 1
+                    next_is_redline = False
+                    temp_ins = bool(curr_ins_id)
+                    temp_del = bool(curr_del_id)
+
+                    while j < len(items):
+                        next_item = items[j]
+                        if isinstance(next_item, Run):
+                            if temp_ins or temp_del:
+                                next_is_redline = True
+                            break
+                        elif isinstance(next_item, DocxEvent):
+                            if next_item.type == "ins_start":
+                                temp_ins = True
+                            elif next_item.type == "ins_end":
+                                temp_ins = False
+                            elif next_item.type == "del_start":
+                                temp_del = True
+                            elif next_item.type == "del_end":
+                                temp_del = False
+                        j += 1
+
+                    if next_is_redline:
+                        should_defer = True
+
+                if not should_defer:
+                    # Flush Metadata
+                    meta_block = self._build_merged_meta_block(deferred_meta_states)
+                    if meta_block:
+                        full_meta = f"{{>>{meta_block}<<}}"
+                        self._add_virtual_text(full_meta, current, paragraph)
+                        current += len(full_meta)
+                    deferred_meta_states = []
 
             elif isinstance(item, DocxEvent):
-                # Flush
-                if pending_spans:
-                    current = self._flush_spans(
-                        pending_spans,
-                        active_ids,
-                        current,
-                        paragraph,
-                        active_ins_event,
-                        active_del_event,
-                    )
-                    pending_spans = []
-
                 # Update State
                 if item.type == "start":
                     active_ids.add(item.id)
@@ -165,124 +225,61 @@ class DocumentMapper:
                     active_del_event = None
 
         # Final Flush
-        if pending_spans:
-            current = self._flush_spans(
-                pending_spans,
-                active_ids,
-                current,
-                paragraph,
-                active_ins_event,
-                active_del_event,
-            )
+        if deferred_meta_states:
+            meta_block = self._build_merged_meta_block(deferred_meta_states)
+            if meta_block:
+                full_meta = f"{{>>{meta_block}<<}}"
+                self._add_virtual_text(full_meta, current, paragraph)
+                current += len(full_meta)
 
         return current
 
-    def _flush_spans(
-        self,
-        items: List[Tuple],
-        active_ids: Set[str],
-        current_offset: int,
-        paragraph: Paragraph,
-        ins_event: Optional[DocxEvent],
-        del_event: Optional[DocxEvent],
-    ) -> int:
-        # Determine if we are inside any block that requires wrapping
-        # items[0] = (kind, text, run, ins_id, del_id)
-        _, _, _, ins_id, del_id = items[0]
+    def _get_wrappers(self, ins_id, del_id, active_ids):
+        if del_id:
+            return "{--", "--}"
+        elif ins_id:
+            return "{++", "++}"
+        elif active_ids:
+            return "{==", "==}"
+        return "", ""
 
-        is_wrapped = bool(active_ids) or bool(ins_id) or bool(del_id)
+    def _build_merged_meta_block(self, states_list) -> str:
+        """
+        Combines metadata from multiple states, removing duplicates.
+        Canonical Order: Changes first, then Comments.
+        """
+        change_lines = []
+        comment_lines = []
+        seen_sigs = set()
 
-        # 1. Virtual Start
-        if is_wrapped:
-            if del_id:
-                marker = "{--"
-            elif ins_id:
-                marker = "{++"
-            else:
-                marker = "{=="
+        for ins_map, del_map, comments_set in states_list:
+            # 1. Changes
+            for map_obj in (ins_map, del_map):
+                for uid, meta in map_obj.items():
+                    sig = f"Chg:{uid}"
+                    if sig not in seen_sigs:
+                        auth = meta.author or "Unknown"
+                        change_lines.append(f"[{sig}] {auth}")
+                        seen_sigs.add(sig)
 
-            self._add_virtual_text(marker, current_offset, paragraph)
-            current_offset += len(marker)
+            # 2. Comments
+            sorted_ids = sorted(list(comments_set))
+            for c_id in sorted_ids:
+                if c_id not in self.comments_map:
+                    continue
+                sig = f"Com:{c_id}"
+                if sig not in seen_sigs:
+                    data = self.comments_map[c_id]
+                    header = f"[{sig}] {data['author']}"
+                    if data["date"]:
+                        short_date = data["date"].split("T")[0]
+                        header += f" @ {short_date}"
+                    if data["resolved"]:
+                        header += "(RESOLVED)"
+                    comment_lines.append(f"{header}: {data['text']}")
+                    seen_sigs.add(sig)
 
-        # 2. Content
-        for kind, text, run_obj, i_id, d_id in items:
-            if kind == "virtual":
-                self._add_virtual_text(text, current_offset, paragraph)
-                current_offset += len(text)
-            else:
-                span = TextSpan(
-                    start=current_offset,
-                    end=current_offset + len(text),
-                    text=text,
-                    run=run_obj,
-                    paragraph=paragraph,
-                    ins_id=i_id,
-                    del_id=d_id,
-                )
-                self.spans.append(span)
-                self.full_text += text
-                current_offset += len(text)
-
-        # 3. Virtual End + Meta
-        if is_wrapped:
-            # Close with matching marker
-            if del_id:
-                marker = "--}"
-            elif ins_id:
-                marker = "++}"
-            else:
-                marker = "==}"
-
-            self._add_virtual_text(marker, current_offset, paragraph)
-            current_offset += len(marker)
-
-            meta_content = self._build_meta_block(active_ids, ins_event, del_event)
-            meta_block = f"{{>>{meta_content}<<}}"
-            self._add_virtual_text(meta_block, current_offset, paragraph)
-            current_offset += len(meta_block)
-
-        return current_offset
-
-    def _build_meta_block(
-        self,
-        active_ids: Set[str],
-        ins_event: Optional[DocxEvent],
-        del_event: Optional[DocxEvent],
-    ) -> str:
-        # Match logic in ingest.py _format_segment
-        lines = []
-
-        # 1. Ins/Del Metadata
-        # (Since we flush on any event change, there is at most one active ins/del context in items)
-        if ins_event:
-            auth = ins_event.author or "Unknown"
-            lines.append(f"[Chg:{ins_event.id}] {auth}")
-
-        if del_event:
-            auth = del_event.author or "Unknown"
-            lines.append(f"[Chg:{del_event.id}] {auth}")
-
-        # 2. Comment Metadata
-        sorted_ids = sorted(list(active_ids))
-        for cid in sorted_ids:
-            if cid not in self.comments_map:
-                continue
-            data = self.comments_map[cid]
-            author = data["author"]
-            body = data["text"]
-            date_str = data["date"]
-            resolved = data["resolved"]
-
-            header_parts = [f"[Com:{cid}] {author}"]
-            if date_str:
-                short_date = date_str.split("T")[0]
-                header_parts.append(f"@ {short_date}")
-            if resolved:
-                header_parts.append("(RESOLVED)")
-            header = " ".join(header_parts)
-            lines.append(f"{header}: {body}")
-
-        return "\n".join(lines)
+        return "\n".join(change_lines + comment_lines)
 
     def _add_virtual_text(self, text: str, offset: int, context_paragraph: Paragraph):
         span = TextSpan(

@@ -744,8 +744,9 @@ class RedlineEngine:
                 clean_text, style_name = self._parse_markdown_style(text_to_insert)
                 if style_name:
                     anchor_para = target_runs[-1]._parent
-                    # Normalize style names to avoid loose mismatch
-                    if anchor_para.style.name == style_name:
+                    # Normalize style names to avoid loose mismatch. Verify it has a style attr (Paragraph has it).
+                    current_style = getattr(anchor_para, "style", None)
+                    if current_style and getattr(current_style, "name", "") == style_name:
                         text_to_insert = clean_text  # Strip Markdown Header to force inline
 
                 ins_elem = self.track_insert(

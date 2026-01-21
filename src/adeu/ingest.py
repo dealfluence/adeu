@@ -74,18 +74,7 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
 def _build_paragraph_text(paragraph, comments_map):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
-
-    Logic:
-    - Iterate stream.
-    - Keep 'current_segment_text'.
-    - Keep 'active_ids' set.
-    - If active_ids changes (start/end event):
-        - If segment has text:
-             - Emit Highlight: {==TEXT==} (only if active_ids > 0)
-             - Emit Text: TEXT (if active_ids == 0)
-             - Emit Metadata: {>>...<<} (for PREVIOUS active_ids)
-        - Reset segment text.
-        - Update active_ids.
+    Merges metadata for adjacent Redline blocks (Substitutions).
     """
     parts = []
 
@@ -93,28 +82,68 @@ def _build_paragraph_text(paragraph, comments_map):
     active_del: dict[str, DocxEvent] = {}
     active_comments: set[str] = set()
 
-    current_segment_text = ""
+    # Buffer for deferred metadata (used for merging substitution blocks)
+    # List of (active_ins_snapshot, active_del_snapshot, active_comments_snapshot)
+    deferred_meta_states = []
 
-    for item in iter_paragraph_content(paragraph):
+    # Pre-calculate item list to allow lookahead
+    items = list(iter_paragraph_content(paragraph))
+
+    for i, item in enumerate(items):
         if isinstance(item, Run):
             prefix, suffix = get_run_style_markers(item)
             text = get_run_text(item)
 
-            # Accumulate text.
-            # Flush immediately to ensure state accuracy per run.
             seg = f"{prefix}{text}{suffix}"
             if seg:
-                formatted = _format_segment(seg, active_ins, active_del, active_comments, comments_map)
-                parts.append(formatted)
+                # 1. Determine Wrappers
+                start_token, end_token = _get_wrappers(active_ins, active_del, active_comments)
+
+                # 2. Output Text Wrapped
+                parts.append(f"{start_token}{seg}{end_token}")
+
+                # 3. Handle Metadata
+                current_state = (active_ins.copy(), active_del.copy(), active_comments.copy())
+                deferred_meta_states.append(current_state)
+
+                should_defer = False
+                is_redline = bool(active_ins) or bool(active_del)
+
+                if is_redline:
+                    # Lookahead
+                    j = i + 1
+                    next_is_redline = False
+
+                    temp_ins = bool(active_ins)
+                    temp_del = bool(active_del)
+
+                    while j < len(items):
+                        next_item = items[j]
+                        if isinstance(next_item, Run):
+                            if temp_ins or temp_del:
+                                next_is_redline = True
+                            break
+                        elif isinstance(next_item, DocxEvent):
+                            if next_item.type == "ins_start":
+                                temp_ins = True
+                            elif next_item.type == "ins_end":
+                                temp_ins = False
+                            elif next_item.type == "del_start":
+                                temp_del = True
+                            elif next_item.type == "del_end":
+                                temp_del = False
+                        j += 1
+
+                    if next_is_redline:
+                        should_defer = True
+
+                if not should_defer:
+                    meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
+                    if meta_block:
+                        parts.append(f"{{>>{meta_block}<<}}")
+                    deferred_meta_states = []
 
         elif isinstance(item, DocxEvent):
-            # Flush current segment using OLD active_ids
-            # Note: with immediate flush logic above, current_segment_text is effectively unused
-            # but kept if we switch back to buffering logic.
-            if current_segment_text:
-                # (Legacy buffer flush logic removed for simplicity in this diff)
-                pass
-
             # Update State
             if item.type == "start":
                 active_comments.add(item.id)
@@ -129,50 +158,55 @@ def _build_paragraph_text(paragraph, comments_map):
             elif item.type == "del_end":
                 active_del.pop(item.id, None)
 
-    # Flush final segment (unused in immediate mode)
+    if deferred_meta_states:
+        meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
+        if meta_block:
+            parts.append(f"{{>>{meta_block}<<}}")
+
     return "".join(parts)
 
 
-def _format_segment(text, active_ins, active_del, active_comments, comments_map) -> str:
-    if not text:
-        return ""
-
-    # 1. Determine Wrapper
-    start_token = ""
-    end_token = ""
-
-    # Priority: Del > Ins > Comment
+def _get_wrappers(active_ins, active_del, active_comments):
     if active_del:
-        start_token = "{--"
-        end_token = "--}"
+        return "{--", "--}"
     elif active_ins:
-        start_token = "{++"
-        end_token = "++}"
+        return "{++", "++}"
     elif active_comments:
-        start_token = "{=="
-        end_token = "==}"
-    else:
-        return text
+        return "{==", "==}"
+    return "", ""
 
-    # 2. Build Metadata
-    meta_lines = []
 
-    # Ins/Del Metadata
-    for i_id, meta in active_ins.items():
-        auth = meta.author or "Unknown"
-        meta_lines.append(f"[Chg:{i_id}] {auth}")
-    for d_id, meta in active_del.items():
-        auth = meta.author or "Unknown"
-        meta_lines.append(f"[Chg:{d_id}] {auth}")
+def _build_merged_meta_block(states_list, comments_map) -> str:
+    """
+    Combines metadata from multiple states, removing duplicates.
+    Canonical Order: Changes first, then Comments.
+    """
+    change_lines = []
+    comment_lines = []
+    seen_sigs = set()
 
-    # Comment Metadata
-    for c_id in sorted(active_comments):
-        if c_id in comments_map:
-            data = comments_map[c_id]
-            header = f"[Com:{c_id}] {data['author']}"
-            if data["date"]:
-                header += f" @ {data['date'].split('T')[0]}"
-            meta_lines.append(f"{header}: {data['text']}")
+    for ins_map, del_map, comments_set in states_list:
+        # 1. Changes (Ins & Del)
+        for map_obj in (ins_map, del_map):
+            for uid, meta in map_obj.items():
+                sig = f"Chg:{uid}"
+                if sig not in seen_sigs:
+                    auth = meta.author or "Unknown"
+                    change_lines.append(f"[{sig}] {auth}")
+                    seen_sigs.add(sig)
 
-    meta_block = "\n".join(meta_lines)
-    return f"{start_token}{text}{end_token}{{>>{meta_block}<<}}"
+        # 2. Comments
+        for c_id in sorted(comments_set):
+            if c_id not in comments_map:
+                continue
+            sig = f"Com:{c_id}"
+            if sig not in seen_sigs:
+                data = comments_map[c_id]
+                header = f"[{sig}] {data['author']}"
+                if data["date"]:
+                    header += f" @ {data['date'].split('T')[0]}"
+                comment_lines.append(f"{header}: {data['text']}")
+                seen_sigs.add(sig)
+
+    # Return Changes first, then Comments
+    return "\n".join(change_lines + comment_lines)
