@@ -11,7 +11,7 @@ from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
-    CommentEvent,
+    DocxEvent,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
@@ -29,6 +29,8 @@ class TextSpan:
     text: str
     run: Optional[Run]
     paragraph: Paragraph
+    ins_id: Optional[str] = None
+    del_id: Optional[str] = None
 
 
 class DocumentMapper:
@@ -102,11 +104,13 @@ class DocumentMapper:
         current = start_offset
 
         active_ids: set[str] = set()
+        active_ins_id = None
+        active_del_id = None
 
         # We need to buffer Run items because we might wrap them in virtual text
         # But we need to yield them one by one for the mapper.
 
-        pending_spans: List[Tuple[str, str, Optional[Run]]] = []
+        pending_spans: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
 
         for item in iter_paragraph_content(paragraph):
             if isinstance(item, Run):
@@ -124,9 +128,12 @@ class DocumentMapper:
                 if suffix:
                     run_items.append(("virtual", suffix, None))
 
-                pending_spans.extend(run_items)
+                # Attach context
+                for k, t, r in run_items:
+                    # Tuple structure: (kind, text, run, ins_id, del_id)
+                    pending_spans.append((k, t, r, active_ins_id, active_del_id))
 
-            elif isinstance(item, CommentEvent):
+            elif isinstance(item, DocxEvent):
                 # Flush
                 if pending_spans:
                     current = self._flush_spans(pending_spans, active_ids, current, paragraph)
@@ -138,6 +145,14 @@ class DocumentMapper:
                 elif item.type == "end":
                     if item.id in active_ids:
                         active_ids.remove(item.id)
+                elif item.type == "ins_start":
+                    active_ins_id = item.id
+                elif item.type == "ins_end":
+                    active_ins_id = None
+                elif item.type == "del_start":
+                    active_del_id = item.id
+                elif item.type == "del_end":
+                    active_del_id = None
 
         # Final Flush
         if pending_spans:
@@ -153,13 +168,19 @@ class DocumentMapper:
             current_offset += len(marker)
 
         # 2. Content
-        for kind, text, run_obj in items:
+        for kind, text, run_obj, i_id, d_id in items:
             if kind == "virtual":
                 self._add_virtual_text(text, current_offset, paragraph)
                 current_offset += len(text)
             else:
                 span = TextSpan(
-                    start=current_offset, end=current_offset + len(text), text=text, run=run_obj, paragraph=paragraph
+                    start=current_offset,
+                    end=current_offset + len(text),
+                    text=text,
+                    run=run_obj,
+                    paragraph=paragraph,
+                    ins_id=i_id,
+                    del_id=d_id,
                 )
                 self.spans.append(span)
                 self.full_text += text
@@ -327,3 +348,13 @@ class DocumentMapper:
         run._element.addnext(new_r_element)
         new_run = Run(new_r_element, run._parent)
         return run, new_run
+
+    def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:
+        """
+        Returns the first real TextSpan in the range to check context.
+        Useful for detecting if we are editing inside an Insertion.
+        """
+        real_spans = [s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx]
+        if real_spans:
+            return real_spans[0]
+        return None

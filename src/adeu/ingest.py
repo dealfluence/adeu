@@ -6,7 +6,7 @@ from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
-    CommentEvent,
+    DocxEvent,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
@@ -89,79 +89,90 @@ def _build_paragraph_text(paragraph, comments_map):
     """
     parts = []
 
-    active_ids: set[str] = set()
+    active_ins: dict[str, DocxEvent] = {}
+    active_del: dict[str, DocxEvent] = {}
+    active_comments: set[str] = set()
+
     current_segment_text = ""
 
     for item in iter_paragraph_content(paragraph):
         if isinstance(item, Run):
             prefix, suffix = get_run_style_markers(item)
             text = get_run_text(item)
-            current_segment_text += f"{prefix}{text}{suffix}"
 
-        elif isinstance(item, CommentEvent):
+            # Accumulate text.
+            # Flush immediately to ensure state accuracy per run.
+            seg = f"{prefix}{text}{suffix}"
+            if seg:
+                formatted = _format_segment(seg, active_ins, active_del, active_comments, comments_map)
+                parts.append(formatted)
+
+        elif isinstance(item, DocxEvent):
             # Flush current segment using OLD active_ids
+            # Note: with immediate flush logic above, current_segment_text is effectively unused
+            # but kept if we switch back to buffering logic.
             if current_segment_text:
-                if active_ids:
-                    parts.append(f"{{=={current_segment_text}==}}")
-                    # Emit comments block
-                    meta_block = _build_meta_block(active_ids, comments_map)
-                    parts.append(f"{{>>{meta_block}<<}}")
-                else:
-                    parts.append(current_segment_text)
-
-                current_segment_text = ""
+                # (Legacy buffer flush logic removed for simplicity in this diff)
+                pass
 
             # Update State
             if item.type == "start":
-                active_ids.add(item.id)
+                active_comments.add(item.id)
             elif item.type == "end":
-                if item.id in active_ids:
-                    active_ids.remove(item.id)
-            elif item.type == "ref":
-                # We ignore explicit reference tags in the Flattened model because
-                # the "End" event triggers the comment emission implicitly.
-                pass
+                active_comments.discard(item.id)
+            elif item.type == "ins_start":
+                active_ins[item.id] = item
+            elif item.type == "ins_end":
+                active_ins.pop(item.id, None)
+            elif item.type == "del_start":
+                active_del[item.id] = item
+            elif item.type == "del_end":
+                active_del.pop(item.id, None)
 
-    # Flush final segment
-    if current_segment_text:
-        if active_ids:
-            parts.append(f"{{=={current_segment_text}==}}")
-            meta_block = _build_meta_block(active_ids, comments_map)
-            parts.append(f"{{>>{meta_block}<<}}")
-        else:
-            parts.append(current_segment_text)
-
+    # Flush final segment (unused in immediate mode)
     return "".join(parts)
 
 
-def _build_meta_block(active_ids, comments_map) -> str:
-    """
-    Constructs the content inside {>> ... <<}
-    Sorts by ID to ensure stability.
-    """
-    lines = []
-    sorted_ids = sorted(list(active_ids))
+def _format_segment(text, active_ins, active_del, active_comments, comments_map) -> str:
+    if not text:
+        return ""
 
-    for cid in sorted_ids:
-        if cid not in comments_map:
-            continue
+    # 1. Determine Wrapper
+    start_token = ""
+    end_token = ""
 
-        data = comments_map[cid]
-        author = data["author"]
-        body = data["text"]
-        date_str = data["date"]
-        resolved = data["resolved"]
+    # Priority: Del > Ins > Comment
+    if active_del:
+        start_token = "{--"
+        end_token = "--}"
+    elif active_ins:
+        start_token = "{++"
+        end_token = "++}"
+    elif active_comments:
+        start_token = "{=="
+        end_token = "==}"
+    else:
+        return text
 
-        # Header: [Author @ Date (RESOLVED)]
-        header_parts = [author]
-        if date_str:
-            short_date = date_str.split("T")[0]
-            header_parts.append(f"@ {short_date}")
-        if resolved:
-            header_parts.append("(RESOLVED)")
+    # 2. Build Metadata
+    meta_lines = []
 
-        header = " ".join(header_parts)
+    # Ins/Del Metadata
+    for i_id, meta in active_ins.items():
+        auth = meta.author or "Unknown"
+        meta_lines.append(f"[ID:{i_id}] {auth}")
+    for d_id, meta in active_del.items():
+        auth = meta.author or "Unknown"
+        meta_lines.append(f"[ID:{d_id}] {auth}")
 
-        lines.append(f"[{header}] {body}")
+    # Comment Metadata
+    for c_id in sorted(active_comments):
+        if c_id in comments_map:
+            data = comments_map[c_id]
+            header = f"[ID:{c_id}] {data['author']}"
+            if data["date"]:
+                header += f" @ {data['date'].split('T')[0]}"
+            meta_lines.append(f"{header}: {data['text']}")
 
-    return "\n".join(lines)
+    meta_block = "\n".join(meta_lines)
+    return f"{start_token}{text}{end_token}{{>>{meta_block}<<}}"

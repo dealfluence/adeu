@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
-from adeu.models import DocumentEdit, EditOperationType
+from adeu.models import DocumentEdit, EditOperationType, ReviewAction
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, normalize_docx
@@ -623,3 +624,79 @@ class RedlineEngine:
         self.doc.save(output)
         output.seek(0)
         return output
+
+    def apply_review_actions(self, actions: List[ReviewAction]) -> tuple[int, int]:
+        applied = 0
+        skipped = 0
+
+        for act in actions:
+            success = False
+            if act.action == "ACCEPT":
+                success = self._accept_change(act.target_id)
+            elif act.action == "REJECT":
+                success = self._reject_change(act.target_id)
+            elif act.action == "REPLY":
+                success = self._reply_to_comment(act.target_id, act.text or "")
+
+            if success:
+                applied += 1
+            else:
+                skipped += 1
+
+        return applied, skipped
+
+    def _accept_change(self, target_id: str) -> bool:
+        # 1. Try Ins -> Unwrap
+        ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{target_id}']")
+        for ins in ins_nodes:
+            parent = ins.getparent()
+            index = parent.index(ins)
+            for child in list(ins):
+                parent.insert(index, child)
+                index += 1
+            parent.remove(ins)
+
+        # 2. Try Del -> Remove
+        del_nodes = self.doc.element.xpath(f"//w:del[@w:id='{target_id}']")
+        for d in del_nodes:
+            d.getparent().remove(d)
+
+        return bool(ins_nodes or del_nodes)
+
+    def _reject_change(self, target_id: str) -> bool:
+        # 1. Try Ins -> Remove
+        ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{target_id}']")
+        for ins in ins_nodes:
+            ins.getparent().remove(ins)
+
+        # 2. Try Del -> Unwrap (Restore text)
+        del_nodes = self.doc.element.xpath(f"//w:del[@w:id='{target_id}']")
+        for d in del_nodes:
+            parent = d.getparent()
+            index = parent.index(d)
+            for child in list(d):
+                # w:delText -> w:t
+                for dt in child.findall(qn("w:delText")):
+                    dt.tag = qn("w:t")
+                parent.insert(index, child)
+                index += 1
+            parent.remove(d)
+
+        return bool(ins_nodes or del_nodes)
+
+    def _reply_to_comment(self, target_id: str, text: str) -> bool:
+        if not self.comments_manager.comments_part:
+            return False
+        comments = self.comments_manager.comments_part.element.findall(qn("w:comment"))
+        for c in comments:
+            if c.get(qn("w:id")) == target_id:
+                p = OxmlElement("w:p")
+                r = OxmlElement("w:r")
+                t = OxmlElement("w:t")
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d")
+                t.text = f"\n[{self.author} @ {timestamp}]: {text}"
+                r.append(t)
+                p.append(r)
+                c.append(p)
+                return True
+        return False

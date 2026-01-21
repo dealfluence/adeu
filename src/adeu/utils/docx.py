@@ -3,7 +3,7 @@ Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 
-from typing import Iterator, NamedTuple, Union
+from typing import Iterator, NamedTuple, Optional, Union
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -14,15 +14,16 @@ from docx.text.run import Run
 
 logger = structlog.get_logger(__name__)
 
+
 # --- Types ---
-
-
-class CommentEvent(NamedTuple):
-    type: str  # 'start', 'end', 'ref'
+class DocxEvent(NamedTuple):
+    type: str  # 'start', 'end', 'ref' (for comments); 'ins_start', etc.
     id: str
+    author: Optional[str] = None
+    date: Optional[str] = None
 
 
-ParagraphItem = Union[Run, CommentEvent]
+ParagraphItem = Union[Run, DocxEvent]
 
 
 def create_element(name: str):
@@ -140,7 +141,7 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
             if child.tag == qn("w:commentReference"):
                 c_id = child.get(qn("w:id"))
                 if c_id:
-                    yield CommentEvent("ref", c_id)
+                    yield DocxEvent("ref", c_id)
 
         # 1. Parse Field Characters (begin/separate/end)
         for fchar in r_element.findall(qn("w:fldChar")):
@@ -173,31 +174,47 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
         if tag == qn("w:r"):
             # Standard run
             yield from process_run_element(child)
-
         elif tag == qn("w:ins"):
+            i_id = child.get(qn("w:id"))
+            i_auth = child.get(qn("w:author"))
+            i_date = child.get(qn("w:date"))
+            yield DocxEvent("ins_start", i_id, i_auth, i_date)
+
             # Inserted runs (Track Changes)
             for subchild in child:
                 if subchild.tag == qn("w:r"):
                     yield from process_run_element(subchild)
                 elif subchild.tag == qn("w:commentRangeStart"):
                     c_id = subchild.get(qn("w:id"))
-                    yield CommentEvent("start", c_id)
+                    yield DocxEvent("start", c_id)
                 elif subchild.tag == qn("w:commentRangeEnd"):
                     c_id = subchild.get(qn("w:id"))
-                    yield CommentEvent("end", c_id)
+                    yield DocxEvent("end", c_id)
+            yield DocxEvent("ins_end", i_id)
+
+        elif tag == qn("w:del"):
+            d_id = child.get(qn("w:id"))
+            d_auth = child.get(qn("w:author"))
+            d_date = child.get(qn("w:date"))
+            yield DocxEvent("del_start", d_id, d_auth, d_date)
+
+            # Deletions contain runs (w:delText inside w:r)
+            for subchild in child:
+                if subchild.tag == qn("w:r"):
+                    yield Run(subchild, paragraph)
+            yield DocxEvent("del_end", d_id)
 
         elif tag == qn("w:commentRangeStart"):
             c_id = child.get(qn("w:id"))
-            yield CommentEvent("start", c_id)
+            yield DocxEvent("start", c_id)
 
         elif tag == qn("w:commentRangeEnd"):
             c_id = child.get(qn("w:id"))
-            yield CommentEvent("end", c_id)
+            yield DocxEvent("end", c_id)
 
         elif tag == qn("w:commentReference"):
             # Reference directly in paragraph
-            c_id = child.get(qn("w:id"))
-            yield CommentEvent("ref", c_id)
+            pass
 
 
 def get_visible_runs(paragraph: Paragraph):
@@ -217,6 +234,8 @@ def get_run_text(run: Run) -> str:
     text = ""
     for child in run._element:
         if child.tag == qn("w:t"):
+            text += child.text or ""
+        elif child.tag == qn("w:delText"):
             text += child.text or ""
         elif child.tag == qn("w:tab"):
             text += " "  # Convert tab to space

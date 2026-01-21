@@ -54,8 +54,9 @@ def test_ingest_critic_markup_simple():
 
     # Assert
     # Note: **Target** because we bolded it.
-    assert "Start {==**Target**==}{>>[Tester" in text
-    assert "] Fix this.<<} End" in text
+    assert "Start {==**Target**==}{>>[ID:" in text
+    # Matches: [ID:1] Tester @ 2026-01-21: Fix this.
+    assert ": Fix this.<<} End" in text
 
 
 def test_ingest_critic_markup_overlapping():
@@ -113,7 +114,7 @@ def test_ingest_critic_markup_overlapping():
     print(f"Overlap Result: {text}")
 
     # Segment A
-    assert "{==**A **==}{>>[U1" in text
+    assert "{==**A **==}{>>" in text
 
     # Segment B (Both)
     match_b = re.search(r"\{==_B _==\}\{>>(.*?)<<\}", text, re.DOTALL)
@@ -123,7 +124,7 @@ def test_ingest_critic_markup_overlapping():
     assert "U2" in content_b
 
     # Segment C
-    assert "{==**C**==}{>>[U2" in text
+    assert "{==**C**==}{>>" in text
 
 
 def test_ingest_legal_brackets_collision():

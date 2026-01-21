@@ -1,5 +1,4 @@
-# FILE: src/adeu/models.py
-
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -23,17 +22,16 @@ class DocumentEdit(BaseModel):
         ...,
         description=(
             "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
-            "NOTE: The text may contain Markdown formatting for Headers (#), Bold (**), and Italic (_). "
-            "You MUST include these markers if they exist in the text representation."
+            "You can include CriticMarkup {==...==} in the target to match text inside existing markup."
         ),
     )
 
-    new_text: Optional[str] = Field(
-        "",
+    new_text: str = Field(
+        ...,
         description=(
             "The desired text replacement. You may use Markdown formatting: "
             "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
-            "For insertions, include anchor context from target_text."
+            "Do NOT try to manually write {++...++} tags; the engine handles tracking."
         ),
     )
 
@@ -45,3 +43,22 @@ class DocumentEdit(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _internal_op: Optional[str] = PrivateAttr(default=None)
+
+
+class ReviewActionType(str, Enum):
+    ACCEPT = "ACCEPT"
+    REJECT = "REJECT"
+    REPLY = "REPLY"
+
+
+class ReviewAction(BaseModel):
+    """
+    Meta-actions on existing markup (Track Changes / Comments).
+    Used for negotiation and approval workflows.
+    """
+
+    action: ReviewActionType = Field(..., description="ACCEPT, REJECT, or REPLY.")
+    target_id: str = Field(..., description="The ID of the Insertion, Deletion, or Comment (e.g. '101' from [ID:101]).")
+
+    text: Optional[str] = Field(None, description="For REPLY: The content of the reply body.")
+    comment: Optional[str] = Field(None, description="For ACCEPT/REJECT: Optional rationale.")
