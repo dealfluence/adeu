@@ -1,3 +1,4 @@
+import datetime
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
@@ -104,8 +105,8 @@ class DocumentMapper:
         current = start_offset
 
         active_ids: set[str] = set()
-        active_ins_id = None
-        active_del_id = None
+        active_ins_event: Optional[DocxEvent] = None
+        active_del_event: Optional[DocxEvent] = None
 
         # We need to buffer Run items because we might wrap them in virtual text
         # But we need to yield them one by one for the mapper.
@@ -129,14 +130,24 @@ class DocumentMapper:
                     run_items.append(("virtual", suffix, None))
 
                 # Attach context
+                current_ins_id = active_ins_event.id if active_ins_event else None
+                current_del_id = active_del_event.id if active_del_event else None
+
                 for k, t, r in run_items:
                     # Tuple structure: (kind, text, run, ins_id, del_id)
-                    pending_spans.append((k, t, r, active_ins_id, active_del_id))
+                    pending_spans.append((k, t, r, current_ins_id, current_del_id))
 
             elif isinstance(item, DocxEvent):
                 # Flush
                 if pending_spans:
-                    current = self._flush_spans(pending_spans, active_ids, current, paragraph)
+                    current = self._flush_spans(
+                        pending_spans,
+                        active_ids,
+                        current,
+                        paragraph,
+                        active_ins_event,
+                        active_del_event,
+                    )
                     pending_spans = []
 
                 # Update State
@@ -146,34 +157,51 @@ class DocumentMapper:
                     if item.id in active_ids:
                         active_ids.remove(item.id)
                 elif item.type == "ins_start":
-                    active_ins_id = item.id
+                    active_ins_event = item
                 elif item.type == "ins_end":
-                    active_ins_id = None
+                    active_ins_event = None
                 elif item.type == "del_start":
-                    active_del_id = item.id
+                    active_del_event = item
                 elif item.type == "del_end":
-                    active_del_id = None
+                    active_del_event = None
 
         # Final Flush
         if pending_spans:
-            current = self._flush_spans(pending_spans, active_ids, current, paragraph)
+            current = self._flush_spans(
+                pending_spans,
+                active_ids,
+                current,
+                paragraph,
+                active_ins_event,
+                active_del_event,
+            )
 
         return current
 
-    def _flush_spans(self, items: List[Tuple], active_ids: Set[str], current_offset: int, paragraph: Paragraph) -> int:
+    def _flush_spans(
+        self,
+        items: List[Tuple],
+        active_ids: Set[str],
+        current_offset: int,
+        paragraph: Paragraph,
+        ins_event: Optional[DocxEvent],
+        del_event: Optional[DocxEvent],
+    ) -> int:
+        # Determine if we are inside any block that requires wrapping
+        # items[0] = (kind, text, run, ins_id, del_id)
+        _, _, _, ins_id, del_id = items[0]
+
+        is_wrapped = bool(active_ids) or bool(ins_id) or bool(del_id)
+
         # 1. Virtual Start
-        if active_ids:
-            # Determine marker type based on active ID context from items
-            # items[0] = (kind, text, run, ins_id, del_id)
-            _, _, _, ins_id, del_id = items[0]
-            
+        if is_wrapped:
             if del_id:
                 marker = "{--"
             elif ins_id:
                 marker = "{++"
             else:
                 marker = "{=="
-                
+
             self._add_virtual_text(marker, current_offset, paragraph)
             current_offset += len(marker)
 
@@ -197,29 +225,45 @@ class DocumentMapper:
                 current_offset += len(text)
 
         # 3. Virtual End + Meta
-        if active_ids:
+        if is_wrapped:
             # Close with matching marker
-            _, _, _, ins_id, del_id = items[0]
             if del_id:
                 marker = "--}"
             elif ins_id:
                 marker = "++}"
             else:
                 marker = "==}"
-                
+
             self._add_virtual_text(marker, current_offset, paragraph)
             current_offset += len(marker)
 
-            meta_content = self._build_meta_block(active_ids)
+            meta_content = self._build_meta_block(active_ids, ins_event, del_event)
             meta_block = f"{{>>{meta_content}<<}}"
             self._add_virtual_text(meta_block, current_offset, paragraph)
             current_offset += len(meta_block)
 
         return current_offset
 
-    def _build_meta_block(self, active_ids) -> str:
-        # Duplicate of logic in ingest.py
+    def _build_meta_block(
+        self,
+        active_ids: Set[str],
+        ins_event: Optional[DocxEvent],
+        del_event: Optional[DocxEvent],
+    ) -> str:
+        # Match logic in ingest.py _format_segment
         lines = []
+
+        # 1. Ins/Del Metadata
+        # (Since we flush on any event change, there is at most one active ins/del context in items)
+        if ins_event:
+            auth = ins_event.author or "Unknown"
+            lines.append(f"[ID:{ins_event.id}] {auth}")
+
+        if del_event:
+            auth = del_event.author or "Unknown"
+            lines.append(f"[ID:{del_event.id}] {auth}")
+
+        # 2. Comment Metadata
         sorted_ids = sorted(list(active_ids))
         for cid in sorted_ids:
             if cid not in self.comments_map:
@@ -230,14 +274,14 @@ class DocumentMapper:
             date_str = data["date"]
             resolved = data["resolved"]
 
-            header_parts = [author]
+            header_parts = [f"[ID:{cid}] {author}"]
             if date_str:
                 short_date = date_str.split("T")[0]
                 header_parts.append(f"@ {short_date}")
             if resolved:
                 header_parts.append("(RESOLVED)")
             header = " ".join(header_parts)
-            lines.append(f"[{header}] {body}")
+            lines.append(f"{header}: {body}")
 
         return "\n".join(lines)
 
