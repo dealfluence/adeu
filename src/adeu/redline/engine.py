@@ -501,7 +501,7 @@ class RedlineEngine:
         # If so, we must target the WHOLE insertion to avoid corrupting it or losing context.
         match_len = len(edit.target_text)
         context_span = self.mapper.get_context_at_range(start_idx, start_idx + match_len)
-        
+
         if context_span and context_span.ins_id:
             ins_id = context_span.ins_id
             # Find the full extent of this insertion
@@ -510,27 +510,21 @@ class RedlineEngine:
                 ins_start = ins_spans[0].start
                 # Reconstruct full text of the insertion
                 full_ins_text = "".join(s.text for s in ins_spans)
-                
+
                 # Calculate the relative offset of our match within the insertion
                 rel_start = start_idx - ins_start
-                
+
                 # Construct the new FULL text (replace the targeted part within the full text)
                 # Logic: [Prefix] + [New Text] + [Suffix]
                 expanded_new_text = (
-                    full_ins_text[:rel_start] 
-                    + (edit.new_text or "") 
-                    + full_ins_text[rel_start + match_len:]
+                    full_ins_text[:rel_start] + (edit.new_text or "") + full_ins_text[rel_start + match_len :]
                 )
 
                 # Create a proxy edit that replaces the WHOLE insertion
-                proxy_edit = DocumentEdit(
-                    target_text=full_ins_text, 
-                    new_text=expanded_new_text, 
-                    comment=edit.comment
-                )
+                proxy_edit = DocumentEdit(target_text=full_ins_text, new_text=expanded_new_text, comment=edit.comment)
                 proxy_edit._match_start_index = ins_start
                 # internal_op will be determined by _apply_single_edit_indexed (likely INSERTION/MODIFICATION)
-                
+
                 return self._apply_single_edit_indexed(proxy_edit)
         # ---------------------------------
 
@@ -621,7 +615,7 @@ class RedlineEngine:
                     if ins_elem is not None:
                         # Insert at the original position
                         parent.insert(index, ins_elem)
-                    
+
                     if edit.comment and ins_elem is not None:
                         self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
 
