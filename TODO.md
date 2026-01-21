@@ -5,6 +5,7 @@
 *   **Mapping Engine**: `DocumentMapper` correctly maps linear text offsets to XML DOM nodes, including handling split runs (`_split_run_at_index`).
 *   **Diff Engine**: `diff-match-patch` integration works to convert full-text rewrites into atomic edits.
 *   **Alignment**: Ingestion logic (`ingest.py`) and Mapper logic are aligned to use raw run concatenation, resolving most "Target Not Found" errors.
+*   **Comments Support**: Implemented **CriticMarkup** style ingestion (`{==Text==}{>>Comment<<}`) with metadata (Author, Date, Resolved). `DocumentMapper` treats these markers as virtual text, allowing edits to text within comments.
 *   **CLI**: Functional CLI for Extract -> Edit -> Redline workflow.
 *   **Offset Precision**: Fixed a critical bug in `DocumentMapper` where virtual newlines (`\n\n`) caused split-point calculations to drift, misplacing insertions in multi-paragraph matches.
 *   **Start-of-Document Handling**: `diff.py` now supports insertions at the very start of the document by converting them to modifications of the following text anchor.

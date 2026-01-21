@@ -26,6 +26,7 @@ graph LR
 **Goal**: Provide text to the LLM that maps 1:1 with the underlying XML runs.
 *   **Mechanism**: It does *not* use `docx.Paragraph.text`. Instead, it iterates over visible XML runs, resolving `<w:tab/>` and `<w:br/>` tags to prevent text merging.
 *   **Structural Signals**: It detects Paragraph Styles and Outline Levels to inject "Virtual Markdown" (e.g., `# Header`) into the text stream. This gives the LLM structural context without modifying the document content.
+*   **Comments**: DOCX Comments are ingested as **CriticMarkup** (`{==Text==}{>>Metadata: Comment<<}`). This preserves the precise scope of the comment and includes Author, Date, and Resolution status. Overlapping comments are flattened into sequential blocks.
 
 ### 2.2 The Mapper (`src/adeu/redline/mapper.py`)
 **Goal**: Translate linear text offsets into XML elements.

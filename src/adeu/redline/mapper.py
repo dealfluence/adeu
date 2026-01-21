@@ -1,8 +1,6 @@
-# FILE: src/adeu/redline/mapper.py
-
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -11,12 +9,14 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
+from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
+    CommentEvent,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
-    get_visible_runs,
     iter_document_parts,
+    iter_paragraph_content,
 )
 
 logger = structlog.get_logger(__name__)
@@ -34,6 +34,8 @@ class TextSpan:
 class DocumentMapper:
     def __init__(self, doc: DocumentObject):
         self.doc = doc
+        self.comments_mgr = CommentsManager(doc)
+        self.comments_map = self.comments_mgr.extract_comments_data()
         self.full_text = ""
         self.spans: List[TextSpan] = []
         self._build_map()
@@ -43,24 +45,16 @@ class DocumentMapper:
         self.spans = []
         self.full_text = ""
 
-        # We must mirror ingest.py logic exactly:
-        # 1. Iterate Parts (Header -> Body -> Footer)
-        # 2. In each part: Paragraphs first, then Tables.
-        # 3. Tables are formatted: Cells joined by " | ", Rows joined by "\n\n".
-        #    Cell paragraphs joined by "\n".
-
         for part in iter_document_parts(self.doc):
             # 1. Loose Paragraphs
             for p in part.paragraphs:
-                # Add Header Prefix (Virtual)
                 prefix = get_paragraph_prefix(p)
                 if prefix:
                     self._add_virtual_text(prefix, current_offset, p)
                     current_offset += len(prefix)
 
-                current_offset = self._map_paragraph_runs(p, current_offset)
+                current_offset = self._map_paragraph_content(p, current_offset)
 
-                # Add Paragraph Separator (\n\n)
                 self._add_virtual_text("\n\n", current_offset, p)
                 current_offset += 2
 
@@ -69,13 +63,12 @@ class DocumentMapper:
                 for row in table.rows:
                     row_has_content = False
                     for cell in row.cells:
-                        # Map cell paragraphs
                         cell_paras = list(cell.paragraphs)
-                        cell_non_empty = any(get_visible_runs(p) for p in cell_paras)
+                        # Check visible content (approximate)
+                        cell_non_empty = any(p.runs for p in cell_paras)
 
                         if cell_non_empty:
                             if row_has_content:
-                                # Add separator from previous cell
                                 self._add_virtual_text(" | ", current_offset, cell_paras[0])
                                 current_offset += 3
 
@@ -83,61 +76,131 @@ class DocumentMapper:
 
                             for j, p in enumerate(cell_paras):
                                 if j > 0:
-                                    # Join paragraphs within cell with \n
                                     self._add_virtual_text("\n", current_offset, p)
                                     current_offset += 1
 
-                                # Add Header Prefix (Virtual) inside table?
-                                # ingest.py does it, so we must too.
                                 prefix = get_paragraph_prefix(p)
                                 if prefix:
                                     self._add_virtual_text(prefix, current_offset, p)
                                     current_offset += len(prefix)
 
-                                current_offset = self._map_paragraph_runs(p, current_offset)
+                                current_offset = self._map_paragraph_content(p, current_offset)
 
                     if row_has_content:
-                        # End of Row
                         self._add_virtual_text("\n\n", current_offset, row.cells[0].paragraphs[0])
                         current_offset += 2
 
-        # Remove trailing newline to match ingest.py
         if self.spans and self.spans[-1].text == "\n\n":
             self.spans.pop()
             self.full_text = self.full_text[:-2]
 
-    def _map_paragraph_runs(self, paragraph: Paragraph, start_offset: int) -> int:
+    def _map_paragraph_content(self, paragraph: Paragraph, start_offset: int) -> int:
+        """
+        Maps Runs to Spans, handling Flattened CriticMarkup generation.
+        Matches logic in ingest.py _build_paragraph_text.
+        """
         current = start_offset
-        runs = get_visible_runs(paragraph)
-        for run in runs:
-            # 1. Check style markers (Virtual)
-            prefix, suffix = get_run_style_markers(run)
 
-            if prefix:
-                self._add_virtual_text(prefix, current, paragraph)
-                current += len(prefix)
+        active_ids: set[str] = set()
 
-            # 2. Real Run Text
-            text = get_run_text(run)
-            text_len = len(text)
-            if text_len > 0:
+        # We need to buffer Run items because we might wrap them in virtual text
+        # But we need to yield them one by one for the mapper.
+
+        pending_spans: List[Tuple[str, str, Optional[Run]]] = []
+
+        for item in iter_paragraph_content(paragraph):
+            if isinstance(item, Run):
+                # 1. Prefix
+                prefix, suffix = get_run_style_markers(item)
+
+                run_items: List[Tuple[str, str, Optional[Run]]] = []
+                if prefix:
+                    run_items.append(("virtual", prefix, None))
+
+                text = get_run_text(item)
+                if text:
+                    run_items.append(("real", text, item))
+
+                if suffix:
+                    run_items.append(("virtual", suffix, None))
+
+                pending_spans.extend(run_items)
+
+            elif isinstance(item, CommentEvent):
+                # Flush
+                if pending_spans:
+                    current = self._flush_spans(pending_spans, active_ids, current, paragraph)
+                    pending_spans = []
+
+                # Update State
+                if item.type == "start":
+                    active_ids.add(item.id)
+                elif item.type == "end":
+                    if item.id in active_ids:
+                        active_ids.remove(item.id)
+
+        # Final Flush
+        if pending_spans:
+            current = self._flush_spans(pending_spans, active_ids, current, paragraph)
+
+        return current
+
+    def _flush_spans(self, items: List[Tuple], active_ids: Set[str], current_offset: int, paragraph: Paragraph) -> int:
+        # 1. Virtual Start
+        if active_ids:
+            marker = "{=="
+            self._add_virtual_text(marker, current_offset, paragraph)
+            current_offset += len(marker)
+
+        # 2. Content
+        for kind, text, run_obj in items:
+            if kind == "virtual":
+                self._add_virtual_text(text, current_offset, paragraph)
+                current_offset += len(text)
+            else:
                 span = TextSpan(
-                    start=current,
-                    end=current + text_len,
-                    text=text,
-                    run=run,
-                    paragraph=paragraph,
+                    start=current_offset, end=current_offset + len(text), text=text, run=run_obj, paragraph=paragraph
                 )
                 self.spans.append(span)
                 self.full_text += text
-                current += text_len
+                current_offset += len(text)
 
-            # 3. Suffix markers (Virtual)
-            if suffix:
-                self._add_virtual_text(suffix, current, paragraph)
-                current += len(suffix)
+        # 3. Virtual End + Meta
+        if active_ids:
+            marker = "==}"
+            self._add_virtual_text(marker, current_offset, paragraph)
+            current_offset += len(marker)
 
-        return current
+            meta_content = self._build_meta_block(active_ids)
+            meta_block = f"{{>>{meta_content}<<}}"
+            self._add_virtual_text(meta_block, current_offset, paragraph)
+            current_offset += len(meta_block)
+
+        return current_offset
+
+    def _build_meta_block(self, active_ids) -> str:
+        # Duplicate of logic in ingest.py
+        lines = []
+        sorted_ids = sorted(list(active_ids))
+        for cid in sorted_ids:
+            if cid not in self.comments_map:
+                continue
+            data = self.comments_map[cid]
+            author = data["author"]
+            body = data["text"]
+            date_str = data["date"]
+            resolved = data["resolved"]
+
+            header_parts = [author]
+            if date_str:
+                short_date = date_str.split("T")[0]
+                header_parts.append(f"@ {short_date}")
+            if resolved:
+                header_parts.append("(RESOLVED)")
+            header = " ".join(header_parts)
+            lines.append(f"[{header}] {body}")
+
+        return "\n".join(lines)
 
     def _add_virtual_text(self, text: str, offset: int, context_paragraph: Paragraph):
         span = TextSpan(
@@ -151,7 +214,7 @@ class DocumentMapper:
         self.full_text += text
 
     def _replace_smart_quotes(self, text: str) -> str:
-        return text.replace("", '"').replace("", '"').replace("‘", "'").replace("’", "'")
+        return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
     def find_match_index(self, target_text: str) -> int:
         start_idx = self.full_text.find(target_text)
@@ -182,20 +245,14 @@ class DocumentMapper:
 
         dom_modified = False
 
-        # Handle splitting if we partially overlap a real text span
-
         # 1. Start Split
         first_real_span = next((s for s in affected_spans if s.run is not None), None)
-        # Track adjustment if we split the run in place
         start_split_adjustment = 0
 
         if first_real_span:
             local_start = start_idx - first_real_span.start
             if local_start > 0:
-                # We are splitting working_runs[0]
-                # run_to_split = working_runs[0]
-                idx_in_working = 0  # working_runs[0] is always the run for first_real_span
-
+                idx_in_working = 0
                 _, right_run = self._split_run_at_index(working_runs[idx_in_working], local_start)
                 working_runs[idx_in_working] = right_run
                 dom_modified = True
@@ -205,23 +262,14 @@ class DocumentMapper:
         last_real_span = next((s for s in reversed(affected_spans) if s.run is not None), None)
 
         if last_real_span:
-            # We want to split working_runs[-1].
-            # Check if this is the same run we just split.
             is_same_run = first_real_span is last_real_span
-
             run_to_split = working_runs[-1]
-
             overlap_end = min(last_real_span.end, end_idx)
-            local_end = overlap_end - last_real_span.start  # Relative to original span start
-
-            # If we split the start of THIS run, the current 'run_to_split'
-            # contains text starting from 'start_split_adjustment'.
-            # So the index in 'run_to_split' needs to be shifted.
+            local_end = overlap_end - last_real_span.start
 
             if is_same_run and start_split_adjustment > 0:
                 local_end -= start_split_adjustment
 
-            # Check validity and split
             if 0 < local_end < len(run_to_split.text):
                 left_run, _ = self._split_run_at_index(run_to_split, local_end)
                 working_runs[-1] = left_run

@@ -1,9 +1,9 @@
-# FILE: src/adeu/utils/docx.py
-
 """
 Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
+
+from typing import Iterator, NamedTuple, Union
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -13,6 +13,16 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 logger = structlog.get_logger(__name__)
+
+# --- Types ---
+
+
+class CommentEvent(NamedTuple):
+    type: str  # 'start', 'end', 'ref'
+    id: str
+
+
+ParagraphItem = Union[Run, CommentEvent]
 
 
 def create_element(name: str):
@@ -112,14 +122,11 @@ def get_run_style_markers(run: Run) -> tuple[str, str]:
     return prefix, suffix
 
 
-def get_visible_runs(paragraph: Paragraph):
+def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
     """
-    Iterates over runs in a paragraph, including those inside <w:ins> tags.
-    Effectively returns the 'Accepted Changes' view of the runs.
-    Filters out dynamic page number fields ({PAGE}, {NUMPAGES}).
+    Iterates over the content of a paragraph, yielding both Runs and Comment events.
+    This allows reconstruction of text with inline comments using CriticMarkup.
     """
-    runs = []
-
     # State for complex fields (w:fldChar)
     in_complex_field = False
     current_instr = ""
@@ -127,6 +134,13 @@ def get_visible_runs(paragraph: Paragraph):
 
     def process_run_element(r_element):
         nonlocal in_complex_field, current_instr, hide_result
+
+        # Check for inline commentReference (sometimes embedded in run)
+        for child in r_element:
+            if child.tag == qn("w:commentReference"):
+                c_id = child.get(qn("w:id"))
+                if c_id:
+                    yield CommentEvent("ref", c_id)
 
         # 1. Parse Field Characters (begin/separate/end)
         for fchar in r_element.findall(qn("w:fldChar")):
@@ -151,23 +165,48 @@ def get_visible_runs(paragraph: Paragraph):
 
         # 3. Yield Run (if not hidden)
         if not hide_result:
-            runs.append(Run(r_element, paragraph))
+            yield Run(r_element, paragraph)
 
     # Iterate over all children of the paragraph XML element
     for child in paragraph._element:
         tag = child.tag
         if tag == qn("w:r"):
             # Standard run
-            process_run_element(child)
+            yield from process_run_element(child)
+
         elif tag == qn("w:ins"):
             # Inserted runs (Track Changes)
             for subchild in child:
                 if subchild.tag == qn("w:r"):
-                    process_run_element(subchild)
-        # w:del is skipped implies we read the "Future" state (Deletions are gone)
-        # w:fldSimple is typically skipped here. If supported in future, add logic to check w:instr attribute.
+                    yield from process_run_element(subchild)
+                elif subchild.tag == qn("w:commentRangeStart"):
+                    c_id = subchild.get(qn("w:id"))
+                    yield CommentEvent("start", c_id)
+                elif subchild.tag == qn("w:commentRangeEnd"):
+                    c_id = subchild.get(qn("w:id"))
+                    yield CommentEvent("end", c_id)
 
-    return runs
+        elif tag == qn("w:commentRangeStart"):
+            c_id = child.get(qn("w:id"))
+            yield CommentEvent("start", c_id)
+
+        elif tag == qn("w:commentRangeEnd"):
+            c_id = child.get(qn("w:id"))
+            yield CommentEvent("end", c_id)
+
+        elif tag == qn("w:commentReference"):
+            # Reference directly in paragraph
+            c_id = child.get(qn("w:id"))
+            yield CommentEvent("ref", c_id)
+
+
+def get_visible_runs(paragraph: Paragraph):
+    """
+    Iterates over runs in a paragraph, including those inside <w:ins> tags.
+    Effectively returns the 'Accepted Changes' view of the runs.
+    Filters out dynamic page number fields ({PAGE}, {NUMPAGES}).
+    """
+    return [item for item in iter_paragraph_content(paragraph) if isinstance(item, Run)]
 
 
 def get_run_text(run: Run) -> str:
