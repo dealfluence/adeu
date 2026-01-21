@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
 
 # --- LOGGING CONFIGURATION ---
@@ -145,6 +145,42 @@ def apply_structured_edits(
 
     except Exception as e:
         return f"Error applying edits: {str(e)}"
+
+
+@mcp.tool()
+def manage_review_actions(
+    original_docx_path: str, actions: List[ReviewAction], author_name: str, output_path: Optional[str] = None
+) -> str:
+    """
+    Manages existing Track Changes and Comments in the document.
+    Use this to ACCEPT or REJECT specific edits (by ID), or REPLY to comments.
+
+    Args:
+        original_docx_path: Absolute path to the source file.
+        actions: List of actions to perform (ACCEPT, REJECT, REPLY).
+                 Target IDs (e.g. "101") come from the CriticMarkup output [ID:101].
+        author_name: Name of the reviewer.
+        output_path: Optional output path.
+    """
+    try:
+        if not author_name or not author_name.strip():
+            return "Error: author_name cannot be empty."
+
+        stream = _read_file_bytes(original_docx_path)
+        engine = RedlineEngine(stream, author=author_name)
+        applied, skipped = engine.apply_review_actions(actions)
+
+        if not output_path:
+            p = Path(original_docx_path)
+            output_path = str(p.parent / f"{p.stem}_reviewed{p.suffix}")
+
+        result_stream = engine.save_to_stream()
+        _save_stream(result_stream, output_path)
+
+        return f"Applied {applied} actions. Skipped {skipped} actions. Saved to: {output_path}"
+
+    except Exception as e:
+        return f"Error managing actions: {str(e)}"
 
 
 def main():

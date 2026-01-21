@@ -496,6 +496,44 @@ class RedlineEngine:
             logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found.")
             return False
 
+        # --- HEURISTIC NESTED EDIT FIX ---
+        # Before trimming, check if the match falls inside an existing Insertion.
+        # If so, we must target the WHOLE insertion to avoid corrupting it or losing context.
+        match_len = len(edit.target_text)
+        context_span = self.mapper.get_context_at_range(start_idx, start_idx + match_len)
+        
+        if context_span and context_span.ins_id:
+            ins_id = context_span.ins_id
+            # Find the full extent of this insertion
+            ins_spans = [s for s in self.mapper.spans if s.ins_id == ins_id]
+            if ins_spans:
+                ins_start = ins_spans[0].start
+                # Reconstruct full text of the insertion
+                full_ins_text = "".join(s.text for s in ins_spans)
+                
+                # Calculate the relative offset of our match within the insertion
+                rel_start = start_idx - ins_start
+                
+                # Construct the new FULL text (replace the targeted part within the full text)
+                # Logic: [Prefix] + [New Text] + [Suffix]
+                expanded_new_text = (
+                    full_ins_text[:rel_start] 
+                    + (edit.new_text or "") 
+                    + full_ins_text[rel_start + match_len:]
+                )
+
+                # Create a proxy edit that replaces the WHOLE insertion
+                proxy_edit = DocumentEdit(
+                    target_text=full_ins_text, 
+                    new_text=expanded_new_text, 
+                    comment=edit.comment
+                )
+                proxy_edit._match_start_index = ins_start
+                # internal_op will be determined by _apply_single_edit_indexed (likely INSERTION/MODIFICATION)
+                
+                return self._apply_single_edit_indexed(proxy_edit)
+        # ---------------------------------
+
         effective_new_text = edit.new_text or ""
         effective_target_text = edit.target_text
 
@@ -548,6 +586,46 @@ class RedlineEngine:
         length = len(target_text) if target_text else 0
 
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
+
+        # Check if the target range is currently inside a Tracked Insertion.
+        # If so, prevent XML corruption (w:del inside w:ins) by Rejecting the insertion first.
+        if length > 0:
+            context_span = self.mapper.get_context_at_range(start_idx, start_idx + length)
+            if context_span and context_span.ins_id:
+                logger.info(f"Detected edit inside Insertion ID={context_span.ins_id}. Converting to Replace.")
+                ins_id = context_span.ins_id
+
+                # 1. Locate the Insertion in the DOM before we delete it
+                ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{ins_id}']")
+                if not ins_nodes:
+                    return False
+
+                first_node = ins_nodes[0]
+                parent = first_node.getparent()
+                index = parent.index(first_node)
+
+                # Capture style from inside if possible (approximate)
+                style_source = None
+                r = first_node.find(qn("w:r"))
+                if r is not None:
+                    style_source = Run(r, parent)
+
+                # 2. Reject the Change (Removes the w:ins nodes)
+                # This clears the path for our new insertion
+                self._reject_change(ins_id)
+
+                # 3. Apply the NEW text as a fresh insertion
+                # We use the position of the *first* ins node we found.
+                if edit.new_text:
+                    ins_elem = self.track_insert(edit.new_text, anchor_run=style_source)
+                    if ins_elem is not None:
+                        # Insert at the original position
+                        parent.insert(index, ins_elem)
+                    
+                    if edit.comment and ins_elem is not None:
+                        self._attach_comment(parent, ins_elem, ins_elem, edit.comment)
+
+                return True
 
         if op == EditOperationType.INSERTION:
             anchor_run = self.mapper.get_insertion_anchor(start_idx)
