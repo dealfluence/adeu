@@ -29,6 +29,7 @@ w16cex_ns = "http://schemas.microsoft.com/office/word/2018/wordml/cex"
 if "w16cex" not in nsmap:
     nsmap["w16cex"] = w16cex_ns
 
+
 class CommentsManager:
     """
     Manages the 'word/comments.xml' part of the DOCX package.
@@ -78,7 +79,7 @@ class CommentsManager:
         """
         RELTYPE_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
         CONTENT_TYPE_EXTENDED = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
-        
+
         # 1. Check existing
         try:
             for rel in self.doc.part.rels.values():
@@ -87,39 +88,34 @@ class CommentsManager:
                     if not isinstance(part, XmlPart):
                         # If python-docx doesn't recognize the content type, it loads as generic Part.
                         # We must upgrade it to XmlPart to edit the XML.
-                        
+
                         # Create new XmlPart
-                        xml_part = XmlPart(
-                            part.partname, 
-                            part.content_type, 
-                            parse_xml(part.blob), 
-                            part.package
-                        )
-                        
+                        xml_part = XmlPart(part.partname, part.content_type, parse_xml(part.blob), part.package)
+
                         # Swap in package (source of truth for serialization)
                         if part in part.package.parts:
                             idx = part.package.parts.index(part)
                             part.package.parts[idx] = xml_part
-                            
+
                         # Swap in relationship (so we return the correct object)
                         rel._target = xml_part
                         return xml_part
-                        
+
                     return part
         except Exception:
             pass
-             
+
         # 2. Create new if missing
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsExtended%d.xml")
-        
+
         # Root element <w15:commentsEx>
         xml_bytes = (f"<w15:commentsEx {nsdecls('w15')}></w15:commentsEx>").encode("utf-8")
-        
+
         extended_part = XmlPart(partname, CONTENT_TYPE_EXTENDED, parse_xml(xml_bytes), package)
         package.parts.append(extended_part)
         self.doc.part.relate_to(extended_part, RELTYPE_EXTENDED)
-        
+
         return extended_part
 
     def _get_or_create_ids_part(self) -> XmlPart:
@@ -129,19 +125,14 @@ class CommentsManager:
         """
         RELTYPE_IDS = "http://schemas.microsoft.com/office/2016/relationships/commentsIds"
         CONTENT_TYPE_IDS = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
-        
+
         # 1. Check existing
         try:
             for rel in self.doc.part.rels.values():
                 if rel.reltype == RELTYPE_IDS:
                     part = rel.target_part
                     if not isinstance(part, XmlPart):
-                        xml_part = XmlPart(
-                            part.partname, 
-                            part.content_type, 
-                            parse_xml(part.blob), 
-                            part.package
-                        )
+                        xml_part = XmlPart(part.partname, part.content_type, parse_xml(part.blob), part.package)
                         if part in part.package.parts:
                             idx = part.package.parts.index(part)
                             part.package.parts[idx] = xml_part
@@ -150,18 +141,18 @@ class CommentsManager:
                     return part
         except Exception:
             pass
-             
+
         # 2. Create new if missing
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsIds%d.xml")
-        
+
         # Root element <w16cid:commentsIds>
         xml_bytes = (f"<w16cid:commentsIds {nsdecls('w16cid')}></w16cid:commentsIds>").encode("utf-8")
-        
+
         ids_part = XmlPart(partname, CONTENT_TYPE_IDS, parse_xml(xml_bytes), package)
         package.parts.append(ids_part)
         self.doc.part.relate_to(ids_part, RELTYPE_IDS)
-        
+
         return ids_part
 
     def _get_or_create_extensible_part(self) -> XmlPart:
@@ -170,20 +161,17 @@ class CommentsManager:
         Required for Modern Comments metadata (dateUtc via durableId).
         """
         RELTYPE_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/relationships/commentsExtensible"
-        CONTENT_TYPE_EXTENSIBLE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
-        
+        CONTENT_TYPE_EXTENSIBLE = (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
+        )
+
         # 1. Check existing
         try:
             for rel in self.doc.part.rels.values():
                 if rel.reltype == RELTYPE_EXTENSIBLE:
                     part = rel.target_part
                     if not isinstance(part, XmlPart):
-                        xml_part = XmlPart(
-                            part.partname, 
-                            part.content_type, 
-                            parse_xml(part.blob), 
-                            part.package
-                        )
+                        xml_part = XmlPart(part.partname, part.content_type, parse_xml(part.blob), part.package)
                         if part in part.package.parts:
                             idx = part.package.parts.index(part)
                             part.package.parts[idx] = xml_part
@@ -192,18 +180,18 @@ class CommentsManager:
                     return part
         except Exception:
             pass
-             
+
         # 2. Create new if missing
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsExtensible%d.xml")
-        
+
         # Root element <w16cex:commentsExtensible>
         xml_bytes = (f"<w16cex:commentsExtensible {nsdecls('w16cex')}></w16cex:commentsExtensible>").encode("utf-8")
-        
+
         extensible_part = XmlPart(partname, CONTENT_TYPE_EXTENSIBLE, parse_xml(xml_bytes), package)
         package.parts.append(extensible_part)
         self.doc.part.relate_to(extensible_part, RELTYPE_EXTENSIBLE)
-        
+
         return extensible_part
 
     def _ensure_namespaces(self):
@@ -216,19 +204,18 @@ class CommentsManager:
         element = self.comments_part.element
         has_w14 = "w14" in element.nsmap and element.nsmap["w14"] == w14_ns
         has_w15 = "w15" in element.nsmap and element.nsmap["w15"] == w15_ns
-        
+
         if has_w14 and has_w15:
             return
 
         xml_str = serialize_for_reading(element)
-        
+
         # Brute force injection into the tag attributes if missing
         # We replace the first occurrence of <w:comments
         if "xmlns:w14=" not in xml_str or "xmlns:w15=" not in xml_str:
             replacement = f'<w:comments xmlns:w14="{w14_ns}" xmlns:w15="{w15_ns}"'
             new_xml = xml_str.replace("<w:comments", replacement, 1)
             self.comments_part._element = parse_xml(new_xml)
-
 
     def _get_next_comment_id(self) -> int:
         ids = [0]
@@ -240,11 +227,11 @@ class CommentsManager:
                 except (ValueError, TypeError):
                     pass
         return max(ids) + 1
-        
+
     def _generate_para_id(self) -> str:
         """Generates a random 8-char hex string for w14:paraId"""
         return f"{random.randint(0, 0xFFFFFFFF):08X}"
-        
+
     def _generate_durable_id(self) -> str:
         """Generates a random 8-char hex string for w16cid:durableId"""
         return f"{random.randint(0, 0xFFFFFFFF):08X}"
@@ -253,7 +240,7 @@ class CommentsManager:
         """Finds the w14:paraId of the first paragraph in the given comment ID."""
         if not self.comments_part:
             return None
-            
+
         # Find comment by ID
         # XPath is cleaner but python-docx elements support direct findall
         for c in self.comments_part.element.findall(qn("w:comment")):
@@ -277,7 +264,7 @@ class CommentsManager:
         if parent_para_id:
             comment_ex.set(qn("w15:paraIdParent"), parent_para_id)
         comment_ex.set(qn("w15:done"), "0")
-        
+
         self.extended_part.element.append(comment_ex)
 
     def _add_to_ids_part(self, para_id: str):
@@ -298,14 +285,14 @@ class CommentsManager:
         """
         if not self.extensible_part or not self.ids_part:
             return
-        
+
         # We need to find the durableId we just assigned to this paraId
         durable_id = None
         for child in self.ids_part.element:
             if child.get(qn("w16cid:paraId")) == para_id:
                 durable_id = child.get(qn("w16cid:durableId"))
                 break
-        
+
         if durable_id:
             ext_el = OxmlElement("w16cex:commentExtensible")
             ext_el.set(qn("w16cex:durableId"), durable_id)
@@ -331,11 +318,11 @@ class CommentsManager:
 
         # Modern Threading (w14:paraId)
         para_id = self._generate_para_id()
-        
+
         p = OxmlElement("w:p")
         p.set(qn("w14:paraId"), para_id)
         # Also need w14:textId ideally, but ParaId is the structural key
-        p.set(qn("w14:textId"), self._generate_para_id()) # Random hex is fine
+        p.set(qn("w14:textId"), self._generate_para_id())  # Random hex is fine
 
         # 1. Add Paragraph Style (CommentText)
         pPr = OxmlElement("w:pPr")
@@ -371,7 +358,7 @@ class CommentsManager:
                 parent_para_id = self._find_para_id_for_comment(parent_id)
                 # If we can't find parent paraId, we can't link in modern way.
                 # Word might rely on w15:p in that case or show as broken.
-                
+
             self._add_to_extended_part(para_id, parent_para_id)
 
         # Handle IDs Part
@@ -411,7 +398,7 @@ class CommentsManager:
             # Check for Parent ID (w15:p)
             # Use Clark notation for robust reading to avoid prefix issues during read
             parent_id = c.get("{http://schemas.microsoft.com/office/word/2012/wordml}p")
-            
+
             # TODO: If parent_id is missing here, we *could* try to resolve it via commentsExtended
             # by looking up paraId -> paraIdParent -> parentCommentId.
             # For now, we rely on legacy reading, which serves our current needs.
