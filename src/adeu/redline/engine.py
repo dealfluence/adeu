@@ -139,6 +139,7 @@ class RedlineEngine:
         self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
         self.comments_manager = CommentsManager(self.doc)
+        self.clean_mapper: Optional[DocumentMapper] = None
 
     def _scan_existing_ids(self) -> int:
         """
@@ -561,19 +562,37 @@ class RedlineEngine:
 
         start_idx, match_len = self.mapper.find_match_index(edit.target_text)
 
+        start_idx, match_len = self.mapper.find_match_index(edit.target_text)
+
+        # FALLBACK: If Raw View match failed, try matching against Clean View
+        use_clean_map = False
         if start_idx == -1:
-            logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found.")
-            return False
+            # Lazy load clean mapper
+            if not self.clean_mapper:
+                self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+
+            start_idx, match_len = self.clean_mapper.find_match_index(edit.target_text)
+            if start_idx != -1:
+                logger.info("Matched edit against Clean View.")
+                use_clean_map = True
+            else:
+                logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found (Raw or Clean).")
+                return False
+
+        # Select active mapper
+        active_mapper = self.clean_mapper if use_clean_map else self.mapper
 
         # --- HEURISTIC NESTED EDIT FIX ---
         # Before trimming, check if the match falls inside an existing Insertion.
         # If so, we must target the WHOLE insertion to avoid corrupting it or losing context.
-        context_span = self.mapper.get_context_at_range(start_idx, start_idx + match_len)
+        context_span = active_mapper.get_context_at_range(start_idx, start_idx + match_len)
 
         if context_span and context_span.ins_id:
             ins_id = context_span.ins_id
             # Find the full extent of this insertion
-            ins_spans = [s for s in self.mapper.spans if s.ins_id == ins_id]
+            # Note: For clean map, we might not have all spans if we skipped some logic?
+            # Actually clean map includes w:ins.
+            ins_spans = [s for s in active_mapper.spans if s.ins_id == ins_id]
             if ins_spans:
                 ins_start = ins_spans[0].start
                 # Reconstruct full text of the insertion
@@ -644,12 +663,22 @@ class RedlineEngine:
         # Construct proxy edit
         proxy_edit = DocumentEdit(target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
+
+        # Store which mapper to use for index resolution in _apply_single_edit_indexed
+        # We need to pass the mapper instance or a flag?
+        # _apply_single_edit_indexed uses self.mapper by default.
+        # We should probably pass the runs directly or tell it to use clean mapper.
+        # Hack: attach the active mapper to the edit object privately?
         proxy_edit._internal_op = effective_op
+        proxy_edit._active_mapper_ref = active_mapper
 
         return self._apply_single_edit_indexed(proxy_edit)
 
     def _apply_single_edit_indexed(self, edit: DocumentEdit) -> bool:
         op = edit._internal_op
+
+        # Use the specific mapper if determined during heuristic phase, else default
+        active_mapper = edit._active_mapper_ref or self.mapper
 
         if op is None:
             if not edit.target_text and edit.new_text:
@@ -733,7 +762,7 @@ class RedlineEngine:
             return True
 
         # Deletion / Modification
-        target_runs = self.mapper.find_target_runs_by_index(start_idx, length)
+        target_runs = active_mapper.find_target_runs_by_index(start_idx, length)
         if not target_runs:
             return False
 
@@ -902,3 +931,26 @@ class RedlineEngine:
                 c.append(p)
                 return True
         return False
+
+    def accept_all_revisions(self):
+        """
+        Accepts all tracked changes and removes comments.
+        """
+        # 1. Accept Insertions: Unwrap them
+        for ins in self.doc.element.xpath("//w:ins"):
+            parent = ins.getparent()
+            index = parent.index(ins)
+            for child in list(ins):
+                parent.insert(index, child)
+                index += 1
+            parent.remove(ins)
+
+        # 2. Accept Deletions: Remove them
+        for d in self.doc.element.xpath("//w:del"):
+            d.getparent().remove(d)
+
+        # 3. Remove Comments (Optional? Usually desired for 'Clean' copy)
+        # Removing comments implies removing commentRangeStart/End and References
+        for tag in ["w:commentRangeStart", "w:commentRangeEnd", "w:commentReference"]:
+            for el in self.doc.element.xpath(f"//{(tag)}"):
+                el.getparent().remove(el)

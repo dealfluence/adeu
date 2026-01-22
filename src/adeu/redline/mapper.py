@@ -35,8 +35,9 @@ class TextSpan:
 
 
 class DocumentMapper:
-    def __init__(self, doc: DocumentObject):
+    def __init__(self, doc: DocumentObject, clean_view: bool = False):
         self.doc = doc
+        self.clean_view = clean_view
         self.comments_mgr = CommentsManager(doc)
         self.comments_map = self.comments_mgr.extract_comments_data()
         self.full_text = ""
@@ -131,6 +132,13 @@ class DocumentMapper:
                 if suffix:
                     run_parts.append(("virtual", suffix, None))
 
+                # Clean View Logic: Skip deleted text
+                if self.clean_view and active_del_event:
+                    # Even though we skip mapping this text to the full_text buffer,
+                    # we proceed to event handling loop to keep state consistent.
+                    # BUT, we must NOT append to spans or full_text.
+                    pass
+
                 # Reconstruct the raw segment text used for coalescing checks
                 full_seg_text = f"{prefix}{text}{suffix}"
 
@@ -138,9 +146,12 @@ class DocumentMapper:
                 curr_ins_id = active_ins_event.id if active_ins_event else None
                 curr_del_id = active_del_event.id if active_del_event else None
 
-                if full_seg_text:
+                if full_seg_text and not (self.clean_view and curr_del_id):
                     # Check wrapper tokens
-                    start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
+                    if self.clean_view:
+                        new_wrappers = ("", "")
+                    else:
+                        start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
                     new_wrappers = (start_token, end_token)
 
                     # --- COALESCING LOGIC ---
@@ -186,83 +197,84 @@ class DocumentMapper:
                     # ------------------------
 
                 # Metadata Handling (Deferral Logic)
-                # Snapshot state
-                state_snapshot = (
-                    {active_ins_event.id: active_ins_event} if active_ins_event else {},
-                    {active_del_event.id: active_del_event} if active_del_event else {},
-                    active_ids.copy(),
-                )
-                deferred_meta_states.append(state_snapshot)
+                if not self.clean_view:
+                    # Snapshot state
+                    state_snapshot = (
+                        {active_ins_event.id: active_ins_event} if active_ins_event else {},
+                        {active_del_event.id: active_del_event} if active_del_event else {},
+                        active_ids.copy(),
+                    )
+                    deferred_meta_states.append(state_snapshot)
 
-                should_defer = False
-                is_redline = bool(curr_ins_id) or bool(curr_del_id)
+                    should_defer = False
+                    is_redline = bool(curr_ins_id) or bool(curr_del_id)
 
-                if is_redline:
-                    # Lookahead
-                    j = i + 1
-                    next_is_redline = False
-                    temp_ins = bool(curr_ins_id)
-                    temp_del = bool(curr_del_id)
+                    if is_redline:
+                        # Lookahead
+                        j = i + 1
+                        next_is_redline = False
+                        temp_ins = bool(curr_ins_id)
+                        temp_del = bool(curr_del_id)
 
-                    while j < len(items):
-                        next_item = items[j]
-                        if isinstance(next_item, Run):
-                            if temp_ins or temp_del:
-                                next_is_redline = True
-                            break
-                        elif isinstance(next_item, DocxEvent):
-                            if next_item.type == "ins_start":
-                                temp_ins = True
-                            elif next_item.type == "ins_end":
-                                temp_ins = False
-                            elif next_item.type == "del_start":
-                                temp_del = True
-                            elif next_item.type == "del_end":
-                                temp_del = False
-                        j += 1
+                        while j < len(items):
+                            next_item = items[j]
+                            if isinstance(next_item, Run):
+                                if temp_ins or temp_del:
+                                    next_is_redline = True
+                                break
+                            elif isinstance(next_item, DocxEvent):
+                                if next_item.type == "ins_start":
+                                    temp_ins = True
+                                elif next_item.type == "ins_end":
+                                    temp_ins = False
+                                elif next_item.type == "del_start":
+                                    temp_del = True
+                                elif next_item.type == "del_end":
+                                    temp_del = False
+                            j += 1
 
-                    if next_is_redline:
-                        should_defer = True
+                        if next_is_redline:
+                            should_defer = True
 
-                if not should_defer:
-                    # Flush Pending Text Buffer before Metadata
-                    if pending_runs:
-                        s_tok, e_tok = current_wrappers
-                        # Output Start Token
-                        if s_tok:
-                            self._add_virtual_text(s_tok, current, paragraph)
-                            current += len(s_tok)
-                        # Output Buffered Parts
-                        for kind, txt, r_obj, i_id, d_id in pending_runs:
-                            if kind == "virtual":
-                                self._add_virtual_text(txt, current, paragraph)
-                            else:
-                                span = TextSpan(
-                                    start=current,
-                                    end=current + len(txt),
-                                    text=txt,
-                                    run=r_obj,
-                                    paragraph=paragraph,
-                                    ins_id=i_id,
-                                    del_id=d_id,
-                                )
-                                self.spans.append(span)
-                                self.full_text += txt
-                            current += len(txt)
-                        # Output End Token
-                        if e_tok:
-                            self._add_virtual_text(e_tok, current, paragraph)
-                            current += len(e_tok)
-                        pending_runs = []
-                        current_wrappers = ("", "")
+                    if not should_defer:
+                        # Flush Pending Text Buffer before Metadata
+                        if pending_runs:
+                            s_tok, e_tok = current_wrappers
+                            # Output Start Token
+                            if s_tok:
+                                self._add_virtual_text(s_tok, current, paragraph)
+                                current += len(s_tok)
+                            # Output Buffered Parts
+                            for kind, txt, r_obj, i_id, d_id in pending_runs:
+                                if kind == "virtual":
+                                    self._add_virtual_text(txt, current, paragraph)
+                                else:
+                                    span = TextSpan(
+                                        start=current,
+                                        end=current + len(txt),
+                                        text=txt,
+                                        run=r_obj,
+                                        paragraph=paragraph,
+                                        ins_id=i_id,
+                                        del_id=d_id,
+                                    )
+                                    self.spans.append(span)
+                                    self.full_text += txt
+                                current += len(txt)
+                            # Output End Token
+                            if e_tok:
+                                self._add_virtual_text(e_tok, current, paragraph)
+                                current += len(e_tok)
+                            pending_runs = []
+                            current_wrappers = ("", "")
 
-                    # Flush Metadata
-                    meta_block = self._build_merged_meta_block(deferred_meta_states)
-                    if meta_block:
-                        full_meta = f"{{>>{meta_block}<<}}"
-                        self._add_virtual_text(full_meta, current, paragraph)
-                        current += len(full_meta)
-                    deferred_meta_states = []
+                        # Flush Metadata
+                        meta_block = self._build_merged_meta_block(deferred_meta_states)
+                        if meta_block:
+                            full_meta = f"{{>>{meta_block}<<}}"
+                            self._add_virtual_text(full_meta, current, paragraph)
+                            current += len(full_meta)
+                        deferred_meta_states = []
 
             elif isinstance(item, DocxEvent):
                 # Event -> Must flush pending text

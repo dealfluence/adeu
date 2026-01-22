@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
 
+from adeu.redline.mapper import DocumentMapper
+
 
 class EditOperationType:
     """Internal enum for low-level XML manipulation"""
@@ -43,6 +45,7 @@ class DocumentEdit(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _internal_op: Optional[str] = PrivateAttr(default=None)
+    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
 
 
 class ReviewActionType(str, Enum):

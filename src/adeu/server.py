@@ -37,29 +37,43 @@ def _save_stream(stream: BytesIO, path: str):
 
 
 @mcp.tool()
-def read_docx(file_path: str) -> str:
+def read_docx(file_path: str, clean_view: bool = False) -> str:
     """
-    Reads a local DOCX file and returns its final text content as Markdown (with all tracked changes accepted).
-    Use this to understand the document content before proposing edits.
+    Reads a DOCX file and returns its text content.
+
+    Args:
+        file_path: Absolute path to the DOCX file.
+        clean_view: If False (default), returns the 'Raw' text with inline CriticMarkup ({--del--}{++ins++})
+                    so you can see existing redlines and comments.
+                    If True, returns the 'Accepted' text (hides deletions, shows insertions) - useful for
+                    seeing the clean final state.
     """
     try:
         stream = _read_file_bytes(file_path)
-        return extract_text_from_stream(stream, filename=Path(file_path).name)
+        return extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 
 @mcp.tool()
-def diff_docx_files(original_path: str, modified_path: str) -> str:
+def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool = True) -> str:
     """
-    Compares two DOCX files and returns a Semantic Unified Diff.
+    Compares two DOCX files and returns a text-based Unified Diff.
+
+    Args:
+        original_path: Path to the base document.
+        modified_path: Path to the new document.
+        compare_clean: If True (default), compares the 'Accepted' state of both docs (ignores tracking markup).
+                       This mimics Word's 'Compare Documents' feature.
+                       If False, compares the raw text including existing redline markup (useful for debugging
+                       markup changes).
     """
     try:
         stream_orig = _read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name)
+        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
 
         stream_mod = _read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name)
+        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
 
         edits = generate_edits_from_text(text_orig, text_mod)
 
@@ -109,22 +123,19 @@ def apply_structured_edits(
     original_docx_path: str, edits: List[DocumentEdit], author_name: str, output_path: Optional[str] = None
 ) -> str:
     """
-    Applies a specific list of text replacements to the DOCX file
-    and saves to a NEW output file, leaving the original unchanged.
+    Applies a list of text replacements to the DOCX file (Track Changes).
 
-    The logic is "Search and Replace".
-    - To Delete: Provide target_text, leave new_text empty.
-    - To Insert: Provide target_text (context), set new_text to "context + new stuff".
-    - To Modify: Provide target_text, set new_text to desired state.
+    Matching Strategy:
+    - The tool tries to match `target_text` against the document.
+    - It supports 'Fuzzy Matching' to handle extra whitespace or varying legal placeholders (e.g. [___] vs [_____]).
+    - It can match against the 'Accepted' view of the document even if the raw file contains deleted text.
 
     Args:
         original_docx_path: Absolute path to the source file.
-        edits: List of edits to apply.
-        author_name: The name of the person making the changes (e.g. "Mikko Korpela").
-                     This appears in the Track Changes metadata. Do NOT default to "AI" unless instructed.
-        output_path: Optional. If NOT provided, a new file is automatically created in the
-                     same directory as the original, named "{original_filename}_redlined.docx".
-                     Use this default to avoid path errors.
+        edits: List of edits. Each edit transforms `target_text` -> `new_text`.
+        author_name: Name to appear in Track Changes (e.g., 'Reviewer AI').
+        output_path: Optional. If not provided, updates the file in place (if it
+        ends in _redlined) or creates a new one.
     """
     try:
         if not author_name or not author_name.strip():
@@ -136,7 +147,10 @@ def apply_structured_edits(
 
         if not output_path:
             p = Path(original_docx_path)
-            output_path = str(p.parent / f"{p.stem}_redlined{p.suffix}")
+            if p.stem.endswith("_redlined"):
+                output_path = str(p)  # Overwrite if already redlined
+            else:
+                output_path = str(p.parent / f"{p.stem}_redlined{p.suffix}")
 
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
@@ -172,7 +186,10 @@ def manage_review_actions(
 
         if not output_path:
             p = Path(original_docx_path)
-            output_path = str(p.parent / f"{p.stem}_reviewed{p.suffix}")
+            if p.stem.endswith("_reviewed"):
+                output_path = str(p)
+            else:
+                output_path = str(p.parent / f"{p.stem}_reviewed{p.suffix}")
 
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
@@ -181,6 +198,39 @@ def manage_review_actions(
 
     except Exception as e:
         return f"Error managing actions: {str(e)}"
+
+
+@mcp.tool()
+def accept_all_changes(docx_path: str, output_path: Optional[str] = None) -> str:
+    """
+    Accepts all tracked changes in the document and removes comments, creating a clean version.
+    Useful for finalizing a round of negotiation before starting a new one.
+    """
+    try:
+        # We can simulate this by reading the document and accepting changes?
+        # python-docx doesn't strictly have an "Accept All" feature natively that handles complex XML perfectly.
+        # However, we can use a simpler approach:
+        # 1. Load Doc.
+        # 2. Iterate and remove <w:del>.
+        # 3. Unwrap <w:ins>.
+        # 4. Remove comments.
+        #
+        # Ideally, we should add this logic to RedlineEngine as a utility.
+        # For now, let's implement a basic version here or defer to engine.
+
+        # Let's add the method to engine.py for robustness.
+        stream = _read_file_bytes(docx_path)
+        engine = RedlineEngine(stream)
+        engine.accept_all_revisions()
+
+        if not output_path:
+            p = Path(docx_path)
+            output_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
+
+        _save_stream(engine.save_to_stream(), output_path)
+        return f"Accepted all changes. Saved to: {output_path}"
+    except Exception as e:
+        return f"Error accepting changes: {str(e)}"
 
 
 def main():

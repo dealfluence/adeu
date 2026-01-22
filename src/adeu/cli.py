@@ -95,7 +95,10 @@ def handle_apply(args):
 
     output_path = args.output
     if not output_path:
-        output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
+        if args.original.stem.endswith("_redlined"):
+            output_path = args.original
+        else:
+            output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
 
     with open(output_path, "wb") as f:
         f.write(engine.save_to_stream().getvalue())
