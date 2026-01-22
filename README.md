@@ -1,4 +1,4 @@
-# Adeu: The "Virtual DOM" for Microsoft Word
+# Adeu OSS: DOCX Redlining Engine
 
 **Adeu allows AI Agents and LLMs to safely "Track Changes" in Microsoft Word documents.**
 
