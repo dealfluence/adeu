@@ -919,21 +919,51 @@ class RedlineEngine:
         return bool(ins_nodes or del_nodes)
 
     def _reply_to_comment(self, target_id: str, text: str) -> bool:
-        if not self.comments_manager.comments_part:
-            return False
-        comments = self.comments_manager.comments_part.element.findall(qn("w:comment"))
-        for c in comments:
-            if c.get(qn("w:id")) == target_id:
-                p = OxmlElement("w:p")
-                r = OxmlElement("w:r")
-                t = OxmlElement("w:t")
-                timestamp = datetime.datetime.now().strftime("%Y-%m-%d")
-                t.text = f"\n[{self.author} @ {timestamp}]: {text}"
-                r.append(t)
-                p.append(r)
-                c.append(p)
-                return True
-        return False
+        """
+        Creates a new comment containing the reply text and attaches it to the
+        same document range as the target comment.
+        """
+        # 1. Create the new comment content in comments.xml
+        new_id = self.comments_manager.add_comment(self.author, text)
+
+        # 2. Duplicate the anchors in document.xml to target the same range
+        found_anchors = False
+
+        # Clone Start nodes
+        starts = self.doc.element.xpath(f"//w:commentRangeStart[@w:id='{target_id}']")
+        for s in starts:
+            found_anchors = True
+            new_s = deepcopy(s)
+            new_s.set(qn("w:id"), new_id)
+            s.addnext(new_s)
+
+        # Clone End nodes
+        ends = self.doc.element.xpath(f"//w:commentRangeEnd[@w:id='{target_id}']")
+        for e in ends:
+            found_anchors = True
+            new_e = deepcopy(e)
+            new_e.set(qn("w:id"), new_id)
+            e.addnext(new_e)
+
+        # Clone Reference nodes (Bubbles)
+        refs = self.doc.element.xpath(f"//w:commentReference[@w:id='{target_id}']")
+        for ref in refs:
+            found_anchors = True
+            parent = ref.getparent()
+            # If reference is inside a run, clone the run to preserve formatting/properties
+            if parent is not None and parent.tag == qn("w:r"):
+                new_run = deepcopy(parent)
+                new_ref = new_run.find(qn("w:commentReference"))
+                if new_ref is not None:
+                    new_ref.set(qn("w:id"), new_id)
+                parent.addnext(new_run)
+            else:
+                # Fallback for naked reference
+                new_ref = deepcopy(ref)
+                new_ref.set(qn("w:id"), new_id)
+                ref.addnext(new_ref)
+
+        return found_anchors
 
     def accept_all_revisions(self):
         """
