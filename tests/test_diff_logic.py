@@ -1,5 +1,6 @@
 from adeu.diff import generate_edits_from_text
 
+
 def test_start_of_doc_insertion_duplication_bug():
     """
     Regression Test: Start-of-document insertion generates duplicate edits.
@@ -7,13 +8,13 @@ def test_start_of_doc_insertion_duplication_bug():
     """
     original = "Contract Agreement"
     modified = "Big Contract Agreement"
-    
+
     edits = generate_edits_from_text(original, modified)
-    
+
     # Current buggy behavior returns 2 edits:
     # 1. Target="Contract", New="Big Contract" (Heuristic)
     # 2. Target="", New="Big " (Standard)
-    
+
     # We want exactly 1 semantic edit to represent this change.
     assert len(edits) == 1, f"Expected 1 edit, got {len(edits)}: {edits}"
 

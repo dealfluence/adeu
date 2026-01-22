@@ -92,7 +92,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
                             # So we assume the next Op=0 will advance past it.
                             # This is a bit hacky. For now, let's stick to standard Anchor logic if possible,
                             # or just use empty anchor if allowed.
-                            
+
                             continue
 
                 # Standard Insertion: Target=Anchor, New=Anchor+Text
