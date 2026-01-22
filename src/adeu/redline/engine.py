@@ -559,7 +559,7 @@ class RedlineEngine:
             logger.warning("Skipping heuristic edit: target_text is empty.")
             return False
 
-        start_idx = self.mapper.find_match_index(edit.target_text)
+        start_idx, match_len = self.mapper.find_match_index(edit.target_text)
 
         if start_idx == -1:
             logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found.")
@@ -568,7 +568,6 @@ class RedlineEngine:
         # --- HEURISTIC NESTED EDIT FIX ---
         # Before trimming, check if the match falls inside an existing Insertion.
         # If so, we must target the WHOLE insertion to avoid corrupting it or losing context.
-        match_len = len(edit.target_text)
         context_span = self.mapper.get_context_at_range(start_idx, start_idx + match_len)
 
         if context_span and context_span.ins_id:
@@ -585,6 +584,7 @@ class RedlineEngine:
 
                 # Construct the new FULL text (replace the targeted part within the full text)
                 # Logic: [Prefix] + [New Text] + [Suffix]
+                # IMPORTANT: use match_len which might differ from edit.target_text length (fuzzy match)
                 expanded_new_text = (
                     full_ins_text[:rel_start] + (edit.new_text or "") + full_ins_text[rel_start + match_len :]
                 )
@@ -598,23 +598,33 @@ class RedlineEngine:
         # ---------------------------------
 
         effective_new_text = edit.new_text or ""
-        effective_target_text = edit.target_text
 
-        if effective_target_text == effective_new_text:
+        # NOTE: Fuzzy matching means user input might NOT
+        # equal the actual document text found at [start_idx : start_idx + match_len].
+        # We should use the ACTUAL document text for prefix/suffix trimming to be safe.
+        actual_doc_text = self.mapper.full_text[start_idx : start_idx + match_len]
+
+        # If the fuzzy match is drastically different in content (e.g. whitespace),
+        # we trust the match index but use actual text for operations.
+
+        if actual_doc_text == effective_new_text:
             return True
 
-        if effective_new_text.startswith(effective_target_text):
+        if effective_new_text.startswith(actual_doc_text):
+            # Pure append?
+            # Note: startswith check might fail if whitespace differs slightly.
+            # But if we assume the user intends to Append, they usually provide context.
             effective_op = EditOperationType.INSERTION
             final_target = ""
-            final_new = effective_new_text[len(effective_target_text) :]
-            effective_start_idx = start_idx + len(effective_target_text)
+            final_new = effective_new_text[len(actual_doc_text) :]
+            effective_start_idx = start_idx + match_len
         else:
-            prefix_len, suffix_len = _trim_common_context(effective_target_text, effective_new_text)
+            prefix_len, suffix_len = _trim_common_context(actual_doc_text, effective_new_text)
 
-            t_end = len(effective_target_text) - suffix_len
+            t_end = len(actual_doc_text) - suffix_len
             n_end = len(effective_new_text) - suffix_len
 
-            final_target = effective_target_text[prefix_len:t_end]
+            final_target = actual_doc_text[prefix_len:t_end]
             final_new = effective_new_text[prefix_len:n_end]
             effective_start_idx = start_idx + prefix_len
 
@@ -627,6 +637,11 @@ class RedlineEngine:
             else:
                 return True
 
+        # If we replaced the target text with actual text, we should update the edit
+        # to ensure downstream logic (logging, etc) sees reality, though _apply uses indices.
+        # However, we must pass the calculated sub-segments.
+
+        # Construct proxy edit
         proxy_edit = DocumentEdit(target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op

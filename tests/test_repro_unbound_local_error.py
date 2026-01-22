@@ -1,4 +1,5 @@
 import io
+
 import pytest
 from docx import Document
 
@@ -9,7 +10,7 @@ from adeu.redline.engine import RedlineEngine
 def test_repro_unbound_local_curr_ins_id_failure():
     """
     Scenario: The FIRST run in a paragraph is empty (no text).
-    
+
     This caused an UnboundLocalError in mapper.py because the 'curr_ins_id'
     variable initialization was skipped inside the 'if full_seg_text:' block,
     but the variable was accessed later in the loop for lookahead logic.
@@ -44,4 +45,4 @@ def test_repro_unbound_local_curr_ins_id_failure():
     except Exception as e:
         # If the fix works, we might get other errors (e.g. not found), but NOT UnboundLocal
         if "local variable 'curr_ins_id' referenced before assignment" in str(e):
-             pytest.fail(f"Regression: UnboundLocalError raised (wrapped)! Details: {e}")
+            pytest.fail(f"Regression: UnboundLocalError raised (wrapped)! Details: {e}")

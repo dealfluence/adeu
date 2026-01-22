@@ -1,3 +1,4 @@
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -403,19 +404,81 @@ class DocumentMapper:
     def _replace_smart_quotes(self, text: str) -> str:
         return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
-    def find_match_index(self, target_text: str) -> int:
+    def _make_fuzzy_regex(self, target_text: str) -> str:
+        """
+        Constructs a regex pattern from target text that permits:
+        - Variable whitespace (\\s+)
+        - Variable underscores (_+)
+        - Smart quote variation
+        """
+        # Normalize quotes in target for consistency
+        target_text = self._replace_smart_quotes(target_text)
+
+        parts = []
+        # Tokenize: Underscores, Whitespace, Quotes
+        token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
+
+        last_idx = 0
+        for match in token_pattern.finditer(target_text):
+            # Add literal text
+            literal = target_text[last_idx : match.start()]
+            if literal:
+                parts.append(re.escape(literal))
+
+            g_underscore, g_space, g_quote = match.groups()
+
+            if g_underscore:
+                parts.append(r"_+")
+            elif g_space:
+                parts.append(r"\s+")
+            elif g_quote:
+                if g_quote == "'":
+                    parts.append(r"['‘’]")
+                else:
+                    parts.append(r"[\"“”]")
+
+            last_idx = match.end()
+
+        remaining = target_text[last_idx:]
+        if remaining:
+            parts.append(re.escape(remaining))
+
+        return "".join(parts)
+
+    def find_match_index(self, target_text: str) -> Tuple[int, int]:
+        """
+        Returns (start_index, match_length).
+        Returns (-1, 0) if not found.
+        """
+        # 1. Exact Match
         start_idx = self.full_text.find(target_text)
-        if start_idx == -1:
-            norm_full = self._replace_smart_quotes(self.full_text)
-            norm_target = self._replace_smart_quotes(target_text)
-            start_idx = norm_full.find(norm_target)
-        return start_idx
+        if start_idx != -1:
+            return start_idx, len(target_text)
+
+        # 2. Smart Quote Normalization
+        norm_full = self._replace_smart_quotes(self.full_text)
+        norm_target = self._replace_smart_quotes(target_text)
+        start_idx = norm_full.find(norm_target)
+        if start_idx != -1:
+            # Since smart quote replacement is 1:1, length matches target_text
+            return start_idx, len(target_text)
+
+        # 3. Fuzzy Regex Match
+        try:
+            pattern = self._make_fuzzy_regex(target_text)
+            match = re.search(pattern, self.full_text)
+            if match:
+                return match.start(), match.end() - match.start()
+        except re.error:
+            pass
+
+        return -1, 0
 
     def find_target_runs(self, target_text: str) -> List[Run]:
-        start_idx = self.find_match_index(target_text)
+        start_idx, length = self.find_match_index(target_text)
         if start_idx == -1:
             return []
-        return self._resolve_runs_at_range(start_idx, start_idx + len(target_text))
+        return self._resolve_runs_at_range(start_idx, start_idx + length)
 
     def find_target_runs_by_index(self, start_index: int, length: int) -> List[Run]:
         end_index = start_index + length
