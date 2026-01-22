@@ -17,12 +17,16 @@ def test_repro_unbound_local_curr_ins_id_failure():
     doc = Document()
     p = doc.add_paragraph()
 
-    # 1. Empty Run FIRST (Critical for repro)
-    # This creates a w:r element with no text.
-    p.add_run() 
-    
-    # 2. Subsequent content to ensure paragraph allows iteration
-    p.add_run("Subsequent text")
+    # 1. Empty Run FIRST
+    # CRITICAL: We must give it a distinct property (like font name) so it is NOT
+    # coalesced with the next run during normalize_docx().
+    # We avoid Bold/Italic because those generate Markdown text ("**"), masking the bug.
+    r1 = p.add_run()
+    r1.font.name = "Arial"
+
+    # 2. Subsequent content
+    r2 = p.add_run("Subsequent text")
+    r2.font.name = "Times New Roman"
 
     stream = io.BytesIO()
     doc.save(stream)

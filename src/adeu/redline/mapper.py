@@ -133,10 +133,11 @@ class DocumentMapper:
                 # Reconstruct the raw segment text used for coalescing checks
                 full_seg_text = f"{prefix}{text}{suffix}"
 
-                if full_seg_text:
-                    curr_ins_id = active_ins_event.id if active_ins_event else None
-                    curr_del_id = active_del_event.id if active_del_event else None
+                # Initialize IDs safely (used for lookahead logic even if text is empty)
+                curr_ins_id = active_ins_event.id if active_ins_event else None
+                curr_del_id = active_del_event.id if active_del_event else None
 
+                if full_seg_text:
                     # Check wrapper tokens
                     start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
                     new_wrappers = (start_token, end_token)
