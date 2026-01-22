@@ -231,11 +231,47 @@ def _get_wrappers(active_ins, active_del, active_comments):
 def _build_merged_meta_block(states_list, comments_map) -> str:
     """
     Combines metadata from multiple states, removing duplicates.
-    Canonical Order: Changes first, then Comments.
+    Canonical Order: Changes first, then Comments (threaded).
     """
     change_lines = []
     comment_lines = []
     seen_sigs = set()
+
+    # Pre-process comments to find children for threading
+    # Map: parent_id -> list of child_ids
+    children_map: dict[str, list[str]] = {}
+    for c_id, data in comments_map.items():
+        p_id = data.get("parent_id")
+        if p_id:
+            children_map.setdefault(p_id, []).append(c_id)
+
+    # Helper for recursive rendering
+    def render_comment(cid):
+        if cid not in comments_map:
+            return
+
+        sig = f"Com:{cid}"
+        if sig in seen_sigs:
+            return
+
+        data = comments_map[cid]
+        header = f"[{sig}] {data['author']}"
+        if data["date"]:
+            # Simplify date if present
+            try:
+                date_str = data["date"].split("T")[0]
+                header += f" @ {date_str}"
+            except Exception:
+                pass
+
+        comment_lines.append(f"{header}: {data['text']}")
+        seen_sigs.add(sig)
+
+        # Render Children recursively
+        if cid in children_map:
+            # Sort children by ID or Date if possible, for now just list order
+            for child_id in children_map[cid]:
+                render_comment(child_id)
 
     for ins_map, del_map, comments_set in states_list:
         # 1. Changes (Ins & Del)
@@ -247,18 +283,12 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
                     change_lines.append(f"[{sig}] {auth}")
                     seen_sigs.add(sig)
 
-        # 2. Comments
-        for c_id in sorted(comments_set):
-            if c_id not in comments_map:
-                continue
-            sig = f"Com:{c_id}"
-            if sig not in seen_sigs:
-                data = comments_map[c_id]
-                header = f"[{sig}] {data['author']}"
-                if data["date"]:
-                    header += f" @ {data['date'].split('T')[0]}"
-                comment_lines.append(f"{header}: {data['text']}")
-                seen_sigs.add(sig)
+        # 2. Comments (Roots only)
+        # comments_set contains IDs visible in the document range.
+        # We assume these are roots (or at least anchors).
+        # We render them and their children.
+        for root_id in sorted(comments_set):
+            render_comment(root_id)
 
     # Return Changes first, then Comments
     return "\n".join(change_lines + comment_lines)
