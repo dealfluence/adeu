@@ -84,7 +84,13 @@ def _build_paragraph_text(paragraph, comments_map):
 
     # Buffer for deferred metadata (used for merging substitution blocks)
     # List of (active_ins_snapshot, active_del_snapshot, active_comments_snapshot)
+    # Buffer for deferred metadata (used for merging substitution blocks)
     deferred_meta_states = []
+
+    # State for Run Coalescing
+    # We buffer text segments as long as the wrapper state (start/end tokens) remains identical
+    pending_text = ""
+    current_wrappers = ("", "")  # (start, end)
 
     # Pre-calculate item list to allow lookahead
     items = list(iter_paragraph_content(paragraph))
@@ -98,11 +104,23 @@ def _build_paragraph_text(paragraph, comments_map):
             if seg:
                 # 1. Determine Wrappers
                 start_token, end_token = _get_wrappers(active_ins, active_del, active_comments)
+                new_wrappers = (start_token, end_token)
 
-                # 2. Output Text Wrapped
-                parts.append(f"{start_token}{seg}{end_token}")
+                # 2. Check if we can merge with pending text
+                if pending_text and new_wrappers == current_wrappers:
+                    # Same state -> Merge
+                    pending_text += seg
+                else:
+                    # Different state -> Flush pending
+                    if pending_text:
+                        s_tok, e_tok = current_wrappers
+                        parts.append(f"{s_tok}{pending_text}{e_tok}")
 
-                # 3. Handle Metadata
+                    # Start new buffer
+                    pending_text = seg
+                    current_wrappers = new_wrappers
+
+                # 3. Handle Metadata (always accumulate state snapshot)
                 current_state = (active_ins.copy(), active_del.copy(), active_comments.copy())
                 deferred_meta_states.append(current_state)
 
@@ -138,12 +156,27 @@ def _build_paragraph_text(paragraph, comments_map):
                         should_defer = True
 
                 if not should_defer:
+                    # Before flushing metadata, ensure pending text is flushed
+                    # This ensures {++Text++}{>>Meta<<} order
+                    if pending_text:
+                        s_tok, e_tok = current_wrappers
+                        parts.append(f"{s_tok}{pending_text}{e_tok}")
+                        pending_text = ""
+                        current_wrappers = ("", "")
+
                     meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
                     if meta_block:
                         parts.append(f"{{>>{meta_block}<<}}")
                     deferred_meta_states = []
 
         elif isinstance(item, DocxEvent):
+            # Event occurred -> State change implies we must flush text buffer
+            if pending_text:
+                s_tok, e_tok = current_wrappers
+                parts.append(f"{s_tok}{pending_text}{e_tok}")
+                pending_text = ""
+                current_wrappers = ("", "")
+
             # Update State
             if item.type == "start":
                 active_comments.add(item.id)
@@ -157,6 +190,11 @@ def _build_paragraph_text(paragraph, comments_map):
                 active_del[item.id] = item
             elif item.type == "del_end":
                 active_del.pop(item.id, None)
+
+    # Final Flush
+    if pending_text:
+        s_tok, e_tok = current_wrappers
+        parts.append(f"{s_tok}{pending_text}{e_tok}")
 
     if deferred_meta_states:
         meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
