@@ -1,16 +1,20 @@
-# Adeu: AI Redlining Engine
+# FILE: README.md
+# Adeu: The "Virtual DOM" for Microsoft Word
 
-**Adeu allows AI Agents and LLMs to "Track Changes" in Microsoft Word documents.**
+**Adeu allows AI Agents and LLMs to safely "Track Changes" in Microsoft Word documents.**
 
-Most LLMs output raw text or Markdown. Professionals need `w:ins` (insertions) and `w:del` (deletions) to review changes inside Word. `adeu` lib shows a Word document in an LLM and human understandable textual format and reflects changes made to it to the actual word document.
+Most LLMs output raw text or Markdown. Legal and compliance professionals need `w:ins` (insertions) and `w:del` (deletions) to review changes natively in Word. 
 
-It creates a "Virtual DOM" of your document, letting AI apply surgical edits without breaking your formatting, numbering, or headers.
+Adeu solves this by treating DOCX as a "Virtual DOM". It presents a clean, readable text representation to the AI, and then **reconciles** the AI's edits back into the original XML structure without breaking formatting, numbering, or images.
+
+## 🚀 New in v0.5.0
+*   **Comments & Threads**: Full support for reading and replying to Word comments using **CriticMarkup** syntax (`{>>Comment<<}`).
+*   **Negotiation Actions**: Agents can now `ACCEPT`, `REJECT`, or `REPLY` to specific changes and comments.
+*   **Safety**: Enhanced protection against corrupting nested revisions or structural boilerplate.
 
 ---
 
 ## Installation
-
-Adeu is available on PyPI.
 
 ```bash
 pip install adeu
@@ -20,8 +24,8 @@ pip install adeu
 
 ## Ways to Use Adeu
 
-### 1. As MCP Server (No Code Required)
-If you use an agentic system such as Claude Desktop, you can connect Adeu directly. This lets you handle contracts in Claude and say: *"Change the Governing Law to Delaware and generate me the redline."*
+### 1. As an MCP Server (Claude Desktop / Cursor)
+Connect Adeu directly to your agentic workspace. This allows Claude to read contracts, propose redlines, and answer comments natively.
 
 Add this to your `claude_desktop_config.json`:
 
@@ -35,10 +39,15 @@ Add this to your `claude_desktop_config.json`:
   }
 }
 ```
-*(Requires [uv](https://docs.astral.sh/uv/) installed on your machine)*
 
-### 2. For "Vibe Coding" & Python Scripts
-Building your own Agentic AI tool in Cursor, Replit, or Windsurf: Adeu is the engine that handles the document manipulation for you.
+**What the Agent sees:**
+The agent receives a text view of the document where comments and changes are clearly marked:
+```text
+The Vendor shall be liable for {==indirect damages==}{>>[Counsel] We request this be removed.<<}...
+```
+
+### 2. For Python Developers ("Vibe Coding")
+Adeu handles the heavy lifting of XML manipulation so you can focus on the logic.
 
 ```python
 from adeu import RedlineEngine, DocumentEdit
@@ -46,17 +55,18 @@ from io import BytesIO
 
 # 1. Load your contract
 with open("NDA.docx", "rb") as f:
-    doc_stream = BytesIO(f.read())
+    stream = BytesIO(f.read())
 
-# 2. Define the change (Usually this comes from your LLM response)
+# 2. Define the change (e.g., from an LLM response)
+# Adeu uses "Search & Replace" logic with fuzzy matching
 edit = DocumentEdit(
     target_text="State of New York",
     new_text="State of Delaware",
-    comment="Changed governing law to neutral jurisdiction."
+    comment="Standardizing governing law."
 )
 
 # 3. Apply the Redline
-engine = RedlineEngine(doc_stream, author="AI Associate")
+engine = RedlineEngine(stream, author="AI Associate")
 engine.apply_edits([edit])
 
 # 4. Save
@@ -68,11 +78,11 @@ with open("NDA_Redlined.docx", "wb") as f:
 Quickly extract text or apply patches from your terminal.
 
 ```bash
-# Compare two docs and see a summary
+# Compare two docs and get a summary
 adeu diff v1.docx v2.docx
 
-# Apply a JSON list of edits to a doc
-adeu apply agreement.docx edits.json
+# Apply a structured edit list (JSON) to a doc
+adeu apply agreement.docx edits.json --author "Reviewer Bot"
 ```
 
 ---
@@ -80,8 +90,8 @@ adeu apply agreement.docx edits.json
 ## Why Adeu?
 
 *   **Native Redlines**: Generates real Microsoft Word Track Changes. You can "Accept" or "Reject" them in Word.
-*   **Format Safe**: Adeu preserves your complex numbering, headers, footers, and images. It only touches the text you change.
-*   **Native Comments**: Supports adding comments (`Review Pane`) linked to specific text ranges.
+*   **Format Safe**: Preserves complex numbering, headers, footers, and images. It only touches the text you change.
+*   **Token Efficient**: Converts heavy XML into lightweight Markdown for the LLM context window.
 *   **Intelligent Mapping**: Handles the messy internal XML of Word documents (e.g., when "Contract" is split into `["Con", "tract"]` by spellcheck).
 
 ## License
