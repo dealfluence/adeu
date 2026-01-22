@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from docx import Document
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
 
