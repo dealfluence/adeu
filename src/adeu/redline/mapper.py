@@ -152,7 +152,7 @@ class DocumentMapper:
                         new_wrappers = ("", "")
                     else:
                         start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
-                    new_wrappers = (start_token, end_token)
+                        new_wrappers = (start_token, end_token)
 
                     # --- COALESCING LOGIC ---
                     if pending_runs and new_wrappers == current_wrappers:

@@ -580,7 +580,10 @@ class RedlineEngine:
                 return False
 
         # Select active mapper
-        active_mapper = self.clean_mapper if use_clean_map else self.mapper
+        if use_clean_map and self.clean_mapper:
+            active_mapper = self.clean_mapper
+        else:
+            active_mapper = self.mapper
 
         # --- HEURISTIC NESTED EDIT FIX ---
         # Before trimming, check if the match falls inside an existing Insertion.
