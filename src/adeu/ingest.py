@@ -269,8 +269,11 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
 
         # Render Children recursively
         if cid in children_map:
-            # Sort children by ID or Date if possible, for now just list order
-            for child_id in children_map[cid]:
+            # Sort children by Date to ensure deterministic threaded order
+            children = children_map[cid]
+            # ISO 8601 dates sort correctly as strings
+            children.sort(key=lambda x: comments_map.get(x, {}).get("date", ""))
+            for child_id in children:
                 render_comment(child_id)
 
     for ins_map, del_map, comments_set in states_list:

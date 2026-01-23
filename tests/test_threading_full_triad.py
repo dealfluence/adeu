@@ -21,8 +21,8 @@ def test_full_modern_comments_triad_creation():
     rels = [rel.reltype for rel in doc_out.part.rels.values()]
 
     rel_extended = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
-    rel_ids = "http://schemas.microsoft.com/office/2016/relationships/commentsIds"
-    rel_extensible = "http://schemas.microsoft.com/office/2018/relationships/commentsExtensible"
+    rel_ids = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
+    rel_extensible = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
 
     assert any(r == rel_extended for r in rels), "Missing commentsExtended"
     assert any(r == rel_ids for r in rels), "Missing commentsIds"

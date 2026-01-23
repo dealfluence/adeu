@@ -2,12 +2,15 @@ import datetime
 import random
 from typing import Dict, Optional
 
+import structlog
 from docx.opc.constants import CONTENT_TYPE as CT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.part import Part, XmlPart
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, nsmap, qn
 from docx.oxml.xmlchemy import serialize_for_reading
+
+logger = structlog.get_logger(__name__)
 
 # Register w15 namespace globally for python-docx
 w15_ns = "http://schemas.microsoft.com/office/word/2012/wordml"
@@ -40,6 +43,7 @@ class CommentsManager:
     """
 
     def __init__(self, doc):
+        logger.debug("Initializing CommentsManager")
         self.doc = doc
         self.comments_part = self._get_or_create_comments_part()
         self._ensure_namespaces()
@@ -57,6 +61,7 @@ class CommentsManager:
         if isinstance(part, XmlPart):
             return part
 
+        logger.debug("Upgrading generic Part to XmlPart", partname=part.partname)
         # Create new XmlPart
         xml_part = XmlPart(part.partname, part.content_type, parse_xml(part.blob), part.package)
 
@@ -80,7 +85,9 @@ class CommentsManager:
         """
         for part in self.doc.part.package.parts:
             if part.content_type == content_type:
+                logger.debug("Found existing part by content type", content_type=content_type, partname=part.partname)
                 return part
+        logger.debug("No existing part found for content type", content_type=content_type)
         return None
 
     def _link_part(self, part: XmlPart, rel_type: str) -> XmlPart:
@@ -97,6 +104,7 @@ class CommentsManager:
                 return part
 
         # Create relationship if missing
+        logger.info("Creating relationship to existing part", partname=part.partname, rel_type=rel_type)
         self.doc.part.relate_to(part, rel_type)
         return part
 
@@ -125,6 +133,7 @@ class CommentsManager:
             f"</w:comments>"
         ).encode("utf-8")
 
+        logger.info("Creating new comments part", partname=partname)
         comments_part = XmlPart(partname, content_type, parse_xml(xml_bytes), package)
         package.parts.append(comments_part)
         self.doc.part.relate_to(comments_part, RT.COMMENTS)
@@ -145,6 +154,7 @@ class CommentsManager:
 
         xml_bytes = (f"<w15:commentsEx {nsdecls('w15')}></w15:commentsEx>").encode("utf-8")
 
+        logger.info("Creating new extended part", partname=partname)
         extended_part = XmlPart(partname, CONTENT_TYPE_EXTENDED, parse_xml(xml_bytes), package)
         package.parts.append(extended_part)
         self.doc.part.relate_to(extended_part, RELTYPE_EXTENDED)
@@ -152,7 +162,7 @@ class CommentsManager:
         return extended_part
 
     def _get_or_create_ids_part(self) -> XmlPart:
-        RELTYPE_IDS = "http://schemas.microsoft.com/office/2016/relationships/commentsIds"
+        RELTYPE_IDS = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
         CONTENT_TYPE_IDS = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_IDS)
@@ -165,6 +175,7 @@ class CommentsManager:
 
         xml_bytes = (f"<w16cid:commentsIds {nsdecls('w16cid')}></w16cid:commentsIds>").encode("utf-8")
 
+        logger.info("Creating new ids part", partname=partname)
         ids_part = XmlPart(partname, CONTENT_TYPE_IDS, parse_xml(xml_bytes), package)
         package.parts.append(ids_part)
         self.doc.part.relate_to(ids_part, RELTYPE_IDS)
@@ -172,7 +183,7 @@ class CommentsManager:
         return ids_part
 
     def _get_or_create_extensible_part(self) -> XmlPart:
-        RELTYPE_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/relationships/commentsExtensible"
+        RELTYPE_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
         CONTENT_TYPE_EXTENSIBLE = (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
         )
@@ -187,6 +198,7 @@ class CommentsManager:
 
         xml_bytes = (f"<w16cex:commentsExtensible {nsdecls('w16cex')}></w16cex:commentsExtensible>").encode("utf-8")
 
+        logger.info("Creating new extensible part", partname=partname)
         extensible_part = XmlPart(partname, CONTENT_TYPE_EXTENSIBLE, parse_xml(xml_bytes), package)
         package.parts.append(extensible_part)
         self.doc.part.relate_to(extensible_part, RELTYPE_EXTENSIBLE)
@@ -217,6 +229,7 @@ class CommentsManager:
             f'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
             f'mc:Ignorable="w14 w15 w16cid w16cex"'
         )
+        logger.debug("Patching root element namespaces", original=xml_str[:100])
         # Regex replace or simple string replace of the first tag
         import re
 
@@ -283,6 +296,7 @@ class CommentsManager:
             self.extensible_part.element.append(ext_el)
 
     def add_comment(self, author: str, text: str, parent_id: Optional[str] = None) -> str:
+        logger.info("Adding comment", author=author, parent_id=parent_id)
         comment_id = str(self.next_id)
         self.next_id += 1
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -347,6 +361,9 @@ class CommentsManager:
         if not self.comments_part:
             return data
 
+        # Map paraId -> comment_id to resolve parents from commentsExtended
+        para_id_to_cid: Dict[str, str] = {}
+
         comments = self.comments_part.element.findall(qn("w:comment"))
         for c in comments:
             c_id = c.get(qn("w:id"))
@@ -362,6 +379,13 @@ class CommentsManager:
             if not parent_id:
                 # Fallback: check for prefixed attribute if namespace wasn't resolved correctly
                 parent_id = c.get("w15:p")
+
+            # Capture paraId for extended threading lookup
+            # Usually in the first paragraph of the comment
+            for p_elem in c.findall(qn("w:p")):
+                pid = p_elem.get(qn("w14:paraId"))
+                if pid:
+                    para_id_to_cid[pid] = c_id
 
             text_parts = []
             for p in c.findall(qn("w:p")):
@@ -380,5 +404,22 @@ class CommentsManager:
                 "resolved": is_resolved,
                 "parent_id": parent_id,
             }
+
+        # 2. Enrich with Threading from commentsExtended (Modern Word)
+        if self.extended_part:
+            try:
+                # Iterate w15:commentEx elements
+                # They look like: <w15:commentEx w15:paraId="..." w15:paraIdParent="..."/>
+                for child in self.extended_part.element:
+                    para_id = child.get(qn("w15:paraId"))
+                    parent_para_id = child.get(qn("w15:paraIdParent"))
+
+                    if para_id and parent_para_id:
+                        c_id = para_id_to_cid.get(para_id)
+                        p_id = para_id_to_cid.get(parent_para_id)
+                        if c_id and p_id and c_id in data:
+                            data[c_id]["parent_id"] = p_id
+            except Exception as e:
+                logger.warning("Failed to parse commentsExtended for threading", error=str(e))
 
         return data
