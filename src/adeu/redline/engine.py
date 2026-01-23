@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from docx import Document
-from docx.oxml.ns import qn
+from docx.oxml.ns import nsmap, qn
 from docx.text.run import Run
 
 from adeu.models import DocumentEdit, EditOperationType, ReviewAction
@@ -15,6 +15,11 @@ from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, normalize_docx
 
 logger = structlog.get_logger(__name__)
+
+# Register w16du namespace for dateUtc
+w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
+if "w16du" not in nsmap:
+    nsmap["w16du"] = w16du_ns
 
 
 def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
@@ -126,6 +131,12 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         else:
             break
 
+    # CHANGE: If the calculated suffix is purely whitespace, ignore it (set to 0).
+    # This prevents fragmenting edits like "word " -> "word2 " into Del("word")-Space-Ins("word2").
+    # Instead we get Del("word ") -> Ins("word2 "), which matches Word's native behavior.
+    if suffix_len > 0 and target[len(target) - suffix_len :].isspace():
+        suffix_len = 0
+
     return prefix_len, suffix_len
 
 
@@ -134,7 +145,9 @@ class RedlineEngine:
         self.doc = Document(doc_stream)
         normalize_docx(self.doc)
         self.author = author
-        self.timestamp = datetime.datetime.now().replace(microsecond=0).isoformat() + "Z"
+        self.timestamp = (
+            datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
         self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
         self.comments_manager = CommentsManager(self.doc)
@@ -169,6 +182,7 @@ class RedlineEngine:
         create_attribute(tag, "w:id", self._get_next_id())
         create_attribute(tag, "w:author", author or self.author)
         create_attribute(tag, "w:date", self.timestamp)
+        create_attribute(tag, "w16du:dateUtc", self.timestamp)
         return tag
 
     def _set_text_content(self, element, text: str):

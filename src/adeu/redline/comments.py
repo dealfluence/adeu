@@ -152,7 +152,7 @@ class CommentsManager:
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsExtended%d.xml")
 
-        xml_bytes = (f"<w15:commentsEx {nsdecls('w15')}></w15:commentsEx>").encode("utf-8")
+        xml_bytes = (f"<w15:commentsEx xmlns:w15='{w15_ns}'></w15:commentsEx>").encode("utf-8")
 
         logger.info("Creating new extended part", partname=partname)
         extended_part = XmlPart(partname, CONTENT_TYPE_EXTENDED, parse_xml(xml_bytes), package)
@@ -258,9 +258,10 @@ class CommentsManager:
             return None
         for c in self.comments_part.element.findall(qn("w:comment")):
             if c.get(qn("w:id")) == comment_id:
-                p = c.find(qn("w:p"))
-                if p is not None:
-                    return p.get(qn("w14:paraId"))
+                for p in c.findall(qn("w:p")):
+                    pid = p.get(qn("w14:paraId"))
+                    if pid:
+                        return pid
         return None
 
     def _add_to_extended_part(self, para_id: str, parent_para_id: Optional[str]):
@@ -329,6 +330,7 @@ class CommentsManager:
         rStyle_ref = OxmlElement("w:rStyle")
         rStyle_ref.set(qn("w:val"), "CommentReference")
         rPr_ref.append(rStyle_ref)
+        r_ref.append(rPr_ref)
         r_ref.append(OxmlElement("w:annotationRef"))
         p.append(r_ref)
 
