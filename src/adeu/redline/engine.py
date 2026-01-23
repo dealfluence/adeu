@@ -498,7 +498,15 @@ class RedlineEngine:
         create_attribute(range_start, "w:id", comment_id)
         range_end = create_element("w:commentRangeEnd")
         create_attribute(range_end, "w:id", comment_id)
+
         ref_run = create_element("w:r")
+
+        rPr = create_element("w:rPr")
+        rStyle = create_element("w:rStyle")
+        create_attribute(rStyle, "w:val", "CommentReference")
+        rPr.append(rStyle)
+        ref_run.append(rPr)
+
         ref = create_element("w:commentReference")
         create_attribute(ref, "w:id", comment_id)
         ref_run.append(ref)
@@ -521,6 +529,13 @@ class RedlineEngine:
         create_attribute(range_end, "w:id", comment_id)
 
         ref_run = create_element("w:r")
+
+        rPr = create_element("w:rPr")
+        rStyle = create_element("w:rStyle")
+        create_attribute(rStyle, "w:val", "CommentReference")
+        rPr.append(rStyle)
+        ref_run.append(rPr)
+
         ref = create_element("w:commentReference")
         create_attribute(ref, "w:id", comment_id)
         ref_run.append(ref)
@@ -940,9 +955,49 @@ class RedlineEngine:
             return False
 
         # Add the comment with parent_id linkage
-        _ = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
+        new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
+        
+        # Anchor the new comment to the same range as the parent
+        self._anchor_reply_comment(target_id, new_comment_id)
 
         return True
+
+    def _anchor_reply_comment(self, parent_id: str, new_id: str):
+        # 1. Find Start
+        starts = self.doc.element.xpath(f"//w:commentRangeStart[@w:id='{parent_id}']")
+        if not starts:
+            logger.warning("Parent comment start not found during reply", parent_id=parent_id)
+            return
+        
+        parent_start = starts[0]
+        new_start = create_element("w:commentRangeStart")
+        create_attribute(new_start, "w:id", new_id)
+        parent_start.addnext(new_start)
+
+        # 2. Find End
+        ends = self.doc.element.xpath(f"//w:commentRangeEnd[@w:id='{parent_id}']")
+        if not ends:
+            return
+        
+        parent_end = ends[0]
+        new_end = create_element("w:commentRangeEnd")
+        create_attribute(new_end, "w:id", new_id)
+        parent_end.addnext(new_end)
+
+        # 3. Create Reference Run
+        ref_run = create_element("w:r")
+        rPr = create_element("w:rPr")
+        rStyle = create_element("w:rStyle")
+        create_attribute(rStyle, "w:val", "CommentReference")
+        rPr.append(rStyle)
+        ref_run.append(rPr)
+        
+        ref = create_element("w:commentReference")
+        create_attribute(ref, "w:id", new_id)
+        ref_run.append(ref)
+
+        # Insert after the new end
+        new_end.addnext(ref_run)
 
     def accept_all_revisions(self):
         """
