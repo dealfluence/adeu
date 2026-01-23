@@ -253,6 +253,14 @@ class CommentsManager:
     def _generate_durable_id(self) -> str:
         return f"{random.randint(0, 0xFFFFFFFF):08X}"
 
+    def _generate_rsid(self) -> str:
+        return f"{random.randint(0, 0xFFFFFFFF):08X}"
+
+    def _get_initials(self, author: str) -> str:
+        if not author:
+            return ""
+        return "".join(part[0] for part in author.split() if part).upper()
+
     def _find_para_id_for_comment(self, comment_id: str) -> Optional[str]:
         if not self.comments_part:
             return None
@@ -263,6 +271,22 @@ class CommentsManager:
                     if pid:
                         return pid
         return None
+
+    def _find_thread_root_para_id(self, comment_id: str) -> Optional[str]:
+        """
+        Finds the 'paraId' of the ROOT comment in the thread.
+        Modern Word flattens all replies to point to the original comment.
+        """
+        direct_para_id = self._find_para_id_for_comment(comment_id)
+        if not direct_para_id or not self.extended_part:
+            return direct_para_id
+
+        for child in self.extended_part.element:
+            if child.get(qn("w15:paraId")) == direct_para_id:
+                parent = child.get(qn("w15:paraIdParent"))
+                if parent:
+                    return parent
+        return direct_para_id
 
     def _add_to_extended_part(self, para_id: str, parent_para_id: Optional[str]):
         if not self.extended_part:
@@ -307,17 +331,26 @@ class CommentsManager:
         comment.set(qn("w:author"), author)
         comment.set(qn("w:date"), now)
 
+        initials = self._get_initials(author)
+        if initials:
+            comment.set(qn("w:initials"), initials)
+
         # Legacy Threading (w15:p)
-        # We ALWAYS add this. Even though modern Word uses commentsExtended for threading,
-        # Adeu's own ingest logic (and older Word versions) rely on w15:p to link replies.
-        if parent_id:
+        # We only add this if we are NOT using modern comments (extended_part),
+        # as modern Word relies on the extended part, and providing both might cause conflicts.
+        # Only add if Modern Comments (extended) are NOT in use to avoid conflicts.
+        if parent_id and not self.extended_part:
             comment.set(qn("w15:p"), str(parent_id))
 
         para_id = self._generate_para_id()
+        rsid = self._generate_rsid()
 
         p = OxmlElement("w:p")
         p.set(qn("w14:paraId"), para_id)
-        p.set(qn("w14:textId"), self._generate_para_id())
+        p.set(qn("w14:textId"), "77777777")
+        p.set(qn("w:rsidR"), rsid)
+        p.set(qn("w:rsidRDefault"), rsid)
+        p.set(qn("w:rsidP"), rsid)
 
         pPr = OxmlElement("w:pPr")
         pStyle = OxmlElement("w:pStyle")
@@ -347,7 +380,7 @@ class CommentsManager:
         if self.extended_part:
             parent_para_id = None
             if parent_id:
-                parent_para_id = self._find_para_id_for_comment(parent_id)
+                parent_para_id = self._find_thread_root_para_id(parent_id)
             self._add_to_extended_part(para_id, parent_para_id)
 
         if self.ids_part:

@@ -12,7 +12,7 @@ def inspect_for_duplicates(docx_path: str):
     duplicates_found = False
     with zipfile.ZipFile(docx_path, "r") as z:
         file_list = z.namelist()
-        
+
         # Check for the specific duplicates known to cause issues
         dup_patterns = [
             ("word/comments.xml", "word/comments1.xml"),
@@ -24,15 +24,17 @@ def inspect_for_duplicates(docx_path: str):
         for original, duplicate in dup_patterns:
             has_orig = original in file_list
             has_dup = duplicate in file_list
-            
+
             if has_orig and has_dup:
                 print(f"❌ FAIL: Found duplicate parts: '{original}' AND '{duplicate}'")
                 duplicates_found = True
             elif has_dup and not has_orig:
-                print(f"⚠️  WARN: Found '{duplicate}' but not original. This might be a fresh file, or original was lost.")
+                print(
+                    f"⚠️  WARN: Found '{duplicate}' but not original. This might be a fresh file, or original was lost."
+                )
             elif has_orig:
                 print(f"✅ OK: Found '{original}' without duplicate.")
-            
+
     if duplicates_found:
         print("\n[CONCLUSION] The bug is REPRODUCED. Word will likely ignore the new part.")
     else:
@@ -57,12 +59,8 @@ def main():
     # Reply to the last known comment in golden.docx (Com:2)
     # Goal: Create Com:3
     print("Applying Reply to 'Com:2'...")
-    action = ReviewAction(
-        action="REPLY",
-        target_id="Com:2", 
-        text="Forth comment"
-    )
-    
+    action = ReviewAction(action="REPLY", target_id="Com:2", text="Forth comment")
+
     applied, skipped = engine.apply_review_actions([action])
     print(f"Applied: {applied}, Skipped: {skipped}")
 
