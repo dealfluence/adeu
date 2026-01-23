@@ -1,9 +1,8 @@
 import argparse
-import zipfile
-import sys
 import difflib
 import os
-from xml.dom.minidom import parseString, Node
+import zipfile
+from xml.dom.minidom import Node, parseString
 
 # Extensions to treat as XML/Text for dumping purposes
 TEXT_EXTENSIONS = {".xml", ".rels"}
@@ -13,7 +12,7 @@ BINARY_EXTENSIONS = {".png", ".jpeg", ".jpg", ".emf", ".wmf", ".bin", ".wdp"}
 
 def pretty_print_xml(xml_bytes, filename):
     """
-    Parses XML, optionally sorts specific lists (Relationships, Content Types) 
+    Parses XML, optionally sorts specific lists (Relationships, Content Types)
     for stability, and returns a pretty-printed string.
     """
     try:
@@ -35,7 +34,7 @@ def pretty_print_xml(xml_bytes, filename):
                     return (0, node.getAttribute("Extension"))
                 elif tag == "Override":
                     return (1, node.getAttribute("PartName"))
-                return (2, tag) # Fallback
+                return (2, tag)  # Fallback
 
             sort_xml_children(root, None, type_sort_key)
 
@@ -57,10 +56,10 @@ def sort_xml_children(parent, tag_name_filter, key_func):
             if tag_name_filter is None or child.tagName == tag_name_filter:
                 children.append(child)
                 parent.removeChild(child)
-    
+
     # Sort
     children.sort(key=key_func)
-    
+
     # Re-append
     for child in children:
         parent.appendChild(child)
@@ -69,15 +68,15 @@ def sort_xml_children(parent, tag_name_filter, key_func):
 def generate_docx_dump(path: str, concise: bool = False) -> str:
     """
     Generates a full textual snapshot of the DOCX contents.
-    
+
     Args:
         path: Path to DOCX file.
         concise: If True (for diffing), omits volatile data like file sizes.
     """
     output = []
-    
+
     output.append(f"=== Inspecting: {path} ===")
-    
+
     if not os.path.exists(path):
         return f"Error: File not found: {path}"
 
@@ -88,7 +87,7 @@ def generate_docx_dump(path: str, concise: bool = False) -> str:
 
             # 2. Summary Table
             output.append(f"\n[File List] Total Files: {len(all_files)}")
-            
+
             if concise:
                 # Minimalist list for diffing
                 output.append("Filename")
@@ -101,20 +100,20 @@ def generate_docx_dump(path: str, concise: bool = False) -> str:
                 output.append("-" * 86)
                 for info in all_files:
                     output.append(f"{info.filename:<60} | {info.file_size:>10} | {info.compress_size:>10}")
-            
+
             output.append("")
 
             # 3. File Contents
             for info in all_files:
                 fname = info.filename
                 ext = os.path.splitext(fname)[1].lower()
-                
+
                 # Skip folders
                 if fname.endswith("/"):
                     continue
 
                 output.append(f"\n=== FILE: {fname} ===")
-                
+
                 if ext in TEXT_EXTENSIONS or fname.endswith(".xml"):
                     content = z.read(fname)
                     formatted_xml = pretty_print_xml(content, fname)
@@ -124,16 +123,17 @@ def generate_docx_dump(path: str, concise: bool = False) -> str:
                 else:
                     # Try to decode as text, fallback to binary msg
                     try:
-                        content = z.read(fname).decode('utf-8')
+                        content = z.read(fname).decode("utf-8")
                         output.append(content)
                     except UnicodeDecodeError:
-                        output.append(f"[Binary Content or Unknown Encoding]")
-                        
+                        output.append("[Binary Content or Unknown Encoding]")
+
                 output.append(f"=== END FILE: {fname} ===")
 
     except Exception as e:
         output.append(f"Error inspecting file: {e}")
         import traceback
+
         output.append(traceback.format_exc())
 
     return "\n".join(output)
@@ -147,22 +147,18 @@ def cmd_inspect(args):
 
 def cmd_diff(args):
     print(f"Diffing {args.file_a} vs {args.file_b}...")
-    
+
     # Concise mode for diffing (hides sizes)
     dump_a = generate_docx_dump(args.file_a, concise=True)
     dump_b = generate_docx_dump(args.file_b, concise=True)
-    
+
     # Calculate unified diff
     diff_lines = difflib.unified_diff(
-        dump_a.splitlines(),
-        dump_b.splitlines(),
-        fromfile=args.file_a,
-        tofile=args.file_b,
-        lineterm=""
+        dump_a.splitlines(), dump_b.splitlines(), fromfile=args.file_a, tofile=args.file_b, lineterm=""
     )
-    
+
     diff_text = "\n".join(diff_lines)
-    
+
     if not diff_text:
         print("Files are structurally identical.")
     else:

@@ -956,7 +956,7 @@ class RedlineEngine:
 
         # Add the comment with parent_id linkage
         new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
-        
+
         # Anchor the new comment to the same range as the parent
         self._anchor_reply_comment(target_id, new_comment_id)
 
@@ -968,7 +968,7 @@ class RedlineEngine:
         if not starts:
             logger.warning("Parent comment start not found during reply", parent_id=parent_id)
             return
-        
+
         parent_start = starts[0]
         new_start = create_element("w:commentRangeStart")
         create_attribute(new_start, "w:id", new_id)
@@ -978,22 +978,22 @@ class RedlineEngine:
         ends = self.doc.element.xpath(f"//w:commentRangeEnd[@w:id='{parent_id}']")
         if not ends:
             return
-        
+
         parent_end = ends[0]
         new_end = create_element("w:commentRangeEnd")
         create_attribute(new_end, "w:id", new_id)
-        
+
         # Locate the Reference Run of the parent to insert AFTER it
         # This preserves the order [Ref Parent] [Ref Child] which Word prefers for threading
         parent_refs = self.doc.element.xpath(f"//w:commentReference[@w:id='{parent_id}']")
         insertion_point = parent_end
-        
+
         if parent_refs:
             # Found the reference element, get its parent run
             ref_el = parent_refs[0]
             if ref_el.getparent().tag == qn("w:r"):
                 insertion_point = ref_el.getparent()
-        
+
         # Insert New End after the insertion point (usually Ref Parent)
         insertion_point.addnext(new_end)
 
@@ -1004,7 +1004,7 @@ class RedlineEngine:
         create_attribute(rStyle, "w:val", "CommentReference")
         rPr.append(rStyle)
         ref_run.append(rPr)
-        
+
         ref = create_element("w:commentReference")
         create_attribute(ref, "w:id", new_id)
         ref_run.append(ref)
