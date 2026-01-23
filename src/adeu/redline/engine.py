@@ -982,7 +982,20 @@ class RedlineEngine:
         parent_end = ends[0]
         new_end = create_element("w:commentRangeEnd")
         create_attribute(new_end, "w:id", new_id)
-        parent_end.addnext(new_end)
+        
+        # Locate the Reference Run of the parent to insert AFTER it
+        # This preserves the order [Ref Parent] [Ref Child] which Word prefers for threading
+        parent_refs = self.doc.element.xpath(f"//w:commentReference[@w:id='{parent_id}']")
+        insertion_point = parent_end
+        
+        if parent_refs:
+            # Found the reference element, get its parent run
+            ref_el = parent_refs[0]
+            if ref_el.getparent().tag == qn("w:r"):
+                insertion_point = ref_el.getparent()
+        
+        # Insert New End after the insertion point (usually Ref Parent)
+        insertion_point.addnext(new_end)
 
         # 3. Create Reference Run
         ref_run = create_element("w:r")
@@ -996,7 +1009,7 @@ class RedlineEngine:
         create_attribute(ref, "w:id", new_id)
         ref_run.append(ref)
 
-        # Insert after the new end
+        # Insert New Ref after New End
         new_end.addnext(ref_run)
 
     def accept_all_revisions(self):
