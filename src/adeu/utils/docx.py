@@ -259,6 +259,27 @@ def _are_runs_identical(r1: Run, r2: Run) -> bool:
     return xml1 == xml2
 
 
+def _has_special_content(run: Run) -> bool:
+    """
+    Checks if the run contains elements that are not simple text, which would be lost
+    during text-only coalescing (e.g. w:commentReference, w:drawing).
+    """
+    # Safe tags that are captured by run.text or are properties
+    SAFE_TAGS = {
+        qn("w:t"),
+        qn("w:tab"),
+        qn("w:br"),
+        qn("w:cr"),
+        qn("w:delText"),
+        qn("w:rPr"),
+    }
+
+    for child in run._element:
+        if child.tag not in SAFE_TAGS:
+            return True
+    return False
+
+
 def _coalesce_runs_in_paragraph(paragraph: Paragraph):
     """
     Merges adjacent runs with identical formatting.
@@ -269,6 +290,13 @@ def _coalesce_runs_in_paragraph(paragraph: Paragraph):
     while i < len(paragraph.runs) - 1:
         current_run = paragraph.runs[i]
         next_run = paragraph.runs[i + 1]
+
+        # Do not merge if either run has special content (comments, images, etc.)
+        # Merging simply concatenates .text and deletes the second node,
+        # which would destroy the special XML elements.
+        if _has_special_content(current_run) or _has_special_content(next_run):
+            i += 1
+            continue
 
         if _are_runs_identical(current_run, next_run):
             # Merge content
