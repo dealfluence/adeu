@@ -90,22 +90,22 @@ class CommentsManager:
         # Check if already related (via python-docx internal cache)
         if part in self.doc.part.related_parts.values():
             return part
-        
+
         # Check relationships manually to be safe (in case cache is stale)
         for rel in self.doc.part.rels.values():
             if rel.target_part == part:
                 return part
-        
+
         # Create relationship if missing
         self.doc.part.relate_to(part, rel_type)
         return part
 
     def _get_or_create_comments_part(self):
         content_type = CT.WML_COMMENTS
-        
+
         # 1. Find existing by Content Type
         part = self._get_existing_part_by_type(content_type)
-        
+
         if part:
             part = self._ensure_xml_part(part)
             return self._link_part(part, RT.COMMENTS)
@@ -119,12 +119,12 @@ class CommentsManager:
         # for backward compatibility, otherwise the attributes might be dropped.
         xml_bytes = (
             f"<w:comments {nsdecls('w', 'w14', 'w15')} "
-            f"xmlns:w16cid=\"{w16cid_ns}\" xmlns:w16cex=\"{w16cex_ns}\" "
-            f"xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
-            f"mc:Ignorable=\"w14 w15 w16cid w16cex\">\n"
+            f'xmlns:w16cid="{w16cid_ns}" xmlns:w16cex="{w16cex_ns}" '
+            f'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+            f'mc:Ignorable="w14 w15 w16cid w16cex">\n'
             f"</w:comments>"
         ).encode("utf-8")
-        
+
         comments_part = XmlPart(partname, content_type, parse_xml(xml_bytes), package)
         package.parts.append(comments_part)
         self.doc.part.relate_to(comments_part, RT.COMMENTS)
@@ -204,7 +204,7 @@ class CommentsManager:
         # Check for mc:Ignorable
         # This is harder to check via nsmap, checking string serialization is robust
         xml_str = serialize_for_reading(element)
-        has_ignorable = 'mc:Ignorable' in xml_str and 'w14' in xml_str and 'w15' in xml_str
+        has_ignorable = "mc:Ignorable" in xml_str and "w14" in xml_str and "w15" in xml_str
 
         if has_w14 and has_w15 and has_ignorable:
             return
@@ -219,6 +219,7 @@ class CommentsManager:
         )
         # Regex replace or simple string replace of the first tag
         import re
+
         new_xml = re.sub(r"<w:comments[^>]*>", replacement, xml_str, count=1)
         self.comments_part._element = parse_xml(new_xml)
 
