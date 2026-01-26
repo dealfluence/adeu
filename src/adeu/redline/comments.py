@@ -1,5 +1,6 @@
 import datetime
 import random
+import re
 from typing import Dict, Optional
 
 import structlog
@@ -230,6 +231,16 @@ class CommentsManager:
             return
 
         # Brute force update of the root tag
+
+        # Check if the existing root tag is self-closing (e.g. <w:comments ... />)
+        # This happens if the comments part is empty.
+        match = re.search(r"<w:comments[^>]*>", xml_str)
+        if not match:
+            return
+
+        original_tag = match.group(0)
+        is_self_closing = original_tag.strip().endswith("/>")
+
         # We reconstruct the opening tag with all needed namespaces and Ignorable
         replacement = (
             f'<w:comments xmlns:w="{nsmap["w"]}" xmlns:w14="{w14_ns}" xmlns:w15="{w15_ns}" '
@@ -237,11 +248,18 @@ class CommentsManager:
             f'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
             f'mc:Ignorable="w14 w15 w16cid w16cex">'
         )
-        logger.debug("Patching root element namespaces", original=xml_str[:100])
-        # Regex replace or simple string replace of the first tag
-        import re
 
-        new_xml = re.sub(r"<w:comments[^>]*>", replacement, xml_str, count=1)
+        if is_self_closing:
+            replacement += "</w:comments>"
+
+        logger.debug(
+            "Patching root element namespaces",
+            original=xml_str[:100],
+            is_self_closing=is_self_closing,
+        )
+
+        # Replace the matched tag with our new tag(s)
+        new_xml = xml_str.replace(original_tag, replacement, 1)
         self.comments_part._element = parse_xml(new_xml)
 
     def _get_next_comment_id(self) -> int:
