@@ -85,7 +85,11 @@ class CommentsManager:
         """
         for part in self.doc.part.package.parts:
             if part.content_type == content_type:
-                logger.debug("Found existing part by content type", content_type=content_type, partname=part.partname)
+                logger.debug(
+                    "Found existing part by content type",
+                    content_type=content_type,
+                    partname=part.partname,
+                )
                 return part
         logger.debug("No existing part found for content type", content_type=content_type)
         return None
@@ -104,7 +108,11 @@ class CommentsManager:
                 return part
 
         # Create relationship if missing
-        logger.info("Creating relationship to existing part", partname=part.partname, rel_type=rel_type)
+        logger.info(
+            "Creating relationship to existing part",
+            partname=part.partname,
+            rel_type=rel_type,
+        )
         self.doc.part.relate_to(part, rel_type)
         return part
 
@@ -227,7 +235,7 @@ class CommentsManager:
             f'<w:comments xmlns:w="{nsmap["w"]}" xmlns:w14="{w14_ns}" xmlns:w15="{w15_ns}" '
             f'xmlns:w16cid="{w16cid_ns}" xmlns:w16cex="{w16cex_ns}" '
             f'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
-            f'mc:Ignorable="w14 w15 w16cid w16cex"'
+            f'mc:Ignorable="w14 w15 w16cid w16cex">'
         )
         logger.debug("Patching root element namespaces", original=xml_str[:100])
         # Regex replace or simple string replace of the first tag
