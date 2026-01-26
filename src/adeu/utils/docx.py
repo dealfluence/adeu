@@ -123,6 +123,23 @@ def get_run_style_markers(run: Run) -> tuple[str, str]:
     return prefix, suffix
 
 
+def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
+    """
+    Applies formatting markers to text, ensuring newlines are excluded from the formatting.
+    Example: "**A\nB**" -> "**A**\n**B**"
+    """
+    if not prefix and not suffix:
+        return text
+    if not text:
+        return ""
+
+    if "\n" not in text:
+        return f"{prefix}{text}{suffix}"
+
+    parts = text.split("\n")
+    return "\n".join(f"{prefix}{p}{suffix}" if p else "" for p in parts)
+
+
 def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
     """
     Iterates over the content of a paragraph, yielding both Runs and Comment events.
@@ -300,7 +317,14 @@ def _coalesce_runs_in_paragraph(paragraph: Paragraph):
 
         if _are_runs_identical(current_run, next_run):
             # Merge content
-            current_run.text += next_run.text
+            # We must move children nodes manually to preserve w:br, w:tab, etc.
+            # python-docx's run.text += ... destroys these tags.
+            for child in list(next_run._element):
+                if child.tag == qn("w:rPr"):
+                    continue
+                # Append content child to current_run
+                current_run._element.append(child)
+
             # Remove next_run from the XML tree
             paragraph._p.remove(next_run._r)
             # Do NOT increment i; check the *new* next_run against current_run

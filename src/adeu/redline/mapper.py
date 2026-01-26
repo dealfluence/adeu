@@ -124,13 +124,28 @@ class DocumentMapper:
                 # 1. Prepare Content
                 prefix, suffix = get_run_style_markers(item)
                 run_parts: List[Tuple[str, str, Optional[Run]]] = []
-                if prefix:
-                    run_parts.append(("virtual", prefix, None))
+
                 text = get_run_text(item)
-                if text:
-                    run_parts.append(("real", text, item))
-                if suffix:
-                    run_parts.append(("virtual", suffix, None))
+
+                # Handle Splitting Formatting across Newlines (Bugfix)
+                if "\n" in text and (prefix or suffix):
+                    parts = text.split("\n")
+                    for idx, part in enumerate(parts):
+                        if idx > 0:
+                            run_parts.append(("real", "\n", item))
+                        if part:
+                            if prefix:
+                                run_parts.append(("virtual", prefix, None))
+                            run_parts.append(("real", part, item))
+                            if suffix:
+                                run_parts.append(("virtual", suffix, None))
+                else:
+                    if prefix:
+                        run_parts.append(("virtual", prefix, None))
+                    if text:
+                        run_parts.append(("real", text, item))
+                    if suffix:
+                        run_parts.append(("virtual", suffix, None))
 
                 # Clean View Logic: Skip deleted text
                 if self.clean_view and active_del_event:
@@ -140,7 +155,8 @@ class DocumentMapper:
                     pass
 
                 # Reconstruct the raw segment text used for coalescing checks
-                full_seg_text = f"{prefix}{text}{suffix}"
+                # We use the parts we just built to be consistent
+                full_seg_text = "".join(x[1] for x in run_parts)
 
                 # Initialize IDs safely (used for lookahead logic even if text is empty)
                 curr_ins_id = active_ins_event.id if active_ins_event else None

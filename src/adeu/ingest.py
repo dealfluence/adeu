@@ -7,6 +7,7 @@ from docx.text.run import Run
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
+    apply_formatting_to_segments,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
@@ -108,7 +109,7 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
             if clean_view and active_del:
                 continue
 
-            seg = f"{prefix}{text}{suffix}"
+            seg = apply_formatting_to_segments(text, prefix, suffix)
             if seg:
                 # 1. Determine Wrappers
                 if clean_view:
