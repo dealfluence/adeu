@@ -11,12 +11,16 @@ from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
+from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 
 # --- LOGGING CONFIGURATION ---
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
 
 structlog.configure(
-    processors=[structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer()],
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
     logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
 )
 
@@ -50,13 +54,17 @@ def read_docx(file_path: str, clean_view: bool = False) -> str:
     """
     try:
         stream = _read_file_bytes(file_path)
-        return extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
+        return extract_text_from_stream(
+            stream, filename=Path(file_path).name, clean_view=clean_view
+        )
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 
 @mcp.tool()
-def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool = True) -> str:
+def diff_docx_files(
+    original_path: str, modified_path: str, compare_clean: bool = True
+) -> str:
     """
     Compares two DOCX files and returns a text-based Unified Diff.
 
@@ -70,17 +78,25 @@ def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool 
     """
     try:
         stream_orig = _read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
+        text_orig = extract_text_from_stream(
+            stream_orig, filename=Path(original_path).name, clean_view=compare_clean
+        )
 
         stream_mod = _read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
+        text_mod = extract_text_from_stream(
+            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean
+        )
 
         edits = generate_edits_from_text(text_orig, text_mod)
 
         if not edits:
             return "No text differences found between the documents."
 
-        output = [f"--- {Path(original_path).name}", f"+++ {Path(modified_path).name}", ""]
+        output = [
+            f"--- {Path(original_path).name}",
+            f"+++ {Path(modified_path).name}",
+            "",
+        ]
         CONTEXT_SIZE = 40
 
         for edit in edits:
@@ -120,7 +136,10 @@ def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool 
 
 @mcp.tool()
 def apply_structured_edits(
-    original_docx_path: str, edits: List[DocumentEdit], author_name: str, output_path: Optional[str] = None
+    original_docx_path: str,
+    edits: List[DocumentEdit],
+    author_name: str,
+    output_path: Optional[str] = None,
 ) -> str:
     """
     Applies a list of text replacements to the DOCX file (Track Changes).
@@ -155,7 +174,9 @@ def apply_structured_edits(
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
 
-        return f"Applied {applied} edits. Skipped {skipped} edits. Saved to: {output_path}"
+        return (
+            f"Applied {applied} edits. Skipped {skipped} edits. Saved to: {output_path}"
+        )
 
     except Exception as e:
         return f"Error applying edits: {str(e)}"
@@ -163,7 +184,10 @@ def apply_structured_edits(
 
 @mcp.tool()
 def manage_review_actions(
-    original_docx_path: str, actions: List[ReviewAction], author_name: str, output_path: Optional[str] = None
+    original_docx_path: str,
+    actions: List[ReviewAction],
+    author_name: str,
+    output_path: Optional[str] = None,
 ) -> str:
     """
     Manages existing Track Changes and Comments in the document.
@@ -231,6 +255,77 @@ def accept_all_changes(docx_path: str, output_path: Optional[str] = None) -> str
         return f"Accepted all changes. Saved to: {output_path}"
     except Exception as e:
         return f"Error accepting changes: {str(e)}"
+
+
+@mcp.tool()
+def apply_edits_as_markdown(
+    docx_path: str,
+    edits: List[DocumentEdit],
+    output_path: Optional[str] = None,
+    include_index: bool = False,
+    highlight_only: bool = False,
+    clean_view: bool = True,
+) -> str:
+    """
+    Reads a DOCX file, extracts its text, applies edits as CriticMarkup, and saves as a Markdown file.
+    Use this to create a marked-up Markdown version of the document showing proposed changes.
+
+    Args:
+        docx_path: Absolute path to the DOCX file.
+        edits: List of edits. Each edit has target_text (text to find),
+               new_text (replacement), and optional comment.
+        output_path: Optional path for the output .md file. If not provided,
+                     saves alongside the DOCX with same name but .md extension.
+        include_index: If True, appends the edit's 0-based index as [Edit:N] in the markup.
+        highlight_only: If True, only highlights target_text with {==...==} notation
+                        without applying the actual changes. Useful for showing
+                        which parts of the document will be affected.
+        clean_view: If True (default), extracts the 'Accepted' state of the document
+                    (hides existing deletions, shows insertions). If False, includes
+                    existing CriticMarkup in the extracted text.
+
+    Returns:
+        Confirmation message with the path to the saved Markdown file, or error message.
+
+        The saved file contains CriticMarkup annotations:
+        - Deletions: {--deleted text--}
+        - Insertions: {++inserted text++}
+        - Modifications: {--old--}{++new++}
+        - Comments: {>>comment text<<}
+        - Highlights (highlight_only mode): {==highlighted==}
+    """
+    try:
+        # 1. Read and extract text from DOCX
+        stream = _read_file_bytes(docx_path)
+        markdown_text = extract_text_from_stream(
+            stream,
+            filename=Path(docx_path).name,
+            clean_view=clean_view,
+        )
+
+        # 2. Apply edits to the extracted text
+        result = _apply_edits_to_markdown(
+            markdown_text=markdown_text,
+            edits=edits,
+            include_index=include_index,
+            highlight_only=highlight_only,
+        )
+
+        # 3. Determine output path
+        if not output_path:
+            p = Path(docx_path)
+            output_path = str(p.parent / f"{p.stem}_markup.md")
+
+        # 4. Save as Markdown file
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(result)
+
+        return f"Saved CriticMarkup to: {output_path}"
+
+    except FileNotFoundError:
+        return f"Error: File not found: {docx_path}"
+    except Exception as e:
+        return f"Error applying edits as markdown: {str(e)}"
 
 
 def main():

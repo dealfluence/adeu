@@ -31,7 +31,11 @@ def _load_edits_from_json(path: Path) -> List[DocumentEdit]:
             new_val = item.get("new_text") or item.get("replace")
             comment = item.get("comment")
 
-            edits.append(DocumentEdit(target_text=target or "", new_text=new_val or "", comment=comment))
+            edits.append(
+                DocumentEdit(
+                    target_text=target or "", new_text=new_val or "", comment=comment
+                )
+            )
         return edits
     except Exception as e:
         print(f"Error parsing JSON edits: {e}", file=sys.stderr)
@@ -109,14 +113,68 @@ def handle_apply(args):
         sys.exit(1)
 
 
-def main():
-    parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
+def handle_markup(args):
+    """Handler for the 'markup' subcommand."""
+    # 1. Read the source document
+    if args.input.suffix.lower() == ".docx":
+        text = _read_docx_text(args.input)
+    else:
+        # Assume it's already a text/markdown file
+        with open(args.input, "r", encoding="utf-8") as f:
+            text = f.read()
 
-    p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
+    # 2. Load edits from JSON
+    if not args.edits.exists():
+        print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
+        sys.exit(1)
+
+    edits = _load_edits_from_json(args.edits)
+
+    if not edits:
+        print("Warning: No edits found in JSON file.", file=sys.stderr)
+
+    # 3. Apply edits as CriticMarkup
+    result = apply_edits_to_markdown(
+        markdown_text=text,
+        edits=edits,
+        include_index=args.index,
+        highlight_only=args.highlight,
+    )
+
+    # 4. Determine output path
+    output_path = args.output
+    if not output_path:
+        output_path = args.input.with_suffix(".md")
+        if args.input.suffix.lower() == ".md":
+            # Avoid overwriting source if it's already .md
+            output_path = args.input.with_name(f"{args.input.stem}_markup.md")
+
+    # 5. Save result
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(result)
+
+    print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
+    print(f"Stats: {len(edits)} edits processed.", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="adeu", description="Adeu: Agentic DOCX Redlining Engine"
+    )
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, help="Subcommands"
+    )
+
+    p_extract = subparsers.add_parser(
+        "extract", help="Extract raw text from a DOCX file"
+    )
     p_extract.add_argument("input", type=Path, help="Input DOCX file")
-    p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
+    p_extract.add_argument(
+        "-o", "--output", type=Path, help="Output file (default: stdout)"
+    )
     p_extract.set_defaults(func=handle_extract)
 
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
@@ -132,7 +190,9 @@ def main():
 
     p_apply = subparsers.add_parser("apply", help="Apply edits to a DOCX")
     p_apply.add_argument("original", type=Path, help="Original DOCX")
-    p_apply.add_argument("changes", type=Path, help="JSON edits file OR Modified Text file")
+    p_apply.add_argument(
+        "changes", type=Path, help="JSON edits file OR Modified Text file"
+    )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
@@ -141,7 +201,27 @@ def main():
         help=f"Author name for Track Changes (default: '{default_author}')",
     )
     p_apply.set_defaults(func=handle_apply)
-
+    p_markup = subparsers.add_parser(
+        "markup",
+        help="Apply edits to a document and output as CriticMarkup Markdown",
+    )
+    p_markup.add_argument("input", type=Path, help="Input DOCX or Markdown file")
+    p_markup.add_argument("edits", type=Path, help="JSON file containing edits")
+    p_markup.add_argument(
+        "-o", "--output", type=Path, help="Output Markdown path (default: input.md)"
+    )
+    p_markup.add_argument(
+        "-i",
+        "--index",
+        action="store_true",
+        help="Include edit indices [Edit:N] in the output",
+    )
+    p_markup.add_argument(
+        "--highlight",
+        action="store_true",
+        help="Highlight-only mode: mark targets with {==...==} without applying changes",
+    )
+    p_markup.set_defaults(func=handle_markup)
     args = parser.parse_args()
     args.func(args)
 
