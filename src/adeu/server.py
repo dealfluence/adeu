@@ -9,9 +9,9 @@ from mcp.server.fastmcp import FastMCP
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
+from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
-from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 
 # --- LOGGING CONFIGURATION ---
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)

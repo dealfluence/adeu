@@ -9,6 +9,7 @@ from typing import List
 from adeu import __version__
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
+from adeu.markup import apply_edits_to_markdown
 from adeu.models import DocumentEdit
 from adeu.redline.engine import RedlineEngine
 

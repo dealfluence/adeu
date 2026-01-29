@@ -3,7 +3,6 @@
 Tests for the pure text CriticMarkup transformation function.
 """
 
-import pytest
 
 from adeu.markup import (
     _build_critic_markup,
