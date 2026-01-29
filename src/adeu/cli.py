@@ -32,11 +32,7 @@ def _load_edits_from_json(path: Path) -> List[DocumentEdit]:
             new_val = item.get("new_text") or item.get("replace")
             comment = item.get("comment")
 
-            edits.append(
-                DocumentEdit(
-                    target_text=target or "", new_text=new_val or "", comment=comment
-                )
-            )
+            edits.append(DocumentEdit(target_text=target or "", new_text=new_val or "", comment=comment))
         return edits
     except Exception as e:
         print(f"Error parsing JSON edits: {e}", file=sys.stderr)
@@ -159,23 +155,13 @@ def handle_markup(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="adeu", description="Adeu: Agentic DOCX Redlining Engine"
-    )
-    parser.add_argument(
-        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    subparsers = parser.add_subparsers(
-        dest="command", required=True, help="Subcommands"
-    )
+    parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
-    p_extract = subparsers.add_parser(
-        "extract", help="Extract raw text from a DOCX file"
-    )
+    p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
     p_extract.add_argument("input", type=Path, help="Input DOCX file")
-    p_extract.add_argument(
-        "-o", "--output", type=Path, help="Output file (default: stdout)"
-    )
+    p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
     p_extract.set_defaults(func=handle_extract)
 
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
@@ -191,9 +177,7 @@ def main():
 
     p_apply = subparsers.add_parser("apply", help="Apply edits to a DOCX")
     p_apply.add_argument("original", type=Path, help="Original DOCX")
-    p_apply.add_argument(
-        "changes", type=Path, help="JSON edits file OR Modified Text file"
-    )
+    p_apply.add_argument("changes", type=Path, help="JSON edits file OR Modified Text file")
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
@@ -208,9 +192,7 @@ def main():
     )
     p_markup.add_argument("input", type=Path, help="Input DOCX or Markdown file")
     p_markup.add_argument("edits", type=Path, help="JSON file containing edits")
-    p_markup.add_argument(
-        "-o", "--output", type=Path, help="Output Markdown path (default: input.md)"
-    )
+    p_markup.add_argument("-o", "--output", type=Path, help="Output Markdown path (default: input.md)")
     p_markup.add_argument(
         "-i",
         "--index",

@@ -54,17 +54,13 @@ def read_docx(file_path: str, clean_view: bool = False) -> str:
     """
     try:
         stream = _read_file_bytes(file_path)
-        return extract_text_from_stream(
-            stream, filename=Path(file_path).name, clean_view=clean_view
-        )
+        return extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 
 @mcp.tool()
-def diff_docx_files(
-    original_path: str, modified_path: str, compare_clean: bool = True
-) -> str:
+def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool = True) -> str:
     """
     Compares two DOCX files and returns a text-based Unified Diff.
 
@@ -78,14 +74,10 @@ def diff_docx_files(
     """
     try:
         stream_orig = _read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(
-            stream_orig, filename=Path(original_path).name, clean_view=compare_clean
-        )
+        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
 
         stream_mod = _read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(
-            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean
-        )
+        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
 
         edits = generate_edits_from_text(text_orig, text_mod)
 
@@ -174,9 +166,7 @@ def apply_structured_edits(
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
 
-        return (
-            f"Applied {applied} edits. Skipped {skipped} edits. Saved to: {output_path}"
-        )
+        return f"Applied {applied} edits. Skipped {skipped} edits. Saved to: {output_path}"
 
     except Exception as e:
         return f"Error applying edits: {str(e)}"

@@ -3,7 +3,6 @@
 Tests for the pure text CriticMarkup transformation function.
 """
 
-
 from adeu.markup import (
     _build_critic_markup,
     _find_match_in_text,
@@ -224,9 +223,7 @@ class TestApplyEditsToMarkdown:
                 comment="Review needed",
             )
         ]
-        result = apply_edits_to_markdown(
-            text, edits, include_index=True, highlight_only=True
-        )
+        result = apply_edits_to_markdown(text, edits, include_index=True, highlight_only=True)
         assert "{==this text==}{>>Review needed [Edit:0]<<}" in result
 
     def test_multiple_edits_non_overlapping(self):
@@ -260,12 +257,8 @@ class TestApplyEditsToMarkdown:
     def test_overlapping_edits_first_wins(self):
         text = "The quick brown fox"
         edits = [
-            DocumentEdit(
-                target_text="quick brown", new_text="slow red"
-            ),  # First in list
-            DocumentEdit(
-                target_text="brown fox", new_text="green dog"
-            ),  # Overlaps, should be skipped
+            DocumentEdit(target_text="quick brown", new_text="slow red"),  # First in list
+            DocumentEdit(target_text="brown fox", new_text="green dog"),  # Overlaps, should be skipped
         ]
         result = apply_edits_to_markdown(text, edits)
         assert "{--quick brown--}{++slow red++}" in result
@@ -382,12 +375,8 @@ Either party may terminate with 30 days notice."""
 
         result = apply_edits_to_markdown(text, edits, include_index=True)
 
-        assert (
-            "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<}" in result
-        )
-        assert (
-            "{--30 days--}{++60 days++}{>>Extended notice period [Edit:1]<<}" in result
-        )
+        assert "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<}" in result
+        assert "{--30 days--}{++60 days++}{>>Extended notice period [Edit:1]<<}" in result
         # Structure preserved
         assert "# Service Agreement" in result
         assert "## Termination" in result
@@ -397,9 +386,7 @@ class TestEdgeCases:
     """Edge cases and regression tests."""
 
     def test_empty_text_returns_empty(self):
-        result = apply_edits_to_markdown(
-            "", [DocumentEdit(target_text="x", new_text="y")]
-        )
+        result = apply_edits_to_markdown("", [DocumentEdit(target_text="x", new_text="y")])
         assert result == ""
 
     def test_special_regex_chars_in_target(self):

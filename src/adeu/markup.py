@@ -168,23 +168,17 @@ def apply_edits_to_markdown(
         if not target:
             if highlight_only:
                 # In highlight mode, skip edits with no target
-                logger.debug(
-                    f"Skipping edit {idx}: no target_text in highlight_only mode"
-                )
+                logger.debug(f"Skipping edit {idx}: no target_text in highlight_only mode")
                 continue
             else:
                 # Pure insertion - needs anchor context
-                logger.warning(
-                    f"Skipping edit {idx}: pure insertion without target_text not supported in text mode"
-                )
+                logger.warning(f"Skipping edit {idx}: pure insertion without target_text not supported in text mode")
                 continue
 
         start, end = _find_match_in_text(markdown_text, target)
 
         if start == -1:
-            logger.warning(
-                f"Skipping edit {idx}: target_text not found: '{target[:50]}...'"
-            )
+            logger.warning(f"Skipping edit {idx}: target_text not found: '{target[:50]}...'")
             continue
 
         # Capture the actual text that was matched (may differ from target due to fuzzy matching)
@@ -204,9 +198,7 @@ def apply_edits_to_markdown(
             # Check overlap: ranges overlap if start < occ_end and end > occ_start
             if start < occ_end and end > occ_start:
                 overlaps = True
-                logger.warning(
-                    f"Skipping edit {orig_idx}: overlaps with previously matched edit"
-                )
+                logger.warning(f"Skipping edit {orig_idx}: overlaps with previously matched edit")
                 break
 
         if not overlaps:
