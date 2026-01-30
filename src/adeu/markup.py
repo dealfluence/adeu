@@ -16,7 +16,7 @@ logger = structlog.get_logger(__name__)
 
 def _replace_smart_quotes(text: str) -> str:
     """Normalizes smart quotes to ASCII equivalents."""
-    return text.replace(""", '"').replace(""", '"').replace("'", "'").replace("'", "'")
+    return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
 
 def _make_fuzzy_regex(target_text: str) -> str:
@@ -25,19 +25,39 @@ def _make_fuzzy_regex(target_text: str) -> str:
     - Variable whitespace (\\s+)
     - Variable underscores (_+)
     - Smart quote variation
+    - Intervening Markdown formatting (*, _)
     """
     target_text = _replace_smart_quotes(target_text)
 
     parts = []
+    # Tokenize: Underscores, Whitespace, Quotes, and common Punctuation that might border formatting
+    # We want to insert allowances for markdown markers (**, _, #) between tokens.
+    # Group 1: Underscores
+    # Group 2: Whitespace
+    # Group 3: Quotes
     token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
+
+    # This pattern matches 0 or more markdown formatting chars
+    # We allow * (bold), _ (italic), # (header), and maybe ` (code)
+    # We use a non-capturing group (?:...)*
+    # UPDATED: Allow whitespace only if attached to formatting chars (e.g. "## ")
+    # This ensures we capture "## " but do not eat isolated spaces.
+    markdown_noise = r"(?:[\*_#`]+[ \t]*)*"
+
+    # ALLOW noise at the very start (e.g. "**Word")
+    parts.append(markdown_noise)
 
     last_idx = 0
     for match in token_pattern.finditer(target_text):
         literal = target_text[last_idx : match.start()]
         if literal:
+            # Escape the literal text (e.g. "Title:")
             parts.append(re.escape(literal))
 
         g_underscore, g_space, g_quote = match.groups()
+
+        # Insert noise handler BEFORE the separator
+        parts.append(markdown_noise)
 
         if g_underscore:
             parts.append(r"_+")
@@ -45,15 +65,20 @@ def _make_fuzzy_regex(target_text: str) -> str:
             parts.append(r"\s+")
         elif g_quote:
             if g_quote == "'":
-                parts.append(r"[''']")
+                parts.append(r"['‘’]")
             else:
-                parts.append(r"[\"" "]")
+                parts.append(r"[\"“”]")
+
+        # Insert noise handler AFTER the separator
+        parts.append(markdown_noise)
 
         last_idx = match.end()
 
     remaining = target_text[last_idx:]
     if remaining:
         parts.append(re.escape(remaining))
+        # Allow noise at the very end as well (e.g. "Word**")
+        parts.append(markdown_noise)
 
     return "".join(parts)
 
@@ -81,6 +106,9 @@ def _find_match_in_text(text: str, target: str) -> Tuple[int, int]:
     # 3. Fuzzy regex match
     try:
         pattern = _make_fuzzy_regex(target)
+        # Use re.IGNORECASE to be slightly more robust?
+        # Standard Word search is often case-insensitive, but safe replace usually isn't.
+        # Let's keep case sensitivity for now to avoid false positives.
         match = re.search(pattern, text)
         if match:
             return match.start(), match.end()

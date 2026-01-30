@@ -3,6 +3,8 @@
 Tests for the pure text CriticMarkup transformation function.
 """
 
+import re
+
 from adeu.markup import (
     _build_critic_markup,
     _find_match_in_text,
@@ -23,7 +25,6 @@ class TestHelperFunctions:
 
     def test_make_fuzzy_regex_whitespace(self):
         pattern = _make_fuzzy_regex("hello world")
-        import re
 
         assert re.match(pattern, "hello world")
         assert re.match(pattern, "hello  world")
@@ -31,7 +32,6 @@ class TestHelperFunctions:
 
     def test_make_fuzzy_regex_underscores(self):
         pattern = _make_fuzzy_regex("[___]")
-        import re
 
         assert re.match(pattern, "[___]")
         assert re.match(pattern, "[_____]")
@@ -427,3 +427,71 @@ class TestEdgeCases:
         result = apply_edits_to_markdown(text, edits)
         assert "{--AB--}{++XY++}" in result
         assert "{--CD--}{++ZW++}" in result
+
+
+# FILE: tests/test_markup.py
+
+# ... existing code ...
+
+
+class TestMarkdownFormattingNoise:
+    """Tests for matching plain text against Markdown-formatted source text."""
+
+    def test_ignore_bold_markers(self):
+        text = "**Período de Prueba:** Los primeros 90 días"
+        # User provides plain text quote without **
+        target = "Período de Prueba: Los"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        # Should match the bolded text and wrap it
+        assert "{==**Período de Prueba:** Los==}" in result
+
+    def test_ignore_italic_markers(self):
+        text = "This is _very_ important."
+        target = "is very important"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        assert "{==is _very_ important==}" in result
+
+    def test_mixed_formatting_noise(self):
+        text = "**Section 1** _Introduction_"
+        target = "Section 1 Introduction"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        assert "{==**Section 1** _Introduction_==}" in result
+
+    def test_formatting_inside_match(self):
+        text = "The **Vendor** shall pay."
+        target = "The Vendor shall"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        assert "{==The **Vendor** shall==}" in result
+
+    def test_formatting_at_boundaries(self):
+        # Case where match starts immediately after formatting
+        text = "**Note:** Prices are net."
+        target = "Prices are net"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        # Match should NOT include the bold markers or "Note:"
+        assert "**Note:** {==Prices are net==}." in result
+
+    def test_complex_policy_scenario(self):
+        # Specific regression test for the user's provided example
+        text = "## 1. PROPÓSITO\n\n**Período de Evaluación:** Fase inicial..."
+        target = "Período de Evaluación: Fase inicial"
+
+        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        result = apply_edits_to_markdown(text, edits, highlight_only=True)
+
+        assert "{==**Período de Evaluación:** Fase inicial==}" in result
