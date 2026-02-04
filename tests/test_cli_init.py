@@ -14,14 +14,14 @@ def test_get_config_path_windows():
     with patch("platform.system", return_value="Windows"):
         with patch.dict(os.environ, {"APPDATA": "C:\\Users\\Test\\AppData\\Roaming"}):
             path = _get_claude_config_path()
-            assert str(path) == "C:\\Users\\Test\\AppData\\Roaming\\Claude\\claude_desktop_config.json"
+            # Normalize slashes to forward slash for consistent comparison across Windows/Linux runners
+            assert str(path).replace("\\", "/") == "C:/Users/Test/AppData/Roaming/Claude/claude_desktop_config.json"
 
 
 def test_get_config_path_macos():
     with patch("platform.system", return_value="Darwin"):
         with patch("pathlib.Path.home", return_value=Path("/Users/Test")):
             path = _get_claude_config_path()
-            # Use as_posix() to ensure test passes on Windows runners
             assert path.as_posix() == "/Users/Test/Library/Application Support/Claude/claude_desktop_config.json"
 
 
@@ -41,8 +41,9 @@ def test_init_creates_fresh_config(mock_config_path):
     # Patch the path resolver to return our temp path
     with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
         with patch("shutil.which", return_value="/usr/bin/uv"):  # Simulate uv installed
-            # Run the command (args are ignored by handle_init currently)
-            handle_init(MagicMock())
+            args = MagicMock()
+            args.local = False
+            handle_init(args)
 
     # Verify file was created
     assert mock_config_path.exists()
@@ -70,7 +71,9 @@ def test_init_updates_existing_and_backups(mock_config_path):
 
     with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
         with patch("shutil.which", return_value="/usr/bin/uv"):
-            handle_init(MagicMock())
+            args = MagicMock()
+            args.local = False
+            handle_init(args)
 
     # 1. Verify Backup Created
     backups = list(mock_config_path.parent.glob("*.bak"))
@@ -91,7 +94,9 @@ def test_init_warns_if_uv_missing(mock_config_path, capsys):
     """Test that a warning is printed if uv is not found."""
     with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
         with patch("shutil.which", return_value=None):  # uv NOT found
-            handle_init(MagicMock())
+            args = MagicMock()
+            args.local = False
+            handle_init(args)
 
     captured = capsys.readouterr()
     assert "Warning: 'uv' tool not found" in captured.err
