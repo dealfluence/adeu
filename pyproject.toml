@@ -1,6 +1,6 @@
 [project]
 name = "adeu"
-version = "0.6.5"
+version = "0.6.6"
 description = "Automated DOCX Redlining Engine"
 authors = [
     { name = "Mikko Korpela" },
