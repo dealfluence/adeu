@@ -1,34 +1,40 @@
-[tool.poetry]
+[project]
 name = "adeu"
 version = "0.6.5"
 description = "Automated DOCX Redlining Engine"
-authors = ["Mikko Korpela", "Uzair Ahmed"]
-homepage = "https://adeu.ai"
+authors = [
+    { name = "Mikko Korpela" },
+    { name = "Uzair Ahmed" }
+]
 readme = "README.md"
-packages = [{include = "adeu", from = "src"}]
+requires-python = ">=3.12"
+dependencies = [
+    "python-docx>=1.1.0",
+    "structlog>=24.0.0",
+    "pydantic>=2.0.0",
+    "lxml>=5.0.0",
+    "diff-match-patch>=20230430",
+    "mcp>=1.2.0",
+]
 
-[tool.poetry.scripts]
+[project.scripts]
 adeu = "adeu.cli:main"
 adeu-server = "adeu.server:main"
 
-[tool.poetry.dependencies]
-python = ">=3.12"
-python-docx = ">=1.1.0"
-structlog = ">=24.0.0"
-pydantic = ">=2.0.0"
-lxml = ">=5.0.0"
-diff-match-patch = ">=20230430"
-mcp = ">=1.2.0"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "*"
-ruff = "*"
-mypy = "*"
-hypothesis = "*"
-
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "hypothesis",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adeu"]
 
 [tool.ruff]
 line-length = 120

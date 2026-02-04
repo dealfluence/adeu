@@ -38,13 +38,14 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 
 ### Deployment
 *   **Versioning**: Semantic versioning in `pyproject.toml`. `src/adeu/__init__.py` dynamically loads this via `importlib.metadata`.
-*   **Dependencies**: Uses `poetry`. `python-docx` is patched at runtime in `comments.py` to support Modern Comments namespaces (`w16cid`, `w15`).
+*   **Dependencies**: Uses `uv` (PEP 621 standard) with `hatchling` as the build backend. `python-docx` is patched at runtime in `comments.py` to support Modern Comments namespaces (`w16cid`, `w15`).
 
 ### Agent Integration Testing
-*   To test changes to the MCP server without publishing to PyPI, use `poetry run adeu init --local`.
+*   To test changes to the MCP server without publishing to PyPI, use `uv run adeu init --local`.
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
-- **v0.6.2**: Agentic Integration.
+- **v0.6.5**: Infrastructure Migration.
+    - **Build System**: Migrated from Poetry to `uv` + `hatchling` for faster, standard-compliant dependency management.
     - **One-Shot Setup**: `adeu init` auto-configures Claude Desktop.
     - **Ephemeral Execution**: Full support for `uvx` based workflows.
