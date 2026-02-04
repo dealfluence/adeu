@@ -1,0 +1,22 @@
+{
+  "name": "adeu-skills",
+  "owner": {
+    "name": "Adeu Solutions",
+    "url": "https://github.com/dealfluence/adeu"
+  },
+  "metadata": {
+    "description": "Agentic tools for reviewing, redlining, and negotiating DOCX contracts.",
+    "version": "0.6.5"
+  },
+  "plugins": [
+    {
+      "name": "adeu-redlining",
+      "description": "Professional DOCX Redlining: Track Changes, Comments, and Review Logic.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/adeu-redlining"
+      ]
+    }
+  ]
+}
