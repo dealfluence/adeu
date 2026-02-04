@@ -8,7 +8,7 @@ import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
-from typing import List
+from typing import List, Any, Dict
 
 from adeu import __version__
 from adeu.diff import generate_edits_from_text
@@ -53,7 +53,7 @@ def handle_init(args: argparse.Namespace):
     print(f"📍 Config found: {config_path}", file=sys.stderr)
 
     # 3. Load or Create Config
-    data = {"mcpServers": {}}
+    data: Dict[str, Any] = {"mcpServers": {}}
     if config_path.exists():
         # Backup
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
