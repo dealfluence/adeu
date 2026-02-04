@@ -1,8 +1,9 @@
 [tool.poetry]
 name = "adeu"
-version = "0.6.1"
+version = "0.6.2"
 description = "Automated DOCX Redlining Engine"
-authors = ["Mikko Korpela"]
+authors = ["Mikko Korpela", "Uzair Ahmed"]
+homepage = "https://adeu.ai"
 readme = "README.md"
 packages = [{include = "adeu", from = "src"}]
 

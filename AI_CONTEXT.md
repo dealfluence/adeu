@@ -5,6 +5,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 - **Ingestion**: `ingest.py` creates a Markdown/CriticMarkup representation of the document.
 - **Mapping**: `mapper.py` builds a linear index of text spans linking back to `python-docx` objects.
 - **Reconciliation**: `engine.py` calculates and applies atomic XML patches (`w:ins`/`w:del`).
+- **Agent Interface**: `server.py` exposes these capabilities as an MCP (Model Context Protocol) server, while `cli.py` handles automated environment configuration.
 
 ## Architectural Decisions & Invariants
 
@@ -23,6 +24,12 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   `ingest.py` and `mapper.py` must be strictly synchronized.
 *   If `ingest.py` produces virtual characters (e.g., `{==` or `**`), `mapper.py` must explicitly account for them as `virtual` spans so the `RedlineEngine` knows they do not exist in the DOM.
 
+### 4. Agentic Distribution Strategy
+*   **Zero-Install**: We prioritize `uvx` (ephemeral execution) over global installation for end-users. The MCP server runs via `uvx adeu adeu-server`.
+*   **Auto-Configuration**: The `adeu init` command manages the injection of tools into `claude_desktop_config.json`.
+    *   *Safety*: It must always create a timestamped backup (`.bak`) before modifying the user's config.
+    *   *OS Agnostic*: It handles path resolution for Windows (`%APPDATA%`) and macOS (`~/Library`) automatically.
+
 ## Developer Workflows
 
 ### Testing
@@ -30,8 +37,14 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Golden Files**: `tests/fixtures/golden.docx` is the source of truth for Modern Comments (Word 2021+) XML structure.
 
 ### Deployment
-*   **Versioning**: Semantic versioning in `pyproject.toml`.
+*   **Versioning**: Semantic versioning in `pyproject.toml`. `src/adeu/__init__.py` dynamically loads this via `importlib.metadata`.
 *   **Dependencies**: Uses `poetry`. `python-docx` is patched at runtime in `comments.py` to support Modern Comments namespaces (`w16cid`, `w15`).
 
+### Agent Integration Testing
+*   To test changes to the MCP server without publishing to PyPI, use `poetry run adeu init --local`.
+*   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
+
 ## Current Status
-- **v0.5.3**: Full support for Threaded Comments, Negotiation Actions, and Safe Formatting.
+- **v0.6.2**: Agentic Integration.
+    - **One-Shot Setup**: `adeu init` auto-configures Claude Desktop.
+    - **Ephemeral Execution**: Full support for `uvx` based workflows.

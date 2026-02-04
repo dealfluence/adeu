@@ -18,29 +18,24 @@ Adeu solves this by treating DOCX as a "Virtual DOM". It presents a clean, reada
 
 ---
 
-## Installation
+## ⚡ Quick Start (The "Invisible" Setup)
+
+**Prerequisite:** You must have [uv](https://github.com/astral-sh/uv) installed.
+
 ```bash
-pip install adeu
+# One-line setup for Claude Desktop
+uvx adeu init
 ```
+*Restart Claude Desktop after running this command.*
+
+Adeu will now be available to your Agent as a set of native tools. No manual JSON editing required.
 
 ---
 
 ## Ways to Use Adeu
 
-### 1. As an MCP Server
-Connect Adeu directly to your agentic workspace. This allows AI Agent to read contracts, propose redlines, and answer comments natively.
-
-Add this to your `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "adeu": {
-      "command": "uvx",
-      "args": ["adeu", "adeu-server"]
-    }
-  }
-}
-```
+### 1. As an Agentic Tool (MCP)
+Once initialized, your Agent (Claude, OpenClaw, etc.) gains these capabilities. You don't need to teach it "how" to code Python; you just ask it to perform tasks.
 
 **What the Agent sees:**
 The agent receives a text view of the document where comments and changes are clearly marked:
@@ -59,6 +54,16 @@ The Vendor shall be liable for {==indirect damages==}{>>[Counsel] We request thi
 | `accept_all_changes` | Creates a clean version of the document by accepting all revisions and removing comments. |
 | `apply_edits_as_markdown` | **New.** Extracts text from a DOCX, applies edits as CriticMarkup, and saves as a `.md` file for preview. |
 
+#### Agent Skills (Prompting Guide)
+When defining "Skills" or "System Prompts" for your agent, use this shorthand to describe Adeu's role:
+
+> **Role:** Document Specialist
+> **Capabilities:**
+> 1.  **Reading:** Always use `read_docx(clean_view=True)` first to understand the contract context.
+> 2.  **Reviewing:** Use `apply_edits_as_markdown` to propose changes. Show the user the diff before applying.
+> 3.  **Editing:** Use `apply_structured_edits` only when the user explicitly confirms changes.
+> 4.  **Negotiating:** Use `manage_review_actions` to Reply/Accept/Reject existing comments from counterparties.
+
 #### CriticMarkup Preview Example
 
 The `apply_edits_as_markdown` tool lets agents preview changes before applying them to the actual DOCX:
@@ -74,7 +79,7 @@ Options:
 - `highlight_only=True`: Only mark targets with `{==...==}` without showing changes
 - `include_index=True`: Add `[Edit:N]` markers for tracking
 
-### 2. For Python Developers ("Vibe Coding")
+### 2. For Python Developers & Vibe Coders
 Adeu handles the heavy lifting of XML manipulation so you can focus on the logic.
 ```python
 from adeu import RedlineEngine, DocumentEdit
@@ -100,8 +105,6 @@ engine.apply_edits([edit])
 with open("NDA_Redlined.docx", "wb") as f:
     f.write(engine.save_to_stream().getvalue())
 ```
-
-#### Preview Changes as Markdown
 
 You can also preview changes as CriticMarkup without modifying the DOCX:
 ```python

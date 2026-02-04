@@ -1,6 +1,10 @@
 import argparse
+import datetime
 import getpass
 import json
+import os
+import platform
+import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +16,93 @@ from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
 from adeu.models import DocumentEdit
 from adeu.redline.engine import RedlineEngine
+
+
+def _get_claude_config_path() -> Path:
+    """Determine the location of claude_desktop_config.json based on OS."""
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA")
+        if not base:
+            raise OSError("APPDATA environment variable not found.")
+        return Path(base) / "Claude" / "claude_desktop_config.json"
+    elif system == "Darwin":  # macOS
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    else:
+        # Fallback for Linux or others, though Claude Desktop is primarily Win/Mac
+        return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def handle_init(args: argparse.Namespace):
+    """
+    Configures Adeu in the Claude Desktop environment.
+    1. Checks for 'uv'.
+    2. Locates config file.
+    3. Backs up existing config.
+    4. Injects MCP server entry.
+    """
+    print("🤖 Adeu Agentic Setup", file=sys.stderr)
+
+    # 2. Locate Config
+    try:
+        config_path = _get_claude_config_path()
+    except Exception as e:
+        print(f"❌ Error locating Claude config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"📍 Config found: {config_path}", file=sys.stderr)
+
+    # 3. Load or Create Config
+    data = {"mcpServers": {}}
+    if config_path.exists():
+        # Backup
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
+        shutil.copy2(config_path, backup_path)
+        print(f"📦 Backup created: {backup_path.name}", file=sys.stderr)
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    data = json.loads(content)
+        except json.JSONDecodeError:
+            print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
+
+    # 4. Inject Adeu Server
+    mcp_servers = data.setdefault("mcpServers", {})
+
+    if args.local:
+        # LOCAL DEV MODE: Point to the current running python environment + code
+        # This is critical for testing changes before publishing to PyPI.
+        cwd = Path.cwd().resolve()
+        python_exe = sys.executable
+        print(f"🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
+        print(f"   - CWD: {cwd}", file=sys.stderr)
+        print(f"   - Python: {python_exe}", file=sys.stderr)
+        
+        mcp_servers["adeu"] = {
+            "command": python_exe,
+            "args": ["-m", "adeu.server"],
+            "cwd": str(cwd)
+        }
+    else:
+        # PRODUCTION MODE: Zero-Install via uvx
+        uv_path = shutil.which("uv") or shutil.which("uvx")
+        if not uv_path:
+             print("⚠️  Warning: 'uv' tool not found. Install it for production use.", file=sys.stderr)
+        
+        mcp_servers["adeu"] = {
+            "command": "uvx",
+            "args": ["--from", "adeu", "adeu-server"]
+        }
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    print("✅ Adeu successfully configured in Claude Desktop.", file=sys.stderr)
+    print("   Please restart Claude to load the new toolset.", file=sys.stderr)
 
 
 def _read_docx_text(path: Path) -> str:
@@ -163,6 +254,11 @@ def main():
     p_extract.add_argument("input", type=Path, help="Input DOCX file")
     p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
     p_extract.set_defaults(func=handle_extract)
+
+    # init command
+    p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
+    p_init.add_argument("--local", action="store_true", help="Configure to run from current source (for dev/testing)")
+    p_init.set_defaults(func=handle_init)
 
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
     p_diff.add_argument("original", type=Path, help="Original DOCX")
