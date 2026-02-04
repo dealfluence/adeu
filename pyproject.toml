@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "adeu"
-version = "0.6.2"
+version = "0.6.3"
 description = "Automated DOCX Redlining Engine"
 authors = ["Mikko Korpela", "Uzair Ahmed"]
 homepage = "https://adeu.ai"
