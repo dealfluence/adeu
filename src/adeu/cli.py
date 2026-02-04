@@ -77,25 +77,18 @@ def handle_init(args: argparse.Namespace):
         # This is critical for testing changes before publishing to PyPI.
         cwd = Path.cwd().resolve()
         python_exe = sys.executable
-        print(f"🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
+        print("🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
         print(f"   - CWD: {cwd}", file=sys.stderr)
         print(f"   - Python: {python_exe}", file=sys.stderr)
-        
-        mcp_servers["adeu"] = {
-            "command": python_exe,
-            "args": ["-m", "adeu.server"],
-            "cwd": str(cwd)
-        }
+
+        mcp_servers["adeu"] = {"command": python_exe, "args": ["-m", "adeu.server"], "cwd": str(cwd)}
     else:
         # PRODUCTION MODE: Zero-Install via uvx
         uv_path = shutil.which("uv") or shutil.which("uvx")
         if not uv_path:
-             print("⚠️  Warning: 'uv' tool not found. Install it for production use.", file=sys.stderr)
-        
-        mcp_servers["adeu"] = {
-            "command": "uvx",
-            "args": ["--from", "adeu", "adeu-server"]
-        }
+            print("⚠️  Warning: 'uv' tool not found. Install it for production use.", file=sys.stderr)
+
+        mcp_servers["adeu"] = {"command": "uvx", "args": ["--from", "adeu", "adeu-server"]}
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:

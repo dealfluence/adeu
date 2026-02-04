@@ -1,21 +1,21 @@
 import json
 import os
-import platform
-import shutil
-import sys
-from unittest.mock import patch, MagicMock
-import pytest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from adeu.cli import handle_init, _get_claude_config_path
+import pytest
+
+from adeu.cli import _get_claude_config_path, handle_init
 
 # --- Tests for Path Resolution ---
+
 
 def test_get_config_path_windows():
     with patch("platform.system", return_value="Windows"):
         with patch.dict(os.environ, {"APPDATA": "C:\\Users\\Test\\AppData\\Roaming"}):
             path = _get_claude_config_path()
             assert str(path) == "C:\\Users\\Test\\AppData\\Roaming\\Claude\\claude_desktop_config.json"
+
 
 def test_get_config_path_macos():
     with patch("platform.system", return_value="Darwin"):
@@ -24,7 +24,9 @@ def test_get_config_path_macos():
             # Use as_posix() to ensure test passes on Windows runners
             assert path.as_posix() == "/Users/Test/Library/Application Support/Claude/claude_desktop_config.json"
 
+
 # --- Tests for Init Logic ---
+
 
 @pytest.fixture
 def mock_config_path(tmp_path):
@@ -33,21 +35,21 @@ def mock_config_path(tmp_path):
     d.mkdir()
     return d / "claude_desktop_config.json"
 
+
 def test_init_creates_fresh_config(mock_config_path):
     """Test initializing when no config exists."""
     # Patch the path resolver to return our temp path
     with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
         with patch("shutil.which", return_value="/usr/bin/uv"):  # Simulate uv installed
-            
             # Run the command (args are ignored by handle_init currently)
             handle_init(MagicMock())
 
     # Verify file was created
     assert mock_config_path.exists()
-    
+
     with open(mock_config_path) as f:
         data = json.load(f)
-    
+
     # Verify Content
     assert "adeu" in data["mcpServers"]
     cmd = data["mcpServers"]["adeu"]
@@ -55,14 +57,13 @@ def test_init_creates_fresh_config(mock_config_path):
     assert "--from" in cmd["args"]
     assert "adeu" in cmd["args"]
 
+
 def test_init_updates_existing_and_backups(mock_config_path):
     """Test updating a config file that already has other settings."""
     # Create existing config
     existing_data = {
-        "mcpServers": {
-            "existing-tool": {"command": "echo", "args": ["hello"]}
-        },
-        "globalShortcut": "Cmd+Space"
+        "mcpServers": {"existing-tool": {"command": "echo", "args": ["hello"]}},
+        "globalShortcut": "Cmd+Space",
     }
     with open(mock_config_path, "w") as f:
         json.dump(existing_data, f)
@@ -74,16 +75,17 @@ def test_init_updates_existing_and_backups(mock_config_path):
     # 1. Verify Backup Created
     backups = list(mock_config_path.parent.glob("*.bak"))
     assert len(backups) == 1
-    
+
     # 2. Verify Config Updated
     with open(mock_config_path) as f:
         new_data = json.load(f)
-    
+
     # Old data preserved
     assert "existing-tool" in new_data["mcpServers"]
     assert new_data["globalShortcut"] == "Cmd+Space"
     # New data added
     assert "adeu" in new_data["mcpServers"]
+
 
 def test_init_warns_if_uv_missing(mock_config_path, capsys):
     """Test that a warning is printed if uv is not found."""

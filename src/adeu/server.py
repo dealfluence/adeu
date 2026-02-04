@@ -14,7 +14,7 @@ from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
 
 # --- LOGGING CONFIGURATION ---
-# MCP communicates over stdio. 
+# MCP communicates over stdio.
 # CRITICAL: All logs must go to stderr. Any print to stdout will break the JSON-RPC protocol.
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
 

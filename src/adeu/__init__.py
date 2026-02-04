@@ -1,4 +1,4 @@
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
