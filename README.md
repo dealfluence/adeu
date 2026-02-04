@@ -1,198 +1,116 @@
-# Adeu OSS: DOCX Redlining Engine
+# Adeu: Native Track Changes for AI
 
-**Adeu allows AI Agents and LLMs to safely "Track Changes" in Microsoft Word documents.**
+**Adeu bridges the gap between LLM text generation and Microsoft Word.**
 
-Most LLMs output raw text or Markdown. Legal and compliance professionals need `w:ins` (insertions) and `w:del` (deletions) to review changes natively in Word. 
+LLMs speak Markdown; Lawyers speak "Track Changes." Adeu allows AI agents to propose edits to `.docx` files without breaking formatting, numbering, or complex layouts.
 
-Adeu solves this by treating DOCX as a "Virtual DOM". It presents a clean, readable text representation to the AI, and then **reconciles** the AI's edits back into the original XML structure without breaking formatting, numbering, or images.
-
-## ⚡ Quick Start (The "Invisible" Setup)
-
-**Prerequisite:** You must have [uv](https://github.com/astral-sh/uv) installed.
-
-```bash
-# One-line setup for Claude Desktop
-uvx adeu init
-```
-*Restart Claude Desktop after running this command.*
-
-Adeu will now be available to your Agent as a set of native tools. No manual JSON editing required.
+It treats the DOCX file as a **Virtual DOM**:
+1.  **Ingest:** Extracts a lightweight, token-efficient text representation for the AI.
+2.  **Diff:** Calculates changes based on the AI's edits.
+3.  **Reconcile:** Surgically injects native XML `w:ins` (insertions) and `w:del` (deletions) back into the original document.
 
 ---
 
-## Ways to Use Adeu
+## ⚡ Zero-Config Setup
 
-### 1. As an Agentic Tool (MCP)
-Once initialized, your Agent (Claude, OpenClaw, etc.) gains these capabilities. You don't need to teach it "how" to code Python; you just ask it to perform tasks.
+**Prerequisite:** [uv](https://github.com/astral-sh/uv) must be installed.
 
-**What the Agent sees:**
-The agent receives a text view of the document where comments and changes are clearly marked:
-```text
-The Vendor shall be liable for {==indirect damages==}{>>[Counsel] We request this be removed.<<}...
+To instantly add Adeu to **Claude Desktop**:
+
+```bash
+uvx adeu init
 ```
 
-#### Available MCP Tools
+*Restart Claude Desktop to load the new tools.*
 
-| Tool | Description |
-| :--- | :--- |
-| `read_docx` | Reads a DOCX file. Supports `clean_view=True` to simulate "Accept All Changes" before reading. |
-| `diff_docx_files` | Compares two DOCX files and returns a text-based Unified Diff, ignoring formatting noise. |
-| `apply_structured_edits` | **The Core Engine.** Applies a list of "Search & Replace" edits, generating native Track Changes (`w:ins`/`w:del`). |
-| `manage_review_actions` | Review workflow. Allows the Agent to `ACCEPT`, `REJECT`, or `REPLY` to specific changes or comments by ID. |
-| `accept_all_changes` | Creates a clean version of the document by accepting all revisions and removing comments. |
-| `apply_edits_as_markdown` | **New.** Extracts text from a DOCX, applies edits as CriticMarkup, and saves as a `.md` file for preview. |
+---
 
-#### Agent Skills (Prompting Guide)
-When defining "Skills" or "System Prompts" for your agent, use this shorthand to describe Adeu's role:
+## Workflows
+
+### 1. For Agents (Claude / MCP)
+Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
+
+**The "Document Specialist" Prompt:**
+Give your agent this context to maximize effectiveness:
 
 > **Role:** Document Specialist
-> **Capabilities:**
-> 1.  **Reading:** Always use `read_docx(clean_view=True)` first to understand the contract context.
-> 2.  **Reviewing:** Use `apply_edits_as_markdown` to propose changes. Show the user the diff before applying.
-> 3.  **Editing:** Use `apply_structured_edits` only when the user explicitly confirms changes.
-> 4.  **Negotiating:** Use `manage_review_actions` to Reply/Accept/Reject existing comments from counterparties.
+> **Tools:**
+> *   `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
+> *   `apply_edits_as_markdown`: **Drafting Mode.** Generate a CriticMarkup preview (`{--old--}{++new++}`) to show the user exactly what will change.
+> *   `apply_structured_edits`: **Commit Mode.** Apply specific search-and-replace edits to generate native Track Changes in the DOCX.
+> *   `manage_review_actions`: **Negotiation.** Reply to comments or Accept/Reject specific changes by ID.
 
-#### CriticMarkup Preview Example
+### 2. For Builders (Python SDK)
+If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation.
 
-The `apply_edits_as_markdown` tool lets agents preview changes before applying them to the actual DOCX:
-```python
-# Input: contract.docx containing "The Tenant shall pay rent monthly."
-# Edit: target_text="Tenant", new_text="Lessee", comment="Standardizing terminology"
-
-# Output saved to contract_markup.md:
-The {--Tenant--}{++Lessee++}{>>Standardizing terminology<<} shall pay rent monthly.
-```
-
-Options:
-- `highlight_only=True`: Only mark targets with `{==...==}` without showing changes
-- `include_index=True`: Add `[Edit:N]` markers for tracking
-
-### 2. For Python Developers & Vibe Coders
-Adeu handles the heavy lifting of XML manipulation so you can focus on the logic.
 ```python
 from adeu import RedlineEngine, DocumentEdit
 from io import BytesIO
 
-# 1. Load your contract
-with open("NDA.docx", "rb") as f:
+# 1. Load the contract
+with open("MSA.docx", "rb") as f:
     stream = BytesIO(f.read())
 
-# 2. Define the change (e.g., from an LLM response)
-# Adeu uses "Search & Replace" logic with fuzzy matching
+# 2. Define the edit (e.g., from an LLM response)
+# Adeu uses fuzzy matching to locate the target text, even if whitespace varies.
 edit = DocumentEdit(
     target_text="State of New York",
     new_text="State of Delaware",
     comment="Standardizing governing law."
 )
 
-# 3. Apply the Redline
-engine = RedlineEngine(stream, author="AI Associate")
+# 3. Apply changes
+engine = RedlineEngine(stream, author="AI Copilot")
 engine.apply_edits([edit])
 
-# 4. Save
-with open("NDA_Redlined.docx", "wb") as f:
+# 4. Save the result
+with open("MSA_Redlined.docx", "wb") as f:
     f.write(engine.save_to_stream().getvalue())
 ```
 
-You can also preview changes as CriticMarkup without modifying the DOCX:
-```python
-from adeu import apply_edits_to_markdown, DocumentEdit
-
-text = "The Tenant shall pay rent monthly."
-edits = [
-    DocumentEdit(
-        target_text="Tenant",
-        new_text="Lessee",
-        comment="Standardizing terminology"
-    )
-]
-
-# Full preview with changes
-result = apply_edits_to_markdown(text, edits, include_index=True)
-# Output: "The {--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<} shall pay rent monthly."
-
-# Highlight-only mode (show what will be changed)
-preview = apply_edits_to_markdown(text, edits, highlight_only=True)
-# Output: "The {==Tenant==}{>>Standardizing terminology<<} shall pay rent monthly."
-```
-
 ### 3. The CLI
-Quickly extract text, apply patches, or preview changes from your terminal.
+Quickly inspect documents or apply batches of edits from your terminal.
+
 ```bash
-# Extract text from a DOCX
+# Extract clean text for RAG or prompting
 adeu extract contract.docx -o contract.md
 
-# Compare two docs and get a summary
+# Generate a visual diff between two versions
 adeu diff v1.docx v2.docx
 
-# Apply a structured edit list (JSON) to a doc
-adeu apply agreement.docx edits.json --author "Reviewer Bot"
+# Preview what an edit list (JSON) would look like
+adeu markup contract.docx edits.json --output preview.md
 
-# Preview changes as CriticMarkup Markdown (NEW)
-adeu markup contract.docx edits.json -o preview.md
-
-# Highlight-only mode (show targets without changes)
-adeu markup contract.docx edits.json --highlight
-
-# Include edit indices for tracking
-adeu markup contract.docx edits.json --index
-```
-
-#### CLI Commands Reference
-
-| Command | Description |
-| :--- | :--- |
-| `extract` | Extract text from a DOCX file to stdout or a file. |
-| `diff` | Compare two DOCX files and show changes. |
-| `apply` | Apply edits from a JSON file to a DOCX with Track Changes. |
-| `markup` | **New.** Apply edits to a document and output as CriticMarkup Markdown. |
-
-#### Edits JSON Format
-
-Both `apply` and `markup` commands accept a JSON file with this structure:
-```json
-[
-  {
-    "target_text": "Contract Agreement",
-    "new_text": "Service Agreement",
-    "comment": "Standardizing terminology"
-  },
-  {
-    "target_text": "30 days",
-    "new_text": "60 days",
-    "comment": "Extended notice period"
-  }
-]
+# Apply edits to the DOCX
+adeu apply contract.docx edits.json --author "Review Bot"
 ```
 
 ---
 
-## CriticMarkup Syntax
+## Key Features
 
-Adeu uses [CriticMarkup](http://criticmarkup.com/) for text-based change representation:
+### 🛡️ Format Safety
+Adeu does not "rewrite" the document. It patches it.
+*   **Images & Layouts:** Untouched.
+*   **Numbering & Headers:** Preserved.
+*   **Complex XML:** It only modifies the text runs targeted by the edit.
+
+### 📝 CriticMarkup Representation
+Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes before they hit the XML.
 
 | Markup | Meaning | Example |
 | :--- | :--- | :--- |
-| `{--text--}` | Deletion | `{--old text--}` |
-| `{++text++}` | Insertion | `{++new text++}` |
-| `{==text==}` | Highlight | `{==marked text==}` |
-| `{>>text<<}` | Comment | `{>>reviewer note<<}` |
+| `{--text--}` | Deletion | `{--Tenant--}` |
+| `{++text++}` | Insertion | `{++Lessee++}` |
+| `{>>text<<}` | Comment | `{>>Clarify this term<<}` |
 
-Combined example:
-```
-The {--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<} shall pay rent.
-```
+### 🔍 Intelligent Mapping
+Word documents are messy. A word like "Contract" might be split into XML runs like `["Con", "tract"]` due to spellcheck or formatting history.
+*   **Run Coalescing:** Adeu normalizes these splits so the AI sees "Contract".
+*   **Fuzzy Matching:** It handles minor whitespace discrepancies between the LLM's memory and the actual document content.
 
 ---
 
-## Why Adeu?
-
-*   **Native Redlines**: Generates real Microsoft Word Track Changes. You can "Accept" or "Reject" them in Word.
-*   **Format Safe**: Preserves complex numbering, headers, footers, and images. It only touches the text you change.
-*   **Token Efficient**: Converts heavy XML into lightweight Markdown for the LLM context window.
-*   **Intelligent Mapping**: Handles the messy internal XML of Word documents (e.g., when "Contract" is split into `["Con", "tract"]` by spellcheck).
-*   **Preview First**: Review changes as CriticMarkup Markdown before committing to the DOCX.
-
 ## License
 
-MIT License. Open source and free to use in commercial legal tech applications.
+MIT License. Open source and free to use in commercial applications.
