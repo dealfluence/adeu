@@ -96,7 +96,7 @@ Adeu does not "rewrite" the document. It patches it.
 *   **Complex XML:** It only modifies the text runs targeted by the edit.
 
 ### 📝 CriticMarkup Representation
-Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes before they hit the XML.
+Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes.
 
 | Markup | Meaning | Example |
 | :--- | :--- | :--- |
