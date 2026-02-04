@@ -8,7 +8,7 @@ import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
-from typing import List, Any, Dict
+from typing import Any, Dict, List
 
 from adeu import __version__
 from adeu.diff import generate_edits_from_text
