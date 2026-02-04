@@ -9,6 +9,7 @@ import structlog
 from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -385,12 +386,44 @@ def normalize_docx(doc: DocumentObject):
         proof_err.getparent().remove(proof_err)
 
     # Coalesce all parts (Headers, Body, Footers)
+    # AND perform recursive coalescing for tables
     for part in iter_document_parts(doc):
-        for p in part.paragraphs:
-            _coalesce_runs_in_paragraph(p)
+        for item in iter_block_items(part):
+            if isinstance(item, Paragraph):
+                _coalesce_runs_in_paragraph(item)
+            elif isinstance(item, Table):
+                _normalize_table(item)
 
-        for table in part.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        _coalesce_runs_in_paragraph(p)
+
+def _normalize_table(table: Table):
+    for row in table.rows:
+        for cell in row.cells:
+            for item in iter_block_items(cell):
+                if isinstance(item, Paragraph):
+                    _coalesce_runs_in_paragraph(item)
+                elif isinstance(item, Table):
+                    _normalize_table(item)
+
+
+def iter_block_items(parent) -> Iterator[Union[Paragraph, Table]]:
+    """
+    Yields Paragraph or Table objects in the order they appear in the XML.
+    Supports Document, Header, Footer, and Cell objects.
+    Recursion is left to the caller.
+    """
+    if isinstance(parent, DocumentObject):
+        parent_elm = parent.element.body
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+    else:
+        # Header/Footer usually expose ._element or can be iterated
+        if hasattr(parent, "_element"):
+            parent_elm = parent._element
+        else:
+            raise ValueError(f"Unsupported parent type for iteration: {type(parent)}")
+
+    for child in parent_elm.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, parent)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, parent)

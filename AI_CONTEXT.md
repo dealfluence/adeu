@@ -30,6 +30,13 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   *Safety*: It must always create a timestamped backup (`.bak`) before modifying the user's config.
     *   *OS Agnostic*: It handles path resolution for Windows (`%APPDATA%`) and macOS (`~/Library`) automatically.
 
+### 5. Block-Level Parsing & Tables
+*   **Sequential Iteration**: We iterate over document elements (`w:p` and `w:tbl`) in strict XML order using `iter_block_items`. We do *not* iterate `part.paragraphs` and `part.tables` separately, as this destroys document flow (e.g., tables appearing after all text).
+*   **Recursion**: Ingestion and Mapping are recursive. `Document` -> `Table` -> `Cell` -> `Block Items` -> ...
+*   **Synchronization Invariants**:
+    *   **Empty Rows**: `ingest.py` must *never* skip empty table rows. `mapper.py` iterates all rows in the DOM; skipping one in text extraction causes index misalignment.
+    *   **Separators**: Row separators (`\n`) are injected *between* rows. Virtual pipes (` | `) separate cells.
+
 ## Developer Workflows
 
 ### Testing

@@ -7,6 +7,7 @@ import structlog
 from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -16,6 +17,7 @@ from adeu.utils.docx import (
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
+    iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
 )
@@ -29,7 +31,7 @@ class TextSpan:
     end: int
     text: str
     run: Optional[Run]
-    paragraph: Paragraph
+    paragraph: Optional[Paragraph]
     ins_id: Optional[str] = None
     del_id: Optional[str] = None
 
@@ -50,53 +52,71 @@ class DocumentMapper:
         self.full_text = ""
 
         for part in iter_document_parts(self.doc):
-            # 1. Loose Paragraphs
-            for p in part.paragraphs:
-                prefix = get_paragraph_prefix(p)
-                if prefix:
-                    self._add_virtual_text(prefix, current_offset, p)
-                    current_offset += len(prefix)
+            current_offset = self._map_blocks(part, current_offset)
 
-                current_offset = self._map_paragraph_content(p, current_offset)
-
-                self._add_virtual_text("\n\n", current_offset, p)
+            # Add part separator if needed, or rely on block separators
+            if self.spans and self.spans[-1].text != "\n\n":
+                self._add_virtual_text("\n\n", current_offset, None)
                 current_offset += 2
 
-            # 2. Tables
-            for table in part.tables:
-                for row in table.rows:
-                    row_has_content = False
-                    for cell in row.cells:
-                        cell_paras = list(cell.paragraphs)
-                        # Check visible content (approximate)
-                        cell_non_empty = any(p.runs for p in cell_paras)
-
-                        if cell_non_empty:
-                            if row_has_content:
-                                self._add_virtual_text(" | ", current_offset, cell_paras[0])
-                                current_offset += 3
-
-                            row_has_content = True
-
-                            for j, p in enumerate(cell_paras):
-                                if j > 0:
-                                    self._add_virtual_text("\n", current_offset, p)
-                                    current_offset += 1
-
-                                prefix = get_paragraph_prefix(p)
-                                if prefix:
-                                    self._add_virtual_text(prefix, current_offset, p)
-                                    current_offset += len(prefix)
-
-                                current_offset = self._map_paragraph_content(p, current_offset)
-
-                    if row_has_content:
-                        self._add_virtual_text("\n\n", current_offset, row.cells[0].paragraphs[0])
-                        current_offset += 2
-
-        if self.spans and self.spans[-1].text == "\n\n":
+        # Cleanup trailing newlines
+        while self.spans and self.spans[-1].text == "\n\n":
             self.spans.pop()
             self.full_text = self.full_text[:-2]
+
+    def _map_blocks(self, container, offset: int) -> int:
+        current = offset
+
+        for item in iter_block_items(container):
+            if isinstance(item, Paragraph):
+                prefix = get_paragraph_prefix(item)
+                if prefix:
+                    self._add_virtual_text(prefix, current, item)
+                    current += len(prefix)
+
+                current = self._map_paragraph_content(item, current)
+
+                # Separator between paragraphs
+                self._add_virtual_text("\n\n", current, item)
+                current += 2
+
+            elif isinstance(item, Table):
+                current = self._map_table(item, current)
+                # Separator after table
+                if self.spans and self.spans[-1].text != "\n\n":
+                    self._add_virtual_text("\n\n", current, None)
+                    current += 2
+
+        return current
+
+    def _map_table(self, table: Table, offset: int) -> int:
+        current = offset
+        rows_processed = 0
+
+        for row in table.rows:
+            if rows_processed > 0:
+                # Newline separator BETWEEN rows (matches "\n".join in ingest)
+                self._add_virtual_text("\n", current, None)
+                current += 1
+
+            seen_cells = set()
+            cells_processed = 0
+
+            for cell in row.cells:
+                if cell in seen_cells:
+                    continue
+                seen_cells.add(cell)
+
+                if cells_processed > 0:
+                    self._add_virtual_text(" | ", current, None)
+                    current += 3
+
+                current = self._map_blocks(cell, current)
+                cells_processed += 1
+
+            rows_processed += 1
+
+        return current
 
     def _map_paragraph_content(self, paragraph: Paragraph, start_offset: int) -> int:
         """
@@ -418,7 +438,7 @@ class DocumentMapper:
 
         return "\n".join(change_lines + comment_lines)
 
-    def _add_virtual_text(self, text: str, offset: int, context_paragraph: Paragraph):
+    def _add_virtual_text(self, text: str, offset: int, context_paragraph: Optional[Paragraph]):
         span = TextSpan(
             start=offset,
             end=offset + len(text),

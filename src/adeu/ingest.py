@@ -2,6 +2,8 @@ import io
 
 import structlog
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
@@ -11,6 +13,7 @@ from adeu.utils.docx import (
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
+    iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
 )
@@ -40,40 +43,62 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
         full_text = []
 
         for part in iter_document_parts(doc):
-            # 1. Paragraphs
-            for para in part.paragraphs:
-                # Add Markdown prefix if heading
-                prefix = get_paragraph_prefix(para)
-
-                # Build content
-                p_text = _build_paragraph_text(para, comments_map, clean_view)
-
-                full_text.append(prefix + p_text)
-
-            # 2. Tables
-            for table in part.tables:
-                for row in table.rows:
-                    row_parts = []
-                    for cell in row.cells:
-                        # Cell paragraphs
-                        cell_text_parts = []
-                        for p in cell.paragraphs:
-                            prefix = get_paragraph_prefix(p)
-                            p_content = _build_paragraph_text(p, comments_map, clean_view)
-                            cell_text_parts.append(prefix + p_content)
-
-                        cell_text = "\n".join(cell_text_parts)
-                        if cell_text:
-                            row_parts.append(cell_text)
-
-                    if row_parts:
-                        full_text.append(" | ".join(row_parts))
+            # Use recursive block iterator to respect document order (P vs Table)
+            part_text = _extract_blocks(part, comments_map, clean_view)
+            if part_text:
+                full_text.append(part_text)
 
         return "\n\n".join(full_text)
 
     except Exception as e:
         logger.error(f"Text extraction failed: {e}", exc_info=True)
         raise ValueError(f"Could not extract text: {str(e)}") from e
+
+
+def _extract_blocks(container, comments_map, clean_view: bool) -> str:
+    """
+    Recursively extracts text from a container (Document, Cell, Header, etc.)
+    iterating over Paragraphs and Tables in order.
+    """
+    blocks = []
+
+    for item in iter_block_items(container):
+        if isinstance(item, Paragraph):
+            prefix = get_paragraph_prefix(item)
+            p_text = _build_paragraph_text(item, comments_map, clean_view)
+            blocks.append(prefix + p_text)
+
+        elif isinstance(item, Table):
+            table_text = _extract_table(item, comments_map, clean_view)
+            if table_text:
+                blocks.append(table_text)
+
+    return "\n\n".join(blocks)
+
+
+def _extract_table(table: Table, comments_map, clean_view: bool) -> str:
+    rows_text = []
+    for row in table.rows:
+        cell_texts = []
+        # Use set to avoid processing merged cells multiple times if python-docx yields them
+        seen_cells = set()
+
+        for cell in row.cells:
+            if cell in seen_cells:
+                continue
+            seen_cells.add(cell)
+
+            # Recursive call to handle nested tables or paragraphs in cell
+            cell_content = _extract_blocks(cell, comments_map, clean_view)
+            cell_texts.append(cell_content)
+
+        # Join cells with pipe
+        row_str = " | ".join(cell_texts)
+        # CRITICAL: Do not skip empty rows. Mapper iterates all rows.
+        # We must maintain 1:1 parity with Mapper's structure traversal.
+        rows_text.append(row_str)
+
+    return "\n".join(rows_text)
 
 
 def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
