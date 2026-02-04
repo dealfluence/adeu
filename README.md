@@ -6,18 +6,6 @@ Most LLMs output raw text or Markdown. Legal and compliance professionals need `
 
 Adeu solves this by treating DOCX as a "Virtual DOM". It presents a clean, readable text representation to the AI, and then **reconciles** the AI's edits back into the original XML structure without breaking formatting, numbering, or images.
 
-## 🚀 New in v0.6.0
-*   **CriticMarkup Preview**: New `apply_edits_as_markdown` tool and `markup` CLI command to preview changes as CriticMarkup in Markdown files before applying to DOCX.
-*   **Highlight-Only Mode**: Mark target text locations with `{==...==}` without applying changes — perfect for review workflows.
-*   **Edit Indexing**: Track edit positions with `[Edit:N]` markers for easy reference back to the original edit list.
-
-## 🚀 New in v0.5.0
-*   **Comments & Threads**: Full support for reading and replying to Word comments using **CriticMarkup** syntax (`{==Target==}{>>Comment<<}`).
-*   **Negotiation Actions**: Agents can now `ACCEPT`, `REJECT`, or `REPLY` to specific changes and comments.
-*   **Safety**: Enhanced protection against corrupting nested revisions or structural boilerplate.
-
----
-
 ## ⚡ Quick Start (The "Invisible" Setup)
 
 **Prerequisite:** You must have [uv](https://github.com/astral-sh/uv) installed.
