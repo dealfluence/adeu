@@ -10,6 +10,84 @@ from adeu.models import DocumentEdit
 logger = structlog.get_logger(__name__)
 
 
+def _should_strip_markers(text: str, marker: str) -> bool:
+    """
+    Determines if outer markers should be stripped from text.
+    Only strip if:
+    1. Text starts AND ends with the marker (balanced)
+    2. The inner content is "prose-like" (not a code identifier or pure symbols)
+    3. There are no additional marker pairs inside (e.g., "**A** and **B**" should NOT strip)
+    """
+    import re
+
+    if not text.startswith(marker) or not text.endswith(marker):
+        return False
+
+    if len(text) < len(marker) * 2:
+        return False
+
+    inner = text[len(marker) : -len(marker)]
+
+    if not inner:
+        return False
+
+    # Check for additional markers inside - if present, don't strip
+    # e.g., "**A** and **B**" has "A** and **B" inside, which contains **
+    if marker in inner:
+        return False
+
+    # Inner content must have actual letter characters (not just digits/underscores/symbols)
+    # This prevents stripping things like "___", "__0__"
+    if not re.search(r"[a-zA-Z]", inner):
+        return False
+
+    # For double-underscore (__), be conservative:
+    # Don't strip if inner looks like a code identifier (e.g., "init", "name", "main")
+    # Code identifiers: only word chars, no spaces
+    if marker == "__":
+        # If inner has no spaces and is only word characters, it's likely code like __init__
+        if re.fullmatch(r"\w+", inner):
+            return False
+
+    # For single underscore (_), only skip if it looks like snake_case (contains inner underscore)
+    # _emphasis_ -> strip (prose)
+    # _some_var_ -> don't strip (code identifier)
+    if marker == "_":
+        # If inner contains underscore, likely snake_case code identifier
+        if "_" in inner:
+            return False
+        # If inner is a single word with no letters (like just digits), don't strip
+        if re.fullmatch(r"[0-9_]+", inner):
+            return False
+
+    return True
+
+
+def _strip_balanced_markers(text: str) -> tuple[str, str, str]:
+    """
+    Strips balanced outer formatting markers from text.
+    Returns (prefix_markup, clean_text, suffix_markup).
+
+    Only strips if the markers are truly formatting (content has word chars).
+    """
+    prefix_markup = ""
+    suffix_markup = ""
+    clean_text = text
+
+    # Check markers in order of length (longer first to avoid ** vs * conflicts)
+    markers = ["**", "__", "_", "*"]
+
+    for marker in markers:
+        if _should_strip_markers(clean_text, marker):
+            prefix_markup += marker
+            suffix_markup = marker + suffix_markup
+            clean_text = clean_text[len(marker) : -len(marker)]
+            # Only strip one level of markers
+            break
+
+    return prefix_markup, clean_text, suffix_markup
+
+
 def _replace_smart_quotes(text: str) -> str:
     """Normalizes smart quotes to ASCII equivalents."""
     return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
@@ -75,9 +153,6 @@ def _find_safe_boundaries(text: str, start: int, end: int) -> Tuple[int, int]:
                 return
 
     # Iteratively check markers.
-    # Order matters slightly if markers are nested, but repeating helps stability.
-    # We do a few passes to handle nesting like **_Text_**.
-
     for _ in range(2):
         expand_if_unbalanced("**")
         expand_if_unbalanced("__")
@@ -87,6 +162,48 @@ def _find_safe_boundaries(text: str, start: int, end: int) -> Tuple[int, int]:
     return new_start, new_end
 
 
+def _refine_match_boundaries(text: str, start: int, end: int) -> Tuple[int, int]:
+    """
+    Refines fuzzy match boundaries to avoid greedy consumption of unbalanced markers.
+    Example: "**Header.**Body" -> Regex matches "**Body".
+    This function trims the leading "**" because "Body" is balanced (0 markers)
+    while "**Body" is unbalanced (1 marker).
+    """
+    # Markers to check. Order matters (check compound markers first).
+    markers = ["**", "__", "*", "_"]
+
+    current_text = text[start:end]
+    best_start, best_end = start, end
+
+    # 1. Check Leading Noise
+    for marker in markers:
+        if current_text.startswith(marker):
+            # Calculate balance scores
+            # "Unbalanced-ness" = count % 2. 0 is perfect. 1 is bad.
+            current_score = current_text.count(marker) % 2
+
+            trimmed_text = current_text[len(marker) :]
+            trimmed_score = trimmed_text.count(marker) % 2
+
+            # If we are currently unbalanced (1) and trimming makes it balanced (0), do it.
+            if current_score == 1 and trimmed_score == 0:
+                best_start += len(marker)
+                current_text = trimmed_text  # Update for next iteration
+
+    # 2. Check Trailing Noise (Logic is symmetric)
+    for marker in markers:
+        if current_text.endswith(marker):
+            current_score = current_text.count(marker) % 2
+            trimmed_text = current_text[: -len(marker)]
+            trimmed_score = trimmed_text.count(marker) % 2
+
+            if current_score == 1 and trimmed_score == 0:
+                best_end -= len(marker)
+                current_text = trimmed_text
+
+    return best_start, best_end
+
+
 def _make_fuzzy_regex(target_text: str) -> str:
     """
     Constructs a regex pattern from target text that permits:
@@ -94,16 +211,29 @@ def _make_fuzzy_regex(target_text: str) -> str:
     - Variable underscores (_+)
     - Smart quote variation
     - Intervening markdown formatting (**, _, etc.)
+    - Punctuation boundaries
+    - Structural noise (bullets, numbering) across newlines
     """
     target_text = _replace_smart_quotes(target_text)
 
     parts = []
-    token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
+    # Tokenize: Underscores, Whitespace, Quotes, AND Punctuation
+    token_pattern = re.compile(r"(_+)|(\s+)|(['\"])|([.,;:])")
 
     # Pattern to allow optional markdown markers between tokens
     md_noise = r"(?:\*\*|__|\*|_)*"
 
-    # Allow noise at start
+    # Pattern for Structural Noise (bullets, indentation, numbering)
+    # Matches sequences of: Whitespace, *, +, -, >, digits+dot
+    # STRICTER: Should not match simple space chars that act as delimiters.
+    # Only match if it looks like a list item marker or newline sequence.
+    structural_noise = r"(?:\s*(?:[*+\->]|\d+\.)\s+|\s*\n\s*)"
+
+    # START ANCHOR:
+    # Allow optional list marker at the very start
+    # Must contain a bullet/number to avoid greedy space matching
+    start_list_marker = r"(?:[ \t]*(?:[*+\->]|\d+\.)\s+)?"
+    parts.append(start_list_marker)
     parts.append(md_noise)
 
     last_idx = 0
@@ -113,17 +243,23 @@ def _make_fuzzy_regex(target_text: str) -> str:
             parts.append(re.escape(literal))
             parts.append(md_noise)
 
-        g_underscore, g_space, g_quote = match.groups()
+        g_underscore, g_space, g_quote, g_punct = match.groups()
 
         if g_underscore:
             parts.append(r"_+")
         elif g_space:
-            parts.append(r"\s+")
+            # If the whitespace contains a newline, allow structural noise (bullets, indents)
+            if "\n" in g_space:
+                parts.append(f"(?:{structural_noise}|\\s+)+")
+            else:
+                parts.append(r"\s+")
         elif g_quote:
             if g_quote == "'":
                 parts.append(r"[''']")
             else:
                 parts.append(r"[\"" "]")
+        elif g_punct:
+            parts.append(re.escape(g_punct))
 
         parts.append(md_noise)
         last_idx = match.end()
@@ -131,13 +267,6 @@ def _make_fuzzy_regex(target_text: str) -> str:
     remaining = target_text[last_idx:]
     if remaining:
         parts.append(re.escape(remaining))
-
-    # Allow noise at end for cases where target is "Word" but text is "Word**"
-    # But ONLY if it's noise. This is risky?
-    # Actually, removing trailing md_noise here and letting _find_safe_boundaries
-    # handle the balance is safer.
-    # We removed trailing noise in previous attempt, let's keep it removed
-    # so we don't aggressively consume markers unless necessary.
 
     return "".join(parts)
 
@@ -167,7 +296,12 @@ def _find_match_in_text(text: str, target: str) -> Tuple[int, int]:
         pattern = _make_fuzzy_regex(target)
         match = re.search(pattern, text)
         if match:
-            return _find_safe_boundaries(text, match.start(), match.end())
+            # Refine boundaries BEFORE expanding safe boundaries.
+            # This prevents the greedy regex match from stealing markers from neighbors.
+            raw_start, raw_end = match.start(), match.end()
+            refined_start, refined_end = _refine_match_boundaries(text, raw_start, raw_end)
+
+            return _find_safe_boundaries(text, refined_start, refined_end)
     except re.error:
         pass
 
@@ -187,33 +321,16 @@ def _build_critic_markup(
     """
     parts = []
 
-    prefix_markup = ""
-    suffix_markup = ""
-    clean_target = target_text
+    # Strip balanced markers from target
+    prefix_markup, clean_target, suffix_markup = _strip_balanced_markers(target_text)
 
-    # Logic to strip balanced outer markers (e.g. **Term**) and place them outside
-    # This keeps the CriticMarkup cleaner: **{==Term==}** instead of {==**Term**==}
-
-    # Check for balanced **
-    if clean_target.startswith("**") and clean_target.endswith("**") and len(clean_target) >= 4:
-        prefix_markup += "**"
-        suffix_markup = "**" + suffix_markup
-        clean_target = clean_target[2:-2]
-    # Check for balanced __
-    elif clean_target.startswith("__") and clean_target.endswith("__") and len(clean_target) >= 4:
-        prefix_markup += "__"
-        suffix_markup = "__" + suffix_markup
-        clean_target = clean_target[2:-2]
-    # Check for balanced _
-    elif clean_target.startswith("_") and clean_target.endswith("_") and len(clean_target) >= 2:
-        prefix_markup += "_"
-        suffix_markup = "_" + suffix_markup
-        clean_target = clean_target[1:-1]
-    # Check for balanced *
-    elif clean_target.startswith("*") and clean_target.endswith("*") and len(clean_target) >= 2:
-        prefix_markup += "*"
-        suffix_markup = "*" + suffix_markup
-        clean_target = clean_target[1:-1]
+    # If we stripped markers from target, try to strip the SAME markers from new_text
+    clean_new = new_text
+    if prefix_markup and new_text:
+        # Check if new_text has the same outer markers
+        if new_text.startswith(prefix_markup) and new_text.endswith(suffix_markup):
+            inner_len = len(prefix_markup)
+            clean_new = new_text[inner_len:-inner_len] if len(new_text) > inner_len * 2 else new_text
 
     parts.append(prefix_markup)
 
@@ -221,14 +338,14 @@ def _build_critic_markup(
         parts.append(f"{{=={clean_target}==}}")
     else:
         has_target = bool(clean_target)
-        has_new = bool(new_text)
+        has_new = bool(clean_new)
 
         if has_target and not has_new:
             parts.append(f"{{--{clean_target}--}}")
         elif not has_target and has_new:
-            parts.append(f"{{++{new_text}++}}")
+            parts.append(f"{{++{clean_new}++}}")
         elif has_target and has_new:
-            parts.append(f"{{--{clean_target}--}}{{++{new_text}++}}")
+            parts.append(f"{{--{clean_target}--}}{{++{clean_new}++}}")
 
     parts.append(suffix_markup)
 

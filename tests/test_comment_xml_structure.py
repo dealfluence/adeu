@@ -4,7 +4,6 @@ Unit tests for Word XML structure compliance in comments.
 These tests verify that Adeu generates XML structures that match Word's expected format,
 isolated from fixture dependencies.
 
-All tests in this file are currently FAILING and represent bugs that need to be fixed.
 """
 
 import io

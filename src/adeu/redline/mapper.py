@@ -125,19 +125,20 @@ class DocumentMapper:
         """
         Strips markdown formatting markers from text for matching purposes.
         Handles: **bold**, __bold__, _italic_, *italic*, # headers
+        Only strips when content looks like actual formatted text (2+ word chars).
         """
         result = text
 
-        # Strip header markers at start of lines (ADDED)
+        # Strip header markers at start of lines
         result = re.sub(r"^#+\s*", "", result, flags=re.MULTILINE)
 
-        # Strip bold markers
-        result = re.sub(r"\*\*([^*]+)\*\*", r"\1", result)
-        result = re.sub(r"__([^_]+)__", r"\1", result)
+        # Strip bold markers - only when wrapping word content (not single chars)
+        result = re.sub(r"\*\*(\w[\w\s]*\w|\w{2,})\*\*", r"\1", result)
+        result = re.sub(r"__(\w[\w\s]*\w|\w{2,})__", r"\1", result)
 
-        # Strip italic markers
-        result = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", result)
-        result = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", result)
+        # Strip italic markers - only when wrapping word content
+        result = re.sub(r"(?<!\w)_(\w[\w\s]*\w|\w{2,})_(?!\w)", r"\1", result)
+        result = re.sub(r"(?<!\w)\*(\w[\w\s]*\w|\w{2,})\*(?!\w)", r"\1", result)
 
         return result
 
@@ -446,48 +447,44 @@ class DocumentMapper:
         target_text = self._replace_smart_quotes(target_text)
 
         parts = []
-        # Tokenize: Underscores, Whitespace, Quotes
-        token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
-
-        # Allow optional markdown markers at the start
-        parts.append(r"(?:\*\*|__|\*|_)?")
+        # Tokenize: Placeholder brackets with underscores, Whitespace, Quotes, Punctuation
+        token_pattern = re.compile(r"(\[_+\])|(\s+)|(['\"])|([.,;:])")
 
         last_idx = 0
         for match in token_pattern.finditer(target_text):
-            # Add literal text with optional intervening markdown
+            # Add literal text
             literal = target_text[last_idx : match.start()]
             if literal:
-                # Allow optional markdown markers between words
                 escaped = re.escape(literal)
-                # Insert optional markdown noise between word characters
-                escaped = re.sub(r"(\w)(\s)", r"\1(?:\*\*|__|\*|_)?\2", escaped)
                 parts.append(escaped)
 
-            g_underscore, g_space, g_quote = match.groups()
+            g_placeholder, g_space, g_quote, g_punct = match.groups()
 
-            # Allow optional markdown around separators
-            parts.append(r"(?:\*\*|__|\*|_)?")
-
-            if g_underscore:
-                parts.append(r"_+")
+            if g_placeholder:
+                # [___] placeholder - allow variable underscore count
+                parts.append(r"\[_+\]")
             elif g_space:
+                # Allow optional markdown markers around whitespace (between words)
+                # This handles cases like "Terms are **Net 90**" matching "Terms are Net 90"
+                parts.append(r"(?:\*\*|__|\*|_)?")
                 parts.append(r"\s+")
+                parts.append(r"(?:\*\*|__|\*|_)?")
             elif g_quote:
                 if g_quote == "'":
                     parts.append(r"[''']")
                 else:
                     parts.append(r"[\"" "]")
-
-            parts.append(r"(?:\*\*|__|\*|_)?")
+            elif g_punct:
+                # Allow optional markdown markers around punctuation
+                parts.append(r"(?:\*\*|__|\*|_)?")
+                parts.append(re.escape(g_punct))
+                parts.append(r"(?:\*\*|__|\*|_)?")
 
             last_idx = match.end()
 
         remaining = target_text[last_idx:]
         if remaining:
             parts.append(re.escape(remaining))
-
-        # Allow optional markdown markers at the end
-        parts.append(r"(?:\*\*|__|\*|_)?")
 
         return "".join(parts)
 

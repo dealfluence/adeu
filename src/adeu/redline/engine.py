@@ -128,26 +128,6 @@ class RedlineEngine:
         self.comments_manager = CommentsManager(self.doc)
         self.clean_mapper: Optional[DocumentMapper] = None
 
-    def _normalize_target_for_matching(self, target_text: str) -> str:
-        """
-        Normalizes target text by stripping inline markdown (bold/italic)
-        BUT preserves Headers (#) because they are part of the virtual document structure.
-        """
-        result = target_text
-
-        # Strip bold markers
-        result = re.sub(r"\*\*([^*]+)\*\*", r"\1", result)
-        result = re.sub(r"__([^_]+)__", r"\1", result)
-
-        # Strip italic markers
-        result = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", result)
-        result = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", result)
-
-        # IMPORTANT: Do NOT strip headers (^#+) because the Mapper includes them
-        # in the document text. Stripping them causes mismatch.
-
-        return result
-
     def _scan_existing_ids(self) -> int:
         """
         Scans the document body for existing w:id attributes in w:ins and w:del
@@ -539,10 +519,7 @@ class RedlineEngine:
             logger.warning("Skipping heuristic edit: target_text is empty.")
             return False
 
-        # Normalize target text by stripping markdown
-        normalized_target = self._normalize_target_for_matching(edit.target_text)
-
-        start_idx, match_len = self.mapper.find_match_index(normalized_target)
+        start_idx, match_len = self.mapper.find_match_index(edit.target_text)
 
         # FALLBACK: If Raw View match failed, try matching against Clean View
         use_clean_map = False
@@ -550,7 +527,7 @@ class RedlineEngine:
             if not self.clean_mapper:
                 self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
 
-            start_idx, match_len = self.clean_mapper.find_match_index(normalized_target)
+            start_idx, match_len = self.clean_mapper.find_match_index(edit.target_text)
             if start_idx != -1:
                 logger.info("Matched edit against Clean View.")
                 use_clean_map = True
