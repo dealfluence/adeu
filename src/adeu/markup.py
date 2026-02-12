@@ -1,8 +1,4 @@
 # FILE: src/adeu/markup.py
-"""
-Pure text transformation utilities for applying edits to Markdown
-and generating CriticMarkup output.
-"""
 
 import re
 from typing import List, Optional, Tuple
@@ -19,45 +15,105 @@ def _replace_smart_quotes(text: str) -> str:
     return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
 
+def _strip_markdown_for_matching(text: str) -> Tuple[str, List[int]]:
+    """
+    Strips markdown formatting markers and builds a position map.
+    Returns (stripped_text, position_map) where position_map[i] = original index.
+    """
+    result = []
+    position_map = []
+    i = 0
+
+    while i < len(text):
+        # Skip ** or __
+        if i < len(text) - 1 and text[i : i + 2] in ("**", "__"):
+            i += 2
+            continue
+        # Skip single * or _ that look like markdown (at word boundaries)
+        if text[i] in ("*", "_"):
+            prev_char = text[i - 1] if i > 0 else " "
+            next_char = text[i + 1] if i < len(text) - 1 else " "
+            # If at boundary (space or start/end), likely markdown
+            if prev_char in (" ", "\n", "\t") or next_char in (" ", "\n", "\t"):
+                i += 1
+                continue
+
+        position_map.append(i)
+        result.append(text[i])
+        i += 1
+
+    return "".join(result), position_map
+
+
+def _find_safe_boundaries(text: str, start: int, end: int) -> Tuple[int, int]:
+    """
+    Adjusts match boundaries to avoid splitting markdown formatting tokens.
+    Ensures that if we consume an opening marker, we also consume the closing one,
+    keeping the replacement balanced.
+    """
+    new_start = start
+    new_end = end
+
+    def expand_if_unbalanced(marker: str):
+        nonlocal new_start, new_end
+
+        # Get current match content
+        current_match = text[new_start:new_end]
+
+        # Check if unbalanced (odd number of markers)
+        if current_match.count(marker) % 2 != 0:
+            # Look in suffix first (most common case for regex consuming opening tag)
+            suffix = text[new_end:]
+            if suffix.startswith(marker):
+                new_end += len(marker)
+                return  # Re-evaluate? For now assuming simple adjacency
+
+            # Look in prefix
+            prefix = text[:new_start]
+            if prefix.endswith(marker):
+                new_start -= len(marker)
+                return
+
+    # Iteratively check markers.
+    # Order matters slightly if markers are nested, but repeating helps stability.
+    # We do a few passes to handle nesting like **_Text_**.
+
+    for _ in range(2):
+        expand_if_unbalanced("**")
+        expand_if_unbalanced("__")
+        expand_if_unbalanced("_")
+        expand_if_unbalanced("*")
+
+    return new_start, new_end
+
+
 def _make_fuzzy_regex(target_text: str) -> str:
     """
-    Constructs a regex pattern that permits:
+    Constructs a regex pattern from target text that permits:
     - Variable whitespace (\\s+)
     - Variable underscores (_+)
     - Smart quote variation
-    - Intervening Markdown formatting (*, _)
+    - Intervening markdown formatting (**, _, etc.)
     """
     target_text = _replace_smart_quotes(target_text)
 
     parts = []
-    # Tokenize: Underscores, Whitespace, Quotes, and common Punctuation that might border formatting
-    # We want to insert allowances for markdown markers (**, _, #) between tokens.
-    # Group 1: Underscores
-    # Group 2: Whitespace
-    # Group 3: Quotes
     token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
 
-    # This pattern matches 0 or more markdown formatting chars
-    # We allow * (bold), _ (italic), # (header), and maybe ` (code)
-    # We use a non-capturing group (?:...)*
-    # UPDATED: Allow whitespace only if attached to formatting chars (e.g. "## ")
-    # This ensures we capture "## " but do not eat isolated spaces.
-    markdown_noise = r"(?:[\*_#`]+[ \t]*)*"
+    # Pattern to allow optional markdown markers between tokens
+    md_noise = r"(?:\*\*|__|\*|_)*"
 
-    # ALLOW noise at the very start (e.g. "**Word")
-    parts.append(markdown_noise)
+    # Allow noise at start
+    parts.append(md_noise)
 
     last_idx = 0
     for match in token_pattern.finditer(target_text):
         literal = target_text[last_idx : match.start()]
         if literal:
-            # Escape the literal text (e.g. "Title:")
             parts.append(re.escape(literal))
+            parts.append(md_noise)
 
         g_underscore, g_space, g_quote = match.groups()
-
-        # Insert noise handler BEFORE the separator
-        parts.append(markdown_noise)
 
         if g_underscore:
             parts.append(r"_+")
@@ -65,20 +121,23 @@ def _make_fuzzy_regex(target_text: str) -> str:
             parts.append(r"\s+")
         elif g_quote:
             if g_quote == "'":
-                parts.append(r"['‘’]")
+                parts.append(r"[''']")
             else:
-                parts.append(r"[\"“”]")
+                parts.append(r"[\"" "]")
 
-        # Insert noise handler AFTER the separator
-        parts.append(markdown_noise)
-
+        parts.append(md_noise)
         last_idx = match.end()
 
     remaining = target_text[last_idx:]
     if remaining:
         parts.append(re.escape(remaining))
-        # Allow noise at the very end as well (e.g. "Word**")
-        parts.append(markdown_noise)
+
+    # Allow noise at end for cases where target is "Word" but text is "Word**"
+    # But ONLY if it's noise. This is risky?
+    # Actually, removing trailing md_noise here and letting _find_safe_boundaries
+    # handle the balance is safer.
+    # We removed trailing noise in previous attempt, let's keep it removed
+    # so we don't aggressively consume markers unless necessary.
 
     return "".join(parts)
 
@@ -94,24 +153,21 @@ def _find_match_in_text(text: str, target: str) -> Tuple[int, int]:
     # 1. Exact match
     idx = text.find(target)
     if idx != -1:
-        return idx, idx + len(target)
+        return _find_safe_boundaries(text, idx, idx + len(target))
 
     # 2. Smart quote normalization
     norm_text = _replace_smart_quotes(text)
     norm_target = _replace_smart_quotes(target)
     idx = norm_text.find(norm_target)
     if idx != -1:
-        return idx, idx + len(target)
+        return _find_safe_boundaries(text, idx, idx + len(norm_target))
 
-    # 3. Fuzzy regex match
+    # 3. Fuzzy regex match (handles markdown noise)
     try:
         pattern = _make_fuzzy_regex(target)
-        # Use re.IGNORECASE to be slightly more robust?
-        # Standard Word search is often case-insensitive, but safe replace usually isn't.
-        # Let's keep case sensitivity for now to avoid false positives.
         match = re.search(pattern, text)
         if match:
-            return match.start(), match.end()
+            return _find_safe_boundaries(text, match.start(), match.end())
     except re.error:
         pass
 
@@ -131,24 +187,50 @@ def _build_critic_markup(
     """
     parts = []
 
+    prefix_markup = ""
+    suffix_markup = ""
+    clean_target = target_text
+
+    # Logic to strip balanced outer markers (e.g. **Term**) and place them outside
+    # This keeps the CriticMarkup cleaner: **{==Term==}** instead of {==**Term**==}
+
+    # Check for balanced **
+    if clean_target.startswith("**") and clean_target.endswith("**") and len(clean_target) >= 4:
+        prefix_markup += "**"
+        suffix_markup = "**" + suffix_markup
+        clean_target = clean_target[2:-2]
+    # Check for balanced __
+    elif clean_target.startswith("__") and clean_target.endswith("__") and len(clean_target) >= 4:
+        prefix_markup += "__"
+        suffix_markup = "__" + suffix_markup
+        clean_target = clean_target[2:-2]
+    # Check for balanced _
+    elif clean_target.startswith("_") and clean_target.endswith("_") and len(clean_target) >= 2:
+        prefix_markup += "_"
+        suffix_markup = "_" + suffix_markup
+        clean_target = clean_target[1:-1]
+    # Check for balanced *
+    elif clean_target.startswith("*") and clean_target.endswith("*") and len(clean_target) >= 2:
+        prefix_markup += "*"
+        suffix_markup = "*" + suffix_markup
+        clean_target = clean_target[1:-1]
+
+    parts.append(prefix_markup)
+
     if highlight_only:
-        # Highlight mode: just mark the target
-        parts.append(f"{{=={target_text}==}}")
+        parts.append(f"{{=={clean_target}==}}")
     else:
-        # Full edit mode
-        has_target = bool(target_text)
+        has_target = bool(clean_target)
         has_new = bool(new_text)
 
         if has_target and not has_new:
-            # Deletion
-            parts.append(f"{{--{target_text}--}}")
+            parts.append(f"{{--{clean_target}--}}")
         elif not has_target and has_new:
-            # Pure insertion
             parts.append(f"{{++{new_text}++}}")
         elif has_target and has_new:
-            # Modification
-            parts.append(f"{{--{target_text}--}}{{++{new_text}++}}")
-        # else: both empty, nothing to output
+            parts.append(f"{{--{clean_target}--}}{{++{new_text}++}}")
+
+    parts.append(suffix_markup)
 
     # Build metadata block
     meta_parts = []
@@ -172,22 +254,11 @@ def apply_edits_to_markdown(
 ) -> str:
     """
     Applies edits to Markdown text and returns CriticMarkup-annotated output.
-
-    Args:
-        markdown_text: The source Markdown document.
-        edits: List of edits with target_text, new_text, and optional comment.
-        include_index: If True, include the edit's 0-based index in the output markup.
-        highlight_only: If True, only highlight target_text with {==...==} notation
-                        without applying insertions/deletions.
-
-    Returns:
-        Transformed Markdown string with CriticMarkup annotations.
     """
     if not edits:
         return markdown_text
 
     # Step 1: Find match positions for each edit
-    # Store: (start_idx, end_idx, actual_matched_text, edit, original_index)
     matched_edits: List[Tuple[int, int, str, DocumentEdit, int]] = []
 
     for idx, edit in enumerate(edits):
@@ -195,11 +266,9 @@ def apply_edits_to_markdown(
 
         if not target:
             if highlight_only:
-                # In highlight mode, skip edits with no target
                 logger.debug(f"Skipping edit {idx}: no target_text in highlight_only mode")
                 continue
             else:
-                # Pure insertion - needs anchor context
                 logger.warning(f"Skipping edit {idx}: pure insertion without target_text not supported in text mode")
                 continue
 
@@ -209,21 +278,18 @@ def apply_edits_to_markdown(
             logger.warning(f"Skipping edit {idx}: target_text not found: '{target[:50]}...'")
             continue
 
-        # Capture the actual text that was matched (may differ from target due to fuzzy matching)
         actual_matched_text = markdown_text[start:end]
         matched_edits.append((start, end, actual_matched_text, edit, idx))
 
-    # Step 2: Check for overlapping edits, first-in-list wins
+    # Step 2: Check for overlapping edits
     matched_edits_filtered: List[Tuple[int, int, str, DocumentEdit, int]] = []
     occupied_ranges: List[Tuple[int, int]] = []
 
-    # Sort by original index to process in list order for overlap resolution
     matched_edits.sort(key=lambda x: x[4])
 
     for start, end, actual_text, edit, orig_idx in matched_edits:
         overlaps = False
         for occ_start, occ_end in occupied_ranges:
-            # Check overlap: ranges overlap if start < occ_end and end > occ_start
             if start < occ_end and end > occ_start:
                 overlaps = True
                 logger.warning(f"Skipping edit {orig_idx}: overlaps with previously matched edit")
@@ -233,7 +299,7 @@ def apply_edits_to_markdown(
             matched_edits_filtered.append((start, end, actual_text, edit, orig_idx))
             occupied_ranges.append((start, end))
 
-    # Step 3: Sort by position descending (apply from end to start)
+    # Step 3: Sort by position descending
     matched_edits_filtered.sort(key=lambda x: x[0], reverse=True)
 
     # Step 4: Apply edits
@@ -243,7 +309,7 @@ def apply_edits_to_markdown(
         new = edit.new_text or ""
 
         markup = _build_critic_markup(
-            target_text=actual_text,  # Use actual matched text, not user input
+            target_text=actual_text,
             new_text=new,
             comment=edit.comment,
             edit_index=orig_idx,
@@ -251,7 +317,6 @@ def apply_edits_to_markdown(
             highlight_only=highlight_only,
         )
 
-        # Replace the target range with the markup
         result = result[:start] + markup + result[end:]
 
     return result

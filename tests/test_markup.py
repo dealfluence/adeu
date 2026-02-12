@@ -429,11 +429,6 @@ class TestEdgeCases:
         assert "{--CD--}{++ZW++}" in result
 
 
-# FILE: tests/test_markup.py
-
-# ... existing code ...
-
-
 class TestMarkdownFormattingNoise:
     """Tests for matching plain text against Markdown-formatted source text."""
 
@@ -445,7 +440,7 @@ class TestMarkdownFormattingNoise:
         edits = [DocumentEdit(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
-        # Should match the bolded text and wrap it
+        # Should match the bolded text and wrap it, keeping markers inside
         assert "{==**Período de Prueba:** Los==}" in result
 
     def test_ignore_italic_markers(self):

@@ -1,3 +1,5 @@
+# FILE: src/adeu/redline/mapper.py
+
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -14,7 +16,7 @@ from docx.text.run import Run
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
-    get_paragraph_prefix,
+    get_paragraph_prefix,  # ENSURE THIS IMPORT IS PRESENT
     get_run_style_markers,
     get_run_text,
     iter_block_items,
@@ -69,6 +71,7 @@ class DocumentMapper:
 
         for item in iter_block_items(container):
             if isinstance(item, Paragraph):
+                # FIX: Include paragraph prefix (e.g. "# ") in the mapper
                 prefix = get_paragraph_prefix(item)
                 if prefix:
                     self._add_virtual_text(prefix, current, item)
@@ -118,10 +121,29 @@ class DocumentMapper:
 
         return current
 
+    def _strip_markdown_formatting(self, text: str) -> str:
+        """
+        Strips markdown formatting markers from text for matching purposes.
+        Handles: **bold**, __bold__, _italic_, *italic*, # headers
+        """
+        result = text
+
+        # Strip header markers at start of lines (ADDED)
+        result = re.sub(r"^#+\s*", "", result, flags=re.MULTILINE)
+
+        # Strip bold markers
+        result = re.sub(r"\*\*([^*]+)\*\*", r"\1", result)
+        result = re.sub(r"__([^_]+)__", r"\1", result)
+
+        # Strip italic markers
+        result = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", result)
+        result = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)", r"\1", result)
+
+        return result
+
     def _map_paragraph_content(self, paragraph: Paragraph, start_offset: int) -> int:
         """
         Maps Runs to Spans, handling Flattened CriticMarkup generation.
-        Matches logic in ingest.py _build_paragraph_text.
         """
         current = start_offset
 
@@ -129,25 +151,19 @@ class DocumentMapper:
         active_ins_event: Optional[DocxEvent] = None
         active_del_event: Optional[DocxEvent] = None
 
-        # Buffers for lookahead flushing
         deferred_meta_states: List[Tuple] = []
-
-        # State for Run Coalescing (Must match ingest.py behavior)
-        current_wrappers = ("", "")  # (start, end)
+        current_wrappers = ("", "")
         pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
-        # Store: (kind, text, run_obj, ins_id, del_id)
 
         items = list(iter_paragraph_content(paragraph))
 
         for i, item in enumerate(items):
             if isinstance(item, Run):
-                # 1. Prepare Content
                 prefix, suffix = get_run_style_markers(item)
                 run_parts: List[Tuple[str, str, Optional[Run]]] = []
 
                 text = get_run_text(item)
 
-                # Handle Splitting Formatting across Newlines (Bugfix)
                 if "\n" in text and (prefix or suffix):
                     parts = text.split("\n")
                     for idx, part in enumerate(parts):
@@ -167,43 +183,31 @@ class DocumentMapper:
                     if suffix:
                         run_parts.append(("virtual", suffix, None))
 
-                # Clean View Logic: Skip deleted text
                 if self.clean_view and active_del_event:
-                    # Even though we skip mapping this text to the full_text buffer,
-                    # we proceed to event handling loop to keep state consistent.
-                    # BUT, we must NOT append to spans or full_text.
                     pass
 
-                # Reconstruct the raw segment text used for coalescing checks
-                # We use the parts we just built to be consistent
                 full_seg_text = "".join(x[1] for x in run_parts)
 
-                # Initialize IDs safely (used for lookahead logic even if text is empty)
+                # Initialize IDs safely before use
                 curr_ins_id = active_ins_event.id if active_ins_event else None
                 curr_del_id = active_del_event.id if active_del_event else None
 
                 if full_seg_text and not (self.clean_view and curr_del_id):
-                    # Check wrapper tokens
                     if self.clean_view:
                         new_wrappers = ("", "")
                     else:
                         start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
                         new_wrappers = (start_token, end_token)
 
-                    # --- COALESCING LOGIC ---
                     if pending_runs and new_wrappers == current_wrappers:
-                        # Same state -> Buffer the parts
                         for kind, txt, r_obj in run_parts:
                             pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
                     else:
-                        # Flush pending
                         if pending_runs:
                             s_tok, e_tok = current_wrappers
-                            # Output Start Token
                             if s_tok:
                                 self._add_virtual_text(s_tok, current, paragraph)
                                 current += len(s_tok)
-                            # Output Buffered Parts
                             for kind, txt, r_obj, i_id, d_id in pending_runs:
                                 if kind == "virtual":
                                     self._add_virtual_text(txt, current, paragraph)
@@ -220,24 +224,20 @@ class DocumentMapper:
                                     self.spans.append(span)
                                     self.full_text += txt
                                 current += len(txt)
-                            # Output End Token
                             if e_tok:
                                 self._add_virtual_text(e_tok, current, paragraph)
                                 current += len(e_tok)
 
-                        # Start new buffer
                         current_wrappers = new_wrappers
                         pending_runs = []
                         for kind, txt, r_obj in run_parts:
                             pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
-                    # ------------------------
 
-                # Metadata Handling (Deferral Logic)
+                # Metadata Handling
                 if not self.clean_view:
-                    # Snapshot state
                     state_snapshot = (
-                        {active_ins_event.id: active_ins_event} if active_ins_event else {},
-                        {active_del_event.id: active_del_event} if active_del_event else {},
+                        ({active_ins_event.id: active_ins_event} if active_ins_event else {}),
+                        ({active_del_event.id: active_del_event} if active_del_event else {}),
                         active_ids.copy(),
                     )
                     deferred_meta_states.append(state_snapshot)
@@ -246,7 +246,6 @@ class DocumentMapper:
                     is_redline = bool(curr_ins_id) or bool(curr_del_id)
 
                     if is_redline:
-                        # Lookahead
                         j = i + 1
                         next_is_redline = False
                         temp_ins = bool(curr_ins_id)
@@ -273,14 +272,11 @@ class DocumentMapper:
                             should_defer = True
 
                     if not should_defer:
-                        # Flush Pending Text Buffer before Metadata
                         if pending_runs:
                             s_tok, e_tok = current_wrappers
-                            # Output Start Token
                             if s_tok:
                                 self._add_virtual_text(s_tok, current, paragraph)
                                 current += len(s_tok)
-                            # Output Buffered Parts
                             for kind, txt, r_obj, i_id, d_id in pending_runs:
                                 if kind == "virtual":
                                     self._add_virtual_text(txt, current, paragraph)
@@ -297,14 +293,12 @@ class DocumentMapper:
                                     self.spans.append(span)
                                     self.full_text += txt
                                 current += len(txt)
-                            # Output End Token
                             if e_tok:
                                 self._add_virtual_text(e_tok, current, paragraph)
                                 current += len(e_tok)
                             pending_runs = []
                             current_wrappers = ("", "")
 
-                        # Flush Metadata
                         meta_block = self._build_merged_meta_block(deferred_meta_states)
                         if meta_block:
                             full_meta = f"{{>>{meta_block}<<}}"
@@ -313,7 +307,6 @@ class DocumentMapper:
                         deferred_meta_states = []
 
             elif isinstance(item, DocxEvent):
-                # Event -> Must flush pending text
                 if pending_runs:
                     s_tok, e_tok = current_wrappers
                     if s_tok:
@@ -341,7 +334,6 @@ class DocumentMapper:
                     pending_runs = []
                     current_wrappers = ("", "")
 
-                # Update State
                 if item.type == "start":
                     active_ids.add(item.id)
                 elif item.type == "end":
@@ -401,16 +393,11 @@ class DocumentMapper:
         return "", ""
 
     def _build_merged_meta_block(self, states_list) -> str:
-        """
-        Combines metadata from multiple states, removing duplicates.
-        Canonical Order: Changes first, then Comments.
-        """
         change_lines = []
         comment_lines = []
         seen_sigs = set()
 
         for ins_map, del_map, comments_set in states_list:
-            # 1. Changes
             for map_obj in (ins_map, del_map):
                 for uid, meta in map_obj.items():
                     sig = f"Chg:{uid}"
@@ -419,7 +406,6 @@ class DocumentMapper:
                         change_lines.append(f"[{sig}] {auth}")
                         seen_sigs.add(sig)
 
-            # 2. Comments
             sorted_ids = sorted(list(comments_set))
             for c_id in sorted_ids:
                 if c_id not in self.comments_map:
@@ -453,12 +439,9 @@ class DocumentMapper:
         return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
     def _make_fuzzy_regex(self, target_text: str) -> str:
-        """
-        Constructs a regex pattern from target text that permits:
-        - Variable whitespace (\\s+)
-        - Variable underscores (_+)
-        - Smart quote variation
-        """
+        # First strip markdown from the target for cleaner matching
+        target_text = self._strip_markdown_formatting(target_text)
+
         # Normalize quotes in target for consistency
         target_text = self._replace_smart_quotes(target_text)
 
@@ -466,14 +449,24 @@ class DocumentMapper:
         # Tokenize: Underscores, Whitespace, Quotes
         token_pattern = re.compile(r"(_+)|(\s+)|(['\"])")
 
+        # Allow optional markdown markers at the start
+        parts.append(r"(?:\*\*|__|\*|_)?")
+
         last_idx = 0
         for match in token_pattern.finditer(target_text):
-            # Add literal text
+            # Add literal text with optional intervening markdown
             literal = target_text[last_idx : match.start()]
             if literal:
-                parts.append(re.escape(literal))
+                # Allow optional markdown markers between words
+                escaped = re.escape(literal)
+                # Insert optional markdown noise between word characters
+                escaped = re.sub(r"(\w)(\s)", r"\1(?:\*\*|__|\*|_)?\2", escaped)
+                parts.append(escaped)
 
             g_underscore, g_space, g_quote = match.groups()
+
+            # Allow optional markdown around separators
+            parts.append(r"(?:\*\*|__|\*|_)?")
 
             if g_underscore:
                 parts.append(r"_+")
@@ -481,15 +474,20 @@ class DocumentMapper:
                 parts.append(r"\s+")
             elif g_quote:
                 if g_quote == "'":
-                    parts.append(r"['‘’]")
+                    parts.append(r"[''']")
                 else:
-                    parts.append(r"[\"“”]")
+                    parts.append(r"[\"" "]")
+
+            parts.append(r"(?:\*\*|__|\*|_)?")
 
             last_idx = match.end()
 
         remaining = target_text[last_idx:]
         if remaining:
             parts.append(re.escape(remaining))
+
+        # Allow optional markdown markers at the end
+        parts.append(r"(?:\*\*|__|\*|_)?")
 
         return "".join(parts)
 
@@ -508,10 +506,19 @@ class DocumentMapper:
         norm_target = self._replace_smart_quotes(target_text)
         start_idx = norm_full.find(norm_target)
         if start_idx != -1:
-            # Since smart quote replacement is 1:1, length matches target_text
             return start_idx, len(target_text)
 
-        # 3. Fuzzy Regex Match
+        # 3. Strip markdown from target and try matching (ADDED)
+        stripped_target = self._strip_markdown_formatting(target_text)
+
+        # We can't use index from stripped_full directly on full_text,
+        # but if it matches, it suggests we should try a fuzzy approach or fallback
+        # This fallback is primarily for Header matching (#)
+        if stripped_target in self.full_text:
+            start_idx = self.full_text.find(stripped_target)
+            return start_idx, len(stripped_target)
+
+        # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
             match = re.search(pattern, self.full_text)
@@ -627,10 +634,6 @@ class DocumentMapper:
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:
-        """
-        Returns the first real TextSpan in the range to check context.
-        Useful for detecting if we are editing inside an Insertion.
-        """
         real_spans = [s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx]
         if real_spans:
             return real_spans[0]
