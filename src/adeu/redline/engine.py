@@ -120,9 +120,14 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         mlen = len(marker)
         tgt_rem = target[prefix_len : len(target) - suffix_len if suffix_len else len(target)]
         new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
-        if (tgt_rem.startswith(marker) and new_rem.startswith(marker) and
-                tgt_rem.endswith(marker) and new_rem.endswith(marker) and
-                len(tgt_rem) > 2 * mlen and len(new_rem) > 2 * mlen):
+        if (
+            tgt_rem.startswith(marker)
+            and new_rem.startswith(marker)
+            and tgt_rem.endswith(marker)
+            and new_rem.endswith(marker)
+            and len(tgt_rem) > 2 * mlen
+            and len(new_rem) > 2 * mlen
+        ):
             prefix_len += mlen
             suffix_len += mlen
 
@@ -241,7 +246,13 @@ class RedlineEngine:
 
         return results
 
-    def track_insert(self, text: str, anchor_run: Optional[Run] = None, comment: Optional[str] = None, suppress_inherited: bool = False):
+    def track_insert(
+        self,
+        text: str,
+        anchor_run: Optional[Run] = None,
+        comment: Optional[str] = None,
+        suppress_inherited: bool = False,
+    ):
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs.
         """
@@ -765,7 +776,7 @@ class RedlineEngine:
                         text_to_insert = clean_text
 
                 # Fix 5.3: Suppress inherited formatting if new text has no markdown markers
-                _has_markdown = bool(re.search(r'\*\*|_', text_to_insert))
+                _has_markdown = bool(re.search(r"\*\*|_", text_to_insert))
                 ins_elem = self.track_insert(
                     text_to_insert,
                     anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
