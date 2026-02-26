@@ -251,10 +251,10 @@ def get_run_text(run: Run) -> str:
     """
     text = ""
     for child in run._element:
-        if child.tag == qn("w:t"):
-            text += child.text or ""
-        elif child.tag == qn("w:delText"):
-            text += child.text or ""
+        if child.tag == qn("w:t") or child.tag == qn("w:delText"):
+            # Fix 5.1: Normalize literal tabs to spaces to match w:tab behavior
+            raw = child.text or ""
+            text += raw.replace("\t", " ")
         elif child.tag == qn("w:tab"):
             text += " "  # Convert tab to space
         elif child.tag == qn("w:br"):

@@ -76,12 +76,13 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
 
         return -1
 
+    # Fix 5.5: Backtrack prefix if it leaves unbalanced markdown markers in remaining
     while prefix_len > 0:
-        current_slice = target[:prefix_len]
-        unbalanced_idx = get_unbalanced_index(current_slice)
-        if unbalanced_idx != -1:
-            # Backtrack to BEFORE the unbalanced token
-            prefix_len = unbalanced_idx
+        text_slice = target[:prefix_len]
+        b_count = text_slice.count("**")
+        u_count = text_slice.count("_")
+        if b_count % 2 != 0 or u_count % 2 != 0:
+            prefix_len -= 1
         else:
             break
 
@@ -99,11 +100,12 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
             suffix_len -= 1
 
-    # Safety: Backtrack Suffix if unbalanced
+    # Fix 5.5: Backtrack suffix if it leaves unbalanced markdown markers
     while suffix_len > 0:
-        current_slice = target[len(target) - suffix_len :]
-        unbalanced_idx = get_unbalanced_index(current_slice)
-        if unbalanced_idx != -1:
+        text_slice = target[len(target) - suffix_len :]
+        b_count = text_slice.count("**")
+        u_count = text_slice.count("_")
+        if b_count % 2 != 0 or u_count % 2 != 0:
             suffix_len -= 1
         else:
             break
@@ -111,6 +113,18 @@ def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     # CHANGE: If the calculated suffix is purely whitespace, ignore it (set to 0).
     if suffix_len > 0 and target[len(target) - suffix_len :].isspace():
         suffix_len = 0
+
+    # Fix 5.5: If both remaining strings share balanced outer ** or _ wrappers,
+    # absorb those wrappers into prefix/suffix to avoid leaving markers in the diff.
+    for marker in ["**", "_"]:
+        mlen = len(marker)
+        tgt_rem = target[prefix_len : len(target) - suffix_len if suffix_len else len(target)]
+        new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
+        if (tgt_rem.startswith(marker) and new_rem.startswith(marker) and
+                tgt_rem.endswith(marker) and new_rem.endswith(marker) and
+                len(tgt_rem) > 2 * mlen and len(new_rem) > 2 * mlen):
+            prefix_len += mlen
+            suffix_len += mlen
 
     return prefix_len, suffix_len
 
@@ -227,7 +241,7 @@ class RedlineEngine:
 
         return results
 
-    def track_insert(self, text: str, anchor_run: Optional[Run] = None, comment: Optional[str] = None):
+    def track_insert(self, text: str, anchor_run: Optional[Run] = None, comment: Optional[str] = None, suppress_inherited: bool = False):
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs.
         """
@@ -280,7 +294,7 @@ class RedlineEngine:
                     if anchor_run and anchor_run._element.rPr is not None:
                         new_run.append(deepcopy(anchor_run._element.rPr))
 
-                    self._apply_run_props(new_run, seg_props)
+                    self._apply_run_props(new_run, seg_props, suppress_inherited=suppress_inherited)
 
                     t = create_element("w:t")
                     self._set_text_content(t, seg_text)
@@ -303,7 +317,7 @@ class RedlineEngine:
 
         # 1. Inline Logic
         first_line = lines[0]
-        ins_elem = self._track_insert_inline(first_line, anchor_run)
+        ins_elem = self._track_insert_inline(first_line, anchor_run, suppress_inherited=suppress_inherited)
 
         remaining_lines = lines[1:]
         if remaining_lines and remaining_lines[-1] == "":
@@ -345,7 +359,7 @@ class RedlineEngine:
                     if anchor_run and anchor_run._element.rPr is not None:
                         new_run.append(deepcopy(anchor_run._element.rPr))
 
-                    self._apply_run_props(new_run, seg_props)
+                    self._apply_run_props(new_run, seg_props, suppress_inherited=suppress_inherited)
 
                     t = create_element("w:t")
                     self._set_text_content(t, seg_text)
@@ -357,22 +371,43 @@ class RedlineEngine:
 
         return ins_elem
 
-    def _apply_run_props(self, run_element, props: Dict[str, Any]):
+    def _apply_run_props(self, run_element, props: Dict[str, Any], suppress_inherited: bool = False) -> None:
+        """
+        Applies Bold/Italic properties to a run.
+        Fix 5.3: When suppress_inherited=True, explicitly turns off properties not in props,
+        preventing inheritance bleed from deepcopied runs.
+        """
         if not props:
-            return
+            if not suppress_inherited:
+                return
+            props = {}
 
         rPr = run_element.find(qn("w:rPr"))
         if rPr is None:
             rPr = create_element("w:rPr")
             run_element.insert(0, rPr)
 
+        # Handle Bold
+        b_tag = rPr.find(qn("w:b"))
         if props.get("bold"):
-            b = create_element("w:b")
-            rPr.append(b)
+            if b_tag is None:
+                b_tag = create_element("w:b")
+                rPr.append(b_tag)
+            b_tag.set(qn("w:val"), "1")
+        elif suppress_inherited:
+            if b_tag is not None:
+                b_tag.set(qn("w:val"), "0")
 
+        # Handle Italic
+        i_tag = rPr.find(qn("w:i"))
         if props.get("italic"):
-            i = create_element("w:i")
-            rPr.append(i)
+            if i_tag is None:
+                i_tag = create_element("w:i")
+                rPr.append(i_tag)
+            i_tag.set(qn("w:val"), "1")
+        elif suppress_inherited:
+            if i_tag is not None:
+                i_tag.set(qn("w:val"), "0")
 
     def _set_paragraph_style(self, p_element, style_name: str):
         existing_pPr = p_element.find(qn("w:pPr"))
@@ -390,7 +425,7 @@ class RedlineEngine:
         pPr.append(pStyle)
         p_element.insert(0, pPr)
 
-    def _track_insert_inline(self, text: str, anchor_run: Optional[Run] = None):
+    def _track_insert_inline(self, text: str, anchor_run: Optional[Run] = None, suppress_inherited: bool = False):
         ins = self._create_track_change_tag("w:ins")
 
         segments = self._parse_inline_markdown(text)
@@ -401,7 +436,7 @@ class RedlineEngine:
             if anchor_run and anchor_run._element.rPr is not None:
                 run.append(deepcopy(anchor_run._element.rPr))
 
-            self._apply_run_props(run, seg_props)
+            self._apply_run_props(run, seg_props, suppress_inherited=suppress_inherited)
 
             t = create_element("w:t")
             self._set_text_content(t, seg_text)
@@ -493,12 +528,21 @@ class RedlineEngine:
 
         applied = 0
         skipped = 0
+        occupied_ranges: List[Tuple[int, int]] = []
 
         # Indexed First (Reverse Order)
         indexed_edits.sort(key=lambda x: x._match_start_index or 0, reverse=True)
         for edit in indexed_edits:
+            # Fix 5.6: Prevent collisions from overlapping edits
+            start = edit._match_start_index or 0
+            end = start + (len(edit.target_text) if edit.target_text else 0)
+            if any(start < occ_end and end > occ_start for occ_start, occ_end in occupied_ranges):
+                logger.warning(f"Skipping overlapping edit at index {start}")
+                skipped += 1
+                continue
             if self._apply_single_edit_indexed(edit):
                 applied += 1
+                occupied_ranges.append((start, end))
             else:
                 skipped += 1
 
@@ -507,6 +551,22 @@ class RedlineEngine:
             unindexed_edits.sort(key=lambda x: len(x.target_text), reverse=True)
             self.mapper._build_map()
             for edit in unindexed_edits:
+                # Fix 5.6: Check for overlaps in heuristic path too
+                if edit.target_text:
+                    start_idx, match_len = self.mapper.find_match_index(edit.target_text)
+                    if start_idx != -1:
+                        end_idx = start_idx + match_len
+                        if any(start_idx < occ_end and end_idx > occ_start for occ_start, occ_end in occupied_ranges):
+                            logger.warning(f"Skipping overlapping heuristic edit at index {start_idx}")
+                            skipped += 1
+                            continue
+                        if self._apply_single_edit_heuristic(edit):
+                            applied += 1
+                            occupied_ranges.append((start_idx, end_idx))
+                            self.mapper._build_map()
+                        else:
+                            skipped += 1
+                        continue
                 if self._apply_single_edit_heuristic(edit):
                     applied += 1
                     self.mapper._build_map()
@@ -704,10 +764,13 @@ class RedlineEngine:
                     if current_style and getattr(current_style, "name", "") == style_name:
                         text_to_insert = clean_text
 
+                # Fix 5.3: Suppress inherited formatting if new text has no markdown markers
+                _has_markdown = bool(re.search(r'\*\*|_', text_to_insert))
                 ins_elem = self.track_insert(
                     text_to_insert,
                     anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
                     comment=edit.comment,
+                    suppress_inherited=not _has_markdown,
                 )
                 if ins_elem is not None:
                     parent.insert(del_index + 1, ins_elem)
