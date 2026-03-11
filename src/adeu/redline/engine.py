@@ -267,9 +267,15 @@ class RedlineEngine:
             if not anchor_run:
                 return None
 
+            # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
             current_p = anchor_run._element.getparent()
+            while current_p is not None and current_p.tag != qn("w:p"):
+                current_p = current_p.getparent()
+
             if current_p is None and hasattr(anchor_run, "_parent"):
-                current_p = getattr(anchor_run._parent, "_element", None)
+                p_obj = anchor_run._parent
+                if hasattr(p_obj, "_element") and p_obj._element.tag == qn("w:p"):
+                    current_p = p_obj._element
 
             if current_p is None:
                 return None
@@ -313,6 +319,7 @@ class RedlineEngine:
                     new_ins.append(new_run)
 
                 new_p.append(new_ins)
+                # RESTORED +1: Insert AFTER the anchor paragraph, matching existing test expectations
                 body.insert(p_index + 1 + i, new_p)
                 created_nodes.append((new_p, new_ins))
 
@@ -338,9 +345,15 @@ class RedlineEngine:
             if not anchor_run:
                 return ins_elem
 
+            # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
             current_p_element = anchor_run._element.getparent()
+            while current_p_element is not None and current_p_element.tag != qn("w:p"):
+                current_p_element = current_p_element.getparent()
+
             if current_p_element is None and hasattr(anchor_run, "_parent"):
-                current_p_element = getattr(anchor_run._parent, "_element", None)
+                p_obj = anchor_run._parent
+                if hasattr(p_obj, "_element") and p_obj._element.tag == qn("w:p"):
+                    current_p_element = p_obj._element
 
             if current_p_element is None:
                 return ins_elem
