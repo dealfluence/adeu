@@ -1,3 +1,4 @@
+# FILE: src/adeu/server.py
 import logging
 import sys
 from io import BytesIO
@@ -56,13 +57,17 @@ def read_docx(file_path: str, clean_view: bool = False) -> str:
     """
     try:
         stream = _read_file_bytes(file_path)
-        return extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
+        return extract_text_from_stream(
+            stream, filename=Path(file_path).name, clean_view=clean_view
+        )
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 
 @mcp.tool()
-def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool = True) -> str:
+def diff_docx_files(
+    original_path: str, modified_path: str, compare_clean: bool = True
+) -> str:
     """
     Compares two DOCX files and returns a text-based Unified Diff.
 
@@ -76,10 +81,14 @@ def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool 
     """
     try:
         stream_orig = _read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
+        text_orig = extract_text_from_stream(
+            stream_orig, filename=Path(original_path).name, clean_view=compare_clean
+        )
 
         stream_mod = _read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
+        text_mod = extract_text_from_stream(
+            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean
+        )
 
         edits = generate_edits_from_text(text_orig, text_mod)
 
@@ -129,91 +138,77 @@ def diff_docx_files(original_path: str, modified_path: str, compare_clean: bool 
 
 
 @mcp.tool()
-def apply_structured_edits(
+def process_document_batch(
     original_docx_path: str,
-    edits: List[DocumentEdit],
     author_name: str,
+    actions: Optional[List[ReviewAction]] = None,
+    edits: Optional[List[DocumentEdit]] = None,
     output_path: Optional[str] = None,
 ) -> str:
     """
-    Applies a list of text replacements to the DOCX file (Track Changes).
+    ATOMIC PIPELINE: Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits in a single operation.
 
-    Matching Strategy:
+    This is the ONLY tool you should use to modify the document text, accept/reject changes, or reply to comments.
+    It reads the document once, resolves all structural review actions, recalculates the Virtual DOM boundaries,
+    and then applies text edits safely without misanchoring.
+
+    Matching Strategy for Edits:
     - The tool tries to match `target_text` against the document.
     - It supports 'Fuzzy Matching' to handle extra whitespace or varying legal placeholders (e.g. [___] vs [_____]).
-    - It can match against the 'Accepted' view of the document even if the raw file contains deleted text.
 
     Args:
         original_docx_path: Absolute path to the source file.
-        edits: List of edits. Each edit transforms `target_text` -> `new_text`.
         author_name: Name to appear in Track Changes (e.g., 'Reviewer AI').
-        output_path: Optional. If not provided, updates the file in place (if it
-        ends in _redlined) or creates a new one.
-    """
-    try:
-        if not author_name or not author_name.strip():
-            return "Error: author_name cannot be empty."
-
-        stream = _read_file_bytes(original_docx_path)
-        engine = RedlineEngine(stream, author=author_name)
-        applied, skipped = engine.apply_edits(edits)
-
-        if not output_path:
-            p = Path(original_docx_path)
-            if p.stem.endswith("_redlined"):
-                output_path = str(p)  # Overwrite if already redlined
-            else:
-                output_path = str(p.parent / f"{p.stem}_redlined{p.suffix}")
-
-        result_stream = engine.save_to_stream()
-        _save_stream(result_stream, output_path)
-
-        return f"Applied {applied} edits. Skipped {skipped} edits. Saved to: {output_path}"
-
-    except Exception as e:
-        return f"Error applying edits: {str(e)}"
-
-
-@mcp.tool()
-def manage_review_actions(
-    original_docx_path: str,
-    actions: List[ReviewAction],
-    author_name: str,
-    output_path: Optional[str] = None,
-) -> str:
-    """
-    Manages existing Track Changes and Comments in the document.
-    Use this to ACCEPT or REJECT specific edits (by ID), or REPLY to comments.
-
-    Args:
-        original_docx_path: Absolute path to the source file.
-        actions: List of actions to perform (ACCEPT, REJECT, REPLY).
+        actions: Optional list of review actions (ACCEPT, REJECT, REPLY) to perform FIRST.
                  Target IDs (e.g. "Chg:1" or "Com:101") come from the CriticMarkup output.
-        author_name: Name of the reviewer.
-        output_path: Optional output path.
+        edits: Optional list of text replacements to perform SECOND. Each edit transforms `target_text` -> `new_text`.
+        output_path: Optional output path. If not provided, updates the file in place
+                     (if it ends in _processed or _redlined) or creates a new one.
     """
     try:
         if not author_name or not author_name.strip():
             return "Error: author_name cannot be empty."
 
+        actions = actions or []
+        edits = edits or []
+
+        if not actions and not edits:
+            return "Error: No actions or edits provided."
+
         stream = _read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name)
-        applied, skipped = engine.apply_review_actions(actions)
+
+        applied_actions, skipped_actions = 0, 0
+        if actions:
+            applied_actions, skipped_actions = engine.apply_review_actions(actions)
+
+            # CRITICAL: Rebuild the mapper so text edits anchor against the post-action DOM state
+            if edits:
+                engine.mapper._build_map()
+                engine.clean_mapper = None
+
+        applied_edits, skipped_edits = 0, 0
+        if edits:
+            applied_edits, skipped_edits = engine.apply_edits(edits)
 
         if not output_path:
             p = Path(original_docx_path)
-            if p.stem.endswith("_reviewed"):
+            if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
                 output_path = str(p)
             else:
-                output_path = str(p.parent / f"{p.stem}_reviewed{p.suffix}")
+                output_path = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
 
-        return f"Applied {applied} actions. Skipped {skipped} actions. Saved to: {output_path}"
+        return (
+            f"Batch complete. Saved to: {output_path}\n"
+            f"Actions: {applied_actions} applied, {skipped_actions} skipped.\n"
+            f"Edits: {applied_edits} applied, {skipped_edits} skipped."
+        )
 
     except Exception as e:
-        return f"Error managing actions: {str(e)}"
+        return f"Error processing batch: {str(e)}"
 
 
 @mcp.tool()
@@ -223,18 +218,6 @@ def accept_all_changes(docx_path: str, output_path: Optional[str] = None) -> str
     Useful for finalizing a round of negotiation before starting a new one.
     """
     try:
-        # We can simulate this by reading the document and accepting changes?
-        # python-docx doesn't strictly have an "Accept All" feature natively that handles complex XML perfectly.
-        # However, we can use a simpler approach:
-        # 1. Load Doc.
-        # 2. Iterate and remove <w:del>.
-        # 3. Unwrap <w:ins>.
-        # 4. Remove comments.
-        #
-        # Ideally, we should add this logic to RedlineEngine as a utility.
-        # For now, let's implement a basic version here or defer to engine.
-
-        # Let's add the method to engine.py for robustness.
         stream = _read_file_bytes(docx_path)
         engine = RedlineEngine(stream)
         engine.accept_all_revisions()

@@ -1,3 +1,4 @@
+# FILE: src/adeu/cli.py
 import argparse
 import datetime
 import getpass
@@ -14,7 +15,7 @@ from adeu import __version__
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit
+from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
 
 
@@ -27,7 +28,13 @@ def _get_claude_config_path() -> Path:
             raise OSError("APPDATA environment variable not found.")
         return Path(base) / "Claude" / "claude_desktop_config.json"
     elif system == "Darwin":  # macOS
-        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
     else:
         # Fallback for Linux or others, though Claude Desktop is primarily Win/Mac
         return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
@@ -67,7 +74,9 @@ def handle_init(args: argparse.Namespace):
                 if content:
                     data = json.loads(content)
         except json.JSONDecodeError:
-            print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
+            print(
+                "⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr
+            )
 
     # 4. Inject Adeu Server
     mcp_servers = data.setdefault("mcpServers", {})
@@ -81,14 +90,24 @@ def handle_init(args: argparse.Namespace):
         print(f"   - CWD: {cwd}", file=sys.stderr)
         print(f"   - Python: {python_exe}", file=sys.stderr)
 
-        mcp_servers["adeu"] = {"command": python_exe, "args": ["-m", "adeu.server"], "cwd": str(cwd)}
+        mcp_servers["adeu"] = {
+            "command": python_exe,
+            "args": ["-m", "adeu.server"],
+            "cwd": str(cwd),
+        }
     else:
         # PRODUCTION MODE: Zero-Install via uvx
         uv_path = shutil.which("uv") or shutil.which("uvx")
         if not uv_path:
-            print("⚠️  Warning: 'uv' tool not found. Install it for production use.", file=sys.stderr)
+            print(
+                "⚠️  Warning: 'uv' tool not found. Install it for production use.",
+                file=sys.stderr,
+            )
 
-        mcp_servers["adeu"] = {"command": "uvx", "args": ["--from", "adeu", "adeu-server"]}
+        mcp_servers["adeu"] = {
+            "command": "uvx",
+            "args": ["--from", "adeu", "adeu-server"],
+        }
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
@@ -106,20 +125,44 @@ def _read_docx_text(path: Path) -> str:
         return extract_text_from_stream(BytesIO(f.read()), filename=path.name)
 
 
-def _load_edits_from_json(path: Path) -> List[DocumentEdit]:
+def _load_batch_from_json(path: Path) -> tuple[List[ReviewAction], List[DocumentEdit]]:
+    """
+    Loads a batch of actions and edits from a JSON file.
+    Requires the unified dict format:
+    {"actions": [...], "edits": [...]}
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "JSON root must be an object with 'actions' and 'edits' arrays."
+            )
+
+        actions = []
         edits = []
-        for item in data:
+
+        raw_actions = data.get("actions", [])
+        raw_edits = data.get("edits", [])
+
+        for item in raw_actions:
+            actions.append(ReviewAction(**item))
+
+        for item in raw_edits:
             target = item.get("target_text") or item.get("original")
             new_val = item.get("new_text") or item.get("replace")
             comment = item.get("comment")
 
-            edits.append(DocumentEdit(target_text=target or "", new_text=new_val or "", comment=comment))
-        return edits
+            edits.append(
+                DocumentEdit(
+                    target_text=target or "", new_text=new_val or "", comment=comment
+                )
+            )
+
+        return actions, edits
     except Exception as e:
-        print(f"Error parsing JSON edits: {e}", file=sys.stderr)
+        print(f"Error parsing JSON batch: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -159,10 +202,12 @@ def handle_diff(args):
 
 
 def handle_apply(args):
+    actions = []
     edits = []
+
     if args.changes.suffix.lower() == ".json":
-        print(f"Loading structured edits from {args.changes}...", file=sys.stderr)
-        edits = _load_edits_from_json(args.changes)
+        print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
+        actions, edits = _load_batch_from_json(args.changes)
     else:
         print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         text_orig = _read_docx_text(args.original)
@@ -170,17 +215,29 @@ def handle_apply(args):
             text_mod = f.read()
         edits = generate_edits_from_text(text_orig, text_mod)
 
-    print(f"Applying {len(edits)} edits...", file=sys.stderr)
+    print(f"Applying {len(actions)} actions and {len(edits)} edits...", file=sys.stderr)
 
     with open(args.original, "rb") as f:
         stream = BytesIO(f.read())
 
     engine = RedlineEngine(stream, author=args.author)
-    applied, skipped = engine.apply_edits(edits)
+
+    applied_actions, skipped_actions = 0, 0
+    if actions:
+        applied_actions, skipped_actions = engine.apply_review_actions(actions)
+        if edits:
+            engine.mapper._build_map()
+            engine.clean_mapper = None
+
+    applied_edits, skipped_edits = 0, 0
+    if edits:
+        applied_edits, skipped_edits = engine.apply_edits(edits)
 
     output_path = args.output
     if not output_path:
-        if args.original.stem.endswith("_redlined"):
+        if args.original.stem.endswith("_redlined") or args.original.stem.endswith(
+            "_processed"
+        ):
             output_path = args.original
         else:
             output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
@@ -189,8 +246,11 @@ def handle_apply(args):
         f.write(engine.save_to_stream().getvalue())
 
     print(f"✅ Saved to {output_path}", file=sys.stderr)
-    print(f"Stats: {applied} applied, {skipped} skipped.", file=sys.stderr)
-    if skipped > 0:
+    print(
+        f"Stats: Actions ({applied_actions} applied, {skipped_actions} skipped). Edits ({applied_edits} applied, {skipped_edits} skipped).",
+        file=sys.stderr,
+    )
+    if skipped_actions > 0 or skipped_edits > 0:
         sys.exit(1)
 
 
@@ -209,7 +269,7 @@ def handle_markup(args):
         print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
         sys.exit(1)
 
-    edits = _load_edits_from_json(args.edits)
+    _, edits = _load_batch_from_json(args.edits)
 
     if not edits:
         print("Warning: No edits found in JSON file.", file=sys.stderr)
@@ -239,18 +299,34 @@ def handle_markup(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
+    parser = argparse.ArgumentParser(
+        prog="adeu", description="Adeu: Agentic DOCX Redlining Engine"
+    )
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, help="Subcommands"
+    )
 
-    p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
+    p_extract = subparsers.add_parser(
+        "extract", help="Extract raw text from a DOCX file"
+    )
     p_extract.add_argument("input", type=Path, help="Input DOCX file")
-    p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
+    p_extract.add_argument(
+        "-o", "--output", type=Path, help="Output file (default: stdout)"
+    )
     p_extract.set_defaults(func=handle_extract)
 
     # init command
-    p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
-    p_init.add_argument("--local", action="store_true", help="Configure to run from current source (for dev/testing)")
+    p_init = subparsers.add_parser(
+        "init", help="Auto-configure Adeu for Claude Desktop"
+    )
+    p_init.add_argument(
+        "--local",
+        action="store_true",
+        help="Configure to run from current source (for dev/testing)",
+    )
     p_init.set_defaults(func=handle_init)
 
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
@@ -266,7 +342,9 @@ def main():
 
     p_apply = subparsers.add_parser("apply", help="Apply edits to a DOCX")
     p_apply.add_argument("original", type=Path, help="Original DOCX")
-    p_apply.add_argument("changes", type=Path, help="JSON edits file OR Modified Text file")
+    p_apply.add_argument(
+        "changes", type=Path, help="JSON edits file OR Modified Text file"
+    )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
@@ -281,7 +359,9 @@ def main():
     )
     p_markup.add_argument("input", type=Path, help="Input DOCX or Markdown file")
     p_markup.add_argument("edits", type=Path, help="JSON file containing edits")
-    p_markup.add_argument("-o", "--output", type=Path, help="Output Markdown path (default: input.md)")
+    p_markup.add_argument(
+        "-o", "--output", type=Path, help="Output Markdown path (default: input.md)"
+    )
     p_markup.add_argument(
         "-i",
         "--index",
