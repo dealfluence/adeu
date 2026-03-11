@@ -202,8 +202,8 @@ def handle_diff(args):
 
 
 def handle_apply(args):
-    actions = []
-    edits = []
+    actions: List[ReviewAction] = []
+    edits: List[DocumentEdit] = []
 
     if args.changes.suffix.lower() == ".json":
         print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
@@ -247,7 +247,8 @@ def handle_apply(args):
 
     print(f"✅ Saved to {output_path}", file=sys.stderr)
     print(
-        f"Stats: Actions ({applied_actions} applied, {skipped_actions} skipped). Edits ({applied_edits} applied, {skipped_edits} skipped).",
+        f"Stats: Actions ({applied_actions} applied, {skipped_actions} skipped). "
+        f"Edits ({applied_edits} applied, {skipped_edits} skipped).",
         file=sys.stderr,
     )
     if skipped_actions > 0 or skipped_edits > 0:

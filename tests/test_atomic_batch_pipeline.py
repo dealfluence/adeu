@@ -70,9 +70,7 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     # 4. Assertions on the Tool Execution
     assert "Batch complete" in result_msg
     assert f"Actions: {len(actions)} applied, 0 skipped" in result_msg
-    assert (
-        "Edits: 1 applied, 0 skipped" in result_msg
-    ), "The edit misanchored and was skipped!"
+    assert "Edits: 1 applied, 0 skipped" in result_msg, "The edit misanchored and was skipped!"
 
     # 5. Assertions on the Final Document State
     with open(out_path, "rb") as f:
