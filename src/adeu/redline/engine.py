@@ -924,6 +924,26 @@ class RedlineEngine:
 
         return applied, skipped
 
+    def _delete_comments_in_element(self, element):
+        """
+        Scans a DOM element scheduled for deletion for comment references.
+        If found, deletes the comment from the XML parts and cleans up stray Range tags globally.
+        """
+        # FIX: Use findall with qn() to avoid XPath namespace errors
+        refs = element.findall(f".//{qn('w:commentReference')}")
+        for ref in refs:
+            c_id = ref.get(qn("w:id"))
+            if c_id:
+                # 1. Clean from all 4 comment XML parts
+                self.comments_manager.delete_comment(c_id)
+
+                # 2. Strip any stray Range start/end tags from the whole document
+                for tag in ["w:commentRangeStart", "w:commentRangeEnd"]:
+                    for node in self.doc.element.findall(f".//{qn(tag)}"):
+                        if node.get(qn("w:id")) == c_id:
+                            if node.getparent() is not None:
+                                node.getparent().remove(node)
+
     def _accept_change(self, target_id: str) -> bool:
         ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{target_id}']")
         for ins in ins_nodes:
@@ -936,6 +956,7 @@ class RedlineEngine:
 
         del_nodes = self.doc.element.xpath(f"//w:del[@w:id='{target_id}']")
         for d in del_nodes:
+            self._delete_comments_in_element(d)
             d.getparent().remove(d)
 
         return bool(ins_nodes or del_nodes)
@@ -943,6 +964,7 @@ class RedlineEngine:
     def _reject_change(self, target_id: str) -> bool:
         ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{target_id}']")
         for ins in ins_nodes:
+            self._delete_comments_in_element(ins)
             ins.getparent().remove(ins)
 
         del_nodes = self.doc.element.xpath(f"//w:del[@w:id='{target_id}']")
@@ -1019,8 +1041,19 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in self.doc.element.xpath("//w:del"):
+            self._delete_comments_in_element(d)
             d.getparent().remove(d)
 
+        # 1. Purge all remaining comments from the comment manager XML parts
+        # FIX: Use findall with qn()
+        for ref in self.doc.element.findall(f".//{qn('w:commentReference')}"):
+            c_id = ref.get(qn("w:id"))
+            if c_id:
+                self.comments_manager.delete_comment(c_id)
+
+        # 2. Strip all stray comment tags from the document body
         for tag in ["w:commentRangeStart", "w:commentRangeEnd", "w:commentReference"]:
-            for el in self.doc.element.xpath(f"//{(tag)}"):
-                el.getparent().remove(el)
+            # FIX: Use findall with qn()
+            for el in self.doc.element.findall(f".//{qn(tag)}"):
+                if el.getparent() is not None:
+                    el.getparent().remove(el)

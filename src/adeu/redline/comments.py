@@ -484,3 +484,76 @@ class CommentsManager:
                 logger.warning("Failed to parse commentsExtended for threading", error=str(e))
 
         return data
+
+    def delete_comment(self, comment_id: str):
+        """
+        Safely deletes a comment and all its metadata from the 4 XML parts.
+        Also recursively deletes any threaded replies attached to this comment.
+        """
+        if not self.comments_part:
+            return
+
+        comment_id_str = str(comment_id)
+        comment_el = None
+
+        # 1. Find the comment element
+        for c in self.comments_part.element.findall(qn("w:comment")):
+            if c.get(qn("w:id")) == comment_id_str:
+                comment_el = c
+                break
+
+        if comment_el is None:
+            return
+
+        # 2. Extract paraId (required to find it in the auxiliary parts)
+        para_id = None
+        for p in comment_el.findall(qn("w:p")):
+            pid = p.get(qn("w14:paraId"))
+            if pid:
+                para_id = pid
+                break
+
+        if para_id:
+            # 3. Handle threaded replies: if we delete the parent, delete the replies
+            replies_to_delete = []
+            if self.extended_part:
+                for child in self.extended_part.element:
+                    if child.get(qn("w15:paraIdParent")) == para_id:
+                        child_para_id = child.get(qn("w15:paraId"))
+                        if child_para_id:
+                            # Map child paraId back to comment ID
+                            for c in self.comments_part.element.findall(qn("w:comment")):
+                                for p in c.findall(qn("w:p")):
+                                    if p.get(qn("w14:paraId")) == child_para_id:
+                                        replies_to_delete.append(c.get(qn("w:id")))
+                                        break
+
+            for rep_id in replies_to_delete:
+                if rep_id:
+                    self.delete_comment(rep_id)
+
+            # 4. Clean up auxiliary parts for THIS comment
+            durable_id = None
+
+            # a. commentsIds.xml
+            if self.ids_part:
+                for child in list(self.ids_part.element):
+                    if child.get(qn("w16cid:paraId")) == para_id:
+                        durable_id = child.get(qn("w16cid:durableId"))
+                        self.ids_part.element.remove(child)
+
+            # b. commentsExtended.xml
+            if self.extended_part:
+                for child in list(self.extended_part.element):
+                    if child.get(qn("w15:paraId")) == para_id:
+                        self.extended_part.element.remove(child)
+
+            # c. commentsExtensible.xml
+            if durable_id and self.extensible_part:
+                for child in list(self.extensible_part.element):
+                    if child.get(qn("w16cex:durableId")) == durable_id:
+                        self.extensible_part.element.remove(child)
+
+        # 5. Finally, remove from comments.xml
+        if comment_el.getparent() is not None:
+            comment_el.getparent().remove(comment_el)
