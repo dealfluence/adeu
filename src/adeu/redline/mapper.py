@@ -154,7 +154,9 @@ class DocumentMapper:
 
         deferred_meta_states: List[Tuple] = []
         current_wrappers = ("", "")
-        pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
+        pending_runs: List[
+            Tuple[str, str, Optional[Run], Optional[str], Optional[str]]
+        ] = []
 
         items = list(iter_paragraph_content(paragraph))
 
@@ -197,12 +199,16 @@ class DocumentMapper:
                     if self.clean_view:
                         new_wrappers = ("", "")
                     else:
-                        start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
+                        start_token, end_token = self._get_wrappers(
+                            curr_ins_id, curr_del_id, active_ids
+                        )
                         new_wrappers = (start_token, end_token)
 
                     if pending_runs and new_wrappers == current_wrappers:
                         for kind, txt, r_obj in run_parts:
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append(
+                                (kind, txt, r_obj, curr_ins_id, curr_del_id)
+                            )
                     else:
                         if pending_runs:
                             s_tok, e_tok = current_wrappers
@@ -232,7 +238,9 @@ class DocumentMapper:
                         current_wrappers = new_wrappers
                         pending_runs = []
                         for kind, txt, r_obj in run_parts:
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append(
+                                (kind, txt, r_obj, curr_ins_id, curr_del_id)
+                            )
 
                 # Metadata Handling
                 if not self.clean_view:
@@ -426,7 +434,9 @@ class DocumentMapper:
 
         return "\n".join(change_lines + comment_lines)
 
-    def _add_virtual_text(self, text: str, offset: int, context_paragraph: Optional[Paragraph]):
+    def _add_virtual_text(
+        self, text: str, offset: int, context_paragraph: Optional[Paragraph]
+    ):
         span = TextSpan(
             start=offset,
             end=offset + len(text),
@@ -438,7 +448,9 @@ class DocumentMapper:
         self.full_text += text
 
     def _replace_smart_quotes(self, text: str) -> str:
-        return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        return (
+            text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        )
 
     def _make_fuzzy_regex(self, target_text: str) -> str:
         # First strip markdown from the target for cleaner matching
@@ -527,6 +539,47 @@ class DocumentMapper:
 
         return -1, 0
 
+    def find_all_match_indices(self, target_text: str) -> List[Tuple[int, int]]:
+        """
+        Returns a list of all non-overlapping matches as (start_index, match_length).
+        Returns an empty list if not found.
+        """
+        if not target_text:
+            return []
+
+        # 1. Exact Match
+        matches = [
+            m.span() for m in re.finditer(re.escape(target_text), self.full_text)
+        ]
+        if matches:
+            return [(s, e - s) for s, e in matches]
+
+        # 2. Smart Quote Normalization
+        norm_full = self._replace_smart_quotes(self.full_text)
+        norm_target = self._replace_smart_quotes(target_text)
+        matches = [m.span() for m in re.finditer(re.escape(norm_target), norm_full)]
+        if matches:
+            return [(s, e - s) for s, e in matches]
+
+        # 3. Strip markdown from target
+        stripped_target = self._strip_markdown_formatting(target_text)
+        matches = [
+            m.span() for m in re.finditer(re.escape(stripped_target), self.full_text)
+        ]
+        if matches:
+            return [(s, e - s) for s, e in matches]
+
+        # 4. Fuzzy Regex Match
+        try:
+            pattern = self._make_fuzzy_regex(target_text)
+            matches = [m.span() for m in re.finditer(pattern, self.full_text)]
+            if matches:
+                return [(s, e - s) for s, e in matches]
+        except re.error:
+            pass
+
+        return []
+
     def find_target_runs(self, target_text: str) -> List[Run]:
         start_idx, length = self.find_match_index(target_text)
         if start_idx == -1:
@@ -538,7 +591,9 @@ class DocumentMapper:
         return self._resolve_runs_at_range(start_index, end_index)
 
     def _resolve_runs_at_range(self, start_idx: int, end_idx: int) -> List[Run]:
-        affected_spans = [s for s in self.spans if s.end > start_idx and s.start < end_idx]
+        affected_spans = [
+            s for s in self.spans if s.end > start_idx and s.start < end_idx
+        ]
         if not affected_spans:
             return []
 
@@ -556,13 +611,17 @@ class DocumentMapper:
             local_start = start_idx - first_real_span.start
             if local_start > 0:
                 idx_in_working = 0
-                _, right_run = self._split_run_at_index(working_runs[idx_in_working], local_start)
+                _, right_run = self._split_run_at_index(
+                    working_runs[idx_in_working], local_start
+                )
                 working_runs[idx_in_working] = right_run
                 dom_modified = True
                 start_split_adjustment = local_start
 
         # 2. End Split
-        last_real_span = next((s for s in reversed(affected_spans) if s.run is not None), None)
+        last_real_span = next(
+            (s for s in reversed(affected_spans) if s.run is not None), None
+        )
 
         if last_real_span:
             is_same_run = first_real_span is last_real_span
@@ -632,7 +691,9 @@ class DocumentMapper:
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:
-        real_spans = [s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx]
+        real_spans = [
+            s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx
+        ]
         if real_spans:
             return real_spans[0]
         return None
