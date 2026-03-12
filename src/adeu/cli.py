@@ -28,13 +28,7 @@ def _get_claude_config_path() -> Path:
             raise OSError("APPDATA environment variable not found.")
         return Path(base) / "Claude" / "claude_desktop_config.json"
     elif system == "Darwin":  # macOS
-        return (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Claude"
-            / "claude_desktop_config.json"
-        )
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     else:
         # Fallback for Linux or others, though Claude Desktop is primarily Win/Mac
         return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
@@ -74,9 +68,7 @@ def handle_init(args: argparse.Namespace):
                 if content:
                     data = json.loads(content)
         except json.JSONDecodeError:
-            print(
-                "⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr
-            )
+            print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
 
     # 4. Inject Adeu Server
     mcp_servers = data.setdefault("mcpServers", {})
@@ -136,9 +128,7 @@ def _load_batch_from_json(path: Path) -> tuple[List[ReviewAction], List[Document
             data = json.load(f)
 
         if not isinstance(data, dict):
-            raise ValueError(
-                "JSON root must be an object with 'actions' and 'edits' arrays."
-            )
+            raise ValueError("JSON root must be an object with 'actions' and 'edits' arrays.")
 
         actions = []
         edits = []
@@ -154,11 +144,7 @@ def _load_batch_from_json(path: Path) -> tuple[List[ReviewAction], List[Document
             new_val = item.get("new_text") or item.get("replace")
             comment = item.get("comment")
 
-            edits.append(
-                DocumentEdit(
-                    target_text=target or "", new_text=new_val or "", comment=comment
-                )
-            )
+            edits.append(DocumentEdit(target_text=target or "", new_text=new_val or "", comment=comment))
 
         return actions, edits
     except Exception as e:
@@ -245,9 +231,7 @@ def handle_apply(args):
 
     output_path = args.output
     if not output_path:
-        if args.original.stem.endswith("_redlined") or args.original.stem.endswith(
-            "_processed"
-        ):
+        if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
             output_path = args.original
         else:
             output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
@@ -310,29 +294,17 @@ def handle_markup(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="adeu", description="Adeu: Agentic DOCX Redlining Engine"
-    )
-    parser.add_argument(
-        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    subparsers = parser.add_subparsers(
-        dest="command", required=True, help="Subcommands"
-    )
+    parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
-    p_extract = subparsers.add_parser(
-        "extract", help="Extract raw text from a DOCX file"
-    )
+    p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
     p_extract.add_argument("input", type=Path, help="Input DOCX file")
-    p_extract.add_argument(
-        "-o", "--output", type=Path, help="Output file (default: stdout)"
-    )
+    p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
     p_extract.set_defaults(func=handle_extract)
 
     # init command
-    p_init = subparsers.add_parser(
-        "init", help="Auto-configure Adeu for Claude Desktop"
-    )
+    p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
     p_init.add_argument(
         "--local",
         action="store_true",
@@ -353,9 +325,7 @@ def main():
 
     p_apply = subparsers.add_parser("apply", help="Apply edits to a DOCX")
     p_apply.add_argument("original", type=Path, help="Original DOCX")
-    p_apply.add_argument(
-        "changes", type=Path, help="JSON edits file OR Modified Text file"
-    )
+    p_apply.add_argument("changes", type=Path, help="JSON edits file OR Modified Text file")
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
@@ -370,9 +340,7 @@ def main():
     )
     p_markup.add_argument("input", type=Path, help="Input DOCX or Markdown file")
     p_markup.add_argument("edits", type=Path, help="JSON file containing edits")
-    p_markup.add_argument(
-        "-o", "--output", type=Path, help="Output Markdown path (default: input.md)"
-    )
+    p_markup.add_argument("-o", "--output", type=Path, help="Output Markdown path (default: input.md)")
     p_markup.add_argument(
         "-i",
         "--index",

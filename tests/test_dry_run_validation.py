@@ -15,9 +15,7 @@ def test_validation_ambiguous_match_with_context():
     doc = Document()
     # Padded with introductory text to ensure the clause numbers fall fully within
     # the engine's 30-character backward context window without getting sliced.
-    doc.add_paragraph(
-        "As specified in Clause 2.4 (Interest), the rate shall not exceed 150% of the base."
-    )
+    doc.add_paragraph("As specified in Clause 2.4 (Interest), the rate shall not exceed 150% of the base.")
     doc.add_paragraph(
         "As specified in Clause 6.1 (Liability Cap), Seller liability shall not exceed 150% of the total contract."
     )
@@ -29,9 +27,7 @@ def test_validation_ambiguous_match_with_context():
     engine = RedlineEngine(stream)
 
     # The LLM's flawed, overly generic edit
-    edit = DocumentEdit(
-        target_text="shall not exceed 150%", new_text="shall not exceed 100%"
-    )
+    edit = DocumentEdit(target_text="shall not exceed 150%", new_text="shall not exceed 100%")
 
     errors = engine.validate_edits([edit])
 
@@ -139,9 +135,7 @@ def test_multiple_errors_accumulated():
 
     engine = RedlineEngine(stream)
 
-    edit1 = DocumentEdit(
-        target_text="Duplicate word.", new_text="Changed."
-    )  # Ambiguous
+    edit1 = DocumentEdit(target_text="Duplicate word.", new_text="Changed.")  # Ambiguous
     edit2 = DocumentEdit(target_text="Missing word.", new_text="Found.")  # Not Found
 
     errors = engine.validate_edits([edit1, edit2])
