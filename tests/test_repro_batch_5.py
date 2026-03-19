@@ -4,9 +4,10 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+from adeu.diff import trim_common_context
 from adeu.ingest import extract_text_from_stream
 from adeu.models import DocumentEdit
-from adeu.redline.engine import RedlineEngine, _trim_common_context
+from adeu.redline.engine import RedlineEngine
 
 
 def _is_bold(run_element) -> bool:
@@ -95,14 +96,14 @@ def test_repro_5_3_bold_inheritance_bleed():
 
 def test_repro_5_5_trim_context_marker_leak():
     """
-    BUG: _trim_common_context may leave unbalanced markdown fragments.
+    BUG: trim_common_context may leave unbalanced markdown fragments.
     Example: Target "**Agreement**", New "**Agreements**".
     If it trims "**Agreement", it leaves "**" in the deletion.
     """
     target = "**Agreement**"
     new_val = "**Agreements**"
 
-    prefix_len, suffix_len = _trim_common_context(target, new_val)
+    prefix_len, suffix_len = trim_common_context(target, new_val)
 
     # Prefix " **Agreement" (len 11) or Suffix "**" (len 2)
     # If prefix_len is 11, remaining target is "}" (if virtual) or empty.
@@ -115,7 +116,7 @@ def test_repro_5_5_trim_context_marker_leak():
     # Remaining target: "**". Remaining new: "er**".
     # This results in: **Bold{--**--}{++er**++}
 
-    p, s = _trim_common_context(target_2, new_2)
+    p, s = trim_common_context(target_2, new_2)
 
     # We expect the trimmer to NOT consume the start of a markdown block
     # if it doesn't consume the end, OR to back off to a word boundary.

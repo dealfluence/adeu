@@ -116,6 +116,7 @@ class TestMarkdownRobustness:
 
         result = apply_edits_to_markdown(text, edits)
 
+        # Trimmer safely backtracks to avoid splitting the '#' from the header text
         assert "{--# Header 1\n\n# Header 2--}{++# H1\n\n# H2++}" == result
 
     def test_partial_underscore_fuzzy(self):

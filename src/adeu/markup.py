@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 import structlog
 
+from adeu.diff import trim_common_context
 from adeu.models import DocumentEdit
 
 logger = structlog.get_logger(__name__)
@@ -425,15 +426,30 @@ def apply_edits_to_markdown(
     for start, end, actual_text, edit, orig_idx in matched_edits_filtered:
         new = edit.new_text or ""
 
+        # Apply context trimming to isolate the actual change from the anchor
+        prefix_len, suffix_len = trim_common_context(actual_text, new)
+
+        # Extract the unmodified prefix and suffix
+        unmodified_prefix = actual_text[:prefix_len] if prefix_len > 0 else ""
+        unmodified_suffix = actual_text[len(actual_text) - suffix_len :] if suffix_len > 0 else ""
+
+        # Isolate the actual target and new text to be marked up
+        t_end = len(actual_text) - suffix_len
+        n_end = len(new) - suffix_len
+        isolated_target = actual_text[prefix_len:t_end]
+        isolated_new = new[prefix_len:n_end]
+
         markup = _build_critic_markup(
-            target_text=actual_text,
-            new_text=new,
+            target_text=isolated_target,
+            new_text=isolated_new,
             comment=edit.comment,
             edit_index=orig_idx,
             include_index=include_index,
             highlight_only=highlight_only,
         )
 
-        result = result[:start] + markup + result[end:]
+        # Recombine the unmodified anchors with the newly generated markup block
+        full_replacement = unmodified_prefix + markup + unmodified_suffix
+        result = result[:start] + full_replacement + result[end:]
 
     return result

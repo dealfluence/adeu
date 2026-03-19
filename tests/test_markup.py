@@ -163,6 +163,43 @@ class TestBuildCriticMarkup:
 class TestApplyEditsToMarkdown:
     """Tests for the main transformation function."""
 
+    def test_pure_insertion_via_context_trimming(self):
+        """
+        Tests that an anchor-based insertion is reduced to a pure {++...++} block
+        rather than rewriting the entire anchor phrase.
+        """
+        text = "Notice of Termination"
+        edits = [
+            DocumentEdit(
+                target_text="Notice of Termination",
+                new_text="Notice of Immediate Termination",
+            )
+        ]
+        result = apply_edits_to_markdown(text, edits)
+
+        # The common prefix "Notice of " and suffix " Termination" should be trimmed.
+        # This leaves only "Immediate " as a pure insertion.
+        assert result == "Notice of {++Immediate ++}Termination"
+        assert "{--" not in result  # Should not be treated as a deletion/replacement
+
+    def test_context_trimming_prefix_only(self):
+        """Tests context trimming when only the prefix matches."""
+        text = "Hello World"
+        edits = [DocumentEdit(target_text="Hello World", new_text="Hello Universe")]
+        result = apply_edits_to_markdown(text, edits)
+
+        # "Hello " is trimmed out of the markup block
+        assert result == "Hello {--World--}{++Universe++}"
+
+    def test_context_trimming_suffix_only(self):
+        """Tests context trimming when only the suffix matches."""
+        text = "Old Item"
+        edits = [DocumentEdit(target_text="Old Item", new_text="New Item")]
+        result = apply_edits_to_markdown(text, edits)
+
+        # " Item" is trimmed out of the markup block
+        assert result == "{--Old--}{++New++} Item"
+
     def test_empty_edits_returns_original(self):
         text = "Original text"
         result = apply_edits_to_markdown(text, [])
@@ -177,8 +214,7 @@ class TestApplyEditsToMarkdown:
             )
         ]
         result = apply_edits_to_markdown(text, edits)
-        assert "{--Contract Agreement--}" in result
-        assert "{++Service Agreement++}" in result
+        assert "{--Contract--}{++Service++} Agreement" in result
         assert "This is a " in result
         assert " for services." in result
 
@@ -376,7 +412,7 @@ Either party may terminate with 30 days notice."""
         result = apply_edits_to_markdown(text, edits, include_index=True)
 
         assert "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<}" in result
-        assert "{--30 days--}{++60 days++}{>>Extended notice period [Edit:1]<<}" in result
+        assert "{--30--}{++60++}{>>Extended notice period [Edit:1]<<} days" in result
         # Structure preserved
         assert "# Service Agreement" in result
         assert "## Termination" in result
@@ -1030,8 +1066,8 @@ class TestApplyEditsToMarkdownRobust:
         edits = [DocumentEdit(target_text="__init__", new_text="__setup__")]
         result = apply_edits_to_markdown(text, edits)
 
-        assert "{--__init__--}" in result
-        assert "{++__setup__++}" in result
+        # Context trimming correctly isolates the change to just the word inside
+        assert "__{--init--}{++setup++}__" in result
 
     def test_code_like_content(self):
         """Content that looks like code with underscores."""
@@ -1076,7 +1112,7 @@ class TestApplyEditsToMarkdownRobust:
         result = apply_edits_to_markdown(text, edits)
 
         assert "# Main Title" in result
-        assert "{--Some content--}" in result
+        assert "{--Some--}{++Different++} content" in result
 
     def test_multiple_edits_same_formatting(self):
         """Multiple edits in same formatted region."""
@@ -1111,8 +1147,7 @@ class TestApplyEditsToMarkdownRobust:
         ]
         result = apply_edits_to_markdown(text, edits)
 
-        assert "{--Section 3.2(a)(i)--}" in result
-        assert "{++Section 4.1(b)(ii)++}" in result
+        assert "Section {--3.2(a)(i)--}{++4.1(b)(ii)++}" in result
         assert "Updated cross-reference" in result
 
     def test_defined_term_with_quotes(self):
@@ -1121,7 +1156,7 @@ class TestApplyEditsToMarkdownRobust:
         edits = [DocumentEdit(target_text='"Effective Date"', new_text='"Commencement Date"')]
         result = apply_edits_to_markdown(text, edits)
 
-        assert "Commencement Date" in result
+        assert '{--"Effective--}{++"Commencement++} Date"' in result
 
     def test_currency_amounts(self):
         """Currency with special characters."""
@@ -1188,7 +1223,7 @@ class TestApplyEditsToMarkdownRobust:
         result = apply_edits_to_markdown(text, edits)
 
         assert "1. First item" in result
-        assert "{--Second item--}" in result
+        assert "{--Second--}{++Modified++} item" in result
         assert "3. Third item" in result
 
     def test_bullet_list_item(self):
@@ -1198,7 +1233,7 @@ class TestApplyEditsToMarkdownRobust:
         result = apply_edits_to_markdown(text, edits)
 
         assert "- Item A" in result
-        assert "{--Item B--}" in result
+        assert "{--Item--}{++Changed++} B" in result
         assert "- Item C" in result
 
     def test_table_like_content(self):
@@ -1244,9 +1279,7 @@ class TestApplyEditsToMarkdownComplexScenarios:
         assert "Purchaser" in result
         assert "Vendor" in result
         assert "$15,000.00" in result
-        assert "45 days" in result
-        assert "[Edit:0]" in result
-        assert "[Edit:3]" in result
+        assert "{--30--}{++45++}{>>[Edit:3]<<} days" in result
 
     def test_policy_document_with_definitions(self):
         """Policy document with defined terms."""
@@ -1398,7 +1431,7 @@ Third paragraph stays."""
 
         assert "Service Provider" in result
         assert "professionally" in result
-        assert "strict confidentiality" in result
+        assert "{++strict ++}confidentiality" in result
         assert "## Article 5" in result
 
     def test_overlapping_edits_handled(self):

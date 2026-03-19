@@ -9,6 +9,112 @@ from adeu.models import DocumentEdit
 logger = structlog.get_logger(__name__)
 
 
+def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
+    """
+    Calculates overlapping prefix/suffix lengths between target and new_val.
+    Returns (prefix_len, suffix_len).
+    Ensures that we only trim at word boundaries (whitespace) AND
+    do not split Markdown style delimiters (bold/italic).
+    """
+    if not target or not new_val:
+        return 0, 0
+
+    # 1. Prefix with Word Boundary Check
+    prefix_len = 0
+    limit = min(len(target), len(new_val))
+    while prefix_len < limit and target[prefix_len] == new_val[prefix_len]:
+        prefix_len += 1
+
+    # Backtrack to nearest whitespace if we split a word
+    if prefix_len < len(target) and prefix_len < len(new_val):
+        while prefix_len > 0:
+            target_split = not target[prefix_len - 1].isspace() and not target[prefix_len].isspace()
+            new_split = not new_val[prefix_len - 1].isspace() and not new_val[prefix_len].isspace()
+            if target_split or new_split:
+                prefix_len -= 1
+            else:
+                break
+
+    # Safety: Backtrack if we consumed a Markdown Header marker (#)
+    temp_len = prefix_len
+    while temp_len > 0:
+        char = target[temp_len - 1]
+        if char == "#":
+            prefix_len = temp_len - 1
+            while prefix_len > 0 and target[prefix_len - 1] != "\n":
+                prefix_len -= 1
+            break
+        if char == "\n":
+            break
+        temp_len -= 1
+
+    # Fix 5.5: Backtrack prefix if it leaves unbalanced markdown markers in remaining
+    while prefix_len > 0:
+        text_slice = target[:prefix_len]
+        b_count = text_slice.count("**")
+        u_count = text_slice.count("_")
+        if b_count % 2 != 0 or u_count % 2 != 0:
+            prefix_len -= 1
+        else:
+            break
+
+    # 2. Suffix with Word Boundary Check
+    suffix_len = 0
+    target_rem_len = len(target) - prefix_len
+    new_rem_len = len(new_val) - prefix_len
+
+    limit_suffix = min(target_rem_len, new_rem_len)
+    while suffix_len < limit_suffix and target[-(suffix_len + 1)] == new_val[-(suffix_len + 1)]:
+        suffix_len += 1
+
+    # Backtrack suffix if we split a word (Bi-directional check)
+    if suffix_len > 0:
+        while suffix_len > 0:
+            target_split = False
+            if suffix_len < len(target):
+                target_split = not target[-(suffix_len + 1)].isspace() and not target[-suffix_len].isspace()
+
+            new_split = False
+            if suffix_len < len(new_val):
+                new_split = not new_val[-(suffix_len + 1)].isspace() and not new_val[-suffix_len].isspace()
+
+            if target_split or new_split:
+                suffix_len -= 1
+            else:
+                break
+
+    # Fix 5.5: Backtrack suffix if it leaves unbalanced markdown markers
+    while suffix_len > 0:
+        text_slice = target[len(target) - suffix_len :]
+        b_count = text_slice.count("**")
+        u_count = text_slice.count("_")
+        if b_count % 2 != 0 or u_count % 2 != 0:
+            suffix_len -= 1
+        else:
+            break
+
+    if suffix_len > 0 and target[len(target) - suffix_len :].isspace():
+        suffix_len = 0
+
+    # Fix 5.5: Absorb wrappers into prefix/suffix to avoid leaving markers in the diff.
+    for marker in ["**", "_"]:
+        mlen = len(marker)
+        tgt_rem = target[prefix_len : len(target) - suffix_len if suffix_len else len(target)]
+        new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
+        if (
+            tgt_rem.startswith(marker)
+            and new_rem.startswith(marker)
+            and tgt_rem.endswith(marker)
+            and new_rem.endswith(marker)
+            and len(tgt_rem) > 2 * mlen
+            and len(new_rem) > 2 * mlen
+        ):
+            prefix_len += mlen
+            suffix_len += mlen
+
+    return prefix_len, suffix_len
+
+
 def generate_edits_from_text(original_text: str, modified_text: str) -> List[DocumentEdit]:
     """
     Compares original and modified text to generate structured ComplianceEdit objects.
@@ -96,7 +202,11 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
                             continue
 
                 # Standard Insertion: Target=Anchor, New=Anchor+Text
-                edit = DocumentEdit(target_text=anchor, new_text=anchor + text, comment="Diff: Text inserted")
+                edit = DocumentEdit(
+                    target_text=anchor,
+                    new_text=anchor + text,
+                    comment="Diff: Text inserted",
+                )
                 edit._match_start_index = current_original_index
                 edits.append(edit)
 

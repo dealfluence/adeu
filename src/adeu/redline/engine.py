@@ -11,6 +11,7 @@ from docx import Document
 from docx.oxml.ns import nsmap, qn
 from docx.text.run import Run
 
+from adeu.diff import trim_common_context
 from adeu.models import DocumentEdit, EditOperationType, ReviewAction
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
@@ -22,116 +23,6 @@ logger = structlog.get_logger(__name__)
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
 if "w16du" not in nsmap:
     nsmap["w16du"] = w16du_ns
-
-
-def _trim_common_context(target: str, new_val: str) -> tuple[int, int]:
-    """
-    Calculates overlapping prefix/suffix lengths between target and new_val.
-    Returns (prefix_len, suffix_len).
-    Ensures that we only trim at word boundaries (whitespace) AND
-    do not split Markdown style delimiters (bold/italic).
-    """
-    if not target or not new_val:
-        return 0, 0
-
-    # 1. Prefix with Word Boundary Check
-    prefix_len = 0
-    limit = min(len(target), len(new_val))
-    while prefix_len < limit and target[prefix_len] == new_val[prefix_len]:
-        prefix_len += 1
-
-    # Backtrack to nearest whitespace if we split a word
-    if prefix_len < len(target) and prefix_len < len(new_val):
-        while prefix_len > 0 and not target[prefix_len - 1].isspace() and not target[prefix_len].isspace():
-            prefix_len -= 1
-
-    # Safety: Backtrack if we consumed a Markdown Header marker (#)
-    temp_len = prefix_len
-    while temp_len > 0:
-        char = target[temp_len - 1]
-        if char == "#":
-            prefix_len = temp_len - 1
-            while prefix_len > 0 and target[prefix_len - 1] != "\n":
-                prefix_len -= 1
-            break
-        if char == "\n":
-            break
-        temp_len -= 1
-
-    # Safety: Backtrack if we are inside a Markdown Inline Delimiter (** or _)
-    # We must be "balanced" in the prefix to safely trim it.
-    # If we have an odd number of delimiters, we are likely inside a block.
-    # We backtrack until we are balanced (usually means backtracking to 0 or previous block end).
-
-    def get_unbalanced_index(text_slice: str) -> int:
-        # Check **
-        bold_indices = [m.start() for m in re.finditer(r"\*\*", text_slice)]
-        if len(bold_indices) % 2 != 0:
-            return bold_indices[-1]
-
-        # Check _
-        underscore_indices = [m.start() for m in re.finditer(r"_", text_slice)]
-        if len(underscore_indices) % 2 != 0:
-            return underscore_indices[-1]
-
-        return -1
-
-    # Fix 5.5: Backtrack prefix if it leaves unbalanced markdown markers in remaining
-    while prefix_len > 0:
-        text_slice = target[:prefix_len]
-        b_count = text_slice.count("**")
-        u_count = text_slice.count("_")
-        if b_count % 2 != 0 or u_count % 2 != 0:
-            prefix_len -= 1
-        else:
-            break
-
-    # 2. Suffix with Word Boundary Check
-    suffix_len = 0
-    target_rem_len = len(target) - prefix_len
-    new_rem_len = len(new_val) - prefix_len
-
-    limit_suffix = min(target_rem_len, new_rem_len)
-    while suffix_len < limit_suffix and target[-(suffix_len + 1)] == new_val[-(suffix_len + 1)]:
-        suffix_len += 1
-
-    # Backtrack suffix if we split a word
-    if suffix_len > 0 and suffix_len < len(target):
-        while suffix_len > 0 and not target[-(suffix_len + 1)].isspace() and not target[-(suffix_len)].isspace():
-            suffix_len -= 1
-
-    # Fix 5.5: Backtrack suffix if it leaves unbalanced markdown markers
-    while suffix_len > 0:
-        text_slice = target[len(target) - suffix_len :]
-        b_count = text_slice.count("**")
-        u_count = text_slice.count("_")
-        if b_count % 2 != 0 or u_count % 2 != 0:
-            suffix_len -= 1
-        else:
-            break
-
-    # CHANGE: If the calculated suffix is purely whitespace, ignore it (set to 0).
-    if suffix_len > 0 and target[len(target) - suffix_len :].isspace():
-        suffix_len = 0
-
-    # Fix 5.5: If both remaining strings share balanced outer ** or _ wrappers,
-    # absorb those wrappers into prefix/suffix to avoid leaving markers in the diff.
-    for marker in ["**", "_"]:
-        mlen = len(marker)
-        tgt_rem = target[prefix_len : len(target) - suffix_len if suffix_len else len(target)]
-        new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
-        if (
-            tgt_rem.startswith(marker)
-            and new_rem.startswith(marker)
-            and tgt_rem.endswith(marker)
-            and new_rem.endswith(marker)
-            and len(tgt_rem) > 2 * mlen
-            and len(new_rem) > 2 * mlen
-        ):
-            prefix_len += mlen
-            suffix_len += mlen
-
-    return prefix_len, suffix_len
 
 
 class RedlineEngine:
@@ -822,7 +713,7 @@ class RedlineEngine:
             final_new = effective_new_text[len(actual_doc_text) :]
             effective_start_idx = start_idx + match_len
         else:
-            prefix_len, suffix_len = _trim_common_context(actual_doc_text, effective_new_text)
+            prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
 
             t_end = len(actual_doc_text) - suffix_len
             n_end = len(effective_new_text) - suffix_len

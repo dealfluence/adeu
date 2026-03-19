@@ -2,15 +2,16 @@ import io
 
 from docx import Document
 
+from adeu.diff import trim_common_context
 from adeu.models import DocumentEdit
-from adeu.redline.engine import RedlineEngine, _trim_common_context
+from adeu.redline.engine import RedlineEngine
 
 
 def test_trim_logic_basic():
     """Prefix and Suffix exist."""
     t = "Context A Context"
     n = "Context B Context"
-    p, s = _trim_common_context(t, n)
+    p, s = trim_common_context(t, n)
     assert p == 8  # "Context "
     assert s == 8  # " Context"
     # Remainder: "A", "B"
@@ -19,7 +20,7 @@ def test_trim_logic_basic():
 def test_trim_logic_prefix_only():
     t = "Hello World"
     n = "Hello User"
-    p, s = _trim_common_context(t, n)
+    p, s = trim_common_context(t, n)
     assert p == 6  # "Hello "
     assert s == 0
 
@@ -27,7 +28,7 @@ def test_trim_logic_prefix_only():
 def test_trim_logic_suffix_only():
     t = "Old Item"
     n = "New Item"
-    p, s = _trim_common_context(t, n)
+    p, s = trim_common_context(t, n)
     assert p == 0
     assert s == 5  # " Item"
 
@@ -35,7 +36,7 @@ def test_trim_logic_suffix_only():
 def test_trim_logic_morph_to_insert():
     t = "Prefix"
     n = "Prefix Added"
-    p, s = _trim_common_context(t, n)
+    p, s = trim_common_context(t, n)
     assert p == 6
     assert s == 0
 
@@ -98,7 +99,7 @@ def test_trim_logic_full_suffix_overlap_crash_repro():
     new_val = "New Agreement"
 
     # This should not raise IndexError
-    p, s = _trim_common_context(target, new_val)
+    p, s = trim_common_context(target, new_val)
 
     # Expectation:
     # Prefix: 0
