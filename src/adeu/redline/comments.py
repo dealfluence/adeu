@@ -64,7 +64,9 @@ class CommentsManager:
 
         logger.debug("Upgrading generic Part to XmlPart", partname=part.partname)
         # Create new XmlPart
-        xml_part = XmlPart(part.partname, part.content_type, parse_xml(part.blob), part.package)
+        xml_part = XmlPart(
+            part.partname, part.content_type, parse_xml(part.blob), part.package
+        )
 
         # 1. Swap in package (source of truth for serialization)
         if part in part.package.parts:
@@ -96,7 +98,9 @@ class CommentsManager:
                     partname=part.partname,
                 )
                 return part
-        logger.debug("No existing part found for content type", content_type=content_type)
+        logger.debug(
+            "No existing part found for content type", content_type=content_type
+        )
         return None
 
     def _link_part(self, part: XmlPart, rel_type: str) -> XmlPart:
@@ -109,6 +113,9 @@ class CommentsManager:
 
         # Check relationships manually to be safe (in case cache is stale)
         for rel in self.doc.part.rels.values():
+            # Skip external relationships to prevent ValueError on target_part
+            if rel.is_external:
+                continue
             if rel.target_part == part:
                 return part
 
@@ -154,7 +161,9 @@ class CommentsManager:
         return comments_part
 
     def _get_or_create_extended_part(self) -> XmlPart:
-        RELTYPE_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
+        RELTYPE_EXTENDED = (
+            "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
+        )
         CONTENT_TYPE_EXTENDED = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_EXTENDED)
@@ -165,17 +174,23 @@ class CommentsManager:
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsExtended%d.xml")
 
-        xml_bytes = (f"<w15:commentsEx xmlns:w15='{w15_ns}'></w15:commentsEx>").encode("utf-8")
+        xml_bytes = (f"<w15:commentsEx xmlns:w15='{w15_ns}'></w15:commentsEx>").encode(
+            "utf-8"
+        )
 
         logger.info("Creating new extended part", partname=partname)
-        extended_part = XmlPart(partname, CONTENT_TYPE_EXTENDED, parse_xml(xml_bytes), package)
+        extended_part = XmlPart(
+            partname, CONTENT_TYPE_EXTENDED, parse_xml(xml_bytes), package
+        )
         package.parts.append(extended_part)
         self.doc.part.relate_to(extended_part, RELTYPE_EXTENDED)
 
         return extended_part
 
     def _get_or_create_ids_part(self) -> XmlPart:
-        RELTYPE_IDS = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
+        RELTYPE_IDS = (
+            "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
+        )
         CONTENT_TYPE_IDS = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_IDS)
@@ -186,7 +201,9 @@ class CommentsManager:
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsIds%d.xml")
 
-        xml_bytes = (f"<w16cid:commentsIds {nsdecls('w16cid')}></w16cid:commentsIds>").encode("utf-8")
+        xml_bytes = (
+            f"<w16cid:commentsIds {nsdecls('w16cid')}></w16cid:commentsIds>"
+        ).encode("utf-8")
 
         logger.info("Creating new ids part", partname=partname)
         ids_part = XmlPart(partname, CONTENT_TYPE_IDS, parse_xml(xml_bytes), package)
@@ -197,9 +214,7 @@ class CommentsManager:
 
     def _get_or_create_extensible_part(self) -> XmlPart:
         RELTYPE_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
-        CONTENT_TYPE_EXTENSIBLE = (
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
-        )
+        CONTENT_TYPE_EXTENSIBLE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_EXTENSIBLE)
         if part:
@@ -209,10 +224,14 @@ class CommentsManager:
         package = self.doc.part.package
         partname = package.next_partname("/word/commentsExtensible%d.xml")
 
-        xml_bytes = (f"<w16cex:commentsExtensible {nsdecls('w16cex')}></w16cex:commentsExtensible>").encode("utf-8")
+        xml_bytes = (
+            f"<w16cex:commentsExtensible {nsdecls('w16cex')}></w16cex:commentsExtensible>"
+        ).encode("utf-8")
 
         logger.info("Creating new extensible part", partname=partname)
-        extensible_part = XmlPart(partname, CONTENT_TYPE_EXTENSIBLE, parse_xml(xml_bytes), package)
+        extensible_part = XmlPart(
+            partname, CONTENT_TYPE_EXTENSIBLE, parse_xml(xml_bytes), package
+        )
         package.parts.append(extensible_part)
         self.doc.part.relate_to(extensible_part, RELTYPE_EXTENSIBLE)
 
@@ -229,7 +248,9 @@ class CommentsManager:
         # Check for mc:Ignorable
         # This is harder to check via nsmap, checking string serialization is robust
         xml_str = serialize_for_reading(element)
-        has_ignorable = "mc:Ignorable" in xml_str and "w14" in xml_str and "w15" in xml_str
+        has_ignorable = (
+            "mc:Ignorable" in xml_str and "w14" in xml_str and "w15" in xml_str
+        )
 
         if has_w14 and has_w15 and has_ignorable:
             return
@@ -350,11 +371,17 @@ class CommentsManager:
             ext_el.set(qn("w16cex:dateUtc"), date_utc)
             self.extensible_part.element.append(ext_el)
 
-    def add_comment(self, author: str, text: str, parent_id: Optional[str] = None) -> str:
+    def add_comment(
+        self, author: str, text: str, parent_id: Optional[str] = None
+    ) -> str:
         logger.info("Adding comment", author=author, parent_id=parent_id)
         comment_id = str(self.next_id)
         self.next_id += 1
-        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = (
+            datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
 
         comment = OxmlElement("w:comment")
         comment.set(qn("w:id"), comment_id)
@@ -485,7 +512,9 @@ class CommentsManager:
                         if c_id and p_id and c_id in data:
                             data[c_id]["parent_id"] = p_id
             except Exception as e:
-                logger.warning("Failed to parse commentsExtended for threading", error=str(e))
+                logger.warning(
+                    "Failed to parse commentsExtended for threading", error=str(e)
+                )
 
         return data
 
@@ -526,7 +555,9 @@ class CommentsManager:
                         child_para_id = child.get(qn("w15:paraId"))
                         if child_para_id:
                             # Map child paraId back to comment ID
-                            for c in self.comments_part.element.findall(qn("w:comment")):
+                            for c in self.comments_part.element.findall(
+                                qn("w:comment")
+                            ):
                                 for p in c.findall(qn("w:p")):
                                     if p.get(qn("w14:paraId")) == child_para_id:
                                         replies_to_delete.append(c.get(qn("w:id")))
