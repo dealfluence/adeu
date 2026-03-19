@@ -391,7 +391,12 @@ class RedlineEngine:
             run = create_element("w:r")
 
             if anchor_run and anchor_run._element.rPr is not None:
-                run.append(deepcopy(anchor_run._element.rPr))
+                rPr_clone = deepcopy(anchor_run._element.rPr)
+                # Prevent hidden/struck text bugs by stripping vanish and strike from deepcopies
+                for tag in ["w:vanish", "w:strike", "w:dstrike"]:
+                    for el in rPr_clone.findall(qn(tag)):
+                        rPr_clone.remove(el)
+                run.append(rPr_clone)
 
             self._apply_run_props(run, seg_props, suppress_inherited=suppress_inherited)
 
@@ -699,6 +704,12 @@ class RedlineEngine:
             final_target = ""
             final_new = effective_new_text[len(actual_doc_text) :]
             effective_start_idx = start_idx + match_len
+        elif effective_new_text.startswith(actual_doc_text.rstrip()):
+            # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space)
+            effective_op = EditOperationType.INSERTION
+            final_target = ""
+            final_new = effective_new_text[len(actual_doc_text.rstrip()) :]
+            effective_start_idx = start_idx + len(actual_doc_text.rstrip())
         else:
             prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
 
@@ -723,7 +734,6 @@ class RedlineEngine:
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper
 
-        # Pass the original LLM text to ensure we don't accidentally strip formatting intent
         return self._apply_single_edit_indexed(proxy_edit, original_new_text=edit.new_text)
 
     def _apply_single_edit_indexed(self, edit: DocumentEdit, original_new_text: Optional[str] = None) -> bool:

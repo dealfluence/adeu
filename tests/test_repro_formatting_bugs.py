@@ -124,3 +124,43 @@ def test_repro_lost_bold_suppressed_formatting():
         is_bold = val is None or val.lower() not in ("0", "false", "off")
 
     assert is_bold, "The inserted run lost its bold formatting (suppress_inherited fired incorrectly)."
+
+
+def test_repro_insertion_trailing_space_omission():
+    """
+    Guards against the bug where an LLM appends text to a sentence but omits
+    the trailing space that exists in the original document.
+    Prior to the fix, this caused the engine to delete and rewrite the entire
+    sentence instead of just performing a clean insertion of the new text.
+    """
+    doc = Document()
+    # Notice the trailing space in the document text
+    doc.add_paragraph("Retailer shall be named as an additional insured. ")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    # Target text matched in document has the space, but new_text drops the space
+    # in favor of a newline (\n) before the new paragraph.
+    edit = DocumentEdit(
+        target_text="Retailer shall be named as an additional insured. ",
+        new_text="Retailer shall be named as an additional insured.\n**7.3 Limitation of Liability.**",
+    )
+
+    engine = RedlineEngine(stream)
+    engine.apply_edits([edit])
+
+    res_stream = engine.save_to_stream()
+    doc_res = Document(res_stream)
+
+    # 1. Verify that the engine recognized this as a pure insertion and
+    # did NOT delete the original sentence.
+    del_tags = doc_res.element.xpath("//w:del")
+    assert len(del_tags) == 0, (
+        "Original sentence was needlessly deleted! Heuristic failed to classify as pure insertion."
+    )
+
+    # 2. Verify that the new text was correctly tracked as an insertion
+    ins_texts = doc_res.element.xpath('//w:ins//w:t[contains(text(), "Limitation of Liability")]')
+    assert len(ins_texts) > 0, "New paragraph text was not inserted."
