@@ -35,28 +35,58 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
             else:
                 break
 
-    # Safety: Backtrack if we consumed a Markdown Header marker (#)
-    temp_len = prefix_len
-    while temp_len > 0:
-        char = target[temp_len - 1]
-        if char == "#":
-            prefix_len = temp_len - 1
-            while prefix_len > 0 and target[prefix_len - 1] != "\n":
-                prefix_len -= 1
-            break
-        if char == "\n":
-            break
-        temp_len -= 1
-
-    # Fix 5.5: Backtrack prefix if it leaves unbalanced markdown markers in remaining
+    # Backtrack prefix to avoid splitting markdown markers or leaving them unbalanced
     while prefix_len > 0:
-        text_slice = target[:prefix_len]
-        b_count = text_slice.count("**")
-        u_count = text_slice.count("_")
-        if b_count % 2 != 0 or u_count % 2 != 0:
+        if prefix_len < len(target) and target[prefix_len - 1 : prefix_len + 1] in (
+            "**",
+            "__",
+        ):
             prefix_len -= 1
-        else:
-            break
+            continue
+
+        left = target[:prefix_len]
+        b_count = left.count("**")
+        u2_count = left.count("__")
+        u1_count = left.replace("__", "").count("_")
+
+        if b_count % 2 != 0:
+            prefix_len = left.rfind("**")
+            continue
+        if u2_count % 2 != 0:
+            prefix_len = left.rfind("__")
+            continue
+        if u1_count % 2 != 0:
+            # Safely find the last standalone '_'
+            idx = len(left) - 1
+            while idx >= 0:
+                if (
+                    left[idx] == "_"
+                    and (idx == 0 or left[idx - 1] != "_")
+                    and (idx == len(left) - 1 or left[idx + 1] != "_")
+                ):
+                    prefix_len = idx
+                    break
+                idx -= 1
+            continue
+
+        # Safety: Backtrack if we consumed a Markdown Header marker (#)
+        temp_len = prefix_len
+        hit_header = False
+        while temp_len > 0:
+            char = target[temp_len - 1]
+            if char == "#":
+                prefix_len = temp_len - 1
+                while prefix_len > 0 and target[prefix_len - 1] != "\n":
+                    prefix_len -= 1
+                hit_header = True
+                break
+            if char == "\n":
+                break
+            temp_len -= 1
+        if hit_header:
+            continue
+
+        break
 
     # 2. Suffix with Word Boundary Check
     suffix_len = 0
@@ -83,31 +113,58 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
             else:
                 break
 
-    # Fix 5.5: Backtrack suffix if it leaves unbalanced markdown markers
+    # Backtrack suffix to avoid splitting markdown markers or leaving them unbalanced
     while suffix_len > 0:
-        text_slice = target[len(target) - suffix_len :]
-        b_count = text_slice.count("**")
-        u_count = text_slice.count("_")
-        if b_count % 2 != 0 or u_count % 2 != 0:
+        idx = len(target) - suffix_len
+        if idx > 0 and target[idx - 1 : idx + 1] in ("**", "__"):
             suffix_len -= 1
-        else:
-            break
+            continue
+
+        right = target[len(target) - suffix_len :]
+        b_count = right.count("**")
+        u2_count = right.count("__")
+        u1_count = right.replace("__", "").count("_")
+
+        if b_count % 2 != 0:
+            idx_in_right = right.find("**")
+            suffix_len -= idx_in_right + 2
+            continue
+        if u2_count % 2 != 0:
+            idx_in_right = right.find("__")
+            suffix_len -= idx_in_right + 2
+            continue
+        if u1_count % 2 != 0:
+            # Safely find the first standalone '_'
+            idx_in_right = 0
+            while idx_in_right < len(right):
+                if (
+                    right[idx_in_right] == "_"
+                    and (idx_in_right == 0 or right[idx_in_right - 1] != "_")
+                    and (idx_in_right == len(right) - 1 or right[idx_in_right + 1] != "_")
+                ):
+                    suffix_len -= idx_in_right + 1
+                    break
+                idx_in_right += 1
+            continue
+        break
 
     if suffix_len > 0 and target[len(target) - suffix_len :].isspace():
         suffix_len = 0
 
-    # Fix 5.5: Absorb wrappers into prefix/suffix to avoid leaving markers in the diff.
-    for marker in ["**", "_"]:
+    # Fix 5.5: Absorb balanced wrappers into prefix/suffix to avoid leaving markers in the diff.
+    # This prevents marker leaks and allows exact matches on formatting blocks (like __init__).
+    for marker in ["**", "__", "_"]:
         mlen = len(marker)
         tgt_rem = target[prefix_len : len(target) - suffix_len if suffix_len else len(target)]
         new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
+
         if (
             tgt_rem.startswith(marker)
             and new_rem.startswith(marker)
             and tgt_rem.endswith(marker)
             and new_rem.endswith(marker)
-            and len(tgt_rem) > 2 * mlen
-            and len(new_rem) > 2 * mlen
+            and len(tgt_rem) >= 2 * mlen
+            and len(new_rem) >= 2 * mlen
         ):
             prefix_len += mlen
             suffix_len += mlen

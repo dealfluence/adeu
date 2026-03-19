@@ -339,40 +339,27 @@ class RedlineEngine:
     def _apply_run_props(self, run_element, props: Dict[str, Any], suppress_inherited: bool = False) -> None:
         """
         Applies Bold/Italic properties to a run.
-        Fix 5.3: When suppress_inherited=True, explicitly turns off properties not in props,
-        preventing inheritance bleed from deepcopied runs.
+        Uses python-docx native Run object to ensure XML schema ordering is correct.
         """
         if not props:
             if not suppress_inherited:
                 return
             props = {}
 
-        rPr = run_element.find(qn("w:rPr"))
-        if rPr is None:
-            rPr = create_element("w:rPr")
-            run_element.insert(0, rPr)
+        # Wrap the OxmlElement in a Run to let python-docx handle exact schema ordering
+        run_obj = Run(run_element, None)  # type: ignore
 
         # Handle Bold
-        b_tag = rPr.find(qn("w:b"))
         if props.get("bold"):
-            if b_tag is None:
-                b_tag = create_element("w:b")
-                rPr.append(b_tag)
-            b_tag.set(qn("w:val"), "1")
+            run_obj.bold = True
         elif suppress_inherited:
-            if b_tag is not None:
-                b_tag.set(qn("w:val"), "0")
+            run_obj.bold = False
 
         # Handle Italic
-        i_tag = rPr.find(qn("w:i"))
         if props.get("italic"):
-            if i_tag is None:
-                i_tag = create_element("w:i")
-                rPr.append(i_tag)
-            i_tag.set(qn("w:val"), "1")
+            run_obj.italic = True
         elif suppress_inherited:
-            if i_tag is not None:
-                i_tag.set(qn("w:val"), "0")
+            run_obj.italic = False
 
     def _set_paragraph_style(self, p_element, style_name: str):
         existing_pPr = p_element.find(qn("w:pPr"))
@@ -736,9 +723,10 @@ class RedlineEngine:
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper
 
-        return self._apply_single_edit_indexed(proxy_edit)
+        # Pass the original LLM text to ensure we don't accidentally strip formatting intent
+        return self._apply_single_edit_indexed(proxy_edit, original_new_text=edit.new_text)
 
-    def _apply_single_edit_indexed(self, edit: DocumentEdit) -> bool:
+    def _apply_single_edit_indexed(self, edit: DocumentEdit, original_new_text: Optional[str] = None) -> bool:
         op = edit._internal_op
         active_mapper = edit._active_mapper_ref or self.mapper
 
@@ -849,8 +837,9 @@ class RedlineEngine:
                     if current_style and getattr(current_style, "name", "") == style_name:
                         text_to_insert = clean_text
 
-                # Fix 5.3: Suppress inherited formatting if new text has no markdown markers
-                _has_markdown = bool(re.search(r"\*\*|_", text_to_insert))
+                check_text = original_new_text if original_new_text is not None else edit.new_text
+                _has_markdown = bool(re.search(r"\*\*|_", check_text or ""))
+
                 ins_elem = self.track_insert(
                     text_to_insert,
                     anchor_run=Run(target_runs[-1]._element, target_runs[-1]._parent),
