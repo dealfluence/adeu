@@ -21,6 +21,10 @@ from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
+import json
+import urllib.request
+import urllib.error
+from adeu.auth import DesktopAuthManager
 
 BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
 # --- LOGGING CONFIGURATION ---
@@ -91,15 +95,21 @@ async def read_docx(
             extra={"size_bytes": len(stream.getvalue())},
         )
 
-        text = extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
-        await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+        text = extract_text_from_stream(
+            stream, filename=Path(file_path).name, clean_view=clean_view
+        )
+        await ctx.info(
+            "Successfully extracted text from DOCX", extra={"text_length": len(text)}
+        )
         return text
 
     except FileNotFoundError as e:
         await ctx.error("File not found", extra={"file_path": file_path})
         return f"Error reading file: {str(e)}"
     except Exception as e:
-        await ctx.error("Failed to parse DOCX", extra={"error": str(e), "file_path": file_path})
+        await ctx.error(
+            "Failed to parse DOCX", extra={"error": str(e), "file_path": file_path}
+        )
         return f"Error reading file: {str(e)}"
 
 
@@ -108,7 +118,9 @@ async def diff_docx_files(
     original_path: Annotated[str, "Path to the base document."],
     modified_path: Annotated[str, "Path to the new document."],
     ctx: Context,
-    compare_clean: Annotated[bool, "If True, compares 'Accepted' state. If False, compares raw text."] = True,
+    compare_clean: Annotated[
+        bool, "If True, compares 'Accepted' state. If False, compares raw text."
+    ] = True,
 ) -> str:
     await ctx.info(
         "Starting document diff",
@@ -122,11 +134,15 @@ async def diff_docx_files(
     try:
         await ctx.debug("Extracting text from original document")
         stream_orig = _read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
+        text_orig = extract_text_from_stream(
+            stream_orig, filename=Path(original_path).name, clean_view=compare_clean
+        )
 
         await ctx.debug("Extracting text from modified document")
         stream_mod = _read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
+        text_mod = extract_text_from_stream(
+            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean
+        )
 
         await ctx.debug("Generating text differences")
         edits = generate_edits_from_text(text_orig, text_mod)
@@ -177,16 +193,22 @@ async def diff_docx_files(
         return f"Error computing diff: {str(e)}"
 
 
-@mcp.tool(description="ATOMIC PIPELINE: Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits.")
+@mcp.tool(
+    description="ATOMIC PIPELINE: Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits."
+)
 async def process_document_batch(
     original_docx_path: Annotated[str, "Absolute path to the source file."],
-    author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
+    author_name: Annotated[
+        str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."
+    ],
     ctx: Context,
     actions: Annotated[
         Optional[List[ReviewAction]],
         "Optional list of review actions (ACCEPT, REJECT, REPLY)",
     ] = None,
-    edits: Annotated[Optional[List[DocumentEdit]], "Optional list of text replacements"] = None,
+    edits: Annotated[
+        Optional[List[DocumentEdit]], "Optional list of text replacements"
+    ] = None,
     output_path: Annotated[Optional[str], "Optional output path."] = None,
 ) -> str:
     await ctx.info(
@@ -208,7 +230,9 @@ async def process_document_batch(
         edits = edits or []
 
         if not actions and not edits:
-            await ctx.warning("Batch processing rejected: No actions or edits provided.")
+            await ctx.warning(
+                "Batch processing rejected: No actions or edits provided."
+            )
             return "Error: No actions or edits provided."
 
         stream = _read_file_bytes(original_docx_path)
@@ -270,7 +294,9 @@ async def process_document_batch(
         result_stream = engine.save_to_stream()
         _save_stream(result_stream, output_path)
 
-        await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
+        await ctx.info(
+            "Batch process complete and saved", extra={"output_path": output_path}
+        )
 
         return (
             f"Batch complete. Saved to: {output_path}\n"
@@ -279,11 +305,15 @@ async def process_document_batch(
         )
 
     except Exception as e:
-        await ctx.error("Critical error during batch processing", extra={"error": str(e)})
+        await ctx.error(
+            "Critical error during batch processing", extra={"error": str(e)}
+        )
         return f"Error processing batch: {str(e)}"
 
 
-@mcp.tool(description="Accepts all tracked changes in the document and removes comments, creating a clean version.")
+@mcp.tool(
+    description="Accepts all tracked changes in the document and removes comments, creating a clean version."
+)
 async def accept_all_changes(
     docx_path: Annotated[str, "Absolute path to the DOCX file."],
     ctx: Context,
@@ -302,7 +332,9 @@ async def accept_all_changes(
             output_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
 
         _save_stream(engine.save_to_stream(), output_path)
-        await ctx.info("Clean document saved successfully", extra={"output_path": output_path})
+        await ctx.info(
+            "Clean document saved successfully", extra={"output_path": output_path}
+        )
 
         return f"Accepted all changes. Saved to: {output_path}"
     except Exception as e:
@@ -320,10 +352,16 @@ async def apply_edits_as_markdown(
     docx_path: Annotated[str, "Absolute path to the DOCX file."],
     edits: Annotated[List[DocumentEdit], "List of edits."],
     ctx: Context,
-    output_path: Annotated[Optional[str], "Optional path for the output .md file."] = None,
-    include_index: Annotated[bool, "If True, appends the edit's 0-based index."] = False,
+    output_path: Annotated[
+        Optional[str], "Optional path for the output .md file."
+    ] = None,
+    include_index: Annotated[
+        bool, "If True, appends the edit's 0-based index."
+    ] = False,
     highlight_only: Annotated[bool, "If True, only highlights target_text."] = False,
-    clean_view: Annotated[bool, "If True (default), extracts the 'Accepted' state."] = True,
+    clean_view: Annotated[
+        bool, "If True (default), extracts the 'Accepted' state."
+    ] = True,
 ) -> str:
     await ctx.info(
         "Starting CriticMarkup conversion",
@@ -359,7 +397,9 @@ async def apply_edits_as_markdown(
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(result)
 
-        await ctx.info("CriticMarkup saved successfully", extra={"output_path": output_path})
+        await ctx.info(
+            "CriticMarkup saved successfully", extra={"output_path": output_path}
+        )
         return f"Saved CriticMarkup to: {output_path}"
 
     except FileNotFoundError:
@@ -370,7 +410,9 @@ async def apply_edits_as_markdown(
         return f"Error applying edits as markdown: {str(e)}"
 
 
-@mcp.tool(description="Logs the user into the Adeu Cloud backend. Securely opens a browser window for authentication.")
+@mcp.tool(
+    description="Logs the user into the Adeu Cloud backend. Securely opens a browser window for authentication."
+)
 async def login_to_adeu_cloud(ctx: Context) -> str:
     await ctx.info("Initiating cloud authentication workflow")
     try:
@@ -420,7 +462,9 @@ async def login_to_adeu_cloud(ctx: Context) -> str:
         raise ToolError(f"Error during login process: {str(e)}") from e
 
 
-@mcp.tool(description="Logs out of the Adeu Cloud backend by clearing the local API key from the OS Keychain.")
+@mcp.tool(
+    description="Logs out of the Adeu Cloud backend by clearing the local API key from the OS Keychain."
+)
 async def logout_of_adeu_cloud(ctx: Context) -> str:
     await ctx.info("Initiating cloud session logout")
     try:
@@ -428,7 +472,9 @@ async def logout_of_adeu_cloud(ctx: Context) -> str:
         await ctx.debug("API key cleared from OS Keychain successfully")
         return "Successfully logged out. The local API key has been removed from the Keychain."
     except Exception as e:
-        await ctx.error("Failed to clear API key during logout", extra={"error": str(e)})
+        await ctx.error(
+            "Failed to clear API key during logout", extra={"error": str(e)}
+        )
         raise ToolError(f"Error during logout: {str(e)}") from e
 
 
@@ -440,7 +486,11 @@ def _encode_multipart_formdata(
 
     for field_name, file_name, file_bytes in files:
         buffer.write(f"--{boundary}\r\n".encode("utf-8"))
-        buffer.write(f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"\r\n'.encode("utf-8"))
+        buffer.write(
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"\r\n'.encode(
+                "utf-8"
+            )
+        )
         content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
         buffer.write(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
         buffer.write(file_bytes)
@@ -459,15 +509,21 @@ def _encode_multipart_formdata(
     )
 )
 async def validate_legal_documents(
-    file_paths: Annotated[List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."],
+    file_paths: Annotated[
+        List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."
+    ],
     ctx: Context,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> str:
-    await ctx.info("Starting legal document validation", extra={"provided_paths": file_paths})
+    await ctx.info(
+        "Starting legal document validation", extra={"provided_paths": file_paths}
+    )
 
     if not file_paths:
         await ctx.warning("No file paths provided by client")
-        raise ToolError("You must provide at least 1 file path or directory to perform document validation.")
+        raise ToolError(
+            "You must provide at least 1 file path or directory to perform document validation."
+        )
 
     resolved_files: list[Path] = []
     valid_extensions = {".docx", ".pdf"}
@@ -485,15 +541,21 @@ async def validate_legal_documents(
                     resolved_files.append(child)
         elif p.is_file():
             if p.suffix.lower() not in valid_extensions:
-                await ctx.warning("Unsupported file type skipped", extra={"file": path_str})
-                raise ToolError(f"Unsupported file type for {path_str}. Only .docx and .pdf are supported.")
+                await ctx.warning(
+                    "Unsupported file type skipped", extra={"file": path_str}
+                )
+                raise ToolError(
+                    f"Unsupported file type for {path_str}. Only .docx and .pdf are supported."
+                )
             resolved_files.append(p)
 
     resolved_files = list(set(resolved_files))
 
     if not resolved_files:
         await ctx.error("No valid documents found in provided paths")
-        raise ToolError("No supported documents (.docx or .pdf) were found in the provided paths.")
+        raise ToolError(
+            "No supported documents (.docx or .pdf) were found in the provided paths."
+        )
 
     await ctx.info(
         f"Resolved {len(resolved_files)} file(s) for validation",
@@ -506,7 +568,9 @@ async def validate_legal_documents(
             with open(p, "rb") as f:
                 files_data.append(("files", p.name, f.read()))
         except Exception as e:
-            await ctx.error("Failed to read file", extra={"filename": p.name, "error": str(e)})
+            await ctx.error(
+                "Failed to read file", extra={"filename": p.name, "error": str(e)}
+            )
             raise ToolError(f"Failed to read file {p.name}: {str(e)}") from e
 
     await ctx.debug("Encoding multipart/form-data payload")
@@ -566,15 +630,21 @@ async def validate_legal_documents(
 
             issues = consistency.get("issues", [])
             if not issues:
-                output.append("No inconsistencies found! The document(s) appear to be structurally aligned.\n")
+                output.append(
+                    "No inconsistencies found! The document(s) appear to be structurally aligned.\n"
+                )
             else:
                 for i, issue in enumerate(issues, 1):
-                    output.append(f"### {i}. [{issue.get('severity')}] {issue.get('title')}")
+                    output.append(
+                        f"### {i}. [{issue.get('severity')}] {issue.get('title')}"
+                    )
                     output.append(f"**Description**: {issue.get('description')}")
                     output.append(format_evidence(issue.get("evidence", [])))
 
             output.append("## 2. Buyer vs. Seller Risk Assessment")
-            output.append(f"**Summary**: {risk.get('summary', 'No summary provided.')}\n")
+            output.append(
+                f"**Summary**: {risk.get('summary', 'No summary provided.')}\n"
+            )
 
             def format_risk_section(section_title, risk_items):
                 if not risk_items:
@@ -599,10 +669,14 @@ async def validate_legal_documents(
         if e.code == 401:
             await ctx.warning("Cloud authentication expired during validation")
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         elif e.code == 403:
             await ctx.warning("Authorization Error: User lacks access to this tool")
-            raise ToolError("Authorization Error: You do not have access to use this tool.") from e
+            raise ToolError(
+                "Authorization Error: You do not have access to use this tool."
+            ) from e
 
         error_body = e.read().decode("utf-8")
         await ctx.error(
@@ -611,7 +685,9 @@ async def validate_legal_documents(
         )
         raise ToolError(f"Cloud analysis failed (HTTP {e.code}): {error_body}") from e
     except Exception as e:
-        await ctx.error("Unexpected error communicating with Adeu Cloud", extra={"error": str(e)})
+        await ctx.error(
+            "Unexpected error communicating with Adeu Cloud", extra={"error": str(e)}
+        )
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
 
 
