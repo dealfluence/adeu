@@ -687,6 +687,116 @@ async def validate_legal_documents(
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
 
 
+def _encode_multipart_formdata(
+    files: List[tuple[str, str, bytes]],
+) -> tuple[bytes, str]:
+    """Encodes files into a multipart/form-data payload for urllib."""
+    boundary = uuid.uuid4().hex
+    buffer = BytesIO()
+
+    for field_name, file_name, file_bytes in files:
+        buffer.write(f"--{boundary}\r\n".encode("utf-8"))
+        buffer.write(
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"\r\n'.encode(
+                "utf-8"
+            )
+        )
+        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        buffer.write(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        buffer.write(file_bytes)
+        buffer.write(b"\r\n")
+
+    buffer.write(f"--{boundary}--\r\n".encode("utf-8"))
+    return buffer.getvalue(), f"multipart/form-data; boundary={boundary}"
+
+
+@mcp.tool(
+    description="""
+Analyzes a package of multiple legal documents (e.g., MSA + SOW + DPA) to find 
+inconsistencies, contradictions, defined term leakage, and structural misalignments.
+Use this tool when you need to verify that multiple related files agree with each other.
+Returns a structured Markdown report.
+"""
+)
+def check_legal_consistency(
+    file_paths: Annotated[
+        List[str],
+        "List of absolute paths to the documents (DOCX, PDF, etc.) to compare. Must contain at least 2 files.",
+    ],
+    api_key: str = Depends(get_cloud_auth_token),
+) -> str:
+    if not file_paths or len(file_paths) < 2:
+        raise ToolError(
+            "You must provide at least 2 file paths to perform a consistency check."
+        )
+
+    files_data = []
+    for path_str in file_paths:
+        p = Path(path_str)
+        if not p.exists():
+            raise ToolError(f"File not found on local disk: {path_str}")
+
+        with open(p, "rb") as f:
+            # We use 'files' as the field name to match the FastAPI `files: List[UploadFile]` parameter
+            files_data.append(("files", p.name, f.read()))
+
+    body, content_type = _encode_multipart_formdata(files_data)
+    url = f"{BACKEND_URL}/api/v1/documents/consistency"
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": content_type,
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+            # Format the JSON response into a readable Markdown report for the LLM
+            output = [
+                f"# Legal Consistency Report",
+                f"\n**Summary**: {data.get('summary', '')}\n",
+                "## Identified Issues\n",
+            ]
+
+            issues = data.get("issues", [])
+            if not issues:
+                output.append(
+                    "No inconsistencies found! The documents appear to be structurally aligned."
+                )
+
+            for i, issue in enumerate(issues, 1):
+                output.append(
+                    f"### {i}. [{issue.get('severity')}] {issue.get('issue_title')}"
+                )
+                output.append(
+                    f"**Affected Documents**: {', '.join(issue.get('affected_documents', []))}"
+                )
+                output.append(f"**Description**: {issue.get('description')}")
+                output.append(f"**Recommendation**: {issue.get('recommendation')}\n")
+
+            return "\n".join(output)
+
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            DesktopAuthManager.clear_api_key()
+            raise ToolError(
+                "Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            )
+
+        # Try to read backend validation errors (e.g. 400 Bad Request)
+        error_body = e.read().decode("utf-8")
+        raise ToolError(f"Cloud analysis failed (HTTP {e.code}): {error_body}")
+    except Exception as e:
+        raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}")
+
+
 def main():
     mcp.run()
 
