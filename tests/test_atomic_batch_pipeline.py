@@ -1,4 +1,5 @@
 # FILE: tests/test_atomic_batch_pipeline.py
+import asyncio
 import io
 import re
 
@@ -8,6 +9,22 @@ from adeu.ingest import extract_text_from_stream
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
 from adeu.server import process_document_batch
+
+
+class MockContext:
+    """Mock FastMCP Context to absorb async logging calls during tests."""
+
+    async def info(self, msg, **kwargs):
+        pass
+
+    async def debug(self, msg, **kwargs):
+        pass
+
+    async def warning(self, msg, **kwargs):
+        pass
+
+    async def error(self, msg, **kwargs):
+        pass
 
 
 def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
@@ -58,13 +75,16 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
 
     out_path = tmp_path / "final.docx"
 
-    # Run the new server tool
-    result_msg = process_document_batch(
-        original_docx_path=str(mid_path),
-        author_name="Round2",
-        actions=actions,
-        edits=edits,
-        output_path=str(out_path),
+    # Run the new server tool asynchronously with the mock context
+    result_msg = asyncio.run(
+        process_document_batch(
+            original_docx_path=str(mid_path),
+            author_name="Round2",
+            ctx=MockContext(),
+            actions=actions,
+            edits=edits,
+            output_path=str(out_path),
+        )
     )
 
     # 4. Assertions on the Tool Execution
