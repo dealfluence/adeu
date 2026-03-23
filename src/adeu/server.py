@@ -1,7 +1,3 @@
-import json
-import logging
-import mimetypes
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -14,7 +10,7 @@ import structlog
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
-
+import logging
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
