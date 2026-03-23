@@ -1,3 +1,6 @@
+import json
+import logging
+import mimetypes
 import sys
 import urllib.error
 import urllib.request
@@ -10,17 +13,12 @@ import structlog
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
-import logging
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
-import json
-import urllib.request
-import urllib.error
-from adeu.auth import DesktopAuthManager
 
 BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
 # --- LOGGING CONFIGURATION ---
@@ -76,7 +74,10 @@ async def read_docx(
     ctx: Context,
     clean_view: Annotated[
         bool,
-        "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
+        "If False (default), returns the 'Raw' text with inline CriticMarkup "
+        "({--del--}{++ins++}) so you can see existing redlines and comments. "
+        "If True, returns the 'Accepted' text (hides deletions, shows insertions) "
+        "- useful for seeing the clean final state.",
     ] = False,
 ) -> str:
     await ctx.info(
@@ -115,7 +116,11 @@ async def diff_docx_files(
     modified_path: Annotated[str, "Path to the new document."],
     ctx: Context,
     compare_clean: Annotated[
-        bool, "If True, compares 'Accepted' state. If False, compares raw text."
+        bool,
+        "If True (default), compares the 'Accepted' state of both docs "
+        "(ignores tracking markup). This mimics Word's 'Compare Documents' feature. "
+        "If False, compares the raw text including existing redline markup "
+        "(useful for debugging markup changes).",
     ] = True,
 ) -> str:
     await ctx.info(
@@ -356,7 +361,9 @@ async def apply_edits_as_markdown(
     ] = False,
     highlight_only: Annotated[bool, "If True, only highlights target_text."] = False,
     clean_view: Annotated[
-        bool, "If True (default), extracts the 'Accepted' state."
+        bool,
+        "If True (default), extracts the 'Accepted' state of the document. "
+        "If False, includes existing CriticMarkup in the extracted text.",
     ] = True,
 ) -> str:
     await ctx.info(
@@ -712,7 +719,7 @@ def _encode_multipart_formdata(
 
 @mcp.tool(
     description="""
-Analyzes a package of multiple legal documents (e.g., MSA + SOW + DPA) to find 
+Analyzes a package of multiple legal documents (e.g., MSA + SOW + DPA) to find
 inconsistencies, contradictions, defined term leakage, and structural misalignments.
 Use this tool when you need to verify that multiple related files agree with each other.
 Returns a structured Markdown report.
@@ -760,7 +767,7 @@ def check_legal_consistency(
 
             # Format the JSON response into a readable Markdown report for the LLM
             output = [
-                f"# Legal Consistency Report",
+                "# Legal Consistency Report",
                 f"\n**Summary**: {data.get('summary', '')}\n",
                 "## Identified Issues\n",
             ]
@@ -788,13 +795,13 @@ def check_legal_consistency(
             DesktopAuthManager.clear_api_key()
             raise ToolError(
                 "Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
-            )
+            ) from e
 
         # Try to read backend validation errors (e.g. 400 Bad Request)
         error_body = e.read().decode("utf-8")
-        raise ToolError(f"Cloud analysis failed (HTTP {e.code}): {error_body}")
+        raise ToolError(f"Cloud analysis failed (HTTP {e.code}): {error_body}") from e
     except Exception as e:
-        raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}")
+        raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
 
 
 def main():
