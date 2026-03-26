@@ -45,9 +45,7 @@ class AuthCallbackHandler(http.server.BaseHTTPRequestHandler):
                 self._send_html_response(success=True)
             else:
                 self.server.api_key = None
-                self._send_html_response(
-                    success=False, message="No API key received in callback."
-                )
+                self._send_html_response(success=False, message="No API key received in callback.")
         else:
             self.send_response(404)
             self.end_headers()
@@ -179,7 +177,5 @@ class DesktopAuthManager:
         if api_key:
             return api_key
 
-        logger.info(
-            "No API key found in Keychain. Starting interactive authentication..."
-        )
+        logger.info("No API key found in Keychain. Starting interactive authentication...")
         return cls.authenticate_interactive()
