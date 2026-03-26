@@ -16,15 +16,24 @@ It treats the DOCX file as a **Virtual DOM**:
 
 **Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. Install it via your terminal:
 
-```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
+**macOS**
 
-# Windows
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+> If you have Homebrew installed, macOS may warn you to use it for system-wide installations. In that case, use:
+> ```bash
+> brew install uv
+> ```
+
+**Windows**
+
+```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-_(Alternatively, you can use `pip install uv`)_
+_(Alternatively, on any platform you can use `pip install uv`)_
 
 ### Claude Desktop Integration
 
@@ -34,7 +43,9 @@ To instantly add Adeu to **Claude Desktop**, run:
 uvx adeu init
 ```
 
-_Note: This command automatically detects and updates your `claude_desktop_config.json`. Restart Claude Desktop afterward to load the new tools._
+> [!IMPORTANT]
+> This command **automatically detects and updates** your `claude_desktop_config.json`.
+> **Restart Claude Desktop** afterward to load the new tools.
 
 <details>
 <summary><b>Manual / Other MCP Client Configuration</b></summary>
