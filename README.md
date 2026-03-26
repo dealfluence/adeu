@@ -47,6 +47,14 @@ uvx adeu init
 > This command **automatically detects and updates** your `claude_desktop_config.json`.
 > **Restart Claude Desktop** afterward to load the new tools.
 
+### ✅ Verify It's Working
+
+Once Claude Desktop has restarted, you can confirm Adeu is connected by typing the following message directly into Claude:
+
+> **"Can you read a DOCX file using the Adeu tool?"**
+
+If everything is set up correctly, Claude will confirm it has access to the Adeu tools and describe what it can do. If it doesn't mention Adeu or says it doesn't have file tools, double-check that you restarted Claude Desktop after running `uvx adeu init`.
+
 <details>
 <summary><b>Manual / Other MCP Client Configuration</b></summary>
 <br>
