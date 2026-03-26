@@ -1,3 +1,4 @@
+````markdown
 # Adeu: Native Track Changes for AI
 
 **Adeu bridges the gap between LLM text generation and Microsoft Word.**
@@ -5,6 +6,7 @@
 LLMs speak Markdown; Lawyers speak "Track Changes." Adeu allows AI agents to propose edits to `.docx` files without breaking formatting, numbering, or complex layouts.
 
 It treats the DOCX file as a **Virtual DOM**:
+
 1.  **Ingest:** Extracts a lightweight, token-efficient text representation for the AI.
 2.  **Diff:** Calculates changes based on the AI's edits.
 3.  **Reconcile:** Surgically injects native XML `w:ins` (insertions) and `w:del` (deletions) back into the original document.
@@ -13,34 +15,70 @@ It treats the DOCX file as a **Virtual DOM**:
 
 ## ⚡ Zero-Config Setup
 
-**Prerequisite:** [uv](https://github.com/astral-sh/uv) must be installed.
+**Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. Install it via your terminal:
 
-To instantly add Adeu to **Claude Desktop**:
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+````
+
+_(Alternatively, you can use `pip install uv`)_
+
+### Claude Desktop Integration
+
+To instantly add Adeu to **Claude Desktop**, run:
 
 ```bash
 uvx adeu init
 ```
 
-*Restart Claude Desktop to load the new tools.*
+_Note: This command automatically detects and updates your `claude_desktop_config.json`. Restart Claude Desktop afterward to load the new tools._
+
+<details>
+<summary><b>Manual / Other MCP Client Configuration</b></summary>
+<br>
+If you are using another MCP client (like Cursor, Windsurf, or a custom app), add the following to your MCP configuration file.
+
+Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading the correct Python version and running the server:
+
+```json
+{
+  "mcpServers": {
+    "adeu": {
+      "command": "uvx",
+      "args": ["--from", "adeu", "adeu-server"]
+    }
+  }
+}
+```
+
+</details>
 
 ---
 
 ## Workflows
 
 ### 1. For Agents (Claude / MCP)
+
 Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
 
 **The "Document Specialist" Prompt:**
-Give your agent this context to maximize effectiveness:
+To maximize the AI's effectiveness, paste this context into Claude's **Project Instructions** or your agent's System Prompt:
 
 > **Role:** Document Specialist
 > **Tools:**
-> *   `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
-> *   `apply_edits_as_markdown`: **Drafting Mode.** Generate a CriticMarkup preview (`{--old--}{++new++}`) to show the user exactly what will change.
-> *   `apply_structured_edits`: **Commit Mode.** Apply specific search-and-replace edits to generate native Track Changes in the DOCX.
-> *   `manage_review_actions`: **Negotiation.** Reply to comments or Accept/Reject specific changes by ID.
+>
+> - `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
+> - `apply_edits_as_markdown`: **Drafting Mode.** Generate a CriticMarkup preview (`{--old--}{++new++}`) to show the user exactly what will change.
+> - `apply_structured_edits`: **Commit Mode.** Apply specific search-and-replace edits to generate native Track Changes in the DOCX.
+> - `manage_review_actions`: **Negotiation.** Reply to comments or Accept/Reject specific changes by ID.
 
 ### 2. For Builders (Python SDK)
+
 If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation.
 
 ```python
@@ -69,6 +107,7 @@ with open("MSA_Redlined.docx", "wb") as f:
 ```
 
 ### 3. The CLI
+
 Quickly inspect documents or apply batches of edits from your terminal.
 
 ```bash
@@ -90,27 +129,36 @@ adeu apply contract.docx edits.json --author "Review Bot"
 ## Key Features
 
 ### 🛡️ Format Safety
+
 Adeu does not "rewrite" the document. It patches it.
-*   **Images & Layouts:** Untouched.
-*   **Numbering & Headers:** Preserved.
-*   **Complex XML:** It only modifies the text runs targeted by the edit.
+
+- **Images & Layouts:** Untouched.
+- **Numbering & Headers:** Preserved.
+- **Complex XML:** It only modifies the text runs targeted by the edit.
 
 ### 📝 CriticMarkup Representation
+
 Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes.
 
-| Markup | Meaning | Example |
-| :--- | :--- | :--- |
-| `{--text--}` | Deletion | `{--Tenant--}` |
-| `{++text++}` | Insertion | `{++Lessee++}` |
-| `{>>text<<}` | Comment | `{>>Clarify this term<<}` |
+| Markup       | Meaning   | Example                   |
+| :----------- | :-------- | :------------------------ |
+| `{--text--}` | Deletion  | `{--Tenant--}`            |
+| `{++text++}` | Insertion | `{++Lessee++}`            |
+| `{>>text<<}` | Comment   | `{>>Clarify this term<<}` |
 
 ### 🔍 Intelligent Mapping
+
 Word documents are messy. A word like "Contract" might be split into XML runs like `["Con", "tract"]` due to spellcheck or formatting history.
-*   **Run Coalescing:** Adeu normalizes these splits so the AI sees "Contract".
-*   **Fuzzy Matching:** It handles minor whitespace discrepancies between the LLM's memory and the actual document content.
+
+- **Run Coalescing:** Adeu normalizes these splits so the AI sees "Contract".
+- **Fuzzy Matching:** It handles minor whitespace discrepancies between the LLM's memory and the actual document content.
 
 ---
 
 ## License
 
 MIT License. Open source and free to use in commercial applications.
+
+```
+
+```
