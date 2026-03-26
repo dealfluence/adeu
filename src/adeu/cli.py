@@ -1,4 +1,3 @@
-# FILE: src/adeu/cli.py
 import argparse
 import datetime
 import getpass
@@ -30,21 +29,19 @@ def _get_claude_config_path() -> Path:
     elif system == "Darwin":  # macOS
         return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     else:
-        # Fallback for Linux or others, though Claude Desktop is primarily Win/Mac
         return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
 def handle_init(args: argparse.Namespace):
     """
     Configures Adeu in the Claude Desktop environment.
-    1. Checks for 'uv'.
+    1. Checks for 'uvx'.
     2. Locates config file.
     3. Backs up existing config.
     4. Injects MCP server entry.
     """
     print("🤖 Adeu Agentic Setup", file=sys.stderr)
 
-    # 2. Locate Config
     try:
         config_path = _get_claude_config_path()
     except Exception as e:
@@ -53,10 +50,8 @@ def handle_init(args: argparse.Namespace):
 
     print(f"📍 Config found: {config_path}", file=sys.stderr)
 
-    # 3. Load or Create Config
     data: Dict[str, Any] = {"mcpServers": {}}
     if config_path.exists():
-        # Backup
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
         shutil.copy2(config_path, backup_path)
@@ -70,12 +65,9 @@ def handle_init(args: argparse.Namespace):
         except json.JSONDecodeError:
             print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
 
-    # 4. Inject Adeu Server
     mcp_servers = data.setdefault("mcpServers", {})
 
     if args.local:
-        # LOCAL DEV MODE: Point to the current running python environment + code
-        # This is critical for testing changes before publishing to PyPI.
         cwd = Path.cwd().resolve()
         python_exe = sys.executable
         print("🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
@@ -88,16 +80,25 @@ def handle_init(args: argparse.Namespace):
             "cwd": str(cwd),
         }
     else:
-        # PRODUCTION MODE: Zero-Install via uvx
-        uv_path = shutil.which("uv") or shutil.which("uvx")
-        if not uv_path:
+        # Resolve the absolute path to uvx so Claude Desktop (which runs
+        # with a stripped PATH) can find it even on macOS/Linux where it
+        # typically lives in ~/.local/bin — outside the GUI app's PATH.
+        uvx_path = shutil.which("uvx")
+        if not uvx_path:
             print(
-                "⚠️  Warning: 'uv' tool not found. Install it for production use.",
+                "❌ Could not find 'uvx' in your PATH.\n"
+                "   Install uv first:\n"
+                "     macOS/Linux: curl -LsSf https://astral.sh/uv/install.sh | sh\n"
+                "     Windows:     powershell -ExecutionPolicy ByPass -c "
+                '"irm https://astral.sh/uv/install.ps1 | iex"',
                 file=sys.stderr,
             )
+            sys.exit(1)
+
+        print(f"🔍 Found uvx at: {uvx_path}", file=sys.stderr)
 
         mcp_servers["adeu"] = {
-            "command": "uvx",
+            "command": uvx_path,  # absolute path, not bare "uvx"
             "args": ["--from", "adeu", "adeu-server"],
         }
 
@@ -251,15 +252,12 @@ def handle_apply(args):
 
 def handle_markup(args):
     """Handler for the 'markup' subcommand."""
-    # 1. Read the source document
     if args.input.suffix.lower() == ".docx":
         text = _read_docx_text(args.input)
     else:
-        # Assume it's already a text/markdown file
         with open(args.input, "r", encoding="utf-8") as f:
             text = f.read()
 
-    # 2. Load edits from JSON
     if not args.edits.exists():
         print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
         sys.exit(1)
@@ -269,7 +267,6 @@ def handle_markup(args):
     if not edits:
         print("Warning: No edits found in JSON file.", file=sys.stderr)
 
-    # 3. Apply edits as CriticMarkup
     result = apply_edits_to_markdown(
         markdown_text=text,
         edits=edits,
@@ -277,15 +274,12 @@ def handle_markup(args):
         highlight_only=args.highlight,
     )
 
-    # 4. Determine output path
     output_path = args.output
     if not output_path:
         output_path = args.input.with_suffix(".md")
         if args.input.suffix.lower() == ".md":
-            # Avoid overwriting source if it's already .md
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
-    # 5. Save result
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(result)
 
@@ -303,7 +297,6 @@ def main():
     p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
     p_extract.set_defaults(func=handle_extract)
 
-    # init command
     p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
     p_init.add_argument(
         "--local",
@@ -334,6 +327,7 @@ def main():
         help=f"Author name for Track Changes (default: '{default_author}')",
     )
     p_apply.set_defaults(func=handle_apply)
+
     p_markup = subparsers.add_parser(
         "markup",
         help="Apply edits to a document and output as CriticMarkup Markdown",
@@ -353,6 +347,7 @@ def main():
         help="Highlight-only mode: mark targets with {==...==} without applying changes",
     )
     p_markup.set_defaults(func=handle_markup)
+
     args = parser.parse_args()
     args.func(args)
 
