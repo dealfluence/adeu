@@ -1,4 +1,3 @@
-````markdown
 # Adeu: Native Track Changes for AI
 
 **Adeu bridges the gap between LLM text generation and Microsoft Word.**
@@ -24,7 +23,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Windows
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
-````
 
 _(Alternatively, you can use `pip install uv`)_
 
@@ -158,7 +156,3 @@ Word documents are messy. A word like "Contract" might be split into XML runs li
 ## License
 
 MIT License. Open source and free to use in commercial applications.
-
-```
-
-```
