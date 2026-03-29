@@ -1,10 +1,8 @@
-# FILE: src/adeu/redline/engine.py
-
 import datetime
 import re
 from copy import deepcopy
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import structlog
 from docx import Document
@@ -12,7 +10,7 @@ from docx.oxml.ns import nsmap, qn
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
-from adeu.models import DocumentEdit, EditOperationType, ReviewAction
+from adeu.models import AcceptChange, DocumentChange, EditOperationType, ModifyText, RejectChange, ReplyComment
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, normalize_docx
@@ -23,6 +21,14 @@ logger = structlog.get_logger(__name__)
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
 if "w16du" not in nsmap:
     nsmap["w16du"] = w16du_ns
+
+
+class BatchValidationError(Exception):
+    """Raised when text edits fail location validation."""
+
+    def __init__(self, errors: List[str]):
+        super().__init__("Batch validation failed")
+        self.errors = errors
 
 
 class RedlineEngine:
@@ -562,7 +568,7 @@ class RedlineEngine:
         except ValueError:
             pass
 
-    def validate_edits(self, edits: List[DocumentEdit]) -> List[str]:
+    def validate_edits(self, edits: List[ModifyText]) -> List[str]:
         """
         Performs an exhaustive dry-run validation of all text edits in the batch.
         Returns a list of error strings. If the list is empty, the batch is safe to apply.
@@ -615,7 +621,38 @@ class RedlineEngine:
 
         return errors
 
-    def apply_edits(self, edits: List[DocumentEdit]) -> tuple[int, int]:
+    def process_batch(self, changes: List[DocumentChange]) -> dict:
+        """
+        Processes a unified batch of actions and edits safely.
+        Actions are applied first, the Virtual DOM map is rebuilt, and then text edits are validated and applied.
+        """
+        actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
+        edits = [c for c in changes if isinstance(c, ModifyText)]
+
+        applied_actions, skipped_actions = 0, 0
+        if actions:
+            applied_actions, skipped_actions = self.apply_review_actions(actions)
+            if edits:
+                self.mapper._build_map()
+                self.clean_mapper = None
+
+        if edits:
+            errors = self.validate_edits(edits)
+            if errors:
+                raise BatchValidationError(errors)
+
+        applied_edits, skipped_edits = 0, 0
+        if edits:
+            applied_edits, skipped_edits = self.apply_edits(edits)
+
+        return {
+            "actions_applied": applied_actions,
+            "actions_skipped": skipped_actions,
+            "edits_applied": applied_edits,
+            "edits_skipped": skipped_edits,
+        }
+
+    def apply_edits(self, edits: List[ModifyText]) -> tuple[int, int]:
         indexed_edits = [e for e in edits if e._match_start_index is not None]
         unindexed_edits = [e for e in edits if e._match_start_index is None]
 
@@ -667,7 +704,7 @@ class RedlineEngine:
                     skipped += 1
         return applied, skipped
 
-    def _apply_single_edit_heuristic(self, edit: DocumentEdit) -> bool:
+    def _apply_single_edit_heuristic(self, edit: ModifyText) -> bool:
         if not edit.target_text:
             logger.warning("Skipping heuristic edit: target_text is empty.")
             return False
@@ -729,14 +766,14 @@ class RedlineEngine:
             else:
                 return True
 
-        proxy_edit = DocumentEdit(target_text=final_target, new_text=final_new, comment=edit.comment)
+        proxy_edit = ModifyText(target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper
 
         return self._apply_single_edit_indexed(proxy_edit, original_new_text=edit.new_text)
 
-    def _apply_single_edit_indexed(self, edit: DocumentEdit, original_new_text: Optional[str] = None) -> bool:
+    def _apply_single_edit_indexed(self, edit: ModifyText, original_new_text: Optional[str] = None) -> bool:
         op = edit._internal_op
         active_mapper = edit._active_mapper_ref or self.mapper
 
@@ -891,7 +928,7 @@ class RedlineEngine:
         output.seek(0)
         return output
 
-    def apply_review_actions(self, actions: List[ReviewAction]) -> tuple[int, int]:
+    def apply_review_actions(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> tuple[int, int]:
         applied = 0
         skipped = 0
         resolved_history = set()
@@ -921,17 +958,17 @@ class RedlineEngine:
             resolved_now = set()
             success = False
 
-            if act.action == "ACCEPT":
+            if isinstance(act, AcceptChange):
                 if is_change:
                     resolved_now = self._accept_change(target_id)
                     success = bool(resolved_now)
-            elif act.action == "REJECT":
+            elif isinstance(act, RejectChange):
                 if is_change:
                     resolved_now = self._reject_change(target_id)
                     success = bool(resolved_now)
-            elif act.action == "REPLY":
+            elif isinstance(act, ReplyComment):
                 if is_comment:
-                    success = self._reply_to_comment(target_id, act.text or "")
+                    success = self._reply_to_comment(target_id, getattr(act, "text", ""))
 
             if success:
                 if resolved_now:

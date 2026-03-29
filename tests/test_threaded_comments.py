@@ -4,7 +4,7 @@ import re
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -23,7 +23,7 @@ def test_threaded_comment_structure():
     # 1. Create Parent Comment (Force edit to ensure comment is attached)
     engine = RedlineEngine(stream, author="UserA")
     # Change "anchor" -> "Anchor" to force a tracked change with comment
-    edit = DocumentEdit(target_text="anchor", new_text="Anchor", comment="Parent Topic")
+    edit = ModifyText(target_text="anchor", new_text="Anchor", comment="Parent Topic")
     engine.apply_edits([edit])
     stream_mid = engine.save_to_stream()
 
@@ -35,7 +35,7 @@ def test_threaded_comment_structure():
 
     # 2. Create Reply (Action: REPLY)
     engine2 = RedlineEngine(stream_mid, author="UserB")
-    action = ReviewAction(action="REPLY", target_id=f"Com:{parent_id}", text="Reply Content")
+    action = ReplyComment(target_id=f"Com:{parent_id}", text="Reply Content")
     applied, skipped = engine2.apply_review_actions([action])
 
     assert applied == 1
@@ -109,7 +109,7 @@ def test_threaded_rendering_order():
 
     # Setup Engine with forced edit
     engine = RedlineEngine(stream, author="A")
-    engine.apply_edits([DocumentEdit(target_text="Target", new_text="TargetModified", comment="Root")])
+    engine.apply_edits([ModifyText(target_text="Target", new_text="TargetModified", comment="Root")])
 
     # Get ID of Root
     data = engine.comments_manager.extract_comments_data()
@@ -118,7 +118,7 @@ def test_threaded_rendering_order():
 
     # Reply 1
     engine.author = "B"
-    engine.apply_review_actions([ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Reply1")])
+    engine.apply_review_actions([ReplyComment(target_id=f"Com:{root_id}", text="Reply1")])
 
     # Get ID of Reply1
     data = engine.comments_manager.extract_comments_data()
@@ -129,7 +129,7 @@ def test_threaded_rendering_order():
 
     # Reply 2 (Reply to Reply1)
     engine.author = "C"
-    engine.apply_review_actions([ReviewAction(action="REPLY", target_id=f"Com:{reply1_id}", text="Reply2")])
+    engine.apply_review_actions([ReplyComment(target_id=f"Com:{reply1_id}", text="Reply2")])
 
     stream_final = engine.save_to_stream()
     text = extract_text_from_stream(stream_final)

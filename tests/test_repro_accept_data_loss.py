@@ -4,7 +4,7 @@ import structlog
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import AcceptChange, ModifyText
 from adeu.redline.engine import RedlineEngine
 
 logger = structlog.get_logger(__name__)
@@ -26,7 +26,7 @@ def test_repro_accept_resolves_paired_modification():
 
     # 1. Apply Edit
     engine = RedlineEngine(stream, author="Me")
-    edit = DocumentEdit(target_text="Old Text", new_text="New Text")
+    edit = ModifyText(target_text="Old Text", new_text="New Text")
     engine.apply_edits([edit])
 
     stream_edited = engine.save_to_stream()
@@ -42,7 +42,7 @@ def test_repro_accept_resolves_paired_modification():
     del_id = ids[0] if ids else "1"
 
     engine2 = RedlineEngine(stream_edited, author="Reviewer")
-    action = ReviewAction(action="ACCEPT", target_id=f"Chg:{del_id}")
+    action = AcceptChange(target_id=f"Chg:{del_id}")
     engine2.apply_review_actions([action])
 
     stream_final = engine2.save_to_stream()

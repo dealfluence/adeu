@@ -3,7 +3,7 @@ import io
 import structlog
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 logger = structlog.get_logger(__name__)
@@ -22,7 +22,7 @@ def test_reject_empty_target_heuristic():
 
     # An edit that effectively has empty target and empty new (or just empty target)
     # Pydantic requires target_text, but it can be an empty string.
-    edit = DocumentEdit(target_text="", new_text="Unexpected Header")
+    edit = ModifyText(target_text="", new_text="Unexpected Header")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])
@@ -49,7 +49,7 @@ def test_multiple_occurrences_apply_once():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Repeat", new_text="Changed")
+    edit = ModifyText(target_text="Repeat", new_text="Changed")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

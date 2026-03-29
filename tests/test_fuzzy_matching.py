@@ -3,7 +3,7 @@ import io
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -20,7 +20,7 @@ def test_placeholder_fuzzy_match():
     stream.seek(0)
 
     # Target has fewer underscores than doc
-    edit = DocumentEdit(target_text="Sign here: [___]", new_text="Sign here: John Doe")
+    edit = ModifyText(target_text="Sign here: [___]", new_text="Sign here: John Doe")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])
@@ -47,7 +47,7 @@ def test_whitespace_fuzzy_match():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Start End", new_text="Start Middle End")
+    edit = ModifyText(target_text="Start End", new_text="Start Middle End")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])
@@ -88,7 +88,7 @@ def test_smart_quote_match():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text='"Hello"', new_text='"Hi"')
+    edit = ModifyText(target_text='"Hello"', new_text='"Hi"')
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

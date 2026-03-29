@@ -7,7 +7,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -88,7 +88,7 @@ def test_repro_nested_insertions_visibility_and_editing():
 
     # 2. TEST EDITABILITY (MAPPER VISIBILITY)
     # Target the text that was inside the nested insertion
-    edit = DocumentEdit(target_text="and Proprietary ", new_text="and Secret ")
+    edit = ModifyText(target_text="and Proprietary ", new_text="and Secret ")
 
     stream.seek(0)
     engine = RedlineEngine(stream, author="Charlie")

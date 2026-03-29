@@ -5,7 +5,7 @@ import io
 from docx import Document
 from docx.oxml.ns import qn
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
 
@@ -75,7 +75,7 @@ def test_list_injection_with_nested_styling():
     # adeu.ingest adds \n\n between paragraphs usually.
     # We target "Phase 1: Initial" and rely on the engine to find it.
 
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="Phase 1: Initial",
         new_text="Phase 1: Initial\nPhase 2: **_Development_** starts here.",
         comment="Inserting list item",
@@ -120,7 +120,7 @@ def test_inline_italic_modification():
     stream = _create_initial_docx()
     engine = RedlineEngine(stream)
 
-    edit = DocumentEdit(target_text="brown", new_text="_red_", comment="Color change")
+    edit = ModifyText(target_text="brown", new_text="_red_", comment="Color change")
 
     applied, skipped = engine.apply_edits([edit])
     assert applied == 1
@@ -159,7 +159,7 @@ def test_inline_bold_modification():
     stream = _create_initial_docx()
     engine = RedlineEngine(stream)
 
-    edit = DocumentEdit(target_text="dog", new_text="**cat**", comment="Animal change")
+    edit = ModifyText(target_text="dog", new_text="**cat**", comment="Animal change")
 
     applied, skipped = engine.apply_edits([edit])
     assert applied == 1

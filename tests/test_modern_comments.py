@@ -4,7 +4,7 @@ from docx import Document
 from docx.opc.part import XmlPart
 from docx.oxml.ns import qn
 
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -24,7 +24,7 @@ def test_modern_comments_extended_update():
     # We do this by adding a comment normally, then manually attaching an extended part
     engine = RedlineEngine(stream)
     # NOTE: Must change text so the edit is not skipped as no-op
-    engine.apply_edits([DocumentEdit(target_text="Content", new_text="Content Modified", comment="Root")])
+    engine.apply_edits([ModifyText(target_text="Content", new_text="Content Modified", comment="Root")])
 
     # Manually create commentsExtended part and relate it
     # We need the paraId of the comment we just added
@@ -67,7 +67,7 @@ def test_modern_comments_extended_update():
     # Verify it detected the extended part
     assert engine2.comments_manager.extended_part is not None, "Should detect existing commentsExtended part"
 
-    action = ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Reply")
+    action = ReplyComment(target_id=f"Com:{root_id}", text="Reply")
     engine2.apply_review_actions([action])
 
     stream_final = engine2.save_to_stream()

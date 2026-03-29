@@ -2,7 +2,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -15,7 +15,7 @@ def test_delete_paragraph_with_newline():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Paragraph 1.\n\n", new_text="")
+    edit = ModifyText(target_text="Paragraph 1.\n\n", new_text="")
 
     stream.seek(0)
     engine = RedlineEngine(stream)

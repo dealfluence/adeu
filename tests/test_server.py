@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.server import (
     accept_all_changes,
@@ -82,15 +82,14 @@ def test_process_document_batch(sample_docx, tmp_path):
     ctx = MockContext()
     output_path = tmp_path / "output.docx"
 
-    edits = [DocumentEdit(target_text="original text", new_text="new text", comment="Test comment")]
+    edits = [ModifyText(target_text="original text", new_text="new text", comment="Test comment")]
 
     result = asyncio.run(
         process_document_batch(
             original_docx_path=sample_docx,
             author_name="AI Agent",
             ctx=ctx,
-            actions=None,
-            edits=edits,
+            changes=edits,
             output_path=str(output_path),
         )
     )
@@ -108,15 +107,14 @@ def test_process_document_batch(sample_docx, tmp_path):
 
 def test_process_document_batch_validation_failure(sample_docx, tmp_path):
     ctx = MockContext()
-    edits = [DocumentEdit(target_text="nonexistent target", new_text="new text")]
+    edits = [ModifyText(target_text="nonexistent target", new_text="new text")]
 
     result = asyncio.run(
         process_document_batch(
             original_docx_path=sample_docx,
             author_name="AI Agent",
             ctx=ctx,
-            actions=None,
-            edits=edits,
+            changes=edits,
             output_path=str(tmp_path / "fail.docx"),
         )
     )
@@ -131,7 +129,7 @@ def test_accept_all_changes(sample_docx, tmp_path):
     # First, programmatically create a doc with tracked changes
     with open(sample_docx, "rb") as f:
         engine = RedlineEngine(BytesIO(f.read()), author="Reviewer")
-        engine.apply_edits([DocumentEdit(target_text="original", new_text="accepted")])
+        engine.apply_edits([ModifyText(target_text="original", new_text="accepted")])
         tracked_stream = engine.save_to_stream()
 
     tracked_path = tmp_path / "tracked.docx"

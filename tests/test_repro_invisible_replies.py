@@ -4,7 +4,7 @@ import re
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -24,7 +24,7 @@ def test_repro_invisible_reply_xml_structure():
     # Add initial comment via Engine
     # CHANGE: Make an actual text modification so the comment attaches
     engine1 = RedlineEngine(stream_initial, author="OrigAuthor")
-    engine1.apply_edits([DocumentEdit(target_text="Paragraph", new_text="ParagraphModified", comment="Base Comment")])
+    engine1.apply_edits([ModifyText(target_text="Paragraph", new_text="ParagraphModified", comment="Base Comment")])
     stream_with_comment = engine1.save_to_stream()
 
     # 2. Workflow: Load existing doc and Reply
@@ -36,7 +36,7 @@ def test_repro_invisible_reply_xml_structure():
     base_id = list(comments_data.keys())[0]
 
     # Perform Reply
-    action = ReviewAction(action="REPLY", target_id=f"Com:{base_id}", text="The Reply")
+    action = ReplyComment(target_id=f"Com:{base_id}", text="The Reply")
     applied, skipped = engine2.apply_review_actions([action])
     assert applied == 1
 

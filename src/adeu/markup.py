@@ -1,12 +1,10 @@
-# FILE: src/adeu/markup.py
-
 import re
 from typing import List, Optional, Tuple
 
 import structlog
 
 from adeu.diff import trim_common_context
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 
 logger = structlog.get_logger(__name__)
 
@@ -366,7 +364,7 @@ def _build_critic_markup(
 
 def apply_edits_to_markdown(
     markdown_text: str,
-    edits: List[DocumentEdit],
+    edits: List[ModifyText],
     include_index: bool = False,
     highlight_only: bool = False,
 ) -> str:
@@ -377,7 +375,7 @@ def apply_edits_to_markdown(
         return markdown_text
 
     # Step 1: Find match positions for each edit
-    matched_edits: List[Tuple[int, int, str, DocumentEdit, int]] = []
+    matched_edits: List[Tuple[int, int, str, ModifyText, int]] = []
 
     for idx, edit in enumerate(edits):
         target = edit.target_text or ""
@@ -400,7 +398,7 @@ def apply_edits_to_markdown(
         matched_edits.append((start, end, actual_matched_text, edit, idx))
 
     # Step 2: Check for overlapping edits
-    matched_edits_filtered: List[Tuple[int, int, str, DocumentEdit, int]] = []
+    matched_edits_filtered: List[Tuple[int, int, str, ModifyText, int]] = []
     occupied_ranges: List[Tuple[int, int]] = []
 
     matched_edits.sort(key=lambda x: x[4])

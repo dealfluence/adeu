@@ -4,7 +4,7 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from adeu.models import ReviewAction
+from adeu.models import RejectChange
 from adeu.redline.engine import RedlineEngine
 
 
@@ -73,7 +73,7 @@ def test_reject_change_cleans_encapsulated_comments():
         assert len(c_mgr.ids_part.element.findall(qn("w16cid:commentId"))) == 1
 
     # 4. Act: Reject the change (should delete the w:ins and trigger comment cleanup)
-    action = ReviewAction(action="REJECT", target_id="Chg:99")
+    action = RejectChange(target_id="Chg:99")
     applied, _ = engine.apply_review_actions([action])
 
     assert applied == 1, "Action should be successfully applied"

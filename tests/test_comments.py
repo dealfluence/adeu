@@ -4,7 +4,7 @@ import re
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -16,7 +16,7 @@ def test_native_comment_creation_and_linking():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="quick", new_text="slow", comment="Foxes are not always quick.")
+    edit = ModifyText(target_text="quick", new_text="slow", comment="Foxes are not always quick.")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -54,8 +54,8 @@ def test_multiple_comments_ids():
     doc.save(stream)
     stream.seek(0)
 
-    edit1 = DocumentEdit(target_text="First", new_text="First The ", comment="Comment One")
-    edit2 = DocumentEdit(target_text="Second", new_text="Second The ", comment="Comment Two")
+    edit1 = ModifyText(target_text="First", new_text="First The ", comment="Comment One")
+    edit2 = ModifyText(target_text="Second", new_text="Second The ", comment="Comment Two")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit1, edit2])

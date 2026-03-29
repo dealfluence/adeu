@@ -2,7 +2,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -30,7 +30,7 @@ def test_insertion_inherits_next_run_style_heuristic():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="",
         new_text="Very ",
     )
@@ -61,7 +61,7 @@ def test_insertion_defaults_to_prev_run_style_if_no_space():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="",
         new_text="Big",
     )

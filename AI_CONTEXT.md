@@ -37,6 +37,10 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   **Empty Rows**: `ingest.py` must *never* skip empty table rows. `mapper.py` iterates all rows in the DOM; skipping one in text extraction causes index misalignment.
     *   **Separators**: Row separators (`\n`) are injected *between* rows. Virtual pipes (` | `) separate cells.
 
+### 6. The Unified `DocumentChange` API
+*   **Flat API Structure**: The LLM interacts with a flat list of `DocumentChange` objects (Discriminated Union of `ModifyText`, `AcceptChange`, `RejectChange`, `ReplyComment`).
+*   **Search & Replace First**: Pure insertions and deletions are intentionally hidden from the LLM. All text modifications must be executed as search-and-replace (`ModifyText`) to guarantee sufficient anchoring context for the fuzzy matcher.
+
 ## Developer Workflows
 
 ### Testing
@@ -52,7 +56,6 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
-- **v0.6.5**: Infrastructure Migration.
-    - **Build System**: Migrated from Poetry to `uv` + `hatchling` for faster, standard-compliant dependency management.
-    - **One-Shot Setup**: `adeu init` auto-configures Claude Desktop.
-    - **Ephemeral Execution**: Full support for `uvx` based workflows.
+- **v0.9.0**: API Unification & Reliability.
+    - **Flat API**: Unified `DocumentChange` discriminated union deployed for the MCP interface.
+    - **Testing**: End-to-end LLM verification complete and backwards compatibility preserved.

@@ -12,7 +12,7 @@ Adeu acts as a "Virtual DOM" for DOCX files. It allows you to read documents as 
 ## Capabilities
 1.  **Extract**: Read text with high fidelity (preserving comments and structural headers).
 2.  **Diff**: Compare two DOCX files to see what changed.
-3.  **Edit**: Apply search-and-replace edits that result in Track Changes.
+3.  **Edit**: Apply search-and-replace modifications that result in Track Changes.
 4.  **Review**: Accept/Reject existing changes or Reply to comments.
 
 ## Execution Model

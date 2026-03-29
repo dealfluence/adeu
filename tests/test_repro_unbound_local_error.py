@@ -3,7 +3,7 @@ import io
 import pytest
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -35,7 +35,7 @@ def test_repro_unbound_local_curr_ins_id_failure():
 
     engine = RedlineEngine(stream)
     # We define an edit just to trigger the mapping engine
-    edit = DocumentEdit(target_text="Subsequent", new_text="Changed")
+    edit = ModifyText(target_text="Subsequent", new_text="Changed")
 
     try:
         # This triggers engine._apply_single_edit_heuristic -> mapper._build_map

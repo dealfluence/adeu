@@ -90,15 +90,14 @@ To maximize the AI's effectiveness, paste this context into Claude's **Project I
 > **Tools:**
 >
 > - `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
-> - `apply_structured_edits`: **Commit Mode.** Apply specific search-and-replace edits to generate native Track Changes in the DOCX.
-> - `manage_review_actions`: **Negotiation.** Reply to comments or Accept/Reject specific changes by ID.
+> - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified list of changes. Use `type: "modify"` for specific search-and-replace text edits, and `type: "accept"`, `"reject"`, or `"reply"` to manage existing Track Changes and Comments by ID.
 
 ### 2. For Builders (Python SDK)
 
 If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation.
 
 ```python
-from adeu import RedlineEngine, DocumentEdit
+from adeu import RedlineEngine, ModifyText
 from io import BytesIO
 
 # 1. Load the contract
@@ -107,7 +106,7 @@ with open("MSA.docx", "rb") as f:
 
 # 2. Define the edit (e.g., from an LLM response)
 # Adeu uses fuzzy matching to locate the target text, even if whitespace varies.
-edit = DocumentEdit(
+edit = ModifyText(
     target_text="State of New York",
     new_text="State of Delaware",
     comment="Standardizing governing law."

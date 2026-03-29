@@ -3,7 +3,7 @@ import io
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import AcceptChange, ModifyText, RejectChange
 from adeu.redline.engine import RedlineEngine
 
 
@@ -26,9 +26,9 @@ def test_batch_accept_does_not_corrupt():
     # Edit 3 (Para 3): Del(5), Ins(6)
 
     edits = [
-        DocumentEdit(target_text="Para 1", new_text="Para One"),
-        DocumentEdit(target_text="Para 2", new_text="Para Two"),
-        DocumentEdit(target_text="Para 3", new_text="Para Three"),
+        ModifyText(target_text="Para 1", new_text="Para One"),
+        ModifyText(target_text="Para 2", new_text="Para Two"),
+        ModifyText(target_text="Para 3", new_text="Para Three"),
     ]
 
     engine = RedlineEngine(stream)
@@ -48,12 +48,12 @@ def test_batch_accept_does_not_corrupt():
     # We accept the Insertions (2, 4, 6) AND the Deletions (1, 3, 5)
     # Order shouldn't matter for correctness, but let's mix them
     actions = [
-        ReviewAction(action="ACCEPT", target_id="Chg:1"),
-        ReviewAction(action="ACCEPT", target_id="Chg:2"),
-        ReviewAction(action="ACCEPT", target_id="Chg:3"),
-        ReviewAction(action="ACCEPT", target_id="Chg:4"),
-        ReviewAction(action="ACCEPT", target_id="Chg:5"),
-        ReviewAction(action="ACCEPT", target_id="Chg:6"),
+        AcceptChange(target_id="Chg:1"),
+        AcceptChange(target_id="Chg:2"),
+        AcceptChange(target_id="Chg:3"),
+        AcceptChange(target_id="Chg:4"),
+        AcceptChange(target_id="Chg:5"),
+        AcceptChange(target_id="Chg:6"),
     ]
 
     engine2 = RedlineEngine(stream_redlined)
@@ -97,8 +97,8 @@ def test_batch_mixed_accept_reject_integrity():
     # Edit 1: Del(1), Ins(2)
     # Edit 2: Del(3), Ins(4)
     edits = [
-        DocumentEdit(target_text="Para 1", new_text="Para One"),
-        DocumentEdit(target_text="Para 2", new_text="Para Two"),
+        ModifyText(target_text="Para 1", new_text="Para One"),
+        ModifyText(target_text="Para 2", new_text="Para Two"),
     ]
 
     engine = RedlineEngine(stream)
@@ -113,10 +113,10 @@ def test_batch_mixed_accept_reject_integrity():
     # Rejecting an Insertion (4) means removing the text.
 
     actions = [
-        ReviewAction(action="ACCEPT", target_id="Chg:1"),
-        ReviewAction(action="ACCEPT", target_id="Chg:2"),
-        ReviewAction(action="REJECT", target_id="Chg:3"),
-        ReviewAction(action="REJECT", target_id="Chg:4"),
+        AcceptChange(target_id="Chg:1"),
+        AcceptChange(target_id="Chg:2"),
+        RejectChange(target_id="Chg:3"),
+        RejectChange(target_id="Chg:4"),
     ]
 
     engine2 = RedlineEngine(stream_redlined)

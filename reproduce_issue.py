@@ -3,7 +3,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from adeu.models import ReviewAction
+from adeu.models import ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -59,7 +59,7 @@ def main():
     # Reply to the last known comment in golden.docx (Com:2)
     # Goal: Create Com:3
     print("Applying Reply to 'Com:2'...")
-    action = ReviewAction(action="REPLY", target_id="Com:2", text="Forth comment")
+    action = ReplyComment(target_id="Com:2", text="Forth comment")
 
     applied, skipped = engine.apply_review_actions([action])
     print(f"Applied: {applied}, Skipped: {skipped}")

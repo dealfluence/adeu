@@ -10,12 +10,14 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
 
+from pydantic import TypeAdapter
+
 from adeu import __version__
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit, ReviewAction
-from adeu.redline.engine import RedlineEngine
+from adeu.models import DocumentChange, ModifyText
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 
 def _get_claude_config_path() -> Path:
@@ -118,36 +120,35 @@ def _read_docx_text(path: Path) -> str:
         return extract_text_from_stream(BytesIO(f.read()), filename=path.name)
 
 
-def _load_batch_from_json(path: Path) -> tuple[List[ReviewAction], List[DocumentEdit]]:
+def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     """
     Loads a batch of actions and edits from a JSON file.
-    Requires the unified dict format:
-    {"actions": [...], "edits": [...]}
+    Supports the unified List[DocumentChange] format or the legacy dict format.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if not isinstance(data, dict):
-            raise ValueError("JSON root must be an object with 'actions' and 'edits' arrays.")
+        # Legacy dict format support
+        if isinstance(data, dict):
+            changes_data = []
+            for item in data.get("actions", []):
+                action_val = item.pop("action", "").lower()
+                item["type"] = action_val if action_val in ("accept", "reject", "reply") else "accept"
+                changes_data.append(item)
+            for item in data.get("edits", []):
+                item["type"] = "modify"
+                if "original" in item:
+                    item["target_text"] = item.pop("original")
+                if "replace" in item:
+                    item["new_text"] = item.pop("replace")
+                changes_data.append(item)
+            data = changes_data
+        elif not isinstance(data, list):
+            raise ValueError("JSON root must be a list of changes or a legacy dict with 'actions' and 'edits'.")
 
-        actions = []
-        edits = []
-
-        raw_actions = data.get("actions", [])
-        raw_edits = data.get("edits", [])
-
-        for item in raw_actions:
-            actions.append(ReviewAction(**item))
-
-        for item in raw_edits:
-            target = item.get("target_text") or item.get("original")
-            new_val = item.get("new_text") or item.get("replace")
-            comment = item.get("comment")
-
-            edits.append(DocumentEdit(target_text=target or "", new_text=new_val or "", comment=comment))
-
-        return actions, edits
+        adapter = TypeAdapter(List[DocumentChange])
+        return adapter.validate_python(data)
     except Exception as e:
         print(f"Error parsing JSON batch: {e}", file=sys.stderr)
         sys.exit(1)
@@ -189,46 +190,31 @@ def handle_diff(args):
 
 
 def handle_apply(args):
-    actions: List[ReviewAction] = []
-    edits: List[DocumentEdit] = []
+    changes: List[DocumentChange] = []
 
     if args.changes.suffix.lower() == ".json":
         print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
-        actions, edits = _load_batch_from_json(args.changes)
+        changes = _load_batch_from_json(args.changes)
     else:
         print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         text_orig = _read_docx_text(args.original)
         with open(args.changes, "r", encoding="utf-8") as f:
             text_mod = f.read()
-        edits = generate_edits_from_text(text_orig, text_mod)
+        changes = generate_edits_from_text(text_orig, text_mod)
 
-    print(f"Applying {len(actions)} actions and {len(edits)} edits...", file=sys.stderr)
-
+    print(f"Applying {len(changes)} changes...", file=sys.stderr)
     with open(args.original, "rb") as f:
         stream = BytesIO(f.read())
 
     engine = RedlineEngine(stream, author=args.author)
-    if edits:
-        validation_errors = engine.validate_edits(edits)
-        if validation_errors:
-            print(
-                f"\n❌ Batch rejected. {len(validation_errors)} out of {len(edits)} edits failed validation:\n",
-                file=sys.stderr,
-            )
-            for err in validation_errors:
-                print(err, file=sys.stderr)
-                print("", file=sys.stderr)
-            sys.exit(1)
-    applied_actions, skipped_actions = 0, 0
-    if actions:
-        applied_actions, skipped_actions = engine.apply_review_actions(actions)
-        if edits:
-            engine.mapper._build_map()
-            engine.clean_mapper = None
-
-    applied_edits, skipped_edits = 0, 0
-    if edits:
-        applied_edits, skipped_edits = engine.apply_edits(edits)
+    try:
+        stats = engine.process_batch(changes)
+    except BatchValidationError as e:
+        print(f"\n❌ Batch rejected. {len(e.errors)} edits failed validation:\n", file=sys.stderr)
+        for err in e.errors:
+            print(err, file=sys.stderr)
+            print("", file=sys.stderr)
+        sys.exit(1)
 
     output_path = args.output
     if not output_path:
@@ -242,11 +228,11 @@ def handle_apply(args):
 
     print(f"✅ Saved to {output_path}", file=sys.stderr)
     print(
-        f"Stats: Actions ({applied_actions} applied, {skipped_actions} skipped). "
-        f"Edits ({applied_edits} applied, {skipped_edits} skipped).",
+        f"Stats: Actions ({stats['actions_applied']} applied, {stats['actions_skipped']} skipped). "
+        f"Edits ({stats['edits_applied']} applied, {stats['edits_skipped']} skipped).",
         file=sys.stderr,
     )
-    if skipped_actions > 0 or skipped_edits > 0:
+    if stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0:
         sys.exit(1)
 
 
@@ -262,10 +248,11 @@ def handle_markup(args):
         print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
         sys.exit(1)
 
-    _, edits = _load_batch_from_json(args.edits)
+    changes = _load_batch_from_json(args.edits)
+    edits = [c for c in changes if isinstance(c, ModifyText)]
 
     if not edits:
-        print("Warning: No edits found in JSON file.", file=sys.stderr)
+        print("Warning: No text edits found in JSON file.", file=sys.stderr)
 
     result = apply_edits_to_markdown(
         markdown_text=text,

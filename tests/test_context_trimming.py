@@ -3,7 +3,7 @@ import io
 from docx import Document
 
 from adeu.diff import trim_common_context
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -52,7 +52,7 @@ def test_end_to_end_context_cleanup():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Start Middle End", new_text="Start Center End")
+    edit = ModifyText(target_text="Start Middle End", new_text="Start Center End")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -75,7 +75,7 @@ def test_auto_strip_insertion_duplication():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Liability Cap.", new_text="Liability Cap. SLA Clause.")
+    edit = ModifyText(target_text="Liability Cap.", new_text="Liability Cap. SLA Clause.")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])

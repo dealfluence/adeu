@@ -4,7 +4,7 @@ import pytest
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -23,7 +23,7 @@ def test_repro_workflow_blocking():
     stream1.seek(0)
 
     # Round 1: Insert "Round1"
-    edit1 = DocumentEdit(target_text="Start ", new_text="Start Round1")
+    edit1 = ModifyText(target_text="Start ", new_text="Start Round1")
     engine1 = RedlineEngine(stream1, author="Party A")
     engine1.apply_edits([edit1])
     stream2 = engine1.save_to_stream()
@@ -35,7 +35,7 @@ def test_repro_workflow_blocking():
 
     # 3. Round 2: Edit "Round1" to "Round2"
     # Target "Round1" inside the markup
-    edit2 = DocumentEdit(target_text="Round1", new_text="Round2", comment="Counter proposal")
+    edit2 = ModifyText(target_text="Round1", new_text="Round2", comment="Counter proposal")
 
     engine2 = RedlineEngine(stream2, author="Party B")
     applied, skipped = engine2.apply_edits([edit2])
@@ -64,13 +64,13 @@ def test_repro_workflow_blocking_target_with_markup():
     stream1.seek(0)
 
     engine1 = RedlineEngine(stream1, author="A")
-    engine1.apply_edits([DocumentEdit(target_text="Start ", new_text="Start Round1")])
+    engine1.apply_edits([ModifyText(target_text="Start ", new_text="Start Round1")])
     stream2 = engine1.save_to_stream()
 
     # Target WITH brackets
     # Note: Regex chars in brackets might cause issues if diff/find uses regex?
     # DocumentMapper.find_match_index uses string.find.
-    edit2 = DocumentEdit(
+    edit2 = ModifyText(
         target_text="{++Round1++}",
         new_text="Round2",
     )

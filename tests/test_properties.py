@@ -77,9 +77,9 @@ def test_fuzz_split_run_mechanics(text):
     doc.save(stream)
     stream.seek(0)
 
-    from adeu.models import DocumentEdit
+    from adeu.models import ModifyText
 
-    edit = DocumentEdit(target_text=text, new_text="")
+    edit = ModifyText(target_text=text, new_text="")
 
     stream.seek(0)
     engine = RedlineEngine(stream)

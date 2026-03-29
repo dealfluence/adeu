@@ -7,7 +7,7 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -29,7 +29,7 @@ def test_external_relationship_does_not_crash_comments_manager():
     # 2. Add an edit with a comment to force the creation of a Comments XML part.
     # The bug only triggers when CommentsManager tries to upgrade an EXISTING part.
     engine = RedlineEngine(stream1)
-    engine.apply_edits([DocumentEdit(target_text="website", new_text="portal", comment="Update wording")])
+    engine.apply_edits([ModifyText(target_text="website", new_text="portal", comment="Update wording")])
     stream2 = engine.save_to_stream()
 
     # 3. Reload the document and inject an external relationship (e.g., a Hyperlink).

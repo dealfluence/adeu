@@ -5,7 +5,7 @@ from docx import Document
 from docx.shared import Pt
 
 from adeu.diff import trim_common_context
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -104,7 +104,7 @@ def test_repro_lost_bold_suppressed_formatting():
     stream.seek(0)
 
     # Setup edit: target text will map to "4.0%" run, new text has bold markers
-    edit = DocumentEdit(target_text="**4.0%**", new_text="**3.0%**")
+    edit = ModifyText(target_text="**4.0%**", new_text="**3.0%**")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -143,7 +143,7 @@ def test_repro_insertion_trailing_space_omission():
 
     # Target text matched in document has the space, but new_text drops the space
     # in favor of a newline (\n) before the new paragraph.
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="Retailer shall be named as an additional insured. ",
         new_text="Retailer shall be named as an additional insured.\n**7.3 Limitation of Liability.**",
     )

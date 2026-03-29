@@ -3,7 +3,7 @@ import os
 
 from docx import Document
 
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -34,7 +34,7 @@ def generate_golden_replica(output_path: str):
     # 1. Add Root Comment
     engine = RedlineEngine(stream, author="Mikko Korpela")
     # Force edit to attach comment
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="Original placeholder text",
         new_text="Start of comment thread",
         comment="Start of comment thread",  # Comment body same as text in golden example
@@ -47,13 +47,13 @@ def generate_golden_replica(output_path: str):
 
     # 2. Add First Reply
     # Action: REPLY
-    action1 = ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Second comment")
+    action1 = ReplyComment(target_id=f"Com:{root_id}", text="Second comment")
     engine.apply_review_actions([action1])
 
     # 3. Add Second Reply
     # In golden.docx, it seems linear or threaded?
     # Usually replying to the root creates a thread.
-    action2 = ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Third comment in the thread")
+    action2 = ReplyComment(target_id=f"Com:{root_id}", text="Third comment in the thread")
     engine.apply_review_actions([action2])
 
     # Save

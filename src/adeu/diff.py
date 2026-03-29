@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 import structlog
 from diff_match_patch import diff_match_patch
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 
 logger = structlog.get_logger(__name__)
 
@@ -172,9 +172,9 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     return prefix_len, suffix_len
 
 
-def generate_edits_from_text(original_text: str, modified_text: str) -> List[DocumentEdit]:
+def generate_edits_from_text(original_text: str, modified_text: str) -> List[ModifyText]:
     """
-    Compares original and modified text to generate structured ComplianceEdit objects.
+    Compares original and modified text to generate structured ModifyText objects.
     Uses Word-Level diffing to ensure natural, readable redlines.
     """
     dmp = diff_match_patch()
@@ -201,7 +201,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
             # Flush pending delete if any
             if pending_delete:
                 idx, del_txt = pending_delete
-                edit = DocumentEdit(target_text=del_txt, new_text="", comment="Diff: Text deleted")
+                edit = ModifyText(target_text=del_txt, new_text="", comment="Diff: Text deleted")
                 edit._match_start_index = idx
                 edits.append(edit)
                 pending_delete = None
@@ -217,7 +217,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
             if pending_delete:
                 # Merge into Modification (Replace)
                 idx, del_txt = pending_delete
-                edit = DocumentEdit(target_text=del_txt, new_text=text, comment="Diff: Replacement")
+                edit = ModifyText(target_text=del_txt, new_text=text, comment="Diff: Replacement")
                 edit._match_start_index = idx
                 edits.append(edit)
                 pending_delete = None
@@ -239,7 +239,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
                             # Target: "Contract" -> New: "Big Contract"
                             logger.info(f"Converting start-of-doc insert to modification of '{anchor_target}'")
 
-                            edit = DocumentEdit(
+                            edit = ModifyText(
                                 target_text=anchor_target,
                                 new_text=text + anchor_target,
                                 comment="Diff: Start-of-doc insertion",
@@ -259,7 +259,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
                             continue
 
                 # Standard Insertion: Target=Anchor, New=Anchor+Text
-                edit = DocumentEdit(
+                edit = ModifyText(
                     target_text=anchor,
                     new_text=anchor + text,
                     comment="Diff: Text inserted",
@@ -270,7 +270,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Doc
     # Flush trailing delete
     if pending_delete:
         idx, del_txt = pending_delete
-        edit = DocumentEdit(target_text=del_txt, new_text="", comment="Diff: Text deleted")
+        edit = ModifyText(target_text=del_txt, new_text="", comment="Diff: Text deleted")
         edit._match_start_index = idx
         edits.append(edit)
 

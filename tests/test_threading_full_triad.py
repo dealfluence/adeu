@@ -2,7 +2,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -14,7 +14,7 @@ def test_full_modern_comments_triad_creation():
     stream.seek(0)
 
     engine = RedlineEngine(stream)
-    engine.apply_edits([DocumentEdit(target_text="Content", new_text="Content Changed", comment="Modern")])
+    engine.apply_edits([ModifyText(target_text="Content", new_text="Content Changed", comment="Modern")])
     stream_out = engine.save_to_stream()
 
     doc_out = Document(stream_out)

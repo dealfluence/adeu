@@ -1,5 +1,4 @@
-from enum import Enum
-from typing import Optional
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -14,11 +13,13 @@ class EditOperationType:
     MODIFICATION = "MODIFICATION"
 
 
-class DocumentEdit(BaseModel):
+class ModifyText(BaseModel):
     """
     Represents a single atomic edit suggested by the LLM.
     The engine treats this as a "Search and Replace" operation.
     """
+
+    type: Literal["modify"] = Field("modify", description="Must be 'modify' for text replacements.")
 
     target_text: str = Field(
         ...,
@@ -48,20 +49,22 @@ class DocumentEdit(BaseModel):
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
 
 
-class ReviewActionType(str, Enum):
-    ACCEPT = "ACCEPT"
-    REJECT = "REJECT"
-    REPLY = "REPLY"
+class AcceptChange(BaseModel):
+    type: Literal["accept"] = Field("accept", description="Must be 'accept' to finalize a tracked change.")
+    target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
+    comment: Optional[str] = Field(None, description="Optional rationale.")
 
 
-class ReviewAction(BaseModel):
-    """
-    Meta-actions on existing markup (Track Changes / Comments).
-    Used for negotiation and approval workflows.
-    """
+class RejectChange(BaseModel):
+    type: Literal["reject"] = Field("reject", description="Must be 'reject' to revert a tracked change.")
+    target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
+    comment: Optional[str] = Field(None, description="Optional rationale.")
 
-    action: ReviewActionType = Field(..., description="ACCEPT, REJECT, or REPLY.")
-    target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:1' or 'Com:5').")
 
-    text: Optional[str] = Field(None, description="For REPLY: The content of the reply body.")
-    comment: Optional[str] = Field(None, description="For ACCEPT/REJECT: Optional rationale.")
+class ReplyComment(BaseModel):
+    type: Literal["reply"] = Field("reply", description="Must be 'reply' to respond to a comment.")
+    target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Com:5').")
+    text: str = Field(..., description="The content of the reply body.")
+
+
+DocumentChange = Annotated[Union[AcceptChange, RejectChange, ReplyComment, ModifyText], Field(discriminator="type")]

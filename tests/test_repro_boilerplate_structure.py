@@ -4,7 +4,7 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
 
@@ -41,7 +41,7 @@ def test_insert_boilerplate_creates_paragraphs():
     # Simulating LLM inserting a full new clause with structure
     boilerplate = "\n\nClause 2: Termination.\nEither party may terminate this agreement."
 
-    edit = DocumentEdit(target_text="Clause 1: Term.", new_text="Clause 1: Term." + boilerplate)
+    edit = ModifyText(target_text="Clause 1: Term.", new_text="Clause 1: Term." + boilerplate)
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -78,7 +78,7 @@ def test_insert_boilerplate_with_comment_attaches_correctly():
     stream.seek(0)
 
     # "#### New Header" triggers header detection -> Block insertion logic.
-    edit = DocumentEdit(target_text="Old Header.", new_text="#### New Header", comment="Changed header style.")
+    edit = ModifyText(target_text="Old Header.", new_text="#### New Header", comment="Changed header style.")
 
     engine = RedlineEngine(stream, author="Tester")
     applied, skipped = engine.apply_edits([edit])

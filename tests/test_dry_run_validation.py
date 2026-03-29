@@ -3,7 +3,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -27,7 +27,7 @@ def test_validation_ambiguous_match_with_context():
     engine = RedlineEngine(stream)
 
     # The LLM's flawed, overly generic edit
-    edit = DocumentEdit(target_text="shall not exceed 150%", new_text="shall not exceed 100%")
+    edit = ModifyText(target_text="shall not exceed 150%", new_text="shall not exceed 100%")
 
     errors = engine.validate_edits([edit])
 
@@ -57,7 +57,7 @@ def test_validation_not_found():
     stream.seek(0)
 
     engine = RedlineEngine(stream)
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="The liability of the Buyer",
         new_text="The liability of the Purchaser",
     )
@@ -83,10 +83,10 @@ def test_validation_success_and_pure_insertion():
 
     engine = RedlineEngine(stream)
 
-    edit1 = DocumentEdit(target_text="unique clause", new_text="special clause")
+    edit1 = ModifyText(target_text="unique clause", new_text="special clause")
 
     # Pure insertion (relies on index internally, skipping target_text validation)
-    edit2 = DocumentEdit(target_text="", new_text="Inserted text.")
+    edit2 = ModifyText(target_text="", new_text="Inserted text.")
 
     errors = engine.validate_edits([edit1, edit2])
 
@@ -110,7 +110,7 @@ def test_validation_fuzzy_match_ambiguity():
     engine = RedlineEngine(stream)
 
     # LLM targets with 3 underscores. The fuzzy matcher should find BOTH signatures.
-    edit = DocumentEdit(target_text="[___]", new_text="John Doe")
+    edit = ModifyText(target_text="[___]", new_text="John Doe")
 
     errors = engine.validate_edits([edit])
 
@@ -135,8 +135,8 @@ def test_multiple_errors_accumulated():
 
     engine = RedlineEngine(stream)
 
-    edit1 = DocumentEdit(target_text="Duplicate word.", new_text="Changed.")  # Ambiguous
-    edit2 = DocumentEdit(target_text="Missing word.", new_text="Found.")  # Not Found
+    edit1 = ModifyText(target_text="Duplicate word.", new_text="Changed.")  # Ambiguous
+    edit2 = ModifyText(target_text="Missing word.", new_text="Found.")  # Not Found
 
     errors = engine.validate_edits([edit1, edit2])
 

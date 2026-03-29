@@ -5,7 +5,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -46,7 +46,7 @@ def test_repro_nested_edit_corruption():
 
     # Action: Try to edit the "Existing Insert" text
     # This triggers the "edit inside edit" scenario
-    edit = DocumentEdit(target_text="Existing Insert", new_text="Modified Insert")
+    edit = ModifyText(target_text="Existing Insert", new_text="Modified Insert")
 
     engine = RedlineEngine(stream, author="Me")
     engine.apply_edits([edit])
@@ -101,13 +101,13 @@ def test_repro_surgical_edit_inside_insertion():
 
     # 1. Simulate Round 1 (Author A inserts a new clause)
     engine1 = RedlineEngine(stream, author="Author A")
-    edit1 = DocumentEdit(target_text="Base text.", new_text="Base text. The notice period is 60 days.")
+    edit1 = ModifyText(target_text="Base text.", new_text="Base text. The notice period is 60 days.")
     engine1.apply_edits([edit1])
     mid_stream = engine1.save_to_stream()
 
     # 2. Simulate Round 2 (Author B changes "60" to "45" inside the insertion)
     engine2 = RedlineEngine(mid_stream, author="Author B")
-    edit2 = DocumentEdit(target_text="60", new_text="45", comment="Standardizing to 45 days")
+    edit2 = ModifyText(target_text="60", new_text="45", comment="Standardizing to 45 days")
     applied, skipped = engine2.apply_edits([edit2])
 
     assert applied == 1, "The engine skipped the surgical edit."

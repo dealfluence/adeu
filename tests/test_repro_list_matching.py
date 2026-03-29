@@ -1,7 +1,7 @@
 # FILE: tests/test_repro_list_matching.py
 
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 
 
 def test_repro_failed_list_match():
@@ -54,7 +54,7 @@ def test_repro_failed_list_match():
     )
 
     # The edit we expect to apply
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text=target_text,
         new_text="",  # Deletion
         comment="Policy requires mutual caps.",

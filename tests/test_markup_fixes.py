@@ -1,7 +1,7 @@
 # FILE: tests/test_markup_fixes.py
 
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 
 
 class TestMarkdownRobustness:
@@ -12,7 +12,7 @@ class TestMarkdownRobustness:
         preserving the outer bold markers.
         """
         text = "This is **Bold** text."
-        edits = [DocumentEdit(target_text="Bold", new_text="Italic")]
+        edits = [ModifyText(target_text="Bold", new_text="Italic")]
 
         result = apply_edits_to_markdown(text, edits)
 
@@ -30,7 +30,7 @@ class TestMarkdownRobustness:
         # User provides text without the bold markers that exist in doc
         target = "Fee. A one-time"
 
-        edits = [DocumentEdit(target_text=target, new_text="")]
+        edits = [ModifyText(target_text=target, new_text="")]
 
         result = apply_edits_to_markdown(text, edits)
 
@@ -47,7 +47,7 @@ class TestMarkdownRobustness:
         or worse **{==**Term**==}**.
         """
         text = "Define **Term** here."
-        edits = [DocumentEdit(target_text="**Term**", new_text="ignored")]
+        edits = [ModifyText(target_text="**Term**", new_text="ignored")]
 
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
@@ -59,7 +59,7 @@ class TestMarkdownRobustness:
         Scenario: Doc has **Term**, user targets 'Term'.
         """
         text = "Define **Term** here."
-        edits = [DocumentEdit(target_text="Term", new_text="ignored")]
+        edits = [ModifyText(target_text="Term", new_text="ignored")]
 
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
@@ -75,7 +75,7 @@ class TestMarkdownRobustness:
         # User input ignores the bold start
         target = "Prefix Suffix"
 
-        edits = [DocumentEdit(target_text=target, new_text="New")]
+        edits = [ModifyText(target_text=target, new_text="New")]
 
         result = apply_edits_to_markdown(text, edits)
 
@@ -97,7 +97,7 @@ class TestMarkdownRobustness:
         this test documents that behavior. If it allows inner matching, it verifies that.
         """
         text = "**Bold Text**"
-        edits = [DocumentEdit(target_text="Bold", new_text="Link")]
+        edits = [ModifyText(target_text="Bold", new_text="Link")]
 
         result = apply_edits_to_markdown(text, edits)
 
@@ -112,7 +112,7 @@ class TestMarkdownRobustness:
         """
         text = "# Header 1\n\n# Header 2"
         target = "# Header 1\n\n# Header 2"
-        edits = [DocumentEdit(target_text=target, new_text="# H1\n\n# H2")]
+        edits = [ModifyText(target_text=target, new_text="# H1\n\n# H2")]
 
         result = apply_edits_to_markdown(text, edits)
 
@@ -124,7 +124,7 @@ class TestMarkdownRobustness:
         Scenario: '[___]' in text, user targets '[_]'.
         """
         text = "Sign: [_______]"
-        edits = [DocumentEdit(target_text="[_]", new_text="Signed")]
+        edits = [ModifyText(target_text="[_]", new_text="Signed")]
 
         result = apply_edits_to_markdown(text, edits)
 

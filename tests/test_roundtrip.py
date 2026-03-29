@@ -3,7 +3,7 @@ import io
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
 
@@ -13,7 +13,7 @@ def test_full_roundtrip_workflow(simple_docx_stream):
     assert "Contract Agreement" in extracted_text
     assert "Seller" in extracted_text
 
-    edit = DocumentEdit(target_text="Seller", new_text="Vendor", comment="Standardizing terminology.")
+    edit = ModifyText(target_text="Seller", new_text="Vendor", comment="Standardizing terminology.")
 
     simple_docx_stream.seek(0)
     engine = RedlineEngine(simple_docx_stream)
@@ -40,7 +40,7 @@ def test_split_run_behavior():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="brown", new_text="")
+    edit = ModifyText(target_text="brown", new_text="")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -66,9 +66,9 @@ def test_insertion_spacing_between_complex_runs():
     doc.save(stream)
     stream.seek(0)
 
-    edit1 = DocumentEdit(target_text="ARTICLE", new_text="ARTICLE ")
+    edit1 = ModifyText(target_text="ARTICLE", new_text="ARTICLE ")
 
-    edit2 = DocumentEdit(target_text="3 ", new_text="3  ")
+    edit2 = ModifyText(target_text="3 ", new_text="3  ")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit1, edit2])
@@ -103,7 +103,7 @@ def test_insertion_splits_coalesced_run():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="ARTICLE", new_text="ARTICLE ")
+    edit = ModifyText(target_text="ARTICLE", new_text="ARTICLE ")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -150,8 +150,8 @@ def test_insertion_multiple_splits_same_run():
     doc.save(stream)
     stream.seek(0)
 
-    e1 = DocumentEdit(target_text="ARTICLE", new_text="ARTICLE ")
-    e2 = DocumentEdit(target_text="3", new_text="3 ")
+    e1 = ModifyText(target_text="ARTICLE", new_text="ARTICLE ")
+    e2 = ModifyText(target_text="3", new_text="3 ")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([e1, e2])
@@ -175,8 +175,8 @@ def test_complex_run_sequence_repro():
     doc.save(stream)
     stream.seek(0)
 
-    e1 = DocumentEdit(target_text="ARTICLE3 FEES", new_text="ARTICLE3 FEES ")
-    e2 = DocumentEdit(target_text="AND", new_text="AND ")
+    e1 = ModifyText(target_text="ARTICLE3 FEES", new_text="ARTICLE3 FEES ")
+    e2 = ModifyText(target_text="AND", new_text="AND ")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([e1, e2])
@@ -226,9 +226,9 @@ def test_split_run_ordering_repro():
     doc.save(stream)
     stream.seek(0)
 
-    e1 = DocumentEdit(target_text="", new_text=" END")
+    e1 = ModifyText(target_text="", new_text=" END")
     e1._match_start_index = 2
-    e2 = DocumentEdit(target_text="e", new_text="")
+    e2 = ModifyText(target_text="e", new_text="")
     e2._match_start_index = 0
 
     engine = RedlineEngine(stream)
@@ -253,7 +253,7 @@ def test_manual_context_disambiguation():
     doc.save(stream)
     stream.seek(0)
 
-    edit = DocumentEdit(target_text="Section 2: Fee", new_text="Section 2: Price", comment="Disambiguated via context")
+    edit = ModifyText(target_text="Section 2: Fee", new_text="Section 2: Price", comment="Disambiguated via context")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

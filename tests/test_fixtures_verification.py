@@ -8,7 +8,7 @@ from xml.dom.minidom import parseString
 import pytest
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -180,7 +180,7 @@ def test_oracle_golden_replica(clean_result_file):
         stream = io.BytesIO(f.read())
 
     engine = RedlineEngine(stream, author="Mikko Korpela")
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="initial ",
         new_text="golden ",
         comment="Start of comment thread",
@@ -196,10 +196,10 @@ def test_oracle_golden_replica(clean_result_file):
             break
     assert root_id, "Root comment not found"
 
-    action1 = ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Second comment")
+    action1 = ReplyComment(target_id=f"Com:{root_id}", text="Second comment")
     engine.apply_review_actions([action1])
 
-    action2 = ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Third comment in the thread")
+    action2 = ReplyComment(target_id=f"Com:{root_id}", text="Third comment in the thread")
     engine.apply_review_actions([action2])
 
     with open(RESULT_DOC, "wb") as f:
@@ -260,7 +260,7 @@ def test_repro_golden_to_golden2(clean_result_file):
     engine = RedlineEngine(stream, author="Mikko Korpela")
 
     # Add the reply seen in golden2.docx
-    action = ReviewAction(action="REPLY", target_id="Com:2", text="Forth comment")
+    action = ReplyComment(target_id="Com:2", text="Forth comment")
     applied, _ = engine.apply_review_actions([action])
     assert applied == 1
 

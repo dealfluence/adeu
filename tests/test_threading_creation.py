@@ -2,7 +2,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -21,7 +21,7 @@ def test_threading_creates_extended_part():
     # 1. Add Root Comment
     engine = RedlineEngine(stream)
     # Note: Must change text so the edit is not skipped as no-op
-    engine.apply_edits([DocumentEdit(target_text="Content", new_text="Content Modified", comment="Root")])
+    engine.apply_edits([ModifyText(target_text="Content", new_text="Content Modified", comment="Root")])
     stream_1 = engine.save_to_stream()
 
     # Check if Extended part exists immediately
@@ -35,7 +35,7 @@ def test_threading_creates_extended_part():
     # Get root ID
     root_id = list(engine2.comments_manager.extract_comments_data().keys())[0]
 
-    engine2.apply_review_actions([ReviewAction(action="REPLY", target_id=f"Com:{root_id}", text="Reply")])
+    engine2.apply_review_actions([ReplyComment(target_id=f"Com:{root_id}", text="Reply")])
     stream_2 = engine2.save_to_stream()
 
     # 3. Inspect XML for Threading

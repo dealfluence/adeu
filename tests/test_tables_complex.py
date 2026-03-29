@@ -3,7 +3,7 @@ import io
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -62,7 +62,7 @@ def test_nested_tables_extraction_and_editing():
     assert "InnerSecret" in text, "Nested table content failed to extract"
 
     # 2. Verify Mapping/Editing can reach it
-    edit = DocumentEdit(target_text="InnerSecret", new_text="OuterSecret")
+    edit = ModifyText(target_text="InnerSecret", new_text="OuterSecret")
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])
 
@@ -101,7 +101,7 @@ def test_merged_cells_no_duplication():
     assert count == 1, f"Merged cell content appeared {count} times (expected 1)"
 
     # Verify Edit targets correctly (coordinates shouldn't be confused by skip)
-    edit = DocumentEdit(target_text="MergedUnique", new_text="ChangedUnique")
+    edit = ModifyText(target_text="MergedUnique", new_text="ChangedUnique")
     engine = RedlineEngine(stream)
     applied, _ = engine.apply_edits([edit])
     assert applied == 1
@@ -125,7 +125,7 @@ def test_empty_row_alignment():
     stream.seek(0)
 
     # If alignment is broken, "RowB" index will be calculated wrong
-    edit = DocumentEdit(target_text="RowB", new_text="RowC")
+    edit = ModifyText(target_text="RowB", new_text="RowC")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

@@ -6,7 +6,7 @@ from docx.oxml.ns import qn
 
 from adeu.diff import trim_common_context
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -74,7 +74,7 @@ def test_repro_5_3_bold_inheritance_bleed():
     stream.seek(0)
 
     # Edit: Change "BOLD" (bold) to "plain" (no markers)
-    edit = DocumentEdit(target_text="BOLD", new_text="plain")
+    edit = ModifyText(target_text="BOLD", new_text="plain")
 
     engine = RedlineEngine(stream)
     engine.apply_edits([edit])
@@ -142,8 +142,8 @@ def test_repro_5_6_overlapping_edits_collision():
     stream.seek(0)
 
     edits = [
-        DocumentEdit(target_text="quick brown", new_text="slow red"),
-        DocumentEdit(target_text="brown", new_text="tan"),  # Overlaps with previous
+        ModifyText(target_text="quick brown", new_text="slow red"),
+        ModifyText(target_text="brown", new_text="tan"),  # Overlaps with previous
     ]
 
     engine = RedlineEngine(stream)

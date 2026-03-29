@@ -5,7 +5,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -54,7 +54,7 @@ def test_edit_on_accepted_view_skipping_deletion():
     assert "A B" in clean_text
 
     # Apply Edit targeting Clean View
-    edit = DocumentEdit(target_text="A B", new_text="A C")
+    edit = ModifyText(target_text="A B", new_text="A C")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

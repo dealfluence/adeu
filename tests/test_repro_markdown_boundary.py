@@ -5,7 +5,7 @@ import io
 from docx import Document
 
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -22,7 +22,7 @@ def test_repro_ui_markdown_boundary_leak_no_space():
     """
     text = "**Header.**Body"
 
-    edit = DocumentEdit(target_text="Body", new_text="NewBody")
+    edit = ModifyText(target_text="Body", new_text="NewBody")
 
     result = apply_edits_to_markdown(text, [edit])
 
@@ -55,7 +55,7 @@ def test_repro_engine_skipped_edit_on_boundary_fixed_assertion():
     stream.seek(0)
 
     # Define Edit targeting the plain text
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="Standard payment terms are Net 90.",
         new_text="Standard payment terms are Net 30.",
     )
@@ -110,7 +110,7 @@ def test_repro_engine_skip_with_formatting_noise():
     stream.seek(0)
 
     # Target provided by LLM is usually plain text
-    edit = DocumentEdit(target_text="Terms are Net 90 Days.", new_text="Terms are Net 30 Days.")
+    edit = ModifyText(target_text="Terms are Net 90 Days.", new_text="Terms are Net 30 Days.")
 
     engine = RedlineEngine(stream)
     applied, skipped = engine.apply_edits([edit])

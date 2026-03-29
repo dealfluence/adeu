@@ -12,7 +12,7 @@ from adeu.markup import (
     _replace_smart_quotes,
     apply_edits_to_markdown,
 )
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 
 
 class TestHelperFunctions:
@@ -170,7 +170,7 @@ class TestApplyEditsToMarkdown:
         """
         text = "Notice of Termination"
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Notice of Termination",
                 new_text="Notice of Immediate Termination",
             )
@@ -185,7 +185,7 @@ class TestApplyEditsToMarkdown:
     def test_context_trimming_prefix_only(self):
         """Tests context trimming when only the prefix matches."""
         text = "Hello World"
-        edits = [DocumentEdit(target_text="Hello World", new_text="Hello Universe")]
+        edits = [ModifyText(target_text="Hello World", new_text="Hello Universe")]
         result = apply_edits_to_markdown(text, edits)
 
         # "Hello " is trimmed out of the markup block
@@ -194,7 +194,7 @@ class TestApplyEditsToMarkdown:
     def test_context_trimming_suffix_only(self):
         """Tests context trimming when only the suffix matches."""
         text = "Old Item"
-        edits = [DocumentEdit(target_text="Old Item", new_text="New Item")]
+        edits = [ModifyText(target_text="Old Item", new_text="New Item")]
         result = apply_edits_to_markdown(text, edits)
 
         # " Item" is trimmed out of the markup block
@@ -208,7 +208,7 @@ class TestApplyEditsToMarkdown:
     def test_basic_modification(self):
         text = "This is a Contract Agreement for services."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Contract Agreement",
                 new_text="Service Agreement",
             )
@@ -220,14 +220,14 @@ class TestApplyEditsToMarkdown:
 
     def test_basic_deletion(self):
         text = "Remove this word please."
-        edits = [DocumentEdit(target_text="this ", new_text="")]
+        edits = [ModifyText(target_text="this ", new_text="")]
         result = apply_edits_to_markdown(text, edits)
         assert result == "Remove {--this --}word please."
 
     def test_modification_with_comment(self):
         text = "The quick brown fox."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="quick",
                 new_text="slow",
                 comment="Speed change",
@@ -238,13 +238,13 @@ class TestApplyEditsToMarkdown:
 
     def test_modification_with_index(self):
         text = "Hello world."
-        edits = [DocumentEdit(target_text="world", new_text="universe")]
+        edits = [ModifyText(target_text="world", new_text="universe")]
         result = apply_edits_to_markdown(text, edits, include_index=True)
         assert "{--world--}{++universe++}{>>[Edit:0]<<}" in result
 
     def test_highlight_only_mode(self):
         text = "Highlight this section please."
-        edits = [DocumentEdit(target_text="this section", new_text="ignored")]
+        edits = [ModifyText(target_text="this section", new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
         assert "{==this section==}" in result
         assert "{--" not in result
@@ -253,7 +253,7 @@ class TestApplyEditsToMarkdown:
     def test_highlight_with_comment_and_index(self):
         text = "Mark this text."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="this text",
                 new_text="ignored",
                 comment="Review needed",
@@ -265,8 +265,8 @@ class TestApplyEditsToMarkdown:
     def test_multiple_edits_non_overlapping(self):
         text = "First word and second word."
         edits = [
-            DocumentEdit(target_text="First", new_text="1st"),
-            DocumentEdit(target_text="second", new_text="2nd"),
+            ModifyText(target_text="First", new_text="1st"),
+            ModifyText(target_text="second", new_text="2nd"),
         ]
         result = apply_edits_to_markdown(text, edits)
         assert "{--First--}{++1st++}" in result
@@ -275,9 +275,9 @@ class TestApplyEditsToMarkdown:
     def test_multiple_edits_preserve_order(self):
         text = "A B C"
         edits = [
-            DocumentEdit(target_text="A", new_text="X"),
-            DocumentEdit(target_text="B", new_text="Y"),
-            DocumentEdit(target_text="C", new_text="Z"),
+            ModifyText(target_text="A", new_text="X"),
+            ModifyText(target_text="B", new_text="Y"),
+            ModifyText(target_text="C", new_text="Z"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
         # Verify indices match original list order
@@ -293,8 +293,8 @@ class TestApplyEditsToMarkdown:
     def test_overlapping_edits_first_wins(self):
         text = "The quick brown fox"
         edits = [
-            DocumentEdit(target_text="quick brown", new_text="slow red"),  # First in list
-            DocumentEdit(target_text="brown fox", new_text="green dog"),  # Overlaps, should be skipped
+            ModifyText(target_text="quick brown", new_text="slow red"),  # First in list
+            ModifyText(target_text="brown fox", new_text="green dog"),  # Overlaps, should be skipped
         ]
         result = apply_edits_to_markdown(text, edits)
         assert "{--quick brown--}{++slow red++}" in result
@@ -305,8 +305,8 @@ class TestApplyEditsToMarkdown:
     def test_target_not_found_skipped(self):
         text = "Hello world."
         edits = [
-            DocumentEdit(target_text="nonexistent", new_text="replacement"),
-            DocumentEdit(target_text="world", new_text="universe"),
+            ModifyText(target_text="nonexistent", new_text="replacement"),
+            ModifyText(target_text="world", new_text="universe"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
         # First edit skipped, second applied with its original index
@@ -315,7 +315,7 @@ class TestApplyEditsToMarkdown:
 
     def test_first_occurrence_only(self):
         text = "word word word"
-        edits = [DocumentEdit(target_text="word", new_text="WORD")]
+        edits = [ModifyText(target_text="word", new_text="WORD")]
         result = apply_edits_to_markdown(text, edits)
         # Only first occurrence should be changed
         assert result.count("{--word--}") == 1
@@ -326,8 +326,8 @@ class TestApplyEditsToMarkdown:
     def test_highlight_only_skips_missing_target(self):
         text = "Some text here."
         edits = [
-            DocumentEdit(target_text="missing", new_text="anything"),
-            DocumentEdit(target_text="text", new_text="ignored"),
+            ModifyText(target_text="missing", new_text="anything"),
+            ModifyText(target_text="text", new_text="ignored"),
         ]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
         assert "{==text==}" in result
@@ -337,8 +337,8 @@ class TestApplyEditsToMarkdown:
         """Pure insertions (empty target) are skipped in text transformation mode."""
         text = "Hello world."
         edits = [
-            DocumentEdit(target_text="", new_text="NEW "),  # No anchor
-            DocumentEdit(target_text="world", new_text="universe"),
+            ModifyText(target_text="", new_text="NEW "),  # No anchor
+            ModifyText(target_text="world", new_text="universe"),
         ]
         result = apply_edits_to_markdown(text, edits)
         # Pure insertion skipped
@@ -348,7 +348,7 @@ class TestApplyEditsToMarkdown:
 
     def test_fuzzy_matching_whitespace(self):
         text = "hello   world"
-        edits = [DocumentEdit(target_text="hello world", new_text="hi earth")]
+        edits = [ModifyText(target_text="hello world", new_text="hi earth")]
         result = apply_edits_to_markdown(text, edits)
         # Should match despite whitespace difference
         assert "{--hello   world--}" in result
@@ -356,33 +356,33 @@ class TestApplyEditsToMarkdown:
 
     def test_fuzzy_matching_underscores(self):
         text = "Sign here: [__________]"
-        edits = [DocumentEdit(target_text="[___]", new_text="John Doe")]
+        edits = [ModifyText(target_text="[___]", new_text="John Doe")]
         result = apply_edits_to_markdown(text, edits)
         assert "{--[__________]--}" in result
         assert "{++John Doe++}" in result
 
     def test_smart_quote_matching(self):
         text = '"Hello" said the fox.'
-        edits = [DocumentEdit(target_text='"Hello"', new_text='"Hi"')]
+        edits = [ModifyText(target_text='"Hello"', new_text='"Hi"')]
         result = apply_edits_to_markdown(text, edits)
         assert '{--"Hello"--}' in result
         assert '{++"Hi"++}' in result
 
     def test_multiline_text(self):
         text = "Line 1\n\nLine 2\n\nLine 3"
-        edits = [DocumentEdit(target_text="Line 2", new_text="Modified Line")]
+        edits = [ModifyText(target_text="Line 2", new_text="Modified Line")]
         result = apply_edits_to_markdown(text, edits)
         assert "Line 1\n\n{--Line 2--}{++Modified Line++}\n\nLine 3" == result
 
     def test_edit_at_start(self):
         text = "Start of text."
-        edits = [DocumentEdit(target_text="Start", new_text="Beginning")]
+        edits = [ModifyText(target_text="Start", new_text="Beginning")]
         result = apply_edits_to_markdown(text, edits)
         assert result.startswith("{--Start--}{++Beginning++}")
 
     def test_edit_at_end(self):
         text = "End of text."
-        edits = [DocumentEdit(target_text="text.", new_text="document.")]
+        edits = [ModifyText(target_text="text.", new_text="document.")]
         result = apply_edits_to_markdown(text, edits)
         assert result.endswith("{--text.--}{++document.++}")
 
@@ -397,12 +397,12 @@ The Tenant shall pay rent monthly.
 Either party may terminate with 30 days notice."""
 
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Tenant",
                 new_text="Lessee",
                 comment="Standardizing terminology",
             ),
-            DocumentEdit(
+            ModifyText(
                 target_text="30 days",
                 new_text="60 days",
                 comment="Extended notice period",
@@ -422,33 +422,33 @@ class TestEdgeCases:
     """Edge cases and regression tests."""
 
     def test_empty_text_returns_empty(self):
-        result = apply_edits_to_markdown("", [DocumentEdit(target_text="x", new_text="y")])
+        result = apply_edits_to_markdown("", [ModifyText(target_text="x", new_text="y")])
         assert result == ""
 
     def test_special_regex_chars_in_target(self):
         """Ensure regex special chars don't break matching."""
         text = "Price is $100.00 (USD)."
-        edits = [DocumentEdit(target_text="$100.00", new_text="$200.00")]
+        edits = [ModifyText(target_text="$100.00", new_text="$200.00")]
         result = apply_edits_to_markdown(text, edits)
         assert "{--$100.00--}{++$200.00++}" in result
 
     def test_critic_markup_chars_in_text(self):
         """Text containing CriticMarkup-like chars should still work."""
         text = "Use {curly} and [square] brackets."
-        edits = [DocumentEdit(target_text="{curly}", new_text="{braces}")]
+        edits = [ModifyText(target_text="{curly}", new_text="{braces}")]
         result = apply_edits_to_markdown(text, edits)
         assert "{--{curly}--}{++{braces}++}" in result
 
     def test_unicode_text(self):
         text = "Héllo wörld 你好"
-        edits = [DocumentEdit(target_text="wörld", new_text="world")]
+        edits = [ModifyText(target_text="wörld", new_text="world")]
         result = apply_edits_to_markdown(text, edits)
         assert "{--wörld--}{++world++}" in result
 
     def test_very_long_text_performance(self):
         """Ensure reasonable performance on large documents."""
         text = "word " * 10000
-        edits = [DocumentEdit(target_text="word", new_text="WORD")]
+        edits = [ModifyText(target_text="word", new_text="WORD")]
         # Should complete without timeout
         result = apply_edits_to_markdown(text, edits)
         assert "{--word--}{++WORD++}" in result
@@ -457,8 +457,8 @@ class TestEdgeCases:
         """Edits that are adjacent but not overlapping."""
         text = "ABCD"
         edits = [
-            DocumentEdit(target_text="AB", new_text="XY"),
-            DocumentEdit(target_text="CD", new_text="ZW"),
+            ModifyText(target_text="AB", new_text="XY"),
+            ModifyText(target_text="CD", new_text="ZW"),
         ]
         result = apply_edits_to_markdown(text, edits)
         assert "{--AB--}{++XY++}" in result
@@ -473,7 +473,7 @@ class TestMarkdownFormattingNoise:
         # User provides plain text quote without **
         target = "Período de Prueba: Los"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         # Should match the bolded text and wrap it, keeping markers inside
@@ -483,7 +483,7 @@ class TestMarkdownFormattingNoise:
         text = "This is _very_ important."
         target = "is very important"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         assert "{==is _very_ important==}" in result
@@ -492,7 +492,7 @@ class TestMarkdownFormattingNoise:
         text = "**Section 1** _Introduction_"
         target = "Section 1 Introduction"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         assert "{==**Section 1** _Introduction_==}" in result
@@ -501,7 +501,7 @@ class TestMarkdownFormattingNoise:
         text = "The **Vendor** shall pay."
         target = "The Vendor shall"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         assert "{==The **Vendor** shall==}" in result
@@ -511,7 +511,7 @@ class TestMarkdownFormattingNoise:
         text = "**Note:** Prices are net."
         target = "Prices are net"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         # Match should NOT include the bold markers or "Note:"
@@ -522,7 +522,7 @@ class TestMarkdownFormattingNoise:
         text = "## 1. PROPÓSITO\n\n**Período de Evaluación:** Fase inicial..."
         target = "Período de Evaluación: Fase inicial"
 
-        edits = [DocumentEdit(target_text=target, new_text="ignored")]
+        edits = [ModifyText(target_text=target, new_text="ignored")]
         result = apply_edits_to_markdown(text, edits, highlight_only=True)
 
         assert "{==**Período de Evaluación:** Fase inicial==}" in result
@@ -1017,7 +1017,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_bold_in_document_plain_in_target_multiword(self):
         """Multi-word bold phrase matched with plain target."""
         text = "The **quick brown fox** jumped."
-        edits = [DocumentEdit(target_text="quick brown fox", new_text="slow red dog")]
+        edits = [ModifyText(target_text="quick brown fox", new_text="slow red dog")]
         result = apply_edits_to_markdown(text, edits)
 
         # When target doesn't include **, the ** markers stay in document at their positions
@@ -1027,7 +1027,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_italic_target_plain_input(self):
         """Document has _italic_, user targets 'italic' without markers."""
         text = "This is _emphasized_ text."
-        edits = [DocumentEdit(target_text="emphasized", new_text="highlighted")]
+        edits = [ModifyText(target_text="emphasized", new_text="highlighted")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "_{--emphasized--}{++highlighted++}_" in result
@@ -1035,7 +1035,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_nested_formatting_target(self):
         """Document has **_nested_** formatting."""
         text = "This is **_very important_** indeed."
-        edits = [DocumentEdit(target_text="very important", new_text="extremely critical")]
+        edits = [ModifyText(target_text="very important", new_text="extremely critical")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "extremely critical" in result
@@ -1044,7 +1044,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_multiple_bold_sections_target_one(self):
         """Multiple bold sections, target only one."""
         text = "**Section A** and **Section B** are different."
-        edits = [DocumentEdit(target_text="Section A", new_text="Part 1")]
+        edits = [ModifyText(target_text="Section A", new_text="Part 1")]
         result = apply_edits_to_markdown(text, edits)
 
         # Should only modify Section A
@@ -1054,7 +1054,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_underscore_placeholder_variable_length(self):
         """[___] should match [__________]."""
         text = "Signature: [__________]"
-        edits = [DocumentEdit(target_text="[___]", new_text="John Smith")]
+        edits = [ModifyText(target_text="[___]", new_text="John Smith")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--[__________]--}" in result
@@ -1063,7 +1063,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_literal_underscores_exact_match(self):
         """Literal __text__ should match exactly, not as bold."""
         text = "Variable __init__ is special."
-        edits = [DocumentEdit(target_text="__init__", new_text="__setup__")]
+        edits = [ModifyText(target_text="__init__", new_text="__setup__")]
         result = apply_edits_to_markdown(text, edits)
 
         # Context trimming correctly isolates the change to just the word inside
@@ -1072,7 +1072,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_code_like_content(self):
         """Content that looks like code with underscores."""
         text = "Call my_function_name() here."
-        edits = [DocumentEdit(target_text="my_function_name", new_text="new_func")]
+        edits = [ModifyText(target_text="my_function_name", new_text="new_func")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--my_function_name--}" in result
@@ -1081,7 +1081,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_smart_quotes_in_document(self):
         """Document has smart quotes, target has straight quotes."""
         text = 'He said "Hello" to her.'
-        edits = [DocumentEdit(target_text='"Hello"', new_text='"Hi"')]
+        edits = [ModifyText(target_text='"Hello"', new_text='"Hi"')]
         result = apply_edits_to_markdown(text, edits)
 
         assert '{--"Hello"--}' in result
@@ -1090,7 +1090,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_smart_apostrophe(self):
         """Smart apostrophe matching."""
         text = "It's a nice day."
-        edits = [DocumentEdit(target_text="It's", new_text="It is")]
+        edits = [ModifyText(target_text="It's", new_text="It is")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--It's--}" in result
@@ -1099,7 +1099,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_extra_whitespace_in_document(self):
         """Document has extra whitespace."""
         text = "Hello    world"
-        edits = [DocumentEdit(target_text="Hello world", new_text="Hi earth")]
+        edits = [ModifyText(target_text="Hello world", new_text="Hi earth")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--Hello    world--}" in result
@@ -1108,7 +1108,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_header_markdown_preserved(self):
         """Markdown headers should be preserved."""
         text = "# Main Title\n\nSome content here."
-        edits = [DocumentEdit(target_text="Some content", new_text="Different content")]
+        edits = [ModifyText(target_text="Some content", new_text="Different content")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "# Main Title" in result
@@ -1118,8 +1118,8 @@ class TestApplyEditsToMarkdownRobust:
         """Multiple edits in same formatted region."""
         text = "**Bold word1 and word2 here**"
         edits = [
-            DocumentEdit(target_text="word1", new_text="WORD1"),
-            DocumentEdit(target_text="word2", new_text="WORD2"),
+            ModifyText(target_text="word1", new_text="WORD1"),
+            ModifyText(target_text="word2", new_text="WORD2"),
         ]
         result = apply_edits_to_markdown(text, edits)
 
@@ -1129,7 +1129,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_edit_spans_formatting_boundary(self):
         """Edit target spans from plain to bold."""
         text = "Plain text **bold text** more plain"
-        edits = [DocumentEdit(target_text="text **bold", new_text="TEXT BOLD")]
+        edits = [ModifyText(target_text="text **bold", new_text="TEXT BOLD")]
         result = apply_edits_to_markdown(text, edits)
 
         # Should handle crossing boundary
@@ -1139,7 +1139,7 @@ class TestApplyEditsToMarkdownRobust:
         """Legal document section references."""
         text = "As per Section 3.2(a)(i), the Party shall..."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Section 3.2(a)(i)",
                 new_text="Section 4.1(b)(ii)",
                 comment="Updated cross-reference",
@@ -1153,7 +1153,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_defined_term_with_quotes(self):
         """Legal defined term in quotes."""
         text = 'The "Effective Date" shall be January 1.'
-        edits = [DocumentEdit(target_text='"Effective Date"', new_text='"Commencement Date"')]
+        edits = [ModifyText(target_text='"Effective Date"', new_text='"Commencement Date"')]
         result = apply_edits_to_markdown(text, edits)
 
         assert '{--"Effective--}{++"Commencement++} Date"' in result
@@ -1161,7 +1161,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_currency_amounts(self):
         """Currency with special characters."""
         text = "Payment of $1,000.00 (USD) due."
-        edits = [DocumentEdit(target_text="$1,000.00", new_text="$2,500.00")]
+        edits = [ModifyText(target_text="$1,000.00", new_text="$2,500.00")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--$1,000.00--}" in result
@@ -1170,7 +1170,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_percentage_values(self):
         """Percentage values."""
         text = "Interest rate of 5.5% per annum."
-        edits = [DocumentEdit(target_text="5.5%", new_text="6.25%")]
+        edits = [ModifyText(target_text="5.5%", new_text="6.25%")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--5.5%--}" in result
@@ -1179,7 +1179,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_date_formats(self):
         """Various date formats."""
         text = "Dated: December 31, 2024"
-        edits = [DocumentEdit(target_text="December 31, 2024", new_text="January 15, 2025")]
+        edits = [ModifyText(target_text="December 31, 2024", new_text="January 15, 2025")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--December 31, 2024--}" in result
@@ -1188,7 +1188,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_email_addresses(self):
         """Email address modification."""
         text = "Contact: john.doe@example.com"
-        edits = [DocumentEdit(target_text="john.doe@example.com", new_text="jane.smith@company.org")]
+        edits = [ModifyText(target_text="john.doe@example.com", new_text="jane.smith@company.org")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--john.doe@example.com--}" in result
@@ -1198,7 +1198,7 @@ class TestApplyEditsToMarkdownRobust:
         """URL modification."""
         text = "Visit https://old-site.com/page for info."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="https://old-site.com/page",
                 new_text="https://new-site.com/updated",
             )
@@ -1211,7 +1211,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_parenthetical_content(self):
         """Content in parentheses."""
         text = "The Company (hereinafter referred to as 'Vendor')"
-        edits = [DocumentEdit(target_text="'Vendor'", new_text="'Supplier'")]
+        edits = [ModifyText(target_text="'Vendor'", new_text="'Supplier'")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "Supplier" in result
@@ -1219,7 +1219,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_numbered_list_item(self):
         """Numbered list items."""
         text = "1. First item\n2. Second item\n3. Third item"
-        edits = [DocumentEdit(target_text="Second item", new_text="Modified item")]
+        edits = [ModifyText(target_text="Second item", new_text="Modified item")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "1. First item" in result
@@ -1229,7 +1229,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_bullet_list_item(self):
         """Bullet list items."""
         text = "- Item A\n- Item B\n- Item C"
-        edits = [DocumentEdit(target_text="Item B", new_text="Changed B")]
+        edits = [ModifyText(target_text="Item B", new_text="Changed B")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "- Item A" in result
@@ -1239,7 +1239,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_table_like_content(self):
         """Pipe-separated table content."""
         text = "| Header1 | Header2 |\n| Cell1 | Cell2 |"
-        edits = [DocumentEdit(target_text="Cell1", new_text="NewCell1")]
+        edits = [ModifyText(target_text="Cell1", new_text="NewCell1")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--Cell1--}" in result
@@ -1249,7 +1249,7 @@ class TestApplyEditsToMarkdownRobust:
     def test_blockquote_content(self):
         """Blockquote modification."""
         text = "> This is a quoted statement."
-        edits = [DocumentEdit(target_text="quoted statement", new_text="referenced clause")]
+        edits = [ModifyText(target_text="quoted statement", new_text="referenced clause")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "> " in result
@@ -1268,10 +1268,10 @@ class TestApplyEditsToMarkdownComplexScenarios:
         )
 
         edits = [
-            DocumentEdit(target_text="Buyer", new_text="Purchaser"),
-            DocumentEdit(target_text="Seller", new_text="Vendor"),
-            DocumentEdit(target_text="$10,000.00", new_text="$15,000.00"),
-            DocumentEdit(target_text="30 days", new_text="45 days"),
+            ModifyText(target_text="Buyer", new_text="Purchaser"),
+            ModifyText(target_text="Seller", new_text="Vendor"),
+            ModifyText(target_text="$10,000.00", new_text="$15,000.00"),
+            ModifyText(target_text="30 days", new_text="45 days"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
 
@@ -1288,7 +1288,7 @@ class TestApplyEditsToMarkdownComplexScenarios:
 **"Confidential Information"** includes all proprietary data."""
 
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text='"Employee"',
                 new_text='"Staff Member"',
                 comment="Broader terminology",
@@ -1303,9 +1303,9 @@ class TestApplyEditsToMarkdownComplexScenarios:
         """Technical spec with version numbers and measurements."""
         text = "System requires CPU >= 2.4GHz, RAM >= 8GB, Storage >= 256GB SSD."
         edits = [
-            DocumentEdit(target_text="2.4GHz", new_text="3.0GHz"),
-            DocumentEdit(target_text="8GB", new_text="16GB"),
-            DocumentEdit(target_text="256GB", new_text="512GB"),
+            ModifyText(target_text="2.4GHz", new_text="3.0GHz"),
+            ModifyText(target_text="8GB", new_text="16GB"),
+            ModifyText(target_text="256GB", new_text="512GB"),
         ]
         result = apply_edits_to_markdown(text, edits)
 
@@ -1316,7 +1316,7 @@ class TestApplyEditsToMarkdownComplexScenarios:
     def test_mixed_language_content(self):
         """Content with mixed languages."""
         text = "The term 'Force Majeure' (不可抗力) applies here."
-        edits = [DocumentEdit(target_text="Force Majeure", new_text="Act of God")]
+        edits = [ModifyText(target_text="Force Majeure", new_text="Act of God")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--Force Majeure--}" in result
@@ -1330,12 +1330,12 @@ class TestApplyEditsToMarkdownComplexScenarios:
 The Landlord reserves the right to enter the premises with 24 hours notice."""
 
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="$1,000,000",
                 new_text="ignored",
                 comment="Verify coverage amount",
             ),
-            DocumentEdit(
+            ModifyText(
                 target_text="24 hours",
                 new_text="ignored",
                 comment="Consider extending notice period",
@@ -1355,12 +1355,12 @@ The Landlord reserves the right to enter the premises with 24 hours notice."""
         """Full redline with indices and comments."""
         text = "Original clause with **important** terms."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Original clause",
                 new_text="Modified provision",
                 comment="Clarified language",
             ),
-            DocumentEdit(
+            ModifyText(
                 target_text="important",
                 new_text="critical",
                 comment="Strengthened terminology",
@@ -1385,7 +1385,7 @@ This entire paragraph should be removed.
 Third paragraph stays."""
 
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="This entire paragraph should be removed.",
                 new_text="",
                 comment="Removed redundant clause",
@@ -1402,7 +1402,7 @@ Third paragraph stays."""
         """Insert new clause (modification that adds content)."""
         text = "Section 1 content.\n\nSection 3 content."
         edits = [
-            DocumentEdit(
+            ModifyText(
                 target_text="Section 1 content.",
                 new_text="Section 1 content.\n\nSection 2: New inserted content.",
                 comment="Added missing section",
@@ -1423,9 +1423,9 @@ Third paragraph stays."""
    (c) comply with all _applicable laws_."""
 
         edits = [
-            DocumentEdit(target_text="Contractor", new_text="Service Provider"),
-            DocumentEdit(target_text="diligently", new_text="professionally"),
-            DocumentEdit(target_text="confidentiality", new_text="strict confidentiality"),
+            ModifyText(target_text="Contractor", new_text="Service Provider"),
+            ModifyText(target_text="diligently", new_text="professionally"),
+            ModifyText(target_text="confidentiality", new_text="strict confidentiality"),
         ]
         result = apply_edits_to_markdown(text, edits)
 
@@ -1438,8 +1438,8 @@ Third paragraph stays."""
         """Overlapping edits - first one wins."""
         text = "The quick brown fox jumps over."
         edits = [
-            DocumentEdit(target_text="quick brown", new_text="slow red"),
-            DocumentEdit(target_text="brown fox", new_text="gray wolf"),  # Overlaps!
+            ModifyText(target_text="quick brown", new_text="slow red"),
+            ModifyText(target_text="brown fox", new_text="gray wolf"),  # Overlaps!
         ]
         result = apply_edits_to_markdown(text, edits)
 
@@ -1451,9 +1451,9 @@ Third paragraph stays."""
         """Adjacent but non-overlapping edits."""
         text = "WordA WordB WordC"
         edits = [
-            DocumentEdit(target_text="WordA", new_text="TermA"),
-            DocumentEdit(target_text="WordB", new_text="TermB"),
-            DocumentEdit(target_text="WordC", new_text="TermC"),
+            ModifyText(target_text="WordA", new_text="TermA"),
+            ModifyText(target_text="WordB", new_text="TermB"),
+            ModifyText(target_text="WordC", new_text="TermC"),
         ]
         result = apply_edits_to_markdown(text, edits)
 
@@ -1464,7 +1464,7 @@ Third paragraph stays."""
     def test_same_word_multiple_occurrences(self):
         """Same word appears multiple times - only first occurrence changed."""
         text = "The fee shall be paid. The fee is non-refundable. The fee covers all services."
-        edits = [DocumentEdit(target_text="fee", new_text="payment")]
+        edits = [ModifyText(target_text="fee", new_text="payment")]
         result = apply_edits_to_markdown(text, edits)
 
         # Only first "fee" should be changed
@@ -1481,7 +1481,7 @@ Third paragraph stays."""
     def test_case_sensitivity(self):
         """Matching should be case-sensitive by default."""
         text = "The Company and the company are different."
-        edits = [DocumentEdit(target_text="Company", new_text="Corporation")]
+        edits = [ModifyText(target_text="Company", new_text="Corporation")]
         result = apply_edits_to_markdown(text, edits)
 
         # Should only match "Company" not "company"
@@ -1496,7 +1496,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_empty_document(self):
         """Empty document."""
         text = ""
-        edits = [DocumentEdit(target_text="anything", new_text="something")]
+        edits = [ModifyText(target_text="anything", new_text="something")]
         result = apply_edits_to_markdown(text, edits)
 
         assert result == ""
@@ -1504,7 +1504,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_whitespace_only_document(self):
         """Document with only whitespace."""
         text = "   \n\n   \t   "
-        edits = [DocumentEdit(target_text="text", new_text="other")]
+        edits = [ModifyText(target_text="text", new_text="other")]
         result = apply_edits_to_markdown(text, edits)
 
         assert result == text  # Unchanged
@@ -1512,7 +1512,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_target_not_found(self):
         """Target not in document."""
         text = "Some actual content here."
-        edits = [DocumentEdit(target_text="nonexistent phrase", new_text="replacement")]
+        edits = [ModifyText(target_text="nonexistent phrase", new_text="replacement")]
         result = apply_edits_to_markdown(text, edits)
 
         assert result == text  # Unchanged
@@ -1528,7 +1528,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_none_values_in_edit(self):
         """Edit with None comment (common case)."""
         text = "Original text."
-        edits = [DocumentEdit(target_text="Original", new_text="Modified", comment=None)]
+        edits = [ModifyText(target_text="Original", new_text="Modified", comment=None)]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--Original--}" in result
@@ -1538,7 +1538,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_very_long_document(self):
         """Performance with long document."""
         text = "Word " * 10000 + "TARGET " + "Word " * 10000
-        edits = [DocumentEdit(target_text="TARGET", new_text="FOUND")]
+        edits = [ModifyText(target_text="TARGET", new_text="FOUND")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--TARGET--}" in result
@@ -1548,7 +1548,7 @@ class TestApplyEditsToMarkdownErrorHandling:
         """Many edits at once."""
         text = " ".join([f"word{i}" for i in range(100)])
         edits = [
-            DocumentEdit(target_text=f"word{i}", new_text=f"WORD{i}")
+            ModifyText(target_text=f"word{i}", new_text=f"WORD{i}")
             for i in range(0, 100, 10)  # Every 10th word
         ]
         result = apply_edits_to_markdown(text, edits)
@@ -1560,7 +1560,7 @@ class TestApplyEditsToMarkdownErrorHandling:
     def test_special_regex_chars_in_all_positions(self):
         """Regex special chars everywhere."""
         text = "Match (this) [and] {that} $100 ^start end$ 50% a+b a*b a?b"
-        edits = [DocumentEdit(target_text="(this)", new_text="(THAT)")]
+        edits = [ModifyText(target_text="(this)", new_text="(THAT)")]
         result = apply_edits_to_markdown(text, edits)
 
         assert "{--(this)--}" in result

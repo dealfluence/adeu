@@ -2,7 +2,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
-from adeu.models import DocumentEdit
+from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 try:
@@ -13,7 +13,11 @@ except PackageNotFoundError:
 
 __all__ = [
     "RedlineEngine",
-    "DocumentEdit",
+    "ModifyText",
+    "AcceptChange",
+    "RejectChange",
+    "ReplyComment",
+    "DocumentChange",
     "extract_text_from_stream",
     "apply_edits_to_markdown",
     "__version__",

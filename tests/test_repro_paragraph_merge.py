@@ -4,7 +4,7 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -39,7 +39,7 @@ def test_multiline_insert_does_not_create_nested_paragraphs():
 
     # 3. Act: Apply a multiline text edit targeting the tracked text
     # This will trigger track_delete_run (splitting the ins) and track_insert
-    edit = DocumentEdit(
+    edit = ModifyText(
         target_text="10. Force Majeure",
         new_text="10. Force Majeure\n\n11. Entire Agreement",
     )

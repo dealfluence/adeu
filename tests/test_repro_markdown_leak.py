@@ -2,7 +2,7 @@ import io
 
 from docx import Document
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
 
@@ -21,7 +21,7 @@ def test_markdown_headers_leak_into_docx():
     target_text = "# Section 1.\n\n# Section 2."
     new_text = "# Section 1.\n\n# New Section.\n\n# Section 2."
 
-    edit = DocumentEdit(target_text=target_text, new_text=new_text)
+    edit = ModifyText(target_text=target_text, new_text=new_text)
 
     engine = RedlineEngine(stream)
 

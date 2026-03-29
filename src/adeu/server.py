@@ -18,11 +18,10 @@ from fastmcp.exceptions import ToolError
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
-from adeu.redline.engine import RedlineEngine
+from adeu.models import DocumentChange, ModifyText
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
-# --- LOGGING CONFIGURATION ---
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, force=True)
 
 structlog.configure(
@@ -33,7 +32,6 @@ structlog.configure(
     logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
 )
 
-# Enable debug logging on the server-side to see client logs locally in stderr too
 to_client_logger = logging.getLogger("fastmcp.server.context.to_client")
 to_client_logger.setLevel(level=logging.DEBUG)
 
@@ -135,57 +133,59 @@ async def diff_docx_files(
             return "No text differences found between the documents."
 
         await ctx.info(f"Diff complete. Found {len(edits)} differences.")
-
-        output = [
-            f"--- {Path(original_path).name}",
-            f"+++ {Path(modified_path).name}",
-            "",
-        ]
-        CONTEXT_SIZE = 40
-
-        for edit in edits:
-            start_idx = getattr(edit, "_match_start_index", 0) or 0
-            pre_start = max(0, start_idx - CONTEXT_SIZE)
-            pre_context = text_orig[pre_start:start_idx]
-            if pre_start > 0:
-                pre_context = "..." + pre_context
-
-            target_len = len(edit.target_text) if edit.target_text else 0
-            post_start = start_idx + target_len
-            post_end = min(len(text_orig), post_start + CONTEXT_SIZE)
-            post_context = text_orig[post_start:post_end]
-            if post_end < len(text_orig):
-                post_context = post_context + "..."
-
-            pre_context = pre_context.replace("\n", " ").replace("\r", "")
-            post_context = post_context.replace("\n", " ").replace("\r", "")
-
-            output.append("@@ Word Patch @@")
-            output.append(f" {pre_context}")
-            if edit.target_text:
-                output.append(f"- {edit.target_text}")
-            if edit.new_text:
-                output.append(f"+ {edit.new_text}")
-            output.append(f" {post_context}")
-            output.append("")
-
-        return "\n".join(output)
+        return _create_diff_output(original_path, modified_path, text_orig, edits)
 
     except Exception as e:
         await ctx.error("Failed to compute diff", extra={"error": str(e)})
         return f"Error computing diff: {str(e)}"
 
 
-@mcp.tool(description="Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits.")
+def _create_diff_output(original_path: str, modified_path: str, text_orig: str, edits: List[ModifyText]):
+    output = [
+        f"--- {Path(original_path).name}",
+        f"+++ {Path(modified_path).name}",
+        "",
+    ]
+    CONTEXT_SIZE = 40
+
+    for edit in edits:
+        start_idx = getattr(edit, "_match_start_index", 0) or 0
+        pre_start = max(0, start_idx - CONTEXT_SIZE)
+        pre_context = text_orig[pre_start:start_idx]
+        if pre_start > 0:
+            pre_context = "..." + pre_context
+
+        target_len = len(edit.target_text) if edit.target_text else 0
+        post_start = start_idx + target_len
+        post_end = min(len(text_orig), post_start + CONTEXT_SIZE)
+        post_context = text_orig[post_start:post_end]
+        if post_end < len(text_orig):
+            post_context = post_context + "..."
+
+        pre_context = pre_context.replace("\n", " ").replace("\r", "")
+        post_context = post_context.replace("\n", " ").replace("\r", "")
+
+        output.append("@@ Word Patch @@")
+        output.append(f" {pre_context}")
+        if edit.target_text:
+            output.append(f"- {edit.target_text}")
+        if edit.new_text:
+            output.append(f"+ {edit.new_text}")
+        output.append(f" {post_context}")
+        output.append("")
+    result = "\n".join(output)
+    return result
+
+
+@mcp.tool(description="Applies a batch of document changes (review actions and text edits).")
 async def process_document_batch(
     original_docx_path: Annotated[str, "Absolute path to the source file."],
     author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
     ctx: Context,
-    actions: Annotated[
-        Optional[List[ReviewAction]],
-        "Optional list of review actions (ACCEPT, REJECT, REPLY)",
-    ] = None,
-    edits: Annotated[Optional[List[DocumentEdit]], "Optional list of text replacements"] = None,
+    changes: Annotated[
+        List[DocumentChange],
+        "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', or 'modify'.",
+    ],
     output_path: Annotated[Optional[str], "Optional output path."] = None,
 ) -> str:
     await ctx.info(
@@ -193,8 +193,7 @@ async def process_document_batch(
         extra={
             "original_docx_path": original_docx_path,
             "author_name": author_name,
-            "actions_count": len(actions) if actions else 0,
-            "edits_count": len(edits) if edits else 0,
+            "changes_count": len(changes) if changes else 0,
         },
     )
 
@@ -203,57 +202,28 @@ async def process_document_batch(
             await ctx.warning("Batch processing rejected: author_name is empty.")
             return "Error: author_name cannot be empty."
 
-        actions = actions or []
-        edits = edits or []
-
-        if not actions and not edits:
+        if not changes:
             await ctx.warning("Batch processing rejected: No actions or edits provided.")
-            return "Error: No actions or edits provided."
+            return "Error: No changes provided."
 
         stream = _read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name)
         await ctx.debug("Redline Engine initialized successfully")
 
-        applied_actions, skipped_actions = 0, 0
-        if actions:
-            await ctx.debug("Applying structural review actions")
-            applied_actions, skipped_actions = engine.apply_review_actions(actions)
-            await ctx.info(
-                "Review actions processed",
-                extra={"applied": applied_actions, "skipped": skipped_actions},
+        try:
+            await ctx.debug("Processing document batch")
+            stats = engine.process_batch(changes)
+            await ctx.info("Changes processed successfully", extra=stats)
+        except BatchValidationError as e:
+            await ctx.error(
+                "Batch validation failed",
+                extra={
+                    "error_count": len(e.errors),
+                    "errors": e.errors,
+                },
             )
-
-            # CRITICAL: Rebuild the mapper so text edits anchor against the post-action DOM state
-            if edits:
-                await ctx.debug("Rebuilding Virtual DOM mapper for text edits")
-                engine.mapper._build_map()
-                engine.clean_mapper = None
-
-        if edits:
-            await ctx.debug("Validating text edits")
-            validation_errors = engine.validate_edits(edits)
-            if validation_errors:
-                await ctx.error(
-                    "Edit validation failed",
-                    extra={
-                        "error_count": len(validation_errors),
-                        "errors": validation_errors,
-                    },
-                )
-                error_report = (
-                    f"Batch rejected. {len(validation_errors)} out of {len(edits)} edits failed validation:\n\n"
-                    + "\n\n".join(validation_errors)
-                )
-                return error_report
-
-        applied_edits, skipped_edits = 0, 0
-        if edits:
-            await ctx.debug("Applying text edits to document")
-            applied_edits, skipped_edits = engine.apply_edits(edits)
-            await ctx.info(
-                "Text edits processed",
-                extra={"applied": applied_edits, "skipped": skipped_edits},
-            )
+            error_report = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
+            return error_report
 
         if not output_path:
             p = Path(original_docx_path)
@@ -273,8 +243,8 @@ async def process_document_batch(
 
         return (
             f"Batch complete. Saved to: {output_path}\n"
-            f"Actions: {applied_actions} applied, {skipped_actions} skipped.\n"
-            f"Edits: {applied_edits} applied, {skipped_edits} skipped."
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
         )
 
     except Exception as e:

@@ -51,19 +51,20 @@ graph LR
 The system relies on the `DocumentEdit` schema defined in `src/adeu/models.py`.
 
 ```python
-class EditOperationType(str, Enum):
-    INSERTION = "INSERTION"
-    DELETION = "DELETION"
-    MODIFICATION = "MODIFICATION"
-
-class DocumentEdit(BaseModel):
-    operation: EditOperationType
-    # The exact text to find (or anchor for insertion)
-    target_text: str 
-    # The new text to apply
-    new_text: Optional[str] 
-    # Optional comment to appear in the Review pane
+class ModifyText(BaseModel):
+    type: Literal["modify"]
+    target_text: str
+    new_text: str
     comment: Optional[str]
+
+class AcceptChange(BaseModel): ...
+class RejectChange(BaseModel): ...
+class ReplyComment(BaseModel): ...
+
+DocumentChange = Annotated[
+    Union[AcceptChange, RejectChange, ReplyComment, ModifyText],
+    Field(discriminator="type")
+]
 ```
 
 ## 4. Project Structure

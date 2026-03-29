@@ -9,7 +9,7 @@ isolated from fixture dependencies.
 import io
 from xml.etree import ElementTree as ET
 
-from adeu.models import DocumentEdit
+from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
@@ -56,7 +56,7 @@ class TestCommentAnnotationRefFormatting:
         stream = create_minimal_docx()
         engine = RedlineEngine(stream, author="Test Author")
 
-        edit = DocumentEdit(
+        edit = ModifyText(
             target_text="initial",
             new_text="modified",
             comment="Test comment",
@@ -103,7 +103,7 @@ class TestRevisionDateAttributes:
         stream = create_minimal_docx()
         engine = RedlineEngine(stream, author="Test Author")
 
-        edit = DocumentEdit(
+        edit = ModifyText(
             target_text="initial",
             new_text="modified",
         )
@@ -136,7 +136,7 @@ class TestRevisionDateAttributes:
         stream = create_minimal_docx()
         engine = RedlineEngine(stream, author="Test Author")
 
-        edit = DocumentEdit(
+        edit = ModifyText(
             target_text="initial",
             new_text="modified",
         )

@@ -4,7 +4,7 @@ import re
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 
 
@@ -23,7 +23,7 @@ def test_reply_creates_new_comment_entry():
     # 1. Create initial comment via modification
     # We change "Text" to "TextModified" to ensure the engine processes it and attaches the comment.
     engine = RedlineEngine(stream, author="Author1")
-    edit = DocumentEdit(target_text="Text", new_text="TextModified", comment="Initial Comment")
+    edit = ModifyText(target_text="Text", new_text="TextModified", comment="Initial Comment")
     engine.apply_edits([edit])
 
     stream_mid = engine.save_to_stream()
@@ -38,7 +38,7 @@ def test_reply_creates_new_comment_entry():
 
     # 2. Reply to the comment
     engine2 = RedlineEngine(stream_mid, author="Author2")
-    action = ReviewAction(action="REPLY", target_id=f"Com:{com_id}", text="This is a reply.")
+    action = ReplyComment(target_id=f"Com:{com_id}", text="This is a reply.")
 
     applied, skipped = engine2.apply_review_actions([action])
 

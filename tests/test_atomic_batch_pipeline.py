@@ -6,7 +6,7 @@ import re
 from docx import Document
 
 from adeu.ingest import extract_text_from_stream
-from adeu.models import DocumentEdit, ReviewAction
+from adeu.models import AcceptChange, ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.server import process_document_batch
 
@@ -30,8 +30,8 @@ class MockContext:
 def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     """
     Validates Issue #2 Fix:
-    Ensures that processing ReviewActions (which mutate the XML DOM and shift text lengths)
-    does not cause subsequent DocumentEdits in the SAME batch to misanchor.
+    Ensures that processing AcceptChanges (which mutate the XML DOM and shift text lengths)
+    does not cause subsequent ModifyTexts in the SAME batch to misanchor.
     """
     # 1. Setup initial doc
     doc = Document()
@@ -47,7 +47,7 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
         engine = RedlineEngine(io.BytesIO(f.read()), author="Round1")
 
     # Edit: "First" -> "1st" (Creates a w:del and w:ins)
-    engine.apply_edits([DocumentEdit(target_text="First", new_text="1st")])
+    engine.apply_edits([ModifyText(target_text="First", new_text="1st")])
 
     mid_path = tmp_path / "mid.docx"
     with open(mid_path, "wb") as f:
@@ -67,11 +67,12 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     # 3. Execute the Atomic Batch (Simulating Round 2)
     # We ACCEPT the previous changes. This removes the w:del and w:ins wrappers,
     # shrinking the XML and shifting the text indices of everything below it.
-    actions = [ReviewAction(action="ACCEPT", target_id=f"Chg:{i}") for i in chg_ids]
+    actions = [AcceptChange(target_id=f"Chg:{i}") for i in chg_ids]
 
     # We edit text further down the document.
     # If the mapper is not rebuilt, "Third" will look for the wrong index and fail.
-    edits = [DocumentEdit(target_text="Third", new_text="3rd")]
+    edits = [ModifyText(target_text="Third", new_text="3rd")]
+    changes = actions + edits
 
     out_path = tmp_path / "final.docx"
 
@@ -81,8 +82,7 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
             original_docx_path=str(mid_path),
             author_name="Round2",
             ctx=MockContext(),
-            actions=actions,
-            edits=edits,
+            changes=changes,
             output_path=str(out_path),
         )
     )
