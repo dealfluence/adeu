@@ -18,7 +18,6 @@ from fastmcp.exceptions import ToolError
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.markup import apply_edits_to_markdown as _apply_edits_to_markdown
 from adeu.models import DocumentEdit, ReviewAction
 from adeu.redline.engine import RedlineEngine
 
@@ -177,7 +176,7 @@ async def diff_docx_files(
         return f"Error computing diff: {str(e)}"
 
 
-@mcp.tool(description="ATOMIC PIPELINE: Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits.")
+@mcp.tool(description="Applies a mixed batch of review actions (ACCEPT/REJECT/REPLY) and text edits.")
 async def process_document_batch(
     original_docx_path: Annotated[str, "Absolute path to the source file."],
     author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
@@ -311,63 +310,6 @@ async def accept_all_changes(
             extra={"error": str(e), "docx_path": docx_path},
         )
         return f"Error accepting changes: {str(e)}"
-
-
-@mcp.tool(
-    description="Reads a DOCX file, extracts its text, applies edits as CriticMarkup, and saves as a Markdown file."
-)
-async def apply_edits_as_markdown(
-    docx_path: Annotated[str, "Absolute path to the DOCX file."],
-    edits: Annotated[List[DocumentEdit], "List of edits."],
-    ctx: Context,
-    output_path: Annotated[Optional[str], "Optional path for the output .md file."] = None,
-    include_index: Annotated[bool, "If True, appends the edit's 0-based index."] = False,
-    highlight_only: Annotated[bool, "If True, only highlights target_text."] = False,
-    clean_view: Annotated[bool, "If True (default), extracts the 'Accepted' state."] = True,
-) -> str:
-    await ctx.info(
-        "Starting CriticMarkup conversion",
-        extra={
-            "docx_path": docx_path,
-            "edits_count": len(edits),
-            "highlight_only": highlight_only,
-        },
-    )
-
-    try:
-        await ctx.debug("Reading and extracting text from DOCX")
-        stream = _read_file_bytes(docx_path)
-        markdown_text = extract_text_from_stream(
-            stream,
-            filename=Path(docx_path).name,
-            clean_view=clean_view,
-        )
-
-        await ctx.debug("Applying CriticMarkup edits to extracted Markdown text")
-        result = _apply_edits_to_markdown(
-            markdown_text=markdown_text,
-            edits=edits,
-            include_index=include_index,
-            highlight_only=highlight_only,
-        )
-
-        if not output_path:
-            p = Path(docx_path)
-            output_path = str(p.parent / f"{p.stem}_markup.md")
-
-        await ctx.debug("Writing Markdown to disk", extra={"output_path": output_path})
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(result)
-
-        await ctx.info("CriticMarkup saved successfully", extra={"output_path": output_path})
-        return f"Saved CriticMarkup to: {output_path}"
-
-    except FileNotFoundError:
-        await ctx.error("Source DOCX file not found", extra={"docx_path": docx_path})
-        return f"Error: File not found: {docx_path}"
-    except Exception as e:
-        await ctx.error("Error applying edits as markdown", extra={"error": str(e)})
-        return f"Error applying edits as markdown: {str(e)}"
 
 
 @mcp.tool(description="Logs the user into the Adeu Cloud backend. Securely opens a browser window for authentication.")

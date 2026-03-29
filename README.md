@@ -12,7 +12,7 @@ It treats the DOCX file as a **Virtual DOM**:
 
 ---
 
-## ⚡ Zero-Config Setup
+## Zero-Config Setup
 
 **Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. Install it via your terminal:
 
@@ -47,7 +47,7 @@ uvx adeu init
 > This command **automatically detects and updates** your `claude_desktop_config.json`.
 > **Restart Claude Desktop** afterward to load the new tools.
 
-### ✅ Verify It's Working
+### Verify It's Working
 
 Once Claude Desktop has restarted, you can confirm Adeu is connected by typing the following message directly into Claude:
 
@@ -90,7 +90,6 @@ To maximize the AI's effectiveness, paste this context into Claude's **Project I
 > **Tools:**
 >
 > - `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
-> - `apply_edits_as_markdown`: **Drafting Mode.** Generate a CriticMarkup preview (`{--old--}{++new++}`) to show the user exactly what will change.
 > - `apply_structured_edits`: **Commit Mode.** Apply specific search-and-replace edits to generate native Track Changes in the DOCX.
 > - `manage_review_actions`: **Negotiation.** Reply to comments or Accept/Reject specific changes by ID.
 
@@ -145,7 +144,7 @@ adeu apply contract.docx edits.json --author "Review Bot"
 
 ## Key Features
 
-### 🛡️ Format Safety
+### Format Safety
 
 Adeu does not "rewrite" the document. It patches it.
 

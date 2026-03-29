@@ -10,7 +10,6 @@ from adeu.models import DocumentEdit
 from adeu.redline.engine import RedlineEngine
 from adeu.server import (
     accept_all_changes,
-    apply_edits_as_markdown,
     diff_docx_files,
     login_to_adeu_cloud,
     logout_of_adeu_cloud,
@@ -153,33 +152,6 @@ def test_accept_all_changes(sample_docx, tmp_path):
     assert "w:del" not in xml
     assert "accepted" in xml
     assert "original" not in xml
-
-
-def test_apply_edits_as_markdown(sample_docx, tmp_path):
-    ctx = MockContext()
-    output_path = tmp_path / "preview.md"
-
-    edits = [DocumentEdit(target_text="original", new_text="preview")]
-
-    result = asyncio.run(
-        apply_edits_as_markdown(
-            docx_path=sample_docx,
-            edits=edits,
-            ctx=ctx,
-            output_path=str(output_path),
-            include_index=True,
-        )
-    )
-
-    assert "Saved CriticMarkup" in result
-    assert output_path.exists()
-
-    with open(output_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    assert "{--original--}" in content
-    assert "{++preview++}" in content
-    assert "[Edit:0]" in content
 
 
 # --- Cloud Auth & Validation Tool Mocks ---
