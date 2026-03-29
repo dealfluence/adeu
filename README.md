@@ -151,7 +151,7 @@ Adeu does not "rewrite" the document. It patches it.
 - **Numbering & Headers:** Preserved.
 - **Complex XML:** It only modifies the text runs targeted by the edit.
 
-### 📝 CriticMarkup Representation
+### CriticMarkup Representation
 
 Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes.
 
@@ -161,7 +161,7 @@ Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarku
 | `{++text++}` | Insertion | `{++Lessee++}`            |
 | `{>>text<<}` | Comment   | `{>>Clarify this term<<}` |
 
-### 🔍 Intelligent Mapping
+### Intelligent Mapping
 
 Word documents are messy. A word like "Contract" might be split into XML runs like `["Con", "tract"]` due to spellcheck or formatting history.
 
