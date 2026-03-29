@@ -766,7 +766,7 @@ class RedlineEngine:
             else:
                 return True
 
-        proxy_edit = ModifyText(target_text=final_target, new_text=final_new, comment=edit.comment)
+        proxy_edit = ModifyText(type="modify", target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper

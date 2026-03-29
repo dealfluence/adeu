@@ -200,7 +200,7 @@ def handle_apply(args):
         text_orig = _read_docx_text(args.original)
         with open(args.changes, "r", encoding="utf-8") as f:
             text_mod = f.read()
-        changes = generate_edits_from_text(text_orig, text_mod)
+        changes.extend(generate_edits_from_text(text_orig, text_mod))
 
     print(f"Applying {len(changes)} changes...", file=sys.stderr)
     with open(args.original, "rb") as f:

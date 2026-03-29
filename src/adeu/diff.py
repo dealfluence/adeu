@@ -201,7 +201,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
             # Flush pending delete if any
             if pending_delete:
                 idx, del_txt = pending_delete
-                edit = ModifyText(target_text=del_txt, new_text="", comment="Diff: Text deleted")
+                edit = ModifyText(type="modify", target_text=del_txt, new_text="", comment="Diff: Text deleted")
                 edit._match_start_index = idx
                 edits.append(edit)
                 pending_delete = None
@@ -217,7 +217,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
             if pending_delete:
                 # Merge into Modification (Replace)
                 idx, del_txt = pending_delete
-                edit = ModifyText(target_text=del_txt, new_text=text, comment="Diff: Replacement")
+                edit = ModifyText(type="modify", target_text=del_txt, new_text=text, comment="Diff: Replacement")
                 edit._match_start_index = idx
                 edits.append(edit)
                 pending_delete = None
@@ -240,6 +240,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
                             logger.info(f"Converting start-of-doc insert to modification of '{anchor_target}'")
 
                             edit = ModifyText(
+                                type="modify",
                                 target_text=anchor_target,
                                 new_text=text + anchor_target,
                                 comment="Diff: Start-of-doc insertion",
@@ -260,6 +261,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
 
                 # Standard Insertion: Target=Anchor, New=Anchor+Text
                 edit = ModifyText(
+                    type="modify",
                     target_text=anchor,
                     new_text=anchor + text,
                     comment="Diff: Text inserted",
@@ -270,7 +272,7 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
     # Flush trailing delete
     if pending_delete:
         idx, del_txt = pending_delete
-        edit = ModifyText(target_text=del_txt, new_text="", comment="Diff: Text deleted")
+        edit = ModifyText(type="modify", target_text=del_txt, new_text="", comment="Diff: Text deleted")
         edit._match_start_index = idx
         edits.append(edit)
 
