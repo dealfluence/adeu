@@ -364,18 +364,18 @@ def _encode_multipart_formdata(
 
 @mcp.tool(
     description=(
-        "Analyzes legal documents to find inconsistencies, contradictions, and risk assessments. "
+        "Analyzes documents to find inconsistencies, contradictions, and risk assessments. "
         "Always present the complete report to the user, including every verbatim evidence quote "
         "exactly as returned, without summarizing or omitting any findings."
         "Run this on validation request for files or directories."
     )
 )
-async def validate_legal_documents(
+async def validate_documents(
     file_paths: Annotated[List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."],
     ctx: Context,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> str:
-    await ctx.info("Starting legal document validation", extra={"provided_paths": file_paths})
+    await ctx.info("Starting document validation", extra={"provided_paths": file_paths})
 
     if not file_paths:
         await ctx.warning("No file paths provided by client")
@@ -471,8 +471,8 @@ async def validate_legal_documents(
                 return "\n".join(ev_lines) + "\n"
 
             output = [
-                "# Comprehensive Legal Validation Report\n",
-                "## 1. Legal Consistency Check",
+                "# Validation Report\n",
+                "## 1. Consistency Check",
                 f"**Summary**: {consistency.get('summary', 'No summary provided.')}\n",
             ]
 

@@ -15,7 +15,7 @@ from adeu.server import (
     logout_of_adeu_cloud,
     process_document_batch,
     read_docx,
-    validate_legal_documents,
+    validate_documents,
 )
 
 
@@ -180,7 +180,7 @@ def test_logout_of_adeu_cloud(mock_clear_key):
 
 
 @patch("urllib.request.urlopen")
-def test_validate_legal_documents_success(mock_urlopen, sample_docx):
+def test_validate_documents_success(mock_urlopen, sample_docx):
     ctx = MockContext()
 
     mock_response_data = {
@@ -214,9 +214,9 @@ def test_validate_legal_documents_success(mock_urlopen, sample_docx):
     mock_urlopen.return_value = mock_response
 
     # Call with fake API key bypassing the Dependency injection
-    result = asyncio.run(validate_legal_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
+    result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
 
-    assert "Comprehensive Legal Validation Report" in result
+    assert "Validation Report" in result
     assert "Date mismatch" in result
     assert "Unlimited Liability" in result
     assert "Evidence 1" in result
