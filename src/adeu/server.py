@@ -14,7 +14,7 @@ import structlog
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
-from fastmcp.server.apps import AppConfig, ResourceCSP
+from fastmcp.server.apps import AppConfig
 from fastmcp.tools import ToolResult
 
 from adeu.auth import DesktopAuthManager
@@ -41,10 +41,8 @@ mcp = FastMCP("Adeu Redlining Service")
 
 VIEW_URI = "ui://adeu/html-viewer"
 
-@mcp.resource(
-    VIEW_URI,
-    app=AppConfig()
-)
+
+@mcp.resource(VIEW_URI, app=AppConfig())
 def html_viewer() -> str:
     """Interactive HTML Viewer App."""
     return """\
@@ -69,7 +67,7 @@ def html_viewer() -> str:
   <div id="app">Loading report...</div>
   <script>
     const INIT_ID = 1;
-    
+
     window.addEventListener("message", (event) => {
       if (!event.data || event.data.jsonrpc !== "2.0") return;
       const msg = event.data;
@@ -593,57 +591,65 @@ async def validate_documents(
 
             # --- Build Custom HTML App View ---
             html_parts = []
-            html_parts.append('<h1>Validation Report</h1>')
-            
-            html_parts.append('<h2>1. Consistency Check</h2>')
-            html_parts.append(f'<p><strong>Summary:</strong> {consistency.get("summary", "No summary provided.")}</p>')
-            
+            html_parts.append("<h1>Validation Report</h1>")
+
+            html_parts.append("<h2>1. Consistency Check</h2>")
+            html_parts.append(f"<p><strong>Summary:</strong> {consistency.get('summary', 'No summary provided.')}</p>")
+
             if not issues:
-                html_parts.append('<div class="badge badge-success" style="margin-bottom: 20px;">No inconsistencies found! Structurally aligned.</div>')
+                html_parts.append(
+                    '<div class="badge badge-success" style="margin-bottom: 20px;">No inconsistencies found! Structurally aligned.</div>'
+                )
             else:
                 for i, issue in enumerate(issues, 1):
                     severity = issue.get("severity", "Unknown")
                     badge_class = "badge-danger" if severity.lower() in ["high", "critical"] else "badge-warning"
-                    
+
                     html_parts.append('<div class="card">')
-                    html_parts.append(f'<h3>{i}. {issue.get("title")} <span class="badge {badge_class}">{severity}</span></h3>')
-                    html_parts.append(f'<p>{issue.get("description")}</p>')
-                    
+                    html_parts.append(
+                        f'<h3>{i}. {issue.get("title")} <span class="badge {badge_class}">{severity}</span></h3>'
+                    )
+                    html_parts.append(f"<p>{issue.get('description')}</p>")
+
                     if issue.get("evidence"):
                         html_parts.append('<div class="evidence"><strong>Verbatim Evidence:</strong><br>')
                         for ev in issue.get("evidence"):
                             if isinstance(ev, dict):
-                                html_parts.append(f'&quot;{ev.get("quote", str(ev))}&quot; &mdash; {ev.get("filename", "Unknown")}<br>')
+                                html_parts.append(
+                                    f"&quot;{ev.get('quote', str(ev))}&quot; &mdash; {ev.get('filename', 'Unknown')}<br>"
+                                )
                             else:
-                                html_parts.append(f'{ev}<br>')
-                        html_parts.append('</div>')
-                    html_parts.append('</div>')
-                    
+                                html_parts.append(f"{ev}<br>")
+                        html_parts.append("</div>")
+                    html_parts.append("</div>")
+
             html_parts.append('<h2 style="margin-top: 30px;">2. Buyer vs. Seller Risk Assessment</h2>')
-            html_parts.append(f'<p><strong>Summary:</strong> {risk.get("summary", "No summary provided.")}</p>')
-            
+            html_parts.append(f"<p><strong>Summary:</strong> {risk.get('summary', 'No summary provided.')}</p>")
+
             def render_ui_risk_section(title: str, items: list):
-                html_parts.append(f'<h3>{title}</h3>')
+                html_parts.append(f"<h3>{title}</h3>")
                 if not items:
                     html_parts.append('<p style="color: #666; font-style: italic;">No specific risks identified.</p>')
                 else:
                     for item in items:
                         html_parts.append('<div class="card">')
-                        html_parts.append(f'<h4>{item.get("title")}</h4>')
-                        html_parts.append(f'<p>{item.get("description")}</p>')
+                        html_parts.append(f"<h4>{item.get('title')}</h4>")
+                        html_parts.append(f"<p>{item.get('description')}</p>")
                         if item.get("evidence"):
                             html_parts.append('<div class="evidence">')
                             for ev in item.get("evidence"):
                                 if isinstance(ev, dict):
-                                    html_parts.append(f'&quot;{ev.get("quote", str(ev))}&quot; &mdash; {ev.get("filename", "Unknown")}<br>')
+                                    html_parts.append(
+                                        f"&quot;{ev.get('quote', str(ev))}&quot; &mdash; {ev.get('filename', 'Unknown')}<br>"
+                                    )
                                 else:
-                                    html_parts.append(f'{ev}<br>')
-                            html_parts.append('</div>')
-                        html_parts.append('</div>')
-                        
+                                    html_parts.append(f"{ev}<br>")
+                            html_parts.append("</div>")
+                        html_parts.append("</div>")
+
             render_ui_risk_section("Buyer-Side Risks", buyer_risks)
             render_ui_risk_section("Seller-Side Risks", seller_risks)
-            
+
             generated_html = "".join(html_parts)
 
             markdown_output = "\n".join(output)
