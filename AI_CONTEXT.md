@@ -42,8 +42,8 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Search & Replace First**: Pure insertions and deletions are intentionally hidden from the LLM. All text modifications must be executed as search-and-replace (`ModifyText`) to guarantee sufficient anchoring context for the fuzzy matcher.
 
 ### 7. MCP Apps & UI Rendering
-*   **Custom HTML Apps**: We use FastMCP's `AppConfig(resource_uri="ui://...")` to serve custom HTML/CSS interfaces for complex tools (e.g., `validate_documents`). We intentionally avoid abstract UI libraries like `prefab-ui` to maintain full control over the markup.
-*   **Zero-Dependency Vanilla JS**: We avoid external JS libraries (like `@modelcontextprotocol/ext-apps`) to bypass CSP restrictions and ensure offline reliability. The iframe client uses a minimal `window.postMessage` JSON-RPC implementation to complete the Host handshake (`ui/initialize` -> `ui/notifications/initialized`) and receive payloads (`ui/notifications/tool-result`).
+*   **Custom HTML Apps**: We use FastMCP's `AppConfig(resource_uri="ui://...")` to serve custom HTML/CSS interfaces for complex tools (e.g., `validate_documents`). We maintain full control over the markup.
+*   **Vanilla JS**: We avoid external untested JS libraries to bypass CSP restrictions and ensure offline reliability. The iframe client uses a minimal `window.postMessage` JSON-RPC implementation to complete the Host handshake (`ui/initialize` -> `ui/notifications/initialized`) and receive payloads (`ui/notifications/tool-result`).
 *   **Dynamic Resizing**: HTML resources must include a `ResizeObserver` that emits `ui/notifications/size-changed` messages to the Host, allowing the iframe to expand seamlessly as content is injected.
 *   **Dual Payloads**: Tools utilizing UIs return `ToolResult(content=..., structured_content={"html": ...})`. This ensures the LLM receives pure Markdown to reason about, while the human user sees the styled HTML.
 
