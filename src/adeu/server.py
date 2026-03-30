@@ -51,16 +51,19 @@ def html_viewer() -> str:
 <head>
   <meta name="color-scheme" content="light dark">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; line-height: 1.6; color: #333; margin: 0; background: transparent; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 20px; line-height: 1.6; color: #333; margin: 0; background: transparent; }
     @media (prefers-color-scheme: dark) { body { color: #eee; } }
     h1, h2, h3, h4 { margin-top: 0; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold; margin-left: 10px; vertical-align: middle; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold;
+    margin-left: 10px; vertical-align: middle; }
     .badge-success { background: #d4edda; color: #155724; }
     .badge-warning { background: #fff3cd; color: #856404; }
     .badge-danger { background: #f8d7da; color: #721c24; }
     .card { border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
     @media (prefers-color-scheme: dark) { .card { border-color: #444; } }
-    .evidence { border-left: 3px solid #ccc; padding-left: 10px; margin-top: 10px; font-size: 0.9em; font-style: italic; }
+    .evidence { border-left: 3px solid #ccc; padding-left: 10px;
+    margin-top: 10px; font-size: 0.9em; font-style: italic; }
   </style>
 </head>
 <body>
@@ -99,7 +102,8 @@ def html_viewer() -> str:
       window.parent.postMessage({
         jsonrpc: "2.0",
         method: "ui/notifications/size-changed",
-        params: { height: Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 400), width: 600 }
+        params: { height: Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 400),
+        width: 600 }
       }, "*");
     });
     observer.observe(document.documentElement);
@@ -598,7 +602,7 @@ async def validate_documents(
 
             if not issues:
                 html_parts.append(
-                    '<div class="badge badge-success" style="margin-bottom: 20px;">No inconsistencies found! Structurally aligned.</div>'
+                    '<div class="badge badge-success" style="margin-bottom: 20px;">Structurally aligned.</div>'
                 )
             else:
                 for i, issue in enumerate(issues, 1):
@@ -615,8 +619,10 @@ async def validate_documents(
                         html_parts.append('<div class="evidence"><strong>Verbatim Evidence:</strong><br>')
                         for ev in issue.get("evidence"):
                             if isinstance(ev, dict):
+                                quote = ev.get('quote', str(ev))
+                                filename = ev.get('filename', 'Unknown')
                                 html_parts.append(
-                                    f"&quot;{ev.get('quote', str(ev))}&quot; &mdash; {ev.get('filename', 'Unknown')}<br>"
+                                    f"&quot;{quote}&quot; &mdash; {filename}<br>"
                                 )
                             else:
                                 html_parts.append(f"{ev}<br>")
