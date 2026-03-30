@@ -14,6 +14,8 @@ import structlog
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from prefab_ui.components import Badge, Column, Heading, Text
 
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
@@ -368,13 +370,14 @@ def _encode_multipart_formdata(
         "Always present the complete report to the user, including every verbatim evidence quote "
         "exactly as returned, without summarizing or omitting any findings."
         "Run this on validation request for files or directories."
-    )
+    ),
+    app=True,
 )
 async def validate_documents(
     file_paths: Annotated[List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."],
     ctx: Context,
     api_key: str = Depends(get_cloud_auth_token),
-) -> str:
+) -> ToolResult:
     await ctx.info("Starting document validation", extra={"provided_paths": file_paths})
 
     if not file_paths:
@@ -505,7 +508,66 @@ async def validate_documents(
             output.append(format_risk_section("Buyer-Side Risks", buyer_risks))
             output.append(format_risk_section("Seller-Side Risks", seller_risks))
 
-            return "\n".join(output)
+            with Column(gap=4, cssClass="p-6") as view:
+                Heading("Validation Report")
+
+                with Column(gap=2, cssClass="mt-4"):
+                    Text("1. Consistency Check", cssClass="text-xl font-bold")
+                    Text(f"Summary: {consistency.get('summary', 'No summary provided.')}", cssClass="text-gray-700")
+
+                    if not issues:
+                        Badge("No inconsistencies found! Structurally aligned.", variant="success")
+                    else:
+                        for i, issue in enumerate(issues, 1):
+                            with Column(gap=2, cssClass="border border-gray-200 rounded p-4 mt-2"):
+                                with Column():
+                                    Text(f"{i}. {issue.get('title')}", cssClass="font-bold text-lg")
+                                    Badge(issue.get("severity", "Unknown"))
+                                Text(issue.get("description"))
+                                if issue.get("evidence"):
+                                    with Column(gap=1, cssClass="pl-4 border-l-2 border-gray-300 mt-2"):
+                                        Text("Verbatim Evidence:", cssClass="text-sm font-semibold")
+                                        for ev in issue.get("evidence"):
+                                            if isinstance(ev, dict):
+                                                Text(
+                                                    f'"{ev.get("quote", str(ev))}" — {ev.get("filename", "Unknown")}',
+                                                    cssClass="text-sm italic",
+                                                )
+                                            else:
+                                                Text(f"{ev}", cssClass="text-sm italic")
+
+                with Column(gap=2, cssClass="mt-6"):
+                    Text("2. Buyer vs. Seller Risk Assessment", cssClass="text-xl font-bold")
+                    Text(f"Summary: {risk.get('summary', 'No summary provided.')}", cssClass="text-gray-700")
+
+                    def render_ui_risk_section(title: str, items: list):
+                        with Column(gap=2, cssClass="mt-4"):
+                            Text(title, cssClass="text-lg font-bold")
+                            if not items:
+                                Text("No specific risks identified.", cssClass="text-sm italic text-gray-500")
+                            else:
+                                for item in items:
+                                    with Column(gap=2, cssClass="border border-gray-200 rounded p-4"):
+                                        Text(item.get("title"), cssClass="font-bold")
+                                        Text(item.get("description"), cssClass="text-sm")
+                                        if item.get("evidence"):
+                                            with Column(gap=1, cssClass="pl-4 border-l-2 border-gray-300 mt-2"):
+                                                for ev in item.get("evidence"):
+                                                    if isinstance(ev, dict):
+                                                        quote = ev.get("quote", str(ev))
+                                                        filename = ev.get("filename", "Unknown")
+                                                        Text(
+                                                            f'"{quote}" — {filename}',
+                                                            cssClass="text-xs italic",
+                                                        )
+                                                    else:
+                                                        Text(f"{ev}", cssClass="text-xs italic")
+
+                    render_ui_risk_section("Buyer-Side Risks", buyer_risks)
+                    render_ui_risk_section("Seller-Side Risks", seller_risks)
+
+            markdown_output = "\n".join(output)
+            return ToolResult(content=markdown_output, structured_content=view)
 
     except urllib.error.HTTPError as e:
         if e.code == 401:

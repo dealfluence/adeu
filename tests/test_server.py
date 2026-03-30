@@ -216,7 +216,9 @@ def test_validate_documents_success(mock_urlopen, sample_docx):
     # Call with fake API key bypassing the Dependency injection
     result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
 
-    assert "Validation Report" in result
-    assert "Date mismatch" in result
-    assert "Unlimited Liability" in result
-    assert "Evidence 1" in result
+    # Extract the text content from the ToolResult for the assertions
+    text_result = str(result.content)
+    assert "Validation Report" in text_result
+    assert "Date mismatch" in text_result
+    assert "Unlimited Liability" in text_result
+    assert "Evidence 1" in text_result
