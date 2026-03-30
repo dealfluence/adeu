@@ -456,7 +456,7 @@ def _encode_multipart_formdata(
         "exactly as returned, without summarizing or omitting any findings."
         "Run this on validation request for files or directories."
     ),
-    app=AppConfig(resource_uri=VIEW_URI),
+    app=AppConfig(resourceUri=VIEW_URI),
 )
 async def validate_documents(
     file_paths: Annotated[List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."],
@@ -619,11 +619,9 @@ async def validate_documents(
                         html_parts.append('<div class="evidence"><strong>Verbatim Evidence:</strong><br>')
                         for ev in issue.get("evidence"):
                             if isinstance(ev, dict):
-                                quote = ev.get('quote', str(ev))
-                                filename = ev.get('filename', 'Unknown')
-                                html_parts.append(
-                                    f"&quot;{quote}&quot; &mdash; {filename}<br>"
-                                )
+                                quote = ev.get("quote", str(ev))
+                                filename = ev.get("filename", "Unknown")
+                                html_parts.append(f"&quot;{quote}&quot; &mdash; {filename}<br>")
                             else:
                                 html_parts.append(f"{ev}<br>")
                         html_parts.append("</div>")
@@ -645,9 +643,9 @@ async def validate_documents(
                             html_parts.append('<div class="evidence">')
                             for ev in item.get("evidence"):
                                 if isinstance(ev, dict):
-                                    html_parts.append(
-                                        f"&quot;{ev.get('quote', str(ev))}&quot; &mdash; {ev.get('filename', 'Unknown')}<br>"
-                                    )
+                                    quote = ev.get("quote", str(ev))
+                                    filename = ev.get("filename", "Unknown")
+                                    html_parts.append(f"&quot;{quote}&quot; &mdash; {filename}<br>")
                                 else:
                                     html_parts.append(f"{ev}<br>")
                             html_parts.append("</div>")
