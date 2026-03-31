@@ -40,7 +40,8 @@ packages = ["src/adeu"]
 artifacts = [
     "src/adeu/assets/*.js",
     "src/adeu/assets/*.png",
-    "src/adeu/templates/*.html"
+    "src/adeu/templates/*.html",
+    "src/adeu/assets/*.svg",
 ]
 [tool.ruff]
 line-length = 120
