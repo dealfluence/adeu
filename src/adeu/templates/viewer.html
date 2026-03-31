@@ -3,93 +3,207 @@
 <html>
 
 <head>
+    <meta charset="utf-8">
     <meta name="color-scheme" content="light dark">
+    <!-- Import Adeu Brand Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&family=Lora:ital,wght@0,600;1,600&display=swap"
+        rel="stylesheet">
+
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            padding: 20px;
-            line-height: 1.6;
-            color: #333;
-            margin: 0;
-            background: transparent;
+        /* Adeu Design System Tokens */
+        :root {
+            /* Primary Colors */
+            --brand-sand: #e8c0a1;
+            --brand-sand-light: #f2d9c7;
+            --brand-sand-dark: #d4a882;
+            --brand-mint: #e6f3f0;
+            --brand-mint-dark: #c9e4de;
+            --brand-navy: #1a2a2c;
+            --brand-navy-light: #2a3a3c;
+            --brand-mauve: #dacad2;
+
+            /* Neutral Palette */
+            --neutral-50: #fafafa;
+            --neutral-100: #f5f5f5;
+            --neutral-200: #e5e5e5;
+            --neutral-300: #d9d9d9;
+            --neutral-600: #555969;
+            --neutral-800: #1e2028;
+            --neutral-900: #171717;
+
+            /* Typography */
+            --font-lora: 'Lora', Georgia, serif;
+            --font-jost: 'Jost', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+
+            /* Semantic overrides for Light Mode */
+            --bg-body: var(--neutral-50);
+            --bg-card: #ffffff;
+            --border-card: var(--neutral-200);
+            --text-main: var(--neutral-600);
+            --text-heading: var(--brand-navy);
+            --bg-blockquote: rgba(232, 192, 161, 0.15);
+            /* Sand transparent */
         }
 
+        /* Dark Mode Semantic Overrides */
         @media (prefers-color-scheme: dark) {
-            body {
-                color: #eee;
+            :root {
+                --bg-body: var(--neutral-900);
+                --bg-card: var(--brand-navy);
+                --border-card: var(--brand-navy-light);
+                --text-main: rgba(255, 255, 255, 0.85);
+                --text-heading: #ffffff;
+                --bg-blockquote: rgba(232, 192, 161, 0.1);
+                --neutral-100: var(--brand-navy-light);
             }
+        }
+
+        /* Base Setup */
+        body {
+            font-family: var(--font-jost);
+            background-color: transparent;
+            color: var(--text-main);
+            padding: 16px 0;
+            /* Removed horizontal padding since shadow is gone */
+            margin: 0;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Main Card Container (Separates UI from Claude) */
+        .adeu-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 12px;
+            /* rounded-xl */
+            padding: 32px;
+            /* space-8 */
+            transition: all 0.2s ease;
+        }
+
+        /* Typography inside Card */
+        h1,
+        h2,
+        h3,
+        h4 {
+            font-family: var(--font-lora);
+            color: var(--text-heading);
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
         }
 
         h1 {
-            border-bottom: 1px solid #ddd;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
+            font-size: 2.25rem;
+            border-bottom: 1px solid var(--border-card);
+            padding-bottom: 0.3em;
+            margin-top: 0;
         }
 
         h2 {
-            margin-top: 30px;
-            color: #0056b3;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            h2 {
-                color: #4da3ff;
-            }
+            font-size: 1.75rem;
         }
 
         h3 {
-            margin-top: 25px;
+            font-size: 1.25rem;
         }
 
-        h4 {
-            margin-top: 15px;
-            margin-bottom: 5px;
+        a {
+            color: var(--brand-sand-dark);
+            text-decoration: none;
+            border-bottom: 1px solid transparent;
+            transition: border 0.2s ease;
         }
 
-        blockquote {
-            border-left: 4px solid #ccc;
-            padding-left: 15px;
-            margin: 15px 0;
-            color: #555;
-            background: rgba(0, 0, 0, 0.03);
-            padding-top: 5px;
-            padding-bottom: 5px;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            blockquote {
-                border-color: #666;
-                color: #bbb;
-                background: rgba(255, 255, 255, 0.05);
-            }
+        a:hover {
+            border-bottom-color: var(--brand-sand-dark);
         }
 
         strong {
             font-weight: 600;
+            color: var(--text-heading);
+        }
+
+        ul,
+        ol {
+            padding-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+        }
+
+        /* Blockquotes */
+        blockquote {
+            border-left: 4px solid var(--brand-sand);
+            padding: 12px 20px;
+            margin: 24px 0;
+            color: var(--text-main);
+            background: var(--bg-blockquote);
+            border-radius: 0 8px 8px 0;
+            font-style: italic;
+        }
+
+        /* Inline Code & Code Blocks */
+        code {
+            font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.85em;
+            background: var(--neutral-100);
+            color: var(--brand-sand-dark);
+            padding: 0.2em 0.4em;
+            border-radius: 4px;
+        }
+
+        pre code {
+            display: block;
+            padding: 16px;
+            background: var(--neutral-900);
+            color: #e5e5e5;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+
+        /* Loading Skeleton Animation */
+        .skeleton {
+            background: linear-gradient(90deg, var(--neutral-100) 25%, var(--border-card) 50%, var(--neutral-100) 75%);
+            background-size: 200% 100%;
+            animation: skeleton 1.5s ease-in-out infinite;
+            border-radius: 4px;
+        }
+
+        @keyframes skeleton {
+            0% {
+                background-position: 200% 0;
+            }
+
+            100% {
+                background-position: -200% 0;
+            }
         }
 
         /* Polished Error Component Styles */
         .alert {
             padding: 16px;
-            border-radius: 6px;
+            border-radius: 8px;
             margin-bottom: 20px;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-
-        .alert-danger {
-            background-color: #fef0f0;
-            border: 1px solid #f5c2c7;
-            color: #842029;
+            background-color: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
         }
 
         @media (prefers-color-scheme: dark) {
-            .alert-danger {
-                background-color: #2c0b0e;
-                border-color: #842029;
-                color: #ea868f;
+            .alert {
+                background-color: rgba(127, 29, 29, 0.2);
+                border-color: rgba(248, 113, 113, 0.3);
+                color: #fca5a5;
             }
         }
 
@@ -100,6 +214,7 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            font-family: var(--font-lora);
         }
 
         .alert-body {
@@ -109,33 +224,32 @@
 
         .alert-details {
             background: rgba(0, 0, 0, 0.05);
-            padding: 10px;
-            border-radius: 4px;
-            font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+            padding: 12px;
+            border-radius: 6px;
+            font-family: ui-monospace, Consolas, monospace;
             font-size: 0.85em;
             white-space: pre-wrap;
             word-break: break-all;
             margin-top: 8px;
             border: 1px solid rgba(0, 0, 0, 0.1);
         }
-
-        @media (prefers-color-scheme: dark) {
-            .alert-details {
-                background: rgba(255, 255, 255, 0.05);
-                border-color: rgba(255, 255, 255, 0.1);
-            }
-        }
     </style>
     <script id="marked-script">[[marked_js_code | safe]]</script>
 </head>
 
 <body>
-    <div id="app">Loading report...</div>
+    <div id="app" class="adeu-card">
+        <!-- Brand-aligned Loading State -->
+        <div class="skeleton" style="height: 36px; width: 40%; margin-bottom: 24px;"></div>
+        <div class="skeleton" style="height: 16px; width: 100%; margin-bottom: 12px;"></div>
+        <div class="skeleton" style="height: 16px; width: 95%; margin-bottom: 12px;"></div>
+        <div class="skeleton" style="height: 16px; width: 90%; margin-bottom: 24px;"></div>
+        <div class="skeleton" style="height: 16px; width: 80%; margin-bottom: 12px;"></div>
+    </div>
     <script>
         const appDiv = document.getElementById('app');
         const INIT_ID = 1;
 
-        // Helper to safely render text to prevent HTML injection in error details
         function escapeHtml(unsafe) {
             return (unsafe || "").toString()
                 .replace(/&/g, "&amp;")
@@ -145,10 +259,9 @@
                 .replace(/'/g, "&#039;");
         }
 
-        // Standardized UI Error Component
         function showError(title, message, details = null) {
             let html = `
-            <div class="alert alert-danger">
+            <div class="alert">
                 <div class="alert-title">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
                     ${escapeHtml(title)}
@@ -164,10 +277,12 @@
         }
 
         function triggerResize() {
+            // Removed height buffer since the drop shadow is gone
+            const height = Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 600);
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 method: "ui/notifications/size-changed",
-                params: { height: Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 600), width: 600 }
+                params: { height: height, width: 600 }
             }, "*");
         }
 
@@ -176,7 +291,6 @@
                 if (!event.data || event.data.jsonrpc !== "2.0") return;
                 const msg = event.data;
 
-                // 1. Host Initialization Handshake
                 if (msg.id === INIT_ID) {
                     window.parent.postMessage({
                         jsonrpc: "2.0",
@@ -186,32 +300,22 @@
                     return;
                 }
 
-                // 2. Incoming Data Render
                 if (msg.method === "ui/notifications/tool-result") {
-
-                    // Check for critical missing dependencies first
                     if (window.__MARKED_ERROR || typeof marked === 'undefined') {
-                        showError(
-                            "Missing Dependency",
-                            "The Markdown renderer (marked.min.js) failed to load. The report cannot be displayed.",
-                            window.__MARKED_ERROR || "The 'marked' global variable is undefined."
-                        );
+                        showError("Missing Dependency", "The Markdown renderer failed to load.", window.__MARKED_ERROR || "marked is undefined.");
                         return;
                     }
 
                     const result = msg.params;
-
                     if (!result) {
-                        showError("Empty Response", "The server returned an empty tool result payload.");
+                        showError("Empty Response", "The server returned an empty payload.");
                         return;
                     }
 
                     if (result.structuredContent && result.structuredContent.markdown) {
-                        // Render successfully
                         appDiv.innerHTML = marked.parse(result.structuredContent.markdown);
                         triggerResize();
                     } else if (result.content) {
-                        // Fallback content rendering
                         if (Array.isArray(result.content)) {
                             const txt = result.content.find(c => c.type === 'text');
                             if (txt) { appDiv.textContent = txt.text; triggerResize(); }
@@ -219,14 +323,14 @@
                             appDiv.textContent = result.content;
                             triggerResize();
                         } else {
-                            showError("Unsupported Format", "Received an unrecognizable content format.", JSON.stringify(result.content));
+                            showError("Unsupported Format", "Unrecognizable content format.", JSON.stringify(result.content));
                         }
                     } else {
-                        showError("No Content", "The tool result payload contained no structured content or raw text.", JSON.stringify(result));
+                        showError("No Content", "No structured content or raw text found.", JSON.stringify(result));
                     }
                 }
             } catch (error) {
-                showError("Rendering Engine Error", "An unexpected error occurred while parsing the document.", error.toString() + "\n" + error.stack);
+                showError("Rendering Engine Error", "An unexpected error occurred.", error.toString() + "\n" + error.stack);
             }
         });
 
