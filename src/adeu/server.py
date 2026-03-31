@@ -18,6 +18,8 @@ from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
 from fastmcp.server.apps import AppConfig
 from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
+from mcp.types import Icon
 
 from adeu.auth import DesktopAuthManager
 from adeu.diff import generate_edits_from_text
@@ -39,7 +41,17 @@ structlog.configure(
 to_client_logger = logging.getLogger("fastmcp.server.context.to_client")
 to_client_logger.setLevel(level=logging.DEBUG)
 
-mcp = FastMCP("Adeu Redlining Service")
+server_icons = []
+logo_path = Path(__file__).parent / "assets" / "logo.png"
+if logo_path.exists():
+    try:
+        img = Image(path=str(logo_path))
+        server_icons.append(Icon(src=img.to_data_uri(), mimeType="image/png"))
+    except Exception as e:
+        logging.warning(f"Failed to load server icon: {e}")
+
+# Initialize MCP Server
+mcp = FastMCP("Adeu Redlining Service", icons=server_icons if server_icons else None)
 
 VIEW_URI = "ui://adeu/html-viewer"
 

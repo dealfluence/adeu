@@ -39,6 +39,7 @@ dev = [
 packages = ["src/adeu"]
 artifacts = [
     "src/adeu/assets/*.js",
+    "src/adeu/assets/*.png",
     "src/adeu/templates/*.html"
 ]
 [tool.ruff]
