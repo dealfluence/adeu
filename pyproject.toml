@@ -38,9 +38,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/adeu"]
 artifacts = [
-    "src/adeu/assets/*.js"
+    "src/adeu/assets/*.js",
+    "src/adeu/templates/*.html"
 ]
-
 [tool.ruff]
 line-length = 120
 target-version = "py310"
