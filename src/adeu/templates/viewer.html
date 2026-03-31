@@ -1,11 +1,9 @@
-<!-- FILE: src/adeu/templates/viewer.html -->
 <!DOCTYPE html>
 <html>
 
 <head>
     <meta charset="utf-8">
     <meta name="color-scheme" content="light dark">
-    <!-- Import Adeu Brand Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
@@ -13,9 +11,7 @@
         rel="stylesheet">
 
     <style>
-        /* Adeu Design System Tokens */
         :root {
-            /* Primary Colors */
             --brand-sand: #e8c0a1;
             --brand-sand-light: #f2d9c7;
             --brand-sand-dark: #d4a882;
@@ -25,7 +21,6 @@
             --brand-navy-light: #2a3a3c;
             --brand-mauve: #dacad2;
 
-            /* Neutral Palette */
             --neutral-50: #fafafa;
             --neutral-100: #f5f5f5;
             --neutral-200: #e5e5e5;
@@ -34,21 +29,17 @@
             --neutral-800: #1e2028;
             --neutral-900: #171717;
 
-            /* Typography */
             --font-lora: 'Lora', Georgia, serif;
             --font-jost: 'Jost', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 
-            /* Semantic overrides for Light Mode */
             --bg-body: var(--neutral-50);
             --bg-card: #ffffff;
             --border-card: var(--neutral-200);
             --text-main: var(--neutral-600);
             --text-heading: var(--brand-navy);
             --bg-blockquote: rgba(232, 192, 161, 0.15);
-            /* Sand transparent */
         }
 
-        /* Dark Mode Semantic Overrides */
         @media (prefers-color-scheme: dark) {
             :root {
                 --bg-body: var(--neutral-900);
@@ -61,30 +52,24 @@
             }
         }
 
-        /* Base Setup */
         body {
             font-family: var(--font-jost);
             background-color: transparent;
             color: var(--text-main);
             padding: 16px 0;
-            /* Removed horizontal padding since shadow is gone */
             margin: 0;
             line-height: 1.6;
             -webkit-font-smoothing: antialiased;
         }
 
-        /* Main Card Container (Separates UI from Claude) */
         .adeu-card {
             background-color: var(--bg-card);
             border: 1px solid var(--border-card);
             border-radius: 12px;
-            /* rounded-xl */
             padding: 32px;
-            /* space-8 */
             transition: all 0.2s ease;
         }
 
-        /* Typography inside Card */
         h1,
         h2,
         h3,
@@ -138,7 +123,6 @@
             margin-bottom: 0.5rem;
         }
 
-        /* Blockquotes */
         blockquote {
             border-left: 4px solid var(--brand-sand);
             padding: 12px 20px;
@@ -149,7 +133,6 @@
             font-style: italic;
         }
 
-        /* Inline Code & Code Blocks */
         code {
             font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
             font-size: 0.85em;
@@ -168,7 +151,6 @@
             overflow-x: auto;
         }
 
-        /* Loading Skeleton Animation */
         .skeleton {
             background: linear-gradient(90deg, var(--neutral-100) 25%, var(--border-card) 50%, var(--neutral-100) 75%);
             background-size: 200% 100%;
@@ -186,7 +168,6 @@
             }
         }
 
-        /* Polished Error Component Styles */
         .alert {
             padding: 16px;
             border-radius: 8px;
@@ -233,18 +214,57 @@
             margin-top: 8px;
             border: 1px solid rgba(0, 0, 0, 0.1);
         }
+
+        .logo-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-card);
+        }
+
+        .logo-container svg {
+            max-width: 140px;
+            height: auto;
+        }
+
+        .logo-container svg path,
+        .logo-container svg rect,
+        .logo-container svg polygon,
+        .logo-container svg circle {
+            transition: fill 0.2s ease;
+        }
+
+        @media (prefers-color-scheme: dark) {
+
+            .logo-container svg path,
+            .logo-container svg rect,
+            .logo-container svg polygon,
+            .logo-container svg circle,
+            .logo-container svg {
+                fill: var(--brand-sand) !important;
+            }
+        }
     </style>
     <script id="marked-script">[[marked_js_code | safe]]</script>
 </head>
 
 <body>
-    <div id="app" class="adeu-card">
-        <!-- Brand-aligned Loading State -->
-        <div class="skeleton" style="height: 36px; width: 40%; margin-bottom: 24px;"></div>
-        <div class="skeleton" style="height: 16px; width: 100%; margin-bottom: 12px;"></div>
-        <div class="skeleton" style="height: 16px; width: 95%; margin-bottom: 12px;"></div>
-        <div class="skeleton" style="height: 16px; width: 90%; margin-bottom: 24px;"></div>
-        <div class="skeleton" style="height: 16px; width: 80%; margin-bottom: 12px;"></div>
+    <div class="adeu-card">
+
+        <div class="logo-container">
+            [[ adeu_svg_code ]]
+        </div>
+
+        <div id="app">
+            <div class="skeleton" style="height: 36px; width: 40%; margin-bottom: 24px;"></div>
+            <div class="skeleton" style="height: 16px; width: 100%; margin-bottom: 12px;"></div>
+            <div class="skeleton" style="height: 16px; width: 95%; margin-bottom: 12px;"></div>
+            <div class="skeleton" style="height: 16px; width: 90%; margin-bottom: 24px;"></div>
+            <div class="skeleton" style="height: 16px; width: 80%; margin-bottom: 12px;"></div>
+        </div>
+
     </div>
     <script>
         const appDiv = document.getElementById('app');
@@ -277,7 +297,6 @@
         }
 
         function triggerResize() {
-            // Removed height buffer since the drop shadow is gone
             const height = Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 600);
             window.parent.postMessage({
                 jsonrpc: "2.0",

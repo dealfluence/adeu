@@ -6,17 +6,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from docx import Document
 
-from adeu.models import ModifyText
-from adeu.redline.engine import RedlineEngine
-from adeu.server import (
+from adeu.mcp_components.tools.auth import login_to_adeu_cloud, logout_of_adeu_cloud
+from adeu.mcp_components.tools.document import (
     accept_all_changes,
     diff_docx_files,
-    login_to_adeu_cloud,
-    logout_of_adeu_cloud,
     process_document_batch,
     read_docx,
-    validate_documents,
 )
+from adeu.mcp_components.tools.validation import validate_documents
+from adeu.models import ModifyText
+from adeu.redline.engine import RedlineEngine
 
 
 class MockContext:
@@ -160,7 +159,7 @@ def test_accept_all_changes(sample_docx, tmp_path):
 # --- Cloud Auth & Validation Tool Mocks ---
 
 
-@patch("adeu.server.DesktopAuthManager.ensure_authenticated")
+@patch("adeu.auth.DesktopAuthManager.ensure_authenticated")
 @patch("urllib.request.urlopen")
 def test_login_to_adeu_cloud_success(mock_urlopen, mock_ensure_auth):
     ctx = MockContext()
@@ -176,7 +175,7 @@ def test_login_to_adeu_cloud_success(mock_urlopen, mock_ensure_auth):
     assert "test@adeu.ai" in result
 
 
-@patch("adeu.server.DesktopAuthManager.clear_api_key")
+@patch("adeu.auth.DesktopAuthManager.clear_api_key")
 def test_logout_of_adeu_cloud(mock_clear_key):
     ctx = MockContext()
     result = asyncio.run(logout_of_adeu_cloud(ctx=ctx))
