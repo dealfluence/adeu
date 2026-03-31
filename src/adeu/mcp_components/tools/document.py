@@ -13,7 +13,9 @@ from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 
 @tool(
-    description="Reads a DOCX file and returns its text content. Use this to ingest the document into your context window.",
+    description=(
+        "Reads a DOCX file and returns its text content. Use this to ingest the document into your context window."
+    ),
     annotations={"readOnlyHint": True},
 )
 async def read_docx(

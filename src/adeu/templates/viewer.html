@@ -1,3 +1,4 @@
+<!-- FILE: src/adeu/templates/viewer.html -->
 <!DOCTYPE html>
 <html>
 
@@ -52,24 +53,169 @@
             }
         }
 
+        /* --- Strict Layout Constraints for MCP Iframe --- */
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden !important;
+            /* CRITICAL: Kills external scrollbar */
+            box-sizing: border-box;
+            background-color: transparent;
+            height: 100%;
+        }
+
         body {
             font-family: var(--font-jost);
-            background-color: transparent;
             color: var(--text-main);
-            padding: 16px 0;
-            margin: 0;
             line-height: 1.6;
             -webkit-font-smoothing: antialiased;
+            padding: 16px;
+            /* Body padding acts as outer margin for the card */
+            display: flex;
+            flex-direction: column;
         }
 
         .adeu-card {
             background-color: var(--bg-card);
             border: 1px solid var(--border-card);
             border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 100%;
+            /* Prevents card from exceeding body height */
+        }
+
+        /* --- Nav / Logo --- */
+        .navbar {
+            flex-shrink: 0;
+            /* Prevents navbar from shrinking */
+            background-color: var(--bg-card);
+            padding: 16px 32px;
+            border-bottom: 1px solid var(--border-card);
+            display: flex;
+            align-items: center;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+        }
+
+        .logo-container svg {
+            max-width: 80px;
+            height: auto;
+        }
+
+        .logo-container svg path,
+        .logo-container svg rect,
+        .logo-container svg polygon,
+        .logo-container svg circle {
+            transition: fill 0.2s ease;
+        }
+
+        @media (prefers-color-scheme: dark) {
+
+            .logo-container svg path,
+            .logo-container svg rect,
+            .logo-container svg polygon,
+            .logo-container svg circle,
+            .logo-container svg {
+                fill: #ffffff !important;
+            }
+        }
+
+        /* --- Content Container (Scrollable Area) --- */
+        .content-wrapper {
+            position: relative;
+            flex: 1 1 auto;
+            /* Allows wrapper to fill remaining space */
+            min-height: 0;
+            /* CRITICAL: Allows Flex children to trigger internal overflow */
+        }
+
+        /* Subtle scrollbar for expanded area */
+        .content-wrapper::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb {
+            background-color: var(--border-card);
+            border-radius: 4px;
+        }
+
+        #app {
             padding: 32px;
+            display: flow-root;
+        }
+
+        .fade-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 80px;
+            background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--bg-card));
+            pointer-events: none;
+            display: none;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .fade-overlay {
+                background: linear-gradient(to bottom, rgba(26, 42, 44, 0), var(--bg-card));
+            }
+        }
+
+        /* --- Toggle Controls --- */
+        .toggle-container {
+            flex-shrink: 0;
+            /* Prevents toggle button from shrinking */
+            display: none;
+            /* Controlled via JS */
+            justify-content: center;
+            align-items: center;
+            padding: 12px;
+            border-top: 1px solid var(--border-card);
+            background-color: var(--bg-card);
+        }
+
+        #toggle-btn {
+            background: transparent;
+            border: none;
+            color: var(--brand-sand-dark);
+            font-family: var(--font-jost);
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: 6px;
             transition: all 0.2s ease;
         }
 
+        #toggle-btn:hover {
+            color: var(--text-heading);
+            background: var(--neutral-100);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            #toggle-btn:hover {
+                background: var(--brand-navy-light);
+            }
+        }
+
+        #toggle-icon {
+            transition: transform 0.3s ease;
+        }
+
+        /* --- Typography Defaults --- */
         h1,
         h2,
         h3,
@@ -214,61 +360,48 @@
             margin-top: 8px;
             border: 1px solid rgba(0, 0, 0, 0.1);
         }
-
-        .logo-container {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid var(--border-card);
-        }
-
-        .logo-container svg {
-            max-width: 140px;
-            height: auto;
-        }
-
-        .logo-container svg path,
-        .logo-container svg rect,
-        .logo-container svg polygon,
-        .logo-container svg circle {
-            transition: fill 0.2s ease;
-        }
-
-        @media (prefers-color-scheme: dark) {
-
-            .logo-container svg path,
-            .logo-container svg rect,
-            .logo-container svg polygon,
-            .logo-container svg circle,
-            .logo-container svg {
-                fill: var(--brand-sand) !important;
-            }
-        }
     </style>
     <script id="marked-script">[[marked_js_code | safe]]</script>
 </head>
 
 <body>
     <div class="adeu-card">
+        <!-- Nav / Logo (Sticky via Flexbox) -->
+        <nav class="navbar">
+            <div class="logo-container">
+                [[ adeu_svg_code ]]
+            </div>
+        </nav>
 
-        <div class="logo-container">
-            [[ adeu_svg_code ]]
+        <!-- Main Content -->
+        <div class="content-wrapper" id="content-wrapper">
+            <div id="app">
+                <div class="skeleton" style="height: 36px; width: 40%; margin-bottom: 24px;"></div>
+                <div class="skeleton" style="height: 16px; width: 100%; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 16px; width: 95%; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 16px; width: 90%; margin-bottom: 24px;"></div>
+                <div class="skeleton" style="height: 16px; width: 80%; margin-bottom: 12px;"></div>
+            </div>
+            <!-- Overlay Fade -->
+            <div class="fade-overlay" id="fade-overlay"></div>
         </div>
 
-        <div id="app">
-            <div class="skeleton" style="height: 36px; width: 40%; margin-bottom: 24px;"></div>
-            <div class="skeleton" style="height: 16px; width: 100%; margin-bottom: 12px;"></div>
-            <div class="skeleton" style="height: 16px; width: 95%; margin-bottom: 12px;"></div>
-            <div class="skeleton" style="height: 16px; width: 90%; margin-bottom: 24px;"></div>
-            <div class="skeleton" style="height: 16px; width: 80%; margin-bottom: 12px;"></div>
+        <!-- Toggle Controls -->
+        <div class="toggle-container" id="toggle-container">
+            <button id="toggle-btn">
+                <span id="toggle-text">Show More</span>
+                <svg id="toggle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+            </button>
         </div>
-
     </div>
+
     <script>
         const appDiv = document.getElementById('app');
         const INIT_ID = 1;
+        let isExpanded = false;
 
         function escapeHtml(unsafe) {
             return (unsafe || "").toString()
@@ -293,15 +426,78 @@
             }
             html += `</div>`;
             appDiv.innerHTML = html;
+        }
+
+        function checkCollapsible() {
+            const wrapper = document.getElementById('content-wrapper');
+            const toggleContainer = document.getElementById('toggle-container');
+            const fadeOverlay = document.getElementById('fade-overlay');
+            const toggleIcon = document.getElementById('toggle-icon');
+            const toggleText = document.getElementById('toggle-text');
+
+            // Measure the unconstrained text content directly
+            const realHeight = appDiv.scrollHeight;
+
+            const COLLAPSE_THRESHOLD = 200;
+            const COLLAPSED_HEIGHT = 120;
+
+            if (realHeight > COLLAPSE_THRESHOLD) {
+                toggleContainer.style.display = 'flex';
+                if (!isExpanded) {
+                    wrapper.style.maxHeight = COLLAPSED_HEIGHT + 'px';
+                    wrapper.style.overflowY = 'hidden';
+                    fadeOverlay.style.display = 'block';
+                    toggleIcon.style.transform = 'rotate(0deg)';
+                    toggleText.textContent = 'Show More';
+                } else {
+                    wrapper.style.maxHeight = 'none';
+                    wrapper.style.overflowY = 'auto';
+                    fadeOverlay.style.display = 'none';
+                    toggleIcon.style.transform = 'rotate(180deg)';
+                    toggleText.textContent = 'Show Less';
+                }
+            } else {
+                toggleContainer.style.display = 'none';
+                wrapper.style.maxHeight = 'none';
+                wrapper.style.overflowY = 'visible';
+                fadeOverlay.style.display = 'none';
+            }
+
             triggerResize();
         }
 
+        document.getElementById('toggle-btn').addEventListener('click', () => {
+            isExpanded = !isExpanded;
+            checkCollapsible();
+        });
+
         function triggerResize() {
-            const height = Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 600);
+            const nav = document.querySelector('.navbar');
+            const wrapper = document.getElementById('content-wrapper');
+            const toggle = document.getElementById('toggle-container');
+
+            let requestedHeight;
+
+            // 32px is body padding (16px top + 16px bottom).
+            // 2px is adeu-card border (1px top + 1px bottom).
+            const containerChrome = 34;
+
+            if (!isExpanded) {
+                // When collapsed, calculate exact visual height
+                const toggleHeight = toggle.style.display === 'none' ? 0 : toggle.offsetHeight;
+                requestedHeight = nav.offsetHeight + wrapper.offsetHeight + toggleHeight + containerChrome;
+            } else {
+                // When expanded, calculate based on the full unconstrained text size
+                const desiredHeight = nav.offsetHeight + appDiv.scrollHeight + toggle.offsetHeight + containerChrome;
+
+                // Hard cap at 600px so it fits nicely inside Claude Desktop without triggering external scrolling
+                requestedHeight = Math.min(desiredHeight, 600);
+            }
+
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 method: "ui/notifications/size-changed",
-                params: { height: height, width: 600 }
+                params: { height: Math.ceil(requestedHeight), width: 600 }
             }, "*");
         }
 
@@ -333,14 +529,12 @@
 
                     if (result.structuredContent && result.structuredContent.markdown) {
                         appDiv.innerHTML = marked.parse(result.structuredContent.markdown);
-                        triggerResize();
                     } else if (result.content) {
                         if (Array.isArray(result.content)) {
                             const txt = result.content.find(c => c.type === 'text');
-                            if (txt) { appDiv.textContent = txt.text; triggerResize(); }
+                            if (txt) appDiv.textContent = txt.text;
                         } else if (typeof result.content === 'string') {
                             appDiv.textContent = result.content;
-                            triggerResize();
                         } else {
                             showError("Unsupported Format", "Unrecognizable content format.", JSON.stringify(result.content));
                         }
@@ -353,9 +547,10 @@
             }
         });
 
-        const observer = new ResizeObserver(triggerResize);
-        observer.observe(document.documentElement);
-        observer.observe(document.body);
+        const observer = new ResizeObserver(() => {
+            checkCollapsible();
+        });
+        observer.observe(appDiv);
 
         window.parent.postMessage({
             jsonrpc: "2.0",
