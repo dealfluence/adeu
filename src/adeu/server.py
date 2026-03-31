@@ -1,3 +1,4 @@
+# FILE: src/adeu/server.py
 import json
 import logging
 import mimetypes
@@ -10,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Annotated, List, Optional
 
+import jinja2
 import structlog
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
@@ -42,87 +44,29 @@ mcp = FastMCP("Adeu Redlining Service")
 VIEW_URI = "ui://adeu/html-viewer"
 
 
+templates_dir = Path(__file__).parent / "templates"
+jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(templates_dir),
+    variable_start_string="[[",
+    variable_end_string="]]",
+)
+
+
+def _get_marked_js_content() -> str:
+    """Reads the bundled marked.min.js file from the assets directory."""
+    asset_path = Path(__file__).parent / "assets" / "marked.min.js"
+    if asset_path.exists():
+        with open(asset_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return f"window.__MARKED_ERROR = 'File not found at: {asset_path}';"
+
+
 @mcp.resource(VIEW_URI, app=AppConfig())
 def html_viewer() -> str:
-    """Interactive HTML Viewer App."""
-    return """\
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="color-scheme" content="light dark">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    padding: 20px; line-height: 1.6; color: #333; margin: 0; background: transparent; }
-    @media (prefers-color-scheme: dark) { body { color: #eee; } }
-    h1, h2, h3, h4 { margin-top: 0; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold;
-    margin-left: 10px; vertical-align: middle; }
-    .badge-success { background: #d4edda; color: #155724; }
-    .badge-warning { background: #fff3cd; color: #856404; }
-    .badge-danger { background: #f8d7da; color: #721c24; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-    @media (prefers-color-scheme: dark) { .card { border-color: #444; } }
-    .evidence { border-left: 3px solid #ccc; padding-left: 10px;
-    margin-top: 10px; font-size: 0.9em; font-style: italic; }
-  </style>
-</head>
-<body>
-  <div id="app">Loading report...</div>
-  <script>
-    const INIT_ID = 1;
-
-    window.addEventListener("message", (event) => {
-      if (!event.data || event.data.jsonrpc !== "2.0") return;
-      const msg = event.data;
-
-      // 1. Handle Initialization Response from Host
-      if (msg.id === INIT_ID) {
-        window.parent.postMessage({
-          jsonrpc: "2.0",
-          method: "ui/notifications/initialized",
-          params: {}
-        }, "*");
-        return;
-      }
-
-      // 2. Handle Tool Result Injection
-      if (msg.method === "ui/notifications/tool-result") {
-        const result = msg.params;
-        if (result.structuredContent && result.structuredContent.html) {
-          document.getElementById('app').innerHTML = result.structuredContent.html;
-        } else if (result.content) {
-          const txt = result.content.find(c => c.type === 'text');
-          if (txt) document.getElementById('app').textContent = txt.text;
-        }
-      }
-    });
-
-    // 3. Auto-resize iframe when content changes
-    const observer = new ResizeObserver(() => {
-      window.parent.postMessage({
-        jsonrpc: "2.0",
-        method: "ui/notifications/size-changed",
-        params: { height: Math.min(Math.ceil(document.documentElement.getBoundingClientRect().height), 400),
-        width: 600 }
-      }, "*");
-    });
-    observer.observe(document.documentElement);
-    observer.observe(document.body);
-
-    // 0. Start Handshake
-    window.parent.postMessage({
-      jsonrpc: "2.0",
-      id: INIT_ID,
-      method: "ui/initialize",
-      params: {
-        appInfo: { name: "Adeu Viewer", version: "1.0.0" },
-        appCapabilities: {},
-        protocolVersion: "2025-11-21"
-      }
-    }, "*");
-  </script>
-</body>
-</html>"""
+    """Interactive HTML Viewer App using standard Markdown."""
+    marked_js_code = _get_marked_js_content()
+    template = jinja_env.get_template("viewer.html")
+    return template.render(marked_js_code=marked_js_code)
 
 
 def get_cloud_auth_token() -> str:
@@ -449,6 +393,13 @@ def _encode_multipart_formdata(
     return buffer.getvalue(), f"multipart/form-data; boundary={boundary}"
 
 
+def _make_cloud_request(url: str, body: bytes, headers: dict) -> dict:
+    """Helper to run the blocking request in a background thread."""
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=300) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 @mcp.tool(
     description=(
         "Analyzes documents to find inconsistencies, contradictions, and risk assessments. "
@@ -534,130 +485,13 @@ async def validate_documents(
 
             await ctx.debug("Received successful response from cloud API")
 
-            consistency = data.get("consistency_result", {})
-            risk = data.get("risk_assessment_result", {})
+            # The backend now provides the fully formatted markdown report
+            markdown_report = data.get("report_markdown", "No report generated.")
 
-            await ctx.info(
-                "Validation Complete",
-                extra={
-                    "inconsistency_issues_found": len(consistency.get("issues", [])),
-                    "total_risks_found": len(risk.get("risks", [])),
-                },
+            return ToolResult(
+                content=markdown_report,
+                structured_content={"markdown": markdown_report},
             )
-
-            def format_evidence(evidence_list):
-                if not evidence_list:
-                    return ""
-                ev_lines = ["\n**Verbatim Evidence**:"]
-                for ev in evidence_list:
-                    if isinstance(ev, dict):
-                        quote = ev.get("quote", str(ev))
-                        doc = ev.get("filename", "Unknown Document")
-                        ev_lines.append(f'> "{quote}" — *{doc}*')
-                    else:
-                        ev_lines.append(f"> {ev}")
-                return "\n".join(ev_lines) + "\n"
-
-            output = [
-                "# Validation Report\n",
-                "## 1. Consistency Check",
-                f"**Summary**: {consistency.get('summary', 'No summary provided.')}\n",
-            ]
-
-            issues = consistency.get("issues", [])
-            if not issues:
-                output.append("No inconsistencies found! The document(s) appear to be structurally aligned.\n")
-            else:
-                for i, issue in enumerate(issues, 1):
-                    output.append(f"### {i}. [{issue.get('severity')}] {issue.get('title')}")
-                    output.append(f"**Description**: {issue.get('description')}")
-                    output.append(format_evidence(issue.get("evidence", [])))
-
-            output.append("## 2. Buyer vs. Seller Risk Assessment")
-            output.append(f"**Summary**: {risk.get('summary', 'No summary provided.')}\n")
-
-            def format_risk_section(section_title, risk_items):
-                if not risk_items:
-                    return f"### {section_title}\nNo specific risks identified.\n"
-                section = [f"### {section_title}\n"]
-                for item in risk_items:
-                    section.append(f"#### {item.get('title')}")
-                    section.append(f"**Description**: {item.get('description')}")
-                    output.append(format_evidence(item.get("evidence", [])))
-                return "\n".join(section)
-
-            all_risks = risk.get("risks", [])
-            buyer_risks = [r for r in all_risks if r.get("party") == "BUYER"]
-            seller_risks = [r for r in all_risks if r.get("party") == "SELLER"]
-
-            output.append(format_risk_section("Buyer-Side Risks", buyer_risks))
-            output.append(format_risk_section("Seller-Side Risks", seller_risks))
-
-            # --- Build Custom HTML App View ---
-            html_parts = []
-            html_parts.append("<h1>Validation Report</h1>")
-
-            html_parts.append("<h2>1. Consistency Check</h2>")
-            html_parts.append(f"<p><strong>Summary:</strong> {consistency.get('summary', 'No summary provided.')}</p>")
-
-            if not issues:
-                html_parts.append(
-                    '<div class="badge badge-success" style="margin-bottom: 20px;">Structurally aligned.</div>'
-                )
-            else:
-                for i, issue in enumerate(issues, 1):
-                    severity = issue.get("severity", "Unknown")
-                    badge_class = "badge-danger" if severity.lower() in ["high", "critical"] else "badge-warning"
-
-                    html_parts.append('<div class="card">')
-                    html_parts.append(
-                        f'<h3>{i}. {issue.get("title")} <span class="badge {badge_class}">{severity}</span></h3>'
-                    )
-                    html_parts.append(f"<p>{issue.get('description')}</p>")
-
-                    if issue.get("evidence"):
-                        html_parts.append('<div class="evidence"><strong>Verbatim Evidence:</strong><br>')
-                        for ev in issue.get("evidence"):
-                            if isinstance(ev, dict):
-                                quote = ev.get("quote", str(ev))
-                                filename = ev.get("filename", "Unknown")
-                                html_parts.append(f"&quot;{quote}&quot; &mdash; {filename}<br>")
-                            else:
-                                html_parts.append(f"{ev}<br>")
-                        html_parts.append("</div>")
-                    html_parts.append("</div>")
-
-            html_parts.append('<h2 style="margin-top: 30px;">2. Buyer vs. Seller Risk Assessment</h2>')
-            html_parts.append(f"<p><strong>Summary:</strong> {risk.get('summary', 'No summary provided.')}</p>")
-
-            def render_ui_risk_section(title: str, items: list):
-                html_parts.append(f"<h3>{title}</h3>")
-                if not items:
-                    html_parts.append('<p style="color: #666; font-style: italic;">No specific risks identified.</p>')
-                else:
-                    for item in items:
-                        html_parts.append('<div class="card">')
-                        html_parts.append(f"<h4>{item.get('title')}</h4>")
-                        html_parts.append(f"<p>{item.get('description')}</p>")
-                        if item.get("evidence"):
-                            html_parts.append('<div class="evidence">')
-                            for ev in item.get("evidence"):
-                                if isinstance(ev, dict):
-                                    quote = ev.get("quote", str(ev))
-                                    filename = ev.get("filename", "Unknown")
-                                    html_parts.append(f"&quot;{quote}&quot; &mdash; {filename}<br>")
-                                else:
-                                    html_parts.append(f"{ev}<br>")
-                            html_parts.append("</div>")
-                        html_parts.append("</div>")
-
-            render_ui_risk_section("Buyer-Side Risks", buyer_risks)
-            render_ui_risk_section("Seller-Side Risks", seller_risks)
-
-            generated_html = "".join(html_parts)
-
-            markdown_output = "\n".join(output)
-            return ToolResult(content=markdown_output, structured_content={"html": generated_html})
 
     except urllib.error.HTTPError as e:
         if e.code == 401:

@@ -71,7 +71,12 @@ def test_read_docx_file_not_found():
 def test_diff_docx_files(sample_docx, modified_docx):
     ctx = MockContext()
     result = asyncio.run(
-        diff_docx_files(original_path=sample_docx, modified_path=modified_docx, ctx=ctx, compare_clean=True)
+        diff_docx_files(
+            original_path=sample_docx,
+            modified_path=modified_docx,
+            ctx=ctx,
+            compare_clean=True,
+        )
     )
     assert "@@ Word Patch @@" in result
     assert "- original" in result
@@ -184,28 +189,15 @@ def test_validate_documents_success(mock_urlopen, sample_docx):
     ctx = MockContext()
 
     mock_response_data = {
-        "consistency_result": {
-            "summary": "1 issue found.",
-            "issues": [
-                {
-                    "title": "Date mismatch",
-                    "description": "Conflict in dates.",
-                    "severity": "HIGH",
-                    "evidence": ["Evidence 1"],
-                }
-            ],
-        },
-        "risk_assessment_result": {
-            "summary": "1 risk found.",
-            "risks": [
-                {
-                    "party": "BUYER",
-                    "title": "Unlimited Liability",
-                    "description": "Buyer has no cap.",
-                    "evidence": ["Evidence 2"],
-                }
-            ],
-        },
+        "report_markdown": (
+            "# Validation Report\n\n"
+            "## Consistency Issues\n"
+            "- **Date mismatch**: Conflict in dates.\n"
+            "  *Evidence: Evidence 1*\n\n"
+            "## Risk Assessment\n"
+            "- **BUYER - Unlimited Liability**: Buyer has no cap.\n"
+            "  *Evidence: Evidence 2*"
+        )
     }
 
     mock_response = MagicMock()
@@ -213,10 +205,8 @@ def test_validate_documents_success(mock_urlopen, sample_docx):
     mock_response.__enter__.return_value = mock_response
     mock_urlopen.return_value = mock_response
 
-    # Call with fake API key bypassing the Dependency injection
     result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
 
-    # Extract the text content from the ToolResult for the assertions
     text_result = str(result.content)
     assert "Validation Report" in text_result
     assert "Date mismatch" in text_result
