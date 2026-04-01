@@ -1,20 +1,22 @@
 # FILE: src/adeu/mcp_components/tools/email.py
 import base64
 import json
+import re
 import tempfile
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
-from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
-from adeu.mcp_components.shared import BACKEND_URL, EMAIL_UI_URI
 from fastmcp import Context
 from fastmcp.dependencies import Depends
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
 from fastmcp.tools.tool import ToolResult
+
+from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
+from adeu.mcp_components.shared import BACKEND_URL, EMAIL_UI_URI
 
 
 class MLStripper(HTMLParser):
@@ -41,7 +43,6 @@ def strip_tags(html: str) -> str:
         s = MLStripper()
         s.feed(html)
         # Collapse multiple newlines/spaces to save tokens
-        import re
 
         text = s.get_data()
         return re.sub(r"\n\s*\n", "\n\n", text)
@@ -52,9 +53,11 @@ def strip_tags(html: str) -> str:
 @tool(
     description=(
         "Searches the user's live email inbox. "
-        "If you provide search filters (subject, sender), it returns a list of lightweight email previews. "
-        "To read the full email body, thread history, and automatically download attachments to local disk, "
-        "call this tool again and provide the specific `email_id`."
+        "Use filters to find specific emails (e.g., 'is_unread=True' for new emails, "
+        "'days_ago=7' for last week, 'folder=sent' for sent items). "
+        "It returns a list of lightweight email previews. "
+        "To read the full email body, thread history, and automatically download attachments "
+        "to local disk, call this tool again and provide the specific `email_id`."
     ),
     annotations={"openWorldHint": True, "readOnlyHint": True},
     meta={"ui": {"resourceUri": EMAIL_UI_URI}},
@@ -65,6 +68,18 @@ async def search_and_fetch_emails(
     subject: Annotated[Optional[str], "Filter by keywords in the subject line."] = None,
     has_attachments: Annotated[Optional[bool], "If True, only returns emails that contain file attachments."] = None,
     attachment_name: Annotated[Optional[str], "Filter by a specific attachment filename."] = None,
+    is_unread: Annotated[
+        Optional[bool],
+        "If True, returns ONLY unread emails. If False, returns ONLY read emails. Leave empty for both.",
+    ] = None,
+    days_ago: Annotated[
+        Optional[int],
+        "Filter emails received in the last N days (e.g., 7 for last week).",
+    ] = None,
+    folder: Annotated[
+        Optional[Literal["inbox", "sent", "all"]],
+        "The mailbox folder to search in (default is all).",
+    ] = None,
     limit: Annotated[int, "Maximum number of emails to retrieve (default: 10)."] = 10,
     offset: Annotated[int, "Pagination offset to skip the first N emails."] = 0,
     email_id: Annotated[
@@ -81,6 +96,9 @@ async def search_and_fetch_emails(
         "subject": subject,
         "has_attachments": has_attachments,
         "attachment_name": attachment_name,
+        "is_unread": is_unread,
+        "days_ago": days_ago,
+        "folder": folder,
         "limit": limit,
         "offset": offset,
     }
@@ -129,8 +147,10 @@ async def search_and_fetch_emails(
         llm_lines = [f"Found {len(previews)} email(s). Here are the previews:", ""]
         for p in previews:
             att_flag = "📎 (Has Attachments)" if p.get("has_attachments") else ""
+            unread_flag = "🟢 [UNREAD]" if p.get("is_read") is False else ""  # Let the LLM see it's unread
+
             llm_lines.append(f"- **ID**: `{p['id']}`")
-            llm_lines.append(f"  **Subject**: {p['subject']} {att_flag}")
+            llm_lines.append(f"  **Subject**: {p['subject']} {att_flag} {unread_flag}")
             llm_lines.append(f"  **From**: {p['sender_name']} <{p['sender_email']}>")
             llm_lines.append(f"  **Date**: {p['received_datetime']}")
             llm_lines.append(f"  **Preview**: {p['preview_text']}")

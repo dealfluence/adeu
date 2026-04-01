@@ -386,10 +386,12 @@
                 const dateStr = p.received_datetime ? new Date(p.received_datetime).toLocaleString() : '';
                 const attIcon = p.has_attachments ? PAPERCLIP_SVG : '';
 
+                const unreadDot = p.is_read === false ? `<span style="color: #3b82f6; margin-right: 6px; font-size: 1.2em; vertical-align: middle;">•</span>` : '';
+
                 html += `
                     <div class="preview-item">
                         <div class="preview-header">
-                            <h4 class="preview-subject">${escapeHtml(p.subject || 'No Subject')} ${attIcon}</h4>
+                            <h4 class="preview-subject">${unreadDot}${escapeHtml(p.subject || 'No Subject')} ${attIcon}</h4>
                             <span class="preview-date">${escapeHtml(dateStr)}</span>
                         </div>
                         <div class="preview-sender">${escapeHtml(p.sender_name)} &lt;${escapeHtml(p.sender_email)}&gt;</div>
