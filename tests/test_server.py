@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from docx import Document
+from fastmcp.exceptions import ToolError
 
 from adeu.mcp_components.tools.auth import login_to_adeu_cloud, logout_of_adeu_cloud
 from adeu.mcp_components.tools.document import (
@@ -57,14 +58,17 @@ def modified_docx(tmp_path) -> str:
 def test_read_docx(sample_docx):
     ctx = MockContext()
     result = asyncio.run(read_docx(file_path=sample_docx, ctx=ctx, clean_view=False))
-    assert "This is the original text." in result
+    assert "This is the original text." in result.structured_content["markdown"]
 
 
 def test_read_docx_file_not_found():
     ctx = MockContext()
-    result = asyncio.run(read_docx(file_path="nonexistent.docx", ctx=ctx))
-    assert "Error reading file" in result
-    assert "not found" in result
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(read_docx(file_path="nonexistent.docx", ctx=ctx))
+
+    error_msg = str(exc_info.value)
+    assert "Error reading file" in error_msg
+    assert "not found" in error_msg
 
 
 def test_diff_docx_files(sample_docx, modified_docx):

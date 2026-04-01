@@ -3,11 +3,13 @@ from pathlib import Path
 from typing import Annotated, List, Optional
 
 from fastmcp import Context
+from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
+from fastmcp.tools.tool import ToolResult
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.mcp_components.shared import _read_file_bytes, _save_stream
+from adeu.mcp_components.shared import VIEW_URI, _read_file_bytes, _save_stream
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 
@@ -17,6 +19,7 @@ from adeu.redline.engine import BatchValidationError, RedlineEngine
         "Reads a DOCX file and returns its text content. Use this to ingest the document into your context window."
     ),
     annotations={"readOnlyHint": True},
+    meta={"ui": {"resourceUri": VIEW_URI}},
 )
 async def read_docx(
     file_path: Annotated[str, "Absolute path to the DOCX file."],
@@ -25,7 +28,7 @@ async def read_docx(
         bool,
         "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
     ] = False,
-) -> str:
+) -> ToolResult:
     await ctx.info(
         f"Reading DOCX file: {Path(file_path).name}",
         extra={"file_path": file_path, "clean_view": clean_view},
@@ -40,14 +43,17 @@ async def read_docx(
 
         text = extract_text_from_stream(stream, filename=Path(file_path).name, clean_view=clean_view)
         await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
-        return text
+        return ToolResult(
+            content=text,
+            structured_content={"markdown": text},
+        )
 
     except FileNotFoundError as e:
         await ctx.error("File not found", extra={"file_path": file_path})
-        return f"Error reading file: {str(e)}"
+        raise ToolError(f"Error reading file: {str(e)}") from e
     except Exception as e:
         await ctx.error("Failed to parse DOCX", extra={"error": str(e), "file_path": file_path})
-        return f"Error reading file: {str(e)}"
+        raise ToolError(f"Error reading file: {str(e)}") from e
 
 
 @tool(
