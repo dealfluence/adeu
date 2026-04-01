@@ -109,10 +109,14 @@ async def validate_documents(
 
             # The backend now provides the fully formatted markdown report
             markdown_report = data.get("report_markdown", "No report generated.")
-
+            report_title = (
+                resolved_files[0].name
+                if len(resolved_files) == 1
+                else f"Validation Report ({len(resolved_files)} files)"
+            )
             return ToolResult(
                 content=markdown_report,
-                structured_content={"markdown": markdown_report},
+                structured_content={"markdown": markdown_report, "title": report_title},
             )
 
     except urllib.error.HTTPError as e:

@@ -45,7 +45,10 @@ async def read_docx(
         await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
         return ToolResult(
             content=text,
-            structured_content={"markdown": text},
+            structured_content={
+                "markdown": text,
+                "title": Path(file_path).name,
+            },
         )
 
     except FileNotFoundError as e:
