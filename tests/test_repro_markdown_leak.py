@@ -1,9 +1,10 @@
 import io
 
+from docx import Document
+
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
-from docx import Document
 
 
 def test_markdown_headers_leak_into_docx():

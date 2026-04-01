@@ -1,9 +1,10 @@
 import io
 
-from adeu.ingest import extract_text_from_stream
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+
+from adeu.ingest import extract_text_from_stream
 
 
 def test_repro_split_insertion_coalescing():

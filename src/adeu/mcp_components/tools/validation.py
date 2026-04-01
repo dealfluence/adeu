@@ -5,17 +5,18 @@ import urllib.request
 from pathlib import Path
 from typing import Annotated, List
 
+from fastmcp import Context
+from fastmcp.dependencies import Depends
+from fastmcp.exceptions import ToolError
+from fastmcp.tools import tool
+from fastmcp.tools.tool import ToolResult
+
 from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
 from adeu.mcp_components.shared import (
     BACKEND_URL,
     MARKDOWN_UI_URI,
     _encode_multipart_formdata,
 )
-from fastmcp import Context
-from fastmcp.dependencies import Depends
-from fastmcp.exceptions import ToolError
-from fastmcp.tools import tool
-from fastmcp.tools.tool import ToolResult
 
 
 @tool(

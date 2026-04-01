@@ -1,10 +1,11 @@
 import io
 import re
 
+from docx import Document
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_reply_creates_new_comment_entry():

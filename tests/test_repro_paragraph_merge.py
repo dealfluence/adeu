@@ -1,10 +1,11 @@
 import io
 
-from adeu.models import ModifyText
-from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+
+from adeu.models import ModifyText
+from adeu.redline.engine import RedlineEngine
 
 
 def test_multiline_insert_does_not_create_nested_paragraphs():

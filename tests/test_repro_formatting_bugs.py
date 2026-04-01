@@ -1,11 +1,12 @@
 # FILE: tests/test_repro_formatting_bugs.py
 import io
 
+from docx import Document
+from docx.shared import Pt
+
 from adeu.diff import trim_common_context
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
-from docx import Document
-from docx.shared import Pt
 
 
 def test_repro_token_slicing_mid_sentence():
@@ -156,9 +157,9 @@ def test_repro_insertion_trailing_space_omission():
     # 1. Verify that the engine recognized this as a pure insertion and
     # did NOT delete the original sentence.
     del_tags = doc_res.element.xpath("//w:del")
-    assert (
-        len(del_tags) == 0
-    ), "Original sentence was needlessly deleted! Heuristic failed to classify as pure insertion."
+    assert len(del_tags) == 0, (
+        "Original sentence was needlessly deleted! Heuristic failed to classify as pure insertion."
+    )
 
     # 2. Verify that the new text was correctly tracked as an insertion
     ins_texts = doc_res.element.xpath('//w:ins//w:t[contains(text(), "Limitation of Liability")]')

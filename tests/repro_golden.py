@@ -1,9 +1,10 @@
 import io
 import os
 
+from docx import Document
+
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def generate_golden_replica(output_path: str):

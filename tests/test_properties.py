@@ -1,12 +1,13 @@
 import io
 
-from adeu.diff import generate_edits_from_text
-from adeu.ingest import extract_text_from_stream
-from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.oxml.ns import qn
 from hypothesis import given, settings
 from hypothesis import strategies as st
+
+from adeu.diff import generate_edits_from_text
+from adeu.ingest import extract_text_from_stream
+from adeu.redline.engine import RedlineEngine
 
 
 def extract_accepted_text_from_xml(doc_stream: io.BytesIO) -> str:

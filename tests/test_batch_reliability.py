@@ -1,9 +1,10 @@
 import io
 
+from docx import Document
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import AcceptChange, ModifyText, RejectChange
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_batch_accept_does_not_corrupt():

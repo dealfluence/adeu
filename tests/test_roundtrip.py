@@ -1,10 +1,11 @@
 import io
 
+from docx import Document
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
-from docx import Document
 
 
 def test_full_roundtrip_workflow(simple_docx_stream):

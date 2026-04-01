@@ -1,10 +1,11 @@
 import io
 
-from adeu.models import RejectChange
-from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+
+from adeu.models import RejectChange
+from adeu.redline.engine import RedlineEngine
 
 
 def _inject_comment_into_element(engine: RedlineEngine, target_element, comment_text: str) -> str:
@@ -88,9 +89,9 @@ def test_reject_change_cleans_encapsulated_comments():
     if c_mgr.extended_part:
         assert len(c_mgr.extended_part.element.findall(qn("w15:commentEx"))) == 0, "Leaked in commentsExtended.xml"
     if c_mgr.extensible_part:
-        assert (
-            len(c_mgr.extensible_part.element.findall(qn("w16cex:commentExtensible"))) == 0
-        ), "Leaked in commentsExtensible.xml"
+        assert len(c_mgr.extensible_part.element.findall(qn("w16cex:commentExtensible"))) == 0, (
+            "Leaked in commentsExtensible.xml"
+        )
 
 
 def test_accept_all_revisions_total_comment_wipe():

@@ -1,11 +1,12 @@
 import io
 
+from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
-from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 
 def test_ingest_detects_structural_info():

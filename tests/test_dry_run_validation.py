@@ -1,9 +1,10 @@
 # FILE: tests/test_dry_run_validation.py
 import io
 
+from docx import Document
+
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_validation_ambiguous_match_with_context():

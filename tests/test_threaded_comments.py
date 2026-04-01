@@ -1,10 +1,11 @@
 import io
 import re
 
+from docx import Document
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_threaded_comment_structure():
@@ -57,9 +58,9 @@ def test_threaded_comment_structure():
     xml = comments_part.blob.decode("utf-8")
 
     # Check 1: Namespace Declaration in Root
-    assert (
-        'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"' in xml
-    ), "Missing w15 namespace declaration in comments.xml root"
+    assert 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"' in xml, (
+        "Missing w15 namespace declaration in comments.xml root"
+    )
 
     # Check 2: Parent Attribute on the Reply
     # Search for w15:p="{parent_id}"

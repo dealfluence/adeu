@@ -2,11 +2,12 @@
 
 import io
 
+from docx import Document
+from docx.oxml.ns import qn
+
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
-from docx import Document
-from docx.oxml.ns import qn
 
 
 def _create_initial_docx() -> io.BytesIO:

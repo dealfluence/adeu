@@ -2,15 +2,16 @@
 from pathlib import Path
 from typing import Annotated, List, Optional
 
+from fastmcp import Context
+from fastmcp.exceptions import ToolError
+from fastmcp.tools import tool
+from fastmcp.tools.tool import ToolResult
+
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.mcp_components.shared import MARKDOWN_UI_URI, _read_file_bytes, _save_stream
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
-from fastmcp import Context
-from fastmcp.exceptions import ToolError
-from fastmcp.tools import tool
-from fastmcp.tools.tool import ToolResult
 
 
 @tool(

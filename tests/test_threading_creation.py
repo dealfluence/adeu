@@ -1,8 +1,9 @@
 import io
 
+from docx import Document
+
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_threading_creates_extended_part():

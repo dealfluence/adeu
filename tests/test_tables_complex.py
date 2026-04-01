@@ -1,9 +1,10 @@
 import io
 
+from docx import Document
+
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
-from docx import Document
 
 
 def test_interleaved_tables_and_text():

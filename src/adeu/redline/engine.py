@@ -5,14 +5,15 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import structlog
+from docx import Document
+from docx.oxml.ns import nsmap, qn
+from docx.text.run import Run
+
 from adeu.diff import trim_common_context
 from adeu.models import AcceptChange, DocumentChange, EditOperationType, ModifyText, RejectChange, ReplyComment
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, normalize_docx
-from docx import Document
-from docx.oxml.ns import nsmap, qn
-from docx.text.run import Run
 
 logger = structlog.get_logger(__name__)
 

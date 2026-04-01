@@ -5,6 +5,9 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
+from docx import Document
+from fastmcp.exceptions import ToolError
+
 from adeu.mcp_components.tools.auth import login_to_adeu_cloud, logout_of_adeu_cloud
 from adeu.mcp_components.tools.document import (
     accept_all_changes,
@@ -15,8 +18,6 @@ from adeu.mcp_components.tools.document import (
 from adeu.mcp_components.tools.validation import validate_documents
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
-from docx import Document
-from fastmcp.exceptions import ToolError
 
 
 class MockContext:
