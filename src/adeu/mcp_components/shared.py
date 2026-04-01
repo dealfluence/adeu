@@ -9,7 +9,7 @@ from typing import List
 # Centralized MCP Configuration
 FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")
 BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
-VIEW_URI = "ui://adeu/html-viewer"
+MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 
 
 def _read_file_bytes(path: str) -> BytesIO:

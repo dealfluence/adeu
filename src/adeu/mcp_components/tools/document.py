@@ -1,10 +1,10 @@
-# FILE: src/adeu/mcp/tools/document.py
+# FILE: src/adeu/mcp_components/tools/document.py
 from pathlib import Path
 from typing import Annotated, List, Optional
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.mcp_components.shared import VIEW_URI, _read_file_bytes, _save_stream
+from adeu.mcp_components.shared import MARKDOWN_UI_URI, _read_file_bytes, _save_stream
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 from fastmcp import Context
@@ -18,7 +18,7 @@ from fastmcp.tools.tool import ToolResult
         "Reads a DOCX file and returns its text content. Use this to ingest the document into your context window."
     ),
     annotations={"readOnlyHint": True},
-    meta={"ui": {"resourceUri": VIEW_URI}},
+    meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
 )
 async def read_docx(
     file_path: Annotated[str, "Absolute path to the DOCX file."],

@@ -1,8 +1,8 @@
-# FILE: src/adeu/mcp/resources/viewer.py
+# FILE: src/adeu/mcp_components/resources/markdown_ui.py
 from pathlib import Path
 
 import jinja2
-from adeu.mcp_components.shared import VIEW_URI
+from adeu.mcp_components.shared import MARKDOWN_UI_URI
 from fastmcp.resources import resource
 
 # Resolve paths relative to the new file location (up 3 levels to src/adeu)
@@ -34,12 +34,16 @@ def _get_adeu_svg_content() -> str:
     return ""
 
 
-@resource(VIEW_URI, annotations={"readOnlyHint": True}, mime_type="text/html;profile=mcp-app")
-def html_viewer() -> str:
-    """Interactive HTML Viewer App using standard Markdown."""
+@resource(
+    MARKDOWN_UI_URI,
+    annotations={"readOnlyHint": True},
+    mime_type="text/html;profile=mcp-app",
+)
+def markdown_ui_app() -> str:
+    """Interactive HTML App for rendering Markdown tool results."""
     marked_js_code = _get_marked_js_content()
     adeu_svg_code = _get_adeu_svg_content()
-    template = jinja_env.get_template("viewer.html")
+    template = jinja_env.get_template("markdown_ui.html")
 
     # Pass the SVG code into the template context
     return template.render(marked_js_code=marked_js_code, adeu_svg_code=adeu_svg_code)

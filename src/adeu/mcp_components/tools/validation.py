@@ -8,7 +8,7 @@ from typing import Annotated, List
 from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
 from adeu.mcp_components.shared import (
     BACKEND_URL,
-    VIEW_URI,
+    MARKDOWN_UI_URI,
     _encode_multipart_formdata,
 )
 from fastmcp import Context
@@ -27,7 +27,7 @@ from fastmcp.tools.tool import ToolResult
     ),
     timeout=300.0,
     annotations={"openWorldHint": True},
-    meta={"ui": {"resourceUri": VIEW_URI}},
+    meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
 )
 async def validate_documents(
     file_paths: Annotated[List[str], "List of absolute paths to documents (DOCX, PDF) OR directories."],
