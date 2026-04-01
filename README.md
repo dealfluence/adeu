@@ -12,7 +12,7 @@ It treats the DOCX file as a **Virtual DOM**:
 
 ---
 
-## Zero-Config Setup
+## Setup
 
 **Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. Install it via your terminal:
 
