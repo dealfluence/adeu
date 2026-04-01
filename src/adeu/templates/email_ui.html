@@ -1,0 +1,565 @@
+<!-- FILE: src/adeu/templates/email_ui.html -->
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Adeu Inbox</title>
+    <meta name="color-scheme" content="light dark">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&family=Lora:ital,wght@0,600;1,600&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --brand-sand: #e8c0a1;
+            --brand-navy: #1a2a2c;
+            --brand-navy-light: #2a3a3c;
+            --neutral-50: #fafafa;
+            --neutral-100: #f5f5f5;
+            --neutral-200: #e5e5e5;
+            --neutral-300: #d9d9d9;
+            --neutral-600: #555969;
+            --neutral-800: #1e2028;
+            --neutral-900: #171717;
+            --font-lora: 'Lora', Georgia, serif;
+            --font-jost: 'Jost', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            --bg-body: var(--neutral-50);
+            --bg-card: #ffffff;
+            --border-card: var(--neutral-200);
+            --text-main: var(--neutral-600);
+            --text-heading: var(--brand-navy);
+            --bg-hover: var(--neutral-100);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-body: var(--neutral-900);
+                --bg-card: var(--brand-navy);
+                --border-card: var(--brand-navy-light);
+                --text-main: rgba(255, 255, 255, 0.85);
+                --text-heading: #ffffff;
+                --bg-hover: var(--brand-navy-light);
+            }
+        }
+
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden !important;
+            box-sizing: border-box;
+            background-color: transparent;
+            height: 100%;
+        }
+
+        body {
+            font-family: var(--font-jost);
+            color: var(--text-main);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .adeu-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 100%;
+        }
+
+        .navbar {
+            flex-shrink: 0;
+            background-color: var(--bg-card);
+            padding: 16px 32px;
+            border-bottom: 1px solid var(--border-card);
+            display: flex;
+            align-items: center;
+        }
+
+        .logo-container svg {
+            max-width: 80px;
+            height: auto;
+        }
+
+        @media (prefers-color-scheme: dark) {
+
+            .logo-container svg path,
+            .logo-container svg rect,
+            .logo-container svg polygon,
+            .logo-container svg circle {
+                fill: #ffffff !important;
+            }
+        }
+
+        .content-wrapper {
+            position: relative;
+            flex: 1 1 auto;
+            overflow-y: auto;
+            padding: 24px 32px;
+        }
+
+        .content-wrapper::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb {
+            background-color: var(--border-card);
+            border-radius: 4px;
+        }
+
+        /* --- PREVIEW LIST VIEW --- */
+        .preview-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .preview-item {
+            padding: 16px;
+            border: 1px solid var(--border-card);
+            border-radius: 8px;
+            background: var(--bg-card);
+            transition: border-color 0.2s ease, background 0.2s ease;
+        }
+
+        .preview-item:hover {
+            border-color: var(--brand-sand);
+            background: var(--bg-hover);
+        }
+
+        .preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+
+        .preview-subject {
+            font-family: var(--font-jost);
+            font-size: 1rem;
+            color: var(--text-heading);
+            font-weight: 600;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .preview-date {
+            font-size: 0.8rem;
+            color: var(--text-main);
+            opacity: 0.8;
+            white-space: nowrap;
+        }
+
+        .preview-sender {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-main);
+            margin-bottom: 8px;
+        }
+
+        .preview-snippet {
+            font-size: 0.85rem;
+            color: var(--text-main);
+            opacity: 0.8;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.4;
+        }
+
+        /* --- FULL EMAIL VIEW --- */
+        .email-thread {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .email-message {
+            border: 1px solid var(--border-card);
+            border-radius: 8px;
+            background: var(--bg-card);
+            overflow: hidden;
+        }
+
+        .email-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border-card);
+            background: var(--bg-hover);
+        }
+
+        .email-subject {
+            font-family: var(--font-lora);
+            font-size: 1.25rem;
+            color: var(--text-heading);
+            margin: 0 0 8px 0;
+            font-weight: 600;
+        }
+
+        .email-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            font-size: 0.9rem;
+        }
+
+        .email-sender {
+            font-weight: 600;
+            color: var(--text-heading);
+        }
+
+        .email-address {
+            color: var(--text-main);
+            opacity: 0.8;
+        }
+
+        .email-date {
+            font-size: 0.85rem;
+            color: var(--text-main);
+            opacity: 0.8;
+            white-space: nowrap;
+        }
+
+        .email-body-container {
+            padding: 24px 16px;
+            color: var(--text-main);
+            overflow-x: auto;
+        }
+
+        .attachments-section {
+            padding: 16px;
+            border-top: 1px dashed var(--border-card);
+            background: rgba(0, 0, 0, 0.02);
+        }
+
+        .attachments-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .attachment-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .attachment-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 6px;
+        }
+
+        .attachment-icon {
+            color: var(--brand-sand);
+            flex-shrink: 0;
+        }
+
+        .attachment-info {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .attachment-name {
+            font-weight: 500;
+            font-size: 0.95rem;
+            color: var(--text-heading);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .attachment-path {
+            font-family: ui-monospace, Consolas, monospace;
+            font-size: 0.75rem;
+            color: var(--text-main);
+            opacity: 0.7;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 2px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-main);
+            font-style: italic;
+        }
+
+        .skeleton {
+            background: linear-gradient(90deg, var(--neutral-100) 25%, var(--border-card) 50%, var(--neutral-100) 75%);
+            background-size: 200% 100%;
+            animation: skeleton 1.5s ease-in-out infinite;
+            border-radius: 4px;
+        }
+
+        @keyframes skeleton {
+            0% {
+                background-position: 200% 0;
+            }
+
+            100% {
+                background-position: -200% 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="adeu-card">
+        <nav class="navbar">
+            <div class="logo-container">[[ adeu_svg_code ]]</div>
+        </nav>
+
+        <div class="content-wrapper" id="content-wrapper">
+            <div id="app">
+                <div class="skeleton" style="height: 24px; width: 60%; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 16px; width: 40%; margin-bottom: 24px;"></div>
+                <div class="skeleton" style="height: 60px; width: 100%; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 60px; width: 100%;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const appDiv = document.getElementById('app');
+        const INIT_ID = 1;
+
+        function escapeHtml(unsafe) {
+            return (unsafe || "").toString()
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0 || !bytes) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function triggerResize() {
+            const nav = document.querySelector('.navbar');
+            const wrapper = document.getElementById('content-wrapper');
+            const desiredHeight = nav.offsetHeight + wrapper.scrollHeight + 34; // 34 is chrome padding
+            const requestedHeight = Math.min(desiredHeight, 800); // Max height 800px
+
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                method: "ui/notifications/size-changed",
+                params: { height: Math.ceil(requestedHeight), width: 650 }
+            }, "*");
+        }
+
+        const PAPERCLIP_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--brand-sand)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
+
+        function renderPreviews(previews) {
+            if (!previews || previews.length === 0) {
+                return `<div class="empty-state">No emails found matching the search criteria.</div>`;
+            }
+
+            let html = `<div class="preview-list">`;
+            previews.forEach(p => {
+                const dateStr = p.received_datetime ? new Date(p.received_datetime).toLocaleString() : '';
+                const attIcon = p.has_attachments ? PAPERCLIP_SVG : '';
+
+                html += `
+                    <div class="preview-item">
+                        <div class="preview-header">
+                            <h4 class="preview-subject">${escapeHtml(p.subject || 'No Subject')} ${attIcon}</h4>
+                            <span class="preview-date">${escapeHtml(dateStr)}</span>
+                        </div>
+                        <div class="preview-sender">${escapeHtml(p.sender_name)} &lt;${escapeHtml(p.sender_email)}&gt;</div>
+                        <div class="preview-snippet">${escapeHtml(p.preview_text || 'No preview available')}</div>
+                    </div>
+                `;
+            });
+            html += `</div>`;
+            return html;
+        }
+
+        function renderFullEmail(email) {
+            const dateStr = email.received_datetime ? new Date(email.received_datetime).toLocaleString() : '';
+
+            // Build Attachments HTML
+            let attachmentsHtml = '';
+            if (email.attachments && email.attachments.length > 0) {
+                const itemsHtml = email.attachments.map(att => `
+                    <div class="attachment-item">
+                        ${PAPERCLIP_SVG}
+                        <div class="attachment-info">
+                            <span class="attachment-name" title="${escapeHtml(att.filename)}">${escapeHtml(att.filename)} <span style="opacity:0.6; font-size:0.8em;">(${formatBytes(att.size_bytes)})</span></span>
+                            ${att.local_path ? `<span class="attachment-path" title="${escapeHtml(att.local_path)}">Local: ${escapeHtml(att.local_path)}</span>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+
+                attachmentsHtml = `
+                    <div class="attachments-section">
+                        <div class="attachments-title">
+                            ${PAPERCLIP_SVG} Attachments (${email.attachments.length})
+                        </div>
+                        <div class="attachment-list">
+                            ${itemsHtml}
+                        </div>
+                    </div>
+                `;
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'email-thread'; // Ensure wrapper stacks properly
+
+            let threadHtml = '';
+
+            // 1. Render Thread History (Oldest first)
+            if (email.is_thread && email.messages && email.messages.length > 0) {
+                email.messages.forEach((histMsg, index) => {
+                    const histDate = histMsg.received_datetime ? new Date(histMsg.received_datetime).toLocaleString() : '';
+
+                    threadHtml += `
+                    <div class="email-message" style="opacity: 0.85; transform: scale(0.98); transform-origin: top;">
+                        <div class="email-header" style="padding: 12px 16px; background: rgba(0,0,0,0.02);">
+                            <div class="email-meta">
+                                <div>
+                                    <span class="email-sender">${escapeHtml(histMsg.sender_name || 'Unknown')}</span>
+                                    <span class="email-address">&lt;${escapeHtml(histMsg.sender_email)}&gt;</span>
+                                </div>
+                                <div class="email-date">${escapeHtml(histDate)}</div>
+                            </div>
+                        </div>
+                        <div class="email-body-container" id="history-body-${index}-${email.id}" style="max-height: 200px; overflow-y: auto; padding: 16px;"></div>
+                    </div>
+                    `;
+                });
+            }
+
+            // 2. Render Target Message (Current/Newest)
+            threadHtml += `
+            <div class="email-message" style="box-shadow: 0 4px 12px rgba(0,0,0,0.05); border-color: var(--brand-sand);">
+                <div class="email-header">
+                    <h3 class="email-subject">${escapeHtml(email.subject || 'No Subject')}</h3>
+                    <div class="email-meta">
+                        <div>
+                            <span class="email-sender">${escapeHtml(email.sender_name || 'Unknown')}</span>
+                            <span class="email-address">&lt;${escapeHtml(email.sender_email)}&gt;</span>
+                        </div>
+                        <div class="email-date">${escapeHtml(dateStr)}</div>
+                    </div>
+                </div>
+                <div class="email-body-container" id="body-${email.id}"></div>
+                ${attachmentsHtml}
+            </div>
+            `;
+
+            wrapper.innerHTML = threadHtml;
+            return wrapper;
+        }
+        window.addEventListener("message", (event) => {
+            try {
+                if (!event.data || event.data.jsonrpc !== "2.0") return;
+                const msg = event.data;
+
+                if (msg.id === INIT_ID) {
+                    window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*");
+                    return;
+                }
+
+                if (msg.method === "ui/notifications/tool-result") {
+                    const result = msg.params;
+                    if (!result || !result.structuredContent) return;
+
+                    const data = result.structuredContent;
+                    appDiv.innerHTML = ''; // Clear skeleton
+
+                    if (data.type === "previews") {
+                        appDiv.innerHTML = renderPreviews(data.previews);
+                        setTimeout(triggerResize, 50);
+                    }
+                    else if (data.type === "full_email" && data.full_email) {
+                        const email = data.full_email;
+                        const emailEl = renderFullEmail(email);
+                        appDiv.appendChild(emailEl);
+
+                        // Inject Target Message Body
+                        const bodyContainer = document.getElementById(`body-${email.id}`);
+                        if (bodyContainer) {
+                            const shadow = bodyContainer.attachShadow({ mode: 'open' });
+                            shadow.innerHTML = `
+                                <style>
+                                    :host { all: initial; display: block; font-family: system-ui, sans-serif; line-height: 1.5; color: var(--text-main, #333); }
+                                    @media (prefers-color-scheme: dark) { :host { color: #e5e5e5; } a { color: #60a5fa; } }
+                                    img { max-width: 100%; height: auto; }
+                                </style>
+                                <div>${email.body_html || '<em>Empty Message</em>'}</div>
+                            `;
+                        }
+
+                        // Inject Thread History Bodies
+                        if (email.is_thread && email.messages) {
+                            email.messages.forEach((histMsg, index) => {
+                                const histContainer = document.getElementById(`history-body-${index}-${email.id}`);
+                                if (histContainer) {
+                                    const shadow = histContainer.attachShadow({ mode: 'open' });
+                                    shadow.innerHTML = `
+                                        <style>
+                                            :host { all: initial; display: block; font-family: system-ui, sans-serif; line-height: 1.5; color: var(--text-main, #333); font-size: 0.9em; }
+                                            @media (prefers-color-scheme: dark) { :host { color: #e5e5e5; } a { color: #60a5fa; } }
+                                            img { max-width: 100%; height: auto; }
+                                        </style>
+                                        <div>${histMsg.body_html || '<em>Empty Message</em>'}</div>
+                                    `;
+                                }
+                            });
+                        }
+
+                        setTimeout(triggerResize, 100);
+                    }
+                    else {
+                        appDiv.innerHTML = `<div class="empty-state">No email data found.</div>`;
+                        triggerResize();
+                    }
+                }
+            } catch (error) {
+                console.error("UI Render Error:", error);
+                appDiv.innerHTML = `<div class="empty-state" style="color: red;">Error rendering UI: ${error.toString()}</div>`;
+                triggerResize();
+            }
+        });
+
+        const observer = new ResizeObserver(() => triggerResize());
+        observer.observe(document.getElementById('content-wrapper'));
+
+        window.parent.postMessage({
+            jsonrpc: "2.0", id: INIT_ID, method: "ui/initialize",
+            params: {
+                appInfo: { name: "Adeu Email Inbox", version: "1.0.0" },
+                appCapabilities: {}, protocolVersion: "2025-11-21"
+            }
+        }, "*");
+    </script>
+</body>
+
+</html>
