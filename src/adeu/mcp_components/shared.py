@@ -10,7 +10,7 @@ from fastmcp.exceptions import ToolError
 
 from adeu.auth import DesktopAuthManager
 
-BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
 VIEW_URI = "ui://adeu/html-viewer"
 
 

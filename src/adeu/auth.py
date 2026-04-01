@@ -13,8 +13,8 @@ import keyring
 logger = logging.getLogger(__name__)
 
 
-FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "http://localhost:5173")  # Default to local React dev server
-BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "http://localhost:8000")  # Default to local React dev server
+FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")  # Default to local React dev server
+BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")  # Default to local React dev server
 KEYRING_SERVICE_NAME = "adeu_mcp_server"
 KEYRING_ACCOUNT_NAME = "api_key"
 
