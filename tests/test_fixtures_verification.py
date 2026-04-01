@@ -6,7 +6,6 @@ import zipfile
 from xml.dom.minidom import parseString
 
 import pytest
-
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine

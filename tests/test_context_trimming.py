@@ -1,10 +1,9 @@
 import io
 
-from docx import Document
-
 from adeu.diff import trim_common_context
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 def test_trim_logic_basic():

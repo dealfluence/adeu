@@ -1,13 +1,12 @@
 import io
 
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-
 from adeu.diff import trim_common_context
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 
 def _is_bold(run_element) -> bool:

@@ -1,13 +1,12 @@
 import io
 
 import pytest
+from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.opc.constants import CONTENT_TYPE as CT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.part import XmlPart
 from docx.oxml import parse_xml
-
-from adeu.redline.engine import RedlineEngine
 
 
 def inject_comments_part(doc: Document, xml_bytes: bytes):

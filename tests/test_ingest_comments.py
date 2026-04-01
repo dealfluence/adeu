@@ -1,12 +1,11 @@
 import io
 import re
 
+from adeu.ingest import extract_text_from_stream
+from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-
-from adeu.ingest import extract_text_from_stream
-from adeu.redline.engine import RedlineEngine
 
 
 def test_ingest_critic_markup_simple():

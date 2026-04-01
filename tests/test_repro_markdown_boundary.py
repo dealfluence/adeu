@@ -2,11 +2,10 @@
 
 import io
 
-from docx import Document
-
 from adeu.markup import apply_edits_to_markdown
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 def test_repro_ui_markdown_boundary_leak_no_space():
@@ -79,9 +78,9 @@ def test_repro_engine_skipped_edit_on_boundary_fixed_assertion():
     # It might be split like <w:t>Standard payment terms are Net 30.</w:t>
     # or <w:t>Net 30</w:t>
 
-    assert "Net 30" in xml or "Net 30" in "".join(t.text for t in p._element.xpath(".//w:t")), (
-        f"New text 'Net 30' not found in paragraph XML: {xml}"
-    )
+    assert "Net 30" in xml or "Net 30" in "".join(
+        t.text for t in p._element.xpath(".//w:t")
+    ), f"New text 'Net 30' not found in paragraph XML: {xml}"
 
 
 def test_repro_engine_skip_with_formatting_noise():

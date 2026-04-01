@@ -6,13 +6,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import structlog
-from docx.document import Document as DocumentObject
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.table import Table
-from docx.text.paragraph import Paragraph
-from docx.text.run import Run
-
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
@@ -23,6 +16,12 @@ from adeu.utils.docx import (
     iter_document_parts,
     iter_paragraph_content,
 )
+from docx.document import Document as DocumentObject
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 
 logger = structlog.get_logger(__name__)
 

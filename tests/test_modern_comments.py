@@ -1,11 +1,10 @@
 import io
 
+from adeu.models import ModifyText, ReplyComment
+from adeu.redline.engine import RedlineEngine
 from docx import Document
 from docx.opc.part import XmlPart
 from docx.oxml.ns import qn
-
-from adeu.models import ModifyText, ReplyComment
-from adeu.redline.engine import RedlineEngine
 
 
 def test_modern_comments_extended_update():

@@ -33,6 +33,7 @@ dev = [
     "ruff",
     "mypy",
     "hypothesis",
+    "pre-commit>=4.5.1",
 ]
 
 [tool.hatch.build.targets.wheel]

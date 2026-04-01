@@ -1,11 +1,10 @@
 import io
 import re
 
-from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
-
 from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
+from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 
 def test_repro_invisible_reply_xml_structure():

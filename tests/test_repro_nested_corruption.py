@@ -1,12 +1,11 @@
 import io
 
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 
 def test_repro_nested_edit_corruption():

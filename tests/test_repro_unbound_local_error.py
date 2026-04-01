@@ -1,10 +1,9 @@
 import io
 
 import pytest
-from docx import Document
-
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 def test_repro_unbound_local_curr_ins_id_failure():

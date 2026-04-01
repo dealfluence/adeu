@@ -2,9 +2,8 @@
 
 from io import BytesIO
 
-from docx import Document
-
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 def _parse_and_check(engine, text, expected_tokens):

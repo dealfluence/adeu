@@ -3,12 +3,11 @@ import json
 import urllib.error
 import urllib.request
 
+from adeu.auth import DesktopAuthManager
+from adeu.mcp_components.shared import BACKEND_URL
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
-
-from adeu.auth import DesktopAuthManager
-from adeu.mcp_components.shared import BACKEND_URL
 
 
 @tool(

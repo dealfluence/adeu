@@ -1,9 +1,8 @@
 import io
 
-from docx import Document
-
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 def _is_element_bold(run_element) -> bool:

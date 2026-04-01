@@ -2,9 +2,8 @@
 from pathlib import Path
 
 import jinja2
-from fastmcp.resources import resource
-
 from adeu.mcp_components.shared import VIEW_URI
+from fastmcp.resources import resource
 
 # Resolve paths relative to the new file location (up 3 levels to src/adeu)
 ADEU_DIR = Path(__file__).resolve().parent.parent.parent

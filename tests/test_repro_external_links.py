@@ -3,12 +3,11 @@
 import io
 
 import pytest
-from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
-
 from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 
 def test_external_relationship_does_not_crash_comments_manager():

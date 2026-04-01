@@ -3,12 +3,11 @@ import asyncio
 import io
 import re
 
-from docx import Document
-
 from adeu.ingest import extract_text_from_stream
 from adeu.mcp_components.tools.document import process_document_batch
 from adeu.models import AcceptChange, ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 
 class MockContext:

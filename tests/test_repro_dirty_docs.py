@@ -2,10 +2,9 @@
 
 import io
 
+from adeu.ingest import extract_text_from_stream
 from docx import Document
 from docx.oxml import OxmlElement
-
-from adeu.ingest import extract_text_from_stream
 
 
 def test_extract_handles_tabs_and_breaks():

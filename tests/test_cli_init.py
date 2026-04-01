@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from adeu.cli import _get_claude_config_path, handle_init
 
 # --- Tests for Path Resolution ---

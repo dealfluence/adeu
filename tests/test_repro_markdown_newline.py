@@ -1,10 +1,9 @@
 import io
 
-from docx import Document
-from docx.oxml import OxmlElement
-
 from adeu.ingest import extract_text_from_stream
 from adeu.utils.docx import normalize_docx
+from docx import Document
+from docx.oxml import OxmlElement
 
 
 def test_markdown_wrapping_newline_bug():

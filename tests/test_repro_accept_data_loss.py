@@ -1,11 +1,10 @@
 import io
 
 import structlog
-from docx import Document
-
 from adeu.ingest import extract_text_from_stream
 from adeu.models import AcceptChange, ModifyText
 from adeu.redline.engine import RedlineEngine
+from docx import Document
 
 logger = structlog.get_logger(__name__)
 
