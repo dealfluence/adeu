@@ -1,9 +1,9 @@
-# FILE: src/adeu/mcp/tools/auth.py
+# FILE: src/adeu/mcp_components/tools/auth.py
 import json
 import urllib.error
 import urllib.request
 
-from adeu.auth import DesktopAuthManager
+from adeu.mcp_components.desktop_auth import DesktopAuthManager
 from adeu.mcp_components.shared import BACKEND_URL
 from fastmcp import Context
 from fastmcp.exceptions import ToolError

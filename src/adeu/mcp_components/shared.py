@@ -1,4 +1,4 @@
-# FILE: src/adeu/mcp/shared.py
+# FILE: src/adeu/mcp_components/shared.py
 import mimetypes
 import os
 import uuid
@@ -6,24 +6,10 @@ from io import BytesIO
 from pathlib import Path
 from typing import List
 
-from fastmcp.exceptions import ToolError
-
-from adeu.auth import DesktopAuthManager
-
+# Centralized MCP Configuration
+FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")
 BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
 VIEW_URI = "ui://adeu/html-viewer"
-
-
-def get_cloud_auth_token() -> str:
-    """Dependency to enforce cloud authentication before tool execution."""
-    api_key = DesktopAuthManager.get_api_key()
-    if not api_key:
-        raise ToolError(
-            "Authentication Required: You are not logged in. "
-            "Please call the `login_to_adeu_cloud` tool first to authenticate, "
-            "then try this task again."
-        )
-    return api_key
 
 
 def _read_file_bytes(path: str) -> BytesIO:

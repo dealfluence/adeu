@@ -1,3 +1,4 @@
+# FILE: tests/test_server.py
 import asyncio
 import json
 from io import BytesIO
@@ -162,7 +163,7 @@ def test_accept_all_changes(sample_docx, tmp_path):
 # --- Cloud Auth & Validation Tool Mocks ---
 
 
-@patch("adeu.auth.DesktopAuthManager.ensure_authenticated")
+@patch("adeu.mcp_components.desktop_auth.DesktopAuthManager.ensure_authenticated")
 @patch("urllib.request.urlopen")
 def test_login_to_adeu_cloud_success(mock_urlopen, mock_ensure_auth):
     ctx = MockContext()
@@ -178,7 +179,7 @@ def test_login_to_adeu_cloud_success(mock_urlopen, mock_ensure_auth):
     assert "test@adeu.ai" in result
 
 
-@patch("adeu.auth.DesktopAuthManager.clear_api_key")
+@patch("adeu.mcp_components.desktop_auth.DesktopAuthManager.clear_api_key")
 def test_logout_of_adeu_cloud(mock_clear_key):
     ctx = MockContext()
     result = asyncio.run(logout_of_adeu_cloud(ctx=ctx))

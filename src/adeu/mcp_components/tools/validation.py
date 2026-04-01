@@ -1,16 +1,15 @@
-# FILE: src/adeu/mcp/tools/validation.py
+# FILE: src/adeu/mcp_components/tools/validation.py
 import json
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Annotated, List
 
-from adeu.auth import DesktopAuthManager
+from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
 from adeu.mcp_components.shared import (
     BACKEND_URL,
     VIEW_URI,
     _encode_multipart_formdata,
-    get_cloud_auth_token,
 )
 from fastmcp import Context
 from fastmcp.dependencies import Depends

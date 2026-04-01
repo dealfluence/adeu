@@ -1,20 +1,18 @@
-# FILE: src/adeu/auth.py
-
+# FILE: src/adeu/mcp_components/desktop_auth.py
 import http.server
 import logging
-import os
 import socketserver
 import threading
 import urllib.parse
 import webbrowser
 
 import keyring
+from fastmcp.exceptions import ToolError
+
+from .shared import FRONTEND_URL
 
 logger = logging.getLogger(__name__)
 
-
-FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")  # Default to local React dev server
-BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")  # Default to local React dev server
 KEYRING_SERVICE_NAME = "adeu_mcp_server"
 KEYRING_ACCOUNT_NAME = "api_key"
 
@@ -179,3 +177,15 @@ class DesktopAuthManager:
 
         logger.info("No API key found in Keychain. Starting interactive authentication...")
         return cls.authenticate_interactive()
+
+
+def get_cloud_auth_token() -> str:
+    """Dependency to enforce cloud authentication before tool execution."""
+    api_key = DesktopAuthManager.get_api_key()
+    if not api_key:
+        raise ToolError(
+            "Authentication Required: You are not logged in. "
+            "Please call the `login_to_adeu_cloud` tool first to authenticate, "
+            "then try this task again."
+        )
+    return api_key
