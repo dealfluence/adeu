@@ -2,8 +2,9 @@
 from pathlib import Path
 
 import jinja2
-from adeu.mcp_components.shared import EMAIL_UI_URI
 from fastmcp.resources import resource
+
+from adeu.mcp_components.shared import EMAIL_UI_URI
 
 ADEU_DIR = Path(__file__).resolve().parent.parent.parent
 
