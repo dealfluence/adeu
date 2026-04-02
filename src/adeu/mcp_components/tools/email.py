@@ -105,7 +105,7 @@ async def search_and_fetch_emails(
     payload_dict = {k: v for k, v in payload_dict.items() if v is not None}
 
     body = json.dumps(payload_dict).encode("utf-8")
-    url = f"{BACKEND_URL}/api/v1/emails/mcp-search"
+    url = f"{BACKEND_URL}/api/v1/emails/search"
 
     req = urllib.request.Request(
         url,
