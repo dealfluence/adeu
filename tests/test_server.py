@@ -189,19 +189,36 @@ def test_logout_of_adeu_cloud(mock_clear_key):
 
 
 @patch("urllib.request.urlopen")
-def test_validate_documents_success(mock_urlopen, sample_docx):
+def test_validate_documents_init(mock_urlopen, sample_docx):
+    """Tests Phase 1: Uploading the document returns a pending status and Task ID."""
     ctx = MockContext()
 
+    mock_response = MagicMock()
+    # Mock the backend returning a new task ID
+    mock_response.read.return_value = json.dumps({"task_id": 99}).encode("utf-8")
+    mock_response.__enter__.return_value = mock_response
+    mock_urlopen.return_value = mock_response
+
+    result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
+
+    text_result = str(result.content)
+    assert "Validation task started successfully" in text_result
+    assert "Task ID: 99" in text_result
+    assert result.structured_content["status"] == "pending"
+
+
+@patch("asyncio.sleep")
+@patch("urllib.request.urlopen")
+def test_validate_documents_poll_success(mock_urlopen, mock_sleep):
+    """Tests Phase 2: Polling successfully retrieves the completed report."""
+    ctx = MockContext()
+
+    # We mock asyncio.sleep so the test doesn't actually wait during polling
+    mock_sleep.return_value = None
+
     mock_response_data = {
-        "report_markdown": (
-            "# Validation Report\n\n"
-            "## Consistency Issues\n"
-            "- **Date mismatch**: Conflict in dates.\n"
-            "  *Evidence: Evidence 1*\n\n"
-            "## Risk Assessment\n"
-            "- **BUYER - Unlimited Liability**: Buyer has no cap.\n"
-            "  *Evidence: Evidence 2*"
-        )
+        "status": "COMPLETED",
+        "report_markdown": ("# Validation Report\n\n## Consistency Issues\n- **Date mismatch**: Conflict in dates.\n"),
     }
 
     mock_response = MagicMock()
@@ -209,10 +226,32 @@ def test_validate_documents_success(mock_urlopen, sample_docx):
     mock_response.__enter__.return_value = mock_response
     mock_urlopen.return_value = mock_response
 
-    result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
+    # Call with task_id to trigger polling mode
+    result = asyncio.run(validate_documents(task_id=99, ctx=ctx, api_key="fake_key"))
 
     text_result = str(result.content)
     assert "Validation Report" in text_result
     assert "Date mismatch" in text_result
-    assert "Unlimited Liability" in text_result
-    assert "Evidence 1" in text_result
+    assert result.structured_content["status"] == "completed"
+
+
+@patch("asyncio.sleep")
+@patch("urllib.request.urlopen")
+def test_validate_documents_poll_timeout(mock_urlopen, mock_sleep):
+    """Tests Phase 2: Polling times out after 10 attempts and returns a pending continuation message."""
+    ctx = MockContext()
+    mock_sleep.return_value = None
+
+    # Mock the backend continuously returning PENDING
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps({"status": "PROCESSING"}).encode("utf-8")
+    mock_response.__enter__.return_value = mock_response
+    mock_urlopen.return_value = mock_response
+
+    result = asyncio.run(validate_documents(task_id=99, ctx=ctx, api_key="fake_key"))
+
+    text_result = str(result.content)
+    # Ensure it tells the LLM to call again with the same task ID
+    assert "still processing" in text_result
+    assert "task_id=99" in text_result
+    assert result.structured_content["status"] == "pending"

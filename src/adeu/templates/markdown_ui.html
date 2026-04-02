@@ -54,10 +54,8 @@
         body {
             margin: 0;
             padding: 0;
-            overflow: hidden !important;
             box-sizing: border-box;
             background-color: transparent;
-            height: 100%;
         }
 
         body {
@@ -66,8 +64,6 @@
             line-height: 1.6;
             -webkit-font-smoothing: antialiased;
             padding: 16px;
-            display: flex;
-            flex-direction: column;
         }
 
         .adeu-card {
@@ -77,7 +73,6 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            max-height: 100%;
         }
 
         .navbar {
@@ -171,8 +166,6 @@
 
         .content-wrapper {
             position: relative;
-            flex: 1 1 auto;
-            min-height: 0;
         }
 
         .content-wrapper::-webkit-scrollbar {
@@ -433,9 +426,9 @@
 
         <div class="toggle-container" id="toggle-container">
             <button id="toggle-btn">
-                <span id="toggle-text">Show More</span>
+                <span id="toggle-text">Show Less</span>
                 <svg id="toggle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(180deg);">
                     <polyline points="6 9 12 15 18 9"></polyline>
                 </svg>
             </button>
@@ -445,7 +438,7 @@
     <script>
         const appDiv = document.getElementById('app');
         const INIT_ID = 1;
-        let isExpanded = false;
+        let isExpanded = true; // START EXPANDED BY DEFAULT!
 
         let rawMarkdownText = "";
         const navTitle = document.getElementById('nav-title');
@@ -552,24 +545,38 @@
             const toggleIcon = document.getElementById('toggle-icon');
             const toggleText = document.getElementById('toggle-text');
 
+            // 1. If no markdown, we are showing the skeleton. Do not collapse!
+            if (!rawMarkdownText) {
+                toggleContainer.style.display = 'none';
+                wrapper.style.maxHeight = 'none';
+                wrapper.style.overflowY = 'visible';
+                fadeOverlay.style.display = 'none';
+                triggerResize();
+                return;
+            }
+
+            // 2. Data is loaded
             const realHeight = appDiv.scrollHeight;
-            const COLLAPSE_THRESHOLD = 200;
-            const COLLAPSED_HEIGHT = 120;
+            const COLLAPSE_THRESHOLD = 300;
+            const COLLAPSED_HEIGHT = 150;
+            const EXPANDED_MAX_HEIGHT = 500;
 
             if (realHeight > COLLAPSE_THRESHOLD) {
                 toggleContainer.style.display = 'flex';
-                if (!isExpanded) {
+                if (isExpanded) {
+                    // Open view! Scroll inside max 500px window
+                    wrapper.style.maxHeight = EXPANDED_MAX_HEIGHT + 'px';
+                    wrapper.style.overflowY = 'auto';
+                    fadeOverlay.style.display = 'none';
+                    toggleIcon.style.transform = 'rotate(180deg)';
+                    toggleText.textContent = 'Show Less';
+                } else {
+                    // Collapsed View
                     wrapper.style.maxHeight = COLLAPSED_HEIGHT + 'px';
                     wrapper.style.overflowY = 'hidden';
                     fadeOverlay.style.display = 'block';
                     toggleIcon.style.transform = 'rotate(0deg)';
                     toggleText.textContent = 'Show More';
-                } else {
-                    wrapper.style.maxHeight = 'none';
-                    wrapper.style.overflowY = 'auto';
-                    fadeOverlay.style.display = 'none';
-                    toggleIcon.style.transform = 'rotate(180deg)';
-                    toggleText.textContent = 'Show Less';
                 }
             } else {
                 toggleContainer.style.display = 'none';
@@ -587,20 +594,11 @@
         });
 
         function triggerResize() {
-            const nav = document.querySelector('.navbar');
-            const wrapper = document.getElementById('content-wrapper');
-            const toggle = document.getElementById('toggle-container');
+            // Measure the exact unconstrained height of the outer card
+            const card = document.querySelector('.adeu-card');
+            const containerChrome = 34; // 16px padding top/bottom + 2px borders
 
-            let requestedHeight;
-            const containerChrome = 34;
-
-            if (!isExpanded) {
-                const toggleHeight = toggle.style.display === 'none' ? 0 : toggle.offsetHeight;
-                requestedHeight = nav.offsetHeight + wrapper.offsetHeight + toggleHeight + containerChrome;
-            } else {
-                const desiredHeight = nav.offsetHeight + appDiv.scrollHeight + toggle.offsetHeight + containerChrome;
-                requestedHeight = Math.min(desiredHeight, 600);
-            }
+            const requestedHeight = card.offsetHeight + containerChrome;
 
             window.parent.postMessage({
                 jsonrpc: "2.0",
@@ -630,31 +628,26 @@
                     }
 
                     const result = msg.params;
-                    if (!result) {
-                        showError("Empty Response", "The server returned an empty payload.");
+
+                    // If the state is pending, or no markdown is returned, completely hide the UI
+                    if (!result || !result.structuredContent || result.structuredContent.status === "pending" || !result.structuredContent.markdown) {
+                        document.documentElement.style.display = 'none';
+                        window.parent.postMessage({
+                            jsonrpc: "2.0",
+                            method: "ui/notifications/size-changed",
+                            params: { height: 0, width: 0 }
+                        }, "*");
                         return;
                     }
 
-                    if (result.structuredContent && result.structuredContent.markdown) {
-                        rawMarkdownText = result.structuredContent.markdown;
-                        appDiv.innerHTML = marked.parse(rawMarkdownText);
-                        copyBtn.style.display = 'flex';
+                    // Render Markdown
+                    rawMarkdownText = result.structuredContent.markdown;
+                    appDiv.innerHTML = marked.parse(rawMarkdownText);
+                    copyBtn.style.display = 'flex';
 
-                        if (result.structuredContent.title) {
-                            navTitle.textContent = result.structuredContent.title;
-                            navTitle.title = result.structuredContent.title;
-                        }
-                    } else if (result.content) {
-                        if (Array.isArray(result.content)) {
-                            const txt = result.content.find(c => c.type === 'text');
-                            if (txt) appDiv.textContent = txt.text;
-                        } else if (typeof result.content === 'string') {
-                            appDiv.textContent = result.content;
-                        } else {
-                            showError("Unsupported Format", "Unrecognizable content format.", JSON.stringify(result.content));
-                        }
-                    } else {
-                        showError("No Content", "No structured content or raw text found.", JSON.stringify(result));
+                    if (result.structuredContent.title) {
+                        navTitle.textContent = result.structuredContent.title;
+                        navTitle.title = result.structuredContent.title;
                     }
                 }
             } catch (error) {
