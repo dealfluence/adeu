@@ -10,38 +10,59 @@ Law firms pay $30-80/user/month for metadata scrubbing tools. Lawyers still forg
 
 ## 2. CLI Interface
 
-### 2.1 Primary Command
+### 2.1 Full Sanitize (closing/signature)
 
 ```
-adeu sanitize <input.docx> -o <output.docx> [--report] [--mode full|outbound]
+adeu sanitize <input.docx> -o <output.docx> [--report] [--accept-all]
 ```
 
-### 2.2 Batch Mode
+Strips everything. Produces a clean document with no history. Requires `--accept-all` if unresolved track changes exist (see §3).
+
+### 2.2 Baseline Sanitize (sending redline to counterparty)
+
+```
+adeu sanitize <input.docx> --baseline <original.docx> -o <output.docx> [--report] [--author "Firm Name"]
+```
+
+The `--baseline` flag changes everything. Instead of stripping all track changes, the tool **computes your delta** against the original document they sent you:
+
+- Content matching baseline = clean text (no markup)
+- Content differing from baseline = your track changes (kept, shown as `w:ins`/`w:del`)
+- Comments present in baseline = theirs (stripped)
+- Comments not in baseline = yours (kept)
+- Resolved comments = internal deliberation (stripped regardless of origin)
+- All author names replaced with `--author` value (or "Author" if omitted)
+- Everything else (rsids, DMS metadata, paths, etc.) = stripped
+
+This means the tool doesn't need to guess authorship from `w:author` attributes. The baseline IS the authority. It also correctly handles cases where a lawyer accepted some counterparty changes and then made further edits — if the result matches the baseline at a given location, it's clean.
+
+**Example workflow:**
+```
+# Counterparty sends you their draft
+$ cp incoming_NDA.docx ~/baseline/    # save the original
+
+# Lawyer works in Word for hours, adding track changes and comments
+# ...
+
+# Before sending back:
+$ adeu sanitize worked_NDA.docx --baseline ~/baseline/incoming_NDA.docx \
+    -o NDA_to_send.docx --author "Smith & Associates" --report
+```
+
+### 2.3 Batch Mode
 
 ```
 adeu sanitize contracts/*.docx --outdir final/ --report
+adeu sanitize contracts/*.docx --baseline baselines/ --outdir outgoing/ --report
 ```
 
-Processes multiple files. Consolidated report across all documents. Non-zero exit code if any document has issues.
+Processes multiple files. Consolidated report. Non-zero exit code if any document has issues.
 
-### 2.3 Modes
-
-**`--mode full`** (default): Preparing a clean document for signature or archival.
-- Accept all track changes (requires `--accept-all`, otherwise refuses)
-- Remove all comments
-- Scrub all author/timestamp metadata
-- Strip all internal infrastructure traces
-
-**`--mode outbound`**: Sending a redline or marked-up draft to counterparty.
-- Keep your track changes (the redline IS the deliverable)
-- Keep open comments (your notes to counterparty)
-- Remove resolved comments (internal deliberation)
-- Replace all author names with a single identity (`--author "Firm A"`)
-- Strip all internal infrastructure traces
+In batch baseline mode, files are matched by name: `contracts/NDA.docx` looks for `baselines/NDA.docx`.
 
 ## 3. Safety Gate
 
-`sanitize --mode full` **refuses to run** if the document contains unresolved track changes:
+`sanitize` (without `--baseline`) **refuses to run** if the document contains unresolved track changes:
 
 ```
 $ adeu sanitize contract.docx -o clean.docx
@@ -83,15 +104,14 @@ This prevents a counterparty's unreviewed insertion from being silently accepted
 | **Image alt text** | Auto-generated `descr` attributes on images | Often contains source filenames |
 | **Embedded OLE metadata** | Document properties inside embedded objects | Nested documents carry full metadata |
 
-### 4.2 Mode-Specific
+### 4.2 Baseline-Dependent Behavior
 
-| What | `--mode full` | `--mode outbound` |
-|------|--------------|-------------------|
-| Track changes | Remove (requires `--accept-all`) | **Keep** |
-| Open comments | Remove | **Keep** |
+| What | Without `--baseline` | With `--baseline` |
+|------|---------------------|-------------------|
+| Track changes | Remove (requires `--accept-all`) | **Keep only your delta** (computed from baseline diff) |
+| Open comments | Remove | **Keep only yours** (not present in baseline) |
 | Resolved comments | Remove | Remove |
-| Author on track changes | Remove | Replace with `--author` value |
-| Author on comments | Remove | Replace with `--author` value |
+| Author names | Remove | Replace with `--author` value |
 | Run coalescing | Yes | Yes (respecting track change boundaries) |
 | Empty rPr/pPr cleanup | Yes | Yes |
 
@@ -102,7 +122,7 @@ The report is the key differentiator. Existing tools scrub silently. This tool p
 ```
 ═══════════════════════════════════════════
 Sanitize Report: MSA_Final.docx
-Mode: full (--accept-all)
+--accept-all
 ═══════════════════════════════════════════
 
 TRACKED CHANGES (auto-accepted)
@@ -164,7 +184,7 @@ src/adeu/
     transforms.py        # All transforms (flat module, no over-abstraction)
 ```
 
-No profiles, no transform IDs, no `--exclude` flags. Two modes, that's it.
+No profiles, no transform IDs, no `--exclude` flags. Presence or absence of `--baseline` determines behavior.
 
 ### 6.2 Transform Execution
 
@@ -179,9 +199,10 @@ Returns a list of strings for the report. The orchestrator collects them.
 
 ### 6.3 Relationship to Existing Code
 
-- Run coalescing: reuse from `utils/docx.py`
-- Track change acceptance (S01): inverse of `RedlineEngine` — unwrap `w:ins`, remove `w:del`
-- Comment extraction for report: reuse `ingest.py` comment parsing
+- **Run coalescing**: reuse from `utils/docx.py`
+- **Track change acceptance**: inverse of `RedlineEngine` — unwrap `w:ins`, remove `w:del`
+- **Comment extraction for report**: reuse `ingest.py` comment parsing
+- **Baseline diffing**: This is adeu's core competency. `--baseline` mode uses `ingest.py` to extract text from both documents, `diff.py` to compute word-level changes, and `RedlineEngine` to inject `w:ins`/`w:del` into a clean copy. The sanitize command with `--baseline` is essentially: accept all existing markup in the working doc, then re-redline against the baseline. This produces a clean document with only your delta as track changes.
 - The `sanitize` command is independent of `fmt normalize`/`pack` — those are a separate feature (git versioning) that can be built later if there's demand
 
 ### 6.4 Exit Codes
@@ -200,7 +221,7 @@ Returns a list of strings for the report. The orchestrator collects them.
 | `fmt pack` (reassemble DOCX) | Only needed if normalize exists. |
 | Git smudge/clean filters | Architecturally broken (directory vs stream). Support nightmare. |
 | File watcher | Over-engineering. Solves a problem nobody expressed urgently. |
-| Profiles (`normalize`, `internal`, `minimal`) | Two modes (`full`, `outbound`) cover all expressed needs. |
+| Profiles / modes | `--baseline` flag is the only branching point. No modes to remember. |
 | Transform exclusion (`--exclude T08`) | Power-user feature nobody asked for. If a transform causes issues, fix the transform. |
 | Pretty-printing / attribute canonicalization | Only valuable for git diffing. Sanitize doesn't need it — output is a DOCX. |
 | History export | Real need but separate product. Requires git integration that was cut. |
