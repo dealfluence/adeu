@@ -266,9 +266,138 @@ The pipeline iterates over all parts in the DOCX, applying each active transform
 - The `fmt sanitize` report could reuse `ingest.py`'s comment extraction to count/describe removed comments.
 - `fmt normalize` is a prerequisite for the `git-setup` integration but is independently useful.
 
-## 9. Non-Goals (for v1)
+## 9. Scenario Analysis & Spec Gaps
 
-- **Semantic merge driver**: Git merge of two divergent DOCX edits. This requires conflict resolution at the paragraph level — possible but a separate project.
+The following gaps were identified by simulating four real legal negotiation workflows.
+
+### 9.1 Sanitize Directionality
+
+**Problem**: `sanitize` treats all metadata uniformly, but legal workflows are directional. When sending a redline *to* counterparty, you want to keep *your* track changes (that's the deliverable) while stripping *their* prior history and all internal metadata.
+
+**Resolution**: Add `--mode` flag to `sanitize`:
+
+| Mode | Track Changes | Comments | Authors | Metadata |
+|------|--------------|----------|---------|----------|
+| `--mode full` (default) | Remove all | Remove all | Scrub all | Strip all |
+| `--mode outbound` | Keep current | Keep unresolved | Replace with `--author` value | Strip all |
+
+Outbound mode:
+- Keeps `w:ins`/`w:del` (your redline is the message)
+- Keeps open comments (your notes to counterparty)
+- Strips resolved comments (internal deliberation artifacts)
+- Replaces all `w:author` values with a single identity (`--author "Firm A"`)
+- Strips everything else (rsids, DMS, paths, etc.)
+
+```
+adeu fmt sanitize NDA_v1_redlined.docx -o clean.docx --mode outbound --author "Firm A Legal"
+```
+
+### 9.2 Track Change Boundary Safety
+
+**Problem**: T03 (coalesce runs) could theoretically merge runs across `w:ins`/`w:del` boundaries, destroying track change structure.
+
+**Resolution**: T03 must explicitly state: **never coalesce runs across track change element boundaries** (`w:ins`, `w:del`, `w:moveTo`, `w:moveFrom`). Adeu's existing `normalize_docx()` already respects this — the spec must document the invariant.
+
+### 9.3 Internal Collaboration Profile
+
+**Problem**: `normalize` strips author attribution (rsids, paraId). For internal collaboration, the team needs to know who changed what, while still getting clean diffs.
+
+**Resolution**: Add `internal` profile:
+
+| Profile | Transforms | Use case |
+|---------|-----------|----------|
+| `normalize` | T01–T12 | Git version control (maximum diffability) |
+| `internal` | T01, T02, T04–T12 (keeps T03 author-aware) | Internal team collaboration |
+| `sanitize` | T01–T12 + S01–S12 | External delivery |
+| `minimal` | T01, T02, T04, T11 | Light touch |
+
+The `internal` profile preserves `w:author` and `w:date` on track changes and comments while still stripping noise. This means git diffs show *what* changed and `git blame`-equivalent shows *who*.
+
+### 9.4 Smudge/Clean Filter Architecture
+
+**Problem**: The spec describes smudge/clean filters operating on stdin/stdout, but `normalize` produces a *directory*, not a single file stream. Git filters expect single-file-in → single-file-out.
+
+**Resolution**: Replace the smudge/clean filter design with one of:
+
+**Option A — Pre-commit hook (recommended for v1)**:
+```
+adeu fmt git-setup --hook
+```
+Installs a pre-commit hook that finds modified `.docx` files, normalizes them to a parallel directory, and stages the normalized XML. The `.docx` itself is gitignored or tracked via git-lfs.
+
+**Option B — File watcher (better UX, more complex)**:
+```
+adeu fmt watch contracts/
+```
+Daemon watches for `.docx` changes, auto-normalizes on save. Lawyer works in Word normally; git sees clean XML updates.
+
+**Option C — Single-stream format (if smudge/clean is essential)**:
+Normalize to a single deterministic XML stream (concatenated parts with delimiters) rather than a directory. Less readable but compatible with git filter protocol.
+
+Remove the current §6.1 smudge/clean description until one of these is implemented.
+
+### 9.5 Sanitize Safety Gate
+
+**Problem**: `S01` blindly accepts all track changes. This is a substantive legal action — a counterparty's unreviewed change could be silently accepted.
+
+**Resolution**: Split S01 into two behaviors:
+
+- **Default**: `sanitize` *refuses* if the document contains unresolved track changes. Reports what exists and exits with error.
+- **`--accept-all`**: Explicit flag to accept all changes and strip markup. The report lists every change that was auto-accepted.
+- **`--strip-markup-only`**: For documents where changes have been reviewed and accepted in Word but the XML markup lingers.
+
+```
+$ adeu fmt sanitize contract.docx -o clean.docx
+ERROR: Document contains 7 unresolved track changes.
+  Use --accept-all to accept and remove, or review in Word first.
+  Use --report to see details.
+
+$ adeu fmt sanitize contract.docx -o clean.docx --accept-all --report
+Sanitize Report:
+  Auto-accepted: 7 tracked changes
+    - Line 42: Deleted "indirect" (by Opposing Counsel, 2025-03-01)
+    - Line 42: Inserted "direct" (by Opposing Counsel, 2025-03-01)
+    ...
+```
+
+### 9.6 Batch Operations
+
+**Problem**: Deal finalization involves multiple documents. No batch support.
+
+**Resolution**: All `fmt` commands accept globs and `--outdir`:
+
+```
+adeu fmt sanitize contracts/*.docx --outdir final/ --report
+adeu fmt normalize contracts/*.docx --outdir exploded/
+```
+
+Batch report is a consolidated summary across all files.
+
+### 9.7 Concurrent Editing Acknowledgment
+
+**Problem**: Multiple lawyers editing the same DOCX simultaneously. Git cannot merge XML structurally.
+
+**Resolution**: The spec should explicitly state the recommended workflow:
+
+> **Concurrent editing**: Use SharePoint/OneDrive co-authoring for real-time collaboration. Normalize to git at checkpoints (after a round of edits is complete). Git is the audit trail, not the collaboration medium. Semantic merge is a non-goal for v1.
+
+### 9.8 Archival & History Export
+
+**Problem**: After deal closing, firms need the negotiation history for compliance (often 7+ years). Raw git history is not lawyer-friendly.
+
+**Resolution**: Add to future scope (not v1):
+
+```
+adeu fmt history contracts/msa/ --format html
+```
+
+Produces a human-readable changelog showing what changed between each committed version, using adeu's text extraction for the diff view. Tagging support (`adeu fmt tag contracts/msa/ "executed-2025-04-01"`) for marking final versions.
+
+## 10. Non-Goals (for v1)
+
+- **Semantic merge driver**: Git merge of two divergent DOCX edits. This requires conflict resolution at the paragraph level — possible but a separate project. See §9.7.
 - **Incremental normalization**: Re-normalizing only changed parts of a large document. Full-document normalization is fast enough for typical legal documents (< 1s for 100-page contracts).
 - **Style normalization**: Rewriting `styles.xml` to remove unused styles or normalize style names. Risky and low value for diffing.
 - **Content modification**: `fmt` never changes visible content. It is purely a structural/metadata operation (except `sanitize`, which explicitly removes content by design).
+- **History export**: Human-readable negotiation history from git. See §9.8 for future scope.
+- **Real-time co-authoring**: Git is an audit trail, not a collaboration medium. See §9.7.
