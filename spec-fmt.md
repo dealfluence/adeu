@@ -378,7 +378,59 @@ Safety gate blocks any document with unresolved track changes. Paralegal fixes t
 | Pretty-printing / attribute canonicalization | Only valuable for git diffing. Sanitize outputs a DOCX, not readable XML. |
 | History export / archival tagging | Real need but separate product. Depends on git integration that was cut. |
 
-## 9. Future Scope
+## 9. MCP Tool
+
+In addition to the CLI, sanitize is exposed as an MCP tool so AI agents can sanitize documents as part of their workflow — e.g., an agent that drafts a redline and sanitizes it before presenting the output to the user.
+
+### 9.1 Tool Definition
+
+```
+sanitize_docx(
+    file_path: str,           # Absolute path to the DOCX file
+    output_path: str | None,  # Output path (default: <stem>_sanitized.docx)
+    keep_markup: bool = False, # Keep track changes and open comments
+    baseline_path: str | None, # Path to baseline document for delta recomputation
+    author: str | None,       # Replace author names (used with keep_markup or baseline)
+    accept_all: bool = False,  # Accept unresolved track changes (full sanitize only)
+) -> SanitizeResult
+```
+
+Returns a structured result with the report data (not just a string), so the agent can reason about what was found:
+
+```python
+class SanitizeResult:
+    output_path: str
+    status: "clean" | "clean_with_warnings" | "blocked"
+    tracked_changes_found: int
+    tracked_changes_accepted: int
+    comments_removed: int
+    comments_kept: int
+    metadata_stripped: list[str]   # ["Template path", "3 authors", "iManage custom XML"]
+    warnings: list[str]           # ["Hyperlink in §12.1 targets internal URL"]
+    report_text: str              # Full human-readable report (same as CLI output)
+```
+
+### 9.2 Agent Workflows
+
+**Redline + sanitize in one flow:**
+An agent using `process_document_batch` to apply edits can follow up with `sanitize_docx` to produce a clean outbound version:
+
+```
+1. Agent calls read_docx(file_path="incoming.docx")
+2. Agent reasons about edits
+3. Agent calls process_document_batch(original_docx_path="incoming.docx", changes=[...])
+4. Agent calls sanitize_docx(file_path="incoming_processed.docx", keep_markup=True, author="Firm A")
+5. Agent presents the sanitized file + report to the user
+```
+
+**Pre-send check (read-only):**
+An agent could also use sanitize in a dry-run/inspection mode — by checking the report without writing a new file. This is a future consideration; for v1 the tool always produces an output file.
+
+### 9.3 Relationship to `accept_all_changes`
+
+The existing `accept_all_changes` MCP tool does a subset of what `sanitize_docx` does (accepts revisions, strips comments). `sanitize_docx` with `accept_all=True` is a strict superset — it also strips metadata, hidden text, orphaned runs, etc. The existing tool remains for backward compatibility but `sanitize_docx` is preferred for outbound documents.
+
+## 10. Future Scope
 
 1. **Outlook / DMS integration** — The CLI is the engine. The product is a pre-send hook in Outlook or a workflow step in iManage/NetDocuments.
 2. **CI/CD for legal** — Run sanitize in a pipeline before documents hit a deal room or VDR. Exit codes and `--report-file` already support this.
