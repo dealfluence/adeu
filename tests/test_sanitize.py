@@ -426,6 +426,29 @@ class TestSanitizeBaseline:
                 os.unlink(result.output_path)
 
 
+class TestNormalizeChangeDates:
+    def test_normalizes_dates_in_keep_markup(self):
+        """--keep-markup normalizes w:date on track changes to prevent timing inference."""
+        stream = _make_doc_with_track_changes()
+        input_path = _save_to_tmp(stream)
+
+        try:
+            result = sanitize_docx(input_path, keep_markup=True)
+            out_doc = Document(result.output_path)
+
+            for tag in [qn("w:ins"), qn("w:del")]:
+                for el in out_doc.element.findall(f".//{tag}"):
+                    date = el.get(qn("w:date"))
+                    if date:
+                        assert date == "2025-01-01T00:00:00Z", (
+                            f"Track change date should be normalized, got {date}"
+                        )
+        finally:
+            os.unlink(input_path)
+            if os.path.exists(result.output_path):
+                os.unlink(result.output_path)
+
+
 class TestSanitizeExitCodes:
     def test_file_not_found(self):
         with pytest.raises(FileNotFoundError):

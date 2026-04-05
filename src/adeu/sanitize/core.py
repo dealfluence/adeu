@@ -118,10 +118,14 @@ def sanitize_docx(
     # --- Common transforms (applied in all modes) ---
     _apply_common_transforms(doc, report)
 
-    # --- Author replacement ---
-    if author and mode in (SanitizeMode.KEEP_MARKUP, SanitizeMode.BASELINE):
-        report.add_transform_lines(transforms.replace_comment_authors(doc, author))
-        report.add_transform_lines(transforms.replace_change_authors(doc, author))
+    # --- Author replacement and date normalization ---
+    if mode in (SanitizeMode.KEEP_MARKUP, SanitizeMode.BASELINE):
+        if author:
+            report.add_transform_lines(transforms.replace_comment_authors(doc, author))
+            report.add_transform_lines(transforms.replace_change_authors(doc, author))
+        # Always normalize change dates on outbound docs — prevents counterparty
+        # from inferring when edits were made
+        report.add_transform_lines(transforms.normalize_change_dates(doc))
 
     # --- Save ---
     output = BytesIO()
