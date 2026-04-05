@@ -334,6 +334,24 @@ def replace_change_authors(doc: DocumentObject, new_author: str) -> list[str]:
     return []
 
 
+def normalize_change_dates(doc: DocumentObject) -> list[str]:
+    """Normalize w:date on track changes to a single timestamp.
+
+    Prevents counterparty from inferring when edits were made
+    (e.g. "they edited clause 8 at 2am — they're under pressure").
+    """
+    count = 0
+    fixed_date = "2025-01-01T00:00:00Z"
+    for tag in [qn("w:ins"), qn("w:del"), qn("w:rPrChange"), qn("w:pPrChange")]:
+        for el in doc.element.iter(tag):
+            if el.get(qn("w:date")):
+                el.set(qn("w:date"), fixed_date)
+                count += 1
+    if count:
+        return [f"Track change timestamps: {count} normalized"]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Document property transforms
 # ---------------------------------------------------------------------------
@@ -353,7 +371,8 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
     if core.title:
         # Title is often intentional, but can leak. Report it, don't strip.
         pass
-    if core.revision:
+    if core.revision and core.revision > 1:
+        lines.append(f"Revision count: {core.revision} → 1")
         core.revision = 1
 
     # Strip volatile app properties via raw XML
@@ -368,12 +387,14 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
                 tag = f"{{{EXTENDED_NS}}}{tag_local}"
                 for el in app_el.findall(f".//{tag}"):
                     if el.text:
-                        if tag_local == "Template" and el.text:
+                        if tag_local == "Template":
                             lines.append(f"Template: {el.text}")
-                        elif tag_local == "Company" and el.text:
+                        elif tag_local == "Company":
                             lines.append(f"Company: {el.text}")
-                        elif tag_local == "Manager" and el.text:
+                        elif tag_local == "Manager":
                             lines.append(f"Manager: {el.text}")
+                        elif tag_local == "TotalTime" and el.text != "0":
+                            lines.append(f"Total editing time: {el.text} minutes")
                         el.text = ""
             _write_part_xml(app_part, app_el)
 
