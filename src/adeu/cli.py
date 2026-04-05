@@ -274,6 +274,136 @@ def handle_markup(args):
     print(f"Stats: {len(edits)} edits processed.", file=sys.stderr)
 
 
+def handle_sanitize(args: argparse.Namespace):
+    from adeu.sanitize.core import SanitizeError, sanitize_docx
+
+    input_files: List[Path] = args.input
+    is_batch = len(input_files) > 1 or args.outdir
+
+    if not is_batch and args.baseline and len(input_files) > 1:
+        print("❌ --baseline only works with a single input file.", file=sys.stderr)
+        sys.exit(2)
+
+    if not is_batch and len(input_files) == 1:
+        # Single file mode
+        input_path = input_files[0]
+        if not input_path.exists():
+            print(f"❌ File not found: {input_path}", file=sys.stderr)
+            sys.exit(2)
+
+        output_path = args.output
+        if not output_path:
+            output_path = input_path.parent / f"{input_path.stem}_sanitized{input_path.suffix}"
+
+        try:
+            result = sanitize_docx(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                keep_markup=args.keep_markup,
+                baseline_path=str(args.baseline) if args.baseline else None,
+                author=args.author,
+                accept_all=args.accept_all,
+            )
+            if args.report or args.report_file:
+                if args.report:
+                    print(result.report_text, file=sys.stderr)
+                if args.report_file:
+                    with open(args.report_file, "w", encoding="utf-8") as f:
+                        f.write(result.report_text)
+                    print(f"📄 Report saved to {args.report_file}", file=sys.stderr)
+
+            print(f"✅ Sanitized → {output_path}", file=sys.stderr)
+
+        except SanitizeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        except FileNotFoundError as e:
+            print(f"❌ {e}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as e:
+            print(f"❌ Error: {e}", file=sys.stderr)
+            sys.exit(2)
+    else:
+        # Batch mode
+        outdir = args.outdir
+        if not outdir:
+            print("❌ Batch mode requires --outdir.", file=sys.stderr)
+            sys.exit(2)
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        all_reports = []
+        blocked = 0
+        succeeded = 0
+
+        for input_path in input_files:
+            if not input_path.exists():
+                print(f"❌ File not found: {input_path}", file=sys.stderr)
+                blocked += 1
+                continue
+
+            output_path = outdir / input_path.name
+
+            # Resolve baseline for batch mode
+            baseline = None
+            if args.baseline:
+                if args.baseline.is_dir():
+                    baseline = str(args.baseline / input_path.name)
+                else:
+                    baseline = str(args.baseline)
+
+            try:
+                result = sanitize_docx(
+                    input_path=str(input_path),
+                    output_path=str(output_path),
+                    keep_markup=args.keep_markup,
+                    baseline_path=baseline,
+                    author=args.author,
+                    accept_all=args.accept_all,
+                )
+                all_reports.append(result)
+                succeeded += 1
+                status = "clean"
+                if result.warnings:
+                    status = f"clean ({len(result.warnings)} warning{'s' if len(result.warnings) > 1 else ''})"
+                print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
+
+            except SanitizeError as e:
+                blocked += 1
+                print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
+                all_reports.append(e)
+
+            except Exception as e:
+                blocked += 1
+                print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
+
+        # Batch summary
+        total = succeeded + blocked
+        summary = f"\nBatch Summary: {total} documents processed, {succeeded} succeeded, {blocked} blocked"
+        print(summary, file=sys.stderr)
+
+        # Write reports
+        if args.report or args.report_file:
+            full_report = []
+            for r in all_reports:
+                if isinstance(r, SanitizeError):
+                    full_report.append(str(r))
+                else:
+                    full_report.append(r.report_text)
+                full_report.append("")
+
+            full_report.append(summary)
+            report_text = "\n".join(full_report)
+
+            if args.report:
+                print(report_text, file=sys.stderr)
+            if args.report_file:
+                with open(args.report_file, "w", encoding="utf-8") as f:
+                    f.write(report_text)
+
+        if blocked > 0:
+            sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -334,6 +464,45 @@ def main():
         help="Highlight-only mode: mark targets with {==...==} without applying changes",
     )
     p_markup.set_defaults(func=handle_markup)
+
+    p_sanitize = subparsers.add_parser(
+        "sanitize",
+        help="Strip metadata and sensitive information from a DOCX file",
+    )
+    p_sanitize.add_argument("input", type=Path, nargs="+", help="Input DOCX file(s)")
+    p_sanitize.add_argument("-o", "--output", type=Path, help="Output DOCX path (single file mode)")
+    p_sanitize.add_argument("--outdir", type=Path, help="Output directory (batch mode)")
+    p_sanitize.add_argument(
+        "--keep-markup",
+        action="store_true",
+        help="Keep existing track changes and open comments; strip everything else",
+    )
+    p_sanitize.add_argument(
+        "--baseline",
+        type=Path,
+        help="Baseline document for delta recomputation",
+    )
+    p_sanitize.add_argument(
+        "--author",
+        type=str,
+        help="Replace all author names with this value",
+    )
+    p_sanitize.add_argument(
+        "--accept-all",
+        action="store_true",
+        help="Accept all unresolved track changes (full sanitize only)",
+    )
+    p_sanitize.add_argument(
+        "--report",
+        action="store_true",
+        help="Print sanitization report to stderr",
+    )
+    p_sanitize.add_argument(
+        "--report-file",
+        type=Path,
+        help="Write report to file",
+    )
+    p_sanitize.set_defaults(func=handle_sanitize)
 
     args = parser.parse_args()
     args.func(args)
