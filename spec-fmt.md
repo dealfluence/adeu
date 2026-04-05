@@ -1,403 +1,213 @@
-# Feature Specification: `adeu fmt` — DOCX XML Formatter & Sanitizer
+# Feature Specification: `adeu sanitize` — DOCX Metadata Scrubber
 
-## 1. Problem Statement
+## 1. Problem
 
-A DOCX file is a ZIP archive of XML files. Microsoft Word treats this XML as an internal implementation detail — it is non-deterministic, verbose, and riddled with metadata that changes on every save without any visible effect on the document.
+DOCX files leak information. Track changes reveal negotiation strategy. Comments contain candid internal notes. Metadata exposes author names, file server paths, DMS structure, editing timelines, and even deleted text that persists in the XML.
 
-This creates two distinct problems:
+Law firms pay $30-80/user/month for metadata scrubbing tools. Lawyers still forget to use them. When they do use them, the tools scrub silently — no proof of what was removed.
 
-1. **Version Control**: Two saves of the same document produce different bytes. `git diff` on raw DOCX XML is unusable — hundreds of lines of noise obscure one real change.
-2. **Metadata Leakage**: DOCX files retain traces of editing history, internal infrastructure, and deleted content that must never reach opposing counsel in legal workflows.
+**This tool does two things**: strips dangerous metadata, and produces a report proving what was stripped.
 
-Both problems are solved by the same architecture: a **deterministic transformation pipeline** over the exploded XML, with different transform profiles for different use cases.
+## 2. CLI Interface
 
-## 2. Design Principle
-
-**There is no `ruff format` for Word XML.** This is that tool.
-
-The goal is a **canonical form** for OOXML — same content always produces the same bytes. Every transformation must be:
-
-- **Idempotent**: Running `fmt` twice produces the same output as running it once.
-- **Round-trippable**: `fmt normalize` then `fmt pack` produces a DOCX that opens identically in Word.
-- **Composable**: Each transform is independent. Profiles combine transforms for different use cases.
-
-## 3. CLI Interface
-
-Two new subcommands under `adeu`:
+### 2.1 Primary Command
 
 ```
-adeu fmt normalize <input.docx> -o <output_dir/> [--profile <name>]
-adeu fmt pack <input_dir/> -o <output.docx>
-adeu fmt sanitize <input.docx> -o <output.docx> [--report]
+adeu sanitize <input.docx> -o <output.docx> [--report] [--mode full|outbound]
 ```
 
-### 3.1 `adeu fmt normalize`
-
-Explodes a DOCX into a directory of normalized XML files, ready for git.
+### 2.2 Batch Mode
 
 ```
-adeu fmt normalize contract.docx -o contract/
+adeu sanitize contracts/*.docx --outdir final/ --report
 ```
 
-Produces:
-```
-contract/
-  [Content_Types].xml
-  _rels/
-    .rels
-  word/
-    document.xml
-    styles.xml
-    numbering.xml
-    comments.xml
-    ...
-  docProps/
-    core.xml
-    app.xml
-```
+Processes multiple files. Consolidated report across all documents. Non-zero exit code if any document has issues.
 
-All XML files are pretty-printed (one element per line) and transformed according to the active profile.
+### 2.3 Modes
 
-### 3.2 `adeu fmt pack`
+**`--mode full`** (default): Preparing a clean document for signature or archival.
+- Accept all track changes (requires `--accept-all`, otherwise refuses)
+- Remove all comments
+- Scrub all author/timestamp metadata
+- Strip all internal infrastructure traces
 
-Reassembles a normalized directory into a valid DOCX (ZIP with correct MIME type).
+**`--mode outbound`**: Sending a redline or marked-up draft to counterparty.
+- Keep your track changes (the redline IS the deliverable)
+- Keep open comments (your notes to counterparty)
+- Remove resolved comments (internal deliberation)
+- Replace all author names with a single identity (`--author "Firm A"`)
+- Strip all internal infrastructure traces
+
+## 3. Safety Gate
+
+`sanitize --mode full` **refuses to run** if the document contains unresolved track changes:
 
 ```
-adeu fmt pack contract/ -o contract.docx
+$ adeu sanitize contract.docx -o clean.docx
+ERROR: Document contains 7 unresolved tracked changes.
+  3 insertions, 4 deletions — review in Word first, or use --accept-all.
+  Use --report to preview what would be accepted.
 ```
 
-Word-specific ZIP requirements:
-- `[Content_Types].xml` must be the first entry
-- No compression on `[Content_Types].xml` (stored)
-- Standard deflate compression on everything else
-- Binary media files (`word/media/*`) are passed through unchanged
-
-### 3.3 `adeu fmt sanitize`
-
-All-in-one command: strips everything that could leak information to an external party. Operates on DOCX directly (no intermediate directory needed).
+`--accept-all` overrides this. The report lists every change that was auto-accepted:
 
 ```
-adeu fmt sanitize contract.docx -o contract-clean.docx --report
+$ adeu sanitize contract.docx -o clean.docx --accept-all --report
+Auto-accepted: 7 tracked changes
+  p.12: Deleted "Vendor" → Inserted "Supplier" (by Opposing Counsel)
+  p.34: Inserted "not to exceed $500,000" (by Opposing Counsel)
+  ...
 ```
 
-The `--report` flag writes a human-readable summary of what was stripped:
+This prevents a counterparty's unreviewed insertion from being silently accepted as final text.
+
+## 4. What Gets Stripped
+
+### 4.1 Always (both modes)
+
+| Category | What | Why it leaks |
+|----------|------|-------------|
+| **rsid attributes** | `w:rsidR`, `w:rsidRPr`, etc. on every run | Reconstructs editing session order |
+| **Paragraph IDs** | `w14:paraId`, `w14:textId` | No user value, noise |
+| **proofErr** | Spellcheck markers | No user value |
+| **Template path** | `Template` in `docProps/app.xml` | Reveals `\\FIRM-DMS\templates\...` paths |
+| **Printer** | Printer references in `docProps/app.xml` | Reveals office location/infrastructure |
+| **Custom XML** | `customXml/` parts (iManage, NetDocuments, etc.) | DMS matter numbers, client codes |
+| **Doc properties** | `TotalTime`, `Words`, revision count in `docProps/` | Editing timeline, effort spent |
+| **Author metadata** | `dc:creator`, `cp:lastModifiedBy` | Who worked on it |
+| **Timestamps** | `dcterms:created`, `dcterms:modified` | When it was worked on |
+| **Hidden text** | Runs with `w:vanish` or `w:webHidden` | Invisible in Word, readable in XML |
+| **Orphaned runs** | Content outside paragraph flow (fast-save remnants) | Previously deleted text still in file |
+| **Hyperlink audit** | Internal URLs (SharePoint, intranet) | Reveals internal infrastructure |
+| **Image alt text** | Auto-generated `descr` attributes on images | Often contains source filenames |
+| **Embedded OLE metadata** | Document properties inside embedded objects | Nested documents carry full metadata |
+
+### 4.2 Mode-Specific
+
+| What | `--mode full` | `--mode outbound` |
+|------|--------------|-------------------|
+| Track changes | Remove (requires `--accept-all`) | **Keep** |
+| Open comments | Remove | **Keep** |
+| Resolved comments | Remove | Remove |
+| Author on track changes | Remove | Replace with `--author` value |
+| Author on comments | Remove | Replace with `--author` value |
+| Run coalescing | Yes | Yes (respecting track change boundaries) |
+| Empty rPr/pPr cleanup | Yes | Yes |
+
+## 5. The Report
+
+The report is the key differentiator. Existing tools scrub silently. This tool proves what it did.
 
 ```
-Sanitize Report: contract.docx
-  Removed: 14 tracked changes (8 insertions, 6 deletions)
-  Removed: 3 comments (2 resolved, 1 open)
-  Removed: rsid attributes from 247 elements
-  Removed: author metadata (2 unique authors)
-  Removed: template path (\\FIRM-DMS\templates\NDA_v3.dotx)
-  Removed: printer name (HP LaserJet 4th Floor)
-  Removed: 1 custom XML part (iManage DMS metadata)
-  Stripped: 12 empty/orphaned runs
-  Warning: 1 hyperlink targets internal URL (SharePoint)
+═══════════════════════════════════════════
+Sanitize Report: MSA_Final.docx
+Mode: full (--accept-all)
+═══════════════════════════════════════════
+
+TRACKED CHANGES (auto-accepted)
+  7 total: 3 insertions, 4 deletions
+  ├─ p.12: "Vendor" → "Supplier"
+  ├─ p.34: Inserted "not to exceed $500,000"
+  ├─ p.51: Deleted entire clause 8.3(b)
+  └─ ... (4 more)
+
+COMMENTS (removed)
+  3 total: 2 resolved, 1 open
+  ├─ p.7: [Resolved] "Check indemnity cap with client" (J. Smith)
+  ├─ p.22: [Resolved] "Confirmed with tax team" (A. Lee)
+  └─ p.45: [Open] "Counterparty won't accept this" (D. Park)
+
+METADATA (scrubbed)
+  Authors found: J. Smith, A. Lee, D. Park
+  Template: \\FIRM-DMS\templates\MSA_Standard_v4.dotx
+  Last printer: HP LaserJet 4th Floor East
+  Custom XML: 1 part (iManage metadata)
+
+STRUCTURAL (cleaned)
+  rsid attributes: 247 removed
+  Empty property elements: 12 removed
+  Orphaned runs: 0
+  Hidden text: 0
+
+WARNINGS
+  ⚠ Hyperlink in p.67 targets internal URL: https://firm.sharepoint.com/...
+
+═══════════════════════════════════════════
+Result: CLEAN (1 warning)
+═══════════════════════════════════════════
 ```
 
-## 4. Transform Catalog
-
-Each transform is a self-contained function that operates on a parsed XML element tree. Transforms are tagged with their applicability to each profile.
-
-### 4.1 Noise Reduction (both profiles)
-
-| ID | Transform | What it does | Risk |
-|----|-----------|-------------|------|
-| `T01` | **Strip rsid** | Remove all `w:rsid*` attributes (`rsidR`, `rsidRPr`, `rsidRDefault`, `rsidP`, `rsidDel`, `rsidSect`) | None. Word regenerates on save. |
-| `T02` | **Strip paraId/textId** | Remove `w14:paraId` and `w14:textId` attributes | None. Random hex, regenerated by Word. |
-| `T03` | **Coalesce runs** | Merge adjacent `w:r` elements with identical `w:rPr` | None. Visual output identical. Adeu already does this. |
-| `T04` | **Strip proofErr** | Remove `w:proofErr` (spellcheck squiggles) | None. Regenerated by Word's spell checker. |
-| `T05` | **Strip empty rPr/pPr** | Remove `<w:rPr/>` and `<w:pPr/>` elements that contain no children | None. Empty property containers have no effect. |
-| `T06` | **Canonicalize attributes** | Sort XML attributes alphabetically per element | None. XML spec says attribute order is insignificant. |
-| `T07` | **Normalize namespaces** | Remove unused namespace declarations. Pin used ones to a canonical set at root. | None. |
-| `T08` | **Sort relationship files** | Sort `_rels/*.rels` entries by target path. Renumber `rId` sequentially. Update all `r:id` references. | Low — must update references consistently across all parts. |
-| `T09` | **Sort numbering/footnotes** | Sort elements in `numbering.xml`, `footnotes.xml`, `endnotes.xml` by their ID attribute | None. Order is insignificant in these parts. |
-| `T10` | **Normalize docProps** | Strip volatile fields: `TotalTime`, `Words`, `Characters`, `Paragraphs`, `Lines` from `app.xml`. Normalize `cp:revision` to `1`. | Low. These are informational only. |
-| `T11` | **Pretty-print** | Format all XML with consistent indentation (2 spaces), one attribute per line for complex elements, UTF-8 with XML declaration | None. Whitespace outside text nodes is insignificant. |
-| `T12` | **Normalize xml:space** | Only add `xml:space="preserve"` on `w:t` elements where the text content has leading/trailing whitespace. Remove elsewhere. | None. Makes intent explicit. |
-
-### 4.2 Sanitize-Only Transforms
-
-These transforms are **destructive by design** — they remove content. Only applied in the `sanitize` profile.
-
-| ID | Transform | What it removes | Legal relevance |
-|----|-----------|----------------|-----------------|
-| `S01` | **Accept/remove track changes** | All `w:ins` wrappers (unwrap, keep content), all `w:del` elements (remove entirely), `w:rPr` change markers (`w:rPrChange`) | Shows negotiation strategy, draft history |
-| `S02` | **Remove comments** | All of `word/comments.xml`, `word/commentsExtended.xml`, `word/commentsIds.xml`, and corresponding `w:commentRangeStart/End`, `w:commentReference` elements | Internal notes, often candid |
-| `S03` | **Scrub authors** | Replace all `w:author` attributes with generic value ("Author"). Clear `dc:creator`, `cp:lastModifiedBy` in `docProps/core.xml` | Reveals who worked on document |
-| `S04` | **Scrub timestamps** | Normalize `w:date` attributes, `dcterms:created`, `dcterms:modified` to a fixed epoch | Reveals editing timeline |
-| `S05` | **Strip template path** | Remove `Template` from `docProps/app.xml` | Reveals internal file server paths |
-| `S06` | **Strip printer** | Remove `Manager`, printer references from `docProps/app.xml` | Reveals office infrastructure |
-| `S07` | **Strip custom XML** | Remove `customXml/` parts entirely (iManage, NetDocuments, SharePoint metadata) | Reveals DMS structure, matter/client numbers |
-| `S08` | **Strip hidden text** | Remove runs with `w:vanish` or `w:webHidden` in their `w:rPr` | Text invisible in Word but present in XML |
-| `S09` | **Strip orphaned content** | Remove runs not referenced by any paragraph flow (fast-save remnants) | Previously deleted text still in file |
-| `S10` | **Audit hyperlinks** | Flag (in report) or strip hyperlinks pointing to internal URLs (configurable pattern list) | Reveals internal infrastructure URLs |
-| `S11` | **Strip alt text** | Remove `descr` attributes from `wp:docPr` on images unless they look intentional (heuristic: length > 10, not a filename) | Auto-generated alt text can reveal filenames |
-| `S12` | **Strip embedded metadata** | Clean OLE objects of their own document properties | Embedded docs carry their own full metadata set |
-
-## 5. Profiles
-
-A profile is a named set of transforms. Specified via `--profile` flag, defaults are sensible per command.
-
-| Profile | Used by | Transforms | Purpose |
-|---------|---------|-----------|---------|
-| `normalize` | `fmt normalize` | T01–T12 | Deterministic XML for version control |
-| `sanitize` | `fmt sanitize` | T01–T12 + S01–S12 | Safe external delivery |
-| `minimal` | `fmt normalize --profile minimal` | T01, T02, T04, T11 | Light touch — just strip noise, pretty-print |
-
-Users can also specify `--exclude T08` to skip individual transforms (e.g., if rId renumbering causes issues with a specific document).
-
-## 6. Git Integration
-
-### 6.1 Smudge/Clean Filters
-
-For transparent git integration, `adeu fmt` can register as a git clean/smudge filter:
+For batch mode, one report per file plus a summary:
 
 ```
-adeu fmt git-setup
+═══════════════════════════════════════════
+Batch Summary: 4 documents processed
+═══════════════════════════════════════════
+  ✓ MSA_Final.docx          — clean (1 warning)
+  ✓ NDA_Final.docx          — clean
+  ✗ SOW_1.docx              — BLOCKED: 3 unresolved track changes
+  ✓ SOW_2.docx              — clean
+═══════════════════════════════════════════
+Exit code: 1 (1 document blocked)
 ```
 
-This writes to `.gitattributes` and `.git/config`:
+## 6. Implementation
 
-```gitattributes
-*.docx filter=adeu-fmt diff=adeu-fmt
-```
-
-```gitconfig
-[filter "adeu-fmt"]
-    clean = adeu fmt normalize --stdin --stdout
-    smudge = adeu fmt pack --stdin --stdout
-
-[diff "adeu-fmt"]
-    textconv = adeu fmt normalize --stdin --to-text
-```
-
-- **`clean`**: On `git add`, the DOCX is exploded and normalized before storage.
-- **`smudge`**: On `git checkout`, the normalized form is repacked into a DOCX.
-- **`textconv`**: `git diff` shows human-readable text extraction (via adeu's existing `extract` command) rather than binary diff.
-
-### 6.2 Exploded Repository Layout
-
-An alternative to smudge/clean filters: just version the exploded XML directly.
-
-```
-contracts/
-  msa/
-    [Content_Types].xml
-    word/
-      document.xml
-      styles.xml
-    docProps/
-      core.xml
-```
-
-A developer/lawyer runs `adeu fmt pack contracts/msa/ -o MSA.docx` to get the Word file. CI could do this automatically.
-
-## 7. Round-Trip Guarantees
-
-### 7.1 What is preserved (byte-level fidelity NOT guaranteed)
-
-The round-trip `normalize → pack` preserves:
-
-- All visible document content (text, images, tables, charts)
-- All formatting and styles
-- Document structure (sections, headers, footers)
-- Numbering and list definitions
-- Hyperlinks and bookmarks
-- Media files (binary passthrough)
-
-### 7.2 What is intentionally lost
-
-- rsid attributes (regenerated by Word on next save)
-- paraId/textId (regenerated by Word)
-- Volatile docProps (recalculated by Word)
-- proofErr markers (recalculated by spell checker)
-- XML formatting/whitespace (replaced by canonical form)
-- Attribute ordering (replaced by canonical alphabetical order)
-
-### 7.3 Verification
-
-The `normalize` command can optionally verify the round-trip:
-
-```
-adeu fmt normalize contract.docx -o contract/ --verify
-```
-
-This runs `normalize → pack → extract text` and compares with `original → extract text`. If the visible text differs, the command fails with a diff showing what was lost.
-
-## 8. Implementation Notes
-
-### 8.1 Dependencies
-
-- `lxml` for XML parsing and serialization (already a transitive dependency via python-docx)
-- `zipfile` from stdlib for DOCX pack/unpack
-- Adeu's existing `normalize_docx()` and `extract_text_from_stream()` for T03, T04, and verification
-
-### 8.2 Architecture
+### 6.1 Architecture
 
 ```
 src/adeu/
-  fmt/
-    __init__.py
-    normalize.py     # Explode + transform pipeline
-    pack.py          # Reassemble DOCX from directory
-    sanitize.py      # Sanitize orchestration + reporting
-    transforms/
-      __init__.py
-      noise.py       # T01-T12: noise reduction transforms
-      sanitize.py    # S01-S12: sanitize-only transforms
-    git.py           # Git filter setup + smudge/clean handlers
-    profiles.py      # Profile definitions + --exclude logic
+  sanitize/
+    __init__.py          # CLI entry point, orchestration
+    report.py            # Report generation
+    transforms.py        # All transforms (flat module, no over-abstraction)
 ```
 
-Each transform is a function with signature:
+No profiles, no transform IDs, no `--exclude` flags. Two modes, that's it.
+
+### 6.2 Transform Execution
+
+Each transform is a function:
 
 ```python
-def transform(tree: etree._ElementTree, part_name: str) -> TransformResult:
-    """Mutates the XML tree in place. Returns a summary of changes made."""
+def strip_rsid(tree: etree._ElementTree) -> list[str]:
+    """Remove rsid attributes. Returns list of human-readable actions taken."""
 ```
 
-The pipeline iterates over all parts in the DOCX, applying each active transform in order.
+Returns a list of strings for the report. The orchestrator collects them.
 
-### 8.3 Relationship to Existing Code
+### 6.3 Relationship to Existing Code
 
-- `T03` (coalesce runs) and `T04` (strip proofErr) already exist in `utils/docx.py` — extract and reuse.
-- `S01` (accept track changes) is conceptually the inverse of `RedlineEngine.apply_edits` — it unwraps what the engine wraps.
-- The `fmt sanitize` report could reuse `ingest.py`'s comment extraction to count/describe removed comments.
-- `fmt normalize` is a prerequisite for the `git-setup` integration but is independently useful.
+- Run coalescing: reuse from `utils/docx.py`
+- Track change acceptance (S01): inverse of `RedlineEngine` — unwrap `w:ins`, remove `w:del`
+- Comment extraction for report: reuse `ingest.py` comment parsing
+- The `sanitize` command is independent of `fmt normalize`/`pack` — those are a separate feature (git versioning) that can be built later if there's demand
 
-## 9. Scenario Analysis & Spec Gaps
+### 6.4 Exit Codes
 
-The following gaps were identified by simulating four real legal negotiation workflows.
+| Code | Meaning |
+|------|---------|
+| 0 | All documents sanitized successfully |
+| 1 | One or more documents blocked (unresolved track changes without `--accept-all`) |
+| 2 | Processing error (corrupt DOCX, I/O error) |
 
-### 9.1 Sanitize Directionality
+## 7. What Was Cut (and Why)
 
-**Problem**: `sanitize` treats all metadata uniformly, but legal workflows are directional. When sending a redline *to* counterparty, you want to keep *your* track changes (that's the deliverable) while stripping *their* prior history and all internal metadata.
+| Feature | Why cut |
+|---------|---------|
+| `fmt normalize` (explode to XML) | No user pulled for it. Lawyers don't use git. Can be added later. |
+| `fmt pack` (reassemble DOCX) | Only needed if normalize exists. |
+| Git smudge/clean filters | Architecturally broken (directory vs stream). Support nightmare. |
+| File watcher | Over-engineering. Solves a problem nobody expressed urgently. |
+| Profiles (`normalize`, `internal`, `minimal`) | Two modes (`full`, `outbound`) cover all expressed needs. |
+| Transform exclusion (`--exclude T08`) | Power-user feature nobody asked for. If a transform causes issues, fix the transform. |
+| Pretty-printing / attribute canonicalization | Only valuable for git diffing. Sanitize doesn't need it — output is a DOCX. |
+| History export | Real need but separate product. Requires git integration that was cut. |
+| Archival tagging | Same — depends on git. |
 
-**Resolution**: Add `--mode` flag to `sanitize`:
+## 8. Future Scope (if sanitize proves valuable)
 
-| Mode | Track Changes | Comments | Authors | Metadata |
-|------|--------------|----------|---------|----------|
-| `--mode full` (default) | Remove all | Remove all | Scrub all | Strip all |
-| `--mode outbound` | Keep current | Keep unresolved | Replace with `--author` value | Strip all |
-
-Outbound mode:
-- Keeps `w:ins`/`w:del` (your redline is the message)
-- Keeps open comments (your notes to counterparty)
-- Strips resolved comments (internal deliberation artifacts)
-- Replaces all `w:author` values with a single identity (`--author "Firm A"`)
-- Strips everything else (rsids, DMS, paths, etc.)
-
-```
-adeu fmt sanitize NDA_v1_redlined.docx -o clean.docx --mode outbound --author "Firm A Legal"
-```
-
-### 9.2 Track Change Boundary Safety
-
-**Problem**: T03 (coalesce runs) could theoretically merge runs across `w:ins`/`w:del` boundaries, destroying track change structure.
-
-**Resolution**: T03 must explicitly state: **never coalesce runs across track change element boundaries** (`w:ins`, `w:del`, `w:moveTo`, `w:moveFrom`). Adeu's existing `normalize_docx()` already respects this — the spec must document the invariant.
-
-### 9.3 Internal Collaboration Profile
-
-**Problem**: `normalize` strips author attribution (rsids, paraId). For internal collaboration, the team needs to know who changed what, while still getting clean diffs.
-
-**Resolution**: Add `internal` profile:
-
-| Profile | Transforms | Use case |
-|---------|-----------|----------|
-| `normalize` | T01–T12 | Git version control (maximum diffability) |
-| `internal` | T01, T02, T04–T12 (keeps T03 author-aware) | Internal team collaboration |
-| `sanitize` | T01–T12 + S01–S12 | External delivery |
-| `minimal` | T01, T02, T04, T11 | Light touch |
-
-The `internal` profile preserves `w:author` and `w:date` on track changes and comments while still stripping noise. This means git diffs show *what* changed and `git blame`-equivalent shows *who*.
-
-### 9.4 Smudge/Clean Filter Architecture
-
-**Problem**: The spec describes smudge/clean filters operating on stdin/stdout, but `normalize` produces a *directory*, not a single file stream. Git filters expect single-file-in → single-file-out.
-
-**Resolution**: Replace the smudge/clean filter design with one of:
-
-**Option A — Pre-commit hook (recommended for v1)**:
-```
-adeu fmt git-setup --hook
-```
-Installs a pre-commit hook that finds modified `.docx` files, normalizes them to a parallel directory, and stages the normalized XML. The `.docx` itself is gitignored or tracked via git-lfs.
-
-**Option B — File watcher (better UX, more complex)**:
-```
-adeu fmt watch contracts/
-```
-Daemon watches for `.docx` changes, auto-normalizes on save. Lawyer works in Word normally; git sees clean XML updates.
-
-**Option C — Single-stream format (if smudge/clean is essential)**:
-Normalize to a single deterministic XML stream (concatenated parts with delimiters) rather than a directory. Less readable but compatible with git filter protocol.
-
-Remove the current §6.1 smudge/clean description until one of these is implemented.
-
-### 9.5 Sanitize Safety Gate
-
-**Problem**: `S01` blindly accepts all track changes. This is a substantive legal action — a counterparty's unreviewed change could be silently accepted.
-
-**Resolution**: Split S01 into two behaviors:
-
-- **Default**: `sanitize` *refuses* if the document contains unresolved track changes. Reports what exists and exits with error.
-- **`--accept-all`**: Explicit flag to accept all changes and strip markup. The report lists every change that was auto-accepted.
-- **`--strip-markup-only`**: For documents where changes have been reviewed and accepted in Word but the XML markup lingers.
-
-```
-$ adeu fmt sanitize contract.docx -o clean.docx
-ERROR: Document contains 7 unresolved track changes.
-  Use --accept-all to accept and remove, or review in Word first.
-  Use --report to see details.
-
-$ adeu fmt sanitize contract.docx -o clean.docx --accept-all --report
-Sanitize Report:
-  Auto-accepted: 7 tracked changes
-    - Line 42: Deleted "indirect" (by Opposing Counsel, 2025-03-01)
-    - Line 42: Inserted "direct" (by Opposing Counsel, 2025-03-01)
-    ...
-```
-
-### 9.6 Batch Operations
-
-**Problem**: Deal finalization involves multiple documents. No batch support.
-
-**Resolution**: All `fmt` commands accept globs and `--outdir`:
-
-```
-adeu fmt sanitize contracts/*.docx --outdir final/ --report
-adeu fmt normalize contracts/*.docx --outdir exploded/
-```
-
-Batch report is a consolidated summary across all files.
-
-### 9.7 Concurrent Editing Acknowledgment
-
-**Problem**: Multiple lawyers editing the same DOCX simultaneously. Git cannot merge XML structurally.
-
-**Resolution**: The spec should explicitly state the recommended workflow:
-
-> **Concurrent editing**: Use SharePoint/OneDrive co-authoring for real-time collaboration. Normalize to git at checkpoints (after a round of edits is complete). Git is the audit trail, not the collaboration medium. Semantic merge is a non-goal for v1.
-
-### 9.8 Archival & History Export
-
-**Problem**: After deal closing, firms need the negotiation history for compliance (often 7+ years). Raw git history is not lawyer-friendly.
-
-**Resolution**: Add to future scope (not v1):
-
-```
-adeu fmt history contracts/msa/ --format html
-```
-
-Produces a human-readable changelog showing what changed between each committed version, using adeu's text extraction for the diff view. Tagging support (`adeu fmt tag contracts/msa/ "executed-2025-04-01"`) for marking final versions.
-
-## 10. Non-Goals (for v1)
-
-- **Semantic merge driver**: Git merge of two divergent DOCX edits. This requires conflict resolution at the paragraph level — possible but a separate project. See §9.7.
-- **Incremental normalization**: Re-normalizing only changed parts of a large document. Full-document normalization is fast enough for typical legal documents (< 1s for 100-page contracts).
-- **Style normalization**: Rewriting `styles.xml` to remove unused styles or normalize style names. Risky and low value for diffing.
-- **Content modification**: `fmt` never changes visible content. It is purely a structural/metadata operation (except `sanitize`, which explicitly removes content by design).
-- **History export**: Human-readable negotiation history from git. See §9.8 for future scope.
-- **Real-time co-authoring**: Git is an audit trail, not a collaboration medium. See §9.7.
+1. **`adeu fmt normalize`/`pack`** — Git versioning for firms that want audit trails. Only build if a customer asks.
+2. **Outlook/DMS integration** — The CLI is the engine. The product is a pre-send hook in Outlook or a workflow step in iManage/NetDocuments. Build integrations after the engine is solid.
+3. **CI/CD for legal** — Run sanitize in a pipeline before documents hit a deal room or VDR.
