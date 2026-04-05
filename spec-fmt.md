@@ -10,65 +10,109 @@ Law firms pay $30-80/user/month for metadata scrubbing tools. Lawyers still forg
 
 ## 2. CLI Interface
 
-### 2.1 Full Sanitize (closing/signature)
-
 ```
-adeu sanitize <input.docx> -o <output.docx> [--report] [--accept-all]
+adeu sanitize <input> -o <output> [flags]
 ```
 
-Strips everything. Produces a clean document with no history. Requires `--accept-all` if unresolved track changes exist (see §3).
+Three paths, determined by which flags are present:
 
-### 2.2 Baseline Sanitize (sending redline to counterparty)
+| Flag | Use case | Behavior |
+|------|----------|----------|
+| _(none)_ | Closing / signature | Full scrub. Refuses if unresolved track changes exist. |
+| `--keep-markup` | Sending a redline | Keeps existing track changes and open comments. Strips everything else. |
+| `--baseline <file>` | Forgot Track Changes / multi-round cleanup | Recomputes your delta against the original. Strips everything else. |
 
-```
-adeu sanitize <input.docx> --baseline <original.docx> -o <output.docx> [--report] [--author "Firm Name"]
-```
-
-The `--baseline` flag changes everything. Instead of stripping all track changes, the tool **computes your delta** against the original document they sent you:
-
-- Content matching baseline = clean text (no markup)
-- Content differing from baseline = your track changes (kept, shown as `w:ins`/`w:del`)
-- Comments present in baseline = theirs (stripped)
-- Comments not in baseline = yours (kept)
-- Resolved comments = internal deliberation (stripped regardless of origin)
-- All author names replaced with `--author` value (or "Author" if omitted)
-- Everything else (rsids, DMS metadata, paths, etc.) = stripped
-
-This means the tool doesn't need to guess authorship from `w:author` attributes. The baseline IS the authority. It also correctly handles cases where a lawyer accepted some counterparty changes and then made further edits — if the result matches the baseline at a given location, it's clean.
-
-**Example workflow:**
-```
-# Counterparty sends you their draft
-$ cp incoming_NDA.docx ~/baseline/    # save the original
-
-# Lawyer works in Word for hours, adding track changes and comments
-# ...
-
-# Before sending back:
-$ adeu sanitize worked_NDA.docx --baseline ~/baseline/incoming_NDA.docx \
-    -o NDA_to_send.docx --author "Smith & Associates" --report
-```
-
-### 2.3 Batch Mode
+### 2.1 Full Sanitize (closing / signature)
 
 ```
-adeu sanitize contracts/*.docx --outdir final/ --report
-adeu sanitize contracts/*.docx --baseline baselines/ --outdir outgoing/ --report
+adeu sanitize contract.docx -o clean.docx [--accept-all] [--report]
 ```
 
-Processes multiple files. Consolidated report. Non-zero exit code if any document has issues.
+Strips everything. Produces a clean document with no history. Refuses if unresolved track changes exist unless `--accept-all` is passed (see §3).
 
-In batch baseline mode, files are matched by name: `contracts/NDA.docx` looks for `baselines/NDA.docx`.
+### 2.2 Keep Markup (sending a redline to counterparty)
+
+```
+adeu sanitize redline.docx -o clean.docx --keep-markup [--author "Firm Name"] [--report]
+```
+
+The most common outbound workflow. The lawyer opened the counterparty's document, turned on Track Changes, made edits and added comments. The file already contains the delta as `w:ins`/`w:del` markup.
+
+`--keep-markup` preserves that markup and strips everything else:
+
+- Track changes (`w:ins`, `w:del`) → **kept**
+- Open comments → **kept** (these are your notes to counterparty)
+- Resolved comments → **stripped** (internal deliberation — see §4.3)
+- Author names on markup/comments → replaced with `--author` value (or "Author")
+- All metadata, rsids, DMS data, paths → **stripped**
+
+**Warning on empty markup**: If the document contains no track changes and no comments, the tool warns:
+
+```
+WARNING: Document contains no tracked changes or comments.
+  Output will be identical to a full sanitize.
+  If you edited without Track Changes, use --baseline to reconstruct the redline.
+```
+
+### 2.3 Baseline Sanitize (reconstructing the delta)
+
+```
+adeu sanitize edited.docx --baseline original.docx -o clean.docx [--author "Firm Name"] [--report]
+```
+
+For when Track Changes was off, or when a document has accumulated multiple rounds of markup that need to be collapsed into a clean delta.
+
+The tool:
+1. Extracts text from both documents (using `ingest.py`)
+2. Computes word-level diff (using `diff.py`)
+3. Produces a new DOCX based on the baseline with `w:ins`/`w:del` showing only your changes
+4. Strips all metadata from the result
+
+Comments:
+- Comments present in the baseline document → **stripped** (theirs)
+- Comments not in the baseline → **kept** (yours, subject to resolved/open rule)
+- Resolved comments → **stripped** regardless of origin
+
+**Baseline rule**: The baseline is always the last document you *received* from the counterparty — the file you opened and started editing. Your delta is measured from that point. Using an earlier version (e.g., your own original proposal instead of their redline of it) would incorrectly attribute their changes to you.
+
+**Divergence warning**: If the baseline and working document differ by more than 50% of content, the tool warns:
+
+```
+WARNING: Baseline and working document differ by 73%.
+  This may indicate the wrong baseline file was selected.
+  Proceeding — review the output carefully.
+```
+
+### 2.4 Batch Mode
+
+```
+adeu sanitize *.docx --outdir final/ [--report] [--report-file report.txt]
+adeu sanitize *.docx --baseline baselines/ --outdir outgoing/ [--report]
+```
+
+Processes multiple files. One report per file plus a consolidated summary. Non-zero exit code if any document has issues (see §6.4).
+
+In batch baseline mode, files are matched by name: `contracts/NDA.docx` looks for `baselines/NDA.docx`. Missing baseline is a fatal error for that file.
+
+### 2.5 Common Flags
+
+| Flag | Description |
+|------|-------------|
+| `-o <path>` | Output file (single) or `--outdir <dir>` (batch) |
+| `--report` | Print report to stderr |
+| `--report-file <path>` | Write report to file (for compliance archival) |
+| `--author <name>` | Replace all author names with this value. Used with `--keep-markup` or `--baseline`. |
+| `--accept-all` | Accept all unresolved track changes (full sanitize only). Required if track changes exist. |
 
 ## 3. Safety Gate
 
-`sanitize` (without `--baseline`) **refuses to run** if the document contains unresolved track changes:
+`sanitize` (without `--keep-markup` or `--baseline`) **refuses** if the document contains unresolved track changes:
 
 ```
 $ adeu sanitize contract.docx -o clean.docx
 ERROR: Document contains 7 unresolved tracked changes.
   3 insertions, 4 deletions — review in Word first, or use --accept-all.
-  Use --report to preview what would be accepted.
+  Run with --report to preview what would be accepted.
 ```
 
 `--accept-all` overrides this. The report lists every change that was auto-accepted:
@@ -76,67 +120,89 @@ ERROR: Document contains 7 unresolved tracked changes.
 ```
 $ adeu sanitize contract.docx -o clean.docx --accept-all --report
 Auto-accepted: 7 tracked changes
-  p.12: Deleted "Vendor" → Inserted "Supplier" (by Opposing Counsel)
-  p.34: Inserted "not to exceed $500,000" (by Opposing Counsel)
+  §4.2 Indemnification: "Vendor" → "Supplier"
+  §8.1 Term: Inserted "not to exceed $500,000"
   ...
 ```
 
 This prevents a counterparty's unreviewed insertion from being silently accepted as final text.
 
+The safety gate does **not** apply to `--keep-markup` (markup is being preserved, not accepted) or `--baseline` (delta is recomputed from scratch).
+
 ## 4. What Gets Stripped
 
-### 4.1 Always (both modes)
+### 4.1 Always Stripped
 
 | Category | What | Why it leaks |
 |----------|------|-------------|
-| **rsid attributes** | `w:rsidR`, `w:rsidRPr`, etc. on every run | Reconstructs editing session order |
+| **rsid attributes** | `w:rsidR`, `w:rsidRPr`, `w:rsidRDefault`, `w:rsidP`, `w:rsidDel`, `w:rsidSect` | Reconstructs editing session order |
 | **Paragraph IDs** | `w14:paraId`, `w14:textId` | No user value, noise |
-| **proofErr** | Spellcheck markers | No user value |
+| **proofErr** | `w:proofErr` spellcheck markers | No user value |
 | **Template path** | `Template` in `docProps/app.xml` | Reveals `\\FIRM-DMS\templates\...` paths |
 | **Printer** | Printer references in `docProps/app.xml` | Reveals office location/infrastructure |
 | **Custom XML** | `customXml/` parts (iManage, NetDocuments, etc.) | DMS matter numbers, client codes |
-| **Doc properties** | `TotalTime`, `Words`, revision count in `docProps/` | Editing timeline, effort spent |
-| **Author metadata** | `dc:creator`, `cp:lastModifiedBy` | Who worked on it |
-| **Timestamps** | `dcterms:created`, `dcterms:modified` | When it was worked on |
-| **Hidden text** | Runs with `w:vanish` or `w:webHidden` | Invisible in Word, readable in XML |
+| **Doc properties** | `TotalTime`, `Words`, `Characters`, `Paragraphs`, `Lines`, revision count | Editing timeline, effort spent |
+| **Author metadata** | `dc:creator`, `cp:lastModifiedBy` in `docProps/core.xml` | Who worked on it |
+| **Timestamps** | `dcterms:created`, `dcterms:modified` in `docProps/core.xml` | When it was worked on |
+| **Hidden text** | Runs with `w:vanish` or `w:webHidden` in `w:rPr` | Invisible in Word, readable in XML |
 | **Orphaned runs** | Content outside paragraph flow (fast-save remnants) | Previously deleted text still in file |
-| **Hyperlink audit** | Internal URLs (SharePoint, intranet) | Reveals internal infrastructure |
-| **Image alt text** | Auto-generated `descr` attributes on images | Often contains source filenames |
+| **Internal hyperlinks** | Links targeting internal URLs (SharePoint, intranet patterns) | Reveals internal infrastructure |
+| **Image alt text** | Auto-generated `descr` attributes on `wp:docPr` | Often contains source filenames |
 | **Embedded OLE metadata** | Document properties inside embedded objects | Nested documents carry full metadata |
+| **Empty property elements** | `<w:rPr/>`, `<w:pPr/>` with no children | Noise |
+| **Resolved comments** | Comments marked resolved (`w15:done="1"`) | Internal deliberation artifacts |
 
-### 4.2 Baseline-Dependent Behavior
+### 4.2 Flag-Dependent Behavior
 
-| What | Without `--baseline` | With `--baseline` |
-|------|---------------------|-------------------|
-| Track changes | Remove (requires `--accept-all`) | **Keep only your delta** (computed from baseline diff) |
-| Open comments | Remove | **Keep only yours** (not present in baseline) |
-| Resolved comments | Remove | Remove |
-| Author names | Remove | Replace with `--author` value |
-| Run coalescing | Yes | Yes (respecting track change boundaries) |
-| Empty rPr/pPr cleanup | Yes | Yes |
+| What | No flag (full) | `--keep-markup` | `--baseline` |
+|------|---------------|----------------|-------------|
+| Track changes | Remove (requires `--accept-all`) | **Keep as-is** | **Recompute from baseline diff** |
+| Open comments | Remove | **Keep** | **Keep if not in baseline** |
+| Resolved comments | Remove | Remove | Remove |
+| Author on tracked changes | Remove | Replace with `--author` | Replace with `--author` |
+| Author on comments | Remove | Replace with `--author` | Replace with `--author` |
+| Run coalescing | Yes | Yes (respects `w:ins`/`w:del` boundaries) | Yes (on freshly generated markup) |
+
+### 4.3 Comment Convention: Resolved = Internal, Open = External
+
+The tool cannot read a lawyer's intent for each comment. Instead, it relies on a simple convention aligned with how lawyers already work:
+
+- **Open comments** are for the counterparty ("We cannot accept uncapped indemnity")
+- **Resolved comments** are internal notes that have served their purpose ("Client approved $2M cap")
+
+**Workflow**: Before running `sanitize --keep-markup` or `--baseline`, resolve any internal comments in Word. Leave comments intended for the counterparty open. The tool strips resolved, keeps open.
+
+The report makes this reviewable (see §5) — listing exactly which comments will be visible and which were stripped.
+
+### 4.4 Run Coalescing Safety
+
+Run coalescing (merging adjacent `w:r` elements with identical `w:rPr`) **never crosses track change boundaries**. Runs inside `w:ins`, `w:del`, `w:moveTo`, or `w:moveFrom` elements are treated as isolated groups. This preserves track change structure.
 
 ## 5. The Report
 
-The report is the key differentiator. Existing tools scrub silently. This tool proves what it did.
+The report is the key differentiator. Existing tools scrub silently. This tool proves what it did — and shows what will be visible to the recipient.
+
+References use the **nearest heading** from the document's outline structure (extracted via `ingest.py`), not paragraph indices. If no heading exists, falls back to `¶<n>` (paragraph count from document start).
+
+### 5.1 Full Sanitize Report
 
 ```
 ═══════════════════════════════════════════
 Sanitize Report: MSA_Final.docx
---accept-all
 ═══════════════════════════════════════════
 
-TRACKED CHANGES (auto-accepted)
+TRACKED CHANGES (auto-accepted via --accept-all)
   7 total: 3 insertions, 4 deletions
-  ├─ p.12: "Vendor" → "Supplier"
-  ├─ p.34: Inserted "not to exceed $500,000"
-  ├─ p.51: Deleted entire clause 8.3(b)
-  └─ ... (4 more)
+  ├─ §4.2 Indemnification: "Vendor" → "Supplier"
+  ├─ §8.1 Term: Inserted "not to exceed $500,000"
+  ├─ §9.3 Limitation of Liability: Deleted clause 9.3(b) entirely
+  └─ (4 more)
 
 COMMENTS (removed)
   3 total: 2 resolved, 1 open
-  ├─ p.7: [Resolved] "Check indemnity cap with client" (J. Smith)
-  ├─ p.22: [Resolved] "Confirmed with tax team" (A. Lee)
-  └─ p.45: [Open] "Counterparty won't accept this" (D. Park)
+  ├─ §4.2 [Resolved] "Check indemnity cap with client" (J. Smith)
+  ├─ §7.1 [Resolved] "Confirmed with tax team" (A. Lee)
+  └─ §9.3 [Open] "Counterparty won't accept this" (D. Park)
 
 METADATA (scrubbed)
   Authors found: J. Smith, A. Lee, D. Park
@@ -151,14 +217,52 @@ STRUCTURAL (cleaned)
   Hidden text: 0
 
 WARNINGS
-  ⚠ Hyperlink in p.67 targets internal URL: https://firm.sharepoint.com/...
+  ⚠ §12.1: Hyperlink targets internal URL (https://firm.sharepoint.com/...)
 
 ═══════════════════════════════════════════
 Result: CLEAN (1 warning)
 ═══════════════════════════════════════════
 ```
 
-For batch mode, one report per file plus a summary:
+### 5.2 Keep-Markup / Baseline Report
+
+When using `--keep-markup` or `--baseline`, the report adds a section showing what **will be visible** to the counterparty:
+
+```
+═══════════════════════════════════════════
+Sanitize Report: NDA_v2_redline.docx
+--keep-markup --author "Smith & Associates"
+═══════════════════════════════════════════
+
+VISIBLE TO COUNTERPARTY
+  Tracked changes: 12 (5 insertions, 7 deletions)
+  Open comments: 2
+  ├─ §3.1 Confidentiality: "We cannot accept a 5-year tail period"
+  └─ §6.2 Governing Law: "Please confirm jurisdiction"
+  Author on all markup: "Smith & Associates"
+
+STRIPPED
+  Resolved comments: 4
+  ├─ §3.1 "Partner approved 3-year tail as fallback" (J. Chen)
+  ├─ §4.1 "Check with tax team" (D. Park)
+  ├─ §5.3 "Client OK with this" (J. Chen)
+  └─ §8.1 "Standard language, no change needed" (A. Lee)
+
+METADATA (scrubbed)
+  Authors found: J. Chen, D. Park, A. Lee
+  Template: \\FIRM-DMS\templates\NDA_Mutual_v2.dotx
+  Custom XML: 1 part (iManage metadata)
+
+STRUCTURAL (cleaned)
+  rsid attributes: 183 removed
+  Empty property elements: 8 removed
+
+═══════════════════════════════════════════
+Result: CLEAN
+═══════════════════════════════════════════
+```
+
+### 5.3 Batch Summary
 
 ```
 ═══════════════════════════════════════════
@@ -172,6 +276,8 @@ Batch Summary: 4 documents processed
 Exit code: 1 (1 document blocked)
 ```
 
+Individual per-file reports precede the summary. With `--report-file`, the full output (all per-file reports + summary) is written to the specified path.
+
 ## 6. Implementation
 
 ### 6.1 Architecture
@@ -179,31 +285,35 @@ Exit code: 1 (1 document blocked)
 ```
 src/adeu/
   sanitize/
-    __init__.py          # CLI entry point, orchestration
-    report.py            # Report generation
-    transforms.py        # All transforms (flat module, no over-abstraction)
+    __init__.py          # CLI wiring, orchestration
+    report.py            # Report generation, heading resolution
+    transforms.py        # All strip/clean transforms
 ```
-
-No profiles, no transform IDs, no `--exclude` flags. Presence or absence of `--baseline` determines behavior.
 
 ### 6.2 Transform Execution
 
-Each transform is a function:
+Each transform is a function that mutates the XML tree and returns report lines:
 
 ```python
 def strip_rsid(tree: etree._ElementTree) -> list[str]:
-    """Remove rsid attributes. Returns list of human-readable actions taken."""
+    """Remove rsid attributes. Returns human-readable summary."""
 ```
 
-Returns a list of strings for the report. The orchestrator collects them.
+The orchestrator:
+1. Loads the DOCX via `python-docx` / `zipfile`
+2. Iterates over all XML parts
+3. Applies each transform, collecting report lines
+4. Handles flag-specific logic (`--keep-markup`, `--baseline`, `--accept-all`)
+5. Repacks the DOCX
+6. Emits the report
 
 ### 6.3 Relationship to Existing Code
 
-- **Run coalescing**: reuse from `utils/docx.py`
-- **Track change acceptance**: inverse of `RedlineEngine` — unwrap `w:ins`, remove `w:del`
-- **Comment extraction for report**: reuse `ingest.py` comment parsing
-- **Baseline diffing**: This is adeu's core competency. `--baseline` mode uses `ingest.py` to extract text from both documents, `diff.py` to compute word-level changes, and `RedlineEngine` to inject `w:ins`/`w:del` into a clean copy. The sanitize command with `--baseline` is essentially: accept all existing markup in the working doc, then re-redline against the baseline. This produces a clean document with only your delta as track changes.
-- The `sanitize` command is independent of `fmt normalize`/`pack` — those are a separate feature (git versioning) that can be built later if there's demand
+- **Run coalescing**: reuse from `utils/docx.py` (`normalize_docx`)
+- **Track change acceptance**: inverse of `RedlineEngine` — unwrap `w:ins` (keep content), remove `w:del` (remove content), strip `w:rPrChange`
+- **Comment extraction for report**: reuse `ingest.py` comment parsing (author, date, scope, resolved status)
+- **Heading resolution for report**: reuse `ingest.py` heading detection (outline level / style name)
+- **Baseline diffing**: adeu's core pipeline. `--baseline` mode uses `ingest.py` to extract text from both documents, `diff.py` to compute word-level changes, and `RedlineEngine` to inject `w:ins`/`w:del` into a clean copy. Conceptually: accept all existing markup, then re-redline against the baseline.
 
 ### 6.4 Exit Codes
 
@@ -211,24 +321,65 @@ Returns a list of strings for the report. The orchestrator collects them.
 |------|---------|
 | 0 | All documents sanitized successfully |
 | 1 | One or more documents blocked (unresolved track changes without `--accept-all`) |
-| 2 | Processing error (corrupt DOCX, I/O error) |
+| 2 | Processing error (corrupt DOCX, I/O error, missing baseline in batch) |
 
-## 7. What Was Cut (and Why)
+## 7. Scenarios Validated
+
+### 7.1 Receive counterparty draft, redline, send back
+
+```
+$ adeu sanitize redline.docx -o out.docx --keep-markup --author "Firm A" --report
+```
+
+Associate had Track Changes on. Markup is preserved, metadata stripped, author names unified. Report confirms which comments go out (open) and which were stripped (resolved).
+
+If Track Changes was off:
+```
+$ adeu sanitize edited.docx --baseline incoming.docx -o out.docx --author "Firm A" --report
+```
+
+### 7.2 Receive counterparty redline of your proposal, respond
+
+```
+$ adeu sanitize response.docx --baseline counterparty_redline.docx -o out.docx --author "Firm A" --report
+```
+
+Baseline is the counterparty's redline (what you received), not your original proposal. Multi-round markup is collapsed into a clean delta showing only your changes.
+
+### 7.3 Internal collaboration before sending
+
+Three lawyers edit with Track Changes on. Before sending:
+
+1. Each lawyer resolves their internal comments in Word
+2. Leave counterparty-facing comments open
+3. Run:
+```
+$ adeu sanitize draft.docx --baseline counterparty_v3.docx -o out.docx --author "Firm A" --report
+```
+
+Report shows "VISIBLE TO COUNTERPARTY" (what goes out) and "STRIPPED" (what was removed). Partner reviews and signs off.
+
+### 7.4 Deal closing (batch finalization)
+
+```
+$ adeu sanitize final/*.docx --outdir executed/ --report --report-file closing_report.txt
+```
+
+Safety gate blocks any document with unresolved track changes. Paralegal fixes the blocked documents, reruns. Report is saved to matter file for 7-year compliance retention.
+
+## 8. What Was Cut (and Why)
 
 | Feature | Why cut |
 |---------|---------|
-| `fmt normalize` (explode to XML) | No user pulled for it. Lawyers don't use git. Can be added later. |
-| `fmt pack` (reassemble DOCX) | Only needed if normalize exists. |
-| Git smudge/clean filters | Architecturally broken (directory vs stream). Support nightmare. |
-| File watcher | Over-engineering. Solves a problem nobody expressed urgently. |
-| Profiles / modes | `--baseline` flag is the only branching point. No modes to remember. |
-| Transform exclusion (`--exclude T08`) | Power-user feature nobody asked for. If a transform causes issues, fix the transform. |
-| Pretty-printing / attribute canonicalization | Only valuable for git diffing. Sanitize doesn't need it — output is a DOCX. |
-| History export | Real need but separate product. Requires git integration that was cut. |
-| Archival tagging | Same — depends on git. |
+| `fmt normalize` (explode DOCX to XML) | No user pull. Lawyers don't use git. Can be added later. |
+| `fmt pack` (reassemble DOCX from XML) | Only needed if normalize exists. |
+| Git integration (smudge/clean, hooks, watcher) | Architecturally complex, support-heavy. Git is not a collaboration tool for lawyers. |
+| Profiles / transform exclusion | Three flags (`--keep-markup`, `--baseline`, `--accept-all`) cover all scenarios. No configuration needed. |
+| Pretty-printing / attribute canonicalization | Only valuable for git diffing. Sanitize outputs a DOCX, not readable XML. |
+| History export / archival tagging | Real need but separate product. Depends on git integration that was cut. |
 
-## 8. Future Scope (if sanitize proves valuable)
+## 9. Future Scope
 
-1. **`adeu fmt normalize`/`pack`** — Git versioning for firms that want audit trails. Only build if a customer asks.
-2. **Outlook/DMS integration** — The CLI is the engine. The product is a pre-send hook in Outlook or a workflow step in iManage/NetDocuments. Build integrations after the engine is solid.
-3. **CI/CD for legal** — Run sanitize in a pipeline before documents hit a deal room or VDR.
+1. **Outlook / DMS integration** — The CLI is the engine. The product is a pre-send hook in Outlook or a workflow step in iManage/NetDocuments.
+2. **CI/CD for legal** — Run sanitize in a pipeline before documents hit a deal room or VDR. Exit codes and `--report-file` already support this.
+3. **`adeu fmt normalize`/`pack`** — Git versioning for firms that want audit trails. Only build if a customer asks.
