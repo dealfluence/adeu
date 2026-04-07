@@ -23,6 +23,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 > If you have Homebrew installed, macOS may warn you to use it for system-wide installations. In that case, use:
+>
 > ```bash
 > brew install uv
 > ```
@@ -82,6 +83,8 @@ Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading 
 ### 1. For Agents (Claude / MCP)
 
 Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
+
+> ✨ **Bleeding Edge MCP UI:** The `read_docx` tool now supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
 
 **The "Document Specialist" Prompt:**
 To maximize the AI's effectiveness, paste this context into Claude's **Project Instructions** or your agent's System Prompt:
