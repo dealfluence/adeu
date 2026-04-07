@@ -16,7 +16,10 @@ from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 @tool(
     description=(
-        "Reads a DOCX file and returns its text content. Use this to ingest the document into your context window."
+        "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window. "
+        "By default (clean_view=False), it returns text with inline CriticMarkup (e.g., {++inserted++}, {--deleted--}, "
+        "{==highlighted==}{>>comment<<}) representing Tracked Changes and Comments. "
+        "Set clean_view=True ONLY if you want to read the final, clean text, ignoring all redlines and comments."
     ),
     annotations={"readOnlyHint": True},
     meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
@@ -60,7 +63,12 @@ async def read_docx(
 
 
 @tool(
-    description="Compares two DOCX files and returns a text-based Unified Diff.",
+    description=(
+        "Compares two DOCX files and generates a text-based Unified Diff. "
+        "Use this to see exactly what changed between two versions of a document. "
+        "By default (compare_clean=True), it compares the 'Accepted' finalized states of both documents. "
+        "Set compare_clean=False if you need to compare the raw underlying text including Tracked Change CriticMarkup."
+    ),
     annotations={"readOnlyHint": True},
 )
 async def diff_docx_files(
@@ -140,7 +148,20 @@ def _create_diff_output(original_path: str, modified_path: str, text_orig: str, 
 
 
 @tool(
-    description="Applies a batch of document changes (review actions and text edits).",
+    description=(
+        "Applies a batch of structural edits, text modifications, and review actions to a document. "
+        "This is your primary tool for editing DOCX files.\n\n"
+        "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
+        "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
+        "surrounding context if the word appears multiple times to ensure unique matching) and "
+        "`new_text` (the replacement, which supports Markdown like **bold** or _italic_). To "
+        "delete text, make `new_text` empty. Do NOT manually write CriticMarkup {++ tags; "
+        "the engine handles that.\n"
+        "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+        "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+        "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
+        "Always provide a realistic `author_name` for Tracked Changes."
+    ),
     annotations={"destructiveHint": True},
 )
 async def process_document_batch(
@@ -218,7 +239,12 @@ async def process_document_batch(
 
 
 @tool(
-    description="Accepts all tracked changes in the document and removes comments, creating a clean version.",
+    description=(
+        "Accepts all tracked changes and removes all comments in a single operation, "
+        "producing a finalized clean document. "
+        "Use this when a document review is entirely complete and you want to clear all redlines. "
+        "For selective acceptance/rejection of specific changes, use `process_document_batch` instead."
+    ),
     annotations={"destructiveHint": True},
 )
 async def accept_all_changes(
