@@ -84,7 +84,7 @@ Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading 
 
 Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
 
-> ✨ **Bleeding Edge MCP UI:** The `read_docx` tool now supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
+> ✨ **MCP Apps UI:** The `read_docx` tool now supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
 
 **The "Document Specialist" Prompt:**
 To maximize the AI's effectiveness, paste this context into Claude's **Project Instructions** or your agent's System Prompt:
