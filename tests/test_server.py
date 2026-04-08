@@ -199,7 +199,10 @@ def test_validate_documents_init(mock_urlopen, sample_docx):
     mock_response.__enter__.return_value = mock_response
     mock_urlopen.return_value = mock_response
 
-    result = asyncio.run(validate_documents(file_paths=[sample_docx], ctx=ctx, api_key="fake_key"))
+    # Convert the list to a JSON string before passing it to the tool
+    file_paths_json = json.dumps([sample_docx])
+
+    result = asyncio.run(validate_documents(file_paths=file_paths_json, ctx=ctx, api_key="fake_key"))
 
     text_result = str(result.content)
     assert "Validation task started successfully" in text_result

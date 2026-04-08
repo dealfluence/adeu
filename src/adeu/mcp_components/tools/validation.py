@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 
 from fastmcp import Context
 from fastmcp.dependencies import Depends
@@ -36,11 +36,13 @@ async def validate_documents(
     ctx: Context,
     file_paths: Annotated[
         Optional[str],
-        'A JSON-encoded string of a list of absolute paths to documents (DOCX, PDF) OR directories to start a new job. Example: \'["/path/to/doc1.pdf", "/path/to/doc2.docx"]\'',
+        (
+            "A JSON-encoded string of a list of absolute paths to documents (DOCX, PDF) "
+            "OR directories to start a new job. "
+            'Example: \'["/path/to/doc1.pdf", "/path/to/doc2.docx"]\''
+        ),
     ] = None,
-    task_id: Annotated[
-        Optional[int], "If resuming a pending check, provide the task ID here."
-    ] = None,
+    task_id: Annotated[Optional[int], "If resuming a pending check, provide the task ID here."] = None,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> ToolResult:
     if not file_paths and not task_id:
@@ -64,12 +66,10 @@ async def validate_documents(
             except json.JSONDecodeError as e:
                 raise ToolError(
                     f"Failed to parse 'file_paths'. Ensure it is a valid JSON array of strings. Error: {e}"
-                )
+                ) from e
 
         if not isinstance(parsed_paths, list):
-            raise ToolError(
-                "The 'file_paths' argument must resolve to a list of strings."
-            )
+            raise ToolError("The 'file_paths' argument must resolve to a list of strings.")
 
         await ctx.info(
             "Starting new document validation task",
@@ -89,16 +89,12 @@ async def validate_documents(
                         resolved_files.append(child)
             elif p.is_file():
                 if p.suffix.lower() not in valid_extensions:
-                    raise ToolError(
-                        f"Unsupported file type for {path_str}. Only .docx and .pdf are supported."
-                    )
+                    raise ToolError(f"Unsupported file type for {path_str}. Only .docx and .pdf are supported.")
                 resolved_files.append(p)
 
         resolved_files = list(set(resolved_files))
         if not resolved_files:
-            raise ToolError(
-                "No supported documents (.docx or .pdf) were found in the provided paths."
-            )
+            raise ToolError("No supported documents (.docx or .pdf) were found in the provided paths.")
 
         files_data = []
         for p in resolved_files:
@@ -130,9 +126,7 @@ async def validate_documents(
                 f"task_id={new_task_id} to monitor the progress."
             )
             await ctx.info(f"Task started: {new_task_id}")
-            return ToolResult(
-                content=msg, structured_content={"status": "pending", "message": msg}
-            )
+            return ToolResult(content=msg, structured_content={"status": "pending", "message": msg})
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
@@ -141,9 +135,7 @@ async def validate_documents(
                     "Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
                 ) from e
             error_body = e.read().decode("utf-8")
-            raise ToolError(
-                f"Cloud analysis failed (HTTP {e.code}): {error_body}"
-            ) from e
+            raise ToolError(f"Cloud analysis failed (HTTP {e.code}): {error_body}") from e
         except Exception as e:
             raise ToolError(f"Unexpected error: {str(e)}") from e
 
@@ -182,20 +174,14 @@ async def validate_documents(
                 error_msg = data.get("error", "Unknown internal error")
                 raise ToolError(f"Validation task failed on the server: {error_msg}")
 
-            await ctx.debug(
-                f"Task {task_id} status is {status}. Attempt {attempt + 1}/10. Sleeping 5s."
-            )
+            await ctx.debug(f"Task {task_id} status is {status}. Attempt {attempt + 1}/10. Sleeping 5s.")
 
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 DesktopAuthManager.clear_api_key()
-                raise ToolError(
-                    "Your authentication expired. Please re-authenticate."
-                ) from e
+                raise ToolError("Your authentication expired. Please re-authenticate.") from e
             error_body = e.read().decode("utf-8")
-            raise ToolError(
-                f"Failed to check task status (HTTP {e.code}): {error_body}"
-            ) from e
+            raise ToolError(f"Failed to check task status (HTTP {e.code}): {error_body}") from e
         except Exception as e:
             raise ToolError(f"Unexpected error checking task status: {str(e)}") from e
 
@@ -204,6 +190,4 @@ async def validate_documents(
 
     # If we reach here, the 50s timeout has been reached but it's still pending
     msg = f"Task {task_id} is still processing. Please call `validate_documents` again with task_id={task_id}."
-    return ToolResult(
-        content=msg, structured_content={"status": "pending", "message": msg}
-    )
+    return ToolResult(content=msg, structured_content={"status": "pending", "message": msg})
