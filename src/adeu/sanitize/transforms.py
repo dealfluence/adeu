@@ -6,6 +6,7 @@ in place and returns a list of human-readable report lines describing what
 was changed.
 """
 
+import datetime
 from typing import Optional
 
 import structlog
@@ -417,24 +418,22 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
 
 
 def scrub_timestamps(doc: DocumentObject) -> list[str]:
-    """Normalize timestamps in core properties."""
-    modified = False
+    """Normalize timestamps in core properties using the python-docx API."""
+    modified_any = False
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    
+    core = doc.core_properties
+    if core.created and core.created != epoch:
+        core.created = epoch
+        modified_any = True
+    if core.modified and core.modified != epoch:
+        core.modified = epoch
+        modified_any = True
+    if core.last_printed and core.last_printed != epoch:
+        core.last_printed = epoch
+        modified_any = True
 
-    # python-docx core_properties exposes created/modified as datetime
-    # We set them to None to clear, but python-docx may complain,
-    # so we go to raw XML
-    core_part = _find_part(doc, "/docProps/core.xml")
-    if core_part is not None:
-        core_el = _parse_part_xml(core_part)
-        if core_el is not None:
-            for tag in [f"{{{DCTERMS_NS}}}created", f"{{{DCTERMS_NS}}}modified"]:
-                for el in core_el.findall(f".//{tag}"):
-                    if el.text:
-                        el.text = "1970-01-01T00:00:00Z"
-                        modified = True
-            _write_part_xml(core_part, core_el)
-
-    if modified:
+    if modified_any:
         return ["Timestamps normalized to epoch"]
     return []
 
@@ -446,28 +445,42 @@ def scrub_timestamps(doc: DocumentObject) -> list[str]:
 
 def strip_custom_xml(doc: DocumentObject) -> list[str]:
     """Remove customXml parts from the package."""
-    parts_to_remove = []
-    for rel in doc.part.rels.values():
-        if rel.is_external:
-            continue
-        try:
-            partname = str(rel.target_part.partname)
-        except Exception:
-            continue
-        if "/customXml/" in partname or partname.startswith("/customXml"):
-            parts_to_remove.append((rel, partname))
-
-    if not parts_to_remove:
+    pkg = doc.part.package
+    
+    # 1. Identify all Custom XML parts
+    custom_parts = []
+    for part in pkg.parts:
+        partname = str(part.partname)
+        if "/customXml" in partname:
+            custom_parts.append(part)
+            
+    if not custom_parts:
         return []
+        
+    custom_partnames = {p.partname for p in custom_parts}
+    
+    # 2. Sever relationships from package root
+    root_rels_to_remove = [
+        rId for rId, rel in pkg.rels.items() 
+        if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
+    ]
+    for rId in root_rels_to_remove:
+        del pkg.rels[rId]
+        
+    # 3. Sever relationships from all other parts
+    for part in pkg.parts:
+        part_rels_to_remove = [
+            rId for rId, rel in part.rels.items() 
+            if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
+        ]
+        for rId in part_rels_to_remove:
+            del part.rels[rId]
+    
+    # 4. Remove from package's internal parts list to prevent serialization
+    if hasattr(pkg, '_parts') and isinstance(pkg._parts, list):
+        pkg._parts = [p for p in pkg._parts if p.partname not in custom_partnames]
 
-    for rel, _partname in parts_to_remove:
-        try:
-            if rel.target_part in doc.part.package.parts:
-                doc.part.package.parts.remove(rel.target_part)
-        except Exception:
-            pass
-
-    return [f"Custom XML parts: {len(parts_to_remove)} removed"]
+    return [f"Custom XML parts: {len(custom_parts)} removed"]
 
 
 def audit_hyperlinks(doc: DocumentObject, internal_patterns: Optional[list[str]] = None) -> list[str]:
