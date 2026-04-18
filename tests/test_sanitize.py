@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.opc.part import Part
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.opc.part import Part
 from lxml import etree
 
 from adeu.sanitize import transforms

@@ -159,7 +159,7 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     Returns report lines listing each change that was accepted.
     """
     lines = []
-    
+
     ins_els = doc.element.findall(f".//{qn('w:ins')}")
     del_els = doc.element.findall(f".//{qn('w:del')}")
     fmt_els = (
@@ -213,7 +213,10 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     total = len(ins_els) + len(del_els) + len(fmt_els)
 
     if total:
-        header = [f"Tracked changes auto-accepted: {total} ({len(ins_els)} insertions, {len(del_els)} deletions, {len(fmt_els)} formatting)"]
+        header = [
+            f"Tracked changes auto-accepted: {total} ({len(ins_els)}"
+            + f" insertions, {len(del_els)} deletions, {len(fmt_els)} formatting)"
+        ]
         return header + lines
     return []
 
