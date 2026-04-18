@@ -10,6 +10,8 @@ It treats the DOCX file as a **Virtual DOM**:
 2.  **Diff:** Calculates changes based on the AI's edits.
 3.  **Reconcile:** Surgically injects native XML `w:ins` (insertions) and `w:del` (deletions) back into the original document.
 
+Adeu Open Source Software is developed by [Adeu](adeu.ai).
+
 ---
 
 ## Setup
