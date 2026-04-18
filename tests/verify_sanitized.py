@@ -115,8 +115,10 @@ def check_keep_markup(zf: zipfile.ZipFile, expected_author: str):
         for c in changes:
             author = c.get(f"{{{NAMESPACES['w']}}}author")
             if author and author != expected_author:
-                raise AssertionError(f"❌ FAIL: Track change author '{author}' does not match expected '{expected_author}'")
-            
+                raise AssertionError(
+                    f"❌ FAIL: Track change author '{author}' does not match expected '{expected_author}'"
+                )
+
             date = c.get(f"{{{NAMESPACES['w']}}}date")
             if date and date != "2025-01-01T00:00:00Z":
                 raise AssertionError(f"❌ FAIL: Track change date '{date}' was not normalized")

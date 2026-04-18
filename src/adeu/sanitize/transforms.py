@@ -261,7 +261,8 @@ def _eject_comment_parts(doc: DocumentObject):
 
     # Sever from package root rels
     root_rels_to_remove = [
-        rId for rId, rel in pkg.rels.items()
+        rId
+        for rId, rel in pkg.rels.items()
         if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
     ]
     for rId in root_rels_to_remove:
@@ -270,14 +271,15 @@ def _eject_comment_parts(doc: DocumentObject):
     # Sever from all other parts
     for part in pkg.parts:
         part_rels_to_remove = [
-            rId for rId, rel in part.rels.items()
+            rId
+            for rId, rel in part.rels.items()
             if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
         ]
         for rId in part_rels_to_remove:
             del part.rels[rId]
 
     # Remove from package parts list
-    if hasattr(pkg, '_parts') and isinstance(pkg._parts, list):
+    if hasattr(pkg, "_parts") and isinstance(pkg._parts, list):
         pkg._parts = [p for p in pkg._parts if p.partname not in comment_partnames]
 
 
@@ -302,7 +304,7 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
         for el in doc.element.findall(f".//{qn(tag)}"):
             if el.getparent() is not None:
                 el.getparent().remove(el)
-                
+
     _eject_comment_parts(doc)
 
     resolved_count = len([c for c in data.values() if c.get("resolved")])
@@ -335,13 +337,13 @@ def remove_resolved_comments(doc: DocumentObject) -> list[str]:
             if el_id and el_id not in remaining_ids:
                 if el.getparent() is not None:
                     el.getparent().remove(el)
-                    
+
     # To be mathematically secure against orphaned resolved comments
     if cm.extended_part:
         for child in list(cm.extended_part.element):
             if child.get(qn("w15:done")) in ("1", "true", "on"):
                 cm.extended_part.element.remove(child)
-                
+
     if not remaining_ids:
         _eject_comment_parts(doc)
 
@@ -465,7 +467,7 @@ def scrub_timestamps(doc: DocumentObject) -> list[str]:
     """Normalize timestamps in core properties using the python-docx API."""
     modified_any = False
     epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
-    
+
     core = doc.core_properties
     if core.created and core.created != epoch:
         core.created = epoch
@@ -490,38 +492,40 @@ def scrub_timestamps(doc: DocumentObject) -> list[str]:
 def strip_custom_xml(doc: DocumentObject) -> list[str]:
     """Remove customXml parts from the package."""
     pkg = doc.part.package
-    
+
     # 1. Identify all Custom XML parts
     custom_parts = []
     for part in pkg.parts:
         partname = str(part.partname)
         if "/customXml" in partname:
             custom_parts.append(part)
-            
+
     if not custom_parts:
         return []
-        
+
     custom_partnames = {p.partname for p in custom_parts}
-    
+
     # 2. Sever relationships from package root
     root_rels_to_remove = [
-        rId for rId, rel in pkg.rels.items() 
+        rId
+        for rId, rel in pkg.rels.items()
         if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
     ]
     for rId in root_rels_to_remove:
         del pkg.rels[rId]
-        
+
     # 3. Sever relationships from all other parts
     for part in pkg.parts:
         part_rels_to_remove = [
-            rId for rId, rel in part.rels.items() 
+            rId
+            for rId, rel in part.rels.items()
             if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
         ]
         for rId in part_rels_to_remove:
             del part.rels[rId]
-    
+
     # 4. Remove from package's internal parts list to prevent serialization
-    if hasattr(pkg, '_parts') and isinstance(pkg._parts, list):
+    if hasattr(pkg, "_parts") and isinstance(pkg._parts, list):
         pkg._parts = [p for p in pkg._parts if p.partname not in custom_partnames]
 
     return [f"Custom XML parts: {len(custom_parts)} removed"]
