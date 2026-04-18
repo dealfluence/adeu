@@ -18,6 +18,7 @@ from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 
 
 def _get_claude_config_path() -> Path:
@@ -275,8 +276,6 @@ def handle_markup(args):
 
 
 def handle_sanitize(args: argparse.Namespace):
-    from adeu.sanitize.core import SanitizeError, sanitize_docx
-
     input_files: List[Path] = args.input
     is_batch = len(input_files) > 1 or args.outdir
 
@@ -331,7 +330,7 @@ def handle_sanitize(args: argparse.Namespace):
             sys.exit(2)
         outdir.mkdir(parents=True, exist_ok=True)
 
-        all_reports = []
+        all_reports: list[SanitizeResult | SanitizeError] = []
         blocked = 0
         succeeded = 0
 

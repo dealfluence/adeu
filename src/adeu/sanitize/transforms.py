@@ -16,6 +16,7 @@ from lxml import etree
 
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
+    get_paragraph_prefix,
     iter_block_items,
     iter_document_parts,
     normalize_docx,
@@ -157,12 +158,12 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     for ins in doc.element.findall(f".//{qn('w:ins')}"):
         text = _get_element_text(ins)
         if text.strip():
-            lines.append(f"  Accepted insertion: \"{_truncate(text, 60)}\"")
+            lines.append(f'  Accepted insertion: "{_truncate(text, 60)}"')
 
     for d in doc.element.findall(f".//{qn('w:del')}"):
         text = _get_element_text(d)
         if text.strip():
-            lines.append(f"  Accepted deletion of: \"{_truncate(text, 60)}\"")
+            lines.append(f'  Accepted deletion of: "{_truncate(text, 60)}"')
 
     # Now mutate: unwrap insertions
     for ins in doc.element.findall(f".//{qn('w:ins')}"):
@@ -195,8 +196,8 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
         if spc.getparent() is not None:
             spc.getparent().remove(spc)
 
-    ins_count = len([l for l in lines if "insertion" in l])
-    del_count = len([l for l in lines if "deletion" in l])
+    ins_count = len([line for line in lines if "insertion" in line])
+    del_count = len([line for line in lines if "deletion" in line])
     total = ins_count + del_count
 
     if total:
@@ -228,13 +229,15 @@ def get_comments_summary(doc: DocumentObject) -> dict:
             resolved_count += 1
         else:
             open_count += 1
-        comments.append({
-            "id": c_id,
-            "author": info.get("author", "Unknown"),
-            "text": info.get("text", ""),
-            "date": info.get("date", ""),
-            "resolved": is_resolved,
-        })
+        comments.append(
+            {
+                "id": c_id,
+                "author": info.get("author", "Unknown"),
+                "text": info.get("text", ""),
+                "date": info.get("date", ""),
+                "resolved": is_resolved,
+            }
+        )
 
     return {
         "total": len(comments),
@@ -252,9 +255,9 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
         return []
 
     lines = []
-    for c_id, info in data.items():
+    for info in data.values():
         status = "[Resolved]" if info.get("resolved") else "[Open]"
-        lines.append(f"  {status} \"{_truncate(info.get('text', ''), 60)}\" ({info.get('author', 'Unknown')})")
+        lines.append(f'  {status} "{_truncate(info.get("text", ""), 60)}" ({info.get("author", "Unknown")})')
 
     # Delete all comments
     for c_id in list(data.keys()):
@@ -266,7 +269,9 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
             if el.getparent() is not None:
                 el.getparent().remove(el)
 
-    header = [f"Comments removed: {len(data)} ({len([c for c in data.values() if c.get('resolved')])} resolved, {len([c for c in data.values() if not c.get('resolved')])} open)"]
+    resolved_count = len([c for c in data.values() if c.get("resolved")])
+    open_count = len([c for c in data.values() if not c.get("resolved")])
+    header = [f"Comments removed: {len(data)} ({resolved_count} resolved, {open_count} open)"]
     return header + lines
 
 
@@ -283,7 +288,7 @@ def remove_resolved_comments(doc: DocumentObject) -> list[str]:
 
     lines = []
     for c_id, info in resolved.items():
-        lines.append(f"  [Resolved] \"{_truncate(info.get('text', ''), 60)}\" ({info.get('author', 'Unknown')})")
+        lines.append(f'  [Resolved] "{_truncate(info.get("text", ""), 60)}" ({info.get("author", "Unknown")})')
         cm.delete_comment(c_id)
 
     # Clean up orphaned range markers for deleted comments
@@ -316,7 +321,7 @@ def replace_comment_authors(doc: DocumentObject, new_author: str) -> list[str]:
             c.set(qn("w:initials"), new_initials)
 
     if original_authors:
-        return [f"Comment authors replaced: {', '.join(sorted(original_authors))} → \"{new_author}\""]
+        return [f'Comment authors replaced: {", ".join(sorted(original_authors))} → "{new_author}"']
     return []
 
 
@@ -330,7 +335,7 @@ def replace_change_authors(doc: DocumentObject, new_author: str) -> list[str]:
                 original_authors.add(author)
                 el.set(qn("w:author"), new_author)
     if original_authors:
-        return [f"Track change authors replaced: {', '.join(sorted(original_authors))} → \"{new_author}\""]
+        return [f'Track change authors replaced: {", ".join(sorted(original_authors))} → "{new_author}"']
     return []
 
 
@@ -381,9 +386,17 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
     if app_part is not None:
         app_el = _parse_part_xml(app_part)
         if app_el is not None:
-            for tag_local in ["TotalTime", "Words", "Characters", "Paragraphs",
-                              "Lines", "CharactersWithSpaces", "Template",
-                              "Manager", "Company"]:
+            for tag_local in [
+                "TotalTime",
+                "Words",
+                "Characters",
+                "Paragraphs",
+                "Lines",
+                "CharactersWithSpaces",
+                "Template",
+                "Manager",
+                "Company",
+            ]:
                 tag = f"{{{EXTENDED_NS}}}{tag_local}"
                 for el in app_el.findall(f".//{tag}"):
                     if el.text:
@@ -399,13 +412,12 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
             _write_part_xml(app_part, app_el)
 
     if lines:
-        return ["Metadata scrubbed:"] + [f"  {l}" for l in lines]
+        return ["Metadata scrubbed:"] + [f"  {line}" for line in lines]
     return []
 
 
 def scrub_timestamps(doc: DocumentObject) -> list[str]:
     """Normalize timestamps in core properties."""
-    core = doc.core_properties
     modified = False
 
     # python-docx core_properties exposes created/modified as datetime
@@ -448,7 +460,7 @@ def strip_custom_xml(doc: DocumentObject) -> list[str]:
     if not parts_to_remove:
         return []
 
-    for rel, partname in parts_to_remove:
+    for rel, _partname in parts_to_remove:
         try:
             if rel.target_part in doc.part.package.parts:
                 doc.part.package.parts.remove(rel.target_part)
@@ -523,7 +535,7 @@ def _truncate(text: str, max_len: int = 60) -> str:
     text = text.replace("\n", " ").strip()
     if len(text) <= max_len:
         return text
-    return text[:max_len - 3] + "..."
+    return text[: max_len - 3] + "..."
 
 
 def _find_part(doc: DocumentObject, partname_suffix: str):
@@ -549,8 +561,6 @@ def _write_part_xml(part, element: etree._Element):
 
 def get_nearest_heading(doc: DocumentObject, target_paragraph_index: int) -> str:
     """Find the nearest heading above a given paragraph index."""
-    from adeu.utils.docx import get_paragraph_prefix
-
     best_heading = None
     para_idx = 0
 

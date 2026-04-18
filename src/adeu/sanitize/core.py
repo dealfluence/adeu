@@ -14,6 +14,10 @@ from typing import Optional
 import structlog
 from docx import Document
 
+from adeu.diff import generate_edits_from_text
+from adeu.ingest import extract_text_from_stream
+from adeu.redline.comments import CommentsManager
+from adeu.redline.engine import RedlineEngine
 from adeu.sanitize import transforms
 from adeu.sanitize.report import SanitizeReport
 
@@ -43,6 +47,7 @@ class SanitizeResult:
 
 class SanitizeError(Exception):
     """Raised when sanitization is blocked (e.g., unresolved track changes)."""
+
     pass
 
 
@@ -109,6 +114,7 @@ def sanitize_docx(
     elif mode == SanitizeMode.KEEP_MARKUP:
         _sanitize_keep_markup(doc, report, author=author)
     elif mode == SanitizeMode.BASELINE:
+        assert baseline_path is not None
         _sanitize_baseline(doc, input_path, baseline_path, report, author=author)
 
     if report.status == "blocked":
@@ -149,7 +155,7 @@ def sanitize_docx(
         tracked_changes_accepted=report.tracked_changes_accepted,
         comments_removed=report.comments_removed,
         comments_kept=report.comments_kept,
-        metadata_stripped=[l for l in report.metadata_lines],
+        metadata_stripped=[line for line in report.metadata_lines],
         warnings=report.warnings,
         report_text=report_text,
     )
@@ -211,18 +217,11 @@ def _sanitize_keep_markup(doc, report: SanitizeReport, *, author: Optional[str])
     remaining = transforms.get_comments_summary(doc)
     for c in remaining["comments"]:
         if not c["resolved"]:
-            report.kept_comment_lines.append(
-                f"\"{transforms._truncate(c['text'], 60)}\" ({c['author']})"
-            )
+            report.kept_comment_lines.append(f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
 
-def _sanitize_baseline(doc, input_path: str, baseline_path: str,
-                       report: SanitizeReport, *, author: Optional[str]):
+def _sanitize_baseline(doc, input_path: str, baseline_path: str, report: SanitizeReport, *, author: Optional[str]):
     """Recompute delta against baseline document."""
-    from adeu.diff import generate_edits_from_text
-    from adeu.ingest import extract_text_from_stream
-    from adeu.redline.engine import RedlineEngine
-
     # Step 1: Extract text from both documents
     with open(input_path, "rb") as f:
         working_stream = BytesIO(f.read())
@@ -243,11 +242,10 @@ def _sanitize_baseline(doc, input_path: str, baseline_path: str,
     # Divergence check
     if baseline_text and working_text:
         # Simple character-level similarity
-        shorter = min(len(baseline_text), len(working_text))
         longer = max(len(baseline_text), len(working_text))
         if longer > 0:
             # Count matching characters at same positions
-            matches = sum(1 for a, b in zip(baseline_text, working_text) if a == b)
+            matches = sum(1 for a, b in zip(baseline_text, working_text, strict=False) if a == b)
             similarity = matches / longer
             if similarity < 0.5:
                 divergence_pct = int((1 - similarity) * 100)
@@ -275,7 +273,7 @@ def _sanitize_baseline(doc, input_path: str, baseline_path: str,
     # The baseline-reconstructed doc won't have any comments from the working version.
     # This is a known limitation — comments require XML-level transplanting.
     # For v1, we note this in the report.
-    from adeu.redline.comments import CommentsManager
+
     working_doc = Document(BytesIO(working_stream.getvalue()))
     working_cm = CommentsManager(working_doc)
     working_comments = working_cm.extract_comments_data()
@@ -288,26 +286,20 @@ def _sanitize_baseline(doc, input_path: str, baseline_path: str,
     # Identify comments unique to working doc
     baseline_texts = {info["text"] for info in baseline_comments.values()}
     new_comments = [
-        info for info in working_comments.values()
-        if info["text"] not in baseline_texts and not info.get("resolved")
+        info for info in working_comments.values() if info["text"] not in baseline_texts and not info.get("resolved")
     ]
     removed_comments = [
-        info for info in working_comments.values()
-        if info["text"] in baseline_texts or info.get("resolved")
+        info for info in working_comments.values() if info["text"] in baseline_texts or info.get("resolved")
     ]
 
     report.comments_kept = len(new_comments)
     report.comments_removed = len(removed_comments)
 
     for c in new_comments:
-        report.kept_comment_lines.append(
-            f"\"{transforms._truncate(c['text'], 60)}\" ({c['author']})"
-        )
+        report.kept_comment_lines.append(f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})')
     for c in removed_comments:
         status = "[Resolved]" if c.get("resolved") else "[Baseline]"
-        report.removed_comment_lines.append(
-            f"{status} \"{transforms._truncate(c['text'], 60)}\" ({c['author']})"
-        )
+        report.removed_comment_lines.append(f'{status} "{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
     # Save the engine's output back to doc for further processing
     result_stream = engine.save_to_stream()

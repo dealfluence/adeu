@@ -6,8 +6,6 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
 
-from adeu.mcp_components.shared import _read_file_bytes
-
 
 @tool(
     description=(
@@ -50,7 +48,8 @@ async def sanitize_docx(
         "The report will list every change that was auto-accepted.",
     ] = False,
 ) -> dict:
-    from adeu.sanitize.core import SanitizeError, sanitize_docx as _sanitize
+    from adeu.sanitize.core import SanitizeError
+    from adeu.sanitize.core import sanitize_docx as _sanitize
 
     await ctx.info(
         f"Sanitizing document: {Path(file_path).name}",

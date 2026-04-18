@@ -53,8 +53,9 @@ class SanitizeReport:
                     self.kept_comment_lines.append(line)
                 else:
                     self.removed_comment_lines.append(line)
-            elif any(k in lower for k in ["author", "template", "company", "manager",
-                                           "metadata", "timestamp", "custom xml"]):
+            elif any(
+                k in lower for k in ["author", "template", "company", "manager", "metadata", "timestamp", "custom xml"]
+            ):
                 self.metadata_lines.append(line)
             elif any(k in lower for k in ["hyperlink", "warning"]):
                 self.warnings.append(line)
@@ -97,7 +98,7 @@ class SanitizeReport:
                 for cl in self.kept_comment_lines:
                     lines.append(f"    {cl}")
             if self.author:
-                lines.append(f"  Author on all markup: \"{self.author}\"")
+                lines.append(f'  Author on all markup: "{self.author}"')
 
         # Tracked changes section
         if self.change_lines:

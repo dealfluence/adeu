@@ -9,9 +9,8 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from adeu.sanitize.core import SanitizeError, SanitizeMode, SanitizeResult, sanitize_docx
 from adeu.sanitize import transforms
-
+from adeu.sanitize.core import SanitizeError, sanitize_docx
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,6 +102,7 @@ def _make_doc_with_comments(resolved: bool = False) -> io.BytesIO:
 
     # Create comments.xml part manually via the engine approach
     from adeu.redline.comments import CommentsManager
+
     cm = CommentsManager(doc)
     cm.add_comment(
         comment_id="0",
@@ -414,10 +414,7 @@ class TestSanitizeBaseline:
 
             out_doc = Document(result.output_path)
             # Should have track changes
-            all_changes = (
-                out_doc.element.findall(f".//{qn('w:ins')}")
-                + out_doc.element.findall(f".//{qn('w:del')}")
-            )
+            all_changes = out_doc.element.findall(f".//{qn('w:ins')}") + out_doc.element.findall(f".//{qn('w:del')}")
             assert len(all_changes) > 0, "Baseline mode should produce track changes"
         finally:
             os.unlink(baseline_path)
@@ -440,9 +437,7 @@ class TestNormalizeChangeDates:
                 for el in out_doc.element.findall(f".//{tag}"):
                     date = el.get(qn("w:date"))
                     if date:
-                        assert date == "2025-01-01T00:00:00Z", (
-                            f"Track change date should be normalized, got {date}"
-                        )
+                        assert date == "2025-01-01T00:00:00Z", f"Track change date should be normalized, got {date}"
         finally:
             os.unlink(input_path)
             if os.path.exists(result.output_path):
