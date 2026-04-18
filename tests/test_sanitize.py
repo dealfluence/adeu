@@ -3,6 +3,8 @@
 import io
 import os
 import tempfile
+import zipfile
+from pathlib import Path
 
 import pytest
 from docx import Document
@@ -11,6 +13,13 @@ from docx.oxml.ns import qn
 
 from adeu.sanitize import transforms
 from adeu.sanitize.core import SanitizeError, sanitize_docx
+from .verify_sanitized import (
+    check_full_scrub,
+    check_global_scrub,
+    check_keep_markup,
+)
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -462,3 +471,27 @@ class TestSanitizeExitCodes:
                 sanitize_docx(input_path, baseline_path="/nonexistent/baseline.docx")
         finally:
             os.unlink(input_path)
+
+
+class TestSanitizeE2E:
+    """End-to-End mathematical verification tests against dirty_sample.docx."""
+    
+    def test_e2e_full_sanitize(self, tmp_path):
+        dirty_doc = FIXTURE_DIR / "dirty_sample.docx"
+        out_path = tmp_path / "clean_full.docx"
+        
+        sanitize_docx(str(dirty_doc), str(out_path), accept_all=True)
+        
+        with zipfile.ZipFile(out_path, "r") as zf:
+            check_global_scrub(zf)
+            check_full_scrub(zf)
+            
+    def test_e2e_keep_markup(self, tmp_path):
+        dirty_doc = FIXTURE_DIR / "dirty_sample.docx"
+        out_path = tmp_path / "clean_keep.docx"
+        
+        sanitize_docx(str(dirty_doc), str(out_path), keep_markup=True, author="My Firm")
+        
+        with zipfile.ZipFile(out_path, "r") as zf:
+            check_global_scrub(zf)
+            check_keep_markup(zf, "My Firm")

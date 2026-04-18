@@ -473,22 +473,25 @@ class CommentsManager:
                 "parent_id": parent_id,
             }
 
-        # 2. Enrich with Threading from commentsExtended (Modern Word)
+        # 2. Enrich with Threading and Resolved status from commentsExtended (Modern Word)
         if self.extended_part:
             try:
-                # Iterate w15:commentEx elements
-                # They look like: <w15:commentEx w15:paraId="..." w15:paraIdParent="..."/>
                 for child in self.extended_part.element:
                     para_id = child.get(qn("w15:paraId"))
                     parent_para_id = child.get(qn("w15:paraIdParent"))
+                    done_val = child.get(qn("w15:done"))
 
-                    if para_id and parent_para_id:
+                    if para_id:
                         c_id = para_id_to_cid.get(para_id)
-                        p_id = para_id_to_cid.get(parent_para_id)
-                        if c_id and p_id and c_id in data:
-                            data[c_id]["parent_id"] = p_id
+                        if c_id and c_id in data:
+                            if parent_para_id:
+                                p_id = para_id_to_cid.get(parent_para_id)
+                                if p_id:
+                                    data[c_id]["parent_id"] = p_id
+                            if done_val in ("1", "true", "on"):
+                                data[c_id]["resolved"] = True
             except Exception as e:
-                logger.warning("Failed to parse commentsExtended for threading", error=str(e))
+                logger.warning("Failed to parse commentsExtended for threading/resolved status", error=str(e))
 
         return data
 

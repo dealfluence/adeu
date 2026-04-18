@@ -248,6 +248,39 @@ def get_comments_summary(doc: DocumentObject) -> dict:
     }
 
 
+def _eject_comment_parts(doc: DocumentObject):
+    """Completely eject all comment XML parts from the DOCX package."""
+    pkg = doc.part.package
+    comment_partnames = set()
+    for part in pkg.parts:
+        if str(part.partname).startswith("/word/comments"):
+            comment_partnames.add(part.partname)
+
+    if not comment_partnames:
+        return
+
+    # Sever from package root rels
+    root_rels_to_remove = [
+        rId for rId, rel in pkg.rels.items()
+        if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
+    ]
+    for rId in root_rels_to_remove:
+        del pkg.rels[rId]
+
+    # Sever from all other parts
+    for part in pkg.parts:
+        part_rels_to_remove = [
+            rId for rId, rel in part.rels.items()
+            if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
+        ]
+        for rId in part_rels_to_remove:
+            del part.rels[rId]
+
+    # Remove from package parts list
+    if hasattr(pkg, '_parts') and isinstance(pkg._parts, list):
+        pkg._parts = [p for p in pkg._parts if p.partname not in comment_partnames]
+
+
 def remove_all_comments(doc: DocumentObject) -> list[str]:
     """Remove all comments from the document."""
     cm = CommentsManager(doc)
@@ -269,6 +302,8 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
         for el in doc.element.findall(f".//{qn(tag)}"):
             if el.getparent() is not None:
                 el.getparent().remove(el)
+                
+    _eject_comment_parts(doc)
 
     resolved_count = len([c for c in data.values() if c.get("resolved")])
     open_count = len([c for c in data.values() if not c.get("resolved")])
@@ -300,6 +335,15 @@ def remove_resolved_comments(doc: DocumentObject) -> list[str]:
             if el_id and el_id not in remaining_ids:
                 if el.getparent() is not None:
                     el.getparent().remove(el)
+                    
+    # To be mathematically secure against orphaned resolved comments
+    if cm.extended_part:
+        for child in list(cm.extended_part.element):
+            if child.get(qn("w15:done")) in ("1", "true", "on"):
+                cm.extended_part.element.remove(child)
+                
+    if not remaining_ids:
+        _eject_comment_parts(doc)
 
     return [f"Resolved comments stripped: {len(resolved)}"] + lines
 

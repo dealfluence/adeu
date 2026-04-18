@@ -47,6 +47,11 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Dynamic Resizing**: HTML resources must include a `ResizeObserver` that emits `ui/notifications/size-changed` messages to the Host, allowing the iframe to expand seamlessly as content is injected.
 *   **Dual Payloads**: Tools utilizing UIs return `ToolResult(content=..., structured_content={"html": ...})`. This ensures the LLM receives pure Markdown to reason about, while the human user sees the styled HTML.
 
+### 8. Document Sanitization & Part Ejection
+*   **Deep Part Ejection**: When completely removing XML parts (e.g., Custom XML, Comments), deleting the elements is insufficient because `python-docx` will repackage empty XML files. We must explicitly sever relationships from `pkg.rels` and `part.rels`, and physically remove the part from `pkg._parts`.
+*   **Mathematical Scrub Verification**: For metadata sanitization, we rely on `lxml` + XPath directly on the unzipped DOCX as the absolute source of truth. This strictly bypasses `python-docx` caching layers to mathematically guarantee artifacts are removed.
+*   **Modern Comments Architecture**: Word's modern comments span four XML parts (`comments.xml`, `commentsExtended.xml`, `commentsIds.xml`, `commentsExtensible.xml`). The resolved status (`w15:done="1"`) is stored inside `commentsExtended.xml` and must be parsed and scrubbed from there.
+
 ## Developer Workflows
 
 ### Testing
