@@ -10,6 +10,8 @@ import pytest
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.part import Part
+from lxml import etree
 
 from adeu.sanitize import transforms
 from adeu.sanitize.core import SanitizeError, sanitize_docx
@@ -186,9 +188,10 @@ class TestCountTrackedChanges:
     def test_counts_insertions_and_deletions(self):
         stream = _make_doc_with_track_changes()
         doc = Document(stream)
-        ins, dels = transforms.count_tracked_changes(doc)
+        ins, dels, fmt = transforms.count_tracked_changes(doc)
         assert ins == 1
         assert dels == 1
+        assert fmt == 0
 
 
 class TestAcceptAllTrackedChanges:
@@ -200,9 +203,10 @@ class TestAcceptAllTrackedChanges:
         assert len(lines) > 0
 
         # Verify no track changes remain
-        ins, dels = transforms.count_tracked_changes(doc)
+        ins, dels, fmt = transforms.count_tracked_changes(doc)
         assert ins == 0
         assert dels == 0
+        assert fmt == 0
 
         # Verify text content: "Vendor" deleted, "Supplier" kept
         text = doc.paragraphs[0].text
@@ -223,6 +227,76 @@ class TestStripHiddenText:
         lines = transforms.strip_hidden_text(doc)
         assert len(lines) > 0
         assert "hidden" in lines[0].lower()
+
+
+class TestScrubDocProperties:
+    def test_schema_valid_empty_fields(self):
+        """Ensure integer fields are set to '0' and strings to '' to avoid Unreadable Content errors."""
+        doc = Document()
+        pkg = doc.part.package
+
+        # Find app.xml part
+        app_part = None
+        for p in pkg.parts:
+            if str(p.partname).endswith("app.xml"):
+                app_part = p
+                break
+
+        assert app_part is not None
+
+        # Inject test data into app.xml
+        xml_str = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Properties xmlns="{transforms.EXTENDED_NS}">
+            <Template>MyTemplate.dotm</Template>
+            <TotalTime>15</TotalTime>
+            <Words>250</Words>
+        </Properties>
+        '''
+        app_part._blob = xml_str.encode("utf-8")
+
+        transforms.scrub_doc_properties(doc)
+
+        # Verify via etree
+        tree = etree.fromstring(app_part.blob)
+        ns = {"app": transforms.EXTENDED_NS}
+
+        assert tree.find(".//app:TotalTime", ns).text == "0", "Integer fields must be zeroed, not emptied"
+        assert tree.find(".//app:Words", ns).text == "0", "Integer fields must be zeroed, not emptied"
+        template = tree.find(".//app:Template", ns)
+        assert template is not None
+        assert template.text is None or template.text == "", "String fields should be emptied"
+
+
+class TestStripCustomXml:
+    def test_removes_data_bindings(self):
+        """Ensure dangling dataBindings are removed when Custom XML is stripped to avoid Unreadable Content."""
+        doc = Document()
+        pkg = doc.part.package
+
+        # 1. Add a fake custom XML part
+        custom_part = Part(pkg.next_partname("/customXml/item%d.xml"), "application/xml", b"<test/>", pkg)
+        pkg.parts.append(custom_part)
+
+        # 2. Add a content control with a data binding
+        p = doc.add_paragraph()
+        sdt = OxmlElement("w:sdt")
+        sdtPr = OxmlElement("w:sdtPr")
+        binding = OxmlElement("w:dataBinding")
+        binding.set(qn("w:xpath"), "/test")
+        sdtPr.append(binding)
+        sdt.append(sdtPr)
+        p._element.append(sdt)
+
+        assert len(doc.element.findall(f".//{qn('w:dataBinding')}")) == 1
+
+        # Act
+        lines = transforms.strip_custom_xml(doc)
+
+        # Verify
+        assert len(lines) == 1
+        assert custom_part not in pkg.parts
+        assert len(doc.element.findall(f".//{qn('w:dataBinding')}")) == 0, "Dangling binding was not removed!"
+        assert len(doc.element.findall(f".//{qn('w:sdtPr')}")) == 1, "Parent sdtPr should remain"
 
 
 # ---------------------------------------------------------------------------

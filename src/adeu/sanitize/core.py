@@ -164,15 +164,15 @@ def sanitize_docx(
 def _sanitize_full(doc, report: SanitizeReport, *, accept_all: bool):
     """Full sanitize: strip everything."""
     # Check for unresolved track changes
-    ins_count, del_count = transforms.count_tracked_changes(doc)
-    total = ins_count + del_count
+    ins_count, del_count, fmt_count = transforms.count_tracked_changes(doc)
+    total = ins_count + del_count + fmt_count
     report.tracked_changes_found = total
 
     if total > 0 and not accept_all:
         report.status = "blocked"
         report.blocked_reason = (
             f"Document contains {total} unresolved tracked changes "
-            f"({ins_count} insertions, {del_count} deletions). "
+            f"({ins_count} insertions, {del_count} deletions, {fmt_count} formatting). "
             f"Review in Word first, or use --accept-all."
         )
         return
@@ -193,8 +193,8 @@ def _sanitize_full(doc, report: SanitizeReport, *, accept_all: bool):
 def _sanitize_keep_markup(doc, report: SanitizeReport, *, author: Optional[str]):
     """Keep existing track changes and open comments, strip the rest."""
     # Count what's there
-    ins_count, del_count = transforms.count_tracked_changes(doc)
-    total_changes = ins_count + del_count
+    ins_count, del_count, fmt_count = transforms.count_tracked_changes(doc)
+    total_changes = ins_count + del_count + fmt_count
     report.tracked_changes_found = total_changes
     report.tracked_changes_kept = total_changes
 
@@ -265,7 +265,13 @@ def _sanitize_baseline(doc, input_path: str, baseline_path: str, report: Sanitiz
     if edits:
         engine.apply_edits(edits)
 
-    report.tracked_changes_found = len(edits) if edits else 0
+    # Save the engine's output back to stream to measure the ACTUAL XML changes
+    result_stream = engine.save_to_stream()
+    result_doc = Document(result_stream)
+
+    # Accurately count the generated track changes XML nodes
+    ins_count, del_count, fmt_count = transforms.count_tracked_changes(result_doc)
+    report.tracked_changes_found = ins_count + del_count + fmt_count
     report.tracked_changes_kept = report.tracked_changes_found
 
     # Step 4: Handle comments from working doc (keep those not in baseline)
@@ -301,14 +307,10 @@ def _sanitize_baseline(doc, input_path: str, baseline_path: str, report: Sanitiz
         status = "[Resolved]" if c.get("resolved") else "[Baseline]"
         report.removed_comment_lines.append(f'{status} "{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
-    # Save the engine's output back to doc for further processing
-    result_stream = engine.save_to_stream()
-
     # We need to replace the doc object. Since we can't reassign it in the caller,
     # we'll modify the approach: return the stream and let caller handle it.
     # Actually, we modify the doc's element tree in-place by loading from the result.
     # This is hacky but works with the current architecture.
-    result_doc = Document(result_stream)
 
     # Replace the original doc's body with the result
     # We need to copy the entire element tree

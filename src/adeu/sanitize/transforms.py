@@ -140,11 +140,16 @@ def coalesce_runs(doc: DocumentObject) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def count_tracked_changes(doc: DocumentObject) -> tuple[int, int]:
-    """Returns (insertion_count, deletion_count) of unresolved track changes."""
+def count_tracked_changes(doc: DocumentObject) -> tuple[int, int, int]:
+    """Returns (insertion_count, deletion_count, format_count) of unresolved track changes."""
     ins_count = len(doc.element.findall(f".//{qn('w:ins')}"))
     del_count = len(doc.element.findall(f".//{qn('w:del')}"))
-    return ins_count, del_count
+    fmt_count = (
+        len(doc.element.findall(f".//{qn('w:rPrChange')}"))
+        + len(doc.element.findall(f".//{qn('w:pPrChange')}"))
+        + len(doc.element.findall(f".//{qn('w:sectPrChange')}"))
+    )
+    return ins_count, del_count, fmt_count
 
 
 def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
@@ -154,20 +159,28 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     Returns report lines listing each change that was accepted.
     """
     lines = []
+    
+    ins_els = doc.element.findall(f".//{qn('w:ins')}")
+    del_els = doc.element.findall(f".//{qn('w:del')}")
+    fmt_els = (
+        doc.element.findall(f".//{qn('w:rPrChange')}")
+        + doc.element.findall(f".//{qn('w:pPrChange')}")
+        + doc.element.findall(f".//{qn('w:sectPrChange')}")
+    )
 
-    # Collect info before mutating
-    for ins in doc.element.findall(f".//{qn('w:ins')}"):
+    # Collect textual info before mutating (we skip empty strings for the detailed list to reduce noise)
+    for ins in ins_els:
         text = _get_element_text(ins)
         if text.strip():
             lines.append(f'  Accepted insertion: "{_truncate(text, 60)}"')
 
-    for d in doc.element.findall(f".//{qn('w:del')}"):
+    for d in del_els:
         text = _get_element_text(d)
         if text.strip():
             lines.append(f'  Accepted deletion of: "{_truncate(text, 60)}"')
 
     # Now mutate: unwrap insertions
-    for ins in doc.element.findall(f".//{qn('w:ins')}"):
+    for ins in ins_els:
         parent = ins.getparent()
         if parent is None:
             continue
@@ -178,7 +191,7 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
         parent.remove(ins)
 
     # Remove deletions
-    for d in doc.element.findall(f".//{qn('w:del')}"):
+    for d in del_els:
         if d.getparent() is not None:
             d.getparent().remove(d)
 
@@ -197,12 +210,10 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
         if spc.getparent() is not None:
             spc.getparent().remove(spc)
 
-    ins_count = len([line for line in lines if "insertion" in line])
-    del_count = len([line for line in lines if "deletion" in line])
-    total = ins_count + del_count
+    total = len(ins_els) + len(del_els) + len(fmt_els)
 
     if total:
-        header = [f"Tracked changes auto-accepted: {total} ({ins_count} insertions, {del_count} deletions)"]
+        header = [f"Tracked changes auto-accepted: {total} ({len(ins_els)} insertions, {len(del_els)} deletions, {len(fmt_els)} formatting)"]
         return header + lines
     return []
 
@@ -433,17 +444,19 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
     if app_part is not None:
         app_el = _parse_part_xml(app_part)
         if app_el is not None:
-            for tag_local in [
-                "TotalTime",
-                "Words",
-                "Characters",
-                "Paragraphs",
-                "Lines",
-                "CharactersWithSpaces",
-                "Template",
-                "Manager",
-                "Company",
-            ]:
+            # Integer fields must be set to "0" (empty string causes schema validation failure / unreadable content)
+            int_fields = ["TotalTime", "Words", "Characters", "Paragraphs", "Lines", "CharactersWithSpaces"]
+            for tag_local in int_fields:
+                tag = f"{{{EXTENDED_NS}}}{tag_local}"
+                for el in app_el.findall(f".//{tag}"):
+                    if el.text and el.text != "0":
+                        if tag_local == "TotalTime":
+                            lines.append(f"Total editing time: {el.text} minutes")
+                        el.text = "0"
+
+            # String fields can be safely emptied
+            str_fields = ["Template", "Manager", "Company"]
+            for tag_local in str_fields:
                 tag = f"{{{EXTENDED_NS}}}{tag_local}"
                 for el in app_el.findall(f".//{tag}"):
                     if el.text:
@@ -453,8 +466,6 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
                             lines.append(f"Company: {el.text}")
                         elif tag_local == "Manager":
                             lines.append(f"Manager: {el.text}")
-                        elif tag_local == "TotalTime" and el.text != "0":
-                            lines.append(f"Total editing time: {el.text} minutes")
                         el.text = ""
             _write_part_xml(app_part, app_el)
 
@@ -527,6 +538,11 @@ def strip_custom_xml(doc: DocumentObject) -> list[str]:
     # 4. Remove from package's internal parts list to prevent serialization
     if hasattr(pkg, "_parts") and isinstance(pkg._parts, list):
         pkg._parts = [p for p in pkg._parts if p.partname not in custom_partnames]
+
+    # 5. Scrub dangling data bindings from the document body to prevent Unreadable Content
+    for sdt_pr in doc.element.findall(f".//{qn('w:sdtPr')}"):
+        for binding in sdt_pr.findall(f".//{qn('w:dataBinding')}"):
+            sdt_pr.remove(binding)
 
     return [f"Custom XML parts: {len(custom_parts)} removed"]
 
