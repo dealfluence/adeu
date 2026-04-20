@@ -2,7 +2,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -117,7 +117,7 @@ if sys.platform == "win32":
                 )
 
             annotations = []
-            
+
             # Helper to get exact bounds, bypassing formatting wrappers if possible
             def _get_bounds(obj):
                 return getattr(obj.Range, "Start", 0), getattr(obj.Range, "End", 0)
@@ -154,7 +154,7 @@ if sys.platform == "win32":
                     com = doc.Comments(i)
                     text = com.Scope.Text or ""
                     author = com.Author
-                    
+
                     cid = str(i - 1)
 
                     date_obj = getattr(com, "Date", None)
@@ -186,8 +186,8 @@ if sys.platform == "win32":
                     logger.warning(f"Failed to read comment {i}: {e}")
 
             # 2b. Extract Formats (Fast COM Path using Collapse)
-            bold_ranges = []
-            italic_ranges = []
+            bold_ranges: List[Tuple[int, int]] = []
+            italic_ranges: List[Tuple[int, int]] = []
             try:
                 for fmt_name, fmt_list in [("bold", bold_ranges), ("italic", italic_ranges)]:
                     rng = doc.Content
@@ -203,7 +203,7 @@ if sys.platform == "win32":
                     while rng.Find.Execute():
                         start = rng.Start
                         end = rng.End
-                        
+
                         is_explicit = True
                         try:
                             style_font = rng.Style.Font
@@ -218,13 +218,18 @@ if sys.platform == "win32":
                             text_val = rng.Text
                             if text_val:
                                 trim_count = 0
-                                while trim_count < len(text_val) and text_val[-(trim_count + 1)] in ('\r', '\x07', '\x0b', '\x0c'):
+                                while trim_count < len(text_val) and text_val[-(trim_count + 1)] in (
+                                    "\r",
+                                    "\x07",
+                                    "\x0b",
+                                    "\x0c",
+                                ):
                                     trim_count += 1
                                 if trim_count > 0:
                                     end -= trim_count
                         except Exception:
                             pass
-                        
+
                         if start < end and is_explicit:
                             fmt_list.append((start, end))
                         rng.Collapse(0)  # wdCollapseEnd
@@ -238,7 +243,7 @@ if sys.platform == "win32":
                 for lvl in range(1, 10):
                     rng = doc.Content
                     rng.Find.ClearFormatting()
-                    rng.Find.Style = -1 - lvl 
+                    rng.Find.Style = -1 - lvl
                     rng.Find.Forward = True
                     rng.Find.Wrap = 0
                     rng.Find.Format = True
@@ -250,7 +255,7 @@ if sys.platform == "win32":
                 logger.warning(f"Failed to read headings: {e}")
 
             # 3. Build sequential Event list at exact COM indices
-            events_by_idx = {}
+            events_by_idx: Dict[int, List[DocxEvent]] = {}
             for ann in annotations:
                 start = ann["start"]
                 end = ann["end"]
@@ -271,11 +276,11 @@ if sys.platform == "win32":
             for start, end in bold_ranges:
                 events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "**"))
                 events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "**"))
-                
+
             for start, end in italic_ranges:
                 events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "_"))
                 events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "_"))
-                
+
             for start, lvl in heading_events:
                 events_by_idx.setdefault(start, []).append(DocxEvent("heading", "#" * lvl + " "))
 
@@ -302,19 +307,25 @@ if sys.platform == "win32":
                         if isinstance(e, str):
                             return 0
                         t = getattr(e, "type", "")
-                        if t == "heading": return -3
-                        if t == "fmt_start": return -2
-                        if "start" in t or t == "start": return -1
-                        if t == "fmt_end": return 3
-                        if "end" in t or t == "end": return 2
+                        if t == "heading":
+                            return -3
+                        if t == "fmt_start":
+                            return -2
+                        if "start" in t or t == "start":
+                            return -1
+                        if t == "fmt_end":
+                            return 3
+                        if "end" in t or t == "end":
+                            return 2
                         return 0
+
                     evts.sort(key=evt_sort_key)
                     items.extend(evts)
 
             # 4. Mirror the ingest.py State Machine
-            active_ins = {}
-            active_del = {}
-            active_comments = set()
+            active_ins: Dict[str, DocxEvent] = {}
+            active_del: Dict[str, DocxEvent] = {}
+            active_comments: Set[str] = set()
             active_bold = 0
             active_italic = 0
             deferred_meta_states = []
@@ -340,9 +351,6 @@ if sys.platform == "win32":
                             suffix = "_" + suffix
 
                         seg = apply_formatting_to_segments(seg, prefix, suffix)
-                        
-                        if '\r' in seg or '\n' in seg:
-                            in_heading = False
 
                         if clean_view:
                             new_wrappers = ("", "")
@@ -404,11 +412,15 @@ if sys.platform == "win32":
                 elif isinstance(item, DocxEvent):
                     if item.type in ("fmt_start", "fmt_end", "heading"):
                         if item.type == "fmt_start":
-                            if item.id == "**": active_bold += 1
-                            elif item.id == "_": active_italic += 1
+                            if item.id == "**":
+                                active_bold += 1
+                            elif item.id == "_":
+                                active_italic += 1
                         elif item.type == "fmt_end":
-                            if item.id == "**": active_bold = max(0, active_bold - 1)
-                            elif item.id == "_": active_italic = max(0, active_italic - 1)
+                            if item.id == "**":
+                                active_bold = max(0, active_bold - 1)
+                            elif item.id == "_":
+                                active_italic = max(0, active_italic - 1)
                         elif item.type == "heading":
                             if pending_text:
                                 s_tok, e_tok = current_wrappers
@@ -446,7 +458,12 @@ if sys.platform == "win32":
                     parts.append(f"{{>>{meta_block}<<}}")
 
             final_text = "".join(parts)
-            final_text = final_text.replace("\r\x07\r\x07", "\n").replace("\r\x07", " | ").replace("\x07", " | ").replace("\r", "\n")
+            final_text = (
+                final_text.replace("\r\x07\r\x07", "\n")
+                .replace("\r\x07", " | ")
+                .replace("\x07", " | ")
+                .replace("\r", "\n")
+            )
 
             return ToolResult(
                 content=final_text,
@@ -502,25 +519,25 @@ if sys.platform == "win32":
                         if isinstance(change, ModifyText):
                             clean_target = _strip_critic_markup(change.target_text)
                             raw_text = doc.Content.Text
-                            
+
                             clean_chars = []
                             mapping = []
                             i = 0
                             while i < len(raw_text):
-                                if raw_text[i:i+4] == '\r\x07\r\x07':
-                                    clean_chars.append('\n')
+                                if raw_text[i : i + 4] == "\r\x07\r\x07":
+                                    clean_chars.append("\n")
                                     mapping.append(i)
                                     i += 4
-                                elif raw_text[i:i+2] == '\r\x07':
-                                    clean_chars.extend([' ', '|', ' '])
+                                elif raw_text[i : i + 2] == "\r\x07":
+                                    clean_chars.extend([" ", "|", " "])
                                     mapping.extend([i, i, i])
                                     i += 2
-                                elif raw_text[i] == '\x07':
-                                    clean_chars.extend([' ', '|', ' '])
+                                elif raw_text[i] == "\x07":
+                                    clean_chars.extend([" ", "|", " "])
                                     mapping.extend([i, i, i])
                                     i += 1
-                                elif raw_text[i] == '\r':
-                                    clean_chars.append('\n')
+                                elif raw_text[i] == "\r":
+                                    clean_chars.append("\n")
                                     mapping.append(i)
                                     i += 1
                                 else:
@@ -529,7 +546,7 @@ if sys.platform == "win32":
                                     i += 1
                             mapping.append(len(raw_text))
                             current_text = "".join(clean_chars)
-                            
+
                             start_idx, end_idx = _find_match_in_text(current_text, clean_target)
 
                             if start_idx != -1:
@@ -559,7 +576,9 @@ if sys.platform == "win32":
                                     doc_rng.Find.ClearFormatting()
                                     doc_rng.Find.Text = search_text
                                     if doc_rng.Find.Execute():
-                                        replace_rng = doc.Range(Start=doc_rng.Start, End=doc_rng.Start + len(exact_substring))
+                                        replace_rng = doc.Range(
+                                            Start=doc_rng.Start, End=doc_rng.Start + len(exact_substring)
+                                        )
                                         _apply_com_replacement(doc, app, replace_rng, change.new_text, change.comment)
                                         stats["applied"] += 1
                                     else:
