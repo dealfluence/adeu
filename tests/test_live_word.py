@@ -127,10 +127,12 @@ def test_live_word_modify_with_comment(active_word_app):
 
         assert "Foxes are very tired today." in content, f"Comment missing from extraction. Extracted: {content}"
 
-        # 4. Verify Strict Nesting (Comment wraps the Insertion, no interleaved tags)
-        # We want: {=={++sleepy++}...==}
-        # NOT: {++{==sleepy++}...==}
-        assert "{=={++sleepy++}" in content, f"Tags interleaved incorrectly! Extracted: {content}"
+        # 4. Verify that the output uses the flattened state machine format
+        # The text 'sleepy' is an insertion, so it gets {++ ++}.
+        # The comment metadata is attached to the same block.
+        assert "{++sleepy++}" in content, f"Insertion tag missing! Extracted: {content}"
+        assert "{--quick--}" in content, f"Deletion tag missing! Extracted: {content}"
+        assert "{=={++" not in content, "Tags should be flattened, not nested!"
 
     asyncio.run(run_test())
 
@@ -192,6 +194,367 @@ def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
     asyncio.run(run_test())
 
 
+def test_live_word_complex_formatting(active_word_app):
+    """
+    Ensures that when the LLM supplies Markdown via Live COM ModifyText,
+    the Markdown is correctly parsed and native Word fonts (Bold/Italic) are applied.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.Range(0, doc.Content.End).Text = "The quick brown fox.\n"
+
+    async def run_test():
+        changes = [ModifyText(target_text="brown fox", new_text="**bold** and _italic_", comment=None)]
+
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+        assert "Applied: 1" in res
+
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # Live COM extraction now parses formatting parity identically to Disk XML
+        assert "{++**bold** and _italic_++}" in content
+        assert "{--brown fox--}" in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_cross_boundary_edits_rescue_comments(active_word_app):
+    """
+    Validates Bug 1 fix: Replacing text that contains a comment should rescue
+    the comment and re-anchor it to the newly inserted text, instead of destroying it.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.Range(0, doc.Content.End).Text = "Initial manuscript document.\n"
+
+    # Add comment specifically targeting "manuscript"
+    start_idx = doc.Content.Text.find("manuscript")
+    doc.Comments.Add(doc.Range(start_idx, start_idx + 10), "Editorial comment")
+
+    async def run_test():
+        changes = [ModifyText(target_text="manuscript", new_text="typescript", comment=None)]
+        await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # Verify the original comment wasn't silently destroyed!
+        assert "Editorial comment" in content
+        assert "{++typescript++}" in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_multiple_comments_overwrite(active_word_app):
+    """
+    Validates Bug 1 & 3 fix: Ensures multiple comments do not overwrite
+    each other in live memory due to shared w:id="0" states before a save.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.Range(0, doc.Content.End).Text = "Initial document.\n"
+    
+    # Add comment 1
+    doc.Comments.Add(doc.Range(0, 7), "Comment One")
+    
+    # Add comment 2
+    doc.Comments.Add(doc.Range(8, 16), "Comment Two")
+
+    async def run_test():
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # Both comments should appear distinctly with their own IDs
+        assert "Comment One" in content
+        assert "Comment Two" in content
+        assert "Com:0" in content
+        assert "Com:1" in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_table_structure_and_mapping(active_word_app):
+    """
+    Validates Bug 1d (Table Structure) and 1a-1c (Table Modification Mapping).
+    Ensures live COM natively extracts table cells with `|` and successfully 
+    maps string replacements perfectly inside complex cell boundaries.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # Create a 2x2 table natively in Word
+    doc.Range(0, doc.Content.End).Text = ""
+    table = doc.Tables.Add(doc.Range(0, 0), NumRows=2, NumColumns=2)
+    table.Cell(1, 1).Range.Text = "Region"
+    table.Cell(1, 2).Range.Text = "Revenue"
+    table.Cell(2, 1).Range.Text = "North"
+    table.Cell(2, 2).Range.Text = "500"
+
+    async def run_test():
+        # Replace cell content, testing the mapping array offsets
+        changes = [
+            ModifyText(target_text="North", new_text="North America", comment=None)
+        ]
+        await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # Verify table structure markers (`|`) are present (Bug 1d)
+        assert "Region | Revenue" in content
+        # Verify atomic insertion is fully intact (Bug 1a, 1b, 1c)
+        assert "{++North America++}{--North--}" in content
+        assert "}North" not in content  # No phantom trailing text
+
+    asyncio.run(run_test())
+
+
+def test_live_word_accept_reject_reply(active_word_app):
+    """
+    End-to-end test: Validates that AcceptChange, RejectChange, and ReplyComment
+    payloads are correctly applied to the active MS Word COM object, modifying
+    its state and successfully reflecting in a subsequent read.
+    """
+    import asyncio
+    import re
+    from adeu.models import AcceptChange, RejectChange, ReplyComment
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # Initial Setup
+    doc.Range(0, doc.Content.End).Text = "The quick brown fox.\n"
+    
+    doc.TrackRevisions = True
+    
+    # Create a Deletion
+    start_del = doc.Content.Text.find("brown ")
+    doc.Range(start_del, start_del + 6).Delete()
+    
+    # Create an Insertion
+    doc.Range(start_del, start_del).Text = "red "
+    
+    # Create a Comment
+    start_com = doc.Content.Text.find("quick")
+    doc.Comments.Add(doc.Range(start_com, start_com + 5), "Is it really quick?")
+    
+    doc.TrackRevisions = False  # Disable tracking so our API test runs cleanly
+    
+    async def run_test():
+        # 1. Read to ensure tags and metadata blocks exist
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+        
+        assert "{--brown --}" in content
+        assert "{++red ++}" in content
+        assert "Is it really quick?" in content
+        
+        # 2. Fire the Review APIs
+        # Based on COM extraction behavior, revisions will be Chg:1 and Chg:2. Comment will be Com:0.
+        # We will Accept both changes to arrive at "The quick red fox."
+        changes = [
+            AcceptChange(target_id="Chg:1"),
+            AcceptChange(target_id="Chg:2"),
+            ReplyComment(target_id="Com:0", text="Yes, absolutely.")
+        ]
+        
+        process_res = await process_active_word_batch(ctx, changes=changes, author_name="QA Agent")
+        assert "Failed: 0" in process_res, f"Batch apply failed: {process_res}"
+        
+        # 3. Verify final state
+        final_res = await read_active_word_document(ctx, clean_view=False)
+        final_content = final_res.structured_content["markdown"] if isinstance(final_res, ToolResult) else str(final_res)
+        
+        # Redlines should be resolved (no markup tags)
+        assert "{++" not in final_content
+        assert "{--" not in final_content
+        
+        # Content should reflect accepted edits
+        assert "brown" not in final_content
+        assert "red fox" in final_content
+        
+        # The reply comment must be present in the metadata block
+        assert "Yes, absolutely." in final_content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_heading_bold_suppression(active_word_app):
+    """
+    Regression test for formatting parity:
+    Ensures that text inheriting Bold from a Heading style (or even explicitly bolded)
+    does NOT get double-styled with ** markers in the Live COM extraction, 
+    matching Disk XML behavior.
+    """
+    import asyncio
+    from adeu.models import ModifyText
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # 1. Setup Document with Heading
+    doc.Range(0, doc.Content.End).Text = "Quarterly Report\n"
+    
+    p1 = doc.Paragraphs(1)
+    p1.Style = -2
+    # Force explicit bold so Word COM definitely finds it
+    p1.Range.Bold = True
+
+    # 2. Track an edit on the heading
+    doc.TrackRevisions = True
+    
+    rng = doc.Range(0, 16)
+    rng.Text = "Annual"
+    
+    doc.TrackRevisions = False
+
+    async def run_test():
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+        
+        # The heading should NOT have ** markers inside or outside the track changes
+        assert "{++**Annual**++}" not in content, "Heading bold leaked into insertion!"
+        assert "{--**Quarterly Report**--}" not in content, "Heading bold leaked into deletion!"
+        assert "**{++Annual++}**" not in content, "Heading was double-styled with bold!"
+
+
+def test_live_word_heading_bold_suppression(active_word_app):
+    """
+    Regression test for formatting parity:
+    Ensures that text inheriting Bold from a Heading style does NOT get double-styled
+    with ** markers in the Live COM extraction, matching Disk XML behavior.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # 1. Setup Document with Heading
+    doc.Range(0, doc.Content.End).Text = "Quarterly Report\n"
+    
+    p1 = doc.Paragraphs(1)
+    p1.Style = -2  # wdStyleHeading1
+    
+    # 2. Track an edit on the heading
+    doc.TrackRevisions = True
+    
+    rng = doc.Range(0, 16)
+    rng.Text = "Annual"
+    
+    doc.TrackRevisions = False
+
+    async def run_test():
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+        
+        # The heading should NOT have ** markers inside the track changes
+        assert "{++**Annual**++}" not in content, "Inherited heading bold leaked into insertion!"
+        assert "{--**Quarterly Report**--}" not in content, "Inherited heading bold leaked into deletion!"
+        
+        # It SHOULD look exactly like this:
+        assert "# {++Annual++}{--Quarterly Report--}" in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_explicit_vs_inherited_formatting(active_word_app):
+    """
+    Regression test for BUG 1 and 2 (Round 13):
+    Ensures that inherited bold (from styles like Heading 1 or Strong) does not
+    trigger ** emission, but explicit bold does. Ensures italic survives in headings.
+    """
+    import asyncio
+    from fastmcp.tools.tool import ToolResult
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # Create Paragraph 1: Heading with Italic
+    doc.Range(0, doc.Content.End).Text = "Heading with italic\n"
+    p1 = doc.Paragraphs(1)
+    p1.Style = -2  # wdStyleHeading1
+    doc.Range(p1.Range.Start + 13, p1.Range.Start + 19).Italic = True
+
+    # Create Paragraph 2: Strong with Italic
+    p2_start = doc.Content.End - 1
+    doc.Range(p2_start, p2_start).Text = "Strong with italic\n"
+    p2 = doc.Paragraphs(2)
+    try:
+        strong_style = doc.Styles.Add("TestStrong", 1)  # 1 = wdStyleTypeParagraph
+        strong_style.Font.Bold = True
+        p2.Style = strong_style
+    except Exception:
+        p2.Range.Bold = True  # fallback
+    doc.Range(p2.Range.Start + 12, p2.Range.Start + 18).Italic = True
+    
+    # Create Paragraph 3: Normal with Explicit Bold
+    p3_start = doc.Content.End - 1
+    doc.Range(p3_start, p3_start).Text = "Normal with bold\n"
+    p3 = doc.Paragraphs(3)
+    doc.Range(p3.Range.Start + 12, p3.Range.Start + 16).Bold = True
+
+    async def run_test():
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+        
+        # 1. Heading italic MUST survive, heading bold MUST NOT emit **
+        assert "# Heading with _italic_" in content, f"Heading formatting failed: {content}"
+        
+        # 2. Strong paragraph MUST NOT emit ** for its inherited bold, but italic MUST survive
+        assert "Strong with _italic_" in content, f"Strong paragraph formatting failed: {content}"
+
+        # 3. Explicit bold in Normal paragraph MUST emit **
+        assert "Normal with **bold**" in content, f"Explicit bold failed: {content}"
+
+    asyncio.run(run_test())
+
+
+def test_live_word_body_bold_after_heading_sticky_state(active_word_app):
+    """
+    Regression test for BUG 1 (Round 11):
+    Ensures the 'in_heading' bold-suppression state properly resets at paragraph
+    boundaries (\\r), so legitimate bold markers in body text/tables are not lost.
+    """
+    import asyncio
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # 1. Setup Document with Heading followed by Bold Body
+    doc.Range(0, doc.Content.End).Text = "Quarterly Report\nRegion | Revenue\n"
+    
+    p1 = doc.Paragraphs(1)
+    p1.Style = -2  # wdStyleHeading1
+    
+    p2 = doc.Paragraphs(2)
+    p2.Range.Bold = True  # Explicit bold on body text
+
+    async def run_test():
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+        
+        # Heading must NOT be bolded
+        assert "**Quarterly Report**" not in content, "Heading was improperly bolded"
+        assert "# Quarterly Report" in content
+        
+        # Body text MUST be bolded (This will fail in Round 11)
+        assert "**Region | Revenue**" in content, "Bold suppression leaked to body text!"
+
+    asyncio.run(run_test())
+
+
 def test_live_word_overlapping_annotations(active_word_app):
     """
     Ensures that overlapping annotations (e.g. a comment wrapping a redline deletion)
@@ -224,8 +587,10 @@ def test_live_word_overlapping_annotations(active_word_app):
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # Validate that the markup is completely balanced and uncorrupted
-        assert content.count("{==") == 1
-        assert content.count("==}") == 1
+        # With the ingest.py state machine, overlaps are flattened.
+        # The comment spans across an insertion and a deletion, so it splits into two {==...==} blocks.
+        assert content.count("{==") == 2
+        assert content.count("==}") == 2
         assert content.count("{++") == 1
         assert content.count("++}") == 1
         assert content.count("{--") == 1

@@ -40,6 +40,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 ### 6. The Unified `DocumentChange` API
 *   **Flat API Structure**: The LLM interacts with a flat list of `DocumentChange` objects (Discriminated Union of `ModifyText`, `AcceptChange`, `RejectChange`, `ReplyComment`).
 *   **Search & Replace First**: Pure insertions and deletions are intentionally hidden from the LLM. All text modifications must be executed as search-and-replace (`ModifyText`) to guarantee sufficient anchoring context for the fuzzy matcher.
+*   **Universal Tooling**: Disk-based and Live Word tools share the same endpoints (`read_docx`, `process_document_batch`). On Windows, omitting file paths dynamically routes the command to the active Live Word COM object, preventing LLM tool selection paralysis.
 
 ### 7. MCP Apps & UI Rendering
 *   **Custom HTML Apps**: We use FastMCP's `AppConfig(resource_uri="ui://...")` to serve custom HTML/CSS interfaces for complex tools (e.g., `validate_documents`). We maintain full control over the markup.
@@ -59,7 +60,16 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   **Extraction Parity**: Active COM extraction uses an *event-based string builder* (sorting events by length and type) to inject CriticMarkup tags safely. This handles infinitely nested/overlapping annotations (e.g., comments wrapping redlines) without string offset drift.
     *   **Pre-Resolution**: Modifying text natively adds Revisions, shifting `doc.Revisions` indices. We pre-resolve and cache all target COM objects *before* applying a batch of `DocumentChange` operations so Accept/Reject actions target the correct revisions.
 *   **Comment Bounds**: We strictly use `Comment.Scope` (the highlighted text), not `Comment.Reference` (the 0-length anchor), to accurately extract target strings for Comment annotations.
-*   **Identity Spoofing**: Tools temporarily hijack `Word.Application.UserName` and toggle `doc.TrackRevisions` to apply tracked changes cleanly as the Agent, guaranteeing state restoration in a `finally` block.
+*   **Identity Spoofing & Deadlocks**: Tools temporarily hijack `Word.Application.UserName` and toggle `doc.TrackRevisions` to apply tracked changes cleanly as the Agent. *Constraint*: Modern M365 enforces logged-in MS Account identities on Comments. Attempting to spoof comment authors via `app.Options.UseLocalUserInfo` causes fatal STA thread deadlocks. Live comments will natively show the local user's real name.
+
+### 10. COM vs XML Impedance Mismatches
+Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requires bridging deep structural differences:
+*   **State Machine Parity**: Both engines MUST feed into the exact same event-driven state machine (`DocxEvent` accumulation -> `_get_wrappers` -> `_build_merged_meta_block`) to ensure identical tag ordering and bubble grouping.
+*   **Formatting (Explicit vs Inherited)**: Disk XML evaluates explicit `<w:b/>` tags. Word COM's `rng.Find.Font.Bold` evaluates WYSIWYG bold (including inherited styles like Headings). Live COM must explicitly cross-check `rng.Style.Font.Bold` to avoid double-styling markdown markers (`**`) on inherited runs.
+*   **Table Rendering & COM Offset Drift**: Word COM injects hidden structural characters (`\r\x07`) at cell boundaries, breaking Python string indices. Solution: Decouple structural markdown extraction (`|` for cells) from native COM execution, using exact index mapping arrays paired with `rng.Find` to securely bypass COM index drift.
+*   **Ephemeral Session IDs**: Word natively assigns `w:id="0"` to all unsaved revisions/comments in live memory, randomly assigning persistent IDs during a Save. **IDs are session-bound.** Agents must treat Save/Reload boundaries as a state wipe and re-index the document IDs afterward.
+*   **Destructive Native Edits (Comment Rescue)**: Assigning `Range.Text` in Live Word natively destroys any comments anchored to that text. Batch processors must explicitly cache, rescue, and re-anchor comments during string replacements.
+*   **Empty Runs & Timestamps**: Both engines must explicitly skip empty runs to synchronize lookahead bubble grouping. Both must emit full ISO-8601 timestamps without truncation to preserve chronological signals.
 
 ## Developer Workflows
 

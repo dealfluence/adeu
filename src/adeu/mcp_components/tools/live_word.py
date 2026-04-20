@@ -15,7 +15,7 @@ if sys.platform == "win32":
     from adeu.ingest import _build_merged_meta_block, _get_wrappers
     from adeu.markup import _find_match_in_text
     from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
-    from adeu.utils.docx import DocxEvent
+    from adeu.utils.docx import DocxEvent, apply_formatting_to_segments
 
     logger = logging.getLogger(__name__)
 
@@ -28,6 +28,70 @@ if sys.platform == "win32":
         text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", text)
         text = re.sub(r"\{==(.*?)==\}", r"\1", text)
         return text
+
+    def _parse_markdown_for_com(text: str):
+        """Parses bold and italic markdown, returning plain text and index ranges."""
+        bold_ranges = []
+        italic_ranges = []
+
+        while True:
+            m = re.search(r"\*\*(.*?)\*\*", text)
+            if not m:
+                break
+            start = m.start()
+            inner = m.group(1)
+            text = text[:start] + inner + text[m.end() :]
+            bold_ranges.append((start, start + len(inner)))
+
+        while True:
+            m = re.search(r"_(.*?)_", text)
+            if not m:
+                break
+            start = m.start()
+            inner = m.group(1)
+            text = text[:start] + inner + text[m.end() :]
+            italic_ranges.append((start, start + len(inner)))
+
+        return text, bold_ranges, italic_ranges
+
+    def _apply_com_replacement(doc, app, target_rng, new_text, comment_text):
+        rescued_comments = []
+        try:
+            for i in range(1, target_rng.Comments.Count + 1):
+                c = target_rng.Comments(i)
+                rescued_comments.append({"author": c.Author, "text": c.Range.Text})
+        except Exception as e:
+            logger.warning(f"Failed to rescue comments: {e}")
+
+        plain_text, b_ranges, i_ranges = _parse_markdown_for_com(new_text.replace("\n", "\r"))
+        target_rng.Text = plain_text
+
+        was_tracking = doc.TrackRevisions
+        doc.TrackRevisions = False  # Suppress formatting clutter in the review pane
+        try:
+            base_start = target_rng.Start
+            for b_start, b_end in b_ranges:
+                fmt_rng = doc.Range(base_start + b_start, base_start + b_end)
+                fmt_rng.Font.Bold = True
+            for i_start, i_end in i_ranges:
+                fmt_rng = doc.Range(base_start + i_start, base_start + i_end)
+                fmt_rng.Font.Italic = True
+        except Exception as e:
+            logger.warning(f"Failed to apply formatting: {e}")
+        finally:
+            doc.TrackRevisions = was_tracking
+
+        current_user = app.UserName
+        for c_data in rescued_comments:
+            try:
+                app.UserName = c_data["author"]
+                doc.Comments.Add(target_rng, c_data["text"])
+            except Exception:
+                pass
+        app.UserName = current_user
+
+        if comment_text:
+            doc.Comments.Add(target_rng, comment_text)
 
     async def read_active_word_document(
         ctx: Context,
@@ -53,6 +117,10 @@ if sys.platform == "win32":
                 )
 
             annotations = []
+            
+            # Helper to get exact bounds, bypassing formatting wrappers if possible
+            def _get_bounds(obj):
+                return getattr(obj.Range, "Start", 0), getattr(obj.Range, "End", 0)
 
             # 1. Extract Revisions
             for i in range(1, doc.Revisions.Count + 1):
@@ -60,6 +128,11 @@ if sys.platform == "win32":
                     rev = doc.Revisions(i)
                     if rev.Type in (1, 2):  # 1: Insert, 2: Delete
                         text = rev.Range.Text or ""
+                        date_obj = getattr(rev, "Date", None)
+                        try:
+                            date = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ") if date_obj else ""
+                        except Exception:
+                            date = str(date_obj) if date_obj else ""
                         annotations.append(
                             {
                                 "start": rev.Range.Start,
@@ -68,7 +141,7 @@ if sys.platform == "win32":
                                 "type": "insert" if rev.Type == 1 else "delete",
                                 "id": str(i),
                                 "author": rev.Author,
-                                "date": str(rev.Date) if hasattr(rev, "Date") else "",
+                                "date": date,
                             }
                         )
                 except Exception as e:
@@ -80,9 +153,15 @@ if sys.platform == "win32":
                 try:
                     com = doc.Comments(i)
                     text = com.Scope.Text or ""
-                    cid = str(i)
                     author = com.Author
-                    date = str(com.Date) if hasattr(com, "Date") else ""
+                    
+                    cid = str(i - 1)
+
+                    date_obj = getattr(com, "Date", None)
+                    try:
+                        date = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ") if date_obj else ""
+                    except Exception:
+                        date = str(date_obj) if date_obj else ""
                     content = com.Range.Text.strip().replace("\r", " ")
 
                     annotations.append(
@@ -106,83 +185,114 @@ if sys.platform == "win32":
                 except Exception as e:
                     logger.warning(f"Failed to read comment {i}: {e}")
 
-            # 3. Anchor annotations to raw_text to bypass COM offset drift
-            mapped_annotations = []
-            for ann in annotations:
-                text_to_find = ann["text"]
-                start_hint = ann["start"]
+            # 2b. Extract Formats (Fast COM Path using Collapse)
+            bold_ranges = []
+            italic_ranges = []
+            try:
+                for fmt_name, fmt_list in [("bold", bold_ranges), ("italic", italic_ranges)]:
+                    rng = doc.Content
+                    rng.Find.ClearFormatting()
+                    if fmt_name == "bold":
+                        rng.Find.Font.Bold = True
+                    else:
+                        rng.Find.Font.Italic = True
+                    rng.Find.Forward = True
+                    rng.Find.Wrap = 0  # wdFindStop
+                    rng.Find.Format = True
+                    rng.Find.Text = ""
+                    while rng.Find.Execute():
+                        start = rng.Start
+                        end = rng.End
+                        
+                        is_explicit = True
+                        try:
+                            style_font = rng.Style.Font
+                            if fmt_name == "bold" and getattr(style_font, "Bold", 0) == -1:
+                                is_explicit = False
+                            elif fmt_name == "italic" and getattr(style_font, "Italic", 0) == -1:
+                                is_explicit = False
+                        except Exception:
+                            pass
+                        try:
+                            # Strip trailing structural characters from formatting boundaries
+                            text_val = rng.Text
+                            if text_val:
+                                trim_count = 0
+                                while trim_count < len(text_val) and text_val[-(trim_count + 1)] in ('\r', '\x07', '\x0b', '\x0c'):
+                                    trim_count += 1
+                                if trim_count > 0:
+                                    end -= trim_count
+                        except Exception:
+                            pass
+                        
+                        if start < end and is_explicit:
+                            fmt_list.append((start, end))
+                        rng.Collapse(0)  # wdCollapseEnd
+            except Exception as e:
+                logger.warning(f"Failed to read formatting: {e}")
 
-                if not text_to_find:
-                    # Point-comment or empty revision
-                    ann["mapped_start"] = min(start_hint, len(raw_text))
-                    ann["mapped_end"] = ann["mapped_start"]
-                    ann["inner_override"] = ""
-                    mapped_annotations.append(ann)
-                    continue
+            # 2c. Extract Headings (Fast COM Path using Style Enumeration)
+            heading_events = []
+            try:
+                # win32com constants: wdStyleHeading1 = -2, wdStyleHeading9 = -10
+                for lvl in range(1, 10):
+                    rng = doc.Content
+                    rng.Find.ClearFormatting()
+                    rng.Find.Style = -1 - lvl 
+                    rng.Find.Forward = True
+                    rng.Find.Wrap = 0
+                    rng.Find.Format = True
+                    rng.Find.Text = ""
+                    while rng.Find.Execute():
+                        heading_events.append((rng.Start, lvl))
+                        rng.Collapse(0)
+            except Exception as e:
+                logger.warning(f"Failed to read headings: {e}")
 
-                # Slice a search window around the expected offset
-                window_start = max(0, start_hint - 200)
-                window_end = min(len(raw_text), start_hint + len(text_to_find) + 200)
-                window_text = raw_text[window_start:window_end]
-
-                rel_start, rel_end = _find_match_in_text(
-                    window_text.replace("\r", "\n"), text_to_find.replace("\r", "\n")
-                )
-
-                if rel_start != -1:
-                    ann["mapped_start"] = window_start + rel_start
-                    ann["mapped_end"] = window_start + rel_end
-                else:
-                    # Fallback for text hidden from doc.Content.Text (like deletions)
-                    ann["mapped_start"] = min(start_hint, len(raw_text))
-                    ann["mapped_end"] = ann["mapped_start"]
-                    ann["inner_override"] = text_to_find
-
-                mapped_annotations.append(ann)
-
-            # 4. Build sequential Event list exactly like ingest.py
+            # 3. Build sequential Event list at exact COM indices
             events_by_idx = {}
-            for ann in mapped_annotations:
-                start = ann["mapped_start"]
-                end = ann["mapped_end"]
+            for ann in annotations:
+                start = ann["start"]
+                end = ann["end"]
                 uid = ann["id"]
                 auth = ann.get("author", "Unknown")
                 date = ann.get("date", "")
 
-                if "inner_override" in ann:
-                    text_val = ann["inner_override"]
-                    if ann["type"] == "delete":
-                        events_by_idx.setdefault(start, []).extend(
-                            [DocxEvent("del_start", uid, auth, date), text_val, DocxEvent("del_end", uid)]
-                        )
-                    elif ann["type"] == "insert":
-                        events_by_idx.setdefault(start, []).extend(
-                            [DocxEvent("ins_start", uid, auth, date), text_val, DocxEvent("ins_end", uid)]
-                        )
-                    elif ann["type"] == "comment":
-                        events_by_idx.setdefault(start, []).extend(
-                            [DocxEvent("start", uid), text_val, DocxEvent("end", uid)]
-                        )
-                else:
-                    if ann["type"] == "insert":
-                        events_by_idx.setdefault(start, []).append(DocxEvent("ins_start", uid, auth, date))
-                        events_by_idx.setdefault(end, []).append(DocxEvent("ins_end", uid))
-                    elif ann["type"] == "delete":
-                        events_by_idx.setdefault(start, []).append(DocxEvent("del_start", uid, auth, date))
-                        events_by_idx.setdefault(end, []).append(DocxEvent("del_end", uid))
-                    elif ann["type"] == "comment":
-                        events_by_idx.setdefault(start, []).append(DocxEvent("start", uid))
-                        events_by_idx.setdefault(end, []).append(DocxEvent("end", uid))
+                if ann["type"] == "insert":
+                    events_by_idx.setdefault(start, []).append(DocxEvent("ins_start", uid, auth, date))
+                    events_by_idx.setdefault(end, []).append(DocxEvent("ins_end", uid))
+                elif ann["type"] == "delete":
+                    events_by_idx.setdefault(start, []).append(DocxEvent("del_start", uid, auth, date))
+                    events_by_idx.setdefault(end, []).append(DocxEvent("del_end", uid))
+                elif ann["type"] == "comment":
+                    events_by_idx.setdefault(start, []).append(DocxEvent("start", uid))
+                    events_by_idx.setdefault(end, []).append(DocxEvent("end", uid))
+
+            for start, end in bold_ranges:
+                events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "**"))
+                events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "**"))
+                
+            for start, end in italic_ranges:
+                events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "_"))
+                events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "_"))
+                
+            for start, lvl in heading_events:
+                events_by_idx.setdefault(start, []).append(DocxEvent("heading", "#" * lvl + " "))
 
             items = []
             last_idx = 0
-            indices = sorted(list(set([0, len(raw_text)] + list(events_by_idx.keys()))))
+            doc_end = doc.Content.End
+            indices = [0, doc_end] + list(events_by_idx.keys())
+            indices = sorted(list(set([i for i in indices if 0 <= i <= doc_end])))
 
             for idx in indices:
                 if idx > last_idx:
-                    text_seg = raw_text[last_idx:idx]
-                    if text_seg:
-                        items.append(text_seg)
+                    try:
+                        text_seg = doc.Range(last_idx, idx).Text
+                        if text_seg:
+                            items.append(text_seg)
+                    except Exception:
+                        pass
                     last_idx = idx
 
                 if idx in events_by_idx:
@@ -190,18 +300,23 @@ if sys.platform == "win32":
 
                     def evt_sort_key(e):
                         if isinstance(e, str):
-                            return 1
-                        if "end" in e.type:
                             return 0
-                        return 2
-
+                        t = getattr(e, "type", "")
+                        if t == "heading": return -3
+                        if t == "fmt_start": return -2
+                        if "start" in t or t == "start": return -1
+                        if t == "fmt_end": return 3
+                        if "end" in t or t == "end": return 2
+                        return 0
                     evts.sort(key=evt_sort_key)
                     items.extend(evts)
 
-            # 5. Mirror the ingest.py State Machine
+            # 4. Mirror the ingest.py State Machine
             active_ins = {}
             active_del = {}
             active_comments = set()
+            active_bold = 0
+            active_italic = 0
             deferred_meta_states = []
             pending_text = ""
             current_wrappers = ("", "")
@@ -215,6 +330,20 @@ if sys.platform == "win32":
                         continue
 
                     if seg:
+                        prefix = ""
+                        suffix = ""
+                        if active_bold > 0:
+                            prefix += "**"
+                            suffix = "**" + suffix
+                        if active_italic > 0:
+                            prefix += "_"
+                            suffix = "_" + suffix
+
+                        seg = apply_formatting_to_segments(seg, prefix, suffix)
+                        
+                        if '\r' in seg or '\n' in seg:
+                            in_heading = False
+
                         if clean_view:
                             new_wrappers = ("", "")
                         else:
@@ -273,6 +402,21 @@ if sys.platform == "win32":
                                 deferred_meta_states = []
 
                 elif isinstance(item, DocxEvent):
+                    if item.type in ("fmt_start", "fmt_end", "heading"):
+                        if item.type == "fmt_start":
+                            if item.id == "**": active_bold += 1
+                            elif item.id == "_": active_italic += 1
+                        elif item.type == "fmt_end":
+                            if item.id == "**": active_bold = max(0, active_bold - 1)
+                            elif item.id == "_": active_italic = max(0, active_italic - 1)
+                        elif item.type == "heading":
+                            if pending_text:
+                                s_tok, e_tok = current_wrappers
+                                parts.append(f"{s_tok}{pending_text}{e_tok}")
+                                pending_text = ""
+                                current_wrappers = ("", "")
+                            parts.append(item.id)
+                        continue
                     if pending_text:
                         s_tok, e_tok = current_wrappers
                         parts.append(f"{s_tok}{pending_text}{e_tok}")
@@ -301,7 +445,8 @@ if sys.platform == "win32":
                 if meta_block:
                     parts.append(f"{{>>{meta_block}<<}}")
 
-            final_text = "".join(parts).replace("\r", "\n")
+            final_text = "".join(parts)
+            final_text = final_text.replace("\r\x07\r\x07", "\n").replace("\r\x07", " | ").replace("\x07", " | ").replace("\r", "\n")
 
             return ToolResult(
                 content=final_text,
@@ -356,14 +501,44 @@ if sys.platform == "win32":
                     try:
                         if isinstance(change, ModifyText):
                             clean_target = _strip_critic_markup(change.target_text)
-                            current_text = doc.Content.Text.replace("\r", "\n")
+                            raw_text = doc.Content.Text
+                            
+                            clean_chars = []
+                            mapping = []
+                            i = 0
+                            while i < len(raw_text):
+                                if raw_text[i:i+4] == '\r\x07\r\x07':
+                                    clean_chars.append('\n')
+                                    mapping.append(i)
+                                    i += 4
+                                elif raw_text[i:i+2] == '\r\x07':
+                                    clean_chars.extend([' ', '|', ' '])
+                                    mapping.extend([i, i, i])
+                                    i += 2
+                                elif raw_text[i] == '\x07':
+                                    clean_chars.extend([' ', '|', ' '])
+                                    mapping.extend([i, i, i])
+                                    i += 1
+                                elif raw_text[i] == '\r':
+                                    clean_chars.append('\n')
+                                    mapping.append(i)
+                                    i += 1
+                                else:
+                                    clean_chars.append(raw_text[i])
+                                    mapping.append(i)
+                                    i += 1
+                            mapping.append(len(raw_text))
+                            current_text = "".join(clean_chars)
+                            
                             start_idx, end_idx = _find_match_in_text(current_text, clean_target)
 
                             if start_idx != -1:
-                                exact_substring = doc.Content.Text[start_idx:end_idx]
+                                actual_start = mapping[start_idx]
+                                actual_end = mapping[end_idx]
+                                exact_substring = raw_text[actual_start:actual_end]
 
-                                search_start = max(0, start_idx - 200)
-                                search_end = min(doc.Content.End, end_idx + 200)
+                                search_start = max(0, actual_start - 200)
+                                search_end = min(doc.Content.End, actual_end + 200)
                                 rng = doc.Range(Start=search_start, End=search_end)
 
                                 search_text = exact_substring[:250] if len(exact_substring) > 250 else exact_substring
@@ -376,9 +551,7 @@ if sys.platform == "win32":
                                 if rng.Find.Execute():
                                     actual_start = rng.Start
                                     replace_rng = doc.Range(Start=actual_start, End=actual_start + len(exact_substring))
-                                    replace_rng.Text = change.new_text.replace("\n", "\r")
-                                    if change.comment:
-                                        doc.Comments.Add(replace_rng, change.comment)
+                                    _apply_com_replacement(doc, app, replace_rng, change.new_text, change.comment)
                                     stats["applied"] += 1
                                 else:
                                     # Fallback: search entire document
@@ -386,12 +559,8 @@ if sys.platform == "win32":
                                     doc_rng.Find.ClearFormatting()
                                     doc_rng.Find.Text = search_text
                                     if doc_rng.Find.Execute():
-                                        replace_rng = doc.Range(
-                                            Start=doc_rng.Start, End=doc_rng.Start + len(exact_substring)
-                                        )
-                                        replace_rng.Text = change.new_text.replace("\n", "\r")
-                                        if change.comment:
-                                            doc.Comments.Add(replace_rng, change.comment)
+                                        replace_rng = doc.Range(Start=doc_rng.Start, End=doc_rng.Start + len(exact_substring))
+                                        _apply_com_replacement(doc, app, replace_rng, change.new_text, change.comment)
                                         stats["applied"] += 1
                                     else:
                                         stats["failed"] += 1
@@ -416,13 +585,17 @@ if sys.platform == "win32":
                                 await ctx.warning(f"Revision {change.target_id} not found or lost to drift.")
 
                         elif isinstance(change, ReplyComment):
-                            idx = int(change.target_id.split(":")[1])
-                            com = doc.Comments(idx)
                             try:
-                                com.Replies.Add(com.Range, change.text)
-                            except Exception:
-                                doc.Comments.Add(com.Range, change.text)
-                            stats["applied"] += 1
+                                target_idx = int(change.target_id.split(":")[1]) + 1
+                                com_to_reply = doc.Comments(target_idx)
+                                try:
+                                    com_to_reply.Replies.Add(com_to_reply.Range, change.text)
+                                except Exception:
+                                    doc.Comments.Add(com_to_reply.Range, change.text)
+                                stats["applied"] += 1
+                            except Exception as e:
+                                stats["failed"] += 1
+                                await ctx.warning(f"Comment {change.target_id} not found. {e}")
 
                     except Exception as e:
                         stats["failed"] += 1

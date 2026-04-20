@@ -183,6 +183,9 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                         while j < len(items):
                             next_item = items[j]
                             if isinstance(next_item, Run):
+                                if not get_run_text(next_item):
+                                    j += 1
+                                    continue
                                 if temp_ins_count > 0 or temp_del_count > 0:
                                     next_is_redline = True
                                 break
@@ -288,12 +291,7 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
         data = comments_map[cid]
         header = f"[{sig}] {data['author']}"
         if data["date"]:
-            # Simplify date if present
-            try:
-                date_str = data["date"].split("T")[0]
-                header += f" @ {date_str}"
-            except Exception:
-                pass
+            header += f" @ {data['date']}"
 
         comment_lines.append(f"{header}: {data['text']}")
         seen_sigs.add(sig)

@@ -256,6 +256,9 @@ class DocumentMapper:
                         while j < len(items):
                             next_item = items[j]
                             if isinstance(next_item, Run):
+                                if not get_run_text(next_item):
+                                    j += 1
+                                    continue
                                 if temp_ins_count > 0 or temp_del_count > 0:
                                     next_is_redline = True
                                 break
@@ -417,8 +420,7 @@ class DocumentMapper:
                     data = self.comments_map[c_id]
                     header = f"[{sig}] {data['author']}"
                     if data["date"]:
-                        short_date = data["date"].split("T")[0]
-                        header += f" @ {short_date}"
+                        header += f" @ {data['date']}"
                     if data["resolved"]:
                         header += "(RESOLVED)"
                     comment_lines.append(f"{header}: {data['text']}")

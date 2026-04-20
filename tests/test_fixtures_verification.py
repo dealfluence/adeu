@@ -32,8 +32,8 @@ def normalize_adeu_extract(text):
     """
     Normalizes the Adeu text extract to ignore volatile IDs and dates.
     """
-    # Remove dates: "@ 2026-01-23" -> ""
-    text = re.sub(r" @ \d{4}-\d{2}-\d{2}", "", text)
+    # Remove dates: "@ 2026-01-23" or "@ 2026-01-23T10:00:00Z" -> ""
+    text = re.sub(r" @ \d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?", "", text)
     # Remove IDs: "[Com:0]" -> "[Com:X]"
     text = re.sub(r"\[Com:\d+\]", "[Com:X]", text)
     # Remove Change IDs: "[Chg:1]" -> "[Chg:X]"
