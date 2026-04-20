@@ -10,10 +10,8 @@ from fastmcp.tools.tool import ToolResult
 if sys.platform == "win32":
     import pythoncom
     import win32com.client
-    from fastmcp.tools import tool
 
     from adeu.markup import _find_match_in_text
-    from adeu.mcp_components.shared import MARKDOWN_UI_URI
     from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
 
     logger = logging.getLogger(__name__)
@@ -28,15 +26,6 @@ if sys.platform == "win32":
         text = re.sub(r"\{==(.*?)==\}", r"\1", text)
         return text
 
-    @tool(
-        description=(
-            "Reads the currently active, visible document in Microsoft Word on Windows. "
-            "Extracts text with inline CriticMarkup representing Tracked Changes and Comments. "
-            "Set clean_view=True to ignore redlines and comments."
-        ),
-        annotations={"readOnlyHint": True},
-        meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
-    )
     async def read_active_word_document(
         ctx: Context,
         clean_view: Annotated[bool, "If True, returns clean text without markup."] = False,
@@ -141,6 +130,7 @@ if sys.platform == "win32":
                 end = ann["mapped_end"]
                 inner_override = ann.get("inner_override")
 
+                layer = 2  # Default inner layer for revisions
                 if ann["type"] == "insert":
                     prefix = "{++"
                     suffix = f"++}}{{>>[Edit:{ann['id']}]<<}}"
@@ -150,25 +140,28 @@ if sys.platform == "win32":
                 elif ann["type"] == "comment":
                     prefix = "{=="
                     suffix = f"==}}{{>>{ann['author']}: {ann['content']} [Edit:{ann['id']}]<<}}"
+                    layer = 1  # Outer layer for comments so they wrap revisions cleanly
                 else:
                     continue
 
                 if start == end:
                     # Point annotations
                     inner = inner_override if inner_override is not None else ""
-                    events.append((start, 1, 0, ann["id"], prefix + inner + suffix))
+                    events.append((start, 1, 0, layer, ann["id"], prefix + inner + suffix))
                 else:
                     length = end - start
-                    # Open events (type 2) sort with -length so longer spans open first
-                    events.append((start, 2, -length, ann["id"], prefix))
-                    # Close events (type 0) sort with length so shorter spans close first
-                    events.append((end, 0, length, ann["id"], suffix))
+                    # Open events (type 2) sort with -length so longer spans open first.
+                    # open_priority uses layer (1 < 2, so Comment opens before Revision).
+                    events.append((start, 2, -length, layer, ann["id"], prefix))
+                    # Close events (type 0) sort with length so shorter spans close first.
+                    # close_priority uses -layer (-2 < -1, so Revision closes before Comment).
+                    events.append((end, 0, length, -layer, ann["id"], suffix))
 
             events.sort()
 
             result_parts = []
             last_idx = 0
-            for idx, _, _, _, text_to_insert in events:
+            for idx, _, _, _, _, text_to_insert in events:
                 if idx > last_idx:
                     result_parts.append(raw_text[last_idx:idx])
                     last_idx = idx
@@ -191,13 +184,6 @@ if sys.platform == "win32":
             # We intentionally omit CoUninitialize() and let the process exit handle cleanup.
             pass
 
-    @tool(
-        description=(
-            "Applies redlines, text modifications, and review actions directly to the user's active MS Word window. "
-            "Use this for real-time live editing and Copilot interactions."
-        ),
-        annotations={"destructiveHint": True},
-    )
     async def process_active_word_batch(
         ctx: Context,
         changes: Annotated[List[DocumentChange], "List of changes to apply."],
@@ -220,6 +206,7 @@ if sys.platform == "win32":
 
             original_track_revisions = doc.TrackRevisions
             doc.TrackRevisions = True
+
             original_user = app.UserName
             app.UserName = author_name
 
@@ -263,6 +250,8 @@ if sys.platform == "win32":
                                     actual_start = rng.Start
                                     replace_rng = doc.Range(Start=actual_start, End=actual_start + len(exact_substring))
                                     replace_rng.Text = change.new_text.replace("\n", "\r")
+                                    if change.comment:
+                                        doc.Comments.Add(replace_rng, change.comment)
                                     stats["applied"] += 1
                                 else:
                                     # Fallback: search entire document
@@ -274,6 +263,8 @@ if sys.platform == "win32":
                                             Start=doc_rng.Start, End=doc_rng.Start + len(exact_substring)
                                         )
                                         replace_rng.Text = change.new_text.replace("\n", "\r")
+                                        if change.comment:
+                                            doc.Comments.Add(replace_rng, change.comment)
                                         stats["applied"] += 1
                                     else:
                                         stats["failed"] += 1

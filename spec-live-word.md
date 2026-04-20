@@ -8,7 +8,7 @@ This enables a "Copilot" UX where the user can watch the agent type, redline, an
 ## 2. Architectural Paradigm
 *   **Dependency**: Requires `pywin32` (`win32com.client`). Restricted via `sys.platform == 'win32'`.
 *   **Interface Parity**: The engine must strictly adhere to the existing `adeu.models.DocumentChange` schema (`ModifyText`, `AcceptChange`, `RejectChange`, `ReplyComment`). The LLM should not know or care whether it is editing a file on disk or a live application.
-*   **Spoofing Identity**: To ensure edits appear as the Agent (and not the local user), the engine will temporarily hijack the `Word.Application.UserName` property during execution and restore it afterward.
+*   **Spoofing Identity**: To ensure tracked edits appear as the Agent (and not the local user), the engine temporarily hijacks the `Word.Application.UserName` property. **Limitation**: Modern Comments (M365) are strictly tied to the logged-in Microsoft Account. While text revisions will show the Agent's name, comments will inevitably show the local user's real name. Attempts to override this via `Options.UseLocalUserInfo` cause fatal COM deadlocks/freezes.
 
 ## 3. Core Components
 

@@ -1,4 +1,4 @@
-# FILE: src/adeu/mcp_components/tools/document.py
+import sys
 from pathlib import Path
 from typing import Annotated, List, Optional
 
@@ -14,24 +14,8 @@ from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 
-@tool(
-    description=(
-        "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window. "
-        "By default (clean_view=False), it returns text with inline CriticMarkup (e.g., {++inserted++}, {--deleted--}, "
-        "{==highlighted==}{>>comment<<}) representing Tracked Changes and Comments. "
-        "Set clean_view=True ONLY if you want to read the final, clean text, ignoring all redlines and comments."
-    ),
-    annotations={"readOnlyHint": True},
-    meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
-)
-async def read_docx(
-    file_path: Annotated[str, "Absolute path to the DOCX file."],
-    ctx: Context,
-    clean_view: Annotated[
-        bool,
-        "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
-    ] = False,
-) -> ToolResult:
+async def _read_docx_disk(file_path: str, ctx: Context, clean_view: bool) -> ToolResult:
+    """Core logic for reading a DOCX from disk."""
     await ctx.info(
         f"Reading DOCX file: {Path(file_path).name}",
         extra={"file_path": file_path, "clean_view": clean_view},
@@ -60,6 +44,74 @@ async def read_docx(
     except Exception as e:
         await ctx.error("Failed to parse DOCX", extra={"error": str(e), "file_path": file_path})
         raise ToolError(f"Error reading file: {str(e)}") from e
+
+
+async def _process_document_batch_disk(
+    original_docx_path: str, author_name: str, ctx: Context, changes: List[DocumentChange], output_path: Optional[str]
+) -> str:
+    """Core logic for modifying a DOCX on disk."""
+    await ctx.info(
+        "Initializing atomic batch process",
+        extra={
+            "original_docx_path": original_docx_path,
+            "author_name": author_name,
+            "changes_count": len(changes) if changes else 0,
+        },
+    )
+
+    try:
+        if not author_name or not author_name.strip():
+            await ctx.warning("Batch processing rejected: author_name is empty.")
+            return "Error: author_name cannot be empty."
+
+        if not changes:
+            await ctx.warning("Batch processing rejected: No actions or edits provided.")
+            return "Error: No changes provided."
+
+        stream = _read_file_bytes(original_docx_path)
+        engine = RedlineEngine(stream, author=author_name)
+        await ctx.debug("Redline Engine initialized successfully")
+
+        try:
+            await ctx.debug("Processing document batch")
+            stats = engine.process_batch(changes)
+            await ctx.info("Changes processed successfully", extra=stats)
+        except BatchValidationError as e:
+            await ctx.error(
+                "Batch validation failed",
+                extra={
+                    "error_count": len(e.errors),
+                    "errors": e.errors,
+                },
+            )
+            error_report = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
+            return error_report
+
+        if not output_path:
+            p = Path(original_docx_path)
+            if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
+                output_path = str(p)
+            else:
+                output_path = str(p.parent / f"{p.stem}_processed{p.suffix}")
+
+        await ctx.debug(
+            "Saving processed document stream to disk",
+            extra={"output_path": output_path},
+        )
+        result_stream = engine.save_to_stream()
+        _save_stream(result_stream, output_path)
+
+        await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
+
+        return (
+            f"Batch complete. Saved to: {output_path}\n"
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
+        )
+
+    except Exception as e:
+        await ctx.error("Critical error during batch processing", extra={"error": str(e)})
+        return f"Error processing batch: {str(e)}"
 
 
 @tool(
@@ -149,97 +201,6 @@ def _create_diff_output(original_path: str, modified_path: str, text_orig: str, 
 
 @tool(
     description=(
-        "Applies a batch of structural edits, text modifications, and review actions to a document. "
-        "This is your primary tool for editing DOCX files.\n\n"
-        "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
-        "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
-        "surrounding context if the word appears multiple times to ensure unique matching) and "
-        "`new_text` (the replacement, which supports Markdown like **bold** or _italic_). To "
-        "delete text, make `new_text` empty. Do NOT manually write CriticMarkup {++ tags; "
-        "the engine handles that.\n"
-        "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-        "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-        "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
-        "Always provide a realistic `author_name` for Tracked Changes."
-    ),
-    annotations={"destructiveHint": True},
-)
-async def process_document_batch(
-    original_docx_path: Annotated[str, "Absolute path to the source file."],
-    author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
-    ctx: Context,
-    changes: Annotated[
-        List[DocumentChange],
-        "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', or 'modify'.",
-    ],
-    output_path: Annotated[Optional[str], "Optional output path."] = None,
-) -> str:
-    await ctx.info(
-        "Initializing atomic batch process",
-        extra={
-            "original_docx_path": original_docx_path,
-            "author_name": author_name,
-            "changes_count": len(changes) if changes else 0,
-        },
-    )
-
-    try:
-        if not author_name or not author_name.strip():
-            await ctx.warning("Batch processing rejected: author_name is empty.")
-            return "Error: author_name cannot be empty."
-
-        if not changes:
-            await ctx.warning("Batch processing rejected: No actions or edits provided.")
-            return "Error: No changes provided."
-
-        stream = _read_file_bytes(original_docx_path)
-        engine = RedlineEngine(stream, author=author_name)
-        await ctx.debug("Redline Engine initialized successfully")
-
-        try:
-            await ctx.debug("Processing document batch")
-            stats = engine.process_batch(changes)
-            await ctx.info("Changes processed successfully", extra=stats)
-        except BatchValidationError as e:
-            await ctx.error(
-                "Batch validation failed",
-                extra={
-                    "error_count": len(e.errors),
-                    "errors": e.errors,
-                },
-            )
-            error_report = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
-            return error_report
-
-        if not output_path:
-            p = Path(original_docx_path)
-            if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
-                output_path = str(p)
-            else:
-                output_path = str(p.parent / f"{p.stem}_processed{p.suffix}")
-
-        await ctx.debug(
-            "Saving processed document stream to disk",
-            extra={"output_path": output_path},
-        )
-        result_stream = engine.save_to_stream()
-        _save_stream(result_stream, output_path)
-
-        await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
-
-        return (
-            f"Batch complete. Saved to: {output_path}\n"
-            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
-            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
-        )
-
-    except Exception as e:
-        await ctx.error("Critical error during batch processing", extra={"error": str(e)})
-        return f"Error processing batch: {str(e)}"
-
-
-@tool(
-    description=(
         "Accepts all tracked changes and removes all comments in a single operation, "
         "producing a finalized clean document. "
         "Use this when a document review is entirely complete and you want to clear all redlines. "
@@ -274,3 +235,128 @@ async def accept_all_changes(
             extra={"error": str(e), "docx_path": docx_path},
         )
         return f"Error accepting changes: {str(e)}"
+
+
+# ==========================================
+# PLATFORM CONDITIONAL TOOL REGISTRATION
+# ==========================================
+
+if sys.platform == "win32":
+    from adeu.mcp_components.tools.live_word import process_active_word_batch, read_active_word_document
+
+    @tool(
+        description=(
+            "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window.\n"
+            "CRITICAL: If you want to read the user's currently open, active Microsoft Word document, "
+            "leave `file_path` EMPTY!\n"
+            "By default (clean_view=False), it returns text with inline CriticMarkup "
+            "(e.g., {++inserted++}, {--deleted--}, {==highlighted==}{>>comment<<}) "
+            "representing Tracked Changes and Comments. "
+            "Set clean_view=True ONLY if you want to read the final, clean text, ignoring all redlines and comments."
+        ),
+        annotations={"readOnlyHint": True},
+        meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
+    )
+    async def read_docx(
+        ctx: Context,
+        file_path: Annotated[
+            Optional[str], "Path to the DOCX file. LEAVE EMPTY (Null) to read the live Word document!"
+        ] = None,
+        clean_view: Annotated[
+            bool,
+            "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
+        ] = False,
+    ) -> ToolResult:
+        if not file_path:
+            return await read_active_word_document(ctx, clean_view)
+        return await _read_docx_disk(file_path, ctx, clean_view)
+
+    @tool(
+        description=(
+            "Applies a batch of structural edits, text modifications, and review actions to a document. "
+            "This is your primary tool for editing DOCX files.\n\n"
+            "CRITICAL: If you want to apply edits directly to the user's active, visible Microsoft Word window, "
+            "leave `original_docx_path` EMPTY!\n\n"
+            "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
+            "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
+            "surrounding context if the word appears multiple times to ensure unique matching) and "
+            "`new_text` (the replacement, which supports Markdown like **bold** or _italic_). To "
+            "delete text, make `new_text` empty. Do NOT manually write CriticMarkup {++ tags; "
+            "the engine handles that.\n"
+            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
+            "Always provide a realistic `author_name` for Tracked Changes. (Note: In live Word, "
+            "comments are strictly tied to the user's M365 identity and cannot be spoofed)."
+        ),
+        annotations={"destructiveHint": True},
+    )
+    async def process_document_batch(
+        author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
+        ctx: Context,
+        changes: Annotated[
+            List[DocumentChange],
+            "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', or 'modify'.",
+        ],
+        original_docx_path: Annotated[
+            Optional[str], "Path to source file. LEAVE EMPTY (Null) to edit the live Word document!"
+        ] = None,
+        output_path: Annotated[
+            Optional[str], "Optional output path (only used if original_docx_path is provided)."
+        ] = None,
+    ) -> str:
+        if not original_docx_path:
+            return await process_active_word_batch(ctx, changes, author_name)
+        return await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+
+else:
+
+    @tool(
+        description=(
+            "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window. "
+            "By default (clean_view=False), it returns text with inline CriticMarkup "
+            "(e.g., {++inserted++}, {--deleted--}, {==highlighted==}{>>comment<<}) "
+            "representing Tracked Changes and Comments. "
+            "Set clean_view=True ONLY if you want to read the final, clean text, ignoring all redlines and comments."
+        ),
+        annotations={"readOnlyHint": True},
+        meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
+    )
+    async def read_docx(
+        file_path: Annotated[str, "Absolute path to the DOCX file."],
+        ctx: Context,
+        clean_view: Annotated[
+            bool,
+            "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
+        ] = False,
+    ) -> ToolResult:
+        return await _read_docx_disk(file_path, ctx, clean_view)
+
+    @tool(
+        description=(
+            "Applies a batch of structural edits, text modifications, and review actions to a document. "
+            "This is your primary tool for editing DOCX files.\n\n"
+            "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
+            "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
+            "surrounding context if the word appears multiple times to ensure unique matching) and "
+            "`new_text` (the replacement, which supports Markdown like **bold** or _italic_). To "
+            "delete text, make `new_text` empty. Do NOT manually write CriticMarkup {++ tags; "
+            "the engine handles that.\n"
+            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
+            "Always provide a realistic `author_name` for Tracked Changes."
+        ),
+        annotations={"destructiveHint": True},
+    )
+    async def process_document_batch(
+        original_docx_path: Annotated[str, "Absolute path to the source file."],
+        author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
+        ctx: Context,
+        changes: Annotated[
+            List[DocumentChange],
+            "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', or 'modify'.",
+        ],
+        output_path: Annotated[Optional[str], "Optional output path."] = None,
+    ) -> str:
+        return await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
