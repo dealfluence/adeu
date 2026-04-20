@@ -98,6 +98,11 @@ To maximize the AI's effectiveness, paste this context into Claude's **Project I
 > - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified list of changes. Use `type: "modify"` for specific search-and-replace text edits, and `type: "accept"`, `"reject"`, or `"reply"` to manage existing Track Changes and Comments by ID.
 > - `sanitize_docx`: **Pre-Send Scrub.** Strip dangerous metadata, author names, and internal tracking IDs before sharing. Can preserve existing markup (`keep_markup=True`) or generate a clean delta against a baseline.
 
+### Windows Copilot: Live Word Integration
+If you are running on Windows with Microsoft Word installed, Adeu can act as a real-time copilot, editing the active document right in front of you.
+*   `read_active_word_document`: Extracts text, tracked changes, and comments directly from the live, open Word window.
+*   `process_active_word_batch`: Translates the LLM's edits into native COM macros, watching Word type, delete, and add comments on the canvas automatically.
+
 ### 2. For Builders (Python SDK)
 
 If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation.

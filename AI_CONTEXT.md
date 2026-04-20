@@ -52,6 +52,15 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Mathematical Scrub Verification**: For metadata sanitization, we rely on `lxml` + XPath directly on the unzipped DOCX as the absolute source of truth. This strictly bypasses `python-docx` caching layers to mathematically guarantee artifacts are removed.
 *   **Modern Comments Architecture**: Word's modern comments span four XML parts (`comments.xml`, `commentsExtended.xml`, `commentsIds.xml`, `commentsExtensible.xml`). The resolved status (`w15:done="1"`) is stored inside `commentsExtended.xml` and must be parsed and scrubbed from there.
 
+### 9. Live MS Word Interop (Windows COM)
+*   **Platform Safety**: All live Word tools (`live_word.py`) depend on `pywin32` and are conditionally registered via `sys.platform == 'win32'`.
+*   **COM Apartment Lifecycle**: Microsoft Office COM objects are strictly Single-Threaded Apartment (STA). Because FastMCP and `pytest` hold proxy frames unpredictably, we **intentionally omit** `pythoncom.CoUninitialize()` and `app.Quit()` during test teardown. We let the OS/Python GC handle teardown naturally to prevent fatal RPC/Access Violations (`0x800706be`).
+*   **Index Drift Mitigation**:
+    *   **Extraction Parity**: Active COM extraction uses an *event-based string builder* (sorting events by length and type) to inject CriticMarkup tags safely. This handles infinitely nested/overlapping annotations (e.g., comments wrapping redlines) without string offset drift.
+    *   **Pre-Resolution**: Modifying text natively adds Revisions, shifting `doc.Revisions` indices. We pre-resolve and cache all target COM objects *before* applying a batch of `DocumentChange` operations so Accept/Reject actions target the correct revisions.
+*   **Comment Bounds**: We strictly use `Comment.Scope` (the highlighted text), not `Comment.Reference` (the 0-length anchor), to accurately extract target strings for Comment annotations.
+*   **Identity Spoofing**: Tools temporarily hijack `Word.Application.UserName` and toggle `doc.TrackRevisions` to apply tracked changes cleanly as the Agent, guaranteeing state restoration in a `finally` block.
+
 ## Developer Workflows
 
 ### Testing
@@ -67,7 +76,8 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
-- **v0.9.0**: API Unification & Reliability.
+- **v1.1.0**: Live Word Interop & Agentic Workflows.
+    - **Live MS Word Engine**: Fully integrated Windows COM engine allowing agents to execute live edits on an active MS Word canvas (`sys.platform == "win32"`).
     - **Flat API**: Unified `DocumentChange` discriminated union deployed for the MCP interface.
     - **Testing**: End-to-end LLM verification complete and backwards compatibility preserved.
-    - **UI Layer**: Replaced abstract UI libraries with a zero-dependency, Vanilla JS custom HTML MCP Apps implementation for tools like `validate_documents`.
+    - **UI Layer**: Zero-dependency, Vanilla JS custom HTML MCP Apps implementation for tools like `validate_documents`.
