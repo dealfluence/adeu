@@ -1,7 +1,6 @@
 import logging
 import re
 import sys
-import gc
 from typing import Annotated, List
 
 from fastmcp import Context
@@ -14,8 +13,8 @@ if sys.platform == "win32":
     from fastmcp.tools import tool
 
     from adeu.markup import _find_match_in_text
-    from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
     from adeu.mcp_components.shared import MARKDOWN_UI_URI
+    from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
 
     logger = logging.getLogger(__name__)
 
@@ -53,16 +52,12 @@ if sys.platform == "win32":
 
             raw_text = doc.Content.Text
             if raw_text is None:
-                return ToolResult(
-                    content="",
-                    structured_content={"markdown": "", "title": "Live Word Document"}
-                )
+                return ToolResult(content="", structured_content={"markdown": "", "title": "Live Word Document"})
 
             if clean_view:
                 clean_text = raw_text.replace("\r", "\n")
                 return ToolResult(
-                    content=clean_text,
-                    structured_content={"markdown": clean_text, "title": "Live Word Document"}
+                    content=clean_text, structured_content={"markdown": clean_text, "title": "Live Word Document"}
                 )
 
             annotations = []
@@ -178,7 +173,7 @@ if sys.platform == "win32":
                     result_parts.append(raw_text[last_idx:idx])
                     last_idx = idx
                 result_parts.append(text_to_insert)
-            
+
             if last_idx < len(raw_text):
                 result_parts.append(raw_text[last_idx:])
 
@@ -188,7 +183,7 @@ if sys.platform == "win32":
                 structured_content={
                     "markdown": final_text,
                     "title": "Live Word Document",
-                }
+                },
             )
 
         finally:
@@ -229,8 +224,8 @@ if sys.platform == "win32":
             app.UserName = author_name
 
             stats = {"applied": 0, "failed": 0}
-            
-            # Pre-resolve Revision objects to prevent index drift. 
+
+            # Pre-resolve Revision objects to prevent index drift.
             # Modifying text adds new Revisions, which shifts collection indices.
             # By holding the COM reference now, we can accept/reject safely later.
             revisions_map = {}
