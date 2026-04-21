@@ -189,7 +189,7 @@ def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
 
         assert live_text == xml_text
 
-        asyncio.run(run_test())
+    asyncio.run(run_test())
 
 
 def test_live_word_complex_formatting(active_word_app):
