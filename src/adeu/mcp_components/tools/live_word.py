@@ -451,3 +451,25 @@ if sys.platform == "win32":
             return msg
         except Exception as e:
             raise ToolError(f"Failed to save active Word document. {e}") from e
+
+else:
+    # Stubs for non-Windows platforms to satisfy static type checkers (mypy)
+    from adeu.models import DocumentChange
+
+    def _read_active_word_document_core(clean_view: bool = False) -> str:
+        raise NotImplementedError("Live Word is only supported on Windows.")
+
+    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict:
+        raise NotImplementedError("Live Word is only supported on Windows.")
+
+    async def read_active_word_document(ctx: Context, clean_view: bool = False) -> ToolResult:
+        raise NotImplementedError("Live Word is only supported on Windows.")
+
+    async def process_active_word_batch(ctx: Context, changes: List[DocumentChange], author_name: str) -> str:
+        raise NotImplementedError("Live Word is only supported on Windows.")
+
+    async def open_word_document_impl(ctx: Context, file_path: str, visible: bool = True) -> str:
+        raise NotImplementedError("Live Word is only supported on Windows.")
+
+    async def save_active_word_document_impl(ctx: Context, output_path: Optional[str] = None, close: bool = False) -> str:
+        raise NotImplementedError("Live Word is only supported on Windows.")
