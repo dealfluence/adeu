@@ -1,8 +1,9 @@
 import logging
+import io
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -12,10 +13,8 @@ if sys.platform == "win32":
     import pythoncom
     import win32com.client
 
-    from adeu.ingest import _build_merged_meta_block, _get_wrappers
     from adeu.markup import _find_match_in_text
     from adeu.models import AcceptChange, DocumentChange, ModifyText, RejectChange, ReplyComment
-    from adeu.utils.docx import DocxEvent, apply_formatting_to_segments
 
     logger = logging.getLogger(__name__)
 
@@ -93,8 +92,46 @@ if sys.platform == "win32":
         if comment_text:
             doc.Comments.Add(target_rng, comment_text)
 
+    def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
+        """
+        Wraps an extracted Flat OPC XML string (doc.WordOpenXML) into a standard ZIP-based
+        DOCX stream so python-docx can parse it natively.
+        Uses regex to prevent xml.etree from mangling namespaces and dropping elements.
+        """
+        import zipfile
+        import base64
+
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zf:
+            # WordOpenXML uses the rigid 'pkg:' namespace prefix.
+            parts = re.findall(r'<pkg:part\s+pkg:name="([^"]+)"[^>]*>(.*?)</pkg:part>', word_open_xml, re.DOTALL)
+            
+            for name, content_block in parts:
+                if name.startswith("/"):
+                    name = name[1:]
+                    
+                # Extract raw XML payload
+                xml_match = re.search(r'<pkg:xmlData>(.*?)</pkg:xmlData>', content_block, re.DOTALL)
+                if xml_match:
+                    inner_xml = xml_match.group(1).strip()
+                    # Prepend standard XML declaration which Flat OPC strips
+                    payload = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n{inner_xml}'.encode('utf-8')
+                    zf.writestr(name, payload)
+                    continue
+                    
+                # Extract base64 Binary payload (images, fonts, etc.)
+                bin_match = re.search(r'<pkg:binaryData>(.*?)</pkg:binaryData>', content_block, re.DOTALL)
+                if bin_match:
+                    b64_data = bin_match.group(1).strip()
+                    zf.writestr(name, base64.b64decode(b64_data))
+
+        stream.seek(0)
+        return stream
+
     def _read_active_word_document_core(clean_view: bool = False) -> str:
-        """Synchronous core for reading live word document, decoupled from FastMCP context."""
+        """Synchronous core for reading live word document using WordOpenXML for massive speedup."""
+        from adeu.ingest import extract_text_from_stream
+
         pythoncom.CoInitialize()
         try:
             try:
@@ -110,369 +147,16 @@ if sys.platform == "win32":
             if clean_view:
                 return raw_text.replace("\r", "\n")
 
-            annotations = []
+            # Grab Word's internal XML serialization of the entire document (~0.05s)
+            xml_str = doc.WordOpenXML
 
-            # Helper to get exact bounds, bypassing formatting wrappers if possible
-            def _get_bounds(obj):
-                return getattr(obj.Range, "Start", 0), getattr(obj.Range, "End", 0)
+            # Re-package the flat XML into a ZIP stream in-memory (~0.01s)
+            stream = _build_mock_docx_stream(xml_str)
 
-            # 1. Extract Revisions
-            for i in range(1, doc.Revisions.Count + 1):
-                try:
-                    rev = doc.Revisions(i)
-                    if rev.Type in (1, 2):  # 1: Insert, 2: Delete
-                        text = rev.Range.Text or ""
-                        date_obj = getattr(rev, "Date", None)
-                        try:
-                            date = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ") if date_obj else ""
-                        except Exception:
-                            date = str(date_obj) if date_obj else ""
-                        annotations.append(
-                            {
-                                "start": rev.Range.Start,
-                                "end": rev.Range.End,
-                                "text": text,
-                                "type": "insert" if rev.Type == 1 else "delete",
-                                "id": str(i),
-                                "author": rev.Author,
-                                "date": date,
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to read revision {i}: {e}")
-
-            # 2. Extract Comments
-            comments_data = {}
-            for i in range(1, doc.Comments.Count + 1):
-                try:
-                    com = doc.Comments(i)
-                    text = com.Scope.Text or ""
-                    author = com.Author
-
-                    cid = str(i - 1)
-
-                    date_obj = getattr(com, "Date", None)
-                    try:
-                        date = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ") if date_obj else ""
-                    except Exception:
-                        date = str(date_obj) if date_obj else ""
-                    content = com.Range.Text.strip().replace("\r", " ")
-
-                    annotations.append(
-                        {
-                            "start": com.Scope.Start,
-                            "end": com.Scope.End,
-                            "text": text,
-                            "type": "comment",
-                            "id": cid,
-                            "author": author,
-                            "date": date,
-                        }
-                    )
-                    comments_data[cid] = {
-                        "author": author,
-                        "text": content,
-                        "date": date,
-                        "resolved": False,
-                        "parent_id": None,
-                    }
-                except Exception as e:
-                    logger.warning(f"Failed to read comment {i}: {e}")
-
-            # 2b. Extract Formats (Fast COM Path using Style Cache)
-            bold_ranges: List[Tuple[int, int]] = []
-            italic_ranges: List[Tuple[int, int]] = []
-            style_cache = {}  # Cache style definitions to bypass slow COM lookup
-            doc_end = doc.Content.End
-            try:
-                for fmt_name, fmt_list in [("bold", bold_ranges), ("italic", italic_ranges)]:
-                    rng = doc.Range(0, doc_end)
-                    find = rng.Find
-                    find.ClearFormatting()
-                    if fmt_name == "bold":
-                        find.Font.Bold = True
-                    else:
-                        find.Font.Italic = True
-                    find.Forward = True
-                    find.Wrap = 0  # wdFindStop
-                    find.Format = True
-                    find.Text = ""
-                    while find.Execute():
-                        start = rng.Start
-                        end = rng.End
-
-                        is_explicit = True
-                        try:
-                            style = rng.Style
-                            style_name = style.NameLocal
-                            if style_name not in style_cache:
-                                font = style.Font
-                                style_cache[style_name] = (
-                                    getattr(font, "Bold", 0) == -1,
-                                    getattr(font, "Italic", 0) == -1,
-                                )
-                            s_bold, s_italic = style_cache[style_name]
-                            if fmt_name == "bold" and s_bold:
-                                is_explicit = False
-                            elif fmt_name == "italic" and s_italic:
-                                is_explicit = False
-                        except Exception:
-                            pass
-                        try:
-                            # Strip trailing structural characters from formatting boundaries
-                            text_val = rng.Text
-                            if text_val:
-                                trim_count = 0
-                                while trim_count < len(text_val) and text_val[-(trim_count + 1)] in (
-                                    "\r",
-                                    "\x07",
-                                    "\x0b",
-                                    "\x0c",
-                                ):
-                                    trim_count += 1
-                                if trim_count > 0:
-                                    end -= trim_count
-                        except Exception:
-                            pass
-
-                        if start < end and is_explicit:
-                            fmt_list.append((start, end))
-                        rng.Collapse(0)  # wdCollapseEnd
-            except Exception as e:
-                logger.warning(f"Failed to read formatting: {e}")
-
-            # 2c. Extract Headings (Fast COM Path using Style Enumeration)
-            heading_events = []
-            try:
-                # win32com constants: wdStyleHeading1 = -2, wdStyleHeading9 = -10
-                for lvl in range(1, 10):
-                    rng = doc.Range(0, doc_end)
-                    find = rng.Find
-                    find.ClearFormatting()
-                    find.Style = -1 - lvl
-                    find.Forward = True
-                    find.Wrap = 0
-                    find.Format = True
-                    find.Text = ""
-                    while find.Execute():
-                        heading_events.append((rng.Start, lvl))
-                        rng.Collapse(0)
-            except Exception as e:
-                logger.warning(f"Failed to read headings: {e}")
-
-            # 3. Build sequential Event list at exact COM indices
-            events_by_idx: Dict[int, List[DocxEvent]] = {}
-            for ann in annotations:
-                start = ann["start"]
-                end = ann["end"]
-                uid = ann["id"]
-                auth = ann.get("author", "Unknown")
-                date = ann.get("date", "")
-
-                if ann["type"] == "insert":
-                    events_by_idx.setdefault(start, []).append(DocxEvent("ins_start", uid, auth, date))
-                    events_by_idx.setdefault(end, []).append(DocxEvent("ins_end", uid))
-                elif ann["type"] == "delete":
-                    events_by_idx.setdefault(start, []).append(DocxEvent("del_start", uid, auth, date))
-                    events_by_idx.setdefault(end, []).append(DocxEvent("del_end", uid))
-                elif ann["type"] == "comment":
-                    events_by_idx.setdefault(start, []).append(DocxEvent("start", uid))
-                    events_by_idx.setdefault(end, []).append(DocxEvent("end", uid))
-
-            for start, end in bold_ranges:
-                events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "**"))
-                events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "**"))
-
-            for start, end in italic_ranges:
-                events_by_idx.setdefault(start, []).append(DocxEvent("fmt_start", "_"))
-                events_by_idx.setdefault(end, []).append(DocxEvent("fmt_end", "_"))
-
-            for start, lvl in heading_events:
-                events_by_idx.setdefault(start, []).append(DocxEvent("heading", "#" * lvl + " "))
-
-            items = []
-            last_idx = 0
-            indices = [0, doc_end] + list(events_by_idx.keys())
-            indices = sorted(list(set([i for i in indices if 0 <= i <= doc_end])))
-
-            for idx in indices:
-                if idx > last_idx:
-                    try:
-                        text_seg = doc.Range(last_idx, idx).Text
-                        if text_seg:
-                            items.append(text_seg)
-                    except Exception:
-                        pass
-                    last_idx = idx
-
-                if idx in events_by_idx:
-                    evts = events_by_idx[idx]
-
-                    def evt_sort_key(e):
-                        if isinstance(e, str):
-                            return 0
-                        t = getattr(e, "type", "")
-                        if t == "heading":
-                            return -3
-                        if t == "fmt_start":
-                            return -2
-                        if "start" in t or t == "start":
-                            return -1
-                        if t == "fmt_end":
-                            return 3
-                        if "end" in t or t == "end":
-                            return 2
-                        return 0
-
-                    evts.sort(key=evt_sort_key)
-                    items.extend(evts)
-
-            # 4. Mirror the ingest.py State Machine
-            active_ins: Dict[str, DocxEvent] = {}
-            active_del: Dict[str, DocxEvent] = {}
-            active_comments: Set[str] = set()
-            active_bold = 0
-            active_italic = 0
-            deferred_meta_states = []
-            pending_text = ""
-            current_wrappers = ("", "")
-            parts = []
-
-            for i, item in enumerate(items):
-                if isinstance(item, str):
-                    seg = item
-
-                    if clean_view and active_del:
-                        continue
-
-                    if seg:
-                        prefix = ""
-                        suffix = ""
-                        if active_bold > 0:
-                            prefix += "**"
-                            suffix = "**" + suffix
-                        if active_italic > 0:
-                            prefix += "_"
-                            suffix = "_" + suffix
-
-                        seg = apply_formatting_to_segments(seg, prefix, suffix)
-
-                        if clean_view:
-                            new_wrappers = ("", "")
-                        else:
-                            new_wrappers = _get_wrappers(active_ins, active_del, active_comments)
-
-                        if pending_text and new_wrappers == current_wrappers:
-                            pending_text += seg
-                        else:
-                            if pending_text:
-                                s_tok, e_tok = current_wrappers
-                                parts.append(f"{s_tok}{pending_text}{e_tok}")
-                            pending_text = seg
-                            current_wrappers = new_wrappers
-
-                        if not clean_view:
-                            current_state = (active_ins.copy(), active_del.copy(), active_comments.copy())
-                            deferred_meta_states.append(current_state)
-
-                            should_defer = False
-                            is_redline = bool(active_ins) or bool(active_del)
-                            if is_redline:
-                                j = i + 1
-                                next_is_redline = False
-                                temp_ins = len(active_ins)
-                                temp_del = len(active_del)
-                                while j < len(items):
-                                    next_item = items[j]
-                                    if isinstance(next_item, str):
-                                        if temp_ins > 0 or temp_del > 0:
-                                            next_is_redline = True
-                                        break
-                                    elif isinstance(next_item, DocxEvent):
-                                        if next_item.type == "ins_start":
-                                            temp_ins += 1
-                                        elif next_item.type == "ins_end":
-                                            temp_ins = max(0, temp_ins - 1)
-                                        elif next_item.type == "del_start":
-                                            temp_del += 1
-                                        elif next_item.type == "del_end":
-                                            temp_del = max(0, temp_del - 1)
-                                    j += 1
-
-                                if next_is_redline:
-                                    should_defer = True
-
-                            if not should_defer:
-                                if pending_text:
-                                    s_tok, e_tok = current_wrappers
-                                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                                    pending_text = ""
-                                    current_wrappers = ("", "")
-
-                                meta_block = _build_merged_meta_block(deferred_meta_states, comments_data)
-                                if meta_block:
-                                    parts.append(f"{{>>{meta_block}<<}}")
-                                deferred_meta_states = []
-
-                elif isinstance(item, DocxEvent):
-                    if item.type in ("fmt_start", "fmt_end", "heading"):
-                        if item.type == "fmt_start":
-                            if item.id == "**":
-                                active_bold += 1
-                            elif item.id == "_":
-                                active_italic += 1
-                        elif item.type == "fmt_end":
-                            if item.id == "**":
-                                active_bold = max(0, active_bold - 1)
-                            elif item.id == "_":
-                                active_italic = max(0, active_italic - 1)
-                        elif item.type == "heading":
-                            if pending_text:
-                                s_tok, e_tok = current_wrappers
-                                parts.append(f"{s_tok}{pending_text}{e_tok}")
-                                pending_text = ""
-                                current_wrappers = ("", "")
-                            parts.append(item.id)
-                        continue
-                    if pending_text:
-                        s_tok, e_tok = current_wrappers
-                        parts.append(f"{s_tok}{pending_text}{e_tok}")
-                        pending_text = ""
-                        current_wrappers = ("", "")
-
-                    if item.type == "start":
-                        active_comments.add(item.id)
-                    elif item.type == "end":
-                        active_comments.discard(item.id)
-                    elif item.type == "ins_start":
-                        active_ins[item.id] = item
-                    elif item.type == "ins_end":
-                        active_ins.pop(item.id, None)
-                    elif item.type == "del_start":
-                        active_del[item.id] = item
-                    elif item.type == "del_end":
-                        active_del.pop(item.id, None)
-
-            if pending_text:
-                s_tok, e_tok = current_wrappers
-                parts.append(f"{s_tok}{pending_text}{e_tok}")
-
-            if deferred_meta_states:
-                meta_block = _build_merged_meta_block(deferred_meta_states, comments_data)
-                if meta_block:
-                    parts.append(f"{{>>{meta_block}<<}}")
-
-            final_text = "".join(parts)
-            final_text = (
-                final_text.replace("\r\x07\r\x07", "\n")
-                .replace("\r\x07", " | ")
-                .replace("\x07", " | ")
-                .replace("\r", "\n")
-            )
-
+            # Use the core engine to parse it securely (~0.02s)
+            final_text = extract_text_from_stream(stream, filename="LiveWord", clean_view=clean_view)
             return final_text
         finally:
-            # Omitted CoUninitialize() to prevent GC access violations.
             pass
 
     async def read_active_word_document(
