@@ -3,7 +3,7 @@ Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 
-from typing import Iterator, NamedTuple, Optional, Union
+from typing import Iterator, NamedTuple, Optional, Union, cast
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -52,7 +52,6 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
     e.g. 'Heading 1' -> '# ', 'Heading 2' -> '## '
     """
     # 1. Check Outline Level (Structural Truth)
-    # python-docx outline_level: 0=Level 1, ..., 8=Level 9, 9=Body Text
     try:
         lvl = paragraph.paragraph_format.outline_level
         if lvl is not None and 0 <= lvl <= 8:
@@ -60,15 +59,16 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
     except Exception:
         pass
 
-    if not paragraph.style:
-        return ""
-
-    style_name = paragraph.style.name
-    if not style_name:
-        return ""
+    # NOTE: Do NOT bail early when paragraph.style is None. python-docx returns
+    # None for paragraphs without an explicit <w:pStyle>, even though Word
+    # treats them as the default "Normal" style. Bailing here misses the
+    # all-caps bold heuristic that catches manually-formatted section titles.
+    style_name = None
+    if paragraph.style is not None:
+        style_name = paragraph.style.name
 
     # 2. Check Style Name
-    if style_name.startswith("Heading"):
+    if style_name and style_name.startswith("Heading"):
         try:
             level = int(style_name.replace("Heading", "").strip())
             return "#" * level + " "
@@ -90,19 +90,19 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
                     return "* "
 
     # 4. Heuristic for "Normal" style headers (Lazy Lawyer / Manually formatted)
-    # If text is short (<100 chars), All Caps, and Bold -> Likely a Header
-    if style_name == "Normal":
+    # If text is short (<100 chars), All Caps, and Bold -> Likely a Header.
+    # Treat None-style as Normal (python-docx returns None for paragraphs
+    # with no explicit <w:pStyle>, but Word renders them as Normal).
+    if style_name is None or style_name == "Normal":
         text = paragraph.text.strip()
         if text and len(text) < 100:
             is_all_caps = text.isupper()
 
-            # Check for Bold (Paragraph style or explicit run formatting)
+            # Check for Bold (paragraph style OR explicit run formatting)
             is_bold = False
-            if paragraph.style.font.bold:
+            if paragraph.style is not None and paragraph.style.font.bold:
                 is_bold = True
             else:
-                # Check if visible runs are bold
-                # This is a loose check; if the first run is bold, we assume intention
                 runs = [r for r in paragraph.runs if r.text.strip()]
                 if runs and runs[0].bold:
                     is_bold = True
@@ -117,14 +117,33 @@ def get_run_style_markers(run: Run) -> tuple[str, str]:
     """
     Returns markdown prefix/suffix for run formatting (bold/italic).
     Only returns markers for explicit formatting to avoid clutter.
+
+    Suppresses ** on runs inside heading paragraphs: heading styles are
+    visually bold by default, so emitting ** would produce redundant markup
+    (e.g. "# **1. Purpose**"). Equally important: Word strips redundant
+    explicit <w:b/> tags from heading runs when serializing via
+    doc.WordOpenXML, so without this suppression the same document renders
+    differently depending on whether it was read from disk (keeps the tags)
+    or from the live canvas (loses them).
     """
     prefix = ""
     suffix = ""
 
-    # Nesting order: Bold outer, Italic inner -> **_text_**
+    # Detect heading context for the run's parent paragraph.
+    # python-docx types Run._parent as ProvidesStoryPart (the broader
+    # story-container protocol, which has no .style attribute). In practice
+    # runs emitted by iter_paragraph_content are always constructed with a
+    # Paragraph parent, so the cast is truthful at runtime.
+    para = cast(Paragraph, run._parent)
+    para_style_name = None
+    para_style = getattr(para, "style", None)
+    if para_style is not None:
+        para_style_name = para_style.name
 
-    # explicit check for True (ignores None/False)
-    if run.bold:
+    is_heading = bool(para_style_name and (para_style_name.startswith("Heading") or para_style_name == "Title"))
+
+    # Nesting order: Bold outer, Italic inner -> **_text_**
+    if run.bold and not is_heading:
         prefix += "**"
         suffix = "**" + suffix
 
@@ -234,7 +253,13 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
             elif tag == qn("w:commentReference"):
                 # Reference directly in paragraph
                 pass
-            elif tag in (qn("w:hyperlink"), qn("w:sdt"), qn("w:smartTag"), qn("w:fldSimple"), qn("w:sdtContent")):
+            elif tag in (
+                qn("w:hyperlink"),
+                qn("w:sdt"),
+                qn("w:smartTag"),
+                qn("w:fldSimple"),
+                qn("w:sdtContent"),
+            ):
                 yield from traverse_node(child)
 
     yield from traverse_node(paragraph._element)
