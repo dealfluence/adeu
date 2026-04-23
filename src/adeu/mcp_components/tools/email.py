@@ -1,5 +1,6 @@
 # FILE: src/adeu/mcp_components/tools/email.py
 import base64
+import hashlib
 import json
 import re
 import tempfile
@@ -17,6 +18,50 @@ from fastmcp.tools.tool import ToolResult
 
 from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
 from adeu.mcp_components.shared import BACKEND_URL, EMAIL_UI_URI
+
+CACHE_FILE = Path.home() / ".adeu" / "mcp_id_cache.json"
+MAX_CACHE_SIZE = 1000
+
+
+def load_id_cache() -> dict[str, str]:
+    """Loads the ID mapping cache from disk."""
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_id_cache(cache: dict[str, str]) -> None:
+    """Saves the ID mapping cache to disk, keeping only the most recent MAX_CACHE_SIZE items."""
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if len(cache) > MAX_CACHE_SIZE:
+            # Python 3.7+ dicts maintain insertion order. Keep newest.
+            cache = dict(list(cache.items())[-MAX_CACHE_SIZE:])
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass  # Non-fatal if we cannot write to the cache
+
+
+def minify_email_id(real_id: str, cache: dict[str, str]) -> str:
+    """Hashes a giant provider ID into a short ID and adds it to the current cache dict."""
+    if not real_id:
+        return real_id
+    short_id = f"msg_{hashlib.md5(real_id.encode('utf-8')).hexdigest()[:6]}"
+    cache[short_id] = real_id
+    return short_id
+
+
+def resolve_email_id(short_id: str) -> str:
+    """Looks up a short ID from disk and returns the real provider ID."""
+    if not short_id:
+        return short_id
+    cache = load_id_cache()
+    return cache.get(short_id, short_id)
 
 
 class MLStripper(HTMLParser):
@@ -42,12 +87,63 @@ def strip_tags(html: str) -> str:
     try:
         s = MLStripper()
         s.feed(html)
-        # Collapse multiple newlines/spaces to save tokens
-
         text = s.get_data()
         return re.sub(r"\n\s*\n", "\n\n", text)
     except Exception:
         return html
+
+
+def remove_nested_quotes(text: str) -> str:
+    """Heuristically strips trailing quoted replies from email bodies."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    clean_lines = []
+    for line in lines:
+        # Outlook common dividers
+        if re.search(r"_{10,}", line):
+            break
+        if re.search(r"From:.*Sent:", line):
+            break
+        # Gmail / Generic dividers
+        if re.search(r"On .* wrote:", line):
+            break
+        if line.strip() == "Original Message":
+            break
+        if re.search(r"-----Original Message-----", line):
+            break
+        clean_lines.append(line)
+    return "\n".join(clean_lines).strip()
+
+
+def _resolve_attachment_dir(working_directory: str | None, email_id: str) -> Path:
+    """
+    Returns the directory where attachments for a given email should be saved.
+    Uses working_directory if provided and valid, otherwise falls back to temp.
+    """
+    if working_directory:
+        base = Path(working_directory)
+        if base.exists() and base.is_dir():
+            return base / "adeu_attachments" / email_id
+
+    # Fallback to system temp
+    return Path(tempfile.gettempdir()) / "adeu_downloads" / email_id
+
+
+def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
+    """Ensures filename uniqueness by appending _1, _2 etc. if the file exists."""
+    base_path = save_dir / filename
+    if not base_path.exists():
+        return base_path
+
+    stem = base_path.stem
+    suffix = base_path.suffix
+    counter = 1
+    while True:
+        new_path = save_dir / f"{stem}_{counter}{suffix}"
+        if not new_path.exists():
+            return new_path
+        counter += 1
 
 
 @tool(
@@ -57,7 +153,11 @@ def strip_tags(html: str) -> str:
         "'days_ago=7' for last week, 'folder=sent' for sent items). "
         "It returns a list of lightweight email previews. "
         "To read the full email body, thread history, and automatically download attachments "
-        "to local disk, call this tool again and provide the specific `email_id`."
+        "to local disk, call this tool again and provide the specific `email_id`. "
+        "Emails often contain attachments. It is highly recommended to always provide "
+        "the `working_directory` parameter so attachments are saved directly to the user's "
+        "actual project folder. This directory path refers to the user's native operating system, "
+        "not the LLM's sandbox environment."
     ),
     annotations={"openWorldHint": True, "readOnlyHint": True},
     meta={"ui": {"resourceUri": EMAIL_UI_URI}},
@@ -86,12 +186,18 @@ async def search_and_fetch_emails(
         Optional[str],
         "If provided, fetches the exact full email and downloads its attachments, ignoring other filters.",
     ] = None,
+    working_directory: Annotated[
+        Optional[str],
+        "Optional. The current working directory of the project or task. "
+        "If provided, attachments will be saved here under an 'adeu_attachments' subfolder. "
+        "If omitted, attachments are saved to the system temp directory.",
+    ] = None,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> ToolResult:
     await ctx.info("Starting live email search", extra={"email_id": email_id, "subject": subject})
-
+    real_email_id = resolve_email_id(email_id) if email_id else None
     payload_dict = {
-        "email_id": email_id,
+        "email_id": real_email_id,
         "sender": sender,
         "subject": subject,
         "has_attachments": has_attachments,
@@ -144,17 +250,25 @@ async def search_and_fetch_emails(
                 structured_content=data,
             )
 
+        # Load the cache to update it with new IDs
+        id_cache = load_id_cache()
+
         llm_lines = [f"Found {len(previews)} email(s). Here are the previews:", ""]
         for p in previews:
+            short_id = minify_email_id(p["id"], id_cache)
+            p["id"] = short_id
             att_flag = "📎 (Has Attachments)" if p.get("has_attachments") else ""
-            unread_flag = "🟢 [UNREAD]" if p.get("is_read") is False else ""  # Let the LLM see it's unread
+            unread_flag = "🟢 [UNREAD]" if p.get("is_read") is False else ""
 
-            llm_lines.append(f"- **ID**: `{p['id']}`")
+            llm_lines.append(f"- **ID**: `{short_id}`")
             llm_lines.append(f"  **Subject**: {p['subject']} {att_flag} {unread_flag}")
             llm_lines.append(f"  **From**: {p['sender_name']} <{p['sender_email']}>")
             llm_lines.append(f"  **Date**: {p['received_datetime']}")
             llm_lines.append(f"  **Preview**: {p['preview_text']}")
             llm_lines.append("")
+
+        # Save the updated cache back to disk
+        save_id_cache(id_cache)
 
         llm_lines.append(
             "⚠️ **ACTION REQUIRED**: To read the full body of an email and download its attachments to the local disk, "
@@ -171,63 +285,92 @@ async def search_and_fetch_emails(
         if not full_email:
             return ToolResult(content="Failed to retrieve full email.", structured_content=data)
 
-        # 1. Download Attachments locally
-        base_temp_dir = Path(tempfile.gettempdir()) / "adeu_downloads"
         email_id_str = full_email.get("id", "unknown_id")
-        local_files = []
+        id_cache = load_id_cache()
+        short_target_id = minify_email_id(email_id_str, id_cache) if email_id_str != "unknown_id" else "unknown_id"
+        full_email["id"] = short_target_id
+        for hist_msg in full_email.get("messages", []):
+            if "id" in hist_msg:
+                hist_msg["id"] = minify_email_id(hist_msg["id"], id_cache)
 
-        for att in full_email.get("attachments", []):
-            filename = att.get("filename", "unnamed_file")
-            b64_data = att.pop("base64_data", None)  # 💥 REMOVE from UI payload to prevent iframe bridge crashing
+        save_id_cache(id_cache)
 
-            if b64_data:
-                try:
-                    save_dir = base_temp_dir / email_id_str
-                    save_dir.mkdir(parents=True, exist_ok=True)
+        save_dir = _resolve_attachment_dir(working_directory, short_target_id)
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-                    file_path = save_dir / filename
-                    file_path.write_bytes(base64.b64decode(b64_data))
-                    local_files.append(str(file_path))
+        # Helper to process attachments for a given message block
+        async def process_message_attachments(message_data: dict) -> list[str]:
+            local_files = []
+            for att in message_data.get("attachments", []):
+                filename = att.get("filename", "unnamed_file")
+                b64_data = att.pop("base64_data", None)  # Remove from UI payload to save IPC memory
 
-                    # Tag with local path for the UI
-                    att["local_path"] = str(file_path)
-                except Exception as e:
-                    await ctx.warning(f"Failed to save attachment {filename}: {e}")
+                if b64_data:
+                    try:
+                        file_path = _get_unique_filepath(save_dir, filename)
+                        file_path.write_bytes(base64.b64decode(b64_data))
+                        local_files.append(str(file_path))
+                        att["local_path"] = str(file_path)
+                    except Exception as e:
+                        await ctx.warning(f"Failed to save attachment {filename}: {e}")
+            return local_files
 
-        # 2. Format LLM Output (Thread History + Main Body)
+        # 1. Format LLM Output (Thread History + Main Body)
         llm_lines = [f"# Email Thread: {full_email.get('subject')}", ""]
 
-        # Process Older Thread Messages First
-        if full_email.get("is_thread") and full_email.get("messages"):
-            llm_lines.append("## Previous Messages in Thread:")
-            for idx, hist_msg in enumerate(full_email.get("messages", [])):
-                clean_hist = strip_tags(hist_msg.get("body_html", ""))
-                llm_lines.append(f"### Message {idx + 1}")
-                llm_lines.append(f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>")
-                llm_lines.append(f"**Date**: {hist_msg.get('received_datetime')}")
-                llm_lines.append(f"**Body**:\n```\n{clean_hist}\n```\n")
-            llm_lines.append("---")
+        # Process Target Message (Newest) FIRST
+        target_local_files = await process_message_attachments(full_email)
+        raw_clean_body = strip_tags(full_email.get("body_html", ""))
+        clean_body = remove_nested_quotes(raw_clean_body)
 
-        # Process Main/Newest Message
-        clean_body = strip_tags(full_email.get("body_html", ""))
         llm_lines.append("## Target Message (Newest):")
         llm_lines.append(f"**From**: {full_email.get('sender_name')} <{full_email.get('sender_email')}>")
         llm_lines.append(f"**Date**: {full_email.get('received_datetime')}")
+
+        if target_local_files:
+            llm_lines.append("**Attachments Saved Locally**:")
+            for path in target_local_files:
+                llm_lines.append(f"- 📎 `{path}`")
+
         llm_lines.append(f"**Body**:\n```\n{clean_body}\n```\n")
 
-        # Process Attachments List
-        if local_files:
-            llm_lines.append("## 📎 Attachments Saved Locally:")
-            for path in local_files:
-                llm_lines.append(f"- `{path}`")
+        # 2. Surface Brief (if available from DB)
+        brief_html = full_email.get("brief_content")
+        if brief_html:
+            clean_brief = strip_tags(brief_html)
+            llm_lines.append("## 🧠 AI Strategy Brief (Previously Generated):")
+            llm_lines.append(f"```\n{clean_brief}\n```\n")
+            llm_lines.append(
+                "*This brief was previously generated by Adeu for this email. "
+                "It reflects the AI's analysis at the time of processing.*\n"
+            )
+
+        # 3. Process Older Thread Messages NEXT
+        if full_email.get("is_thread") and full_email.get("messages"):
+            llm_lines.append("## Previous Messages in Thread (Historical Context):")
+            for idx, hist_msg in enumerate(full_email.get("messages", [])):
+                hist_local_files = await process_message_attachments(hist_msg)
+
+                raw_clean_hist = strip_tags(hist_msg.get("body_html", ""))
+                clean_hist = remove_nested_quotes(raw_clean_hist)
+
+                llm_lines.append(f"### Message {-1 * (idx + 1)} (Older)")
+                llm_lines.append(f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>")
+                llm_lines.append(f"**Date**: {hist_msg.get('received_datetime')}")
+
+                if hist_local_files:
+                    llm_lines.append("**Attachments Saved Locally**:")
+                    for path in hist_local_files:
+                        llm_lines.append(f"- 📎 `{path}`")
+
+                llm_lines.append(f"**Body**:\n```\n{clean_hist}\n```\n")
+            llm_lines.append("---")
+
+        if target_local_files or any(m.get("attachments") for m in full_email.get("messages", [])):
             llm_lines.append(
                 "\n*You can now use tools like `read_docx`, `diff_docx_files`, or `validate_documents` "
-                "on the local file paths listed above.*"
+                "on the local file paths listed under each message.*"
             )
-        else:
-            llm_lines.append("*No attachments found in this email.*")
 
         return ToolResult(content="\n".join(llm_lines), structured_content=data)
-
-    # Fallback
     return ToolResult(content="Unknown response format from backend.", structured_content=data)

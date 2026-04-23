@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import List
 
 # Centralized MCP Configuration
-FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")
-BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "https://app.adeu.ai")
+FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "http://localhost:5173")
+BACKEND_URL = os.environ.get("ADEU_BACKEND_URL", "http://localhost:8000")
 MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 EMAIL_UI_URI = "ui://adeu/email-ui"
 

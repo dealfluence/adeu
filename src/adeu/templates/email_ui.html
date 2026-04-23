@@ -257,6 +257,33 @@
             gap: 8px;
         }
 
+        .brief-section {
+            padding: 16px;
+            border-top: 2px solid var(--brand-sand);
+            background: rgba(232, 192, 161, 0.06);
+        }
+
+        .brief-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--brand-sand);
+        }
+
+        .brief-body-container {
+            padding: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 6px;
+            font-size: 0.9em;
+            color: var(--text-main);
+        }
+
         .attachment-item {
             display: flex;
             align-items: center;
@@ -402,63 +429,89 @@
             html += `</div>`;
             return html;
         }
+        function renderAttachmentsList(attachments) {
+            if (!attachments || attachments.length === 0) return '';
+
+            const itemsHtml = attachments.map(att => `
+                <div class="attachment-item">
+                    ${PAPERCLIP_SVG}
+                    <div class="attachment-info">
+                        <span class="attachment-name" title="${escapeHtml(att.filename)}">${escapeHtml(att.filename)} <span style="opacity:0.6; font-size:0.8em;">(${formatBytes(att.size_bytes)})</span></span>
+                        ${att.local_path ? `<span class="attachment-path" title="${escapeHtml(att.local_path)}">Local: ${escapeHtml(att.local_path)}</span>` : ''}
+                    </div>
+                </div>
+            `).join('');
+
+            return `
+                <div class="attachments-section">
+                    <div class="attachments-title">
+                        ${PAPERCLIP_SVG} Attachments (${attachments.length})
+                    </div>
+                    <div class="attachment-list">
+                        ${itemsHtml}
+                    </div>
+                </div>
+            `;
+        }
+        function cleanEmailHTML(htmlString) {
+            if (!htmlString) return '';
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlString, 'text/html');
+
+            // Prune standard nested quotes to keep the UI clean
+            const selectorsToPrune = [
+                '.gmail_quote',                // Gmail
+                'blockquote[type="cite"]',     // Apple Mail
+                '#divRplyFwdMsg',              // Outlook Desktop
+                '#appendonsend',               // Outlook Web
+                '.ydp_quote'                   // Yahoo
+            ];
+
+            selectorsToPrune.forEach(selector => {
+                doc.querySelectorAll(selector).forEach(el => el.remove());
+            });
+
+            // Handle Outlook's <hr tabindex="-1"> pattern
+            const hrs = doc.querySelectorAll('hr');
+            hrs.forEach(hr => {
+                if (hr.getAttribute('tabindex') === '-1' || hr.style.display === 'inline-block') {
+                    // Outlook often puts the quote text right after this HR.
+                    // We remove all siblings after this hr.
+                    let next = hr.nextSibling;
+                    while (next) {
+                        const toRemove = next;
+                        next = next.nextSibling;
+                        toRemove.remove();
+                    }
+                    hr.remove();
+                }
+            });
+
+            return doc.body.innerHTML;
+        }
 
         function renderFullEmail(email) {
             const dateStr = email.received_datetime ? new Date(email.received_datetime).toLocaleString() : '';
 
-            // Build Attachments HTML
-            let attachmentsHtml = '';
-            if (email.attachments && email.attachments.length > 0) {
-                const itemsHtml = email.attachments.map(att => `
-                    <div class="attachment-item">
-                        ${PAPERCLIP_SVG}
-                        <div class="attachment-info">
-                            <span class="attachment-name" title="${escapeHtml(att.filename)}">${escapeHtml(att.filename)} <span style="opacity:0.6; font-size:0.8em;">(${formatBytes(att.size_bytes)})</span></span>
-                            ${att.local_path ? `<span class="attachment-path" title="${escapeHtml(att.local_path)}">Local: ${escapeHtml(att.local_path)}</span>` : ''}
-                        </div>
-                    </div>
-                `).join('');
+            const attachmentsHtml = renderAttachmentsList(email.attachments);
+            const wrapper = document.createElement('div');
+            wrapper.className = 'email-thread';
 
-                attachmentsHtml = `
-                    <div class="attachments-section">
-                        <div class="attachments-title">
-                            ${PAPERCLIP_SVG} Attachments (${email.attachments.length})
+            let threadHtml = '';
+
+            // 1. Render Target Email FIRST
+            let briefHtml = '';
+            if (email.brief_content) {
+                briefHtml = `
+                    <div class="brief-section">
+                        <div class="brief-title">
+                            🧠 AI Strategy Brief
                         </div>
-                        <div class="attachment-list">
-                            ${itemsHtml}
-                        </div>
+                        <div class="brief-body-container" id="brief-${email.id}"></div>
                     </div>
                 `;
             }
 
-            const wrapper = document.createElement('div');
-            wrapper.className = 'email-thread'; // Ensure wrapper stacks properly
-
-            let threadHtml = '';
-
-            // 1. Render Thread History (Oldest first)
-            if (email.is_thread && email.messages && email.messages.length > 0) {
-                email.messages.forEach((histMsg, index) => {
-                    const histDate = histMsg.received_datetime ? new Date(histMsg.received_datetime).toLocaleString() : '';
-
-                    threadHtml += `
-                    <div class="email-message" style="opacity: 0.85; transform: scale(0.98); transform-origin: top;">
-                        <div class="email-header" style="padding: 12px 16px; background: rgba(0,0,0,0.02);">
-                            <div class="email-meta">
-                                <div>
-                                    <span class="email-sender">${escapeHtml(histMsg.sender_name || 'Unknown')}</span>
-                                    <span class="email-address">&lt;${escapeHtml(histMsg.sender_email)}&gt;</span>
-                                </div>
-                                <div class="email-date">${escapeHtml(histDate)}</div>
-                            </div>
-                        </div>
-                        <div class="email-body-container" id="history-body-${index}-${email.id}" style="max-height: 200px; overflow-y: auto; padding: 16px;"></div>
-                    </div>
-                    `;
-                });
-            }
-
-            // 2. Render Target Message (Current/Newest)
             threadHtml += `
             <div class="email-message" style="box-shadow: 0 4px 12px rgba(0,0,0,0.05); border-color: var(--brand-sand);">
                 <div class="email-header">
@@ -473,8 +526,35 @@
                 </div>
                 <div class="email-body-container" id="body-${email.id}"></div>
                 ${attachmentsHtml}
+                ${briefHtml}
             </div>
             `;
+
+            // 2. Render Thread History BELOW target email
+            if (email.is_thread && email.messages && email.messages.length > 0) {
+                threadHtml += `<div style="margin-top: 16px; margin-bottom: -12px; font-weight: 600; color: var(--text-main); font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.05em; padding-left: 8px;">Previous Messages</div>`;
+
+                email.messages.forEach((histMsg, index) => {
+                    const histDate = histMsg.received_datetime ? new Date(histMsg.received_datetime).toLocaleString() : '';
+                    const histAttachmentsHtml = renderAttachmentsList(histMsg.attachments);
+
+                    threadHtml += `
+                    <div class="email-message" style="opacity: 0.85; transform: scale(0.98); transform-origin: top;">
+                        <div class="email-header" style="padding: 12px 16px; background: rgba(0,0,0,0.02);">
+                            <div class="email-meta">
+                                <div>
+                                    <span class="email-sender">${escapeHtml(histMsg.sender_name || 'Unknown')}</span>
+                                    <span class="email-address">&lt;${escapeHtml(histMsg.sender_email)}&gt;</span>
+                                </div>
+                                <div class="email-date">${escapeHtml(histDate)}</div>
+                            </div>
+                        </div>
+                        <div class="email-body-container" id="history-body-${index}-${email.id}" style="max-height: 250px; overflow-y: auto; padding: 16px;"></div>
+                        ${histAttachmentsHtml}
+                    </div>
+                    `;
+                });
+            }
 
             wrapper.innerHTML = threadHtml;
             return wrapper;
@@ -508,30 +588,50 @@
                         // Inject Target Message Body
                         const bodyContainer = document.getElementById(`body-${email.id}`);
                         if (bodyContainer) {
+                            const cleanedBody = cleanEmailHTML(email.body_html);
                             const shadow = bodyContainer.attachShadow({ mode: 'open' });
                             shadow.innerHTML = `
                                 <style>
                                     :host { all: initial; display: block; font-family: system-ui, sans-serif; line-height: 1.5; color: var(--text-main, #333); }
                                     @media (prefers-color-scheme: dark) { :host { color: #e5e5e5; } a { color: #60a5fa; } }
                                     img { max-width: 100%; height: auto; }
+                                    a { target-name: new; target-new: window; } 
                                 </style>
-                                <div>${email.body_html || '<em>Empty Message</em>'}</div>
+                                <div>${cleanedBody || '<em>Empty Message</em>'}</div>
                             `;
                         }
-
+                        // Inject Brief Content (styled HTML from DB)
+                        if (email.brief_content) {
+                            const briefContainer = document.getElementById(`brief-${email.id}`);
+                            if (briefContainer) {
+                                const shadow = briefContainer.attachShadow({ mode: 'open' });
+                                shadow.innerHTML = `
+                                    <style>
+                                        :host { all: initial; display: block; font-family: system-ui, sans-serif; line-height: 1.6; color: var(--text-main, #333); }
+                                        @media (prefers-color-scheme: dark) { :host { color: #e5e5e5; } a { color: #60a5fa; } }
+                                        img { max-width: 100%; height: auto; }
+                                        table { width: 100%; border-collapse: collapse; }
+                                        td, th { padding: 4px 8px; }
+                                    </style>
+                                    <div>${email.brief_content}</div>
+                                `;
+                            }
+                        }
                         // Inject Thread History Bodies
                         if (email.is_thread && email.messages) {
                             email.messages.forEach((histMsg, index) => {
                                 const histContainer = document.getElementById(`history-body-${index}-${email.id}`);
                                 if (histContainer) {
+                                    const cleanedHist = cleanEmailHTML(histMsg.body_html);
                                     const shadow = histContainer.attachShadow({ mode: 'open' });
                                     shadow.innerHTML = `
                                         <style>
                                             :host { all: initial; display: block; font-family: system-ui, sans-serif; line-height: 1.5; color: var(--text-main, #333); font-size: 0.9em; }
                                             @media (prefers-color-scheme: dark) { :host { color: #e5e5e5; } a { color: #60a5fa; } }
                                             img { max-width: 100%; height: auto; }
+                                            a { target-name: new; target-new: window; }
                                         </style>
-                                        <div>${histMsg.body_html || '<em>Empty Message</em>'}</div>
+                                        <div>${cleanedHist || '<em>Empty Message</em>'}</div>
                                     `;
                                 }
                             });
