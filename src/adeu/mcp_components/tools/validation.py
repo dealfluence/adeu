@@ -101,7 +101,7 @@ async def validate_documents(
             with open(p, "rb") as f:
                 files_data.append(("files", p.name, f.read()))
 
-        body, content_type = _encode_multipart_formdata(files_data)
+        body, content_type = _encode_multipart_formdata(files=files_data)
         url = f"{BACKEND_URL}/api/v1/documents/validate"
 
         req = urllib.request.Request(

@@ -4,7 +4,7 @@ import os
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 # Centralized MCP Configuration
 FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "http://localhost:5173")
@@ -27,18 +27,29 @@ def _save_stream(stream: BytesIO, path: str):
 
 
 def _encode_multipart_formdata(
-    files: List[tuple[str, str, bytes]],
+    fields: Optional[Dict[str, str]] = None,
+    files: Optional[List[tuple[str, str, bytes]]] = None,
 ) -> tuple[bytes, str]:
     boundary = uuid.uuid4().hex
     buffer = BytesIO()
 
-    for field_name, file_name, file_bytes in files:
-        buffer.write(f"--{boundary}\r\n".encode("utf-8"))
-        buffer.write(f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"\r\n'.encode("utf-8"))
-        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-        buffer.write(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
-        buffer.write(file_bytes)
-        buffer.write(b"\r\n")
+    if fields:
+        for key, value in fields.items():
+            buffer.write(f"--{boundary}\r\n".encode("utf-8"))
+            buffer.write(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"))
+            buffer.write(value.encode("utf-8"))
+            buffer.write(b"\r\n")
+
+    if files:
+        for field_name, file_name, file_bytes in files:
+            buffer.write(f"--{boundary}\r\n".encode("utf-8"))
+            buffer.write(
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"\r\n'.encode("utf-8")
+            )
+            content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+            buffer.write(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+            buffer.write(file_bytes)
+            buffer.write(b"\r\n")
 
     buffer.write(f"--{boundary}--\r\n".encode("utf-8"))
     return buffer.getvalue(), f"multipart/form-data; boundary={boundary}"

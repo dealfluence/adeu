@@ -17,7 +17,12 @@ from fastmcp.tools import tool
 from fastmcp.tools.tool import ToolResult
 
 from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_token
-from adeu.mcp_components.shared import BACKEND_URL, EMAIL_UI_URI
+from adeu.mcp_components.shared import (
+    BACKEND_URL,
+    EMAIL_UI_URI,
+    _encode_multipart_formdata,
+    _read_file_bytes,
+)
 
 CACHE_FILE = Path.home() / ".adeu" / "mcp_id_cache.json"
 MAX_CACHE_SIZE = 1000
@@ -374,3 +379,109 @@ async def search_and_fetch_emails(
 
         return ToolResult(content="\n".join(llm_lines), structured_content=data)
     return ToolResult(content="Unknown response format from backend.", structured_content=data)
+
+
+@tool(
+    name="create_email_draft",
+    description=(
+        "Creates an email draft in the user's native draft box (e.g., Outlook/Gmail). "
+        "Can either start a NEW email, or REPLY to an existing thread. "
+        "To REPLY, provide 'reply_to_email_id' (the short ID from search_and_fetch_emails). "
+        "To start a NEW email, omit the ID but provide 'subject' and 'to_recipients'. "
+        "Allows attaching local files (PDF/DOCX) by providing their absolute paths. "
+        "The body should be formatted in Markdown."
+    ),
+)
+async def create_email_draft(
+    ctx: Context,
+    body_markdown: Annotated[str, "The body of the email in Markdown format. Will be converted to HTML."],
+    reply_to_email_id: Annotated[Optional[str], "Provide the short email ID to reply to an existing thread."] = None,
+    subject: Annotated[Optional[str], "The subject line. Required if starting a NEW email."] = None,
+    to_recipients: Annotated[Optional[list[str] | str], "List of emails. Required if starting a NEW email."] = None,
+    attachment_paths: Annotated[
+        Optional[list[str] | str],
+        "List of absolute file paths on the local system to attach to the draft.",
+    ] = None,
+    api_key: str = Depends(get_cloud_auth_token),
+) -> ToolResult:
+    # 1. Validation
+    if not reply_to_email_id and (not subject or not to_recipients):
+        return ToolResult(
+            "Error: You must provide either 'reply_to_email_id' (to reply) OR "
+            "both 'subject' and 'to_recipients' (to start a new email).",
+        )
+
+    await ctx.info(
+        "Creating email draft",
+        extra={"reply_to": reply_to_email_id, "subject": subject},
+    )
+    url = f"{BACKEND_URL}/api/v1/emails/drafts/new"
+
+    # Helper to safely parse stringified lists from Claude
+    def _parse_list(val) -> list[str]:
+        if not val:
+            return []
+        if isinstance(val, list):
+            return val
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else [val]
+        except Exception:
+            return [x.strip() for x in val.split(",") if x.strip()]
+
+    parsed_recipients = _parse_list(to_recipients)
+    parsed_attachments = _parse_list(attachment_paths)
+
+    # 2. Resolve Minified ID to Real Graph ID
+    real_reply_to_id = resolve_email_id(reply_to_email_id) if reply_to_email_id else None
+
+    # Prepare text fields
+    fields = {
+        "body_markdown": body_markdown,
+    }
+    if real_reply_to_id:
+        fields["reply_to_email_id"] = real_reply_to_id
+    if subject:
+        fields["subject"] = subject
+    if parsed_recipients:
+        fields["to_recipients"] = json.dumps(parsed_recipients)
+
+    # Prepare file bytes
+    files_to_upload = []
+    if parsed_attachments:
+        for path in parsed_attachments:
+            try:
+                file_bytes = _read_file_bytes(path).getvalue()
+                filename = Path(path).name
+                files_to_upload.append(("files", filename, file_bytes))
+            except Exception as e:
+                raise ToolError(f"Failed to read attachment {path}: {e}") from e
+
+    # Encode payload
+    body, content_type = _encode_multipart_formdata(fields=fields, files=files_to_upload)
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": content_type,
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        await ctx.debug("Sending draft request to Adeu Cloud")
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            draft_id = data.get("id")
+            return ToolResult(content=f"Successfully created email draft! Draft ID: {draft_id}")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            DesktopAuthManager.clear_api_key()
+            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+        error_body = e.read().decode("utf-8")
+        raise ToolError(f"Cloud draft creation failed (HTTP {e.code}): {error_body}") from e
+    except Exception as e:
+        raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
