@@ -426,9 +426,9 @@
 
         <div class="toggle-container" id="toggle-container">
             <button id="toggle-btn">
-                <span id="toggle-text">Show Less</span>
+                <span id="toggle-text">Show More</span>
                 <svg id="toggle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(180deg);">
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate(0deg);">
                     <polyline points="6 9 12 15 18 9"></polyline>
                 </svg>
             </button>
@@ -438,7 +438,7 @@
     <script>
         const appDiv = document.getElementById('app');
         const INIT_ID = 1;
-        let isExpanded = true; // START EXPANDED BY DEFAULT!
+        let isExpanded = false; // START COLLAPSED BY DEFAULT!
 
         let rawMarkdownText = "";
         const navTitle = document.getElementById('nav-title');
