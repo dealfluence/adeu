@@ -63,7 +63,7 @@ def format_and_sort_xml(xml_bytes: bytes, filename: str) -> str:
         # Sort Relationships for deterministic diffing
         if filename.endswith(".rels"):
             rels_node = None
-            if dom.documentElement.tagName == "Relationships":
+            if dom.documentElement is not None and dom.documentElement.tagName == "Relationships":
                 rels_node = dom.documentElement
 
             if rels_node:

@@ -2,7 +2,7 @@ import io
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import structlog
 from fastmcp import Context
@@ -532,9 +532,9 @@ if sys.platform == "win32":
         except Exception as e:
             raise ToolError(str(e)) from e
 
-    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict:
+    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict[str, Any]:
         """Synchronous core for processing live word batch, decoupled from FastMCP context."""
-        stats = {"applied": 0, "failed": 0, "skipped_details": []}
+        stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
             return stats
 
@@ -783,7 +783,7 @@ else:
     def _read_active_word_document_core(clean_view: bool = False) -> str:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
-    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict:
+    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict[str, Any]:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
     async def read_active_word_document(ctx: Context, clean_view: bool = False) -> ToolResult:

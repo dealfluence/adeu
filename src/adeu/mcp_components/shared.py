@@ -4,7 +4,7 @@ import time
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Centralized MCP Configuration
 FRONTEND_URL = os.environ.get("ADEU_FRONTEND_URL", "https://app.adeu.ai")
@@ -21,7 +21,7 @@ def read_file_bytes(path: str) -> BytesIO:
         return BytesIO(f.read())
 
 
-def add_timing_if_debug(start_time: float, result: any) -> any:
+def add_timing_if_debug(start_time: float, result: Any) -> Any:
     """Appends execution time to the tool result if ADEU_ENABLE_TEST_TOOLS is active."""
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") not in ("1", "true", "True", "yes"):
         return result
