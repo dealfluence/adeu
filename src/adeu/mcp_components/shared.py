@@ -1,6 +1,6 @@
-# FILE: src/adeu/mcp_components/shared.py
 import mimetypes
 import os
+import time
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -13,7 +13,7 @@ MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 EMAIL_UI_URI = "ui://adeu/email-ui"
 
 
-def _read_file_bytes(path: str) -> BytesIO:
+def read_file_bytes(path: str) -> BytesIO:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {path}")
@@ -21,12 +21,35 @@ def _read_file_bytes(path: str) -> BytesIO:
         return BytesIO(f.read())
 
 
-def _save_stream(stream: BytesIO, path: str):
+def add_timing_if_debug(start_time: float, result: any) -> any:
+    """Appends execution time to the tool result if ADEU_ENABLE_TEST_TOOLS is active."""
+    if os.getenv("ADEU_ENABLE_TEST_TOOLS") not in ("1", "true", "True", "yes"):
+        return result
+
+    elapsed = time.perf_counter() - start_time
+    timing_msg = f"\n\n[Debug] Tool execution time: {elapsed:.3f}s"
+
+    if isinstance(result, str):
+        return result + timing_msg
+    elif hasattr(result, "content") and hasattr(result, "structured_content"):
+        # Handle ToolResult via duck typing to avoid circular imports
+        if isinstance(result.content, str):
+            result.content += timing_msg
+        if isinstance(result.structured_content, dict) and "markdown" in result.structured_content:
+            result.structured_content["markdown"] += timing_msg
+    elif isinstance(result, dict) and "report_text" in result:
+        # Handle dicts from tools like sanitize
+        result["report_text"] += timing_msg
+
+    return result
+
+
+def save_stream(stream: BytesIO, path: str):
     with open(path, "wb") as f:
         f.write(stream.getvalue())
 
 
-def _encode_multipart_formdata(
+def encode_multipart_formdata(
     fields: Optional[Dict[str, str]] = None,
     files: Optional[List[tuple[str, str, bytes]]] = None,
 ) -> tuple[bytes, str]:

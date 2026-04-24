@@ -20,8 +20,8 @@ from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_
 from adeu.mcp_components.shared import (
     BACKEND_URL,
     EMAIL_UI_URI,
-    _encode_multipart_formdata,
-    _read_file_bytes,
+    encode_multipart_formdata,
+    read_file_bytes,
 )
 
 CACHE_FILE = Path.home() / ".adeu" / "mcp_id_cache.json"
@@ -452,14 +452,14 @@ async def create_email_draft(
     if parsed_attachments:
         for path in parsed_attachments:
             try:
-                file_bytes = _read_file_bytes(path).getvalue()
+                file_bytes = read_file_bytes(path).getvalue()
                 filename = Path(path).name
                 files_to_upload.append(("files", filename, file_bytes))
             except Exception as e:
                 raise ToolError(f"Failed to read attachment {path}: {e}") from e
 
     # Encode payload
-    body, content_type = _encode_multipart_formdata(fields=fields, files=files_to_upload)
+    body, content_type = encode_multipart_formdata(fields=fields, files=files_to_upload)
 
     req = urllib.request.Request(
         url,

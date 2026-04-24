@@ -16,7 +16,7 @@ from adeu.mcp_components.desktop_auth import DesktopAuthManager, get_cloud_auth_
 from adeu.mcp_components.shared import (
     BACKEND_URL,
     MARKDOWN_UI_URI,
-    _encode_multipart_formdata,
+    encode_multipart_formdata,
 )
 
 
@@ -101,7 +101,7 @@ async def validate_documents(
             with open(p, "rb") as f:
                 files_data.append(("files", p.name, f.read()))
 
-        body, content_type = _encode_multipart_formdata(files=files_data)
+        body, content_type = encode_multipart_formdata(files=files_data)
         url = f"{BACKEND_URL}/api/v1/documents/validate"
 
         req = urllib.request.Request(

@@ -1,10 +1,12 @@
-# FILE: src/adeu/mcp_components/tools/sanitize.py
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
+
+from adeu.mcp_components.shared import add_timing_if_debug
 
 
 @tool(
@@ -48,6 +50,7 @@ async def sanitize_docx(
         "The report will list every change that was auto-accepted.",
     ] = False,
 ) -> dict:
+    start_time = time.perf_counter()
     from adeu.sanitize.core import SanitizeError
     from adeu.sanitize.core import sanitize_docx as _sanitize
 
@@ -90,7 +93,7 @@ async def sanitize_docx(
             },
         )
 
-        return {
+        res = {
             "output_path": result.output_path,
             "status": result.status,
             "tracked_changes_found": result.tracked_changes_found,
@@ -101,6 +104,7 @@ async def sanitize_docx(
             "warnings": result.warnings,
             "report_text": result.report_text,
         }
+        return add_timing_if_debug(start_time, res)
 
     except SanitizeError as e:
         await ctx.warning(

@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, List, Optional
 
@@ -11,7 +12,7 @@ from fastmcp.tools.tool import ToolResult
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
-from adeu.mcp_components.shared import MARKDOWN_UI_URI, _read_file_bytes, _save_stream
+from adeu.mcp_components.shared import MARKDOWN_UI_URI, add_timing_if_debug, read_file_bytes, save_stream
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 
@@ -24,7 +25,7 @@ async def _read_docx_disk(file_path: str, ctx: Context, clean_view: bool) -> Too
     )
 
     try:
-        stream = _read_file_bytes(file_path)
+        stream = read_file_bytes(file_path)
         await ctx.debug(
             "File bytes read successfully into memory",
             extra={"size_bytes": len(stream.getvalue())},
@@ -75,7 +76,7 @@ async def _process_document_batch_disk(
             await ctx.warning("Batch processing rejected: No actions or edits provided.")
             return "Error: No changes provided."
 
-        stream = _read_file_bytes(original_docx_path)
+        stream = read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name)
         await ctx.debug("Redline Engine initialized successfully")
 
@@ -106,7 +107,7 @@ async def _process_document_batch_disk(
             extra={"output_path": output_path},
         )
         result_stream = engine.save_to_stream()
-        _save_stream(result_stream, output_path)
+        save_stream(result_stream, output_path)
 
         await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
 
@@ -136,6 +137,7 @@ async def diff_docx_files(
     ctx: Context,
     compare_clean: Annotated[bool, "If True, compares 'Accepted' state. If False, compares raw text."] = True,
 ) -> str:
+    start_time = time.perf_counter()
     await ctx.info(
         "Starting document diff",
         extra={
@@ -147,11 +149,11 @@ async def diff_docx_files(
 
     try:
         await ctx.debug("Extracting text from original document")
-        stream_orig = _read_file_bytes(original_path)
+        stream_orig = read_file_bytes(original_path)
         text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
 
         await ctx.debug("Extracting text from modified document")
-        stream_mod = _read_file_bytes(modified_path)
+        stream_mod = read_file_bytes(modified_path)
         text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
 
         await ctx.debug("Generating text differences")
@@ -159,14 +161,15 @@ async def diff_docx_files(
 
         if not edits:
             await ctx.warning("No text differences found between the documents.")
-            return "No text differences found between the documents."
+            return add_timing_if_debug(start_time, "No text differences found between the documents.")
 
         await ctx.info(f"Diff complete. Found {len(edits)} differences.")
-        return _create_diff_output(original_path, modified_path, text_orig, edits)
+        res = _create_diff_output(original_path, modified_path, text_orig, edits)
+        return add_timing_if_debug(start_time, res)
 
     except Exception as e:
         await ctx.error("Failed to compute diff", extra={"error": str(e)})
-        return f"Error computing diff: {str(e)}"
+        return add_timing_if_debug(start_time, f"Error computing diff: {str(e)}")
 
 
 def _create_diff_output(original_path: str, modified_path: str, text_orig: str, edits: List[ModifyText]):
@@ -220,9 +223,10 @@ async def accept_all_changes(
     ctx: Context,
     output_path: Annotated[Optional[str], "Optional output path."] = None,
 ) -> str:
+    start_time = time.perf_counter()
     await ctx.info(f"Accepting all changes for document: {Path(docx_path).name}")
     try:
-        stream = _read_file_bytes(docx_path)
+        stream = read_file_bytes(docx_path)
         engine = RedlineEngine(stream)
 
         await ctx.debug("Engine loaded, executing accept_all_revisions()")
@@ -232,16 +236,16 @@ async def accept_all_changes(
             p = Path(docx_path)
             output_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
 
-        _save_stream(engine.save_to_stream(), output_path)
+        save_stream(engine.save_to_stream(), output_path)
         await ctx.info("Clean document saved successfully", extra={"output_path": output_path})
 
-        return f"Accepted all changes. Saved to: {output_path}"
+        return add_timing_if_debug(start_time, f"Accepted all changes. Saved to: {output_path}")
     except Exception as e:
         await ctx.error(
             "Failed to accept all changes",
             extra={"error": str(e), "docx_path": docx_path},
         )
-        return f"Error accepting changes: {str(e)}"
+        return add_timing_if_debug(start_time, f"Error accepting changes: {str(e)}")
 
 
 @tool(
@@ -252,6 +256,7 @@ async def open_local_file(
     file_path: Annotated[str, "Absolute path to the file to open."],
     ctx: Context,
 ) -> str:
+    start_time = time.perf_counter()
     await ctx.info(f"Opening file in native app: {file_path}")
     p = Path(file_path)
     if not p.exists():
@@ -264,7 +269,7 @@ async def open_local_file(
             subprocess.run(["open", str(p)], check=True)
         else:
             subprocess.run(["xdg-open", str(p)], check=True)
-        return f"Successfully opened {p.name} in its native application."
+        return add_timing_if_debug(start_time, f"Successfully opened {p.name} in its native application.")
     except Exception as e:
         await ctx.error("Failed to open file", extra={"error": str(e)})
         raise ToolError(f"Failed to open file: {e}") from e
@@ -306,9 +311,12 @@ if sys.platform == "win32":
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
     ) -> ToolResult:
+        start_time = time.perf_counter()
         if not file_path:
-            return await read_active_word_document(ctx, clean_view)
-        return await _read_docx_disk(file_path, ctx, clean_view)
+            res = await read_active_word_document(ctx, clean_view)
+        else:
+            res = await _read_docx_disk(file_path, ctx, clean_view)
+        return add_timing_if_debug(start_time, res)
 
     @tool(
         description=(
@@ -349,11 +357,47 @@ if sys.platform == "win32":
             "Optional output path (only used if original_docx_path is provided).",
         ] = None,
     ) -> str:
+        start_time = time.perf_counter()
         if not original_docx_path:
-            return await process_active_word_batch(ctx, changes, author_name)
-        return await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+            res = await process_active_word_batch(ctx, changes, author_name)
+        else:
+            res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+        return add_timing_if_debug(start_time, res)
 
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") in ("1", "true", "True", "yes"):
+
+        @tool(
+            description=(
+                "Performs a deep, structural XML diff between two DOCX files. "
+                "Bypasses the virtual Markdown representation to show raw OOXML changes "
+                "(e.g., w:ins, w:del, property changes). Essential for debugging the redline engine."
+            ),
+            annotations={"readOnlyHint": True},
+        )
+        async def debug_xml_diff(
+            file_a: Annotated[str, "Absolute path to the first/baseline DOCX file."],
+            file_b: Annotated[str, "Absolute path to the second/modified DOCX file."],
+            ctx: Context,
+        ) -> str:
+            start_time = time.perf_counter()
+            await ctx.info(f"Generating XML diff between {Path(file_a).name} and {Path(file_b).name}")
+            import difflib
+
+            from adeu.utils.xml_debug import get_abstracted_xml_snapshot
+
+            try:
+                xml_a = get_abstracted_xml_snapshot(file_a)
+                xml_b = get_abstracted_xml_snapshot(file_b)
+                diff_lines = list(
+                    difflib.unified_diff(
+                        xml_a.splitlines(), xml_b.splitlines(), fromfile="Baseline", tofile="Modified", lineterm=""
+                    )
+                )
+                res = "No structural XML differences found." if not diff_lines else "\n".join(diff_lines)
+                return add_timing_if_debug(start_time, res)
+            except Exception as e:
+                await ctx.error("Failed to generate XML diff", extra={"error": str(e)})
+                raise ToolError(f"Failed to generate XML diff: {e}") from e
 
         @tool(
             description=(
@@ -366,7 +410,9 @@ if sys.platform == "win32":
             file_path: Annotated[str, "Absolute path to the DOCX file to open in Word."],
             visible: Annotated[bool, "Whether to make the Word application window visible."] = True,
         ) -> str:
-            return await open_word_document_impl(ctx, file_path, visible)
+            start_time = time.perf_counter()
+            res = await open_word_document_impl(ctx, file_path, visible)
+            return add_timing_if_debug(start_time, res)
 
         @tool(
             description="Saves the currently active Microsoft Word document to disk. Optionally closes it after saving."
@@ -379,7 +425,9 @@ if sys.platform == "win32":
             ] = None,
             close: Annotated[bool, "Whether to close the document in Word after saving."] = False,
         ) -> str:
-            return await save_active_word_document_impl(ctx, output_path, close)
+            start_time = time.perf_counter()
+            res = await save_active_word_document_impl(ctx, output_path, close)
+            return add_timing_if_debug(start_time, res)
 
 else:
 
@@ -402,7 +450,9 @@ else:
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
     ) -> ToolResult:
-        return await _read_docx_disk(file_path, ctx, clean_view)
+        start_time = time.perf_counter()
+        res = await _read_docx_disk(file_path, ctx, clean_view)
+        return add_timing_if_debug(start_time, res)
 
     @tool(
         description=(
@@ -434,4 +484,6 @@ else:
         ],
         output_path: Annotated[Optional[str], "Optional output path."] = None,
     ) -> str:
-        return await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+        start_time = time.perf_counter()
+        res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+        return add_timing_if_debug(start_time, res)
