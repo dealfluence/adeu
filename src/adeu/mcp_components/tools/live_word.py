@@ -534,7 +534,7 @@ if sys.platform == "win32":
 
     def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict:
         """Synchronous core for processing live word batch, decoupled from FastMCP context."""
-        stats = {"applied": 0, "failed": 0}
+        stats = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
             return stats
 
@@ -648,8 +648,14 @@ if sys.platform == "win32":
                                     stats["applied"] += 1
                                 else:
                                     stats["failed"] += 1
+                                    stats["skipped_details"].append(
+                                        f"- Failed to find match in document for: '{change.target_text[:40]}...'"
+                                    )
                         else:
                             stats["failed"] += 1
+                            stats["skipped_details"].append(
+                                f"- Failed to find target text: '{change.target_text[:40]}...'"
+                            )
                             logger.warning(f"Could not find target text: '{change.target_text[:30]}...'")
 
                     elif isinstance(change, AcceptChange):
@@ -658,6 +664,9 @@ if sys.platform == "win32":
                             stats["applied"] += 1
                         else:
                             stats["failed"] += 1
+                            stats["skipped_details"].append(
+                                f"- Revision {change.target_id} not found or lost to drift."
+                            )
                             logger.warning(f"Revision {change.target_id} not found or lost to drift.")
 
                     elif isinstance(change, RejectChange):
@@ -666,6 +675,9 @@ if sys.platform == "win32":
                             stats["applied"] += 1
                         else:
                             stats["failed"] += 1
+                            stats["skipped_details"].append(
+                                f"- Revision {change.target_id} not found or lost to drift."
+                            )
                             logger.warning(f"Revision {change.target_id} not found or lost to drift.")
 
                     elif isinstance(change, ReplyComment):
@@ -679,10 +691,14 @@ if sys.platform == "win32":
                             stats["applied"] += 1
                         except Exception as e:
                             stats["failed"] += 1
+                            stats["skipped_details"].append(f"- Comment {change.target_id} not found.")
                             logger.warning(f"Comment {change.target_id} not found. {e}")
 
                 except Exception as e:
                     stats["failed"] += 1
+                    stats["skipped_details"].append(
+                        f"- Failed to apply change {getattr(change, 'type', 'Unknown')}: {e}"
+                    )
                     logger.error(f"Failed to apply change {getattr(change, 'type', 'Unknown')}: {e}")
 
         finally:
@@ -706,7 +722,10 @@ if sys.platform == "win32":
         try:
             stats = _process_active_word_batch_core(changes, author_name)
             await ctx.info(f"Live Word batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}.")
-            return f"Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
+            res = f"Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
+            if stats.get("skipped_details"):
+                res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
+            return res
         except Exception as e:
             raise ToolError(str(e)) from e
 

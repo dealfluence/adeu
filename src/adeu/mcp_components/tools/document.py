@@ -111,11 +111,14 @@ async def _process_document_batch_disk(
 
         await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
 
-        return (
+        res = (
             f"Batch complete. Saved to: {output_path}\n"
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
             f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
         )
+        if stats.get("skipped_details"):
+            res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
+        return res
 
     except Exception as e:
         await ctx.error("Critical error during batch processing", extra={"error": str(e)})
