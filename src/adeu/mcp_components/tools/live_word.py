@@ -33,6 +33,8 @@ def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
     """
     import base64
     import os
+    import posixpath
+    import xml.etree.ElementTree as ET
     import zipfile
 
     # Match both paired and self-closing pkg:part forms in a single pass.
@@ -43,50 +45,87 @@ def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
     )
 
     parts_meta: list[tuple[str, str]] = []
-    parts_written = 0
+    parts_data: dict[str, bytes] = {}
     parts_skipped = 0
 
+    # 1. Collect all parts into memory
+    for m in part_pattern.finditer(word_open_xml):
+        attrs_str = m.group(1)
+        content_block = m.group(2) or ""
+
+        name_m = re.search(r'pkg:name="([^"]+)"', attrs_str)
+        ctype_m = re.search(r'pkg:contentType="([^"]+)"', attrs_str)
+
+        if not name_m:
+            parts_skipped += 1
+            continue
+
+        raw_name = name_m.group(1)
+        content_type = ctype_m.group(1) if ctype_m else ""
+
+        if not content_type and not raw_name.endswith(".rels"):
+            parts_skipped += 1
+            continue
+
+        zip_name = raw_name.lstrip("/")
+
+        xml_match = re.search(r"<pkg:xmlData>(.*?)</pkg:xmlData>", content_block, re.DOTALL)
+        bin_match = re.search(r"<pkg:binaryData>(.*?)</pkg:binaryData>", content_block, re.DOTALL)
+
+        if xml_match:
+            inner_xml = xml_match.group(1).strip()
+            payload = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n{inner_xml}').encode("utf-8")
+            parts_data[zip_name] = payload
+            parts_meta.append((raw_name, content_type))
+        elif bin_match:
+            b64_data = bin_match.group(1).strip()
+            parts_data[zip_name] = base64.b64decode(b64_data)
+            parts_meta.append((raw_name, content_type))
+        else:
+            # Empty/self-closing part dropped by COM
+            logger.debug(f"Empty pkg:part (no xmlData/binaryData): {raw_name}")
+
+    valid_zip_names = set(parts_data.keys())
+
+    # 2. Prune broken relationships (e.g. customXml dropped by COM)
+    rels_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ET.register_namespace("", rels_ns)
+
+    for zip_name, payload in parts_data.items():
+        if zip_name.endswith(".rels"):
+            try:
+                tree = ET.fromstring(payload)
+                modified = False
+                for rel in list(tree):
+                    target = rel.attrib.get("Target")
+                    mode = rel.attrib.get("TargetMode", "Internal")
+
+                    if target and mode == "Internal":
+                        d1 = posixpath.dirname(zip_name)
+                        d2 = posixpath.dirname(d1)
+                        base_dir = "/" + d2
+                        resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
+
+                        if resolved not in valid_zip_names:
+                            logger.debug(f"Pruning broken relationship to {resolved} from {zip_name}")
+                            tree.remove(rel)
+                            modified = True
+
+                if modified:
+                    parts_data[zip_name] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+            except Exception as e:
+                logger.warning(f"Failed to prune relations in {zip_name}: {e}")
+
+    # 3. Build the ZIP
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zf:
-        for m in part_pattern.finditer(word_open_xml):
-            attrs_str = m.group(1)
-            content_block = m.group(2) or ""
-
-            name_m = re.search(r'pkg:name="([^"]+)"', attrs_str)
-            ctype_m = re.search(r'pkg:contentType="([^"]+)"', attrs_str)
-            if not name_m or not ctype_m:
-                parts_skipped += 1
-                logger.debug(f"Skipping pkg:part with missing name/contentType: {attrs_str[:80]!r}")
-                continue
-
-            raw_name = name_m.group(1)
-            content_type = ctype_m.group(1)
-
-            # ZIP entries must not have a leading slash
-            zip_name = raw_name.lstrip("/")
-
-            xml_match = re.search(r"<pkg:xmlData>(.*?)</pkg:xmlData>", content_block, re.DOTALL)
-            bin_match = re.search(r"<pkg:binaryData>(.*?)</pkg:binaryData>", content_block, re.DOTALL)
-
-            if xml_match:
-                inner_xml = xml_match.group(1).strip()
-                payload = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n{inner_xml}').encode("utf-8")
-                zf.writestr(zip_name, payload)
-                parts_written += 1
-                parts_meta.append((raw_name, content_type))
-            elif bin_match:
-                b64_data = bin_match.group(1).strip()
-                zf.writestr(zip_name, base64.b64decode(b64_data))
-                parts_written += 1
-                parts_meta.append((raw_name, content_type))
-            else:
-                # Empty self-closing part — legitimate but no body to write.
-                logger.debug(f"Empty pkg:part (no xmlData/binaryData): {raw_name}")
+        for z_name, data in parts_data.items():
+            zf.writestr(z_name, data)
 
         rels_ct = "application/vnd.openxmlformats-package.relationships+xml"
         overrides = []
         for raw_name, ctype in parts_meta:
-            if raw_name.endswith(".rels"):
+            if raw_name.endswith(".rels") or not ctype:
                 continue
             safe_name = raw_name.replace("&", "&amp;").replace('"', "&quot;")
             safe_ct = ctype.replace("&", "&amp;").replace('"', "&quot;")
@@ -101,7 +140,7 @@ def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
 
     size_bytes = stream.tell()
     logger.info(
-        f"Built in-memory DOCX from Flat OPC: {parts_written} parts written, "
+        f"Built in-memory DOCX from Flat OPC: {len(parts_data)} parts written, "
         f"{parts_skipped} malformed parts skipped, {size_bytes} bytes total."
     )
 
