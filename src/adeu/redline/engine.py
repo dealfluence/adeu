@@ -708,7 +708,9 @@ class RedlineEngine:
                         if any(start_idx < occ_end and end_idx > occ_start for occ_start, occ_end in occupied_ranges):
                             logger.warning(f"Skipping overlapping heuristic edit at index {start_idx}")
                             skipped += 1
-                            self.skipped_details.append(f"- Skipped overlapping edit targeting: '{edit.target_text[:40]}...'")
+                            self.skipped_details.append(
+                                f"- Skipped overlapping edit targeting: '{edit.target_text[:40]}...'"
+                            )
                             continue
                         if self._apply_single_edit_heuristic(edit):
                             applied += 1
@@ -716,7 +718,9 @@ class RedlineEngine:
                             self.mapper._build_map()
                         else:
                             skipped += 1
-                            self.skipped_details.append(f"- Failed to apply edit targeting: '{edit.target_text[:40]}...'")
+                            self.skipped_details.append(
+                                f"- Failed to apply edit targeting: '{edit.target_text[:40]}...'"
+                            )
                         continue
                 if self._apply_single_edit_heuristic(edit):
                     applied += 1
@@ -758,7 +762,9 @@ class RedlineEngine:
 
         if actual_doc_text == effective_new_text:
             if edit.comment:
-                proxy_edit = ModifyText(type="modify", target_text=actual_doc_text, new_text=effective_new_text, comment=edit.comment)
+                proxy_edit = ModifyText(
+                    type="modify", target_text=actual_doc_text, new_text=effective_new_text, comment=edit.comment
+                )
                 proxy_edit._match_start_index = start_idx
                 proxy_edit._internal_op = "COMMENT_ONLY"
                 proxy_edit._active_mapper_ref = active_mapper
@@ -833,7 +839,7 @@ class RedlineEngine:
                 end_p = last_el.getparent()
                 while end_p is not None and end_p.tag != qn("w:p"):
                     end_p = end_p.getparent()
-                
+
                 if start_p is not None and end_p is not None:
                     if start_p == end_p:
                         self._attach_comment(start_p, first_el, last_el, edit.comment)

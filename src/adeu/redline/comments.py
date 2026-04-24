@@ -346,7 +346,9 @@ class CommentsManager:
         Modern Word flattens all replies to point to the original comment.
         """
         direct_para_id = self._find_para_id_for_comment(comment_id)
-        ext_part = self._get_existing_part_by_type("application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml")
+        ext_part = self._get_existing_part_by_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+        )
         if not direct_para_id or not ext_part:
             return direct_para_id
 
@@ -409,7 +411,9 @@ class CommentsManager:
         # We only add this if we are NOT using modern comments (extended_part),
         # as modern Word relies on the extended part, and providing both might cause conflicts.
         # Only add if Modern Comments (extended) are NOT in use to avoid conflicts.
-        ext_part = self._get_existing_part_by_type("application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml")
+        ext_part = self._get_existing_part_by_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+        )
         if parent_id and not ext_part:
             comment.set(qn("w15:p"), str(parent_id))
 
@@ -513,7 +517,9 @@ class CommentsManager:
             }
 
         # 2. Enrich with Threading and Resolved status from commentsExtended (Modern Word)
-        ext_part = self._get_existing_part_by_type("application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml")
+        ext_part = self._get_existing_part_by_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+        )
         if ext_part:
             try:
                 ext_xml = parse_xml(ext_part.blob)
