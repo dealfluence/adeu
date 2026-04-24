@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Annotated, List, Optional
@@ -36,6 +37,7 @@ async def _read_docx_disk(file_path: str, ctx: Context, clean_view: bool) -> Too
             structured_content={
                 "markdown": text,
                 "title": Path(file_path).name,
+                "file_path": str(Path(file_path).resolve()),
             },
         )
 
@@ -240,6 +242,32 @@ async def accept_all_changes(
             extra={"error": str(e), "docx_path": docx_path},
         )
         return f"Error accepting changes: {str(e)}"
+
+
+@tool(
+    description="Opens a local file in its native desktop application (e.g., Microsoft Word for DOCX files).",
+    annotations={"openWorldHint": True},
+)
+async def open_local_file(
+    file_path: Annotated[str, "Absolute path to the file to open."],
+    ctx: Context,
+) -> str:
+    await ctx.info(f"Opening file in native app: {file_path}")
+    p = Path(file_path)
+    if not p.exists():
+        raise ToolError(f"File not found: {file_path}")
+
+    try:
+        if sys.platform == "win32":
+            os.startfile(p)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(p)], check=True)
+        else:
+            subprocess.run(["xdg-open", str(p)], check=True)
+        return f"Successfully opened {p.name} in its native application."
+    except Exception as e:
+        await ctx.error("Failed to open file", extra={"error": str(e)})
+        raise ToolError(f"Failed to open file: {e}") from e
 
 
 # ==========================================

@@ -86,6 +86,8 @@ Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requ
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
+- **v1.3.0**: UI Integrations
+    - **Native Open**: Added `open_local_file` tool to allow the Custom MCP UI to seamlessly launch the native OS default application (Word, PDF readers, etc.) without hitting iframe sandbox restrictions via the `tools/call` RPC method.
 - **v1.1.0**: Live Word Interop & Agentic Workflows.
     - **Live MS Word Engine**: Fully integrated Windows COM engine allowing agents to execute live edits on an active MS Word canvas (`sys.platform == "win32"`).
     - **Flat API**: Unified `DocumentChange` discriminated union deployed for the MCP interface.
