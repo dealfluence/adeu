@@ -325,6 +325,10 @@ if sys.platform == "win32":
         description=(
             "Applies a batch of structural edits, text modifications, and review actions to a document. "
             "This is your primary tool for editing DOCX files.\n\n"
+            "CRITICAL: All changes in the batch evaluate against the ORIGINAL document state. "
+            "Do not send sequential edits that depend on each other within the same batch "
+            "(e.g. rename X to Y, then modify Y). "
+            "Instead, apply the rename in one batch, then modify Y in a subsequent batch.\n\n"
             "CRITICAL: If you want to apply edits directly to the user's active, visible Microsoft Word window, "
             "leave `original_docx_path` EMPTY!\n\n"
             "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
@@ -336,8 +340,10 @@ if sys.platform == "win32":
             "`new_text` into multiple paragraphs. Multi-paragraph inserts are tracked as one "
             "logical revision. To delete text, make `new_text` empty. Do NOT manually write "
             "CriticMarkup {++ tags; the engine handles that.\n"
-            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
+            "(Note: Accepting one half of a paired modify cascades to accept the other half).\n"
+            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
+            "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
             "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
             "Always provide a realistic `author_name` for Tracked Changes. (Note: In live Word, "
             "comments are strictly tied to the user's M365 identity and cannot be spoofed)."
@@ -391,12 +397,33 @@ if sys.platform == "win32":
             try:
                 xml_a = get_abstracted_xml_snapshot(file_a)
                 xml_b = get_abstracted_xml_snapshot(file_b)
+
+                # R6 Fix: Strip noisy rsid and paraId metadata to speed up difflib
+                import re
+
+                xml_a = re.sub(r'\s*w:rsid[RPT]?="[^"]*"', "", xml_a)
+                xml_a = re.sub(r'\s*w14:paraId="[^"]*"', "", xml_a)
+                xml_a = re.sub(r'\s*w14:textId="[^"]*"', "", xml_a)
+
+                xml_b = re.sub(r'\s*w:rsid[RPT]?="[^"]*"', "", xml_b)
+                xml_b = re.sub(r'\s*w14:paraId="[^"]*"', "", xml_b)
+                xml_b = re.sub(r'\s*w14:textId="[^"]*"', "", xml_b)
+
                 diff_lines = list(
                     difflib.unified_diff(
                         xml_a.splitlines(), xml_b.splitlines(), fromfile="Baseline", tofile="Modified", lineterm=""
                     )
                 )
                 res = "No structural XML differences found." if not diff_lines else "\n".join(diff_lines)
+
+                # R5 Fix: Truncate inline diff and provide spill file
+                if len(res) > 150_000:
+                    import tempfile
+
+                    fd, path = tempfile.mkstemp(suffix=".diff", prefix="adeu_xml_diff_")
+                    with open(fd, "w", encoding="utf-8") as f:
+                        f.write(res)
+                    res = res[:150_000] + f"\n\n... [Diff truncated to 150KB. Full diff saved to host at:\n{path}]"
                 return add_timing_if_debug(start_time, res)
             except Exception as e:
                 await ctx.error("Failed to generate XML diff", extra={"error": str(e)})
@@ -461,6 +488,10 @@ else:
         description=(
             "Applies a batch of structural edits, text modifications, and review actions to a document. "
             "This is your primary tool for editing DOCX files.\n\n"
+            "CRITICAL: All changes in the batch evaluate against the ORIGINAL document state. "
+            "Do not send sequential edits that depend on each other within the same batch "
+            "(e.g. rename X to Y, then modify Y). "
+            "Instead, apply the rename in one batch, then modify Y in a subsequent batch.\n\n"
             "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
             "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
             "surrounding context if the word appears multiple times to ensure unique matching) and "
@@ -470,8 +501,10 @@ else:
             "`new_text` into multiple paragraphs. Multi-paragraph inserts are tracked as one "
             "logical revision. To delete text, make `new_text` empty. Do NOT manually write "
             "CriticMarkup {++ tags; the engine handles that.\n"
-            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+            "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
+            "(Note: Accepting one half of a paired modify cascades to accept the other half).\n"
+            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
+            "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
             "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
             "Always provide a realistic `author_name` for Tracked Changes."
         ),

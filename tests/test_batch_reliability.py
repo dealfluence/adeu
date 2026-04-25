@@ -106,17 +106,18 @@ def test_batch_mixed_accept_reject_integrity():
     stream_redlined = engine.save_to_stream()
 
     # Batch Action:
-    # Accept Edit 1 (Accept 1, Accept 2)
-    # Reject Edit 2 (Reject 3, Reject 4)
-
-    # Note: Rejecting a Deletion (3) means restoring the text.
-    # Rejecting an Insertion (4) means removing the text.
+    # Note: Because edits are processed backwards (bottom to top) to prevent index drift,
+    # Edit 2 ("Para 2") is processed first and gets IDs 1 (Del) and 2 (Ins).
+    # Edit 1 ("Para 1") is processed second and gets IDs 3 (Del) and 4 (Ins).
+    #
+    # To Accept Edit 1, we Accept 3 & 4.
+    # To Reject Edit 2, we Reject 1 & 2.
 
     actions = [
-        AcceptChange(target_id="Chg:1"),
-        AcceptChange(target_id="Chg:2"),
-        RejectChange(target_id="Chg:3"),
-        RejectChange(target_id="Chg:4"),
+        AcceptChange(target_id="Chg:3"),
+        AcceptChange(target_id="Chg:4"),
+        RejectChange(target_id="Chg:1"),
+        RejectChange(target_id="Chg:2"),
     ]
 
     engine2 = RedlineEngine(stream_redlined)

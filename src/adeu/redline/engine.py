@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import structlog
 from docx import Document
+from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
+from docx.oxml.xmlchemy import serialize_for_reading
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
@@ -34,6 +36,16 @@ class BatchValidationError(Exception):
 class RedlineEngine:
     def __init__(self, doc_stream: BytesIO, author: str = "Adeu AI"):
         self.doc = Document(doc_stream)
+
+        # M8: Ensure w16du namespace is declared at the document root to prevent ns0 aliasing
+        xml_str = serialize_for_reading(self.doc.part._element)
+
+        w16du_ns_str = 'xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du"'
+        if 'xmlns:w16du="' not in xml_str and "xmlns:w16du='" not in xml_str:
+            xml_str = xml_str.replace("<w:document ", "<w:document " + w16du_ns_str + " ", 1)
+            self.doc.part._element = parse_xml(xml_str.encode("utf-8"))
+            self.doc._element = self.doc.part._element
+
         normalize_docx(self.doc)
         self.author = author
         self.timestamp = (
@@ -672,69 +684,96 @@ class RedlineEngine:
         }
 
     def apply_edits(self, edits: List[ModifyText]) -> tuple[int, int]:
-        indexed_edits = [e for e in edits if e._match_start_index is not None]
-        unindexed_edits = [e for e in edits if e._match_start_index is None]
-
         applied = 0
         skipped = 0
+
+        resolved_edits = []
+
+        # Pre-resolve phase: locate all edits against initial clean state
+        for edit in edits:
+            if edit._match_start_index is not None:
+                resolved_edits.append((edit, edit.new_text))
+            else:
+                resolved = self._pre_resolve_heuristic_edit(edit)
+                if resolved:
+                    if isinstance(resolved, list):
+                        for r in resolved:
+                            resolved_edits.append((r, r.new_text))
+                    else:
+                        resolved_edits.append((resolved, edit.new_text))
+                else:
+                    skipped += 1
+
+                    # N2 Fix: Safe display text fallback for heuristic failures
+                    display_text = edit.target_text or "insertion"
+                    if not display_text.strip() and hasattr(edit, "_original_target_text"):
+                        display_text = edit._original_target_text
+
+                    target_snippet = display_text.strip()[:40]
+                    if not target_snippet:
+                        target_snippet = "insertion"
+
+                    msg = f"- Failed to apply edit targeting: '{target_snippet}...'"
+                    if getattr(edit, "_is_table_edit", False) or " | " in (edit.target_text or ""):
+                        msg += (
+                            ". (Note: Structural table changes like adding/removing columns "
+                            "are not supported via text replace)."
+                        )
+                    self.skipped_details.append(msg)
+
+        # Process all edits backwards in a single O(N) sweep to avoid index drift and map rebuilds
+        resolved_edits.sort(key=lambda x: x[0]._match_start_index or 0, reverse=True)
         occupied_ranges: List[Tuple[int, int]] = []
 
-        # Indexed First (Reverse Order)
-        indexed_edits.sort(key=lambda x: x._match_start_index or 0, reverse=True)
-        for edit in indexed_edits:
+        for edit, orig_new in resolved_edits:
             start = edit._match_start_index or 0
             end = start + (len(edit.target_text) if edit.target_text else 0)
+
             if any(start < occ_end and end > occ_start for occ_start, occ_end in occupied_ranges):
                 logger.warning(f"Skipping overlapping edit at index {start}")
                 skipped += 1
-                self.skipped_details.append(f"- Skipped overlapping edit targeting: '{edit.target_text[:40]}...'")
+
+                display_text = edit.target_text or "insertion"
+                if not display_text.strip() and hasattr(edit, "_original_target_text"):
+                    display_text = edit._original_target_text
+                target_snippet = display_text.strip()[:40]
+
+                msg = f"- Skipped overlapping edit targeting: '{target_snippet}...'"
+                if getattr(edit, "_is_table_edit", False):
+                    msg += ". (Note: Overlapping cell edits in tables must be processed in separate batches)."
+                self.skipped_details.append(msg)
                 continue
-            if self._apply_single_edit_indexed(edit):
+
+            if self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False):
                 applied += 1
                 occupied_ranges.append((start, end))
             else:
                 skipped += 1
-                self.skipped_details.append(f"- Failed to apply edit targeting: '{edit.target_text[:40]}...'")
 
-        # Heuristic Second
-        if unindexed_edits:
-            unindexed_edits.sort(key=lambda x: len(x.target_text), reverse=True)
+                display_text = edit.target_text or "insertion"
+                if not display_text.strip() and hasattr(edit, "_original_target_text"):
+                    display_text = edit._original_target_text
+                target_snippet = display_text.strip()[:40]
+                if not target_snippet:
+                    target_snippet = "insertion"
+
+                msg = f"- Failed to apply edit targeting: '{target_snippet}...'"
+                if getattr(edit, "_is_table_edit", False):
+                    msg += (
+                        ". (Note: Structural table changes or overlapping cell"
+                        + " edits are not supported via text replace)."
+                    )
+                self.skipped_details.append(msg)
+
+        if applied > 0:
             self.mapper._build_map()
-            for edit in unindexed_edits:
-                if edit.target_text:
-                    start_idx, match_len = self.mapper.find_match_index(edit.target_text)
-                    if start_idx != -1:
-                        end_idx = start_idx + match_len
-                        if any(start_idx < occ_end and end_idx > occ_start for occ_start, occ_end in occupied_ranges):
-                            logger.warning(f"Skipping overlapping heuristic edit at index {start_idx}")
-                            skipped += 1
-                            self.skipped_details.append(
-                                f"- Skipped overlapping edit targeting: '{edit.target_text[:40]}...'"
-                            )
-                            continue
-                        if self._apply_single_edit_heuristic(edit):
-                            applied += 1
-                            occupied_ranges.append((start_idx, end_idx))
-                            self.mapper._build_map()
-                        else:
-                            skipped += 1
-                            self.skipped_details.append(
-                                f"- Failed to apply edit targeting: '{edit.target_text[:40]}...'"
-                            )
-                        continue
-                if self._apply_single_edit_heuristic(edit):
-                    applied += 1
-                    self.mapper._build_map()
-                else:
-                    skipped += 1
-                    target_snippet = edit.target_text[:40] if edit.target_text else "insertion"
-                    self.skipped_details.append(f"- Failed to apply edit targeting: '{target_snippet}...'")
+            self.clean_mapper = None
+
         return applied, skipped
 
-    def _apply_single_edit_heuristic(self, edit: ModifyText) -> bool:
+    def _pre_resolve_heuristic_edit(self, edit: ModifyText) -> Union[ModifyText, List[ModifyText], None]:
         if not edit.target_text:
-            logger.warning("Skipping heuristic edit: target_text is empty.")
-            return False
+            return None
 
         start_idx, match_len = self.mapper.find_match_index(edit.target_text)
 
@@ -746,19 +785,84 @@ class RedlineEngine:
 
             start_idx, match_len = self.clean_mapper.find_match_index(edit.target_text)
             if start_idx != -1:
-                logger.info("Matched edit against Clean View.")
                 use_clean_map = True
             else:
-                logger.warning(f"Skipping edit: Target '{edit.target_text[:20]}...' not found (Raw or Clean).")
-                return False
+                return None
 
-        if use_clean_map and self.clean_mapper:
-            active_mapper = self.clean_mapper
-        else:
-            active_mapper = self.mapper
+        active_mapper = self.clean_mapper if use_clean_map else self.mapper
 
         effective_new_text = edit.new_text or ""
         actual_doc_text = self.mapper.full_text[start_idx : start_idx + match_len]
+
+        # TABLE CELL SPLITTING LOGIC (R1, R2, R3, R4, N1 Fix)
+        # Only split if the target area actually spans a virtual table boundary (" | ")
+        if " | " in actual_doc_text:
+            actual_cells = actual_doc_text.split("|")
+            new_cells = effective_new_text.split("|")
+
+            if len(actual_cells) == len(new_cells) and len(actual_cells) > 1:
+                sub_edits = []
+                current_offset = start_idx
+                comment_attached = False
+
+                for a_cell, n_cell in zip(actual_cells, new_cells, strict=True):
+                    a_clean = a_cell.strip()
+                    n_clean = n_cell.strip()
+
+                    if a_clean:
+                        idx = a_cell.find(a_clean)
+                        a_leading = a_cell[:idx]
+                        a_trailing = a_cell[idx + len(a_clean) :]
+                    else:
+                        a_leading = ""
+                        a_trailing = a_cell
+
+                    n_cell_aligned = a_leading + n_clean + a_trailing
+                    start_offset = len(a_leading)
+
+                    if a_cell != n_cell_aligned or (edit.comment and not comment_attached):
+                        sub_edit = ModifyText(
+                            type="modify",
+                            target_text=a_clean,
+                            new_text=n_clean,
+                            comment=edit.comment if not comment_attached else None,
+                        )
+                        sub_edit._active_mapper_ref = active_mapper
+                        sub_edit._original_target_text = edit.target_text  # type: ignore[attr-defined]
+                        sub_edit._is_table_edit = True  # type: ignore[attr-defined]
+
+                        if a_clean == n_clean:
+                            sub_edit._match_start_index = current_offset + start_offset
+                            sub_edit._internal_op = "COMMENT_ONLY"
+                        else:
+                            prefix_len, suffix_len = trim_common_context(a_clean, n_clean)
+                            t_end = len(a_clean) - suffix_len
+                            n_end = len(n_clean) - suffix_len
+
+                            final_target = a_clean[prefix_len:t_end]
+                            final_new = n_clean[prefix_len:n_end]
+                            sub_edit.target_text = final_target
+                            sub_edit.new_text = final_new
+                            sub_edit._match_start_index = current_offset + start_offset + prefix_len
+
+                            if not final_target and final_new:
+                                sub_edit._internal_op = EditOperationType.INSERTION
+                            elif final_target and not final_new:
+                                sub_edit._internal_op = EditOperationType.DELETION
+                            elif final_target and final_new:
+                                sub_edit._internal_op = EditOperationType.MODIFICATION
+                            else:
+                                sub_edit._internal_op = "COMMENT_ONLY"
+
+                        sub_edits.append(sub_edit)
+                        comment_attached = True
+
+                    current_offset += len(a_cell) + 1  # Move past cell and the "|" separator
+
+                return sub_edits
+            else:
+                # Reject structural modifications to tables (adding/removing columns) via text replacement
+                return None
 
         if actual_doc_text == effective_new_text:
             if edit.comment:
@@ -768,8 +872,8 @@ class RedlineEngine:
                 proxy_edit._match_start_index = start_idx
                 proxy_edit._internal_op = "COMMENT_ONLY"
                 proxy_edit._active_mapper_ref = active_mapper
-                return self._apply_single_edit_indexed(proxy_edit)
-            return True
+                return proxy_edit
+            return edit
 
         if effective_new_text.startswith(actual_doc_text):
             effective_op = EditOperationType.INSERTION
@@ -799,16 +903,23 @@ class RedlineEngine:
             elif final_target and final_new:
                 effective_op = EditOperationType.MODIFICATION
             else:
-                return True
+                proxy_edit = ModifyText(
+                    type="modify", target_text=final_target, new_text=final_new, comment=edit.comment
+                )
+                proxy_edit._match_start_index = effective_start_idx
+                proxy_edit._internal_op = "COMMENT_ONLY"
+                proxy_edit._active_mapper_ref = active_mapper
+                return proxy_edit
 
         proxy_edit = ModifyText(type="modify", target_text=final_target, new_text=final_new, comment=edit.comment)
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper
+        return proxy_edit
 
-        return self._apply_single_edit_indexed(proxy_edit, original_new_text=edit.new_text)
-
-    def _apply_single_edit_indexed(self, edit: ModifyText, original_new_text: Optional[str] = None) -> bool:
+    def _apply_single_edit_indexed(
+        self, edit: ModifyText, original_new_text: Optional[str] = None, rebuild_map: bool = True
+    ) -> bool:
         op = edit._internal_op
         active_mapper = edit._active_mapper_ref or self.mapper
 
@@ -827,7 +938,7 @@ class RedlineEngine:
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
 
         if op == "COMMENT_ONLY":
-            target_runs = active_mapper.find_target_runs_by_index(start_idx, length)
+            target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
             if not target_runs:
                 return False
             if edit.comment:
@@ -848,7 +959,7 @@ class RedlineEngine:
             return True
 
         if op == EditOperationType.INSERTION:
-            anchor_run = self.mapper.get_insertion_anchor(start_idx)
+            anchor_run = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
             if not anchor_run:
                 return False
 
@@ -885,7 +996,7 @@ class RedlineEngine:
                         self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             return True
 
-        target_runs = active_mapper.find_target_runs_by_index(start_idx, length)
+        target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
         if not target_runs:
             return False
 
@@ -895,8 +1006,21 @@ class RedlineEngine:
                 affected_ps.add(run._parent._element)
 
         if op == EditOperationType.DELETION:
+            first_del_element = None
+            last_del_element = None
             for run in target_runs:
-                self.track_delete_run(run)
+                del_elem = self.track_delete_run(run)
+                if first_del_element is None:
+                    first_del_element = del_elem
+                last_del_element = del_elem
+
+            if edit.comment and first_del_element is not None and last_del_element is not None:
+                start_p = first_del_element.getparent()
+                end_p = last_del_element.getparent()
+                if start_p == end_p:
+                    self._attach_comment(start_p, first_del_element, last_del_element, edit.comment)
+                else:
+                    self._attach_comment_spanning(start_p, first_del_element, end_p, last_del_element, edit.comment)
 
         elif op == EditOperationType.MODIFICATION:
             first_del_element = None
@@ -907,42 +1031,43 @@ class RedlineEngine:
                     first_del_element = del_elem
                 last_del_element = del_elem
 
-            if last_del_element is not None and edit.new_text:
+            if first_del_element is not None and last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
-                del_index = parent.index(last_del_element)
+                if parent is not None:
+                    del_index = parent.index(last_del_element)
 
-                text_to_insert = edit.new_text
-                clean_text, style_name = self._parse_markdown_style(text_to_insert)
-                if style_name:
-                    anchor_para = target_runs[-1]._parent
-                    current_style = getattr(anchor_para, "style", None)
-                    if current_style and getattr(current_style, "name", "") == style_name:
-                        text_to_insert = clean_text
+                    text_to_insert = edit.new_text
+                    clean_text, style_name = self._parse_markdown_style(text_to_insert)
+                    if style_name:
+                        anchor_para = target_runs[-1]._parent
+                        current_style = getattr(anchor_para, "style", None)
+                        if current_style and getattr(current_style, "name", "") == style_name:
+                            text_to_insert = clean_text
 
-                check_text = original_new_text if original_new_text is not None else edit.new_text
-                _has_markdown = bool(re.search(r"\*\*|_", check_text or ""))
+                    check_text = original_new_text if original_new_text is not None else edit.new_text
+                    _has_markdown = bool(re.search(r"\*\*|_", check_text or ""))
 
-                del_r = last_del_element.find(qn("w:r"))
-                if del_r is None:
-                    del_r = target_runs[-1]._element
+                    del_r = last_del_element.find(qn("w:r"))
+                    if del_r is None:
+                        del_r = target_runs[-1]._element
 
-                ins_elem = self.track_insert(
-                    text_to_insert,
-                    anchor_run=Run(del_r, target_runs[-1]._parent),
-                    comment=edit.comment,
-                    suppress_inherited=not _has_markdown,
-                )
-                if ins_elem is not None:
-                    parent.insert(del_index + 1, ins_elem)
+                    ins_elem = self.track_insert(
+                        text_to_insert,
+                        anchor_run=Run(del_r, target_runs[-1]._parent),
+                        comment=edit.comment,
+                        suppress_inherited=not _has_markdown,
+                    )
+                    if ins_elem is not None:
+                        parent.insert(del_index + 1, ins_elem)
 
-                if edit.comment and ins_elem is not None and first_del_element is not None:
-                    start_p = first_del_element.getparent()
-                    end_p = ins_elem.getparent()
+                    if edit.comment and ins_elem is not None and first_del_element is not None:
+                        start_p = first_del_element.getparent()
+                        end_p = ins_elem.getparent()
 
-                    if start_p == end_p:
-                        self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
-                    else:
-                        self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
+                        if start_p == end_p:
+                            self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
+                        else:
+                            self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
 
         for p_elem in affected_ps:
             has_visible = False
@@ -1207,6 +1332,8 @@ class RedlineEngine:
             for child in list(d):
                 for dt in child.findall(f".//{qn('w:delText')}"):
                     dt.tag = qn("w:t")
+                    if dt.text is not None and dt.text.strip() != dt.text:
+                        dt.set(qn("xml:space"), "preserve")
                 parent.insert(index, child)
                 index += 1
             parent.remove(d)
@@ -1300,3 +1427,5 @@ class RedlineEngine:
             for el in self.doc.element.findall(f".//{qn(tag)}"):
                 if el.getparent() is not None:
                     el.getparent().remove(el)
+
+        normalize_docx(self.doc)

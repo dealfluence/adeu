@@ -538,11 +538,11 @@ class DocumentMapper:
             return []
         return self._resolve_runs_at_range(start_idx, start_idx + length)
 
-    def find_target_runs_by_index(self, start_index: int, length: int) -> List[Run]:
+    def find_target_runs_by_index(self, start_index: int, length: int, rebuild_map: bool = True) -> List[Run]:
         end_index = start_index + length
-        return self._resolve_runs_at_range(start_index, end_index)
+        return self._resolve_runs_at_range(start_index, end_index, rebuild_map=rebuild_map)
 
-    def _resolve_runs_at_range(self, start_idx: int, end_idx: int) -> List[Run]:
+    def _resolve_runs_at_range(self, start_idx: int, end_idx: int, rebuild_map: bool = True) -> List[Run]:
         affected_spans = [s for s in self.spans if s.end > start_idx and s.start < end_idx]
         if not affected_spans:
             return []
@@ -583,12 +583,12 @@ class DocumentMapper:
                 working_runs[-1] = left_run
                 dom_modified = True
 
-        if dom_modified:
+        if dom_modified and rebuild_map:
             self._build_map()
 
         return working_runs
 
-    def get_insertion_anchor(self, index: int) -> Optional[Run]:
+    def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Optional[Run]:
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
             if preceding[-1].run:
@@ -601,6 +601,8 @@ class DocumentMapper:
             else:
                 offset = index - span.start
                 left, _ = self._split_run_at_index(span.run, offset)
+                if rebuild_map:
+                    self._build_map()
                 return left
 
         if index == 0 and self.spans:

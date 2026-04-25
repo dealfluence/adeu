@@ -36,6 +36,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Synchronization Invariants**:
     *   **Empty Rows**: `ingest.py` must *never* skip empty table rows. `mapper.py` iterates all rows in the DOM; skipping one in text extraction causes index misalignment.
     *   **Separators**: Row separators (`\n`) are injected *between* rows. Virtual pipes (` | `) separate cells.
+    *   **Cell Isolation**: The virtual `|` boundary represents a hard `<w:tc>` cell wall. Modifying text across `|` boundaries is dynamically segmented into per-cell edits by the engine. Structural table changes (adding/removing `|` columns) via text replacement are explicitly intercepted and rejected to prevent cross-cell data corruption.
 
 ### 6. The Unified `DocumentChange` API
 *   **Flat API Structure**: The LLM interacts with a flat list of `DocumentChange` objects (Discriminated Union of `ModifyText`, `AcceptChange`, `RejectChange`, `ReplyComment`).
@@ -52,6 +53,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Deep Part Ejection**: When completely removing XML parts (e.g., Custom XML, Comments), deleting the elements is insufficient because `python-docx` will repackage empty XML files. We must explicitly sever relationships from `pkg.rels` and `part.rels`, and physically remove the part from `pkg._parts`.
 *   **Mathematical Scrub Verification**: For metadata sanitization, we rely on `lxml` + XPath directly on the unzipped DOCX as the absolute source of truth. This strictly bypasses `python-docx` caching layers to mathematically guarantee artifacts are removed.
 *   **Modern Comments Architecture**: Word's modern comments span four XML parts (`comments.xml`, `commentsExtended.xml`, `commentsIds.xml`, `commentsExtensible.xml`). The resolved status (`w15:done="1"`) is stored inside `commentsExtended.xml` and must be parsed and scrubbed from there.
+*   **Empty Comment Part Lifecycle**: Empty comment XML parts are explicitly left intact rather than purged when all comments are removed, as dynamically mutating the `pkg.rels` matrix across different `python-docx` versions is volatile and can cause unrecoverable package corruption.
 
 ### 9. Live MS Word Interop (Windows COM)
 *   **Platform Safety**: All live Word tools (`live_word.py`) depend on `pywin32` and are conditionally registered via `sys.platform == 'win32'`.
@@ -70,6 +72,11 @@ Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requ
 *   **Ephemeral Session IDs**: Word natively assigns `w:id="0"` to all unsaved revisions/comments in live memory, randomly assigning persistent IDs during a Save. **IDs are session-bound.** Agents must treat Save/Reload boundaries as a state wipe and re-index the document IDs afterward.
 *   **Destructive Native Edits (Comment Rescue)**: Assigning `Range.Text` in Live Word natively destroys any comments anchored to that text. Batch processors must explicitly cache, rescue, and re-anchor comments during string replacements.
 *   **Empty Runs & Timestamps**: Both engines must explicitly skip empty runs to synchronize lookahead bubble grouping. Both must emit full ISO-8601 timestamps without truncation to preserve chronological signals.
+
+### 11. Redline Engine Execution Model (Performance & Safety)
+*   **Pre-Resolution & Backwards-Sweep**: To avoid O(N²) scaling on large documents, all text edits are mapped against the *initial* document state to cache their physical offsets before any DOM mutations occur. Edits are then sorted in reverse order and applied bottom-up in a single O(N) sweep. This completely eliminates index drift and bypasses rebuilding the Virtual DOM map mid-batch. (Note: Because of this reverse execution, bottom-most edits receive lower sequential IDs like `Chg:1`).
+*   **Namespace Injection Safety**: Custom namespaces (e.g., `xmlns:w16du`) are injected directly into the raw XML byte stream at the document root upon load to prevent `lxml` from generating `ns0` alias artifacts that corrupt downstream processors.
+*   **Modification Comment Anchoring**: When a single edit causes a deletion and an insertion (`w:del` followed by `w:ins`), comments spanning the modification are explicitly anchored from the start of the `del` element to the end of the `ins` element to successfully encapsulate the full atomic revision.
 
 ## Developer Workflows
 

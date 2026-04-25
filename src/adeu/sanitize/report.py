@@ -54,7 +54,19 @@ class SanitizeReport:
                 else:
                     self.removed_comment_lines.append(line)
             elif any(
-                k in lower for k in ["author", "template", "company", "manager", "metadata", "timestamp", "custom xml"]
+                k in lower
+                for k in [
+                    "author",
+                    "template",
+                    "company",
+                    "manager",
+                    "metadata",
+                    "timestamp",
+                    "custom xml",
+                    "last modified by",
+                    "revision count",
+                    "last printed",
+                ]
             ):
                 self.metadata_lines.append(line)
             elif any(k in lower for k in ["hyperlink", "warning"]):

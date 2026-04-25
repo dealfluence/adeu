@@ -186,7 +186,9 @@ def test_complex_run_sequence_repro():
     xml = doc.element.xml
 
     idx_fees = xml.find("ARTICLE3 FEES")
-    idx_ins1 = xml.find('w:id="1"')
+    # Because edits are processed backwards, e2 ("AND") is processed first and gets ID 1.
+    # e1 ("ARTICLE3 FEES") is processed second and gets ID 2.
+    idx_ins1 = xml.find('w:id="2"')
     idx_an = xml.find(">AND</w:t>")
 
     assert idx_fees != -1
