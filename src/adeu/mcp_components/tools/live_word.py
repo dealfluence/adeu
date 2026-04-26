@@ -164,6 +164,7 @@ if sys.platform == "win32":
     import pythoncom
     import win32com.client
 
+    from adeu.diff import trim_common_context
     from adeu.markup import _find_match_in_text
     from adeu.models import (
         AcceptChange,
@@ -616,15 +617,26 @@ if sys.platform == "win32":
 
                             if rng.Find.Execute():
                                 actual_start = rng.Start
-                                replace_rng = doc.Range(
-                                    Start=actual_start,
-                                    End=actual_start + len(exact_substring),
-                                )
+                                actual_end = actual_start + len(exact_substring)
+
+                                # Bug #8 Fix: Mathematically shrink the replacement range by trimming common context
+                                effective_new = change.new_text or ""
+                                if exact_substring == effective_new:
+                                    final_new_text = effective_new
+                                else:
+                                    p_len, s_len = trim_common_context(exact_substring, effective_new)
+                                    actual_start += p_len
+                                    actual_end -= s_len
+
+                                    n_end = len(effective_new) - s_len
+                                    final_new_text = effective_new[p_len:n_end]
+
+                                replace_rng = doc.Range(Start=actual_start, End=actual_end)
                                 _apply_com_replacement(
                                     doc,
                                     app,
                                     replace_rng,
-                                    change.new_text,
+                                    final_new_text,
                                     change.comment,
                                 )
                                 stats["applied"] += 1

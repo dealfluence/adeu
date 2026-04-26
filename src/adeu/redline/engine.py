@@ -8,7 +8,6 @@ import structlog
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
-from docx.oxml.xmlchemy import serialize_for_reading
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
@@ -38,7 +37,10 @@ class RedlineEngine:
         self.doc = Document(doc_stream)
 
         # M8: Ensure w16du namespace is declared at the document root to prevent ns0 aliasing
-        xml_str = serialize_for_reading(self.doc.part._element)
+        import lxml.etree as etree
+
+        xml_bytes = etree.tostring(self.doc.part._element, encoding="utf-8", pretty_print=False)
+        xml_str = xml_bytes.decode("utf-8")
 
         w16du_ns_str = 'xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du"'
         if 'xmlns:w16du="' not in xml_str and "xmlns:w16du='" not in xml_str:
@@ -46,7 +48,6 @@ class RedlineEngine:
             self.doc.part._element = parse_xml(xml_str.encode("utf-8"))
             self.doc._element = self.doc.part._element
 
-        normalize_docx(self.doc)
         self.author = author
         self.timestamp = (
             datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -381,6 +382,9 @@ class RedlineEngine:
             if rPr is not None:
                 for b in rPr.findall(qn("w:b")):
                     rPr.remove(b)
+                # Remove Complex Script bold (Bug #12)
+                for bCs in rPr.findall(qn("w:bCs")):
+                    rPr.remove(bCs)
 
         # Handle Italic
         if props.get("italic"):
@@ -395,6 +399,9 @@ class RedlineEngine:
             if rPr is not None:
                 for i in rPr.findall(qn("w:i")):
                     rPr.remove(i)
+                # Remove Complex Script italic (Bug #12)
+                for iCs in rPr.findall(qn("w:iCs")):
+                    rPr.remove(iCs)
 
     def _set_paragraph_style(self, p_element, style_name: str):
         existing_pPr = p_element.find(qn("w:pPr"))
@@ -1044,9 +1051,6 @@ class RedlineEngine:
                         if current_style and getattr(current_style, "name", "") == style_name:
                             text_to_insert = clean_text
 
-                    check_text = original_new_text if original_new_text is not None else edit.new_text
-                    _has_markdown = bool(re.search(r"\*\*|_", check_text or ""))
-
                     del_r = last_del_element.find(qn("w:r"))
                     if del_r is None:
                         del_r = target_runs[-1]._element
@@ -1055,7 +1059,7 @@ class RedlineEngine:
                         text_to_insert,
                         anchor_run=Run(del_r, target_runs[-1]._parent),
                         comment=edit.comment,
-                        suppress_inherited=not _has_markdown,
+                        suppress_inherited=False,
                     )
                     if ins_elem is not None:
                         parent.insert(del_index + 1, ins_elem)
@@ -1174,9 +1178,6 @@ class RedlineEngine:
             else:
                 self.skipped_details.append(f"- Failed to apply action: {act.type} on {target_id}")
                 skipped += 1
-
-        if applied > 0:
-            normalize_docx(self.doc)
 
         return applied, skipped
 

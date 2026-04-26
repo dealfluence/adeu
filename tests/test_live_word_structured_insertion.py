@@ -252,6 +252,7 @@ def test_simple_inline_replacement_unchanged(active_word_app):
     assert "Applied: 1, Failed: 0" in result, result
 
     content = _read(ctx)
-    assert "{--brown fox--}" in content
+    assert "{--brown--}" in content
+    assert "{++**red**++}" in content
     # bold is applied inside the insertion; when read raw it's markdown-wrapped
     assert "**red**" in content

@@ -15,7 +15,8 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   *Implementation*: `utils.docx.apply_formatting_to_segments` splits text by newlines *before* wrapping segments in markers.
     *   *Pattern*: `**Line 1**\n**Line 2**`, NOT `**Line 1\nLine 2**`.
 
-### 2. XML Normalization (`normalize_docx`)
+### 2. XML Normalization & Surgical Mode
+*   **Surgical Mode**: The `RedlineEngine` operates in "Surgical Mode" — it never performs global document normalization (`normalize_docx`) on initialization or save. It strictly preserves untouched paragraphs, preventing the silent destruction of unrelated metadata (like `<w:proofErr>`) and preserving exact XML whitespace lines to guarantee minimal, readable diffs.
 *   **Run Coalescing**: We merge adjacent runs with identical styling to reduce token count and simplify mapping ("Con" + "tract" -> "Contract").
 *   **Safety Constraint**: Runs containing "Special Content" (`w:br`, `w:tab`, `w:commentReference`, `w:drawing`) are **immutable boundaries**.
     *   *Rule*: Never merge a run containing special tags into a text run, or the special tag will be destroyed.
@@ -61,6 +62,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Index Drift Mitigation**:
     *   **Extraction Parity**: Active COM extraction uses an *event-based string builder* (sorting events by length and type) to inject CriticMarkup tags safely. This handles infinitely nested/overlapping annotations (e.g., comments wrapping redlines) without string offset drift.
     *   **Pre-Resolution**: Modifying text natively adds Revisions, shifting `doc.Revisions` indices. We pre-resolve and cache all target COM objects *before* applying a batch of `DocumentChange` operations so Accept/Reject actions target the correct revisions.
+    *   **Minimal-Diff Replacements**: Live Word COM replacements must mathematically trim common context (`trim_common_context`) from the target string's prefix and suffix before executing the COM replacement. Replacing the entire target string wholesale creates bloat and destroys adjacent comment anchors.
 *   **Comment Bounds**: We strictly use `Comment.Scope` (the highlighted text), not `Comment.Reference` (the 0-length anchor), to accurately extract target strings for Comment annotations.
 *   **Identity Spoofing & Deadlocks**: Tools temporarily hijack `Word.Application.UserName` and toggle `doc.TrackRevisions` to apply tracked changes cleanly as the Agent. *Constraint*: Modern M365 enforces logged-in MS Account identities on Comments. Attempting to spoof comment authors via `app.Options.UseLocalUserInfo` causes fatal STA thread deadlocks. Live comments will natively show the local user's real name.
 
@@ -75,8 +77,14 @@ Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requ
 
 ### 11. Redline Engine Execution Model (Performance & Safety)
 *   **Pre-Resolution & Backwards-Sweep**: To avoid O(N²) scaling on large documents, all text edits are mapped against the *initial* document state to cache their physical offsets before any DOM mutations occur. Edits are then sorted in reverse order and applied bottom-up in a single O(N) sweep. This completely eliminates index drift and bypasses rebuilding the Virtual DOM map mid-batch. (Note: Because of this reverse execution, bottom-most edits receive lower sequential IDs like `Chg:1`).
-*   **Namespace Injection Safety**: Custom namespaces (e.g., `xmlns:w16du`) are injected directly into the raw XML byte stream at the document root upon load to prevent `lxml` from generating `ns0` alias artifacts that corrupt downstream processors.
+*   **Namespace Injection & Serialization Safety**: Custom namespaces (e.g., `xmlns:w16du`) are injected directly into the raw XML byte stream at the document root upon load to prevent `lxml` from generating `ns0` alias artifacts that corrupt downstream processors. Crucially, we bypass `python-docx`'s `serialize_for_reading()` which forces destructive pretty-printing. We use raw `lxml.etree` with `pretty_print=False` and `remove_blank_text=False` to strictly preserve Microsoft Word's original whitespace structure and prevent massive, noisy diffs.
+*   **Formatting Inheritance & Optimal Coalescing**: When text is inserted or replaced inside a styled span (e.g., bold), the new text natively inherits the context's styling (`suppress_inherited=False`) to prevent visual data loss. The engine's run coalescer then merges the matching runs to produce optimal, single-run output for whole-span replacements.
 *   **Modification Comment Anchoring**: When a single edit causes a deletion and an insertion (`w:del` followed by `w:ins`), comments spanning the modification are explicitly anchored from the start of the `del` element to the end of the `ins` element to successfully encapsulate the full atomic revision.
+
+### 12. FastMCP Concurrency & Tooling
+*   **Event Loop Blocking**: Any heavy, synchronous CPU or disk-bound tasks (e.g., `sanitize_docx`, or heavy batch processing) called from an async FastMCP tool endpoint MUST be wrapped in `asyncio.to_thread()`. This prevents the `asyncio` event loop from freezing and dropping MCP client heartbeats.
+*   **Kwargs in to_thread**: When dispatching functions via `asyncio.to_thread` that expect keyword-only arguments, arguments must be explicitly passed as keyword arguments to prevent `TypeError: takes X positional arguments` errors.
+*   **Testing Tools**: FastMCP's `@tool` decorator heavily modifies function metadata. When asserting against an MCP tool's prompt or docstring in tests, prefer `inspect.getsource(func)` or `getattr(func, "description", "")` rather than `func.__doc__`.
 
 ## Developer Workflows
 

@@ -61,8 +61,8 @@ def test_repro_5_1_tab_consistency():
 
 def test_repro_5_3_bold_inheritance_bleed():
     """
-    BUG: Modifications inherit style from the last deleted run.
-    If we replace **Bold** with Plain, the result is often silently Bold.
+    Update (Round 16 QA): Modifications SHOULD inherit style from the target run.
+    If we replace **Bold** with Plain, the result should retain the context's Bold.
     """
     doc = Document()
     p = doc.add_paragraph()
@@ -87,8 +87,8 @@ def test_repro_5_3_bold_inheritance_bleed():
     ins_runs = doc_res.element.xpath('//w:ins//w:r[w:t[text()="plain"]]')
     assert ins_runs, "Insertion 'plain' not found"
 
-    # If bug exists, the run inherits the bold property from the deleted "BOLD" run
-    assert not _is_bold(ins_runs[0]), "Inserted text 'plain' incorrectly inherited Bold style"
+    # Per Round 16 QA policy, the run should inherit the bold property from the deleted "BOLD" run
+    assert _is_bold(ins_runs[0]), "Inserted text 'plain' failed to inherit Bold style"
 
 
 # --- 5.5 Markdown Markers Leaking ---

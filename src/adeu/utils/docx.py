@@ -340,10 +340,27 @@ def _coalesce_runs_in_container(container_element, parent_paragraph):
             r2 = Run(nxt, parent_paragraph)
             if not _has_special_content(r1) and not _has_special_content(r2):
                 if _are_runs_identical(r1, r2):
+                    # Find the last text node in the current run to merge into
+                    last_t = None
+                    for c in curr:
+                        if c.tag in (qn("w:t"), qn("w:delText")):
+                            last_t = c
+
                     for child in list(nxt):
                         if child.tag == qn("w:rPr"):
                             continue
-                        curr.append(child)
+                        if child.tag in (qn("w:t"), qn("w:delText")) and last_t is not None and last_t.tag == child.tag:
+                            # Concatenate text instead of creating sibling text nodes
+                            t1 = last_t.text or ""
+                            t2 = child.text or ""
+                            combined = t1 + t2
+                            last_t.text = combined
+                            if combined.strip() != combined:
+                                last_t.set(qn("xml:space"), "preserve")
+                        else:
+                            curr.append(child)
+                            if child.tag in (qn("w:t"), qn("w:delText")):
+                                last_t = child
                     container_element.remove(nxt)
                     children.pop(i + 1)
                     continue

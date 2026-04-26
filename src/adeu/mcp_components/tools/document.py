@@ -409,6 +409,10 @@ if sys.platform == "win32":
                 xml_b = re.sub(r'\s*w14:paraId="[^"]*"', "", xml_b)
                 xml_b = re.sub(r'\s*w14:textId="[^"]*"', "", xml_b)
 
+                # R7 Fix: Normalize whitespace between tags to exactly one newline to eliminate formatting noise
+                xml_a = re.sub(r">\s+<", ">\n<", xml_a)
+                xml_b = re.sub(r">\s+<", ">\n<", xml_b)
+
                 diff_lines = list(
                     difflib.unified_diff(
                         xml_a.splitlines(), xml_b.splitlines(), fromfile="Baseline", tofile="Modified", lineterm=""
@@ -506,7 +510,8 @@ else:
             "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
             "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
             "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
-            "Always provide a realistic `author_name` for Tracked Changes."
+            "Always provide a realistic `author_name` for Tracked Changes. (Note: In live Word, "
+            "author identities cannot be spoofed and will natively default to the local M365 user)."
         ),
         annotations={"destructiveHint": True},
     )

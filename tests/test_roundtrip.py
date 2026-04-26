@@ -189,7 +189,8 @@ def test_complex_run_sequence_repro():
     # Because edits are processed backwards, e2 ("AND") is processed first and gets ID 1.
     # e1 ("ARTICLE3 FEES") is processed second and gets ID 2.
     idx_ins1 = xml.find('w:id="2"')
-    idx_an = xml.find(">AND</w:t>")
+    # Under Surgical Mode, "AN" and "D" are not coalesced. The insertion happens after "D".
+    idx_an = xml.find(">D</w:t>")
 
     assert idx_fees != -1
     assert idx_ins1 != -1

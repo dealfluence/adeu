@@ -1,3 +1,4 @@
+import asyncio
 import time
 from pathlib import Path
 from typing import Annotated, Optional
@@ -74,8 +75,10 @@ async def sanitize_docx(
         raise ToolError(f"Baseline file not found: {baseline_path}")
 
     try:
-        result = _sanitize(
-            input_path=file_path,
+        # Wrap the heavy synchronous sanitize operation in a thread to avoid blocking the MCP event loop
+        result = await asyncio.to_thread(
+            _sanitize,
+            file_path,
             output_path=output_path,
             keep_markup=keep_markup,
             baseline_path=baseline_path,

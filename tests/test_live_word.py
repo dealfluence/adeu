@@ -311,7 +311,7 @@ def test_live_word_table_structure_and_mapping(active_word_app):
         # Verify table structure markers (`|`) are present (Bug 1d)
         assert "Region | Revenue" in content
         # Verify atomic insertion is fully intact (Bug 1a, 1b, 1c)
-        assert "{++North America++}{--North--}" in content
+        assert "North{++ America++}" in content
         assert "}North" not in content  # No phantom trailing text
 
     asyncio.run(run_test())
