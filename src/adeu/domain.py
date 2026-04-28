@@ -134,12 +134,12 @@ def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, 
                 continue
             if term == candidate + "s" or term == candidate + "es":
                 continue
-                
+
             dist = levenshtein_distance(candidate, term)
-            
+
             if dist == 0 or dist > 2:
                 continue
-                
+
             # Stricter rules for short words to prevent coincidental acronym matches
             if len(term) <= 5:
                 if dist > 1:
