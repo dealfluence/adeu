@@ -48,7 +48,7 @@ def test_indemnification_clause_rewrite():
     modified = "Customer shall hold Provider harmless from claims."
 
     edits = generate_edits_from_text(original, modified)
-    indemnify_edit = [e for e in edits if e.target_text == "indemnify"]
+    indemnify_edit = [e for e in edits if "indemnify" in (e.target_text or "")]
     assert len(indemnify_edit) == 1
 
 
@@ -63,3 +63,19 @@ def test_multi_word_phrase_change():
     assert "brown" in phrase_edits[0].target_text
     assert "slow" in phrase_edits[0].new_text
     assert "red" in phrase_edits[0].new_text
+
+
+def test_val_obs_new_8_diff_coalescing():
+    """
+    VAL-OBS-NEW-8: Adjacent edits separated only by whitespace or punctuation
+    or short runs of stable tokens should be coalesced into a single hunk
+    to prevent redline fragmentation across clauses.
+    """
+    # 4-word gap (" year of the AI ")
+    original = "the second year of the AI platform shift"
+    modified = "the third year of the AI strategy shift"
+
+    edits = generate_edits_from_text(original, modified)
+
+    # Without coalescing, 'second'->'third' and 'platform'->'strategy' are 2 separate edits.
+    assert len(edits) == 1, "Edits should be coalesced into a single hunk"

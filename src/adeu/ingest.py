@@ -313,6 +313,14 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                     current_wrappers = ("", "")
                     current_style = ("", "")
                 parts.append(f"~](#{item.id})")
+            elif item.type == "bookmark":
+                if pending_text:
+                    s_tok, e_tok = current_wrappers
+                    parts.append(f"{s_tok}{pending_text}{e_tok}")
+                    pending_text = ""
+                    current_wrappers = ("", "")
+                    current_style = ("", "")
+                parts.append(f"{{#{item.id}}}")
 
     if pending_text:
         s_tok, e_tok = current_wrappers

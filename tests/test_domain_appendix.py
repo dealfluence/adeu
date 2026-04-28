@@ -83,7 +83,7 @@ def test_appendix_projection(domain_docx_stream):
     assert "## Defined Terms" in text
     assert '"Affiliate"' in text
     assert '"Confidential Information"' in text
-    assert "used 2 times" in text  # "Affiliate" should appear 2 times (definition + usage)
+    assert "used 1 times" in text  # "Affiliate" appears 1 time as a pure usage (excluding its declaration)
 
     # Track 3.3: Named Anchors & Back-References
     assert "## Named Anchors" in text

@@ -401,6 +401,13 @@ class DocumentMapper:
                     txt = f"~](#{item.id})"
                     self._add_virtual_text(txt, current, paragraph)
                     current += len(txt)
+                elif item.type == "bookmark":
+                    flush_pending_runs()
+                    current_wrappers = ("", "")
+                    current_style = ("", "")
+                    txt = f"{{#{item.id}}}"
+                    self._add_virtual_text(txt, current, paragraph)
+                    current += len(txt)
 
         flush_pending_runs()
 

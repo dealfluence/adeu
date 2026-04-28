@@ -179,6 +179,14 @@ def _sanitize_full(doc, report: SanitizeReport, *, accept_all: bool):
 
     # Accept all tracked changes
     if total > 0:
+        # VAL-OBS-NEW-9: Warn if there are multiple authors to prevent silent smuggle
+        authors = transforms.get_track_change_authors(doc)
+        if len(authors) > 1:
+            report.warnings.append(
+                f"Multiple authors detected in tracked changes: {', '.join(sorted(authors))}. "
+                f"Review per-change list before sending."
+            )
+
         lines = transforms.accept_all_tracked_changes(doc)
         report.tracked_changes_accepted = total
         report.add_transform_lines(lines)

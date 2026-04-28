@@ -71,6 +71,61 @@ def _make_doc_with_track_changes() -> io.BytesIO:
     return stream
 
 
+def _make_doc_with_multi_author_track_changes() -> io.BytesIO:
+    """Create a DOCX with track changes from multiple authors."""
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+
+    # Deletion by Author 1
+    d = OxmlElement("w:del")
+    d.set(qn("w:id"), "1")
+    d.set(qn("w:author"), "Adeu Reviewer")
+    d.set(qn("w:date"), "2025-01-15T10:00:00Z")
+    rd = OxmlElement("w:r")
+    rt = OxmlElement("w:delText")
+    rt.set(qn("xml:space"), "preserve")
+    rt.text = "Vendor"
+    rd.append(rt)
+    d.append(rd)
+    p._element.append(d)
+
+    # Insertion by Author 1
+    ins1 = OxmlElement("w:ins")
+    ins1.set(qn("w:id"), "2")
+    ins1.set(qn("w:author"), "Adeu Reviewer")
+    ins1.set(qn("w:date"), "2025-01-15T10:00:00Z")
+    ri1 = OxmlElement("w:r")
+    ti1 = OxmlElement("w:t")
+    ti1.set(qn("xml:space"), "preserve")
+    ti1.text = "Supplier"
+    ri1.append(ti1)
+    ins1.append(ri1)
+    p._element.append(ins1)
+
+    p.add_run(" shall provide services for ")
+
+    # Insertion by Author 2
+    ins2 = OxmlElement("w:ins")
+    ins2.set(qn("w:id"), "3")
+    ins2.set(qn("w:author"), "Sneaky Counterparty")
+    ins2.set(qn("w:date"), "2025-01-15T10:00:00Z")
+    ri2 = OxmlElement("w:r")
+    ti2 = OxmlElement("w:t")
+    ti2.set(qn("xml:space"), "preserve")
+    ti2.text = "five (5) "
+    ri2.append(ti2)
+    ins2.append(ri2)
+    p._element.append(ins2)
+
+    p.add_run("years.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    return stream
+
+
 def _make_doc_with_rsids() -> io.BytesIO:
     """Create a DOCX with rsid attributes on paragraphs and runs."""
     doc = Document()
@@ -352,6 +407,26 @@ class TestSanitizeFull:
             out_doc = Document(result.output_path)
             text = out_doc.paragraphs[0].text
             assert "Supplier" in text
+        finally:
+            os.unlink(input_path)
+            if os.path.exists(result.output_path):
+                os.unlink(result.output_path)
+
+    def test_full_sanitize_with_accept_all_warns_multi_author(self):
+        """Full sanitize with --accept-all warns if multiple authors are detected (VAL-OBS-NEW-9)."""
+        stream = _make_doc_with_multi_author_track_changes()
+        input_path = _save_to_tmp(stream)
+
+        try:
+            result = sanitize_docx(input_path, accept_all=True)
+            # Should drop into clean_with_warnings status
+            assert result.status == "clean_with_warnings"
+            # Warning list should contain the alert
+            assert any("Multiple authors detected" in w for w in result.warnings)
+
+            # The rendered report text should explicitly name the authors
+            assert "Adeu Reviewer" in result.report_text
+            assert "Sneaky Counterparty" in result.report_text
         finally:
             os.unlink(input_path)
             if os.path.exists(result.output_path):

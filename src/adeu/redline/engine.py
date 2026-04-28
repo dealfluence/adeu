@@ -49,11 +49,10 @@ class RedlineEngine:
                 parts_to_inject.append(part)
 
         for part in parts_to_inject:
-            if not hasattr(part, "_adeu_element"):
-                if part == self.doc.part:
-                    part._adeu_element = part._element  # type: ignore[attr-defined]
-                else:
-                    part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
+            if hasattr(part, "_element"):
+                part._adeu_element = part._element  # type: ignore[attr-defined]
+            elif not hasattr(part, "_adeu_element"):
+                part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
 
             xml_bytes = etree.tostring(part._adeu_element, encoding="utf-8", pretty_print=False)  # type: ignore[attr-defined]
             xml_str = xml_bytes.decode("utf-8")
@@ -61,9 +60,10 @@ class RedlineEngine:
             if 'xmlns:w16du="' not in xml_str and "xmlns:w16du='" not in xml_str:
                 xml_str = re.sub(r"(<w:[a-zA-Z0-9_]+ )", r"\1" + w16du_ns_str + " ", xml_str, count=1)
                 part._adeu_element = parse_xml(xml_str.encode("utf-8"))  # type: ignore[attr-defined]
-                if part == self.doc.part:
-                    self.doc.part._element = part._adeu_element  # type: ignore[attr-defined]
-                    self.doc._element = self.doc.part._element
+                if hasattr(part, "_element"):
+                    part._element = part._adeu_element  # type: ignore[attr-defined]
+                    if part == self.doc.part:
+                        self.doc._element = self.doc.part._element
 
         self.author = author
         self.timestamp = (
@@ -280,6 +280,18 @@ class RedlineEngine:
                 elif current_p.pPr is not None:
                     new_p.append(deepcopy(current_p.pPr))
 
+                # Track the paragraph break itself as an insertion
+                pPr = new_p.find(qn("w:pPr"))
+                if pPr is None:
+                    pPr = create_element("w:pPr")
+                    new_p.insert(0, pPr)
+                rPr = pPr.find(qn("w:rPr"))
+                if rPr is None:
+                    rPr = create_element("w:rPr")
+                    pPr.append(rPr)
+                ins_mark = self._create_track_change_tag("w:ins")
+                rPr.append(ins_mark)
+
                 new_ins = self._create_track_change_tag("w:ins")
 
                 segments = self._parse_inline_markdown(c_text)
@@ -345,13 +357,50 @@ class RedlineEngine:
             except ValueError:
                 return ins_elem
 
+            has_num_pr = False
+            if current_p_element.pPr is not None and current_p_element.pPr.find(qn("w:numPr")) is not None:
+                has_num_pr = True
+
             for i, line_text in enumerate(remaining_lines):
+                list_level = None
+                if has_num_pr:
+                    match = re.match(r"^([ \t]*)(?:\*|-|\d+\.)\s+", line_text)
+                    if match:
+                        prefix = match.group(0)
+                        indent = match.group(1)
+                        spaces = len(indent.replace("\t", "    "))
+                        list_level = spaces // 4
+                        line_text = line_text[len(prefix) :]
+
                 clean_text, style_name = self._parse_markdown_style(line_text)
                 new_p = create_element("w:p")
                 if style_name:
                     self._set_paragraph_style(new_p, style_name)
                 elif current_p_element.pPr is not None:
-                    new_p.append(deepcopy(current_p_element.pPr))
+                    pPr_clone = deepcopy(current_p_element.pPr)
+                    if list_level is not None:
+                        numPr = pPr_clone.find(qn("w:numPr"))
+                        if numPr is not None:
+                            ilvl_el = numPr.find(qn("w:ilvl"))
+                            if ilvl_el is not None:
+                                ilvl_el.set(qn("w:val"), str(list_level))
+                            else:
+                                ilvl_el = create_element("w:ilvl")
+                                ilvl_el.set(qn("w:val"), str(list_level))
+                                numPr.append(ilvl_el)
+                    new_p.append(pPr_clone)
+
+                # Track the paragraph break itself as an insertion
+                pPr = new_p.find(qn("w:pPr"))
+                if pPr is None:
+                    pPr = create_element("w:pPr")
+                    new_p.insert(0, pPr)
+                rPr = pPr.find(qn("w:rPr"))
+                if rPr is None:
+                    rPr = create_element("w:rPr")
+                    pPr.append(rPr)
+                ins_mark = self._create_track_change_tag("w:ins")
+                rPr.append(ins_mark)
 
                 new_ins = self._create_track_change_tag("w:ins")
 
@@ -463,6 +512,9 @@ class RedlineEngine:
             self._set_text_content(t, seg_text)
             run.append(t)
             ins.append(run)
+
+        if len(ins) == 0:
+            return None
 
         return ins
 
@@ -712,6 +764,18 @@ class RedlineEngine:
                                 "to prevent dependency corruption."
                             )
 
+            # VAL-OBS-9: Internal Anchor Structural Integrity
+            if "{#" in t_text or "{#" in n_text:
+                t_anchors = re.findall(r"\{#[^\}]+\}", t_text)
+                n_anchors = re.findall(r"\{#[^\}]+\}", n_text)
+                for anchor in n_anchors:
+                    if n_anchors.count(anchor) > t_anchors.count(anchor):
+                        errors.append(
+                            f"- Edit {i + 1} Failed: Cannot modify or insert internal anchor markers (`{{#...}}`). "
+                            "These represent structural XML bookmarks."
+                        )
+                        break
+
             if edit.new_text:
                 for line in edit.new_text.splitlines():
                     stripped = line.lstrip()
@@ -738,12 +802,15 @@ class RedlineEngine:
                     active_text = self.clean_mapper.full_text
 
             # Track 3: Appendix Boundary Validation
+            valid_matches = []
             if self.mapper.appendix_start_index != -1:
-                violates_boundary = False
                 for match_start, match_length in matches:
                     if match_start + match_length > self.mapper.appendix_start_index:
-                        violates_boundary = True
-                        break
+                        pass  # Skip appendix copies
+                    else:
+                        valid_matches.append((match_start, match_length))
+
+                violates_boundary = False
                 if "READONLY_BOUNDARY_START" in (edit.target_text or "") or "READONLY_BOUNDARY_START" in (
                     edit.new_text or ""
                 ):
@@ -752,22 +819,25 @@ class RedlineEngine:
                     edit.target_text or ""
                 ) or "# Document Structure (Read-Only)" in (edit.new_text or ""):
                     violates_boundary = True
-                if violates_boundary:
+
+                if violates_boundary or (matches and not valid_matches):
                     errors.append(
                         f"- Edit {i + 1} Failed: Modification targets the read-only boundary "
                         "(Structural Appendix). This section cannot be edited."
                     )
                     continue
+            else:
+                valid_matches = matches
 
-            if len(matches) == 0:
+            if len(valid_matches) == 0:
                 errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
-            elif len(matches) > 1:
+            elif len(valid_matches) > 1:
                 error_msg = [
                     f"- Edit {i + 1} Failed: Ambiguous match. Target text appears "
-                    f"{len(matches)} times. Occurrences found at:"
+                    f"{len(valid_matches)} times. Occurrences found at:"
                 ]
 
-                for idx, (start, length) in enumerate(matches):
+                for idx, (start, length) in enumerate(valid_matches):
                     end = start + length
                     # Extract context (~50 chars before and after to ensure full clause names are captured)
                     pre_context = active_text[max(0, start - 50) : start].replace("\n", " ")
@@ -784,6 +854,22 @@ class RedlineEngine:
                     "  Please provide more surrounding context in your target_text to uniquely identify the location."
                 )
                 errors.append("\n".join(error_msg))
+
+            for start, length in valid_matches:
+                spans = [s for s in self.mapper.spans if s.end > start and s.start < start + length]
+                nested_authors = set()
+                for s in spans:
+                    if s.ins_id:
+                        ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{s.ins_id}']")
+                        if ins_nodes:
+                            auth = ins_nodes[0].get(qn("w:author"))
+                            if auth and auth != self.author:
+                                nested_authors.add(auth)
+                if nested_authors:
+                    errors.append(
+                        f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
+                        f"({', '.join(nested_authors)}). Accept that change first or scope your edit outside of it."
+                    )
 
         return errors
 
@@ -1366,9 +1452,26 @@ class RedlineEngine:
         Removes comment anchors that tightly wrap this element (or a paired del/ins).
         This prevents orphaned comment ranges from leaking when an edit is accepted/rejected.
         """
-        # 1. Collect tightly adjacent Start anchors (looking backwards)
+        # Find the contiguous redline group to correctly bound the search
+        first_node = element
+        while True:
+            prev = first_node.getprevious()
+            if prev is not None and prev.tag in (qn("w:ins"), qn("w:del")):
+                first_node = prev
+            else:
+                break
+
+        last_node = element
+        while True:
+            nxt = last_node.getnext()
+            if nxt is not None and nxt.tag in (qn("w:ins"), qn("w:del")):
+                last_node = nxt
+            else:
+                break
+
+        # 1. Collect tightly adjacent Start anchors (looking backwards from first_node)
         starts_to_remove = []
-        prev = element.getprevious()
+        prev = first_node.getprevious()
         while prev is not None:
             if prev.tag == qn("w:commentRangeStart"):
                 starts_to_remove.append(prev)
@@ -1378,9 +1481,9 @@ class RedlineEngine:
             else:
                 break
 
-        # 2. Collect tightly adjacent End/Ref anchors (looking forwards)
+        # 2. Collect tightly adjacent End/Ref anchors (looking forwards from last_node)
         ends_to_remove = []
-        nxt = element.getnext()
+        nxt = last_node.getnext()
         while nxt is not None:
             if nxt.tag == qn("w:commentRangeEnd"):
                 ends_to_remove.append(nxt)
@@ -1390,9 +1493,6 @@ class RedlineEngine:
                 nxt = nxt.getnext()
             elif nxt.tag == qn("w:commentReference"):
                 ends_to_remove.append(nxt)
-                nxt = nxt.getnext()
-            elif nxt.tag in (qn("w:ins"), qn("w:del")):
-                # Skip over the rest of the paired edit block to find the ending anchor
                 nxt = nxt.getnext()
             else:
                 break
@@ -1579,9 +1679,14 @@ class RedlineEngine:
             if part == self.doc.part:
                 continue
             if "wordprocessingml" in part.content_type and part.content_type.endswith("+xml"):
-                if not hasattr(part, "_adeu_element"):
-                    part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
-                parts_to_process.append(part._adeu_element)  # type: ignore[attr-defined]
+                element_to_process = None
+                if hasattr(part, "_element"):
+                    element_to_process = part._element
+                else:
+                    if not hasattr(part, "_adeu_element"):
+                        part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
+                    element_to_process = part._adeu_element  # type: ignore[attr-defined]
+                parts_to_process.append(element_to_process)
 
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):

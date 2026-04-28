@@ -14,6 +14,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   *Reasoning*: Wrapping newlines breaks many Markdown parsers and complicates line-based text segmentation.
     *   *Implementation*: `utils.docx.apply_formatting_to_segments` splits text by newlines *before* wrapping segments in markers.
     *   *Pattern*: `**Line 1**\n**Line 2**`, NOT `**Line 1\nLine 2**`.
+*   **Multi-Level Lists**: OOXML `<w:ilvl>` maps natively to standard Markdown indentation (4 spaces per level) on read. On write, the engine parses leading spaces divided by 4 to explicitly inject `<w:ilvl>` into `<w:numPr>`.
 
 ### 2. XML Normalization & Surgical Mode
 *   **Surgical Mode**: The `RedlineEngine` operates in "Surgical Mode" — it never performs global document normalization (`normalize_docx`) on initialization or save. It strictly preserves untouched paragraphs, preventing the silent destruction of unrelated metadata (like `<w:proofErr>`) and preserving exact XML whitespace lines to guarantee minimal, readable diffs.
@@ -57,6 +58,8 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Mathematical Scrub Verification**: For metadata sanitization, we rely on `lxml` + XPath directly on the unzipped DOCX as the absolute source of truth. This strictly bypasses `python-docx` caching layers to mathematically guarantee artifacts are removed.
 *   **Modern Comments Architecture**: Word's modern comments span four XML parts (`comments.xml`, `commentsExtended.xml`, `commentsIds.xml`, `commentsExtensible.xml`). The resolved status (`w15:done="1"`) is stored inside `commentsExtended.xml` and must be parsed and scrubbed from there.
 *   **Empty Comment Part Lifecycle**: Empty comment XML parts are explicitly left intact rather than purged when all comments are removed, as dynamically mutating the `pkg.rels` matrix across different `python-docx` versions is volatile and can cause unrecoverable package corruption.
+*   **Multi-Author Sanitization Awareness**: When executing a full document sanitization with auto-acceptance (`accept_all=True`), if multiple distinct authors are detected in pending track changes, a high-visibility warning is injected into the report to alert the user of potential 'silent smuggles'.
+*   **Proxy Class OPC Binding**: When modifying `python-docx` XML parts that have native proxy classes (like `XmlPart` for Headers/Footers), we must re-bind `part._element = part._adeu_element` to ensure successful serialization on save.
 
 ### 9. Live MS Word Interop (Windows COM)
 *   **Platform Safety**: All live Word tools (`live_word.py`) depend on `pywin32` and are conditionally registered via `sys.platform == 'win32'`.
@@ -82,6 +85,10 @@ Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requ
 *   **Namespace Injection & Serialization Safety**: Custom namespaces (e.g., `xmlns:w16du`) are injected directly into the raw XML byte stream at the document root upon load to prevent `lxml` from generating `ns0` alias artifacts that corrupt downstream processors. Crucially, we bypass `python-docx`'s `serialize_for_reading()` which forces destructive pretty-printing. We use raw `lxml.etree` with `pretty_print=False` and `remove_blank_text=False` to strictly preserve Microsoft Word's original whitespace structure and prevent massive, noisy diffs.
 *   **Formatting Inheritance & Optimal Coalescing**: When text is inserted or replaced inside a styled span (e.g., bold), the new text natively inherits the context's styling (`suppress_inherited=False`) to prevent visual data loss. The engine's run coalescer then merges the matching runs to produce optimal, single-run output for whole-span replacements.
 *   **Modification Comment Anchoring**: When a single edit causes a deletion and an insertion (`w:del` followed by `w:ins`), comments spanning the modification are explicitly anchored from the start of the `del` element to the end of the `ins` element to successfully encapsulate the full atomic revision.
+*   **Nested Redline Strict Refusal**: Edits that target text strictly inside an active `<w:ins>` authored by a *different* user are explicitly rejected (`BatchValidationError`) to prevent confusing nested redline fragmentation.
+*   **Paragraph Break Tracking**: When multi-paragraph text is inserted (`\n\n`), the engine explicitly injects an `<w:ins>` marker inside the `<w:pPr><w:rPr>` of the newly created paragraph, ensuring MS Word natively tracks the paragraph break itself.
+*   **Diff Hunk Coalescing**: To prevent redline fragmentation, adjacent textual diff hunks separated by short runs of stable tokens (≤ 4 words) within the same paragraph are mathematically coalesced into a single unified edit hunk.
+*   **Contiguous Orphan Comment Sweep**: When accepting/rejecting changes, comment anchor cleanup (`w:commentRangeStart/End`) must sweep across the entire contiguous block of adjacent redline tags (`w:ins`/`w:del`) to prevent orphaned anchors from leaking into the document body.
 
 ### 12. FastMCP Concurrency & Tooling
 *   **Event Loop Blocking**: Any heavy, synchronous CPU or disk-bound tasks (e.g., `sanitize_docx`, or heavy batch processing) called from an async FastMCP tool endpoint MUST be wrapped in `asyncio.to_thread()`. This prevents the `asyncio` event loop from freezing and dropping MCP client heartbeats.
@@ -94,7 +101,11 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 *   **Footnotes/Endnotes**: Projected inline as `[^fn-{w:id}]` (using stable OOXML IDs, not display numbers) and appended at the bottom. Fully bi-directional. Editing them natively updates `footnotes.xml`. *Constraint*: Generic XML parts lack `get_style()`, so `_get_paragraph_style_safe` gracefully handles missing formatting attributes.
 *   **Bi-directional Links**: `[text](url)`. Editing the text applies tracked changes. Editing the URL executes a silent `URL_RETARGET` operation in `_rels` (no redlines emitted).
 *   **Cross-References**: Projected as `[~text~](#_Ref)`. The `[~...~]` wrapper indicates computed/read-only text. Attempting to modify the display text or hash via `ModifyText` is strictly rejected (`BatchValidationError`) to prevent dependency corruption.
-*   **Structural Appendix**: Structural XML (Bookmarks, TOC boundaries, Defined Terms) is too dangerous to inject inline. The engine extracts this dependency map and appends it to the bottom of the projection behind a `<!-- READONLY_BOUNDARY_START -->` marker. The `RedlineEngine` explicitly tracks `mapper.appendix_start_index` and strictly rejects any `ModifyText` operation targeting this read-only block.
+*   **Internal Anchors**: Structural bookmarks project inline as `{#_BookmarkName}`. Modifying or fabricating this syntax throws a `BatchValidationError` (Strict Refusal) as text-replacement cannot safely resolve these structural nodes.
+*   **Structural Appendix & Boundary Validation**: Structural XML (Bookmarks, TOC boundaries) is appended to the bottom behind a `<!-- READONLY_BOUNDARY_START -->` marker. The boundary validator strictly uses *resolved physical indices* (`find_all_match_indices`) rather than blind string-matching, safely allowing body edits that coincidentally share text with the appendix.
+*   **Defined Terms & Semantic Diagnostics**: We project a "Symbol Table" of terms and "Semantic Diagnostics" (Unresolved, Unused, Duplicate, Typo warnings) in the Appendix.
+    *   *Language-Agnostic Extraction*: Terms are extracted structurally via typography (leading/inline quotes), not brittle English regexes. Terms must be used ≥1 time to be included.
+    *   *High-Signal Diagnostics*: Typo candidates are grouped by target term. False positives are pruned via stop-word filtering, singular/plural exclusion, and a strict rule for short acronyms (≤5 chars: max edit distance of 1 and identical first letter).
 
 ## Developer Workflows
 

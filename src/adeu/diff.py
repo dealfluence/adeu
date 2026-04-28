@@ -276,7 +276,31 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
         edit._match_start_index = idx
         edits.append(edit)
 
-    return edits
+    # Post-processing pass: coalesce adjacent edits separated only by formatting/spaces
+    merged_edits: List[ModifyText] = []
+    for edit in edits:
+        if not merged_edits:
+            merged_edits.append(edit)
+            continue
+
+        last_edit = merged_edits[-1]
+
+        # Calculate the gap between the end of last_edit and start of current edit
+        last_end = (last_edit._match_start_index or 0) + len(last_edit.target_text)
+        curr_start = edit._match_start_index or 0
+
+        gap = original_text[last_end:curr_start]
+
+        # If the gap is on the same paragraph and contains <= 4 words, coalesce them
+        # This merges fragmented word edits within the same sentence/clause
+        word_count = len(re.findall(r"\w+", gap))
+        if "\n" not in gap and word_count <= 4:
+            last_edit.target_text += gap + edit.target_text
+            last_edit.new_text += gap + edit.new_text
+        else:
+            merged_edits.append(edit)
+
+    return merged_edits
 
 
 def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:

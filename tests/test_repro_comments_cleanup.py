@@ -176,3 +176,59 @@ def test_accept_all_revisions_preserves_untouched_comments():
     assert "w:ins" not in doc_xml, "Track change must be accepted/gone"
     assert "w:commentRangeStart" in doc_xml, "Original comment must survive"
     assert "w:proofErr" in doc_xml, "w:proofErr must survive (normalize_docx was wrongly called)"
+
+
+def test_val_obs_new_5_orphan_comments_spanning_redlines():
+    """
+    VAL-OBS-NEW-5: Comments that wrap across adjacent redline tags (del + ins)
+    must be correctly cleaned up during accept_all_revisions, rather than
+    halting prematurely and leaving orphans.
+    """
+    doc = Document()
+    doc.add_paragraph()
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    p_elem = engine.doc.paragraphs[0]._element
+    c_id = engine.comments_manager.add_comment("Test", "Spanning comment")
+
+    # Construct: [Start] <del/> <ins/> [End] [Ref]
+    start = OxmlElement("w:commentRangeStart")
+    start.set(qn("w:id"), c_id)
+    p_elem.append(start)
+
+    del_tag = OxmlElement("w:del")
+    del_tag.set(qn("w:id"), "1")
+    p_elem.append(del_tag)
+
+    ins_tag = OxmlElement("w:ins")
+    ins_tag.set(qn("w:id"), "1")
+    p_elem.append(ins_tag)
+
+    end = OxmlElement("w:commentRangeEnd")
+    end.set(qn("w:id"), c_id)
+    p_elem.append(end)
+
+    engine.accept_all_revisions()
+
+    doc_xml = engine.doc.element.xml
+    assert "w:commentRangeStart" not in doc_xml, "Comment start anchor leaked"
+    assert "w:commentRangeEnd" not in doc_xml, "Comment end anchor leaked"
+
+
+def test_val_obs_new_6_empty_ins_tag():
+    """
+    VAL-OBS-NEW-6: Inserting an empty string should return None,
+    preventing the generation of self-closing <w:ins/> ghost tags.
+    """
+    doc = Document()
+    doc.add_paragraph("Target word.")
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    ins = engine._track_insert_inline("")
+    assert ins is None, "Empty string should not return an empty <w:ins> tag"

@@ -57,3 +57,29 @@ def test_multiline_insert_does_not_create_nested_paragraphs():
 
     # Ensure the new paragraph was successfully inserted
     assert "11. Entire Agreement" in doc_xml
+
+
+def test_val_obs_new_7_paragraph_break_tracking():
+    """
+    VAL-OBS-NEW-7: When a multi-line string is inserted, the paragraph break
+    itself must be tracked inside the <w:pPr><w:rPr> of the newly created paragraph.
+    """
+    doc = Document()
+    doc.add_paragraph("First paragraph")
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream, author="TestAuthor")
+    edit = ModifyText(target_text="paragraph", new_text="paragraph\n\nSecond paragraph")
+
+    engine.apply_edits([edit])
+
+    # Find the newly created paragraph
+    p_elements = engine.doc.element.xpath("//w:p")
+    assert len(p_elements) == 2, "Should have exactly 2 paragraphs"
+
+    # Assert the break is tracked: <w:pPr><w:rPr><w:ins/></w:rPr></w:pPr>
+    new_p = p_elements[1]
+    ins_marker = new_p.xpath("./w:pPr/w:rPr/w:ins")
+    assert len(ins_marker) > 0, "Paragraph break must be tracked with an <w:ins> inside <w:pPr>"

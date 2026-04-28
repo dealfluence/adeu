@@ -1,20 +1,27 @@
 # Appendix Schema & Data Extraction Blueprint
 
-This document defines the heuristics and XML crawl strategies for generating the read-only "Structural Appendix". Because this runs on every `read_docx` call, extraction must be single-pass where possible.
+This document defines the heuristics and XML crawl strategies for generating the read-only "Structural Appendix". It acts as a deterministic "Language Server (LSP)" hover panel for the LLM.
 
-## 1. Definitions Detection (Heuristic)
+## 1. Symbol Table & Code Diagnostics (Defined Terms)
 
-Finding defined terms is an imprecise domain problem, but high-confidence heuristics cover 95% of standard legal templates.
+Finding defined terms is treated as building a PL "Symbol Table" or index.
 
 ### Extraction Strategy:
-1.  **Definitions Section Scan:** 
-    *   Locate paragraphs descending from a heading containing the word "Definitions".
-    *   *Rule 1 (Quotes):* Extract text wrapped in double quotes at the start of a paragraph (e.g., `"Affiliate" means...` or `“Affiliate”`).
-    *   *Rule 2 (Styling):* Extract the first italicized or bolded span in a list item/paragraph within this section.
-2.  **Usage Counting (Global Scan):**
-    *   Once a list of defined terms is collected, do a fast regex pass over the plain-text projection of the document.
-    *   Regex: `\b{Term}\b` (Case-sensitive, whole word match).
-    *   *Output:* `"Term" — defined in [Heading], used [X] times.`
+1.  **Declaration Parsing (Strong Verbs & Glossary):** 
+    *   Scan for paragraphs containing patterns like `"Term"` or `“Term”` followed by `means` or `shall mean`.
+    *   Extract the *value* of the definition (the text following the term). 
+    *   *Truncation Rule:* If the definition spans more than 400 characters or multiple list items, truncate and report its location (e.g., `[Located in Section 1.1]`) to save LLM context window space.
+2.  **Inline Declaration Parsing:**
+    *   Scan for parentheticals containing capitalized terms wrapped in quotes, e.g., `(the "Term")` or `(hereinafter, the "Term")`.
+3.  **Static Analysis (The Linter):**
+    *   Execute a global scan of the plain-text projection to map Usages against Declarations.
+    *   **Validation Rule:** A term *must be used* to be considered a term. If usage count is 0, it is discarded from the index to prevent indexing phantom examples or dead code.
+
+### Diagnostic Rules:
+| Code | Trigger Condition | Diagnostic Output |
+| :--- | :--- | :--- |
+| **Duplicate** | Multiple Glossary matches found for the exact same Term. | `[Error] Duplicate Definition: 'Term' is defined multiple times.` |
+| **Typo** | Text contains a capitalized phrase within a Levenshtein distance of 1-2 from a valid Term. | `[Info] Possible Typo: Found 'Materal'. Did you mean 'Material'?` |
 
 ## 2. Bookmarks & Back-References (Deterministic)
 

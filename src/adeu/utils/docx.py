@@ -116,7 +116,17 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
             if numId is not None:
                 val = numId.get(qn("w:val"))
                 if val and val != "0":
-                    return "* "
+                    ilvl_str = "0"
+                    ilvl = numPr.find(qn("w:ilvl"))
+                    if ilvl is not None:
+                        val_attr = ilvl.get(qn("w:val"))
+                        if val_attr is not None:
+                            ilvl_str = val_attr
+                    try:
+                        level = int(ilvl_str)
+                    except ValueError:
+                        level = 0
+                    return ("    " * level) + "* "
 
     # 4. Heuristic for "Normal" style headers (Lazy Lawyer / Manually formatted)
     # If text is short (<100 chars), All Caps, and Bold -> Likely a Header.
@@ -315,6 +325,10 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 yield from traverse_node(child)
                 if target:
                     yield DocxEvent("xref_end", target)
+            elif tag == qn("w:bookmarkStart"):
+                b_name = child.get(qn("w:name"))
+                if b_name and not b_name.startswith("_GoBack") and not b_name.startswith("_MailAutoSig"):
+                    yield DocxEvent("bookmark", b_name)
             elif tag in (qn("w:sdt"), qn("w:smartTag"), qn("w:sdtContent")):
                 yield from traverse_node(child)
 

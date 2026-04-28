@@ -23,6 +23,15 @@ This specification dictates exactly what the LLM sees in the `read_docx` output 
     *   Editing the `Visible Text` applies standard tracked changes (redlines) to the display text.
     *   Editing the `(https://url.com)` URL updates the link target silently in the DOCX relationship files (no redlines emitted, but surfaced in the silent-change diff).
 
+### 1.3 Multi-Level Lists
+*   **Syntax:** Standard Markdown indentation (4 spaces per level) mapping to OOXML `<w:ilvl>`.
+    ```markdown
+    1. Article 1
+        1. Section 1.1
+            * Clause (a)
+    ```
+*   **Editability:** Fully editable. The engine counts leading whitespace on newly inserted lines and assigns the appropriate `<w:ilvl>` value, allowing Word to natively compute the correct rendering sequence (e.g., changing from `1.` to `a.`) upon opening.
+
 ## 2. Read-Only Inline Elements (Computed Fields)
 
 ### 2.1 Cross-References
@@ -38,9 +47,17 @@ This specification dictates exactly what the LLM sees in the `read_docx` output 
 *   **Definition:** Replaces the entire multi-page TOC field block in the body text with a single placeholder.
 *   **Editability:** STRICTLY READ-ONLY. Do not attempt to edit the TOC entries. Update the source headings instead.
 
+### 2.3 Internal Anchors (Bookmarks)
+*   **Syntax:** Pandoc-style attribute tags appended to the end of a block: `{#_BookmarkName}`.
+*   **Definition:** Represents a `<w:bookmarkStart>` tag that acts as the target for cross-references.
+*   **Editability:**
+    *   If the surrounding text is edited, the engine preserves the bookmark.
+    *   Deleting the `{#...}` token acts as an explicit instruction to delete the bookmark from the DOM.
+    *   Changing the ID inside the braces is disallowed (handled as a strict refusal) to prevent breaking existing pointers.
+
 ## 3. The Structural Appendix
 
-To prevent LLMs from accidentally corrupting the document's reference graph, structural metadata is never injected into the editable body text. Instead, it is appended to the absolute bottom of the document.
+To prevent LLMs from accidentally corrupting the document's reference graph, document-wide structural metadata and semantic diagnostics are appended to the absolute bottom of the document. This acts as a "Language Server Protocol (LSP)" hover panel for the LLM.
 
 ### 3.1 Boundary Marker
 The Appendix is always preceded by this exact system boundary:
@@ -50,17 +67,23 @@ The Appendix is always preceded by this exact system boundary:
 ---
 
 <!-- READONLY_BOUNDARY_START -->
-# Document Structure (Read-Only)
-The content below is metadata describing the document's reference structure. Do not include this section in any tracked changes or edits — it is for your context only and will be discarded on write.
+# Document Context Server (Read-Only)
+The content below contains structural metadata and semantic diagnostics. Do not include this section in any tracked changes or edits — it is for your context only and will be discarded on write.
 ```
 *   **Engine Rule:** Any `ModifyText` targeting text *after* this boundary marker must be immediately rejected by the batch validator.
 
-### 3.2 Defined Terms (Domain Concept)
-Heuristically detected terms that carry specific contractual meaning.
+### 3.2 Symbol Table & Diagnostics (Defined Terms)
+A compiler-style report of explicitly defined legal terms, their values, and static analysis warnings regarding their usage.
 ```markdown
-## Defined Terms
-- "Affiliate" — defined in Section 2, used 47 times.
-- "Confidential Information" — defined in Section 2, used 23 times.
+## Symbol Table (Defined Terms)
+- **"Affiliate"**: means any entity that directly or indirectly controls...
+- **"Closing Date"**: [Definition spans 4 paragraphs. Located in Article I.]
+
+## Diagnostics (Semantic Warnings)
+- [Warning] Unresolved Reference: `Confidential Information` is capitalized as a defined term, but no definition was found.
+- [Warning] Unused Definition: `Subsidiary` is defined, but never used in the document.
+- [Error] Duplicate Definition: `Closing Date` is defined in Article I and Schedule A.
+- [Info] Possible Typo: Found `Materal Adverse Effect`. Did you mean `"Material Adverse Effect"`?
 ```
 
 ### 3.3 Named Anchors & Back-References (OOXML Concept)

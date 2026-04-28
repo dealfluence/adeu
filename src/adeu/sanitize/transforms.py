@@ -152,6 +152,17 @@ def count_tracked_changes(doc: DocumentObject) -> tuple[int, int, int]:
     return ins_count, del_count, fmt_count
 
 
+def get_track_change_authors(doc: DocumentObject) -> set[str]:
+    """Return a set of all unique authors found in unresolved track changes."""
+    authors = set()
+    for tag in [qn("w:ins"), qn("w:del"), qn("w:rPrChange"), qn("w:pPrChange"), qn("w:sectPrChange")]:
+        for el in doc.element.iter(tag):
+            author = el.get(qn("w:author"))
+            if author:
+                authors.add(author)
+    return authors
+
+
 def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     """
     Accept all tracked changes: unwrap w:ins (keep content), remove w:del (discard content).
