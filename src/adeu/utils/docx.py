@@ -327,7 +327,7 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                     yield DocxEvent("xref_end", target)
             elif tag == qn("w:bookmarkStart"):
                 b_name = child.get(qn("w:name"))
-                if b_name and not b_name.startswith("_GoBack") and not b_name.startswith("_MailAutoSig"):
+                if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                     yield DocxEvent("bookmark", b_name)
             elif tag in (qn("w:sdt"), qn("w:smartTag"), qn("w:sdtContent")):
                 yield from traverse_node(child)

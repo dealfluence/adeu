@@ -180,7 +180,7 @@ def extract_anchors(doc) -> Dict[str, Dict[str, Any]]:
             for node in item._element.iter():
                 if node.tag == qn("w:bookmarkStart"):
                     b_name = node.get(qn("w:name"))
-                    if b_name and not b_name.startswith("_GoBack") and not b_name.startswith("_MailAutoSig"):
+                    if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                         if b_name not in anchors:
                             text = _get_paragraph_text(item).strip()
                             anchors[b_name] = {

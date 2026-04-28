@@ -28,9 +28,15 @@ def _create_bookmark_docx() -> io.BytesIO:
     # Inject a noise bookmark that should be ignored
     p2 = doc.add_paragraph("Some text.")
     bstart2 = OxmlElement("w:bookmarkStart")
-    bstart2.set(qn("w:name"), "_GoBack")
+    bstart2.set(qn("w:name"), "_GoBack")  # Legacy internal bookmark
     bstart2.set(qn("w:id"), "1")
     p2._element.append(bstart2)
+
+    # Inject a TOC bookmark that should be ignored
+    bstart3 = OxmlElement("w:bookmarkStart")
+    bstart3.set(qn("w:name"), "_Toc123456789")
+    bstart3.set(qn("w:id"), "2")
+    p2._element.append(bstart3)
 
     stream = io.BytesIO()
     doc.save(stream)
@@ -49,8 +55,9 @@ def test_internal_anchor_projection():
     assert "{#_Ref12345}" in projection, "Bookmark projection missing."
     assert "Section 5. Indemnification{#_Ref12345}" in projection
 
-    # The _GoBack noise bookmark should be ignored
+    # The _GoBack and _Toc noise bookmarks should be ignored
     assert "{#_GoBack}" not in projection, "Noise bookmarks must be ignored."
+    assert "{#_Toc123456789}" not in projection, "TOC bookmarks must be ignored."
 
 
 def test_internal_anchor_strict_refusal():
