@@ -1,5 +1,5 @@
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,18 +27,18 @@ def test_live_word_trims_common_context():
     app_mock = MagicMock()
     app_mock.ActiveDocument = doc_mock
 
-    with (
-        patch("win32com.client.GetActiveObject", return_value=app_mock),
-        patch("adeu.mcp_components.tools.live_word._apply_com_replacement") as mock_apply,
-    ):
+    import win32com.client
+
+    original_get = getattr(win32com.client, "GetActiveObject", None)
+    win32com.client.GetActiveObject = lambda name: app_mock
+    try:
         changes = [ModifyText(target_text="The quick brown fox", new_text="The fast brown fox", comment="Speed up")]
+        stats = lw._process_active_word_batch_core(changes, "Reviewer")
 
-        lw._process_active_word_batch_core(changes, "Reviewer")
+        assert stats["failed"] == 0, f"Batch failed with: {stats.get('skipped_details', [])}"
 
-        assert mock_apply.called
-        args, kwargs = mock_apply.call_args
-
-        # args = (doc, app, target_rng, new_text, comment_text)
-        passed_new_text = args[3]
-
-        assert passed_new_text == "fast", f"Expected trimmed 'fast', got '{passed_new_text}'"
+        # The real _apply_com_replacement will set target_rng.Text
+        assert rng_mock.Text == "fast", f"Expected trimmed 'fast', got '{rng_mock.Text}'"
+    finally:
+        if original_get:
+            win32com.client.GetActiveObject = original_get

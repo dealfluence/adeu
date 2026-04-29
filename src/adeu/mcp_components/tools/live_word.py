@@ -2,7 +2,7 @@ import io
 import re
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import structlog
 from fastmcp import Context
@@ -166,6 +166,11 @@ if sys.platform == "win32":
 
     from adeu.diff import trim_common_context
     from adeu.markup import _find_match_in_text
+    from adeu.mcp_components.tools.live_word_ops import (
+        apply_com_replacement,
+        strip_critic_markup,
+        strip_markdown_formatting,
+    )
     from adeu.models import (
         AcceptChange,
         DocumentChange,
@@ -173,302 +178,6 @@ if sys.platform == "win32":
         RejectChange,
         ReplyComment,
     )
-
-    def _strip_critic_markup(text: str) -> str:
-        """Removes CriticMarkup tags so raw text can be found via Word's native Find."""
-        if not text:
-            return ""
-        text = re.sub(r"\{--.*?--\}", "", text)
-        text = re.sub(r"\{>>.*?<<\}", "", text)
-        text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", text)
-        text = re.sub(r"\{==(.*?)==\}", r"\1", text)
-        return text
-
-    def _strip_markdown_formatting(text: str) -> str:
-        """Strips Markdown bold/italic/header markers so target_text can match plain COM text."""
-        if not text:
-            return ""
-        # Strip bold: **text** or __text__
-        text = re.sub(r"\*\*", "", text)
-        text = re.sub(r"__", "", text)
-        # Strip italic: single * or _ not part of a word
-        text = re.sub(r"(?<!\w)\*(?!\*)", "", text)
-        text = re.sub(r"(?<!\w)_(?!_)", "", text)
-        # Strip header markers at line start
-        text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
-        return text
-
-    def _parse_markdown_for_com(text: str):
-        """Parses bold and italic markdown, returning plain text and index ranges."""
-        bold_ranges = []
-        italic_ranges = []
-
-        while True:
-            m = re.search(r"\*\*(.*?)\*\*", text)
-            if not m:
-                break
-            start = m.start()
-            inner = m.group(1)
-            text = text[:start] + inner + text[m.end() :]
-            bold_ranges.append((start, start + len(inner)))
-
-        while True:
-            m = re.search(r"_(.*?)_", text)
-            if not m:
-                break
-            start = m.start()
-            inner = m.group(1)
-            text = text[:start] + inner + text[m.end() :]
-            italic_ranges.append((start, start + len(inner)))
-
-        return text, bold_ranges, italic_ranges
-
-    _WD_HEADING_STYLE_IDS = {
-        1: -2,  # wdStyleHeading1
-        2: -3,  # wdStyleHeading2
-        3: -4,  # wdStyleHeading3
-        4: -5,  # wdStyleHeading4
-        5: -6,  # wdStyleHeading5
-        6: -7,  # wdStyleHeading6
-        7: -8,  # wdStyleHeading7
-        8: -9,  # wdStyleHeading8
-        9: -10,  # wdStyleHeading9
-    }
-
-    def _parse_markdown_heading_prefix(line: str):
-        """
-        Detects a leading markdown heading marker on a single line.
-        Returns (clean_text, heading_level) where heading_level is an int 1..9
-        or None if no heading prefix. Strips up to 9 leading '#' chars followed
-        by a space, matching the disk engine's _parse_markdown_style.
-        """
-        if not line.startswith("#"):
-            return line, None
-        level = 0
-        rest = line
-        while rest.startswith("#") and level < 9:
-            level += 1
-            rest = rest[1:]
-        if rest.startswith(" "):
-            return rest[1:], level
-        # '#' with no space: not a heading, treat as literal
-        return line, None
-
-    def _is_structured_new_text(new_text: str) -> bool:
-        """
-        Returns True if `new_text` contains any markdown structure that the
-        simple inline-replacement path cannot render: paragraph breaks or
-        heading markers. Bold/italic alone is NOT structural.
-        """
-        if not new_text:
-            return False
-        # Paragraph boundary via blank line or explicit newline pair
-        if "\n" in new_text or "\r" in new_text:
-            return True
-        # Heading marker at the very start
-        stripped = new_text.lstrip()
-        if stripped.startswith("#"):
-            # confirm it's actually a heading marker ('# ...'), not literal
-            _, level = _parse_markdown_heading_prefix(stripped)
-            if level is not None:
-                return True
-        return False
-
-    def _split_new_text_into_lines(new_text: str) -> list[str]:
-        """
-        Splits new_text into lines for paragraph-wise insertion. Matches
-        the disk engine's behaviour of splitting on any run of newline chars.
-        Trailing empty elements are dropped so we don't emit a trailing
-        empty paragraph.
-        """
-        lines = re.split(r"[\r\n]+", new_text)
-        # Disk engine also pops trailing empty lines in track_insert
-        while lines and lines[-1] == "":
-            lines.pop()
-        return lines
-
-    def _apply_line_formatting(doc, base_start: int, plain_text: str, b_ranges, i_ranges, was_tracking: bool):
-        """
-        Applies bold/italic ranges to a just-inserted span. Mirrors the
-        TrackRevisions-toggle pattern used in the original
-        _apply_com_replacement: formatting is applied with tracking OFF so
-        we don't pollute the review pane with format revisions, then the
-        caller's tracking state is restored.
-        """
-        doc.TrackRevisions = False
-        try:
-            for b_start, b_end in b_ranges:
-                fmt_rng = doc.Range(base_start + b_start, base_start + b_end)
-                fmt_rng.Font.Bold = True
-            for i_start, i_end in i_ranges:
-                fmt_rng = doc.Range(base_start + i_start, base_start + i_end)
-                fmt_rng.Font.Italic = True
-        except Exception as e:
-            logger.warning(f"Failed to apply formatting: {e}")
-        finally:
-            doc.TrackRevisions = was_tracking
-
-    _WD_STYLE_NORMAL = -1
-
-    def _apply_paragraph_style(doc, position: int, heading_level):
-        """
-        Applies a paragraph style to the paragraph containing `position`.
-
-        heading_level=None means "plain body paragraph" (apply Normal).
-        heading_level=1..9 means Heading N.
-
-        We always apply an explicit style so that subsequent paragraphs
-        inserted after a Heading do NOT silently inherit the Heading
-        style (Word's default split-paragraph behaviour).
-        """
-        if heading_level is None:
-            style_id = _WD_STYLE_NORMAL
-        else:
-            looked_up = _WD_HEADING_STYLE_IDS.get(heading_level)
-            if looked_up is None:
-                return
-            style_id = looked_up
-        try:
-            p = doc.Range(position, position).Paragraphs(1)
-            p.Style = style_id
-        except Exception as e:
-            logger.warning(f"Failed to apply paragraph style (level={heading_level}) at {position}: {e}")
-
-    def _apply_structured_com_replacement(doc, app, target_rng, new_text, comment_text):
-        """
-        Multi-paragraph tracked replacement via COM. Mirrors engine.track_insert
-        semantics: first line replaces target inline (with its heading style
-        applied if any), each subsequent line inserted as a new paragraph
-        AFTER the previous one.
-
-        Comments rescued from the target range are re-anchored to the full
-        resulting insertion span. An explicit comment_text is attached the
-        same way.
-        """
-        was_tracking = doc.TrackRevisions
-
-        # 1. Rescue comments currently anchored to target_rng
-        rescued_comments = []
-        try:
-            for i in range(1, target_rng.Comments.Count + 1):
-                c = target_rng.Comments(i)
-                rescued_comments.append({"author": c.Author, "text": c.Range.Text})
-        except Exception as e:
-            logger.warning(f"Failed to rescue comments: {e}")
-
-        # 2. Parse new_text into structured lines
-        lines = _split_new_text_into_lines(new_text)
-        if not lines:
-            # Caller gave us an empty new_text after splitting; nothing to do
-            # beyond deleting the target. Fall back to a blank inline replace.
-            target_rng.Text = ""
-            return
-
-        # 3. First line: inline replacement.
-        first_clean, first_level = _parse_markdown_heading_prefix(lines[0])
-        first_plain, first_b, first_i = _parse_markdown_for_com(first_clean)
-
-        first_start = target_rng.Start
-        target_rng.Text = first_plain
-
-        _apply_paragraph_style(doc, first_start, first_level)
-        _apply_line_formatting(doc, first_start, first_plain, first_b, first_i, was_tracking)
-
-        # 4. Remaining lines: insert as new paragraphs AFTER the current paragraph.
-        # This mirrors the Disk engine's invariant of appending <w:p> elements to the body
-        # rather than splitting the current paragraph, preventing the deleted text from
-        # being pushed to the next line.
-        para = target_rng.Paragraphs(1)
-        insert_idx = para.Range.End
-        last_end = first_start + len(first_plain)
-
-        for line in lines[1:]:
-            clean, level = _parse_markdown_heading_prefix(line)
-            plain, b_ranges, i_ranges = _parse_markdown_for_com(clean)
-
-            try:
-                rng = doc.Range(insert_idx, insert_idx)
-                rng.Text = plain + "\r"
-            except Exception as e:
-                logger.error(f"Failed to insert line text: {e}")
-                break
-
-            _apply_paragraph_style(doc, insert_idx, level)
-            _apply_line_formatting(doc, insert_idx, plain, b_ranges, i_ranges, was_tracking)
-            
-            last_end = insert_idx + len(plain)
-            insert_idx += len(plain) + 1
-
-        # 5. Reattach rescued comments to the full insertion span.
-        full_insertion_rng = doc.Range(first_start, last_end)
-        current_user = app.UserName
-        for c_data in rescued_comments:
-            try:
-                app.UserName = c_data["author"]
-                doc.Comments.Add(full_insertion_rng, c_data["text"])
-            except Exception as e:
-                logger.warning(f"Failed to re-attach rescued comment: {e}")
-        app.UserName = current_user
-
-        # 6. Attach explicit comment if requested.
-        if comment_text:
-            try:
-                doc.Comments.Add(full_insertion_rng, comment_text)
-            except Exception as e:
-                logger.warning(f"Failed to attach edit comment: {e}")
-
-    def _apply_com_replacement(doc, app, target_rng, new_text, comment_text):
-        """
-        Routes to simple or structured replacement based on new_text content.
-
-        Simple path: inline Range.Text=... + bold/italic, for single-line
-        new_text with no heading markers. Fast, unchanged behaviour.
-
-        Structured path: multi-paragraph tracked insertion with heading
-        styles. See _apply_structured_com_replacement.
-        """
-        if _is_structured_new_text(new_text):
-            _apply_structured_com_replacement(doc, app, target_rng, new_text, comment_text)
-            return
-
-        # ---- Simple path (original behaviour) ----
-        rescued_comments = []
-        try:
-            for i in range(1, target_rng.Comments.Count + 1):
-                c = target_rng.Comments(i)
-                rescued_comments.append({"author": c.Author, "text": c.Range.Text})
-        except Exception as e:
-            logger.warning(f"Failed to rescue comments: {e}")
-
-        plain_text, b_ranges, i_ranges = _parse_markdown_for_com(new_text.replace("\n", "\r"))
-        target_rng.Text = plain_text
-
-        was_tracking = doc.TrackRevisions
-        doc.TrackRevisions = False
-        try:
-            base_start = target_rng.Start
-            for b_start, b_end in b_ranges:
-                fmt_rng = doc.Range(base_start + b_start, base_start + b_end)
-                fmt_rng.Font.Bold = True
-            for i_start, i_end in i_ranges:
-                fmt_rng = doc.Range(base_start + i_start, base_start + i_end)
-                fmt_rng.Font.Italic = True
-        except Exception as e:
-            logger.warning(f"Failed to apply formatting: {e}")
-        finally:
-            doc.TrackRevisions = was_tracking
-
-        current_user = app.UserName
-        for c_data in rescued_comments:
-            try:
-                app.UserName = c_data["author"]
-                doc.Comments.Add(target_rng, c_data["text"])
-            except Exception:
-                pass
-        app.UserName = current_user
-
-        if comment_text:
-            doc.Comments.Add(target_rng, comment_text)
 
     def _read_active_word_document_core(clean_view: bool = False) -> str:
         """
@@ -512,7 +221,6 @@ if sys.platform == "win32":
             raise ToolError(str(e)) from e
 
     def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict[str, Any]:
-        """Synchronous core for processing live word batch, decoupled from FastMCP context."""
         stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
             return stats
@@ -546,36 +254,9 @@ if sys.platform == "win32":
             for change in changes:
                 try:
                     if isinstance(change, ModifyText):
-                        clean_target = _strip_markdown_formatting(_strip_critic_markup(change.target_text))
+                        clean_target = strip_markdown_formatting(strip_critic_markup(change.target_text))
                         raw_text = doc.Content.Text
-
-                        clean_chars = []
-                        mapping = []
-                        i = 0
-                        while i < len(raw_text):
-                            if raw_text[i : i + 4] == "\r\x07\r\x07":
-                                clean_chars.append("\n")
-                                mapping.append(i)
-                                i += 4
-                            elif raw_text[i : i + 2] == "\r\x07":
-                                clean_chars.extend([" ", "|", " "])
-                                mapping.extend([i, i, i])
-                                i += 2
-                            elif raw_text[i] == "\x07":
-                                clean_chars.extend([" ", "|", " "])
-                                mapping.extend([i, i, i])
-                                i += 1
-                            elif raw_text[i] == "\r":
-                                clean_chars.append("\n")
-                                mapping.append(i)
-                                i += 1
-                            else:
-                                clean_chars.append(raw_text[i])
-                                mapping.append(i)
-                                i += 1
-                        mapping.append(len(raw_text))
-                        current_text = "".join(clean_chars)
-
+                        current_text, mapping = _clean_chars(raw_text)
                         start_idx, end_idx = _find_match_in_text(current_text, clean_target)
 
                         if start_idx != -1:
@@ -612,18 +293,12 @@ if sys.platform == "win32":
                                     continue
 
                                 # Bug #8 Fix: Mathematically shrink the replacement range by trimming common context
-                                if exact_substring == effective_new:
-                                    final_new_text = effective_new
-                                else:
-                                    p_len, s_len = trim_common_context(exact_substring, effective_new)
-                                    actual_start += p_len
-                                    actual_end -= s_len
-
-                                    n_end = len(effective_new) - s_len
-                                    final_new_text = effective_new[p_len:n_end]
+                                actual_start, actual_end, final_new_text = _shrink_replacement_range(
+                                    exact_substring, effective_new, actual_start, actual_end
+                                )
 
                                 replace_rng = doc.Range(Start=actual_start, End=actual_end)
-                                _apply_com_replacement(
+                                apply_com_replacement(
                                     doc,
                                     app,
                                     replace_rng,
@@ -655,7 +330,7 @@ if sys.platform == "win32":
                                         stats["applied"] += 1
                                         continue
 
-                                    _apply_com_replacement(
+                                    apply_com_replacement(
                                         doc,
                                         app,
                                         replace_rng,
@@ -676,40 +351,13 @@ if sys.platform == "win32":
                             logger.warning(f"Could not find target text: '{change.target_text[:30]}...'")
 
                     elif isinstance(change, AcceptChange):
-                        if change.target_id in revisions_map:
-                            revisions_map[change.target_id].Accept()
-                            stats["applied"] += 1
-                        else:
-                            stats["failed"] += 1
-                            stats["skipped_details"].append(
-                                f"- Revision {change.target_id} not found or lost to drift."
-                            )
-                            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
+                        _process_accept_change(stats, revisions_map, change)
 
                     elif isinstance(change, RejectChange):
-                        if change.target_id in revisions_map:
-                            revisions_map[change.target_id].Reject()
-                            stats["applied"] += 1
-                        else:
-                            stats["failed"] += 1
-                            stats["skipped_details"].append(
-                                f"- Revision {change.target_id} not found or lost to drift."
-                            )
-                            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
+                        _process_reject_change(stats, revisions_map, change)
 
                     elif isinstance(change, ReplyComment):
-                        try:
-                            target_idx = int(change.target_id.split(":")[1]) + 1
-                            com_to_reply = doc.Comments(target_idx)
-                            try:
-                                com_to_reply.Replies.Add(com_to_reply.Range, change.text)
-                            except Exception:
-                                doc.Comments.Add(com_to_reply.Range, change.text)
-                            stats["applied"] += 1
-                        except Exception as e:
-                            stats["failed"] += 1
-                            stats["skipped_details"].append(f"- Comment {change.target_id} not found.")
-                            logger.warning(f"Comment {change.target_id} not found. {e}")
+                        _process_reply_comment(stats, doc, change)
 
                 except Exception as e:
                     stats["failed"] += 1
@@ -723,6 +371,78 @@ if sys.platform == "win32":
             doc.TrackRevisions = original_track_revisions
 
         return stats
+
+    def _shrink_replacement_range(exact_substring, effective_new, actual_start: int, actual_end: int):
+        if exact_substring == effective_new:
+            final_new_text = effective_new
+        else:
+            p_len, s_len = trim_common_context(exact_substring, effective_new)
+            actual_start += p_len
+            actual_end -= s_len
+
+            n_end = len(effective_new) - s_len
+            final_new_text = effective_new[p_len:n_end]
+        return actual_start, actual_end, final_new_text
+
+    def _clean_chars(raw_text: str) -> Tuple[str, List[int]]:
+        i = 0
+        clean_chars = []
+        mapping = []
+        while i < len(raw_text):
+            if raw_text[i : i + 4] == "\r\x07\r\x07":
+                clean_chars.append("\n")
+                mapping.append(i)
+                i += 4
+            elif raw_text[i : i + 2] == "\r\x07":
+                clean_chars.extend([" ", "|", " "])
+                mapping.extend([i, i, i])
+                i += 2
+            elif raw_text[i] == "\x07":
+                clean_chars.extend([" ", "|", " "])
+                mapping.extend([i, i, i])
+                i += 1
+            elif raw_text[i] == "\r":
+                clean_chars.append("\n")
+                mapping.append(i)
+                i += 1
+            else:
+                clean_chars.append(raw_text[i])
+                mapping.append(i)
+                i += 1
+        mapping.append(len(raw_text))
+        return "".join(clean_chars), mapping
+
+    def _process_accept_change(stats, revisions_map, change):
+        if change.target_id in revisions_map:
+            revisions_map[change.target_id].Accept()
+            stats["applied"] += 1
+        else:
+            stats["failed"] += 1
+            stats["skipped_details"].append(f"- Revision {change.target_id} not found or lost to drift.")
+            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
+
+    def _process_reject_change(stats, revisions_map, change):
+        if change.target_id in revisions_map:
+            revisions_map[change.target_id].Reject()
+            stats["applied"] += 1
+        else:
+            stats["failed"] += 1
+            stats["skipped_details"].append(f"- Revision {change.target_id} not found or lost to drift.")
+            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
+
+    def _process_reply_comment(stats, doc, change):
+        try:
+            target_idx = int(change.target_id.split(":")[1]) + 1
+            com_to_reply = doc.Comments(target_idx)
+            try:
+                com_to_reply.Replies.Add(com_to_reply.Range, change.text)
+            except Exception:
+                doc.Comments.Add(com_to_reply.Range, change.text)
+            stats["applied"] += 1
+        except Exception as e:
+            stats["failed"] += 1
+            stats["skipped_details"].append(f"- Comment {change.target_id} not found.")
+            logger.warning(f"Comment {change.target_id} not found. {e}")
 
     async def process_active_word_batch(
         ctx: Context,
