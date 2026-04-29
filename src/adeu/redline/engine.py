@@ -1282,7 +1282,11 @@ class RedlineEngine:
             return True
 
         target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
-        if not target_runs:
+        virtual_spans = []
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
+            virtual_spans = active_mapper.get_virtual_spans_in_range(start_idx, length)
+
+        if not target_runs and not virtual_spans:
             return False
 
         affected_ps = set()
@@ -1353,6 +1357,50 @@ class RedlineEngine:
                             self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
                         else:
                             self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
+
+        # PHASE 2: OOXML Paragraph Merge Protocol
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
+            # If no physical runs were modified, but a paragraph boundary was,
+            # we must manually handle the insertion of new_text (e.g. replacing \n\n with a space).
+            if op == EditOperationType.MODIFICATION and not target_runs and virtual_spans and edit.new_text:
+                first_span = virtual_spans[0]
+                if first_span.paragraph:
+                    p1_el = first_span.paragraph._element
+                    last_runs = p1_el.findall(f".//{qn('w:r')}")
+                    anchor = Run(last_runs[-1], first_span.paragraph) if last_runs else None
+
+                    ins_elem = self.track_insert(edit.new_text, anchor_run=anchor, comment=edit.comment)
+                    if ins_elem is not None:
+                        p1_el.append(ins_elem)
+
+            for span in virtual_spans:
+                if span.paragraph:
+                    p1_element = span.paragraph._element
+                    p2_element = p1_element.getnext()
+
+                    if p2_element is not None and p2_element.tag == qn("w:p"):
+                        # 1. Track pilcrow deletion in p1
+                        pPr = p1_element.find(qn("w:pPr"))
+                        if pPr is None:
+                            pPr = create_element("w:pPr")
+                            p1_element.insert(0, pPr)
+                        rPr = pPr.find(qn("w:rPr"))
+                        if rPr is None:
+                            rPr = create_element("w:rPr")
+                            pPr.append(rPr)
+
+                        del_mark = self._create_track_change_tag("w:del")
+                        rPr.append(del_mark)
+
+                        # 2. Coalesce children from p2 to p1
+                        for child in list(p2_element):
+                            if child.tag != qn("w:pPr"):
+                                p1_element.append(child)
+
+                        # 3. Destroy orphan p2
+                        parent = p2_element.getparent()
+                        if parent is not None:
+                            parent.remove(p2_element)
 
         for p_elem in affected_ps:
             has_visible = False

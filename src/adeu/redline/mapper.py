@@ -611,6 +611,18 @@ class DocumentMapper:
         end_index = start_index + length
         return self._resolve_runs_at_range(start_index, end_index, rebuild_map=rebuild_map)
 
+    def get_virtual_spans_in_range(self, start_index: int, length: int) -> List[TextSpan]:
+        """
+        Returns any virtual spans (run is None) that fall completely within the
+        provided range. Used primarily for detecting deleted paragraph boundaries.
+        """
+        end_index = start_index + length
+        return [
+            s
+            for s in self.spans
+            if s.run is None and s.text == "\n\n" and s.start >= start_index and s.end <= end_index
+        ]
+
     def _resolve_runs_at_range(self, start_idx: int, end_idx: int, rebuild_map: bool = True) -> List[Run]:
         affected_spans = [s for s in self.spans if s.end > start_idx and s.start < end_idx]
         if not affected_spans:
