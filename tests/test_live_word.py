@@ -567,3 +567,50 @@ def test_live_word_pure_comment_same_text(active_word_app):
         assert "This clause needs legal review." in content
 
     asyncio.run(run_test())
+
+
+def test_live_word_multi_paragraph_insert_split_deletion(active_word_app):
+    """
+    Test to explicitly demonstrate BUG-03 and BUG-04.
+    Replaces a single line with two paragraphs.
+    Verifies that the deletion is not pushed past the second paragraph,
+    and that the comment anchor wraps BOTH paragraphs.
+    """
+    import asyncio
+    from fastmcp.tools.tool import ToolResult
+    from adeu.models import ModifyText
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # Setup without tracking so the base text is clean
+    doc.TrackRevisions = False
+    doc.Range(0, doc.Content.End).Text = "This is a single paragraph. We will replace this specific sentence completely.\n"
+
+    async def run_test():
+        changes = [
+            ModifyText(
+                target_text="We will replace this specific sentence completely.",
+                new_text="Line 1 of new content.\nLine 2 of new content.",
+                comment="This comment should span both lines."
+            )
+        ]
+
+        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+
+        deletion_str = "{--We will replace this specific sentence completely.--}"
+        line1_str = "Line 1 of new content."
+        line2_str = "Line 2 of new content."
+
+        del_idx = content.find(deletion_str)
+        line2_idx = content.find(line2_str)
+
+        assert del_idx < line2_idx, f"BUG-03: Deletion was displaced past the paragraph boundary!\nContent:\n{content}"
+
+        first_comment_end = content.find("==}", content.find(line1_str))
+        assert first_comment_end > line2_idx, f"BUG-04: Comment highlight ended before Line 2!\nContent:\n{content}"
+
+    asyncio.run(run_test())

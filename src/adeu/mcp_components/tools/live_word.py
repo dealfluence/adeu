@@ -364,64 +364,42 @@ if sys.platform == "win32":
             target_rng.Text = ""
             return
 
-        # 3. First line: inline replacement. This deletes the target AND inserts
-        #    line 1's plain text in one COM call, which Word tracks as
-        #    <w:del> + <w:ins>. Apply heading style (if any) and bold/italic
-        #    afterwards so they land on the inserted span only.
+        # 3. First line: inline replacement.
         first_clean, first_level = _parse_markdown_heading_prefix(lines[0])
         first_plain, first_b, first_i = _parse_markdown_for_com(first_clean)
 
         first_start = target_rng.Start
         target_rng.Text = first_plain
-        first_end = first_start + len(first_plain)
 
         _apply_paragraph_style(doc, first_start, first_level)
-
         _apply_line_formatting(doc, first_start, first_plain, first_b, first_i, was_tracking)
 
-        # Track the final end of the combined insertion so we can anchor
-        # comments spanning the whole block at the end.
-        last_end = first_end
+        # 4. Remaining lines: insert as new paragraphs AFTER the current paragraph.
+        # This mirrors the Disk engine's invariant of appending <w:p> elements to the body
+        # rather than splitting the current paragraph, preventing the deleted text from
+        # being pushed to the next line.
+        para = target_rng.Paragraphs(1)
+        insert_idx = para.Range.End
+        last_end = first_start + len(first_plain)
 
-        # 4. Remaining lines: each becomes a new paragraph AFTER the previous.
-        #    Sequence:
-        #      a. Range(last_end, last_end).InsertParagraphAfter()
-        #         -> creates a tracked ¶ mark, last_end now points just
-        #         before that ¶, content cursor moves to last_end+1
-        #      b. Range(last_end+1, last_end+1).Text = plain_text
-        #         -> tracked insert of the line's text
-        #      c. Apply style + bold/italic
-        #      d. last_end advances by 1 + len(plain_text)
         for line in lines[1:]:
             clean, level = _parse_markdown_heading_prefix(line)
             plain, b_ranges, i_ranges = _parse_markdown_for_com(clean)
 
-            # Insert paragraph break after last inserted content
             try:
-                doc.Range(last_end, last_end).InsertParagraphAfter()
+                rng = doc.Range(insert_idx, insert_idx)
+                rng.Text = plain + "\r"
             except Exception as e:
-                logger.error(f"Failed to insert paragraph break at {last_end}: {e}")
+                logger.error(f"Failed to insert line text: {e}")
                 break
 
-            # Text goes into the NEW paragraph, which starts at last_end+1
-            line_start = last_end + 1
-            try:
-                doc.Range(line_start, line_start).Text = plain
-            except Exception as e:
-                logger.error(f"Failed to insert line text at {line_start}: {e}")
-                break
-
-            line_end = line_start + len(plain)
-
-            _apply_paragraph_style(doc, line_start, level)
-
-            _apply_line_formatting(doc, line_start, plain, b_ranges, i_ranges, was_tracking)
-
-            last_end = line_end
+            _apply_paragraph_style(doc, insert_idx, level)
+            _apply_line_formatting(doc, insert_idx, plain, b_ranges, i_ranges, was_tracking)
+            
+            last_end = insert_idx + len(plain)
+            insert_idx += len(plain) + 1
 
         # 5. Reattach rescued comments to the full insertion span.
-        #    (The original target is gone; the new content is what the
-        #    rescued comments should anchor to.)
         full_insertion_rng = doc.Range(first_start, last_end)
         current_user = app.UserName
         for c_data in rescued_comments:
