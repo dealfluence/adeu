@@ -22,6 +22,7 @@ def test_live_word_trims_common_context():
     rng_mock = MagicMock()
     rng_mock.Find.Execute.return_value = True
     rng_mock.Start = 4  # Index of 'quick'
+    rng_mock.End = 23
     doc_mock.Range.return_value = rng_mock
 
     app_mock = MagicMock()

@@ -3,13 +3,16 @@ import inspect
 from adeu.mcp_components.tools.document import process_document_batch
 
 
-def test_process_document_batch_docstring_mentions_live_spoofing():
+def test_process_document_batch_docstring_mentions_attribution():
     """
-    Bug #9: The process_document_batch docstring must explicitly warn the LLM
-    that author_name cannot be spoofed in Live Word.
+    OBS-01 Update: The process_document_batch docstring must explicitly state
+    that author_name is correctly used for attribution, even in Live Word.
     """
     source = inspect.getsource(process_document_batch)
 
-    assert "live word" in source.lower() and "spoofed" in source.lower(), (
-        "Docstring must explicitly warn that live Word identities cannot be spoofed."
+    assert "spoofed" not in source.lower(), (
+        "Docstring should no longer claim identities cannot be spoofed, as this was disproved."
+    )
+    assert "used for attribution" in source.lower(), (
+        "Docstring must explicitly state that author_name is used for attribution."
     )

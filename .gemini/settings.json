@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "adeu": {
+      "command": "uv",
+      "args": [
+        "run",
+        "adeu-server"
+      ],
+      "env": {
+        "ADEU_ENABLE_TEST_TOOLS": "1"
+      }
+    }
+  }
+}

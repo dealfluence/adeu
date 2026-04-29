@@ -345,8 +345,8 @@ if sys.platform == "win32":
             "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
             "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
             "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
-            "Always provide a realistic `author_name` for Tracked Changes. (Note: In live Word, "
-            "comments are strictly tied to the user's M365 identity and cannot be spoofed)."
+            "Always provide a realistic `author_name` for Tracked Changes. This name will be "
+            "used for attribution in the document's tracked changes and comments."
         ),
         annotations={"destructiveHint": True},
     )
@@ -510,8 +510,8 @@ else:
             "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
             "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
             "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
-            "Always provide a realistic `author_name` for Tracked Changes. (Note: In live Word, "
-            "author identities cannot be spoofed and will natively default to the local M365 user)."
+            "Always provide a realistic `author_name` for Tracked Changes. This name will be "
+            "used for attribution in the document's tracked changes and comments."
         ),
         annotations={"destructiveHint": True},
     )

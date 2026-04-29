@@ -622,4 +622,127 @@ def test_live_word_multi_paragraph_insert_split_deletion(active_word_app):
         # so `adeu.ingest` flattens it (no {==...==} tags).
         assert "{==" not in content, f"Unexpected comment span format!\nContent:\n{content}"
 
-        asyncio.run(run_test())
+    asyncio.run(run_test())
+
+
+def test_live_word_bug_04_garbled_text(active_word_app):
+    """
+    Test to explicitly demonstrate BUG-03 and BUG-04 as reported.
+    When new_text contains \n\n (paragraph break) and formatting, the live path
+    should not garble the inserted text with surrounding context (BUG-04)
+    and should not displace the deletion (BUG-03).
+    """
+    import asyncio
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.models import ModifyText
+
+    _, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.TrackRevisions = False
+    doc.Range(0, doc.Content.End).Text = (
+        "Company, incorporated under the laws of [Country], "
+        "business identity code [ID], having its principal place of business.\n"
+    )
+
+    async def run_test():
+        changes = [
+            ModifyText(
+                target_text="business identity code [ID]",
+                new_text="**business identity code** [ID]\n\nTest second paragraph inserted here.",
+                comment="Multi-paragraph insert test.",
+            )
+        ]
+
+        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+
+        # Assert no garbled text (BUG-04)
+        # We expect `{++**business identity code** [ID]++}` not something like `{++**nder the laws of...`
+        # Also test deletion is placed correctly (BUG-03)
+        assert "{--business identity code [ID]--}" in content
+        assert "{++**business identity code** [ID]++}" in content
+
+        # Check that the garbled text from the bug report does NOT appear
+        original_sentence = (
+            "Company, incorporated under the laws of [Country], "
+            "business identity code [ID], having its principal place of business."
+        )
+        assert "the laws of [Country], business identity code" not in content.replace(
+            original_sentence, ""
+        )  # Ensure it didn't duplicate text
+
+    asyncio.run(run_test())
+
+
+def test_live_word_obs_01_author_name_respected(active_word_app):
+    """
+    Test for OBS-01: Word originally enforced the signed-in user's identity.
+    We now use app.Options.UseLocalUserInfo to force it to respect the
+    provided author_name, aligning it with the disk engine.
+    """
+    import asyncio
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.models import ModifyText
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.TrackRevisions = False
+    doc.Range(0, doc.Content.End).Text = "Test document.\n"
+
+    async def run_test():
+        changes = [ModifyText(target_text="Test document.", new_text="Modified document.", comment="Spoof test.")]
+
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Sherlock Holmes")
+
+        # Verify the warning is NO LONGER present because we successfully overrode it
+        assert "Warning: Live Word natively enforces M365 identities" not in res
+
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # The tracked change metadata block in CriticMarkup should contain Sherlock Holmes
+        assert "Sherlock Holmes" in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_obs_02_deletion_insertion_order(active_word_app):
+    """
+    Test for OBS-02: In simple replacements, we now force the COM automation
+    to insert the new text AFTER the original text before deleting the original.
+    This guarantees the tags extract as {--DEL--}{++INS++}, perfectly
+    matching the disk engine.
+    """
+    import asyncio
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.models import ModifyText
+
+    _, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.TrackRevisions = False
+    doc.Range(0, doc.Content.End).Text = "The quick brown fox.\n"
+
+    async def run_test():
+        changes = [ModifyText(target_text="brown", new_text="red", comment=None)]
+
+        await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
+
+        res = await read_active_word_document(ctx, clean_view=False)
+        content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
+
+        # Confirm the literal string pattern places deletion before insertion
+        # e.g., "The quick {--brown--}{++red++} fox."
+        assert "{--brown--}{++red++}" in content
+
+    asyncio.run(run_test())

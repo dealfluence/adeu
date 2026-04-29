@@ -239,8 +239,28 @@ if sys.platform == "win32":
         doc.TrackRevisions = True
 
         original_user = app.UserName
-        stats["author_overridden_by_word"] = original_user
         app.UserName = author_name
+
+        has_local_user_info = False
+        original_use_local_info = False
+        try:
+            if hasattr(app.Options, "UseLocalUserInfo"):
+                has_local_user_info = True
+                original_use_local_info = app.Options.UseLocalUserInfo
+                app.Options.UseLocalUserInfo = True
+        except Exception:
+            pass
+
+        original_smart_cut_paste = True
+        try:
+            if hasattr(app.Options, "SmartCutPaste"):
+                original_smart_cut_paste = app.Options.SmartCutPaste
+                app.Options.SmartCutPaste = False
+        except Exception as e:
+            logger.warning(f"Could not disable SmartCutPaste: {e}")
+
+        if not has_local_user_info:
+            stats["author_overridden_by_word"] = original_user
 
         # Pre-resolve Revision objects to prevent index drift.
         revisions_map = {}
@@ -368,6 +388,16 @@ if sys.platform == "win32":
 
         finally:
             app.UserName = original_user
+            if has_local_user_info:
+                try:
+                    app.Options.UseLocalUserInfo = original_use_local_info
+                except Exception:
+                    pass
+            try:
+                if hasattr(app.Options, "SmartCutPaste"):
+                    app.Options.SmartCutPaste = original_smart_cut_paste
+            except Exception:
+                pass
             doc.TrackRevisions = original_track_revisions
 
         return stats

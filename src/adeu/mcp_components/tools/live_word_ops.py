@@ -250,19 +250,28 @@ def _apply_structured_com_replacement(
 
     line_1 = full_plain_parts[0]
 
-    # 3. Insert Line 1 BEFORE the original text
+    # 3. Insert Line 1 BEFORE the original text (inline)
     logger.debug(f"Inserting Line 1 before deletion at index {base_start}")
     doc.Range(base_start, base_start).Text = line_1
 
-    # 4. Insert remaining lines AFTER the original text
+    # 4. Insert remaining lines AFTER the current paragraph
+    # BUG-03 fix: Multi-paragraph inserts inside a sentence should split the new
+    # paragraphs *after* the entire current paragraph, matching the disk engine.
     after_orig = base_start + len(line_1) + original_len
+
+    rest_text_start = None
     if len(full_plain_parts) > 1:
-        rest_text = "\r" + "\r".join(full_plain_parts[1:])
-        logger.debug(f"Inserting remaining lines after deletion at index {after_orig}")
-        doc.Range(after_orig, after_orig).Text = rest_text
-        actual_end = after_orig + len(rest_text)
-    else:
-        actual_end = after_orig
+        # Find the end of the current paragraph
+        p_end = doc.Range(base_start, base_start).Paragraphs(1).Range.End
+
+        # Word's Range.End includes the \r. We want to insert after the paragraph break,
+        # so we just insert at p_end. We append the new lines, each terminated by \r.
+        # But wait, inserting text at p_end pushes the next paragraph down.
+        rest_text = "".join(part + "\r" for part in full_plain_parts[1:])
+
+        logger.debug(f"Inserting remaining lines after paragraph at index {p_end}")
+        rest_text_start = p_end
+        doc.Range(p_end, p_end).Text = rest_text
 
     # 5. Attach comments strictly to Line 1.
     # Word's Comments.Add natively truncates or refuses to span tracked paragraph breaks.
@@ -292,7 +301,6 @@ def _apply_structured_com_replacement(
             logger.error(f"Failed to attach edit comment: {e}")
 
     # 6. Execute the explicit Deletion LAST
-    # The \r is already anchored after it, so Word will not natively reorder them.
     logger.debug("Executing deletion of original text to finalize Sandwich.")
     orig_rng_to_delete = doc.Range(base_start + len(line_1), after_orig)
     orig_rng_to_delete.Delete()
@@ -301,39 +309,50 @@ def _apply_structured_com_replacement(
     logger.debug("Toggling TrackRevisions OFF for styling phase.")
     doc.TrackRevisions = False
     try:
-        current_abs_offset = base_start
+        # Format Line 1
+        p_info_1 = parsed_lines[0]
+        _apply_paragraph_style(doc, base_start, p_info_1["level"])
+        _apply_line_formatting(
+            doc,
+            base_start,
+            p_info_1["plain"],
+            p_info_1["b_ranges"],
+            p_info_1["i_ranges"],
+            was_tracking=False,
+        )
 
-        for i, p_info in enumerate(parsed_lines):
-            if i == 1:
-                # Moving from Line 1 to Line 2: Skip deleted text and the \r
-                current_abs_offset += original_len + 1
-            elif i > 1:
-                # Moving between subsequent lines: Skip the \r
-                current_abs_offset += 1
+        # Format remaining lines
+        if rest_text_start is not None:
+            # We inserted the original text length earlier, but orig_rng_to_delete.Delete()
+            # was called. If tracking is ON, the deleted text remains in the document
+            # length. But p_end was captured BEFORE orig_rng_to_delete.Delete()!
+            # Wait, if p_end was captured before Delete(), but Delete() was called,
+            # does the absolute index shift?
+            # Tracked deletions DO NOT shift indices. Untracked deletions DO.
+            # To be safe, we recalculate the offset based on doc.Range shifting.
+            # Actually, since we appended the text at p_end, we can just use rest_text_start
+            # but adjusted if orig_rng_to_delete was a real deletion (tracking off).
+            shift = 0
+            if not was_tracking:
+                shift = -original_len
 
-            plain_len = len(p_info["plain"])
+            current_abs_offset = rest_text_start + shift
 
-            logger.debug(
-                f"Applying styles/formats for Line {p_info['idx']}",
-                abs_start=current_abs_offset,
-                plain_len=plain_len,
-                heading_level=p_info["level"],
-            )
+            for i in range(1, len(parsed_lines)):
+                p_info = parsed_lines[i]
+                plain_len = len(p_info["plain"])
 
-            assert current_abs_offset >= base_start, "Invariant violated: Absolute start drifted before base_start!"
-            assert current_abs_offset + plain_len <= actual_end, "Invariant violated: Line offset exceeded bounds!"
+                _apply_paragraph_style(doc, current_abs_offset, p_info["level"])
+                _apply_line_formatting(
+                    doc,
+                    current_abs_offset,
+                    p_info["plain"],
+                    p_info["b_ranges"],
+                    p_info["i_ranges"],
+                    was_tracking=False,
+                )
 
-            _apply_paragraph_style(doc, current_abs_offset, p_info["level"])
-            _apply_line_formatting(
-                doc,
-                current_abs_offset,
-                p_info["plain"],
-                p_info["b_ranges"],
-                p_info["i_ranges"],
-                was_tracking=False,  # Already disabled in this block
-            )
-
-            current_abs_offset += plain_len
+                current_abs_offset += plain_len + 1  # +1 for the \r we added
 
     except Exception as e:
         logger.error(f"Error during styling/formatting phase: {e}")
@@ -352,7 +371,7 @@ def apply_com_replacement(doc: Any, app: Any, target_rng: Any, new_text: str, co
         _apply_structured_com_replacement(doc, app, target_rng, new_text, comment_text)
         return
 
-    # ---- Simple path (original behaviour) ----
+    # ---- Simple path ----
     rescued_comments = []
     try:
         for i in range(1, target_rng.Comments.Count + 1):
@@ -362,31 +381,54 @@ def apply_com_replacement(doc: Any, app: Any, target_rng: Any, new_text: str, co
         logger.warning(f"Failed to rescue comments: {e}")
 
     plain_text, b_ranges, i_ranges = parse_markdown_for_com(new_text.replace("\n", "\r"))
-    target_rng.Text = plain_text
 
     was_tracking = doc.TrackRevisions
-    doc.TrackRevisions = False
-    try:
-        base_start = target_rng.Start
-        for b_start, b_end in b_ranges:
-            fmt_rng = doc.Range(base_start + b_start, base_start + b_end)
-            fmt_rng.Font.Bold = True
-        for i_start, i_end in i_ranges:
-            fmt_rng = doc.Range(base_start + i_start, base_start + i_end)
-            fmt_rng.Font.Italic = True
-    except Exception as e:
-        logger.warning(f"Failed to apply formatting: {e}")
-    finally:
-        doc.TrackRevisions = was_tracking
+    original_len = target_rng.End - target_rng.Start
 
+    # 1. Insert new text AFTER the original text
+    actual_insert_start = target_rng.End
+    doc.Range(actual_insert_start, actual_insert_start).Text = plain_text
+    inserted_rng = doc.Range(actual_insert_start, actual_insert_start + len(plain_text))
+
+    # 2. Attach comments BEFORE deleting the original text
     current_user = app.UserName
+
+    if len(plain_text) > 0:
+        comment_anchor_rng = inserted_rng
+    else:
+        comment_anchor_rng = target_rng
+
     for c_data in rescued_comments:
         try:
             app.UserName = c_data["author"]
-            doc.Comments.Add(target_rng, c_data["text"])
+            doc.Comments.Add(comment_anchor_rng, c_data["text"])
         except Exception:
             pass
     app.UserName = current_user
 
     if comment_text:
-        doc.Comments.Add(target_rng, comment_text)
+        try:
+            doc.Comments.Add(comment_anchor_rng, comment_text)
+        except Exception as e:
+            logger.error(f"Failed to attach edit comment: {e}")
+
+    # 3. Delete the original text LAST
+    if target_rng.Start < target_rng.End:
+        target_rng.Delete()
+
+    # 4. Format the new text
+    doc.TrackRevisions = False
+    try:
+        shift = 0 if was_tracking else -original_len
+        fmt_base_start = actual_insert_start + shift
+
+        for b_start, b_end in b_ranges:
+            fmt_rng = doc.Range(fmt_base_start + b_start, fmt_base_start + b_end)
+            fmt_rng.Font.Bold = True
+        for i_start, i_end in i_ranges:
+            fmt_rng = doc.Range(fmt_base_start + i_start, fmt_base_start + i_end)
+            fmt_rng.Font.Italic = True
+    except Exception as e:
+        logger.warning(f"Failed to apply formatting: {e}")
+    finally:
+        doc.TrackRevisions = was_tracking
