@@ -70,7 +70,15 @@ def resolve_email_id(short_id: str) -> str:
 
 
 class MLStripper(HTMLParser):
-    """Simple HTML stripper to provide clean text to the LLM."""
+    """Simple HTML stripper to provide clean text to the LLM.
+
+    Suppresses content inside <style>, <script>, and <head> blocks so that
+    embedded CSS/JS doesn't leak into the cleaned text output. This is
+    particularly important for Outlook-formatted emails which often embed
+    extensive CSS resets in <style> tags inside <head>.
+    """
+
+    SUPPRESSED_TAGS = {"style", "script", "head"}
 
     def __init__(self):
         super().__init__()
@@ -78,9 +86,19 @@ class MLStripper(HTMLParser):
         self.strict = False
         self.convert_charrefs = True
         self.text = []
+        self._suppress_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SUPPRESSED_TAGS:
+            self._suppress_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SUPPRESSED_TAGS and self._suppress_depth > 0:
+            self._suppress_depth -= 1
 
     def handle_data(self, d):
-        self.text.append(d)
+        if self._suppress_depth == 0:
+            self.text.append(d)
 
     def get_data(self):
         return "".join(self.text).strip()
@@ -90,35 +108,63 @@ def strip_tags(html: str) -> str:
     if not html:
         return ""
     try:
+
+        normalized = re.sub(
+            r"</(p|div|br|hr|tr|li|h[1-6]|blockquote)\s*/?>",
+            "\n",
+            html,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+
         s = MLStripper()
-        s.feed(html)
+        s.feed(normalized)
         text = s.get_data()
-        return re.sub(r"\n\s*\n", "\n\n", text)
+        # Collapse runs of 3+ newlines down to 2 for readability.
+        return re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
     except Exception:
         return html
 
 
 def remove_nested_quotes(text: str) -> str:
-    """Heuristically strips trailing quoted replies from email bodies."""
+    """Heuristically strips trailing quoted replies from email bodies.
+
+    Operates on the full text (not line-by-line) so multi-line dividers
+    like Outlook's:
+        From: Sender Name <addr>
+        Sent: Date
+    are correctly detected as a single boundary.
+
+    When a divider is found, everything from the divider onward is removed.
+    Content before the divider on the same line is preserved.
+    """
     if not text:
         return ""
-    lines = text.split("\n")
-    clean_lines = []
-    for line in lines:
-        # Outlook common dividers
-        if re.search(r"_{10,}", line):
-            break
-        if re.search(r"From:.*Sent:", line):
-            break
-        # Gmail / Generic dividers
-        if re.search(r"On .* wrote:", line):
-            break
-        if line.strip() == "Original Message":
-            break
-        if re.search(r"-----Original Message-----", line):
-            break
-        clean_lines.append(line)
-    return "\n".join(clean_lines).strip()
+
+    # Patterns that mark the start of a quoted/forwarded section.
+    # These are searched against the full text with re.MULTILINE | re.DOTALL.
+    divider_patterns = [
+        re.compile(r"_{10,}", re.MULTILINE),
+        # Outlook reply headers: 'From:' line followed (within ~5 lines) by 'Sent:'
+        re.compile(r"^From:\s.*?\n(?:.*\n){0,5}?Sent:\s", re.MULTILINE | re.DOTALL),
+        re.compile(r"-----Original Message-----", re.MULTILINE),
+        # Gmail-style: 'On <date> <author> wrote:' — may span lines
+        re.compile(r"On .{1,200}? wrote:", re.MULTILINE | re.DOTALL),
+        re.compile(r"^Original Message$", re.MULTILINE),
+    ]
+
+    # Find the earliest divider position in the text.
+    earliest_cut = None
+    for pattern in divider_patterns:
+        match = pattern.search(text)
+        if match is not None:
+            if earliest_cut is None or match.start() < earliest_cut:
+                earliest_cut = match.start()
+
+    if earliest_cut is None:
+        return text.strip()
+
+    return text[:earliest_cut].strip()
 
 
 def _resolve_attachment_dir(working_directory: str | None, email_id: str) -> Path:
@@ -153,9 +199,12 @@ def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
 
 @tool(
     description=(
-        "Searches the user's live email inbox. "
+        "Searches the user's live email inbox. By default, searches only the Inbox folder "
+        "(matching what the user sees in their mail client) — this excludes deleted items, "
+        "drafts, and spam. "
         "Use filters to find specific emails (e.g., 'is_unread=True' for new emails, "
-        "'days_ago=7' for last week, 'folder=sent' for sent items). "
+        "'days_ago=7' for last week, 'folder=sent' for sent items, 'folder=all' to "
+        "search the entire mailbox including trash). "
         "It returns a list of lightweight email previews. "
         "To read the full email body, thread history, and automatically download attachments "
         "to local disk, call this tool again and provide the specific `email_id`. "
@@ -169,10 +218,16 @@ def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
 )
 async def search_and_fetch_emails(
     ctx: Context,
-    sender: Annotated[Optional[str], "Filter by the sender's email address or name."] = None,
+    sender: Annotated[
+        Optional[str], "Filter by the sender's email address or name."
+    ] = None,
     subject: Annotated[Optional[str], "Filter by keywords in the subject line."] = None,
-    has_attachments: Annotated[Optional[bool], "If True, only returns emails that contain file attachments."] = None,
-    attachment_name: Annotated[Optional[str], "Filter by a specific attachment filename."] = None,
+    has_attachments: Annotated[
+        Optional[bool], "If True, only returns emails that contain file attachments."
+    ] = None,
+    attachment_name: Annotated[
+        Optional[str], "Filter by a specific attachment filename."
+    ] = None,
     is_unread: Annotated[
         Optional[bool],
         "If True, returns ONLY unread emails. If False, returns ONLY read emails. Leave empty for both.",
@@ -183,7 +238,13 @@ async def search_and_fetch_emails(
     ] = None,
     folder: Annotated[
         Optional[Literal["inbox", "sent", "all"]],
-        "The mailbox folder to search in (default is all).",
+        (
+            "The mailbox folder to search in. Defaults to 'inbox' when omitted, "
+            "which matches what the user sees in their mail client and excludes "
+            "deleted items, drafts, and spam. Use 'sent' to search sent items. "
+            "Use 'all' ONLY when the user explicitly asks to search across the "
+            "entire mailbox including trash/deleted items."
+        ),
     ] = None,
     limit: Annotated[int, "Maximum number of emails to retrieve (default: 10)."] = 10,
     offset: Annotated[int, "Pagination offset to skip the first N emails."] = 0,
@@ -200,7 +261,9 @@ async def search_and_fetch_emails(
     ] = None,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> ToolResult:
-    await ctx.info("Starting live email search", extra={"email_id": email_id, "subject": subject})
+    await ctx.info(
+        "Starting live email search", extra={"email_id": email_id, "subject": subject}
+    )
     real_email_id = resolve_email_id(email_id) if email_id else None
     payload_dict = {
         "email_id": real_email_id,
@@ -237,7 +300,9 @@ async def search_and_fetch_emails(
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         error_body = e.read().decode("utf-8")
         raise ToolError(f"Cloud search failed (HTTP {e.code}): {error_body}") from e
     except Exception as e:
@@ -289,11 +354,17 @@ async def search_and_fetch_emails(
     elif response_type == "full_email":
         full_email = data.get("full_email", {})
         if not full_email:
-            return ToolResult(content="Failed to retrieve full email.", structured_content=data)
+            return ToolResult(
+                content="Failed to retrieve full email.", structured_content=data
+            )
 
         email_id_str = full_email.get("id", "unknown_id")
         id_cache = load_id_cache()
-        short_target_id = minify_email_id(email_id_str, id_cache) if email_id_str != "unknown_id" else "unknown_id"
+        short_target_id = (
+            minify_email_id(email_id_str, id_cache)
+            if email_id_str != "unknown_id"
+            else "unknown_id"
+        )
         full_email["id"] = short_target_id
         for hist_msg in full_email.get("messages", []):
             if "id" in hist_msg:
@@ -309,7 +380,9 @@ async def search_and_fetch_emails(
             local_files = []
             for att in message_data.get("attachments", []):
                 filename = att.get("filename", "unnamed_file")
-                b64_data = att.pop("base64_data", None)  # Remove from UI payload to save IPC memory
+                b64_data = att.pop(
+                    "base64_data", None
+                )  # Remove from UI payload to save IPC memory
 
                 if b64_data:
                     try:
@@ -330,7 +403,9 @@ async def search_and_fetch_emails(
         clean_body = remove_nested_quotes(raw_clean_body)
 
         llm_lines.append("## Target Message (Newest):")
-        llm_lines.append(f"**From**: {full_email.get('sender_name')} <{full_email.get('sender_email')}>")
+        llm_lines.append(
+            f"**From**: {full_email.get('sender_name')} <{full_email.get('sender_email')}>"
+        )
         llm_lines.append(f"**Date**: {full_email.get('received_datetime')}")
 
         if target_local_files:
@@ -361,7 +436,9 @@ async def search_and_fetch_emails(
                 clean_hist = remove_nested_quotes(raw_clean_hist)
 
                 llm_lines.append(f"### Message {-1 * (idx + 1)} (Older)")
-                llm_lines.append(f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>")
+                llm_lines.append(
+                    f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>"
+                )
                 llm_lines.append(f"**Date**: {hist_msg.get('received_datetime')}")
 
                 if hist_local_files:
@@ -372,14 +449,18 @@ async def search_and_fetch_emails(
                 llm_lines.append(f"**Body**:\n```\n{clean_hist}\n```\n")
             llm_lines.append("---")
 
-        if target_local_files or any(m.get("attachments") for m in full_email.get("messages", [])):
+        if target_local_files or any(
+            m.get("attachments") for m in full_email.get("messages", [])
+        ):
             llm_lines.append(
                 "\n*You can now use tools like `read_docx`, `diff_docx_files`, or `validate_documents` "
                 "on the local file paths listed under each message.*"
             )
 
         return ToolResult(content="\n".join(llm_lines), structured_content=data)
-    return ToolResult(content="Unknown response format from backend.", structured_content=data)
+    return ToolResult(
+        content="Unknown response format from backend.", structured_content=data
+    )
 
 
 @tool(
@@ -395,10 +476,18 @@ async def search_and_fetch_emails(
 )
 async def create_email_draft(
     ctx: Context,
-    body_markdown: Annotated[str, "The body of the email in Markdown format. Will be converted to HTML."],
-    reply_to_email_id: Annotated[Optional[str], "Provide the short email ID to reply to an existing thread."] = None,
-    subject: Annotated[Optional[str], "The subject line. Required if starting a NEW email."] = None,
-    to_recipients: Annotated[Optional[list[str] | str], "List of emails. Required if starting a NEW email."] = None,
+    body_markdown: Annotated[
+        str, "The body of the email in Markdown format. Will be converted to HTML."
+    ],
+    reply_to_email_id: Annotated[
+        Optional[str], "Provide the short email ID to reply to an existing thread."
+    ] = None,
+    subject: Annotated[
+        Optional[str], "The subject line. Required if starting a NEW email."
+    ] = None,
+    to_recipients: Annotated[
+        Optional[list[str] | str], "List of emails. Required if starting a NEW email."
+    ] = None,
     attachment_paths: Annotated[
         Optional[list[str] | str],
         "List of absolute file paths on the local system to attach to the draft.",
@@ -434,7 +523,9 @@ async def create_email_draft(
     parsed_attachments = _parse_list(attachment_paths)
 
     # 2. Resolve Minified ID to Real Graph ID
-    real_reply_to_id = resolve_email_id(reply_to_email_id) if reply_to_email_id else None
+    real_reply_to_id = (
+        resolve_email_id(reply_to_email_id) if reply_to_email_id else None
+    )
 
     # Prepare text fields
     fields = {
@@ -477,12 +568,18 @@ async def create_email_draft(
         with urllib.request.urlopen(req) as response:
             data = json.loads(response.read().decode("utf-8"))
             draft_id = data.get("id")
-            return ToolResult(content=f"Successfully created email draft! Draft ID: {draft_id}")
+            return ToolResult(
+                content=f"Successfully created email draft! Draft ID: {draft_id}"
+            )
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(f"Cloud draft creation failed (HTTP {e.code}): {error_body}") from e
+        raise ToolError(
+            f"Cloud draft creation failed (HTTP {e.code}): {error_body}"
+        ) from e
     except Exception as e:
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
