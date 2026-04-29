@@ -522,3 +522,48 @@ def test_live_word_overlapping_annotations(active_word_app):
         assert "}==}" not in content
 
     asyncio.run(run_test())
+
+
+def test_live_word_pure_comment_same_text(active_word_app):
+    """
+    Validates Bug Fix: Pure comment (same target and new text) should not produce
+    any tracked text revisions, only a comment.
+    """
+    import asyncio
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.models import ModifyText
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    doc.Range(0, doc.Content.End).Text = "MUTUAL NON-DISCLOSURE AGREEMENT\n"
+    doc.TrackRevisions = True
+
+    async def run_test():
+        changes = [
+            ModifyText(
+                target_text="MUTUAL NON-DISCLOSURE AGREEMENT",
+                new_text="MUTUAL NON-DISCLOSURE AGREEMENT",
+                comment="This clause needs legal review.",
+            )
+        ]
+
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+        assert "Applied: 1, Failed: 0" in res
+
+        # The document should have 0 tracked revisions, and exactly 1 comment.
+        assert doc.Revisions.Count == 0, "Spurious tracked changes were created!"
+        assert doc.Comments.Count == 1
+
+        read_res = await read_active_word_document(ctx, clean_view=False)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # Assert critic markup anchor exists, but NO insertions/deletions
+        assert "{==MUTUAL NON-DISCLOSURE AGREEMENT==}" in content
+        assert "{++" not in content
+        assert "{--" not in content
+        assert "This clause needs legal review." in content
+
+    asyncio.run(run_test())

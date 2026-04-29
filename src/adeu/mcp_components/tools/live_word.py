@@ -620,8 +620,20 @@ if sys.platform == "win32":
                                 actual_start = rng.Start
                                 actual_end = actual_start + len(exact_substring)
 
-                                # Bug #8 Fix: Mathematically shrink the replacement range by trimming common context
                                 effective_new = change.new_text or ""
+
+                                # Pure comment detection: skip text replacement to prevent spurious w:del/w:ins tags
+                                if change.target_text == effective_new:
+                                    if change.comment:
+                                        replace_rng = doc.Range(Start=actual_start, End=actual_end)
+                                        try:
+                                            doc.Comments.Add(replace_rng, change.comment)
+                                        except Exception as e:
+                                            logger.warning(f"Failed to attach comment for same->same edit: {e}")
+                                    stats["applied"] += 1
+                                    continue
+
+                                # Bug #8 Fix: Mathematically shrink the replacement range by trimming common context
                                 if exact_substring == effective_new:
                                     final_new_text = effective_new
                                 else:
@@ -651,6 +663,20 @@ if sys.platform == "win32":
                                         Start=doc_rng.Start,
                                         End=doc_rng.Start + len(exact_substring),
                                     )
+
+                                    effective_new = change.new_text or ""
+                                    # Pure comment detection (Fallback path)
+                                    if change.target_text == effective_new:
+                                        if change.comment:
+                                            try:
+                                                doc.Comments.Add(replace_rng, change.comment)
+                                            except Exception as e:
+                                                logger.warning(
+                                                    f"Failed to attach comment for same->same fallback edit: {e}"
+                                                )
+                                        stats["applied"] += 1
+                                        continue
+
                                     _apply_com_replacement(
                                         doc,
                                         app,
