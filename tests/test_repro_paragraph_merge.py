@@ -56,7 +56,7 @@ def test_multiline_insert_does_not_create_nested_paragraphs():
     assert len(nested_p_check) == 0, "FATAL: Nested <w:p> tags detected. Word will merge these!"
 
     # Ensure the new paragraph was successfully inserted
-    assert "11. Entire Agreement" in doc_xml
+    assert "Entire Agreement" in doc_xml
 
 
 def test_val_obs_new_7_paragraph_break_tracking():

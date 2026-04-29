@@ -223,7 +223,7 @@ class TestQaReportDefects:
     def test_tech6_table_error_wording(self):
         """
         TECH-6: Error message for structural table changes should explicitly say "rows or columns",
-        not just "columns".
+        not just "columns". (Note: The engine now throws a BatchValidationError).
         """
         doc = Document()
         table = doc.add_table(rows=1, cols=2)
@@ -237,10 +237,18 @@ class TestQaReportDefects:
         engine = RedlineEngine(stream)
         # Attempt a structural column insertion via text replace
         edit = ModifyText(target_text="Left | Right", new_text="Left | Right | Extra")
-        stats = engine.process_batch([edit])
+        import pytest
 
-        assert stats["edits_skipped"] == 1
-        skipped_msg = stats["skipped_details"][0].lower()
+        from adeu.redline.engine import BatchValidationError
+
+        with pytest.raises(BatchValidationError) as exc:
+            engine.process_batch([edit])
+
+        skipped_msg = str(exc.value).lower()
+        # The test originally checked for "rows or columns" in the skipped details.
+        # Ensure our new error message contains the expected explanatory text.
+        assert "target text spans 2 table cells, but replacement provides 3" in skipped_msg
+        assert "altering table structure" in skipped_msg
 
         assert "rows or columns" in skipped_msg, f"Error message lacks 'rows or columns'. Got: {skipped_msg}"
 

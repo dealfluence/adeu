@@ -148,6 +148,7 @@ def test_n2_consistent_skipped_details_for_tables():
     """
     N2: Structural table rejections must have consistent, non-empty error messages
     with the explanatory note on *every* failure, not just the first.
+    (Note: The engine now throws a BatchValidationError).
     """
     doc = Document()
     table = doc.add_table(rows=1, cols=2)
@@ -162,18 +163,14 @@ def test_n2_consistent_skipped_details_for_tables():
     edit2 = ModifyText(target_text="X | Y", new_text="X | Y | Z")
 
     engine = RedlineEngine(stream)
-    stats = engine.process_batch([edit1, edit2])
 
-    assert stats["edits_applied"] == 0
-    assert stats["edits_skipped"] == 2
+    import pytest
 
-    details = stats["skipped_details"]
-    assert len(details) == 2
+    from adeu.redline.engine import BatchValidationError
 
-    for i, detail in enumerate(details):
-        assert "(Note: Structural table changes" in detail, f"N2 Regression: Note missing from detail {i + 1}: {detail}"
-        assert "Failed to apply edit targeting:" in detail
-        assert "\\n\\n" not in detail, (
-            "N2 Regression: Error message truncated to raw internal newlines instead of human-readable text"
-        )
-        assert "X | Y" in detail, f"N2 Regression: Original target text snippet missing: {detail}"
+    with pytest.raises(BatchValidationError) as exc:
+        engine.process_batch([edit1, edit2])
+
+    err_msg = str(exc.value)
+    assert "Target text spans 2 table cells, but replacement provides 1" in err_msg
+    assert "altering table structure" in err_msg

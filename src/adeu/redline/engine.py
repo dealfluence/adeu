@@ -161,17 +161,29 @@ class RedlineEngine:
 
     def _parse_markdown_style(self, text: str) -> tuple[str, str | None]:
         """
-        Detects if text starts with markdown header (e.g. '## Title').
+        Detects if text starts with markdown header (e.g. '## Title') or list markers (e.g. '* ', '1. ').
         Returns (clean_text, style_name).
         """
-        if text.startswith("#"):
-            level = 0
-            while text.startswith("#"):
-                level += 1
-                text = text[1:]
+        stripped_text = text.lstrip()
 
-            if text.startswith(" "):
-                return text.strip(), f"Heading {level}"
+        # Headers
+        if stripped_text.startswith("#"):
+            level = 0
+            while stripped_text.startswith("#"):
+                level += 1
+                stripped_text = stripped_text[1:]
+
+            if stripped_text.startswith(" "):
+                return stripped_text.strip(), f"Heading {level}"
+
+        # Bullet Lists
+        if stripped_text.startswith("* ") or stripped_text.startswith("- "):
+            return stripped_text[2:].strip(), "List Paragraph"
+
+        # Numbered Lists (e.g., "1. ", "2. ", "10. ")
+        match = re.match(r"^\d+\.\s+", stripped_text)
+        if match:
+            return stripped_text[match.end() :].strip(), "List Number"
 
         return text, None
 
@@ -1119,7 +1131,15 @@ class RedlineEngine:
                 return sub_edits
             else:
                 # Reject structural modifications to tables (adding/removing columns) via text replacement
-                return None
+                raise BatchValidationError(
+                    [
+                        f"Target text spans {len(actual_cells)} table cells, but replacement provides "
+                        f"{len(new_cells)}. "
+                        "To modify text without altering table structure (rows or columns), ensure the replacement "
+                        "contains the exact same number of '|' separators "
+                        "(e.g., replace with 'CellC | ' to empty the second cell)."
+                    ]
+                )
 
         if actual_doc_text == effective_new_text:
             if edit.comment:
