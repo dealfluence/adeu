@@ -221,6 +221,23 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
     def process_run_element(r_element):
         nonlocal in_complex_field, current_instr, hide_result
 
+        # Check for inline Tracked Formatting (w:rPrChange)
+        rPr = r_element.find(qn("w:rPr"))
+        rPrChange = rPr.find(qn("w:rPrChange")) if rPr is not None else None
+        if rPrChange is not None:
+            c_id = rPrChange.get(qn("w:id"))
+            c_auth = rPrChange.get(qn("w:author"))
+            c_date = rPrChange.get(qn("w:date"))
+            yield DocxEvent("fmt_start", c_id, c_auth, c_date)
+
+        # Check for inline Tracked Formatting (w:rPrChange) anywhere in the run
+        rPrChange = r_element.find(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPrChange")
+        if rPrChange is not None:
+            c_id = rPrChange.get(qn("w:id"))
+            c_auth = rPrChange.get(qn("w:author"))
+            c_date = rPrChange.get(qn("w:date"))
+            yield DocxEvent("fmt_start", c_id, c_auth, c_date)
+
         # Check for inline commentReference (sometimes embedded in run)
         for child in r_element:
             if child.tag == qn("w:commentReference"):
@@ -268,6 +285,9 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
         # 3. Yield Run (if not hidden)
         if not hide_result:
             yield Run(r_element, paragraph)
+
+        if rPrChange is not None:
+            yield DocxEvent("fmt_end", c_id)
 
     def traverse_node(node):
         for child in node:

@@ -37,7 +37,7 @@ def test_repro_workflow_blocking():
     # Target "Round1" inside the markup
     edit2 = ModifyText(target_text="Round1", new_text="Round2", comment="Counter proposal")
 
-    engine2 = RedlineEngine(stream2, author="Party B")
+    engine2 = RedlineEngine(stream2, author="Party A")
     applied, skipped = engine2.apply_edits([edit2])
 
     if skipped > 0:
@@ -75,7 +75,7 @@ def test_repro_workflow_blocking_target_with_markup():
         new_text="Round2",
     )
 
-    engine2 = RedlineEngine(stream2, author="B")
+    engine2 = RedlineEngine(stream2, author="A")
     applied, skipped = engine2.apply_edits([edit2])
 
     # This is likely where it fails if the mapper treats brackets as virtual

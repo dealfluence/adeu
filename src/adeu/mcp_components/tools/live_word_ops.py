@@ -273,21 +273,23 @@ def _apply_structured_com_replacement(
         rest_text_start = p_end
         doc.Range(p_end, p_end).Text = rest_text
 
-    # 5. Attach comments strictly to Line 1.
-    # Word's Comments.Add natively truncates or refuses to span tracked paragraph breaks.
-    # Anchoring to the first inserted line guarantees the comment survives and is highly visible.
-    line_1_rng = doc.Range(base_start, base_start + len(line_1))
+    # 5. Attach comments to a combined range (Insertion + Target).
+    # If we anchor only to the inserted Line 1, Word natively snaps the comment anchor 
+    # leftwards into the preceding un-tracked text. By anchoring across the insertion 
+    # AND the target text, we force Word to grip the normal text. When we delete the 
+    # target text in Step 6, the anchor perfectly collapses onto the insertion.
+    combined_rng = doc.Range(base_start, after_orig)
     logger.info(
-        "Attaching comments strictly to Line 1.",
-        range_start=line_1_rng.Start,
-        range_end=line_1_rng.End,
+        "Attaching comments to combined range.",
+        range_start=combined_rng.Start,
+        range_end=combined_rng.End,
     )
 
     current_user = app.UserName
     for c_data in rescued_comments:
         try:
             app.UserName = c_data["author"]
-            doc.Comments.Add(line_1_rng, c_data["text"])
+            doc.Comments.Add(combined_rng, c_data["text"])
             logger.debug(f"Rescued comment re-attached: '{c_data['text'][:20]}...'")
         except Exception as e:
             logger.warning(f"Failed to re-attach rescued comment: {e}")
@@ -295,7 +297,7 @@ def _apply_structured_com_replacement(
 
     if comment_text:
         try:
-            doc.Comments.Add(line_1_rng, comment_text)
+            doc.Comments.Add(combined_rng, comment_text)
             logger.debug("New comment attached successfully.")
         except Exception as e:
             logger.error(f"Failed to attach edit comment: {e}")

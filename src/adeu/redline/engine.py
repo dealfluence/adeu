@@ -242,13 +242,13 @@ class RedlineEngine:
         anchor_run: Optional[Run] = None,
         comment: Optional[str] = None,
         suppress_inherited: bool = False,
-    ):
+    ) -> Tuple[Optional[Any], Optional[Any]]:
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs.
         """
         lines = re.split(r"[\r\n]+", text)
         if not lines:
-            return None
+            return None, None
 
         # 0. Check if FIRST line implies a block element (Header)
         first_clean, first_style = self._parse_markdown_style(lines[0])
@@ -333,7 +333,7 @@ class RedlineEngine:
                 else:
                     self._attach_comment_spanning(start_p, start_ins, end_p, end_ins, comment)
 
-            return None
+            return None, (created_nodes[-1][0] if created_nodes else None)
 
         # 1. Inline Logic
         first_line = lines[0]
@@ -343,9 +343,10 @@ class RedlineEngine:
         if remaining_lines and remaining_lines[-1] == "":
             remaining_lines.pop()
 
+        last_p = None
         if remaining_lines:
             if not anchor_run:
-                return ins_elem
+                return ins_elem, None
 
             # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
             current_p_element = anchor_run._element.getparent()
@@ -431,8 +432,9 @@ class RedlineEngine:
 
                 new_p.append(new_ins)
                 parent_body.insert(p_index + 1 + i, new_p)
+                last_p = new_p
 
-        return ins_elem
+        return ins_elem, last_p
 
     def _apply_run_props(self, run_element, props: Dict[str, Any], suppress_inherited: bool = False) -> None:
         """
@@ -572,13 +574,14 @@ class RedlineEngine:
 
     def track_delete_run(self, run: Run):
         del_tag = self._create_track_change_tag("w:del")
-        new_run = create_element("w:r")
-        if run._r.rPr is not None:
-            new_run.append(deepcopy(run._r.rPr))
-        text_content = run.text
-        del_text = create_element("w:delText")
-        self._set_text_content(del_text, text_content)
-        new_run.append(del_text)
+
+        # Clone the run to preserve special content (w:drawing, w:commentReference)
+        new_run = deepcopy(run._r)
+
+        # Convert w:t to w:delText
+        for t in new_run.findall(qn("w:t")):
+            t.tag = qn("w:delText")
+
         del_tag.append(new_run)
 
         parent = run._r.getparent()
@@ -897,6 +900,8 @@ class RedlineEngine:
         applied_actions, skipped_actions = 0, 0
         if actions:
             applied_actions, skipped_actions = self.apply_review_actions(actions)
+            if skipped_actions > 0:
+                raise BatchValidationError(self.skipped_details)
             if edits:
                 self.mapper._build_map()
                 self.clean_mapper = None
@@ -1254,7 +1259,7 @@ class RedlineEngine:
             final_new_text = edit.new_text or ""
 
             if start_idx == 0:
-                ins_elem = self.track_insert(final_new_text, anchor_run=anchor_run, comment=edit.comment)
+                ins_elem, last_p = self.track_insert(final_new_text, anchor_run=anchor_run, comment=edit.comment)
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
                         self._insert_and_split_ins(parent, index, ins_elem)
@@ -1264,11 +1269,15 @@ class RedlineEngine:
                         actual_parent = parent
 
                     if edit.comment:
-                        self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+                        if last_p is not None:
+                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
+                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                        else:
+                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             else:
                 next_run = self._get_next_run(anchor_run)
                 style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
-                ins_elem = self.track_insert(final_new_text, anchor_run=style_run, comment=edit.comment)
+                ins_elem, last_p = self.track_insert(final_new_text, anchor_run=style_run, comment=edit.comment)
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
                         self._insert_and_split_ins(parent, index + 1, ins_elem)
@@ -1278,7 +1287,11 @@ class RedlineEngine:
                         actual_parent = parent
 
                     if edit.comment:
-                        self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+                        if last_p is not None:
+                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
+                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                        else:
+                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             return True
 
         target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
@@ -1340,23 +1353,29 @@ class RedlineEngine:
                     if del_r is None:
                         del_r = target_runs[-1]._element
 
-                    ins_elem = self.track_insert(
+                    ins_elem, last_p = self.track_insert(
                         text_to_insert,
                         anchor_run=Run(del_r, target_runs[-1]._parent),
-                        comment=edit.comment,
+                        comment=None,
                         suppress_inherited=False,
                     )
                     if ins_elem is not None:
                         parent.insert(del_index + 1, ins_elem)
 
-                    if edit.comment and ins_elem is not None and first_del_element is not None:
+                    if edit.comment and first_del_element is not None:
                         start_p = first_del_element.getparent()
-                        end_p = ins_elem.getparent()
-
-                        if start_p == end_p:
-                            self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
+                        if last_p is not None:
+                            end_p = last_p
+                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
+                            self._attach_comment_spanning(start_p, first_del_element, end_p, last_ins, edit.comment)
+                        elif ins_elem is not None:
+                            end_p = ins_elem.getparent()
+                            if start_p == end_p:
+                                self._attach_comment(parent, first_del_element, ins_elem, edit.comment)
+                            else:
+                                self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
                         else:
-                            self._attach_comment_spanning(start_p, first_del_element, end_p, ins_elem, edit.comment)
+                            self._attach_comment(start_p, first_del_element, last_del_element, edit.comment)
 
         # PHASE 2: OOXML Paragraph Merge Protocol
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
@@ -1369,7 +1388,7 @@ class RedlineEngine:
                     last_runs = p1_el.findall(f".//{qn('w:r')}")
                     anchor = Run(last_runs[-1], first_span.paragraph) if last_runs else None
 
-                    ins_elem = self.track_insert(edit.new_text, anchor_run=anchor, comment=edit.comment)
+                    ins_elem, _ = self.track_insert(edit.new_text, anchor_run=anchor, comment=edit.comment)
                     if ins_elem is not None:
                         p1_el.append(ins_elem)
 
@@ -1691,6 +1710,10 @@ class RedlineEngine:
 
     def _reply_to_comment(self, target_id: str, text: str) -> bool:
         if not self.comments_manager.comments_part:
+            return False
+
+        existing_comments = self.comments_manager.extract_comments_data()
+        if target_id not in existing_comments:
             return False
 
         new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)

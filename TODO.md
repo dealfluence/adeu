@@ -4,8 +4,6 @@
 ## 🚧 Upcoming Priorities (v0.6.0+)
 
 ### 1. Document Scope Expansion
-*   **Headers & Footers**: Update `ingest.py` and `mapper.py` to iterate through `section.header` and `section.footer` parts. Currently, these are read-only/invisible.
-*   **Hyperlinks**: Implement support for editing text inside `w:hyperlink` tags.
 *   **Complex Fields**: Investigate safe strategies for handling Fields (Date, TOC) without breaking them.
 
 ### 2. Advanced Table Redlining

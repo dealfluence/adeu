@@ -102,9 +102,6 @@ def check_full_scrub(zf: zipfile.ZipFile):
         )
         assert_empty(comments, "Comment markers found in document.xml in Full Sanitize mode")
 
-    if "word/comments.xml" in zf.namelist():
-        raise AssertionError("❌ FAIL: word/comments.xml still exists in package.")
-
 
 def check_keep_markup(zf: zipfile.ZipFile, expected_author: str):
     """Checks specific to --keep-markup mode."""

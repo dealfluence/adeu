@@ -147,6 +147,7 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
     active_ins: dict[str, DocxEvent] = {}
     active_del: dict[str, DocxEvent] = {}
     active_comments: set[str] = set()
+    active_fmt: dict[str, DocxEvent] = {}
 
     deferred_meta_states = []
 
@@ -171,7 +172,7 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                 if clean_view:
                     new_wrappers = ("", "")
                 else:
-                    new_wrappers = _get_wrappers(active_ins, active_del, active_comments)
+                    new_wrappers = _get_wrappers(active_ins, active_del, active_comments, active_fmt)
                 new_style = (prefix, suffix)
 
                 if pending_text and new_wrappers == current_wrappers:
@@ -205,17 +206,19 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                         active_ins.copy(),
                         active_del.copy(),
                         active_comments.copy(),
+                        active_fmt.copy(),
                     )
                     deferred_meta_states.append(current_state)
 
                     should_defer = False
-                    is_redline = bool(active_ins) or bool(active_del)
+                    is_redline = bool(active_ins) or bool(active_del) or bool(active_fmt)
 
                     if is_redline:
                         j = i + 1
                         next_is_redline = False
                         temp_ins_count = len(active_ins)
                         temp_del_count = len(active_del)
+                        temp_fmt_count = len(active_fmt)
 
                         while j < len(items):
                             next_item = items[j]
@@ -223,7 +226,7 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                                 if not get_run_text(next_item):
                                     j += 1
                                     continue
-                                if temp_ins_count > 0 or temp_del_count > 0:
+                                if temp_ins_count > 0 or temp_del_count > 0 or temp_fmt_count > 0:
                                     next_is_redline = True
                                 break
                             elif isinstance(next_item, DocxEvent):
@@ -235,6 +238,10 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                                     temp_del_count += 1
                                 elif next_item.type == "del_end":
                                     temp_del_count = max(0, temp_del_count - 1)
+                                elif next_item.type == "fmt_start":
+                                    temp_fmt_count += 1
+                                elif next_item.type == "fmt_end":
+                                    temp_fmt_count = max(0, temp_fmt_count - 1)
                             j += 1
 
                         if next_is_redline:
@@ -272,6 +279,10 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                 active_del[item.id] = item
             elif item.type == "del_end":
                 active_del.pop(item.id, None)
+            elif item.type == "fmt_start":
+                active_fmt[item.id] = item
+            elif item.type == "fmt_end":
+                active_fmt.pop(item.id, None)
             elif item.type in ("footnote", "endnote"):
                 if pending_text:
                     s_tok, e_tok = current_wrappers
@@ -334,12 +345,12 @@ def _build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
     return "".join(parts)
 
 
-def _get_wrappers(active_ins, active_del, active_comments):
+def _get_wrappers(active_ins, active_del, active_comments, active_fmt):
     if active_del:
         return "{--", "--}"
     elif active_ins:
         return "{++", "++}"
-    elif active_comments:
+    elif active_comments or active_fmt:
         return "{==", "==}"
     return "", ""
 
@@ -381,8 +392,8 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
             for child_id in children:
                 render_comment(child_id)
 
-    for ins_map, del_map, comments_set in states_list:
-        for map_obj in (ins_map, del_map):
+    for ins_map, del_map, comments_set, fmt_map in states_list:
+        for map_obj in (ins_map, del_map, fmt_map):
             for uid, meta in map_obj.items():
                 sig = f"Chg:{uid}"
                 if sig not in seen_sigs:

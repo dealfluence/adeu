@@ -330,8 +330,6 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
             if el.getparent() is not None:
                 el.getparent().remove(el)
 
-    _eject_comment_parts(doc)
-
     resolved_count = len([c for c in data.values() if c.get("resolved")])
     open_count = len([c for c in data.values() if not c.get("resolved")])
     header = [f"Comments removed: {len(data)} ({resolved_count} resolved, {open_count} open)"]
@@ -368,9 +366,6 @@ def remove_resolved_comments(doc: DocumentObject) -> list[str]:
         for child in list(cm.extended_part.element):
             if child.get(qn("w15:done")) in ("1", "true", "on"):
                 cm.extended_part.element.remove(child)
-
-    if not remaining_ids:
-        _eject_comment_parts(doc)
 
     return [f"Resolved comments stripped: {len(resolved)}"] + lines
 

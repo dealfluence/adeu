@@ -169,6 +169,13 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
             prefix_len += mlen
             suffix_len += mlen
 
+    # If the replacement introduces newlines that would separate the prefix and suffix,
+    # we must explicitly prevent suffix trimming to guarantee the suffix is physically
+    # transplanted into the new paragraph rather than left stranded in the original.
+    new_rem = new_val[prefix_len : len(new_val) - suffix_len if suffix_len else len(new_val)]
+    if "\n" in new_rem or "\r" in new_rem:
+        suffix_len = 0
+
     return prefix_len, suffix_len
 
 

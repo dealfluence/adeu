@@ -107,14 +107,11 @@ def test_insert_boilerplate_with_comment_attaches_correctly():
     comments_xml = comments_part.blob.decode("utf-8")
     assert "Changed header style." in comments_xml
 
-    # Check if the new paragraph contains commentRangeStart/End
-    # The new header is likely the second paragraph (after the deleted "Old Header.")
-    # Or modification replaces content?
-    # Modification: Delete runs in P1. Insert New P (Heading) AFTER P1.
-    # So P1 is now empty (or contains deleted text). P2 is New Header.
+    # Check if the comment spans from the deletion (p1) to the insertion (p2)
+    # as mandated by Architectural Decision #11 (Modification Comment Anchoring).
+    p1 = doc_result.paragraphs[0]  # Deleted "Old Header"
+    p2 = doc_result.paragraphs[1]  # Inserted "New Header"
 
-    p2 = doc_result.paragraphs[1]  # "New Header"
-    xml = p2._element.xml
-
-    assert "w:commentRangeStart" in xml
-    assert "w:commentRangeEnd" in xml
+    assert "w:commentRangeStart" in p1._element.xml, "Comment start should anchor to the deletion"
+    assert "w:commentRangeEnd" in p2._element.xml, "Comment end should anchor to the insertion"
+    assert "w:commentReference" in p2._element.xml, "Comment reference should follow the end anchor"
