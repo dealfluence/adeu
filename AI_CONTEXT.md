@@ -21,6 +21,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Run Coalescing**: We merge adjacent runs with identical styling to reduce token count and simplify mapping ("Con" + "tract" -> "Contract").
 *   **Safety Constraint**: Runs containing "Special Content" (`w:br`, `w:tab`, `w:commentReference`, `w:drawing`) are **immutable boundaries**.
     *   *Rule*: Never merge a run containing special tags into a text run, or the special tag will be destroyed.
+    *   *Deletion Survival*: When a text run containing Special Content is marked for deletion (`w:del`), the engine uses `deepcopy` to clone the run. This ensures images and structural elements physically survive inside the deletion block instead of being silently erased.
 
 ### 3. The "Virtual Text" Contract
 *   `ingest.py` and `mapper.py` must be strictly synchronized.
@@ -38,7 +39,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Synchronization Invariants**:
     *   **Empty Rows**: `ingest.py` must *never* skip empty table rows. `mapper.py` iterates all rows in the DOM; skipping one in text extraction causes index misalignment.
     *   **Separators**: Row separators (`\n`) are injected *between* rows. Virtual pipes (` | `) separate cells.
-    *   **Cell Isolation**: The virtual `|` boundary represents a hard `<w:tc>` cell wall. Modifying text across `|` boundaries is dynamically segmented into per-cell edits by the engine. Structural table changes (adding/removing `|` columns) via text replacement are explicitly intercepted and rejected to prevent cross-cell data corruption.
+    *   **Cell Isolation**: The virtual `|` boundary represents a hard `<w:tc>` cell wall. Modifying text across `|` boundaries is dynamically segmented into per-cell edits by the engine. Structural table changes (adding or removing rows, or adding/removing `|` columns) via text replacement are explicitly intercepted and strictly rejected to prevent gridspan corruption and misaligned `<w:tc>` elements.
     *   **Heuristic Cell Matching**: When modifying table rows via text substitution, we explicitly `.strip()` individual cell contents to bypass whitespace drift and accurately anchor comments to the semantically modified cell.
 
 ### 6. The Unified `DocumentChange` API
@@ -46,6 +47,7 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Search & Replace First**: Pure insertions and deletions are intentionally hidden from the LLM. All text modifications must be executed as search-and-replace (`ModifyText`) to guarantee sufficient anchoring context for the fuzzy matcher.
 *   **Universal Tooling**: Disk-based and Live Word tools share the same endpoints (`read_docx`, `process_document_batch`). On Windows, omitting file paths dynamically routes the command to the active Live Word COM object, preventing LLM tool selection paralysis.
 *   **Heading Depth Validation**: Markdown heading depths (`#`) are strictly clamped to a maximum of 6. Exceeding this raises a `BatchValidationError` to prevent the silent generation of broken/unstyled XML blocks.
+*   **Strict Action Validation**: The batch engine strictly enforces referential integrity. Attempting to execute review actions (like `ReplyComment`) on non-existent or fake IDs immediately raises a `BatchValidationError` rather than failing silently.
 
 ### 7. MCP Apps & UI Rendering
 *   **Custom HTML Apps**: We use FastMCP's `AppConfig(resource_uri="ui://...")` to serve custom HTML/CSS interfaces for complex tools (e.g., `validate_documents`). We maintain full control over the markup.
@@ -90,6 +92,7 @@ Achieving 100% CriticMarkup extraction parity between Live COM and Disk XML requ
 *   **Modification Comment Anchoring**: When a single edit causes a deletion and an insertion (`w:del` followed by `w:ins`), comments spanning the modification are explicitly anchored from the start of the `del` element to the end of the `ins` element to successfully encapsulate the full atomic revision.
 *   **Nested Redline Strict Refusal**: Edits that target text strictly inside an active `<w:ins>` authored by a *different* user are explicitly rejected (`BatchValidationError`) to prevent confusing nested redline fragmentation.
 *   **Paragraph Break Tracking**: When multi-paragraph text is inserted (`\n\n`), the engine explicitly injects an `<w:ins>` marker inside the `<w:pPr><w:rPr>` of the newly created paragraph, ensuring MS Word natively tracks the paragraph break itself.
+*   **Multi-Paragraph Comment Anchoring (Disk)**: When a text replacement spans multiple paragraphs, the engine explicitly anchors the start of the comment to the first paragraph and the end of the comment to the last inserted paragraph to ensure survival and proper rendering.
 *   **Diff Hunk Coalescing**: To prevent redline fragmentation, adjacent textual diff hunks separated by short runs of stable tokens (≤ 4 words) within the same paragraph are mathematically coalesced into a single unified edit hunk.
 *   **Contiguous Orphan Comment Sweep**: When accepting/rejecting changes, comment anchor cleanup (`w:commentRangeStart/End`) must sweep across the entire contiguous block of adjacent redline tags (`w:ins`/`w:del`) to prevent orphaned anchors from leaking into the document body.
 

@@ -255,7 +255,7 @@ class RedlineEngine:
 
         if first_style:
             if not anchor_run:
-                return None
+                return None, None
 
             # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
             current_p = anchor_run._element.getparent()
@@ -268,16 +268,16 @@ class RedlineEngine:
                     current_p = p_obj._element
 
             if current_p is None:
-                return None
+                return None, None
 
             body = current_p.getparent()
             if body is None:
-                return None
+                return None, None
 
             try:
                 p_index = body.index(current_p)
             except ValueError:
-                return None
+                return None, None
 
             created_nodes = []
 

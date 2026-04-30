@@ -274,9 +274,9 @@ def _apply_structured_com_replacement(
         doc.Range(p_end, p_end).Text = rest_text
 
     # 5. Attach comments to a combined range (Insertion + Target).
-    # If we anchor only to the inserted Line 1, Word natively snaps the comment anchor 
-    # leftwards into the preceding un-tracked text. By anchoring across the insertion 
-    # AND the target text, we force Word to grip the normal text. When we delete the 
+    # If we anchor only to the inserted Line 1, Word natively snaps the comment anchor
+    # leftwards into the preceding un-tracked text. By anchoring across the insertion
+    # AND the target text, we force Word to grip the normal text. When we delete the
     # target text in Step 6, the anchor perfectly collapses onto the insertion.
     combined_rng = doc.Range(base_start, after_orig)
     logger.info(
