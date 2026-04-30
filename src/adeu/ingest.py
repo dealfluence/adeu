@@ -3,6 +3,7 @@ import io
 
 import structlog
 from docx import Document
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
@@ -117,6 +118,23 @@ def _extract_table(table: Table, comments_map, clean_view: bool) -> str:
             cell_texts.append(cell_content)
 
         row_str = " | ".join(cell_texts)
+
+        # Structural Row Tracking
+        tr = row._element
+        trPr = tr.find(qn("w:trPr"))
+        if trPr is not None:
+            ins = trPr.find(qn("w:ins"))
+            del_node = trPr.find(qn("w:del"))
+            
+            if clean_view and del_node is not None:
+                continue
+                
+            if not clean_view:
+                if ins is not None:
+                    row_str = f"{{++ {row_str} |Chg:{ins.get(qn('w:id'))}++}}"
+                elif del_node is not None:
+                    row_str = f"{{-- {row_str} |Chg:{del_node.get(qn('w:id'))}--}}"
+
         rows_text.append(row_str)
 
     return "\n".join(rows_text)

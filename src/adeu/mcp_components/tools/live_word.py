@@ -273,6 +273,16 @@ if sys.platform == "win32":
         try:
             for change in changes:
                 try:
+                    from adeu.models import DeleteTableRow, InsertTableRow
+
+                    if isinstance(change, (InsertTableRow, DeleteTableRow)):
+                        stats["failed"] += 1
+                        stats["skipped_details"].append(
+                            f"- Structural table edits ({change.type}) are currently only supported for disk-based DOCX files. "
+                            "Please provide an 'original_docx_path' to use this feature."
+                        )
+                        continue
+
                     if isinstance(change, ModifyText):
                         clean_target = strip_markdown_formatting(strip_critic_markup(change.target_text))
                         raw_text = doc.Content.Text

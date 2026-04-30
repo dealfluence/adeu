@@ -342,11 +342,11 @@ if sys.platform == "win32":
             "CriticMarkup {++ tags; the engine handles that.\n"
             "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
             "(Note: Accepting one half of a paired modify cascades to accept the other half).\n"
-            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
-            "(Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
-            "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n\n"
-            "Always provide a realistic `author_name` for Tracked Changes. This name will be "
-            "used for attribution in the document's tracked changes and comments."
+            "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). (Note: Rejecting one half of a paired modify cascades to reject the other half).\n"
+            "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n"
+            "5. 'insert_row': Insert a new row into a table. Requires `target_text` (anchor row), `position` ('above' or 'below'), and `cells` (list of Markdown strings for cell contents).\n"
+            "6. 'delete_row': Delete an entire table row. Requires `target_text` inside the row to be deleted.\n\n"
+            "Always provide a realistic `author_name` for Tracked Changes. This name will be used for attribution in the document's tracked changes and comments."
         ),
         annotations={"destructiveHint": True},
     )
@@ -355,7 +355,7 @@ if sys.platform == "win32":
         ctx: Context,
         changes: Annotated[
             List[DocumentChange],
-            "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', or 'modify'.",
+            "List of changes to apply. Each change must specify 'type' as 'accept', 'reject', 'reply', 'modify', 'insert_row', or 'delete_row'.",
         ],
         original_docx_path: Annotated[
             Optional[str],

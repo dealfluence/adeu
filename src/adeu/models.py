@@ -67,4 +67,41 @@ class ReplyComment(BaseModel):
     text: str = Field(..., description="The content of the reply body.")
 
 
-DocumentChange = Annotated[Union[AcceptChange, RejectChange, ReplyComment, ModifyText], Field(discriminator="type")]
+class InsertTableRow(BaseModel):
+    type: Literal["insert_row"] = Field("insert_row")
+
+    target_text: str = Field(
+        ...,
+        description="Text inside an existing row to use as an anchor. The new row will be inserted relative to this row.",
+    )
+
+    position: Literal["above", "below"] = Field(
+        "below",
+        description="Whether to insert the new row above or below the anchor row.",
+    )
+
+    cells: list[str] = Field(
+        ...,
+        description="A list of Markdown strings representing the contents of the new cells.",
+    )
+
+    # Internal use only. PrivateAttr is invisible to the MCP API schema.
+    _match_start_index: Optional[int] = PrivateAttr(default=None)
+
+
+class DeleteTableRow(BaseModel):
+    type: Literal["delete_row"] = Field("delete_row")
+
+    target_text: str = Field(
+        ...,
+        description="Text inside the row you wish to delete. The engine will delete the entire row containing this match.",
+    )
+
+    # Internal use only. PrivateAttr is invisible to the MCP API schema.
+    _match_start_index: Optional[int] = PrivateAttr(default=None)
+
+
+DocumentChange = Annotated[
+    Union[AcceptChange, RejectChange, ReplyComment, ModifyText, InsertTableRow, DeleteTableRow],
+    Field(discriminator="type"),
+]

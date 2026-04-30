@@ -118,10 +118,26 @@ class DocumentMapper:
         rows_processed = 0
 
         for row in table.rows:
+            # Structural Row Tracking
+            tr = row._element
+            trPr = tr.find(qn("w:trPr"))
+            ins = trPr.find(qn("w:ins")) if trPr is not None else None
+            del_node = trPr.find(qn("w:del")) if trPr is not None else None
+
+            if self.clean_view and del_node is not None:
+                continue
+
             if rows_processed > 0:
                 # Newline separator BETWEEN rows (matches "\n".join in ingest)
                 self._add_virtual_text("\n", current, None)
                 current += 1
+
+            if ins is not None and not self.clean_view:
+                self._add_virtual_text("{++ ", current, None)
+                current += 4
+            elif del_node is not None and not self.clean_view:
+                self._add_virtual_text("{-- ", current, None)
+                current += 4
 
             seen_cells = set()
             cells_processed = 0
@@ -137,6 +153,15 @@ class DocumentMapper:
 
                 current = self._map_blocks(cell, current)
                 cells_processed += 1
+
+            if ins is not None and not self.clean_view:
+                suffix = f" |Chg:{ins.get(qn('w:id'))}++}}"
+                self._add_virtual_text(suffix, current, None)
+                current += len(suffix)
+            elif del_node is not None and not self.clean_view:
+                suffix = f" |Chg:{del_node.get(qn('w:id'))}--}}"
+                self._add_virtual_text(suffix, current, None)
+                current += len(suffix)
 
             rows_processed += 1
 

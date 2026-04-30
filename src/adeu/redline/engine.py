@@ -11,7 +11,16 @@ from docx.oxml.ns import nsmap, qn
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
-from adeu.models import AcceptChange, DocumentChange, EditOperationType, ModifyText, RejectChange, ReplyComment
+from adeu.models import (
+    AcceptChange,
+    DeleteTableRow,
+    DocumentChange,
+    EditOperationType,
+    InsertTableRow,
+    ModifyText,
+    RejectChange,
+    ReplyComment,
+)
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element
@@ -688,7 +697,7 @@ class RedlineEngine:
         except ValueError:
             pass
 
-    def validate_edits(self, edits: List[ModifyText]) -> List[str]:
+    def validate_edits(self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]]) -> List[str]:
         """
         Performs an exhaustive dry-run validation of all text edits in the batch.
         Returns a list of error strings. If the list is empty, the batch is safe to apply.
@@ -700,7 +709,7 @@ class RedlineEngine:
 
         for i, edit in enumerate(edits):
             t_text = edit.target_text or ""
-            n_text = edit.new_text or ""
+            n_text = getattr(edit, "new_text", "") or ""
 
             # VAL-CRIT-3 & VAL-CRIT-4: Footnotes/Endnotes Structural Integrity
             if "[^" in t_text or "[^" in n_text:
@@ -791,7 +800,7 @@ class RedlineEngine:
                         )
                         break
 
-            if edit.new_text:
+            if isinstance(edit, ModifyText) and edit.new_text:
                 for line in edit.new_text.splitlines():
                     stripped = line.lstrip()
                     if stripped.startswith("#######"):
@@ -827,12 +836,12 @@ class RedlineEngine:
 
                 violates_boundary = False
                 if "READONLY_BOUNDARY_START" in (edit.target_text or "") or "READONLY_BOUNDARY_START" in (
-                    edit.new_text or ""
+                    getattr(edit, "new_text", "") or ""
                 ):
                     violates_boundary = True
                 if "# Document Structure (Read-Only)" in (
                     edit.target_text or ""
-                ) or "# Document Structure (Read-Only)" in (edit.new_text or ""):
+                ) or "# Document Structure (Read-Only)" in (getattr(edit, "new_text", "") or ""):
                     violates_boundary = True
 
                 if violates_boundary or (matches and not valid_matches):
@@ -895,7 +904,7 @@ class RedlineEngine:
         """
         self.skipped_details = []
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
-        edits = [c for c in changes if isinstance(c, ModifyText)]
+        edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
 
         applied_actions, skipped_actions = 0, 0
         if actions:
@@ -923,7 +932,7 @@ class RedlineEngine:
             "skipped_details": self.skipped_details,
         }
 
-    def apply_edits(self, edits: List[ModifyText]) -> tuple[int, int]:
+    def apply_edits(self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]]) -> tuple[int, int]:
         applied = 0
         skipped = 0
 
@@ -932,7 +941,24 @@ class RedlineEngine:
         # Pre-resolve phase: locate all edits against initial clean state
         for edit in edits:
             if edit._match_start_index is not None:
-                resolved_edits.append((edit, edit.new_text))
+                resolved_edits.append((edit, getattr(edit, "new_text", None)))
+            elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
+                # Simplified resolution for structural edits
+                matches = self.mapper.find_all_match_indices(edit.target_text)
+                if not matches:
+                    # Try clean view
+                    if not self.clean_mapper:
+                        self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+                    matches = self.clean_mapper.find_all_match_indices(edit.target_text)
+
+                if matches:
+                    # validate_edits already ensured uniqueness
+                    edit._match_start_index = matches[0][0]
+                    resolved_edits.append((edit, None))
+                else:
+                    skipped += 1
+                    target_snippet = edit.target_text.strip()[:40]
+                    self.skipped_details.append(f"- Failed to apply structural edit targeting: '{target_snippet}...'")
             else:
                 resolved = self._pre_resolve_heuristic_edit(edit)
                 if resolved:
@@ -984,7 +1010,15 @@ class RedlineEngine:
                 self.skipped_details.append(msg)
                 continue
 
-            if self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False):
+            success = False
+            if isinstance(edit, InsertTableRow):
+                success = self._apply_insert_row(edit)
+            elif isinstance(edit, DeleteTableRow):
+                success = self._apply_delete_row(edit)
+            else:
+                success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
+
+            if success:
                 applied += 1
                 occupied_ranges.append((start, end))
             else:
@@ -1010,6 +1044,90 @@ class RedlineEngine:
             self.clean_mapper = None
 
         return applied, skipped
+
+    def _apply_insert_row(self, edit: InsertTableRow) -> bool:
+        start_idx = edit._match_start_index
+        if start_idx is None:
+            return False
+
+        target_runs = self.mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
+        if not target_runs:
+            return False
+
+        row_el = None
+        curr = target_runs[0]._element
+        while curr is not None:
+            if curr.tag == qn("w:tr"):
+                row_el = curr
+                break
+            curr = curr.getparent()
+
+        if row_el is None:
+            return False
+
+        table_el = row_el.getparent()
+        if table_el.tag != qn("w:tbl"):
+            return False
+
+        from docx.table import Table, _Row
+
+        table = Table(table_el, table_el.getparent())
+
+        # Create a new row by cloning the current row (to preserve formatting/cells)
+        new_row_el = deepcopy(row_el)
+
+        # Clear text from all cells in the new row
+        for tc in new_row_el.xpath(".//w:tc"):
+            # Clear existing paragraphs except one empty one
+            for p in tc.xpath("./w:p"):
+                tc.remove(p)
+            tc.append(create_element("w:p"))
+
+        # Set new cell text
+        new_row = _Row(new_row_el, table)
+        for i, cell_text in enumerate(edit.cells):
+            if i < len(new_row.cells):
+                new_row.cells[i].text = cell_text
+
+        # Inject tracked change info
+        trPr = new_row_el.get_or_add_trPr()
+        ins = self._create_track_change_tag("w:ins")
+        trPr.append(ins)
+
+        # Insert into DOM
+        if edit.position == "above":
+            row_el.addprevious(new_row_el)
+        else:
+            row_el.addnext(new_row_el)
+
+        return True
+
+    def _apply_delete_row(self, edit: DeleteTableRow) -> bool:
+        start_idx = edit._match_start_index
+        if start_idx is None:
+            return False
+
+        target_runs = self.mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
+        if not target_runs:
+            return False
+
+        row_el = None
+        curr = target_runs[0]._element
+        while curr is not None:
+            if curr.tag == qn("w:tr"):
+                row_el = curr
+                break
+            curr = curr.getparent()
+
+        if row_el is None:
+            return False
+
+        # Instead of removing, we mark as deleted
+        trPr = row_el.get_or_add_trPr()
+        del_el = self._create_track_change_tag("w:del")
+        trPr.append(del_el)
+
+        return True
 
     def _pre_resolve_heuristic_edit(self, edit: ModifyText) -> Union[ModifyText, List[ModifyText], None]:
         if not edit.target_text:
@@ -1653,6 +1771,12 @@ class RedlineEngine:
             parent = ins.getparent()
             if parent is None:
                 continue
+
+            if parent.tag == qn("w:trPr"):
+                # Accepting a row insertion: just remove the tracking tag
+                parent.remove(ins)
+                continue
+
             index = parent.index(ins)
             for child in list(ins):
                 parent.insert(index, child)
@@ -1662,8 +1786,15 @@ class RedlineEngine:
         for d in all_del:
             self._clean_wrapping_comments(d)
             self._delete_comments_in_element(d)
-            if d.getparent() is not None:
-                d.getparent().remove(d)
+            parent = d.getparent()
+            if parent is not None:
+                if parent.tag == qn("w:trPr"):
+                    # Accepting a row deletion: remove the entire row
+                    row = parent.getparent()
+                    if row is not None:
+                        row.getparent().remove(row)
+                else:
+                    parent.remove(d)
 
         return resolved_ids
 
@@ -1688,14 +1819,27 @@ class RedlineEngine:
         for ins in all_ins:
             self._clean_wrapping_comments(ins)
             self._delete_comments_in_element(ins)
-            if ins.getparent() is not None:
-                ins.getparent().remove(ins)
+            parent = ins.getparent()
+            if parent is not None:
+                if parent.tag == qn("w:trPr"):
+                    # Rejecting a row insertion: remove the entire row
+                    row = parent.getparent()
+                    if row is not None:
+                        row.getparent().remove(row)
+                else:
+                    parent.remove(ins)
 
         for d in all_del:
             self._clean_wrapping_comments(d)
             parent = d.getparent()
             if parent is None:
                 continue
+
+            if parent.tag == qn("w:trPr"):
+                # Rejecting a row deletion: just remove the tracking tag
+                parent.remove(d)
+                continue
+
             index = parent.index(d)
             for child in list(d):
                 for dt in child.findall(f".//{qn('w:delText')}"):
@@ -1785,6 +1929,12 @@ class RedlineEngine:
                 parent = ins.getparent()
                 if parent is None:
                     continue
+
+                if parent.tag == qn("w:trPr"):
+                    # Accepting a row insertion: just remove the tracking tag
+                    parent.remove(ins)
+                    continue
+
                 index = parent.index(ins)
                 for child in list(ins):
                     parent.insert(index, child)
@@ -1804,5 +1954,12 @@ class RedlineEngine:
             for d in root_element.findall(f".//{qn('w:del')}"):
                 self._clean_wrapping_comments(d)
                 self._delete_comments_in_element(d)
-                if d.getparent() is not None:
-                    d.getparent().remove(d)
+                parent = d.getparent()
+                if parent is not None:
+                    if parent.tag == qn("w:trPr"):
+                        # Accepting a row deletion: remove the entire row
+                        row = parent.getparent()
+                        if row is not None:
+                            row.getparent().remove(row)
+                    else:
+                        parent.remove(d)

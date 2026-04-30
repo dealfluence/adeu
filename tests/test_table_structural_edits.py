@@ -1,0 +1,166 @@
+import io
+
+from docx import Document
+from docx.oxml.ns import qn
+
+from adeu.ingest import extract_text_from_stream
+from adeu.models import DeleteTableRow, InsertTableRow, RejectChange
+from adeu.redline.engine import RedlineEngine
+
+
+def test_insert_table_row_below():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    change = InsertTableRow(target_text="A1 | A2", position="below", cells=["New B1", "New B2"])
+
+    engine = RedlineEngine(stream)
+    stats = engine.process_batch([change])
+
+    assert stats["edits_applied"] == 1
+
+    engine.accept_all_revisions()
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+
+    assert "A1 | A2" in clean_text
+    assert "New B1 | New B2" in clean_text
+    assert "B1 | B2" in clean_text
+
+    # Check order
+    lines = [line.strip() for line in clean_text.split("\n") if "|" in line]
+    assert lines == ["A1 | A2", "New B1 | New B2", "B1 | B2"]
+
+
+def test_delete_table_row():
+    doc = Document()
+    table = doc.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    table.cell(2, 0).text = "C1"
+    table.cell(2, 1).text = "C2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    change = DeleteTableRow(target_text="B1")
+
+    engine = RedlineEngine(stream)
+    stats = engine.process_batch([change])
+
+    assert stats["edits_applied"] == 1
+
+    engine.accept_all_revisions()
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+
+    assert "A1 | A2" in clean_text
+    assert "B1 | B2" not in clean_text
+    assert "C1 | C2" in clean_text
+
+
+def test_reject_insert_table_row():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    change = InsertTableRow(target_text="A1 | A2", position="below", cells=["New B1", "New B2"])
+
+    engine = RedlineEngine(stream)
+    engine.process_batch([change])
+
+    ins_id = engine.doc.element.xpath("//w:tr/w:trPr/w:ins")[0].get(qn("w:id"))
+
+    engine.process_batch([RejectChange(target_id=f"Chg:{ins_id}")])
+
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+    assert "New B1 | New B2" not in clean_text
+    assert "A1 | A2" in clean_text
+    assert "B1 | B2" in clean_text
+
+
+def test_reject_delete_table_row():
+    doc = Document()
+    table = doc.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    table.cell(2, 0).text = "C1"
+    table.cell(2, 1).text = "C2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    change = DeleteTableRow(target_text="B1")
+
+    engine = RedlineEngine(stream)
+    engine.process_batch([change])
+
+    del_id = engine.doc.element.xpath("//w:tr/w:trPr/w:del")[0].get(qn("w:id"))
+
+    engine.process_batch([RejectChange(target_id=f"Chg:{del_id}")])
+
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+    assert "A1 | A2" in clean_text
+    assert "B1 | B2" in clean_text
+    assert "C1 | C2" in clean_text
+
+
+def test_ingest_structural_row_changes():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream)
+    engine.process_batch([InsertTableRow(target_text="A1", cells=["New", "Row"]), DeleteTableRow(target_text="B1")])
+
+    raw_text = extract_text_from_stream(engine.save_to_stream(), clean_view=False)
+    assert "{++ A1 | A2 |" in raw_text or "{++ New | Row |" in raw_text
+    # Based on my previous run, it was:
+    # A1 | A2
+    # {++ New | Row |Chg:2++}
+    # {-- B1 | B2 |Chg:1--}
+    assert "{++ New | Row |Chg:2++}" in raw_text
+    assert "{-- B1 | B2 |Chg:1--}" in raw_text
+
+def test_clean_view_omits_deleted_row():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "A2"
+    table.cell(1, 0).text = "B1"
+    table.cell(1, 1).text = "B2"
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    change = DeleteTableRow(target_text="B1")
+
+    engine = RedlineEngine(stream)
+    engine.process_batch([change])
+    
+    # DO NOT accept revisions. We want to test how clean_view handles the active tracked deletion.
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+    
+    assert "A1 | A2" in clean_text
+    assert "B1 | B2" not in clean_text  # <--- THIS FAILS WITHOUT THE FIX
