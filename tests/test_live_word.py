@@ -66,7 +66,7 @@ def test_live_word_read_and_modify(active_word_app):
 
     async def run_test():
         # Step 1: Verify Initial Extraction
-        content_res = await read_active_word_document(ctx, clean_view=False)
+        content_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = (
             content_res.structured_content["markdown"] if isinstance(content_res, ToolResult) else str(content_res)
         )
@@ -78,11 +78,11 @@ def test_live_word_read_and_modify(active_word_app):
         ]
 
         # Process batch as "Testing Agent"
-        result = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
+        result = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent", file_path=None)
         assert "Applied: 1, Failed: 0" in result
 
         # Step 3: Re-read to verify CriticMarkup injection was correct!
-        updated_content_res = await read_active_word_document(ctx, clean_view=False)
+        updated_content_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         updated_content = (
             updated_content_res.structured_content["markdown"]
             if isinstance(updated_content_res, ToolResult)
@@ -115,14 +115,14 @@ def test_live_word_modify_with_comment(active_word_app):
         # 1. Apply a Modification WITH a comment
         changes = [ModifyText(target_text="quick", new_text="sleepy", comment="Foxes are very tired today.")]
 
-        res = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent", file_path=None)
         assert "Applied: 1, Failed: 0" in res
 
         # 2. Check if comment was physically added to the Word COM object
         assert doc.Comments.Count == 1, "Comment was not added to the Word Document!"
 
         # 3. Check extraction output
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         assert "Foxes are very tired today." in content, f"Comment missing from extraction. Extracted: {content}"
@@ -164,7 +164,7 @@ def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
 
     async def run_test():
         # 1. Extract via Live Word COM
-        live_content_res = await read_active_word_document(ctx, clean_view=False)
+        live_content_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         live_text = (
             live_content_res.structured_content["markdown"]
             if isinstance(live_content_res, ToolResult)
@@ -207,10 +207,10 @@ def test_live_word_complex_formatting(active_word_app):
     async def run_test():
         changes = [ModifyText(target_text="brown fox", new_text="**bold** and _italic_", comment=None)]
 
-        res = await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Agent", file_path=None)
         assert "Applied: 1" in res
 
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # Live COM extraction now parses formatting parity identically to Disk XML
@@ -238,9 +238,9 @@ def test_live_word_cross_boundary_edits_rescue_comments(active_word_app):
 
     async def run_test():
         changes = [ModifyText(target_text="manuscript", new_text="typescript", comment=None)]
-        await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+        await process_active_word_batch(ctx, changes=changes, author_name="Agent", file_path=None)
 
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # Verify the original comment wasn't silently destroyed!
@@ -269,7 +269,7 @@ def test_live_word_multiple_comments_overwrite(active_word_app):
     doc.Comments.Add(doc.Range(8, 16), "Comment Two")
 
     async def run_test():
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # Both comments should appear distinctly with their own IDs
@@ -303,9 +303,9 @@ def test_live_word_table_structure_and_mapping(active_word_app):
     async def run_test():
         # Replace cell content, testing the mapping array offsets
         changes = [ModifyText(target_text="North", new_text="North America", comment=None)]
-        await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+        await process_active_word_batch(ctx, changes=changes, author_name="Agent", file_path=None)
 
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # Verify table structure markers (`|`) are present (Bug 1d)
@@ -350,7 +350,7 @@ def test_live_word_accept_reject_reply(active_word_app):
 
     async def run_test():
         # 1. Read to ensure tags and metadata blocks exist
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         assert "{--brown --}" in content
@@ -366,11 +366,11 @@ def test_live_word_accept_reject_reply(active_word_app):
             ReplyComment(target_id="Com:0", text="Yes, absolutely."),
         ]
 
-        process_res = await process_active_word_batch(ctx, changes=changes, author_name="QA Agent")
+        process_res = await process_active_word_batch(ctx, changes=changes, author_name="QA Agent", file_path=None)
         assert "Failed: 0" in process_res, f"Batch apply failed: {process_res}"
 
         # 3. Verify final state
-        final_res = await read_active_word_document(ctx, clean_view=False)
+        final_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         final_content = (
             final_res.structured_content["markdown"] if isinstance(final_res, ToolResult) else str(final_res)
         )
@@ -427,7 +427,7 @@ def test_live_word_explicit_vs_inherited_formatting(active_word_app):
     doc.Range(p3.Range.Start + 12, p3.Range.Start + 16).Bold = True
 
     async def run_test():
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # 1. Heading italic MUST survive, heading bold MUST NOT emit **
@@ -463,7 +463,7 @@ def test_live_word_body_bold_after_heading_sticky_state(active_word_app):
     p2.Range.Bold = True  # Explicit bold on body text
 
     async def run_test():
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # Heading must NOT be bolded
@@ -504,7 +504,7 @@ def test_live_word_overlapping_annotations(active_word_app):
     doc.Comments.Add(doc.Range(start_com, end_com), "Color comment")
 
     async def run_test():
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # Validate that the markup is completely balanced and uncorrupted
@@ -550,14 +550,14 @@ def test_live_word_pure_comment_same_text(active_word_app):
             )
         ]
 
-        res = await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Claude AI", file_path=None)
         assert "Applied: 1, Failed: 0" in res
 
         # The document should have 0 tracked revisions, and exactly 1 comment.
         assert doc.Revisions.Count == 0, "Spurious tracked changes were created!"
         assert doc.Comments.Count == 1
 
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # Assert critic markup anchor exists, but NO insertions/deletions
@@ -565,6 +565,44 @@ def test_live_word_pure_comment_same_text(active_word_app):
         assert "{++" not in content
         assert "{--" not in content
         assert "This clause needs legal review." in content
+
+    asyncio.run(run_test())
+
+
+def test_live_word_read_returns_filepath_in_content(active_word_app, tmp_path):
+    """
+    Validates that when reading the live active document without providing a path,
+    the absolute file path is included in the string content returned to the LLM.
+    """
+    import asyncio
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.mcp_components.tools.live_word import read_active_word_document
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # Save doc to disk to give it a fully qualified path
+    temp_file = tmp_path / "live_path_test.docx"
+    doc.SaveAs2(str(temp_file))
+
+    async def run_test():
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
+
+        # The LLM natively reads the 'content' field.
+        if isinstance(res, ToolResult):
+            if isinstance(res.content, list):
+                content = "".join(getattr(c, "text", str(c)) for c in res.content)
+            else:
+                content = str(res.content)
+        else:
+            content = str(res)
+
+        assert str(temp_file) in content, (
+            f"The file path ({temp_file}) MUST be present in the text content "
+            f"returned to the LLM. Content was: {content[:100]}..."
+        )
 
     asyncio.run(run_test())
 
@@ -600,9 +638,9 @@ def test_live_word_multi_paragraph_insert_split_deletion(active_word_app):
             )
         ]
 
-        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI", file_path=None)
 
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         deletion_str = "{--We will replace this specific sentence completely.--}"
@@ -652,9 +690,9 @@ def test_live_word_bug_04_garbled_text(active_word_app):
             )
         ]
 
-        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI")
+        await process_active_word_batch(ctx, changes=changes, author_name="Claude AI", file_path=None)
 
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # Assert no garbled text (BUG-04)
@@ -696,12 +734,12 @@ def test_live_word_obs_01_author_name_respected(active_word_app):
     async def run_test():
         changes = [ModifyText(target_text="Test document.", new_text="Modified document.", comment="Spoof test.")]
 
-        res = await process_active_word_batch(ctx, changes=changes, author_name="Sherlock Holmes")
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Sherlock Holmes", file_path=None)
 
         # Verify the warning is NO LONGER present because we successfully overrode it
         assert "Warning: Live Word natively enforces M365 identities" not in res
 
-        read_res = await read_active_word_document(ctx, clean_view=False)
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
 
         # The tracked change metadata block in CriticMarkup should contain Sherlock Holmes
@@ -732,9 +770,9 @@ def test_live_word_obs_02_deletion_insertion_order(active_word_app):
     async def run_test():
         changes = [ModifyText(target_text="brown", new_text="red", comment=None)]
 
-        await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
+        await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent", file_path=None)
 
-        res = await read_active_word_document(ctx, clean_view=False)
+        res = await read_active_word_document(ctx, clean_view=False, file_path=None)
         content = res.structured_content["markdown"] if isinstance(res, ToolResult) else str(res)
 
         # Confirm the literal string pattern places deletion before insertion

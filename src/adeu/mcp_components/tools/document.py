@@ -286,8 +286,10 @@ READ_DOCX_COMMON_DESC = (
     "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window.\n"
 )
 READ_DOCX_WIN32_EXTRA = (
-    "CRITICAL: If you want to read the user's currently open, active Microsoft Word document, "
-    "leave `file_path` EMPTY!\n"
+    "Auto-Routing: If the provided file is currently open in Microsoft Word, "
+    "Adeu will automatically sync with the live window. "
+    "If you don't know the file path yet and want to read whatever document "
+    "the user is currently working on, LEAVE `file_path` EMPTY!\n"
 )
 READ_DOCX_TAIL = (
     "By default (clean_view=False), it returns text with inline CriticMarkup "
@@ -305,8 +307,10 @@ PROCESS_BATCH_COMMON_DESC = (
     "Instead, apply the rename in one batch, then modify Y in a subsequent batch.\n\n"
 )
 PROCESS_BATCH_WIN32_EXTRA = (
-    "CRITICAL: If you want to apply edits directly to the user's active, visible Microsoft Word window, "
-    "leave `original_docx_path` EMPTY!\n\n"
+    "Auto-Routing: If the provided file is currently open in Microsoft Word, "
+    "Adeu will automatically execute these edits live on the canvas. "
+    "If you want to apply edits to the user's currently active document "
+    "and don't know the path, LEAVE `original_docx_path` EMPTY!\n\n"
 )
 PROCESS_BATCH_OPERATIONS_DESC = (
     "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
@@ -361,9 +365,16 @@ if sys.platform == "win32":
     ) -> ToolResult:
         start_time = time.perf_counter()
         if not file_path:
-            res = await read_active_word_document(ctx, clean_view)
+            # Read active document directly. No disk fallback available if this fails.
+            res = await read_active_word_document(ctx, clean_view, None)
         else:
-            res = await _read_docx_disk(file_path, ctx, clean_view)
+            # Try Live Word first. Fallback to Disk if Word is closed or document isn't open.
+            try:
+                res = await read_active_word_document(ctx, clean_view, file_path)
+                await ctx.debug("Read document via Live Word COM.")
+            except Exception:
+                await ctx.debug("Document not open in live Word, falling back to disk read.")
+                res = await _read_docx_disk(file_path, ctx, clean_view)
         return add_timing_if_debug(start_time, res)
 
     @tool(
@@ -388,9 +399,15 @@ if sys.platform == "win32":
     ) -> str:
         start_time = time.perf_counter()
         if not original_docx_path:
-            res = await process_active_word_batch(ctx, changes, author_name)
+            # Edit active document directly. No disk fallback available.
+            res = await process_active_word_batch(ctx, changes, author_name, None)
         else:
-            res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+            # Try Live Word first. Fallback to Disk if Word is closed or document isn't open.
+            try:
+                res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
+            except Exception:
+                await ctx.debug("Document not open in live Word, falling back to disk edit.")
+                res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
         return add_timing_if_debug(start_time, res)
 
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") in ("1", "true", "True", "yes"):

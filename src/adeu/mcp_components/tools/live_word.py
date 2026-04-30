@@ -164,6 +164,11 @@ if sys.platform == "win32":
     import pythoncom
     import win32com.client
 
+    class LiveDocumentNotOpenError(Exception):
+        """Raised when a specific file path is not found in the open Word documents."""
+
+        pass
+
     from adeu.diff import trim_common_context
     from adeu.markup import _find_match_in_text
     from adeu.mcp_components.tools.live_word_ops import (
@@ -179,11 +184,28 @@ if sys.platform == "win32":
         ReplyComment,
     )
 
-    def _read_active_word_document_core(clean_view: bool = False) -> str:
+    def _get_word_doc(app: Any, file_path: Optional[str] = None) -> Any:
+        """Gets the requested document from Word, or the ActiveDocument if no path provided."""
+        if not file_path:
+            try:
+                return app.ActiveDocument
+            except Exception as e:
+                raise RuntimeError("No active document found in Word.") from e
+
+        target_path = str(Path(file_path).resolve()).lower()
+        for i in range(1, app.Documents.Count + 1):
+            doc = app.Documents(i)
+            if doc.FullName and str(Path(doc.FullName).resolve()).lower() == target_path:
+                return doc
+
+        raise LiveDocumentNotOpenError(f"Document {file_path} is not open in Word.")
+
+    def _read_active_word_document_core(clean_view: bool = False, file_path: Optional[str] = None) -> Tuple[str, str]:
         """
-        Reads the live active Word document by extracting its Flat OPC XML via
-        doc.WordOpenXML, wrapping it into an in-memory DOCX zip stream, and routing
-        it through the same ingest pipeline used for disk files.
+        Reads the live active Word document (or specific open file) by extracting its
+        Flat OPC XML via doc.WordOpenXML, wrapping it into an in-memory DOCX zip stream,
+        and routing it through the same ingest pipeline used for disk files.
+        Returns (extracted_text, absolute_file_path).
 
         This unifies the live and disk paths for both normal and clean_view reads
         and avoids the COM round-trip overhead that dominated the old character-by-
@@ -194,33 +216,42 @@ if sys.platform == "win32":
         pythoncom.CoInitialize()
         try:
             app = win32com.client.GetActiveObject("Word.Application")
-            doc = app.ActiveDocument
-        except Exception as e:
+        except Exception as e:  # Catch pywintypes.com_error
             raise RuntimeError(f"Could not connect to active Word document. {e}") from e
 
+        doc = _get_word_doc(app, file_path)
         xml_str = doc.WordOpenXML
         stream = _build_mock_docx_stream(xml_str)
-        return extract_text_from_stream(stream, filename="LiveWord", clean_view=clean_view)
+        actual_path = doc.FullName
+        return extract_text_from_stream(stream, filename=Path(actual_path).name, clean_view=clean_view), actual_path
 
     async def read_active_word_document(
         ctx: Context,
         clean_view: bool = False,
+        file_path: Optional[str] = None,
     ) -> ToolResult:
-        await ctx.info(f"Extracting live Word document via WordOpenXML (clean_view={clean_view})")
+        await ctx.info(f"Extracting live Word document via WordOpenXML (clean_view={clean_view}, path={file_path})")
         try:
-            final_text = _read_active_word_document_core(clean_view)
+            final_text, actual_path = _read_active_word_document_core(clean_view, file_path)
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
+
+            llm_content = f"Active Document Path: {actual_path}\n\n{final_text}"
+
             return ToolResult(
-                content=final_text,
+                content=llm_content,
                 structured_content={
                     "markdown": final_text,
-                    "title": "Live Word Document",
+                    "title": Path(actual_path).name,
+                    "file_path": actual_path,
+                    "live_word": True,
                 },
             )
         except Exception as e:
             raise ToolError(str(e)) from e
 
-    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict[str, Any]:
+    def _process_active_word_batch_core(
+        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+    ) -> dict[str, Any]:
         stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
             return stats
@@ -231,9 +262,10 @@ if sys.platform == "win32":
         pythoncom.CoInitialize()
         try:
             app = win32com.client.GetActiveObject("Word.Application")
-            doc = app.ActiveDocument
         except Exception as e:
             raise RuntimeError(f"Could not connect to active Word document. {e}") from e
+
+        doc = _get_word_doc(app, file_path)
 
         original_track_revisions = doc.TrackRevisions
         doc.TrackRevisions = True
@@ -489,6 +521,7 @@ if sys.platform == "win32":
         ctx: Context,
         changes: List[DocumentChange],
         author_name: str,
+        file_path: Optional[str] = None,
     ) -> str:
         if not changes:
             return "No changes provided."
@@ -498,9 +531,9 @@ if sys.platform == "win32":
 
         await ctx.info(f"Applying {len(changes)} changes to live Word document...")
         try:
-            stats = _process_active_word_batch_core(changes, author_name)
+            stats = _process_active_word_batch_core(changes, author_name, file_path)
             await ctx.info(f"Live Word batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}.")
-            res = f"Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
+            res = f"[Live Word Mode] Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
             if "author_overridden_by_word" in stats:
                 res += (
                     f"\n\nWarning: Live Word natively enforces M365 identities. "
@@ -564,16 +597,22 @@ else:
     # Stubs for non-Windows platforms to satisfy static type checkers (mypy)
     from adeu.models import DocumentChange
 
-    def _read_active_word_document_core(clean_view: bool = False) -> str:
+    def _read_active_word_document_core(clean_view: bool = False, file_path: Optional[str] = None) -> Tuple[str, str]:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
-    def _process_active_word_batch_core(changes: List[DocumentChange], author_name: str) -> dict[str, Any]:
+    def _process_active_word_batch_core(
+        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+    ) -> dict[str, Any]:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
-    async def read_active_word_document(ctx: Context, clean_view: bool = False) -> ToolResult:
+    async def read_active_word_document(
+        ctx: Context, clean_view: bool = False, file_path: Optional[str] = None
+    ) -> ToolResult:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
-    async def process_active_word_batch(ctx: Context, changes: List[DocumentChange], author_name: str) -> str:
+    async def process_active_word_batch(
+        ctx: Context, changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+    ) -> str:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
     async def open_word_document_impl(ctx: Context, file_path: str, visible: bool = True) -> str:

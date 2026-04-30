@@ -162,7 +162,7 @@ def handle_extract(args):
             sys.exit(1)
         from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
-        text = _read_active_word_document_core(clean_view=False)
+        text, _ = _read_active_word_document_core(clean_view=False)
     else:
         if not args.input:
             print("❌ Must provide input file or use --live", file=sys.stderr)
@@ -226,7 +226,7 @@ def handle_apply(args):
                 sys.exit(1)
             from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
-            text_orig = _read_active_word_document_core(clean_view=False)
+            text_orig, _ = _read_active_word_document_core(clean_view=False)
         else:
             if not args.original:
                 print("❌ Must provide original file if not using --live", file=sys.stderr)
