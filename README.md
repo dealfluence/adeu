@@ -6,22 +6,19 @@
 [![CI](https://github.com/dealfluence/adeu/actions/workflows/ci.yml/badge.svg)](https://github.com/dealfluence/adeu/actions/workflows/ci.yml)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 
-**Adeu bridges the gap between LLM text generation and Microsoft Word.**
+**LLMs speak Markdown; Lawyers speak "Track Changes."** 
 
-LLMs speak Markdown; Lawyers speak "Track Changes." Adeu allows AI agents to propose edits to `.docx` files without breaking formatting, numbering, or complex layouts.
+Adeu is a Model Context Protocol (MCP) server and Python SDK that provides a two-way abstraction layer between AI agents and Microsoft Word.
 
-It treats the DOCX file as a **Virtual DOM**:
+While standard libraries like `python-docx` excel at generating documents from scratch, they fail at non-destructive redlining. Adeu solves this by translating `.docx` files into a token-efficient Markdown representation. This frees AI agents to focus entirely on document semantics instead of wasting tokens wrestling with OpenXML.
 
-1.  **Ingest:** Extracts a lightweight, token-efficient text representation for the AI.
-2.  **Diff:** Calculates changes based on the AI's edits.
-3.  **Reconcile:** Surgically injects native XML `w:ins` (insertions) and `w:del` (deletions) back into the original document.
+Adeu acts as an **intelligent proxy**, processing AI edits as safe, atomic transactions:
+
+1. **Extract:** Translates the document (from disk or live Word memory) into LLM-friendly **CriticMarkup**, exposing native Track Changes and margin comments. It also generates a semantic appendix flagging defined terms and potential typos for the AI.
+2. **Validate:** Acts as a strict safety gate. It protects the document's integrity by automatically blocking ambiguous text matches or invalid structural changes before they touch the file.
+3. **Commit:** Translates the AI's text edits into native Word Track Changes. Adeu handles the complex XML under the hood, ensuring existing layouts, fonts, and margin comments are perfectly preserved.
 
 Adeu Open Source Software is developed by [Adeu](https://adeu.ai).
-
-### Why Adeu? (The Technical Differentiator)
-While established libraries like `python-docx` are the standard for programmatic document generation, they inherently struggle with granular, non-destructive editing required for legal negotiations.
-
-Adeu solves this by acting as a "Virtual DOM" for Word. It utilizes **advanced fuzzy-matching and run-coalescing algorithms to surgically inject native `<w:ins>` (insert) and `<w:del>` (delete) XML nodes** directly into the document structure. This translates LLM semantic reasoning into strict OpenXML without corrupting the underlying schema or destroying adjacent metadata.
 
 ---
 
