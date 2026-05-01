@@ -1,5 +1,11 @@
 # Adeu: Native Track Changes for AI
 
+[![PyPI version](https://img.shields.io/pypi/v/adeu.svg)](https://pypi.org/project/adeu/)
+[![Python versions](https://img.shields.io/pypi/pyversions/adeu.svg)](https://pypi.org/project/adeu/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/dealfluence/adeu/actions/workflows/ci.yml/badge.svg)](https://github.com/dealfluence/adeu/actions/workflows/ci.yml)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
+
 **Adeu bridges the gap between LLM text generation and Microsoft Word.**
 
 LLMs speak Markdown; Lawyers speak "Track Changes." Adeu allows AI agents to propose edits to `.docx` files without breaking formatting, numbering, or complex layouts.
@@ -11,6 +17,11 @@ It treats the DOCX file as a **Virtual DOM**:
 3.  **Reconcile:** Surgically injects native XML `w:ins` (insertions) and `w:del` (deletions) back into the original document.
 
 Adeu Open Source Software is developed by [Adeu](https://adeu.ai).
+
+### Why Adeu? (The Technical Differentiator)
+While established libraries like `python-docx` are the standard for programmatic document generation, they inherently struggle with granular, non-destructive editing required for legal negotiations.
+
+Adeu solves this by acting as a "Virtual DOM" for Word. It utilizes **advanced fuzzy-matching and run-coalescing algorithms to surgically inject native `<w:ins>` (insert) and `<w:del>` (delete) XML nodes** directly into the document structure. This translates LLM semantic reasoning into strict OpenXML without corrupting the underlying schema or destroying adjacent metadata.
 
 ---
 
