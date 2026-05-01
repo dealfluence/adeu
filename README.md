@@ -14,7 +14,7 @@ While standard libraries like `python-docx` excel at generating documents from s
 
 Adeu acts as an **intelligent proxy**, processing AI edits as safe, atomic transactions:
 
-1. **Extract:** Translates the document (from disk or live Word) into LLM-friendly **CriticMarkup** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. Agent starts with structure and not raw data.
+1. **Extract:** Translates the document (from disk or live Word) into LLM-friendly **CriticMarkup** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. The agent starts with semantic structure, not raw data.
 2. **Validate:** Acts as a strict safety gate. It protects the document's integrity by automatically blocking ambiguous text matches or invalid structural changes before they touch the file.
 3. **Commit:** Translates the AI's text edits into native Word Track Changes. Adeu handles the complex XML under the hood, ensuring existing layouts, fonts, and margin comments are perfectly preserved.
 
@@ -94,7 +94,7 @@ Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading 
 
 Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
 
-> ✨ **MCP Apps UI:** The `read_docx` tool now supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
+> **MCP Apps UI:** The `read_docx` tool supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
 
 **The "Document Specialist" Prompt:**
 To maximize the AI's effectiveness, paste this context into Claude's **Project Instructions** or your agent's System Prompt:
@@ -106,10 +106,10 @@ To maximize the AI's effectiveness, paste this context into Claude's **Project I
 > - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified list of changes. Use `type: "modify"` for specific search-and-replace text edits, and `type: "accept"`, `"reject"`, or `"reply"` to manage existing Track Changes and Comments by ID.
 > - `sanitize_docx`: **Pre-Send Scrub.** Strip dangerous metadata, author names, and internal tracking IDs before sharing. Can preserve existing markup (`keep_markup=True`) or generate a clean delta against a baseline.
 
-### Live MS Word Integration
+#### Live MS Word Integration
 If you are running on Windows with Microsoft Word installed, Adeu can act as a real-time copilot, editing the active document right in front of you.
-*   `read_active_word_document`: Extracts text, tracked changes, and comments directly from the live, open Word window.
-*   `process_active_word_batch`: Translates the LLM's edits into native COM macros, watching Word type, delete, and add comments on the canvas automatically.
+- `read_active_word_document`: Extracts text, tracked changes, and comments directly from the live, open Word window.
+- `process_active_word_batch`: Translates the LLM's edits into native COM macros, watching Word type, delete, and add comments on the canvas automatically.
 
 ### 2. For Builders (Python SDK)
 
