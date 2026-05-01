@@ -186,7 +186,7 @@ Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarku
 
 ### Semantic Appendix
 
-Contracts are full of landmines an LLM will miss on a first pass: defined terms used inconsistently, broken cross-references, OCR typos in scanned PDFs converted to Word. Adeu pre-computes these on extract and hands the agent a structured appendix alongside the text.
+Contracts are full of landmines that an LLM will miss on a first pass: defined terms used inconsistently, broken cross-references, OCR typos in scanned PDFs converted to Word. Adeu pre-computes these on extract and hands the agent a structured appendix alongside the text.
 
 ### Intelligent Mapping
 
