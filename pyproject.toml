@@ -20,6 +20,9 @@ dependencies = [
     "pywin32; sys_platform == 'win32'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/dealfluence/adeu"
+
 [project.scripts]
 adeu = "adeu.cli:main"
 adeu-server = "adeu.server:main"
