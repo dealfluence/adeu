@@ -24,7 +24,15 @@ Maintained by [Adeu](https://adeu.ai).
 
 ## Setup
 
-**Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. Install it via your terminal:
+**Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. The easiest way to install it is via pip:
+
+```bash
+pip install uv
+```
+
+<details>
+<summary><b>Alternative OS-Specific Installers</b></summary>
+<br>
 
 **macOS**
 
@@ -32,19 +40,12 @@ Maintained by [Adeu](https://adeu.ai).
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-> If you have Homebrew installed, macOS may warn you to use it for system-wide installations. In that case, use:
->
-> ```bash
-> brew install uv
-> ```
-
 **Windows**
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
-
-_(Alternatively, on any platform you can use `pip install uv`)_
+</details>
 
 ### Claude Desktop Integration
 
@@ -96,8 +97,8 @@ Adeu runs as a Model Context Protocol (MCP) server. It provides agents with spec
 
 > **MCP Apps UI:** The `read_docx` tool supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
 
-**The "Document Specialist" Prompt:**
-To maximize the AI's effectiveness, paste this context into Claude's **Project Instructions** or your agent's System Prompt:
+**Recommended Agent Prompt:**
+While Adeu's tools automatically describe their own schemas to the LLM, you can guarantee the best behavioral results by adding this context to Claude's **Project Instructions** or your agent's System Prompt:
 
 > **Role:** Document Specialist
 > **Tools:**
@@ -157,7 +158,7 @@ adeu markup contract.docx edits.json --output preview.md
 # Apply edits to the DOCX
 adeu apply contract.docx edits.json --author "Review Bot"
 
-# Sanitize a document (strip metadata) before sharing with a counterparty
+# Scrub author metadata and internal trackers, but keep the visual redlines for the counterparty
 adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
 
@@ -186,7 +187,7 @@ Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarku
 
 ### Semantic Appendix
 
-Contracts are full of landmines that an LLM will miss on a first pass: defined terms used inconsistently, broken cross-references, OCR typos in scanned PDFs converted to Word. Adeu pre-computes these on extract and hands the agent a structured appendix alongside the text.
+Contracts are full of landmines that an LLM will miss on a first pass: defined terms used inconsistently, broken cross-references, and OCR-style typos in messy documents. Adeu pre-computes these on extract and hands the agent a structured appendix alongside the text.
 
 ### Intelligent Mapping
 
@@ -208,7 +209,7 @@ By default, the core Adeu redlining engine and local file tools are fully open-s
 However, you can explicitly opt-in to connect your MCP server to **Adeu Cloud** to unlock:
 
 - **End-to-End Workflows (Email):** Because contracts travel via email, Adeu Cloud allows agents to securely fetch email threads, extract counterparty DOCX attachments for review, and draft replies with your newly sanitized redlines attached.
-- **Advanced Document Validation:** Run complex, multi-document semantic validation tasks asynchronously. By securely routing these massive contexts to Adeu Cloud for processing, you prevent your local AI agent from burning millions of tokens or hitting context limits.
+- **Advanced Document Validation:** Run complex, multi-document semantic validation tasks asynchronously. By securely routing these massive contexts to Adeu Cloud for processing, you prevent your local AI agent from exhausting its context window or hitting rate limits.
 
 [Learn more about Adeu Cloud](https://adeu.ai).
 
