@@ -108,15 +108,18 @@ def build_paginated_response(text: str, page: int, file_path: str) -> ToolResult
 
     selected = result.pages[page - 1]
 
-    path_header = f"> **File Path:** `{file_path}`\n\n"
+    # Build the original UI markdown
     banner = _build_page_banner(selected.page, selected.total_pages)
     footer = _build_page_footer(selected.page, selected.total_pages, selected.has_next)
-    annotated = path_header + banner + selected.page_content + footer
+    ui_markdown = banner + selected.page_content + footer
+
+    # Prepend the path ONLY for the LLM
+    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return ToolResult(
-        content=annotated,
+        content=llm_content,
         structured_content={
-            "markdown": annotated,
+            "markdown": ui_markdown,
             "title": Path(file_path).name,
             "file_path": str(Path(file_path).resolve()),
         },
@@ -126,14 +129,6 @@ def build_paginated_response(text: str, page: int, file_path: str) -> ToolResult
 def build_outline_response(doc: "DocumentObject", projected_text: str, file_path: str) -> ToolResult:
     """
     Returns a structural map of headings as a Markdown tree.
-
-    The body content is omitted — outline mode is for navigation/planning, not
-    reading. Both `content` (LLM) and `structured_content["markdown"]` (UI) get
-    the full rendered tree; there is no separate one-line summary.
-
-    `doc` is the same Document object used to produce `projected_text`. We
-    reuse it (rather than re-loading) so the outline stays consistent with
-    what mode='full' would return for the same call.
     """
 
     body, appendix = split_structural_appendix(projected_text)
@@ -147,19 +142,22 @@ def build_outline_response(doc: "DocumentObject", projected_text: str, file_path
     )
     rendered = render_outline_tree(nodes)
 
-    path_header = f"> **File Path:** `{file_path}`\n\n"
+    # Build the original UI markdown
     header = (
         f"> **Outline view** — {len(nodes)} headings across "
         f"{pagination_result.total_pages} page(s). "
         f"Call `read_docx` with `mode='full'` and `page=N` to read a section.\n\n"
         f"---\n\n"
     )
-    annotated = path_header + header + rendered
+    ui_markdown = header + rendered
+
+    # Prepend the path ONLY for the LLM
+    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return ToolResult(
-        content=annotated,
+        content=llm_content,
         structured_content={
-            "markdown": annotated,
+            "markdown": ui_markdown,
             "title": Path(file_path).name,
             "file_path": str(Path(file_path).resolve()),
         },
