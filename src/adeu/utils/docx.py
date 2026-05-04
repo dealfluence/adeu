@@ -3,7 +3,7 @@ Low-level utilities for manipulating DOCX XML structures.
 Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 
-from typing import Iterator, NamedTuple, Optional, Union, cast
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Union
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -16,31 +16,95 @@ from docx.text.run import Run
 logger = structlog.get_logger(__name__)
 
 
-def _install_styles_default_cache():
+def _get_style_cache(part):
+    """
+    Parses styles.xml natively and builds an O(1) dictionary cache of styles.
+    Bypasses the extreme overhead of python-docx's lazy-loading style wrappers.
+    """
+    main_part = part.package.main_document_part
+    if hasattr(main_part, "_adeu_style_cache"):
+        return main_part._adeu_style_cache
+
+    cache: Dict[str, Any] = {}
+    default_pstyle = None
+
     try:
-        from docx.styles.styles import Styles as _DocxStyles
+        styles_xml = main_part.styles.element
     except Exception:
-        return
-    if getattr(_DocxStyles, "_adeu_default_cached", False):
-        return
-    _orig_default = _DocxStyles.default
+        main_part._adeu_style_cache = (cache, None)
+        return cache, None
 
-    def _cached_default(self, style_type):
-        cache = self.__dict__.get("_adeu_default_cache")
-        if cache is None:
-            cache = {}
-            self.__dict__["_adeu_default_cache"] = cache
-        if style_type in cache:
-            return cache[style_type]
-        result = _orig_default(self, style_type)
-        cache[style_type] = result
-        return result
+    raw_styles = {}
+    # 1. Parse raw XML elements
+    for s in styles_xml.findall(qn("w:style")):
+        s_id = s.get(qn("w:styleId"))
+        if not s_id:
+            continue
 
-    _DocxStyles.default = _cached_default  # type: ignore[method-assign]
-    _DocxStyles._adeu_default_cached = True  # type: ignore[attr-defined]
+        s_type = s.get(qn("w:type"))
+        is_default = s.get(qn("w:default")) in ("1", "true", "on")
 
+        if s_type == "paragraph" and is_default:
+            default_pstyle = s_id
 
-_install_styles_default_cache()
+        name_el = s.find(qn("w:name"))
+        name = name_el.get(qn("w:val")) if name_el is not None else s_id
+
+        based_on_el = s.find(qn("w:basedOn"))
+        based_on = based_on_el.get(qn("w:val")) if based_on_el is not None else None
+
+        outline_lvl = None
+        pPr = s.find(qn("w:pPr"))
+        if pPr is not None:
+            oLvl = pPr.find(qn("w:outlineLvl"))
+            if oLvl is not None:
+                val = oLvl.get(qn("w:val"))
+                if val and val.isdigit():
+                    outline_lvl = int(val)
+
+        bold = None
+        rPr = s.find(qn("w:rPr"))
+        if rPr is not None:
+            b = rPr.find(qn("w:b"))
+            if b is not None:
+                val = b.get(qn("w:val"))
+                bold = val not in ("0", "false", "off")
+
+        raw_styles[s_id] = {
+            "name": name,
+            "based_on": based_on,
+            "outline_level": outline_lvl,
+            "bold": bold,
+        }
+
+    # 2. Recursively resolve inheritance chains
+    def resolve_style(s_id, visited):
+        if s_id in cache:
+            return cache[s_id]
+        if s_id in visited or s_id not in raw_styles:
+            return {"name": s_id, "outline_level": None, "bold": False}
+
+        visited.add(s_id)
+        raw = raw_styles[s_id]
+        based_on_id = raw["based_on"]
+
+        if based_on_id:
+            parent = resolve_style(based_on_id, visited)
+            o_lvl = raw["outline_level"] if raw["outline_level"] is not None else parent["outline_level"]
+            bold_val = raw["bold"] if raw["bold"] is not None else parent["bold"]
+        else:
+            o_lvl = raw["outline_level"]
+            bold_val = raw["bold"] if raw["bold"] is not None else False
+
+        resolved = {"name": raw["name"], "outline_level": o_lvl, "bold": bold_val}
+        cache[s_id] = resolved
+        return resolved
+
+    for s_id in raw_styles:
+        resolve_style(s_id, set())
+
+    main_part._adeu_style_cache = (cache, default_pstyle)
+    return cache, default_pstyle
 
 
 # --- Types ---
@@ -86,70 +150,48 @@ def _is_page_instr(instr: str) -> bool:
     if not instr:
         return False
     instr = instr.upper().strip()
-    # Check for PAGE or NUMPAGES keyword at start of instruction
     parts = instr.split()
     if not parts:
         return False
     return parts[0] in ("PAGE", "NUMPAGES")
 
 
-_STYLE_CACHE_MISS = object()
-
-
-def _get_paragraph_style_safe(paragraph: Paragraph):
-    """
-    Returns paragraph.style or None.
-
-    PERF: python-docx's `paragraph.style` access is extremely expensive on
-    large docs because the underlying part.get_style → styles.get_by_id →
-    styles.default → default_for chain re-walks styles.xml on every call,
-    burning 80-90% of read/projection wall time on a doc with thousands of
-    paragraphs. We cache the resolved style on the Paragraph instance for
-    the duration of one projection pass.
-
-    The cache attribute is set on the Paragraph object, NOT the underlying
-    XML element, so it disappears naturally when the wrapper is GC'd. If a
-    caller mutates a paragraph's pStyle after caching, they must clear the
-    attribute manually (no current code path does this during projection).
-    """
-    cached = getattr(paragraph, "_adeu_cached_style", _STYLE_CACHE_MISS)
-    if cached is not _STYLE_CACHE_MISS:
-        return cached
-    try:
-        style = paragraph.style
-    except AttributeError:
-        style = None
-    try:
-        paragraph._adeu_cached_style = style  # type: ignore[attr-defined]
-    except AttributeError:
-        # Some odd Paragraph wrappers may be slot-defined; fall back gracefully.
-        pass
-    return style
-
-
 def get_paragraph_prefix(paragraph: Paragraph) -> str:
     """
     Returns the Markdown prefix for a paragraph based on its style.
-    e.g. 'Heading 1' -> '# ', 'Heading 2' -> '## '
+    Uses the Fast XML Cache to avoid python-docx performance penalties.
     """
-    # 1. Check Outline Level (Structural Truth)
-    try:
-        lvl = paragraph.paragraph_format.outline_level
+    cache, default_pstyle = _get_style_cache(paragraph.part)
+    p_el = paragraph._element
+    pPr = p_el.find(qn("w:pPr"))
+
+    # 1. Check Outline Level on the paragraph itself (Structural Truth)
+    if pPr is not None:
+        oLvl = pPr.find(qn("w:outlineLvl"))
+        if oLvl is not None:
+            val = oLvl.get(qn("w:val"))
+            if val and val.isdigit():
+                lvl = int(val)
+                if 0 <= lvl <= 8:
+                    return "#" * (lvl + 1) + " "
+
+    # 2. Get Style Name & properties from Cache
+    style_id = default_pstyle
+    if pPr is not None:
+        pStyle = pPr.find(qn("w:pStyle"))
+        if pStyle is not None:
+            style_id = pStyle.get(qn("w:val")) or default_pstyle
+
+    style_info = cache.get(style_id) if style_id else None
+
+    if style_info:
+        lvl = style_info.get("outline_level")
         if lvl is not None and 0 <= lvl <= 8:
             return "#" * (lvl + 1) + " "
-    except Exception:
-        pass
 
-    # NOTE: Do NOT bail early when paragraph.style is None. python-docx returns
-    # None for paragraphs without an explicit <w:pStyle>, even though Word
-    # treats them as the default "Normal" style. Bailing here misses the
-    # all-caps bold heuristic that catches manually-formatted section titles.
-    style_name = None
-    style = _get_paragraph_style_safe(paragraph)
-    if style is not None:
-        style_name = style.name
+    style_name = style_info["name"] if style_info else None
 
-    # 2. Check Style Name
+    # Check Style Name explicitly
     if style_name and style_name.startswith("Heading"):
         try:
             level = int(style_name.replace("Heading", "").strip())
@@ -161,7 +203,6 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
         return "# "
 
     # 3. Check for List Formatting
-    pPr = paragraph._element.find(qn("w:pPr"))
     if pPr is not None:
         numPr = pPr.find(qn("w:numPr"))
         if numPr is not None:
@@ -181,23 +222,29 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
                         level = 0
                     return ("    " * level) + "* "
 
-    # 4. Heuristic for "Normal" style headers (Lazy Lawyer / Manually formatted)
-    # If text is short (<100 chars), All Caps, and Bold -> Likely a Header.
-    # Treat None-style as Normal (python-docx returns None for paragraphs
-    # with no explicit <w:pStyle>, but Word renders them as Normal).
+    # 4. Heuristic for "Normal" style headers
     if style_name is None or style_name == "Normal":
         text = paragraph.text.strip()
         if text and len(text) < 100:
             is_all_caps = text.isupper()
 
-            # Check for Bold (paragraph style OR explicit run formatting)
             is_bold = False
-            if style is not None and style.font.bold:
+            if style_info and style_info.get("bold"):
                 is_bold = True
             else:
-                runs = [r for r in paragraph.runs if r.text.strip()]
-                if runs and runs[0].bold:
-                    is_bold = True
+                # Check if the first visible run is explicitly bold in XML
+                runs = p_el.findall(f".//{qn('w:r')}")
+                for r in runs:
+                    t = r.find(f".//{qn('w:t')}")
+                    if t is not None and t.text and t.text.strip():
+                        rPr_run = r.find(qn("w:rPr"))
+                        if rPr_run is not None:
+                            b = rPr_run.find(qn("w:b"))
+                            if b is not None:
+                                val = b.get(qn("w:val"))
+                                if val not in ("0", "false", "off"):
+                                    is_bold = True
+                        break
 
             if is_all_caps and is_bold:
                 return "## "
@@ -208,36 +255,59 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
 def get_run_style_markers(run: Run) -> tuple[str, str]:
     """
     Returns markdown prefix/suffix for run formatting (bold/italic).
-    Only returns markers for explicit formatting to avoid clutter.
-
-    Suppresses ** on runs inside heading paragraphs: heading styles are
-    visually bold by default, so emitting ** would produce redundant markup
-    (e.g. "# **1. Purpose**"). Equally important: Word strips redundant
-    explicit <w:b/> tags from heading runs when serializing via
-    doc.WordOpenXML, so without this suppression the same document renders
-    differently depending on whether it was read from disk (keeps the tags)
-    or from the live canvas (loses them).
+    Bypasses `run.bold` and `run.italic` attributes for massive OXML performance gains.
     """
     prefix = ""
     suffix = ""
 
-    # Detect heading context for the run's parent paragraph.
-    # python-docx types Run._parent as ProvidesStoryPart (the broader
-    # story-container protocol, which has no .style attribute). In practice
-    # runs emitted by iter_paragraph_content are always constructed with a
-    # Paragraph parent, so the cast is truthful at runtime.
-    para = cast(Paragraph, run._parent)
-    para_style = _get_paragraph_style_safe(para)
-    para_style_name = para_style.name if para_style else None
+    # 1. Determine if paragraph is a heading (using fast cache)
+    para_el = run._element.getparent()
+    while para_el is not None and para_el.tag != qn("w:p"):
+        para_el = para_el.getparent()
 
-    is_heading = bool(para_style_name and (para_style_name.startswith("Heading") or para_style_name == "Title"))
+    is_heading = False
+    if para_el is not None:
+        para_part = getattr(run._parent, "part", None)
+        if para_part:
+            cache, default_pstyle = _get_style_cache(para_part)
+
+            pPr = para_el.find(qn("w:pPr"))
+            style_id = default_pstyle
+            if pPr is not None:
+                pStyle = pPr.find(qn("w:pStyle"))
+                if pStyle is not None:
+                    style_id = pStyle.get(qn("w:val")) or default_pstyle
+
+            style_info = cache.get(style_id) if style_id else None
+            if style_info:
+                name = style_info["name"]
+                if name.startswith("Heading") or name == "Title":
+                    is_heading = True
+
+    # 2. Check explicitly defined run properties in XML
+    rPr = run._element.find(qn("w:rPr"))
+    is_bold = False
+    is_italic = False
+
+    if rPr is not None:
+        b = rPr.find(qn("w:b"))
+        if b is not None:
+            val = b.get(qn("w:val"))
+            if val not in ("0", "false", "off"):
+                is_bold = True
+
+        i = rPr.find(qn("w:i"))
+        if i is not None:
+            val = i.get(qn("w:val"))
+            if val not in ("0", "false", "off"):
+                is_italic = True
 
     # Nesting order: Bold outer, Italic inner -> **_text_**
-    if run.bold and not is_heading:
+    if is_bold and not is_heading:
         prefix += "**"
         suffix = "**" + suffix
 
-    if run.italic:
+    if is_italic:
         prefix += "_"
         suffix = "_" + suffix
 
