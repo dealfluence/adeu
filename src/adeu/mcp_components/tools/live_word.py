@@ -9,7 +9,11 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 
-from adeu.mcp_components._response_builders import build_outline_response, build_paginated_response
+from adeu.mcp_components._response_builders import (
+    build_outline_response,
+    build_paginated_response,
+)
+from adeu.models import DeleteTableRow, InsertTableRow
 
 logger = structlog.get_logger(__name__)
 
@@ -331,11 +335,32 @@ if sys.platform == "win32":
         except Exception as e:
             logger.warning(f"Failed to pre-resolve revisions: {e}")
 
+        # Haystack cache: avoids re-fetching doc.Content.Text and recomputing
+        # _clean_chars (an O(N) Python loop) on every iteration. Invalidated
+        # after every mutating change.
+        cached_raw_text: Optional[str] = None
+        cached_current_text: Optional[str] = None
+        cached_mapping: Optional[List[int]] = None
+
+        def _get_haystack() -> Tuple[str, str, List[int]]:
+            nonlocal cached_raw_text, cached_current_text, cached_mapping
+            if cached_raw_text is None:
+                cached_raw_text = doc.Content.Text
+                cached_current_text, cached_mapping = _clean_chars(cached_raw_text)
+            assert cached_raw_text is not None
+            assert cached_current_text is not None
+            assert cached_mapping is not None
+            return cached_raw_text, cached_current_text, cached_mapping
+
+        def _invalidate_haystack() -> None:
+            nonlocal cached_raw_text, cached_current_text, cached_mapping
+            cached_raw_text = None
+            cached_current_text = None
+            cached_mapping = None
+
         try:
             for change in changes:
                 try:
-                    from adeu.models import DeleteTableRow, InsertTableRow
-
                     if isinstance(change, (InsertTableRow, DeleteTableRow)):
                         stats["failed"] += 1
                         stats["skipped_details"].append(
@@ -347,17 +372,32 @@ if sys.platform == "win32":
 
                     if isinstance(change, ModifyText):
                         clean_target = strip_markdown_formatting(strip_critic_markup(change.target_text))
-                        raw_text = doc.Content.Text
-                        current_text, mapping = _clean_chars(raw_text)
+                        raw_text, current_text, mapping = _get_haystack()
                         start_idx, end_idx = _find_match_in_text(current_text, clean_target)
 
                         if start_idx != -1:
+                            # _find_match_in_text gave us indices into current_text
+                            # (Content.Text coordinate space). The `mapping` array
+                            # translates current_text → raw_text indices, but raw_text
+                            # indices CANNOT be passed directly to doc.Range() —
+                            # Word's Range coordinates include hidden characters not
+                            # present in Content.Text, so the two coordinate systems
+                            # drift apart progressively through the document.
+                            #
+                            # Use the mapping only to slice exact_substring out of
+                            # raw_text, then hand that text to Find.Execute to locate
+                            # it in proper Range coordinates.
                             actual_start = mapping[start_idx]
                             actual_end = mapping[end_idx]
                             exact_substring = raw_text[actual_start:actual_end]
 
-                            search_start = max(0, actual_start - 200)
-                            search_end = min(doc.Content.End, actual_end + 200)
+                            # Use raw_text indices ONLY as a hint for the search
+                            # window. Find.Execute does the actual locating in Range
+                            # coordinate space. Widen the window to absorb the
+                            # Content.Text vs Range coordinate drift, which grows
+                            # with document size.
+                            search_start = max(0, actual_start - 5000)
+                            search_end = min(doc.Content.End, actual_end + 5000)
                             rng = doc.Range(Start=search_start, End=search_end)
 
                             search_text = exact_substring[:250] if len(exact_substring) > 250 else exact_substring
@@ -373,7 +413,8 @@ if sys.platform == "win32":
 
                                 effective_new = change.new_text or ""
 
-                                # Pure comment detection: skip text replacement to prevent spurious w:del/w:ins tags
+                                # Pure comment detection: skip text replacement to
+                                # prevent spurious w:del/w:ins tags
                                 if change.target_text == effective_new:
                                     if change.comment:
                                         replace_rng = doc.Range(Start=actual_start, End=actual_end)
@@ -382,9 +423,11 @@ if sys.platform == "win32":
                                         except Exception as e:
                                             logger.warning(f"Failed to attach comment for same->same edit: {e}")
                                     stats["applied"] += 1
+                                    _invalidate_haystack()
                                     continue
 
-                                # Bug #8 Fix: Mathematically shrink the replacement range by trimming common context
+                                # Bug #8 Fix: Mathematically shrink the replacement
+                                # range by trimming common context
                                 actual_start, actual_end, final_new_text = _shrink_replacement_range(
                                     exact_substring,
                                     effective_new,
@@ -401,8 +444,12 @@ if sys.platform == "win32":
                                     change.comment,
                                 )
                                 stats["applied"] += 1
+                                _invalidate_haystack()
                             else:
-                                # Fallback: search entire document
+                                # Fallback: search entire document. Find cannot
+                                # cross structural chars (\r, \x07), so cell-spanning
+                                # targets will fail here — this matches disk-path
+                                # design where cell-splitting handles such cases.
                                 doc_rng = doc.Content
                                 doc_rng.Find.ClearFormatting()
                                 doc_rng.Find.Text = search_text
@@ -423,6 +470,7 @@ if sys.platform == "win32":
                                                     f"Failed to attach comment for same->same fallback edit: {e}"
                                                 )
                                         stats["applied"] += 1
+                                        _invalidate_haystack()
                                         continue
 
                                     apply_com_replacement(
@@ -433,6 +481,7 @@ if sys.platform == "win32":
                                         change.comment,
                                     )
                                     stats["applied"] += 1
+                                    _invalidate_haystack()
                                 else:
                                     stats["failed"] += 1
                                     stats["skipped_details"].append(
@@ -446,13 +495,22 @@ if sys.platform == "win32":
                             logger.warning(f"Could not find target text: '{change.target_text[:30]}...'")
 
                     elif isinstance(change, AcceptChange):
+                        applied_before = stats["applied"]
                         _process_accept_change(stats, revisions_map, change)
+                        if stats["applied"] > applied_before:
+                            _invalidate_haystack()
 
                     elif isinstance(change, RejectChange):
+                        applied_before = stats["applied"]
                         _process_reject_change(stats, revisions_map, change)
+                        if stats["applied"] > applied_before:
+                            _invalidate_haystack()
 
                     elif isinstance(change, ReplyComment):
+                        applied_before = stats["applied"]
                         _process_reply_comment(stats, doc, change)
+                        if stats["applied"] > applied_before:
+                            _invalidate_haystack()
 
                 except Exception as e:
                     stats["failed"] += 1

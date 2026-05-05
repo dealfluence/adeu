@@ -241,23 +241,163 @@ def _walk_doc_body(doc: DocumentObject, comments_map: dict) -> List[_BlockRecord
             )
             # Record inner blocks for heading detection — but DO NOT call
             # build_paragraph_text on them (we don't need their lengths).
-            _record_table_inner_blocks_lite(item, table_start, records)
+            _record_table_inner_blocks_lite(item, table_start, records, comments_map)
             cursor += block_len
             is_first_block = False
 
     return records
 
 
+def _compute_inner_block_offset(
+    table: Table,
+    target_paragraph: Paragraph,
+    table_start_offset: int,
+    comments_map: dict,
+) -> int:
+    """
+    Computes the absolute projected-text offset where `target_paragraph` begins,
+    given that it lives somewhere inside `table`. Walks the table in the same
+    order as ingest.extract_table:
+
+        rows joined by "\n"
+        within each row, unique cells joined by " | "
+        within each cell, blocks joined by "\n\n" (recursive)
+
+    Returns table_start_offset if target_paragraph is not found inside the table
+    (defensive fallback — should never happen in practice).
+
+    NOTE: We deliberately ignore structural-row-tracking wrappers ({++ ... ++})
+    here. They affect *the position of subsequent rows* relative to the start
+    of the table, but the cost of replicating that math precisely is not worth
+    it for outline page resolution — pagination granularity is ~19k chars; a
+    few-character drift from a tracked-row wrapper will not flip a heading to
+    the wrong page.
+    """
+    target_el = target_paragraph._element
+    cursor = table_start_offset
+    rows_processed = 0
+
+    for row in table.rows:
+        # Skip rows that ingest would skip in clean_view; outline runs against
+        # the non-clean projection, so do NOT skip clean_view-deleted rows here.
+        # extract_table only skips a row when clean_view=True AND trPr/del exists.
+        # We are projection-side (clean_view=False), so include all rows.
+
+        if rows_processed > 0:
+            cursor += 1  # "\n" between rows
+
+        seen_cells: set = set()
+        cells_in_row = 0
+
+        for cell in row.cells:
+            cell_id = id(cell._tc)
+            if cell_id in seen_cells:
+                continue
+            seen_cells.add(cell_id)
+
+            if cells_in_row > 0:
+                cursor += 3  # " | " between cells
+
+            # Walk this cell's blocks in projection order.
+            cursor, found = _walk_cell_for_offset(cell, target_el, cursor, comments_map)
+            if found:
+                return cursor
+
+            cells_in_row += 1
+
+        rows_processed += 1
+
+    return table_start_offset
+
+
+def _walk_cell_for_offset(
+    cell,
+    target_el,
+    cell_start_cursor: int,
+    comments_map: dict,
+) -> tuple[int, bool]:
+    """
+    Walks a single table cell's block items, accumulating offsets exactly the
+    way ingest._extract_blocks does: blocks joined by "\n\n".
+
+    Returns (offset_at_or_after_target, found_flag). When found_flag is True,
+    offset_at_or_after_target is the absolute offset where target_el's
+    paragraph begins.
+    """
+    cursor = cell_start_cursor
+    is_first_block = True
+
+    for inner_item in iter_block_items(cell):
+        if not is_first_block:
+            cursor += 2  # "\n\n" between blocks
+
+        if isinstance(inner_item, Paragraph):
+            if inner_item._element is target_el:
+                return cursor, True
+            prefix = get_paragraph_prefix(inner_item)
+            p_text = build_paragraph_text(inner_item, comments_map, clean_view=False)
+            cursor += len(prefix + p_text)
+
+        elif isinstance(inner_item, Table):
+            # Recurse into nested table. If the target paragraph is inside this
+            # nested table, _compute_inner_block_offset returns its absolute
+            # offset; otherwise it returns the table's start (which we then need
+            # to skip past by adding the projected length).
+            nested_offset = _compute_inner_block_offset(
+                inner_item, _paragraph_from_element(target_el), cursor, comments_map
+            )
+            if nested_offset != cursor:
+                # We "found" something deeper. Verify by checking that the
+                # target_el actually lives inside this table.
+                if _element_is_descendant(target_el, inner_item._element):
+                    return nested_offset, True
+            # Not in this nested table — skip past it.
+            table_text = extract_table(inner_item, comments_map, clean_view=False)
+            cursor += len(table_text) if table_text else 0
+
+        is_first_block = False
+
+    return cursor, False
+
+
+def _paragraph_from_element(p_el):
+    """
+    Returns a lightweight Paragraph wrapper around p_el. Used only to satisfy
+    the type signature of _compute_inner_block_offset when recursing through
+    nested tables — we only ever read ._element off it.
+
+    parent=None violates Paragraph's nominal type but is safe in practice:
+    downstream code only touches ._element.
+    """
+    return Paragraph(p_el, None)  # type: ignore[arg-type]
+
+
+def _element_is_descendant(target_el, ancestor_el) -> bool:
+    """True iff target_el is contained anywhere within ancestor_el's subtree."""
+    cur = target_el.getparent()
+    while cur is not None:
+        if cur is ancestor_el:
+            return True
+        cur = cur.getparent()
+    return False
+
+
 def _record_table_inner_blocks_lite(
     table: Table,
     inherited_offset: int,
     records: List[_BlockRecord],
+    comments_map: dict,
 ) -> None:
     """
     PERF-optimized version of _record_table_inner_blocks: records inner
-    paragraphs/tables for heading detection WITHOUT projecting their text.
-    projected_length=0 because it's never read for these inner records
-    (pagination is at the table level; headings only need start_offset).
+    paragraphs/tables for heading detection without paying the full projection
+    cost for non-headings.
+
+    Headings inside tables get TRUE offsets computed via _compute_inner_block_offset
+    (so outline.page resolves correctly when a table spans page boundaries).
+    Non-heading inner blocks keep projected_length=0 and inherit the table's
+    start_offset — they are never used to resolve a page, only to scan for
+    nested headings/tables.
     """
     seen_cells: set = set()
     for row in table.rows:
@@ -269,12 +409,20 @@ def _record_table_inner_blocks_lite(
 
             for inner_item in iter_block_items(cell):
                 if isinstance(inner_item, Paragraph):
+                    # Only pay the projection cost when the inner paragraph is
+                    # actually a heading — non-heading inner paragraphs do not
+                    # need a true offset (they're never assigned a page).
+                    if _is_heading(inner_item):
+                        true_offset = _compute_inner_block_offset(table, inner_item, inherited_offset, comments_map)
+                    else:
+                        true_offset = inherited_offset
+
                     records.append(
                         _BlockRecord(
                             item=inner_item,
                             is_paragraph=True,
                             is_table=False,
-                            start_offset=inherited_offset,
+                            start_offset=true_offset,
                             projected_length=0,
                         )
                     )
@@ -288,7 +436,7 @@ def _record_table_inner_blocks_lite(
                             projected_length=0,
                         )
                     )
-                    _record_table_inner_blocks_lite(inner_item, inherited_offset, records)
+                    _record_table_inner_blocks_lite(inner_item, inherited_offset, records, comments_map)
 
 
 def _project_part(part, comments_map: dict) -> str:

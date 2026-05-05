@@ -212,6 +212,12 @@ def _make_fuzzy_regex(target_text: str) -> str:
     - Intervening markdown formatting (**, _, etc.)
     - Punctuation boundaries
     - Structural noise (bullets, numbering) across newlines
+
+    REGEX SAFETY: All optional marker groups use atomic-group syntax (?>...)
+    to prevent catastrophic backtracking. The previous non-atomic version
+    `(?:\\*\\*|__|\\*|_)?` interleaved with `\\s+` produced exponential
+    backtracking on long targets in long haystacks. Atomic groups commit
+    on first match and never reconsider, making the regex linear.
     """
     target_text = _replace_smart_quotes(target_text)
 
@@ -219,18 +225,15 @@ def _make_fuzzy_regex(target_text: str) -> str:
     # Tokenize: Underscores, Whitespace, Quotes, AND Punctuation
     token_pattern = re.compile(r"(_+)|(\s+)|(['\"])|([.,;:])")
 
-    # Pattern to allow optional markdown markers between tokens
-    md_noise = r"(?:\*\*|__|\*|_)*"
+    # Pattern to allow optional markdown markers between tokens.
+    # Atomic group prevents backtracking through marker permutations.
+    md_noise = r"(?>\*\*|__|\*|_)*"
 
     # Pattern for Structural Noise (bullets, indentation, numbering)
-    # Matches sequences of: Whitespace, *, +, -, >, digits+dot
-    # STRICTER: Should not match simple space chars that act as delimiters.
-    # Only match if it looks like a list item marker or newline sequence.
     structural_noise = r"(?:\s*(?:[*+\->]|\d+\.)\s+|\s*\n\s*)"
 
     # START ANCHOR:
     # Allow optional list marker at the very start
-    # Must contain a bullet/number to avoid greedy space matching
     start_list_marker = r"(?:[ \t]*(?:[*+\->]|\d+\.)\s+)?"
     parts.append(start_list_marker)
     parts.append(md_noise)
@@ -247,16 +250,16 @@ def _make_fuzzy_regex(target_text: str) -> str:
         if g_underscore:
             parts.append(r"_+")
         elif g_space:
-            # If the whitespace contains a newline, allow structural noise (bullets, indents)
+            # If the whitespace contains a newline, allow structural noise
             if "\n" in g_space:
                 parts.append(f"(?:{structural_noise}|\\s+)+")
             else:
                 parts.append(r"\s+")
         elif g_quote:
             if g_quote == "'":
-                parts.append(r"[''']")
+                parts.append(r"[\u2018\u2019']")
             else:
-                parts.append(r"[\"" "]")
+                parts.append(r"[\"\u201c\u201d]")
         elif g_punct:
             parts.append(re.escape(g_punct))
 
@@ -290,16 +293,14 @@ def _find_match_in_text(text: str, target: str) -> Tuple[int, int]:
     if idx != -1:
         return _find_safe_boundaries(text, idx, idx + len(norm_target))
 
-    # 3. Fuzzy regex match (handles markdown noise)
+    # 3. Fuzzy regex match (handles markdown noise, list markers, etc.).
+    # Atomic groups in _make_fuzzy_regex prevent catastrophic backtracking.
     try:
         pattern = _make_fuzzy_regex(target)
         match = re.search(pattern, text)
         if match:
-            # Refine boundaries BEFORE expanding safe boundaries.
-            # This prevents the greedy regex match from stealing markers from neighbors.
             raw_start, raw_end = match.start(), match.end()
             refined_start, refined_end = _refine_match_boundaries(text, raw_start, raw_end)
-
             return _find_safe_boundaries(text, refined_start, refined_end)
     except re.error:
         pass

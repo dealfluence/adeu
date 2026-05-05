@@ -486,7 +486,11 @@ class DocumentMapper:
         return "\n".join(change_lines + comment_lines)
 
     def _add_virtual_text(
-        self, text: str, offset: int, context_paragraph: Optional[Paragraph], hyperlink_id: Optional[str] = None
+        self,
+        text: str,
+        offset: int,
+        context_paragraph: Optional[Paragraph],
+        hyperlink_id: Optional[str] = None,
     ):
         span = TextSpan(
             start=offset,
@@ -503,10 +507,20 @@ class DocumentMapper:
         return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
 
     def _make_fuzzy_regex(self, target_text: str) -> str:
+        """
+        Constructs a regex from target text permitting variable whitespace,
+        variable underscores in placeholders, smart quotes, intervening
+        markdown markers, and punctuation boundaries.
+
+        REGEX SAFETY: Optional marker groups use atomic-group syntax (?>...)
+        to prevent catastrophic backtracking. The non-atomic version
+        `(?:\\*\\*|__|\\*|_)?` interleaved with `\\s+` produced exponential
+        backtracking on long targets. Atomic groups commit on first match.
+        """
         # First strip markdown from the target for cleaner matching
         target_text = self._strip_markdown_formatting(target_text)
 
-        # Normalize quotes in target for consistency
+        # Normalize quotes
         target_text = self._replace_smart_quotes(target_text)
 
         parts = []
@@ -515,7 +529,6 @@ class DocumentMapper:
 
         last_idx = 0
         for match in token_pattern.finditer(target_text):
-            # Add literal text
             literal = target_text[last_idx : match.start()]
             if literal:
                 escaped = re.escape(literal)
@@ -527,21 +540,21 @@ class DocumentMapper:
                 # [___] placeholder - allow variable underscore count
                 parts.append(r"\[_+\]")
             elif g_space:
-                # Allow optional markdown markers around whitespace (between words)
-                # This handles cases like "Terms are **Net 90**" matching "Terms are Net 90"
-                parts.append(r"(?:\*\*|__|\*|_)?")
+                # Allow optional markdown markers around whitespace.
+                # Atomic group prevents backtracking through marker combinations.
+                parts.append(r"(?>\*\*|__|\*|_)?")
                 parts.append(r"\s+")
-                parts.append(r"(?:\*\*|__|\*|_)?")
+                parts.append(r"(?>\*\*|__|\*|_)?")
             elif g_quote:
                 if g_quote == "'":
-                    parts.append(r"[''']")
+                    parts.append(r"[\u2018\u2019']")
                 else:
-                    parts.append(r"[\"" "]")
+                    parts.append(r"[\"\u201c\u201d]")
             elif g_punct:
                 # Allow optional markdown markers around punctuation
-                parts.append(r"(?:\*\*|__|\*|_)?")
+                parts.append(r"(?>\*\*|__|\*|_)?")
                 parts.append(re.escape(g_punct))
-                parts.append(r"(?:\*\*|__|\*|_)?")
+                parts.append(r"(?>\*\*|__|\*|_)?")
 
             last_idx = match.end()
 
@@ -568,17 +581,15 @@ class DocumentMapper:
         if start_idx != -1:
             return start_idx, len(target_text)
 
-        # 3. Strip markdown from target and try matching (ADDED)
+        # 3. Strip markdown from target and try matching against raw haystack.
+        # Primarily for Header matching (#) where the target lacks the marker.
         stripped_target = self._strip_markdown_formatting(target_text)
-
-        # We can't use index from stripped_full directly on full_text,
-        # but if it matches, it suggests we should try a fuzzy approach or fallback
-        # This fallback is primarily for Header matching (#)
         if stripped_target in self.full_text:
             start_idx = self.full_text.find(stripped_target)
             return start_idx, len(stripped_target)
 
-        # 4. Fuzzy Regex Match
+        # 4. Fuzzy Regex Match. Atomic groups in _make_fuzzy_regex prevent
+        # catastrophic backtracking against long haystacks.
         try:
             pattern = self._make_fuzzy_regex(target_text)
             match = re.search(pattern, self.full_text)
@@ -615,7 +626,7 @@ class DocumentMapper:
         if matches:
             return [(s, e - s) for s, e in matches]
 
-        # 4. Fuzzy Regex Match
+        # 4. Fuzzy Regex Match. Atomic groups prevent catastrophic backtracking.
         try:
             pattern = self._make_fuzzy_regex(target_text)
             matches = [m.span() for m in re.finditer(pattern, self.full_text)]
