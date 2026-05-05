@@ -1,3 +1,4 @@
+# FILE: src/adeu/redline/engine.py
 import datetime
 import re
 from copy import deepcopy
@@ -8,6 +9,7 @@ import structlog
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
+from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
@@ -87,8 +89,6 @@ class RedlineEngine:
     def _get_paired_nodes(self, node):
         """
         Finds all contiguous w:ins/w:del nodes that form a single logical Modification block.
-        This handles cases where a modification spans multiple runs (producing multiple w:del tags)
-        followed by a w:ins tag, ensuring they are accepted/rejected atomically.
         """
         pairs = set()
         author = node.get(qn("w:author"))
@@ -249,6 +249,7 @@ class RedlineEngine:
         self,
         text: str,
         anchor_run: Optional[Run] = None,
+        anchor_paragraph: Optional[Paragraph] = None,
         comment: Optional[str] = None,
         suppress_inherited: bool = False,
     ) -> Tuple[Optional[Any], Optional[Any]]:
@@ -259,14 +260,11 @@ class RedlineEngine:
         if not lines:
             return None, None
 
-        # 0. Check if FIRST line implies a block element (Header)
-        first_clean, first_style = self._parse_markdown_style(lines[0])
-
-        if first_style:
-            if not anchor_run:
-                return None, None
-
-            # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
+        # Resolve the current paragraph robustly
+        current_p = None
+        if anchor_paragraph is not None:
+            current_p = anchor_paragraph._element
+        elif anchor_run is not None:
             current_p = anchor_run._element.getparent()
             while current_p is not None and current_p.tag != qn("w:p"):
                 current_p = current_p.getparent()
@@ -276,6 +274,10 @@ class RedlineEngine:
                 if hasattr(p_obj, "_element") and p_obj._element.tag == qn("w:p"):
                     current_p = p_obj._element
 
+        # 0. Check if FIRST line implies a block element (Header)
+        first_clean, first_style = self._parse_markdown_style(lines[0])
+
+        if first_style:
             if current_p is None:
                 return None, None
 
@@ -354,33 +356,20 @@ class RedlineEngine:
 
         last_p = None
         if remaining_lines:
-            if not anchor_run:
+            if current_p is None:
                 return ins_elem, None
 
-            # Robustly traverse up to the actual w:p tag, bypassing w:ins/w:del wrappers
-            current_p_element = anchor_run._element.getparent()
-            while current_p_element is not None and current_p_element.tag != qn("w:p"):
-                current_p_element = current_p_element.getparent()
-
-            if current_p_element is None and hasattr(anchor_run, "_parent"):
-                p_obj = anchor_run._parent
-                if hasattr(p_obj, "_element") and p_obj._element.tag == qn("w:p"):
-                    current_p_element = p_obj._element
-
-            if current_p_element is None:
-                return ins_elem
-
-            parent_body = current_p_element.getparent()
+            parent_body = current_p.getparent()
             if parent_body is None:
                 return ins_elem
 
             try:
-                p_index = parent_body.index(current_p_element)
+                p_index = parent_body.index(current_p)
             except ValueError:
                 return ins_elem
 
             has_num_pr = False
-            if current_p_element.pPr is not None and current_p_element.pPr.find(qn("w:numPr")) is not None:
+            if current_p.pPr is not None and current_p.pPr.find(qn("w:numPr")) is not None:
                 has_num_pr = True
 
             for i, line_text in enumerate(remaining_lines):
@@ -398,8 +387,8 @@ class RedlineEngine:
                 new_p = create_element("w:p")
                 if style_name:
                     self._set_paragraph_style(new_p, style_name)
-                elif current_p_element.pPr is not None:
-                    pPr_clone = deepcopy(current_p_element.pPr)
+                elif current_p.pPr is not None:
+                    pPr_clone = deepcopy(current_p.pPr)
                     if list_level is not None:
                         numPr = pPr_clone.find(qn("w:numPr"))
                         if numPr is not None:
@@ -1188,14 +1177,24 @@ class RedlineEngine:
                     return sub_edits if len(sub_edits) > 1 else sub_edits[0]
 
         # TABLE CELL SPLITTING LOGIC (R1, R2, R3, R4, N1 Fix)
-        # Only split if the target area actually spans a virtual table boundary (" | ")
-        if " | " in actual_doc_text:
+        # Check if the target text actually overlaps a virtual table boundary (" | ")
+        overlaps_virtual_pipe = False
+        if active_mapper:
+            overlaps_virtual_pipe = any(
+                s.text == " | " and s.run is None and s.start < start_idx + match_len and s.end > start_idx
+                for s in active_mapper.spans
+            )
+
+        if overlaps_virtual_pipe:
             actual_cells = actual_doc_text.split("|")
             new_cells = effective_new_text.split("|")
 
             if len(actual_cells) == len(new_cells) and len(actual_cells) > 1:
                 sub_edits = []
-                current_offset = start_idx
+
+                # We use the real DOM structure (mapper.full_text) to advance offsets,
+                # completely bypassing any truncated strings from the LLM.
+                search_offset = start_idx
 
                 # Determine which cell should receive the comment (first cell that actually changes, or cell 0)
                 target_comment_idx = 0
@@ -1209,19 +1208,16 @@ class RedlineEngine:
                     n_clean = n_cell.strip()
 
                     if a_clean:
-                        idx = a_cell.find(a_clean)
-                        a_leading = a_cell[:idx]
-                        a_trailing = a_cell[idx + len(a_clean) :]
+                        # Align exactly to where this cell's text begins in the real document
+                        actual_start = self.mapper.full_text.find(a_clean, search_offset)
+                        if actual_start == -1 or actual_start > search_offset + 10:
+                            actual_start = search_offset  # fallback if not found cleanly
                     else:
-                        a_leading = ""
-                        a_trailing = a_cell
-
-                    n_cell_aligned = a_leading + n_clean + a_trailing
-                    start_offset = len(a_leading)
+                        actual_start = search_offset
 
                     should_attach_comment = (edit.comment is not None) and (cell_idx == target_comment_idx)
 
-                    if a_cell != n_cell_aligned or should_attach_comment:
+                    if a_clean != n_clean or should_attach_comment:
                         sub_edit = ModifyText(
                             type="modify",
                             target_text=a_clean,
@@ -1233,7 +1229,7 @@ class RedlineEngine:
                         sub_edit._is_table_edit = True  # type: ignore[attr-defined]
 
                         if a_clean == n_clean:
-                            sub_edit._match_start_index = current_offset + start_offset
+                            sub_edit._match_start_index = actual_start
                             sub_edit._internal_op = "COMMENT_ONLY"
                         else:
                             prefix_len, suffix_len = trim_common_context(a_clean, n_clean)
@@ -1244,7 +1240,7 @@ class RedlineEngine:
                             final_new = n_clean[prefix_len:n_end]
                             sub_edit.target_text = final_target
                             sub_edit.new_text = final_new
-                            sub_edit._match_start_index = current_offset + start_offset + prefix_len
+                            sub_edit._match_start_index = actual_start + prefix_len
 
                             if not final_target and final_new:
                                 sub_edit._internal_op = EditOperationType.INSERTION
@@ -1257,7 +1253,16 @@ class RedlineEngine:
 
                         sub_edits.append(sub_edit)
 
-                    current_offset += len(a_cell) + 1  # Move past cell and the "|" separator
+                    # Advance search_offset to the start of the next cell safely
+                    if a_clean:
+                        search_offset = actual_start + len(a_clean)
+
+                    next_pipe = self.mapper.full_text.find(" | ", search_offset)
+                    if next_pipe != -1 and next_pipe <= search_offset + 10:
+                        # The start of the next cell is exactly 3 chars after the pipe index
+                        search_offset = next_pipe + 3
+                    else:
+                        search_offset += len(a_cell) + 1
 
                 return sub_edits
             else:
@@ -1387,17 +1392,35 @@ class RedlineEngine:
             return True
 
         if op == EditOperationType.INSERTION:
-            anchor_run = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
-            if not anchor_run:
+            anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
+            if not anchor_run and not anchor_paragraph:
                 return False
 
-            parent = anchor_run._element.getparent()
-            index = parent.index(anchor_run._element)
+            parent = None
+            index = 0
+            if anchor_run:
+                parent = anchor_run._element.getparent()
+                index = parent.index(anchor_run._element)
+            elif anchor_paragraph:
+                parent = anchor_paragraph._element
+                for i, child in enumerate(parent):
+                    if child.tag == qn("w:pPr"):
+                        index = i + 1
+                    else:
+                        break
+
+            if parent is None:
+                return False
 
             final_new_text = edit.new_text or ""
 
             if start_idx == 0:
-                ins_elem, last_p = self.track_insert(final_new_text, anchor_run=anchor_run, comment=edit.comment)
+                ins_elem, last_p = self.track_insert(
+                    final_new_text,
+                    anchor_run=anchor_run,
+                    anchor_paragraph=anchor_paragraph,
+                    comment=edit.comment,
+                )
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
                         self._insert_and_split_ins(parent, index, ins_elem)
@@ -1413,15 +1436,25 @@ class RedlineEngine:
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             else:
-                next_run = self._get_next_run(anchor_run)
-                style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
-                ins_elem, last_p = self.track_insert(final_new_text, anchor_run=style_run, comment=edit.comment)
+                if anchor_run:
+                    next_run = self._get_next_run(anchor_run)
+                    style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
+                else:
+                    style_run = None
+
+                ins_elem, last_p = self.track_insert(
+                    final_new_text,
+                    anchor_run=style_run,
+                    anchor_paragraph=anchor_paragraph,
+                    comment=edit.comment,
+                )
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
                         self._insert_and_split_ins(parent, index + 1, ins_elem)
                         actual_parent = parent.getparent()
                     else:
-                        parent.insert(index + 1, ins_elem)
+                        insert_idx = index + 1 if anchor_run else index
+                        parent.insert(insert_idx, ins_elem)
                         actual_parent = parent
 
                     if edit.comment:
@@ -1540,8 +1573,6 @@ class RedlineEngine:
 
         # PHASE 2: OOXML Paragraph Merge Protocol
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
-            # If no physical runs were modified, but a paragraph boundary was,
-            # we must manually handle the insertion of new_text (e.g. replacing \n\n with a space).
             if op == EditOperationType.MODIFICATION and not target_runs and virtual_spans and edit.new_text:
                 first_span = virtual_spans[0]
                 if first_span.paragraph:
@@ -1670,7 +1701,6 @@ class RedlineEngine:
                 is_change = True
                 is_comment = True
 
-            # If this edit was already swept up in a paired resolution, mark as applied and skip
             if is_change and target_id in resolved_history:
                 applied += 1
                 continue
@@ -1705,7 +1735,6 @@ class RedlineEngine:
         Removes comment anchors that tightly wrap this element (or a paired del/ins).
         This prevents orphaned comment ranges from leaking when an edit is accepted/rejected.
         """
-        # Find the contiguous redline group to correctly bound the search
         first_node = element
         while True:
             prev = first_node.getprevious()
@@ -1722,7 +1751,6 @@ class RedlineEngine:
             else:
                 break
 
-        # 1. Collect tightly adjacent Start anchors (looking backwards from first_node)
         starts_to_remove = []
         prev = first_node.getprevious()
         while prev is not None:
@@ -1734,7 +1762,6 @@ class RedlineEngine:
             else:
                 break
 
-        # 2. Collect tightly adjacent End/Ref anchors (looking forwards from last_node)
         ends_to_remove = []
         nxt = last_node.getnext()
         while nxt is not None:
@@ -1750,7 +1777,6 @@ class RedlineEngine:
             else:
                 break
 
-        # 3. Match pairs and delete
         end_ids = set()
         for e in ends_to_remove:
             if e.tag == qn("w:commentRangeEnd"):
@@ -1821,7 +1847,6 @@ class RedlineEngine:
                 continue
 
             if parent.tag == qn("w:trPr"):
-                # Accepting a row insertion: just remove the tracking tag
                 parent.remove(ins)
                 continue
 
@@ -1837,7 +1862,6 @@ class RedlineEngine:
             parent = d.getparent()
             if parent is not None:
                 if parent.tag == qn("w:trPr"):
-                    # Accepting a row deletion: remove the entire row
                     row = parent.getparent()
                     if row is not None:
                         row.getparent().remove(row)
@@ -1870,7 +1894,6 @@ class RedlineEngine:
             parent = ins.getparent()
             if parent is not None:
                 if parent.tag == qn("w:trPr"):
-                    # Rejecting a row insertion: remove the entire row
                     row = parent.getparent()
                     if row is not None:
                         row.getparent().remove(row)
@@ -1884,7 +1907,6 @@ class RedlineEngine:
                 continue
 
             if parent.tag == qn("w:trPr"):
-                # Rejecting a row deletion: just remove the tracking tag
                 parent.remove(d)
                 continue
 
@@ -1979,7 +2001,6 @@ class RedlineEngine:
                     continue
 
                 if parent.tag == qn("w:trPr"):
-                    # Accepting a row insertion: just remove the tracking tag
                     parent.remove(ins)
                     continue
 
@@ -2005,7 +2026,6 @@ class RedlineEngine:
                 parent = d.getparent()
                 if parent is not None:
                     if parent.tag == qn("w:trPr"):
-                        # Accepting a row deletion: remove the entire row
                         row = parent.getparent()
                         if row is not None:
                             row.getparent().remove(row)

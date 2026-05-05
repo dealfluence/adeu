@@ -1,9 +1,8 @@
 # FILE: src/adeu/redline/mapper.py
-
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -17,7 +16,7 @@ from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
-    get_paragraph_prefix,  # ENSURE THIS IMPORT IS PRESENT
+    get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
     iter_block_items,
@@ -87,12 +86,20 @@ class DocumentMapper:
             current += 2
 
         is_first_para = True
+
+        previous_item: Any = None
         for item in iter_block_items(container):
             i_type = type(item).__name__
 
             if i_type == "FootnoteItem":
                 current = self._map_blocks(item, current)
             elif isinstance(item, Paragraph):
+                if not is_first_para:
+                    # Attach the newline to the previous paragraph so merges work correctly
+                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    self._add_virtual_text("\n\n", current, prev_para)
+                    current += 2
+
                 prefix = get_paragraph_prefix(item)
                 if is_first_para and c_type == "FootnoteItem":
                     prefix = f"[^{container.note_type}-{container.id}]: " + prefix
@@ -101,15 +108,18 @@ class DocumentMapper:
                     current += len(prefix)
 
                 current = self._map_paragraph_content(item, current)
-                self._add_virtual_text("\n\n", current, item)
-                current += 2
                 is_first_para = False
+                previous_item = item
             elif isinstance(item, Table):
-                current = self._map_table(item, current)
-                if self.spans and self.spans[-1].text != "\n\n":
-                    self._add_virtual_text("\n\n", current, None)
+                if not is_first_para:
+                    # Attach the newline to the previous paragraph so merges work correctly
+                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
+
+                current = self._map_table(item, current)
                 is_first_para = False
+                previous_item = item
 
         return current
 
@@ -191,18 +201,12 @@ class DocumentMapper:
     def _map_paragraph_content(self, paragraph: Paragraph, start_offset: int) -> int:
         """
         Maps Runs to Spans, handling Flattened CriticMarkup generation.
-
-        FIX C (parity with ingest.py):
-          * Merge eligibility is WRAPPERS ONLY — two runs inside one redline
-            group combine into one {++...++} block regardless of style.
-          * When adjacent runs within a merged group share the SAME non-empty
-            style markers, the trailing virtual suffix of the previous run and
-            the leading virtual prefix of the next run are elided so we emit
-            "**AB**" instead of "**A****B**".
-          * `current_style` tracks the style of the trailing real piece in
-            `pending_runs`, used only for elision decisions.
         """
         current = start_offset
+
+        # Inject zero-length paragraph anchor so empty paragraphs/cells are still map-able
+        span = TextSpan(start=current, end=current, text="", run=None, paragraph=paragraph)
+        self.spans.append(span)
 
         active_ids: set[str] = set()
         active_ins: dict[str, DocxEvent] = {}
@@ -291,7 +295,6 @@ class DocumentMapper:
 
                     if pending_runs and new_wrappers == current_wrappers:
                         # MERGE: same redline wrapper group.
-                        # Elide adjacent same-style markers when applicable.
                         skip_leading_prefix = False
                         if (
                             new_style == current_style
@@ -300,8 +303,6 @@ class DocumentMapper:
                             and pending_runs[-1][0] == "virtual"
                             and pending_runs[-1][1] == current_style[1]
                         ):
-                            # Drop the trailing closing marker of the previous run;
-                            # the new run's opening marker will also be skipped below.
                             pending_runs.pop()
                             skip_leading_prefix = True
 
@@ -320,7 +321,7 @@ class DocumentMapper:
                         for kind, txt, r_obj in run_parts:
                             pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
 
-                # Metadata Handling (unchanged)
+                # Metadata Handling
                 if not self.clean_view:
                     state_snapshot = (
                         active_ins.copy(),
@@ -511,20 +512,11 @@ class DocumentMapper:
         Constructs a regex from target text permitting variable whitespace,
         variable underscores in placeholders, smart quotes, intervening
         markdown markers, and punctuation boundaries.
-
-        REGEX SAFETY: Optional marker groups use atomic-group syntax (?>...)
-        to prevent catastrophic backtracking. The non-atomic version
-        `(?:\\*\\*|__|\\*|_)?` interleaved with `\\s+` produced exponential
-        backtracking on long targets. Atomic groups commit on first match.
         """
-        # First strip markdown from the target for cleaner matching
         target_text = self._strip_markdown_formatting(target_text)
-
-        # Normalize quotes
         target_text = self._replace_smart_quotes(target_text)
 
         parts = []
-        # Tokenize: Placeholder brackets with underscores, Whitespace, Quotes, Punctuation
         token_pattern = re.compile(r"(\[_+\])|(\s+)|(['\"])|([.,;:])")
 
         last_idx = 0
@@ -537,11 +529,8 @@ class DocumentMapper:
             g_placeholder, g_space, g_quote, g_punct = match.groups()
 
             if g_placeholder:
-                # [___] placeholder - allow variable underscore count
                 parts.append(r"\[_+\]")
             elif g_space:
-                # Allow optional markdown markers around whitespace.
-                # Atomic group prevents backtracking through marker combinations.
                 parts.append(r"(?>\*\*|__|\*|_)?")
                 parts.append(r"\s+")
                 parts.append(r"(?>\*\*|__|\*|_)?")
@@ -551,7 +540,6 @@ class DocumentMapper:
                 else:
                     parts.append(r"[\"\u201c\u201d]")
             elif g_punct:
-                # Allow optional markdown markers around punctuation
                 parts.append(r"(?>\*\*|__|\*|_)?")
                 parts.append(re.escape(g_punct))
                 parts.append(r"(?>\*\*|__|\*|_)?")
@@ -582,14 +570,12 @@ class DocumentMapper:
             return start_idx, len(target_text)
 
         # 3. Strip markdown from target and try matching against raw haystack.
-        # Primarily for Header matching (#) where the target lacks the marker.
         stripped_target = self._strip_markdown_formatting(target_text)
         if stripped_target in self.full_text:
             start_idx = self.full_text.find(stripped_target)
             return start_idx, len(stripped_target)
 
-        # 4. Fuzzy Regex Match. Atomic groups in _make_fuzzy_regex prevent
-        # catastrophic backtracking against long haystacks.
+        # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
             match = re.search(pattern, self.full_text)
@@ -626,7 +612,7 @@ class DocumentMapper:
         if matches:
             return [(s, e - s) for s, e in matches]
 
-        # 4. Fuzzy Regex Match. Atomic groups prevent catastrophic backtracking.
+        # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
             matches = [m.span() for m in re.finditer(pattern, self.full_text)]
@@ -705,35 +691,50 @@ class DocumentMapper:
 
         return working_runs
 
-    def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Optional[Run]:
+    def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Tuple[Optional[Run], Optional[Paragraph]]:
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
-            if preceding[-1].run:
-                return preceding[-1].run
+            for s in reversed(preceding):
+                if s.run:
+                    return s.run, s.paragraph
+            for s in reversed(preceding):
+                if s.paragraph:
+                    return None, s.paragraph
+
         containing = [s for s in self.spans if s.start < index < s.end]
         if containing:
             span = containing[0]
             if span.run is None:
-                pass
+                if span.paragraph is None:
+                    # We are inside a virtual string (like " | " or "\n").
+                    # Push the insertion point to the end of this virtual boundary.
+                    return self.get_insertion_anchor(span.end, rebuild_map=False)
+                return None, span.paragraph
             else:
                 offset = index - span.start
                 left, _ = self._split_run_at_index(span.run, offset)
                 if rebuild_map:
                     self._build_map()
-                return left
+                return left, span.paragraph
 
         if index == 0 and self.spans:
             for s in self.spans:
                 if s.run:
-                    return s.run
-            return None
+                    return s.run, s.paragraph
+            for s in self.spans:
+                if s.paragraph:
+                    return None, s.paragraph
+            return None, None
 
         preceding_gap = [s for s in self.spans if s.end < index]
         if preceding_gap:
             for s in reversed(preceding_gap):
                 if s.run:
-                    return s.run
-        return None
+                    return s.run, s.paragraph
+            for s in reversed(preceding_gap):
+                if s.paragraph:
+                    return None, s.paragraph
+        return None, None
 
     def _split_run_at_index(self, run: Run, split_index: int) -> Tuple[Run, Run]:
         text = run.text
