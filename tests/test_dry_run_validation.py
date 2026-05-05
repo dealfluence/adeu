@@ -143,3 +143,24 @@ def test_multiple_errors_accumulated():
     assert len(errors) == 2
     assert "Edit 1 Failed: Ambiguous match" in errors[0]
     assert "Edit 2 Failed: Target text not found" in errors[1]
+
+
+def test_validation_rejects_hallucinated_criticmarkup():
+    """
+    Scenario: LLM hallucinates CriticMarkup tags inside the new_text instead of using the comment parameter.
+    Validates that the engine explicitly catches and rejects this to prevent DOM pollution.
+    """
+    doc = Document()
+    doc.add_paragraph("Target text.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream)
+    edit = ModifyText(target_text="Target text", new_text="New text {>>LLM Comment<<}")
+
+    errors = engine.validate_edits([edit])
+
+    assert len(errors) == 1
+    assert "Do not manually write CriticMarkup tags" in errors[0]

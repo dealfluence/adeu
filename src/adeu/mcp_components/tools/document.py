@@ -321,7 +321,7 @@ PROCESS_BATCH_OPERATIONS_DESC = (
     "'**bold**' and '_italic_' inline formatting, and blank lines ('\\n\\n') to split "
     "`new_text` into multiple paragraphs. Multi-paragraph inserts are tracked as one "
     "logical revision. To delete text, make `new_text` empty. Do NOT manually write "
-    "CriticMarkup {++ tags; the engine handles that.\n"
+    "CriticMarkup tags ({++, {--, {>>). To add a comment, use the 'comment' parameter.\n"
     "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
     "(Note: Accepting one half of a paired modify cascades to accept the other half).\n"
     "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "

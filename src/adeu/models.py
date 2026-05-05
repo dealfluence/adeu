@@ -34,7 +34,8 @@ class ModifyText(BaseModel):
         description=(
             "The desired text replacement. You may use Markdown formatting: "
             "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
-            "Do NOT try to manually write {++...++} tags; the engine handles tracking."
+            "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
+            "To add a comment, use the 'comment' parameter instead."
         ),
     )
 

@@ -711,6 +711,14 @@ class RedlineEngine:
             t_text = edit.target_text or ""
             n_text = getattr(edit, "new_text", "") or ""
 
+            # VAL-CRIT-6: CriticMarkup Hallucination Prevention
+            if "{++" in n_text or "{--" in n_text or "{>>" in n_text or "{==" in n_text:
+                errors.append(
+                    f"- Edit {i + 1} Failed: Do not manually write CriticMarkup tags ({{++, {{--, {{>>, {{==) "
+                    "in `new_text`. The engine handles redlining automatically. "
+                    "To add a comment, use the `comment` parameter."
+                )
+
             # VAL-CRIT-3 & VAL-CRIT-4: Footnotes/Endnotes Structural Integrity
             if "[^" in t_text or "[^" in n_text:
                 t_fns = re.findall(r"\[\^(?:fn|en)-[^\]]+\]", t_text)
