@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "adeu.ai/adeu",
+  "name": "ai.adeu/adeu",
   "description": "Automated DOCX Redlining Engine",
   "repository": {
     "url": "https://github.com/dealfluence/adeu",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.5.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "adeu",
-      "version": "1.5.0",
+      "version": "1.5.2",
       "transport": {
         "type": "stdio"
       }

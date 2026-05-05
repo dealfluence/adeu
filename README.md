@@ -225,4 +225,4 @@ We welcome contributions from the community! Whether it's fixing bugs, adding ca
 
 MIT License. Open source and free to use in commercial applications.
 
-<!-- mcp-name: adeu.ai/adeu -->
+<!-- mcp-name: ai.adeu/adeu -->
