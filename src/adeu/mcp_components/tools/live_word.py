@@ -1,3 +1,4 @@
+# FILE: src/adeu/mcp_components/tools/live_word.py
 import io
 import re
 import sys
@@ -507,6 +508,7 @@ if sys.platform == "win32":
                                                         n_c,
                                                         actual_start,
                                                         actual_end,
+                                                        t_c,
                                                     )
 
                                                     replace_rng = doc.Range(Start=final_start, End=final_end)
@@ -563,6 +565,7 @@ if sys.platform == "win32":
                                         effective_new,
                                         actual_start,
                                         actual_end,
+                                        change.target_text,
                                     )
 
                                     replace_rng = doc.Range(Start=actual_start, End=actual_end)
@@ -599,11 +602,21 @@ if sys.platform == "win32":
                                             _invalidate_haystack()
                                             continue
 
+                                        # Recalculate shrinkage for fallback
+                                        actual_start, actual_end, final_new_text = _shrink_replacement_range(
+                                            exact_substring,
+                                            effective_new,
+                                            doc_rng.Start,
+                                            doc_rng.Start + len(exact_substring),
+                                            change.target_text,
+                                        )
+
+                                        replace_rng = doc.Range(Start=actual_start, End=actual_end)
                                         apply_com_replacement(
                                             doc,
                                             app,
                                             replace_rng,
-                                            change.new_text,
+                                            final_new_text,
                                             change.comment,
                                         )
                                         stats["applied"] += 1
@@ -661,17 +674,74 @@ if sys.platform == "win32":
 
         return stats
 
-    def _shrink_replacement_range(exact_substring, effective_new, actual_start: int, actual_end: int):
+    def _shrink_replacement_range(
+        exact_substring: str,
+        effective_new: str,
+        actual_start: int,
+        actual_end: int,
+        target_text_markdown: str,
+    ):
         if exact_substring == effective_new:
-            final_new_text = effective_new
-        else:
-            p_len, s_len = trim_common_context(exact_substring, effective_new)
-            actual_start += p_len
-            actual_end -= s_len
+            return actual_start, actual_end, effective_new
 
-            n_end = len(effective_new) - s_len
-            final_new_text = effective_new[p_len:n_end]
-        return actual_start, actual_end, final_new_text
+        p_len_md, s_len_md = trim_common_context(target_text_markdown, effective_new)
+
+        # Isolate the exact markdown hunks
+        t_hunk = target_text_markdown[
+            p_len_md : (len(target_text_markdown) - s_len_md if s_len_md else len(target_text_markdown))
+        ]
+        n_hunk = effective_new[p_len_md : len(effective_new) - s_len_md if s_len_md else len(effective_new)]
+
+        # Build offset map for exact_substring -> normalized current_text format
+        norm_exact = ""
+        map_norm_to_exact = []
+        i = 0
+        while i < len(exact_substring):
+            if exact_substring[i : i + 4] == "\r\x07\r\x07":
+                norm_exact += "\n"
+                map_norm_to_exact.append(i)
+                i += 4
+            elif exact_substring[i : i + 2] == "\r\x07":
+                norm_exact += " | "
+                map_norm_to_exact.extend([i, i, i])
+                i += 2
+            elif exact_substring[i] == "\x07":
+                norm_exact += " | "
+                map_norm_to_exact.extend([i, i, i])
+                i += 1
+            elif exact_substring[i] == "\r":
+                norm_exact += "\n"
+                map_norm_to_exact.append(i)
+                i += 1
+            elif exact_substring[i] == "\x0b":
+                norm_exact += "\n"
+                map_norm_to_exact.append(i)
+                i += 1
+            else:
+                norm_exact += exact_substring[i]
+                map_norm_to_exact.append(i)
+                i += 1
+        map_norm_to_exact.append(len(exact_substring))
+
+        # Calculate prefix length in the normalized space
+        md_prefix = target_text_markdown[:p_len_md]
+        clean_prefix = strip_markdown_formatting(strip_critic_markup(md_prefix))
+        clean_prefix = clean_prefix.replace("\n\n", "\n")
+        p_len_norm = len(clean_prefix)
+
+        # Calculate match length in the normalized space
+        clean_t_hunk = strip_markdown_formatting(strip_critic_markup(t_hunk))
+        clean_t_hunk = clean_t_hunk.replace("\n\n", "\n")
+        match_len_norm = len(clean_t_hunk)
+
+        # Map back to exact_substring bounds safely
+        original_actual_start = actual_start
+        if p_len_norm < len(map_norm_to_exact) and (p_len_norm + match_len_norm) < len(map_norm_to_exact):
+            actual_start = original_actual_start + map_norm_to_exact[p_len_norm]
+            actual_end = original_actual_start + map_norm_to_exact[p_len_norm + match_len_norm]
+            return actual_start, actual_end, n_hunk
+
+        return actual_start, actual_end, effective_new
 
     def _clean_chars(raw_text: str) -> Tuple[str, List[int]]:
         i = 0

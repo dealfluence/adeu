@@ -1,3 +1,4 @@
+# FILE: src/adeu/mcp_components/tools/document.py
 import os
 import subprocess
 import sys
@@ -352,14 +353,16 @@ PROCESS_BATCH_OPERATIONS_DESC = (
     "`new_text` into multiple paragraphs. Multi-paragraph inserts are tracked as one "
     "logical revision. To delete text, make `new_text` empty. Do NOT manually write "
     "CriticMarkup tags ({++, {--, {>>). To add a comment, use the 'comment' parameter.\n"
-    "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
-    "(Note: Accepting one half of a paired modify cascades to accept the other half).\n"
-    "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12'). "
-    "(Note: Rejecting one half cascades to reject the other half).\n"
+    "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
+    "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
     "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n"
     "5. 'insert_row': Insert table row. Requires `target_text` (anchor), `position` "
     "('above'/'below'), and `cells` (Markdown strings).\n"
     "6. 'delete_row': Delete table row. Requires `target_text` inside the row to be deleted.\n\n"
+    "CRITICAL ID VOLATILITY: Tracked Change and Comment IDs (e.g. 'Chg:12', 'Com:5') are strictly session-bound "
+    "and MAY BE RENUMBERED by Microsoft Word dynamically (e.g., during background AutoSaves). "
+    "You MUST call `read_docx` immediately before executing any `accept`, `reject`, or `reply` operations "
+    "to guarantee you have the freshest IDs. Do not cache IDs across tool calls.\n\n"
     "Always provide a realistic `author_name` for Tracked Changes. This name will be used for "
     "attribution in the document's tracked changes and comments."
 )

@@ -868,3 +868,67 @@ def test_live_word_table_spanning_edits(active_word_app):
         assert doc.Revisions.Count > 0, "Changes were not recorded as Tracked Revisions."
 
     asyncio.run(run_test())
+
+
+def test_live_word_obs_03_styled_whitespace_trimming(active_word_app):
+    """
+    Test for OBS-03 (Bug #2): Modifying whitespace adjacent to styled markdown
+    markers (like **bold**) must not trigger paragraph restructuring that
+    corrupts or shears formatting. The styling must remain intact.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from fastmcp.tools.tool import ToolResult
+
+    from adeu.mcp_components.tools.live_word import (
+        process_active_word_batch,
+        read_active_word_document,
+    )
+    from adeu.models import ModifyText
+
+    app, doc = active_word_app
+    ctx = AsyncMock()
+
+    # 1. Setup the document to exactly match the failing state
+    doc.TrackRevisions = False
+    doc.Range(0, doc.Content.End).Text = "(After Prequalification)\n\nFor Projects with Project Concept Notes (PCN) "
+
+    # 2. Explicitly apply Bold formatting to the paragraphs
+    # Paragraphs are 1-indexed. '\n\n' creates 3 paragraphs.
+    doc.Paragraphs(1).Range.Font.Bold = True
+    doc.Paragraphs(3).Range.Font.Bold = True
+
+    async def run_test():
+        target_text = "**(After Prequalification)**\n\n**For Projects with Project Concept Notes (PCN) **"
+        new_text = "**(After Prequalification)**\n\n**For Projects with Project Concept Notes (PCN)**"
+
+        changes = [
+            ModifyText(
+                target_text=target_text,
+                new_text=new_text,
+                comment="Testing whitespace trim",
+            )
+        ]
+
+        # Execute the Batch
+        result = await process_active_word_batch(ctx=ctx, changes=changes, author_name="Adeu Tester", file_path=None)
+
+        assert "Applied: 1" in result, f"Expected 1 applied edit, but got: {result}"
+        assert "Failed: 0" in result, f"Expected 0 failures, but got: {result}"
+
+        # Read the document back to verify CriticMarkup and Formatting Integrity
+        read_res = await read_active_word_document(ctx, clean_view=False, file_path=None)
+        content = read_res.structured_content["markdown"] if isinstance(read_res, ToolResult) else str(read_res)
+
+        # 3. Assert formatting was not sheared off.
+        # If the bug is present, the 'F' in 'For' gets separated from the bold marker like:
+        # "**For Projects...**" -> "For Projects...**" (leading bold marker destroyed).
+
+        # Look for the exact opening sequence of the second paragraph
+        assert "**For Projects" in content, "Formatting corruption detected! The leading bold marker was sheared off."
+
+        # Ensure the trailing space was handled safely (either surgically or via full line replacement)
+        assert "(PCN) **" not in content, "The trailing space was not successfully removed."
+
+    asyncio.run(run_test())
