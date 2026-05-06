@@ -18,7 +18,9 @@ def test_legal_term_replacement_tenant_lessee():
     modified = "The Lessee shall pay."
 
     edits = generate_edits_from_text(original, modified)
-    target_edits = [e for e in edits if "enant" in e.target_text or "essee" in (e.new_text or "")]
+    target_edits = [
+        e for e in edits if "enant" in e.target_text or "essee" in (e.new_text or "")
+    ]
 
     assert len(target_edits) == 1
     assert target_edits[0].target_text == "Tenant"
@@ -65,11 +67,23 @@ def test_multi_word_phrase_change():
     assert "red" in phrase_edits[0].new_text
 
 
-def test_val_obs_new_8_diff_coalescing():
+def test_val_obs_new_8_adjacent_edits_remain_separate():
     """
-    VAL-OBS-NEW-8: Adjacent edits separated only by whitespace or punctuation
-    or short runs of stable tokens should be coalesced into a single hunk
-    to prevent redline fragmentation across clauses.
+    Adjacent semantic edits separated by stable text remain as separate
+    ModifyText objects.
+
+    History: an earlier implementation coalesced adjacent edits into a single
+    hunk by appending "gap + edit.target_text" to the previous edit's
+    target_text. That post-coalesce pass produced semantically inconsistent
+    edit objects (target_text claimed to live at one position while
+    _match_start_index pointed elsewhere) and silently corrupted documents
+    when the resulting edits were fed through RedlineEngine.apply_edits.
+    See `debug_bug6_engine_baseline.py` and the Bug 6 investigation.
+
+    The original VAL-OBS-NEW-8 intent — visually grouping adjacent redlines
+    in rendered output — is a rendering-layer concern. If desired, it should
+    be re-implemented inside `_create_diff_output` without mutating the
+    underlying ModifyText objects.
     """
     # 4-word gap (" year of the AI ")
     original = "the second year of the AI platform shift"
@@ -77,5 +91,17 @@ def test_val_obs_new_8_diff_coalescing():
 
     edits = generate_edits_from_text(original, modified)
 
-    # Without coalescing, 'second'->'third' and 'platform'->'strategy' are 2 separate edits.
-    assert len(edits) == 1, "Edits should be coalesced into a single hunk"
+    # Two semantic changes -> two edits. Each is self-consistent.
+    assert len(edits) == 2
+    assert edits[0].target_text == "second"
+    assert edits[0].new_text == "third"
+    assert edits[1].target_text == "platform"
+    assert edits[1].new_text == "strategy"
+
+    # Self-consistency invariant: each edit's target_text actually appears
+    # at its claimed _match_start_index.
+    for e in edits:
+        idx = e._match_start_index
+        assert idx is not None
+        if e.target_text:
+            assert original[idx : idx + len(e.target_text)] == e.target_text
