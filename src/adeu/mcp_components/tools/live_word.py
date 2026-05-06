@@ -1,4 +1,6 @@
 # FILE: src/adeu/mcp_components/tools/live_word.py
+from adeu.redline.mapper import DocumentMapper
+from adeu.redline.mapper import renumber_snapshot_ids
 from adeu.redline.engine import validate_edit_strings
 from adeu import RedlineEngine
 import io
@@ -6,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
-
+from docx import Document as load_document
 import structlog
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
@@ -265,6 +267,14 @@ if sys.platform == "win32":
         actual_path = word_doc.FullName
 
         py_doc = load_document(stream)
+
+        # Bug 5: renumber snapshot IDs to the disk path's two-pool scheme so
+        # an agent that reads via Live Word sees the same shape of Chg:N /
+        # Com:N IDs that the disk path emits, eliminating cross-path
+        # collision when the agent later targets a tracked change or comment.
+
+        renumber_snapshot_ids(py_doc)
+
         text = _extract_text_from_doc(py_doc, clean_view=clean_view)
         return text, actual_path, py_doc
 
@@ -463,9 +473,18 @@ if sys.platform == "win32":
         # then run RedlineEngine.validate_edits against it.
         if edits:
             try:
+
                 xml_str = doc.WordOpenXML
                 snapshot_stream = _build_mock_docx_stream(xml_str)
                 snapshot_engine = RedlineEngine(snapshot_stream, author=author_name)
+                # Bug 5: renumber the snapshot's IDs so that any error messages
+                # mention the same Chg:N / Com:N values the agent saw when it
+                # last read the document via Live Word.
+                renumber_snapshot_ids(snapshot_engine.doc)
+                # Force the mapper to rebuild against the renumbered doc.
+                snapshot_engine.mapper = type(snapshot_engine.mapper)(
+                    snapshot_engine.doc
+                )
                 category_b_errors = snapshot_engine.validate_edits(edits)
             except Exception as e:
                 logger.warning(f"Could not run Category B validation: {e}")
@@ -480,14 +499,15 @@ if sys.platform == "win32":
         try:
             # --- FIX 1: PROCESS ACTIONS FIRST & SURVIVE DRIFT ---
             if actions:
-                from docx import Document as load_document
-
-                from adeu.redline.mapper import DocumentMapper
 
                 # Build virtual map to translate the LLM's Chg:N IDs
                 xml_str = doc.WordOpenXML
                 stream = _build_mock_docx_stream(xml_str)
                 py_doc = load_document(stream)
+                # Bug 5: renumber to the disk-style two-pool scheme so the
+                # agent's Chg:N / Com:N target_id values resolve to the same
+                # XML elements the agent saw when reading via Live Word.
+                renumber_snapshot_ids(py_doc)
                 mapper = DocumentMapper(py_doc)
                 _, _, mapping = _get_haystack()
 

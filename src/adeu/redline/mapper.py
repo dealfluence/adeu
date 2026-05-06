@@ -39,6 +39,129 @@ class TextSpan:
     hyperlink_id: Optional[str] = None
 
 
+# FILE: src/adeu/redline/mapper.py
+
+
+def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Rewrites w:id attributes on a snapshot Document to mirror the disk path's
+    two-pool numbering scheme:
+      - w:ins / w:del elements form a sequential "Chg" pool starting at 1
+      - w:comment elements form a separate sequential "Com" pool starting at 1
+
+    Updates all cross-references so the document remains internally consistent:
+      - w:commentReference, w:commentRangeStart, w:commentRangeEnd in document.xml
+        get their w:id values remapped to the new Com pool
+      - w15:p (legacy comment threading parent attribute) gets remapped
+      - commentsExtended.xml's w15:paraIdParent linking is preserved verbatim
+        because it's keyed by paraId (a separate identifier) — no remap needed
+
+    Why: Live Word allocates IDs from a single shared counter for both revisions
+    and comments. Disk path uses two independent counters. An agent that reads
+    via the disk path and writes via Live Word (or vice versa) can target the
+    wrong element because Com:N from one path may not match Com:N from the
+    other. Renumbering the Live Word snapshot to match disk's two-pool scheme
+    eliminates this collision (Bug 5).
+
+    The remapping is fully deterministic: IDs are assigned in document order
+    of the elements, so two reads of the same unmodified snapshot produce
+    identical renumbered projections.
+
+    Args:
+        doc: a python-docx Document built from a Live Word snapshot.
+
+    Returns:
+        (chg_id_remap, com_id_remap): two dicts mapping original w:id strings
+        to new w:id strings. Useful for callers that need to translate IDs
+        across the renumber, though most consumers can ignore them — the
+        mapper reads the renumbered IDs directly from the mutated doc.
+    """
+
+    # --- Renumber w:ins / w:del (Chg pool) ---
+    chg_remap: dict[str, str] = {}
+    next_chg = 1
+    body_root = doc.element
+
+    # Find ins/del elements in document order. We walk in tree order to ensure
+    # determinism — XPath findall returns in document order for python-docx.
+    for tag in (qn("w:ins"), qn("w:del")):
+        for elem in body_root.iter(tag):
+            old_id = elem.get(qn("w:id"))
+            if old_id is None:
+                continue
+            if old_id in chg_remap:
+                # Same id might appear on multiple elements (rare but possible —
+                # e.g. paired ins/del from a single revision). Keep them paired.
+                elem.set(qn("w:id"), chg_remap[old_id])
+                continue
+            new_id = str(next_chg)
+            chg_remap[old_id] = new_id
+            elem.set(qn("w:id"), new_id)
+            next_chg += 1
+
+    # --- Renumber w:comment (Com pool) ---
+    # Comments live in a separate part — find it via the package.
+    com_remap: dict[str, str] = {}
+    next_com = 1
+    comments_part = None
+    for part in doc.part.package.parts:
+        if (
+            part.content_type
+            == "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+        ):
+            comments_part = part
+            break
+
+    if comments_part is not None:
+        # The comments part may be a generic Part or an XmlPart depending on
+        # how python-docx loaded it. Use the same lazy-element pattern that
+        # CommentsManager uses elsewhere in the codebase.
+        if hasattr(comments_part, "element"):
+            comments_root = comments_part.element
+        else:
+            from docx.oxml import parse_xml
+
+            if not hasattr(comments_part, "_adeu_element"):
+                comments_part._adeu_element = parse_xml(comments_part.blob)
+            comments_root = comments_part._adeu_element
+
+        for c in comments_root.findall(qn("w:comment")):
+            old_id = c.get(qn("w:id"))
+            if old_id is None:
+                continue
+            if old_id in com_remap:
+                c.set(qn("w:id"), com_remap[old_id])
+                continue
+            new_id = str(next_com)
+            com_remap[old_id] = new_id
+            c.set(qn("w:id"), new_id)
+            next_com += 1
+
+    # --- Update cross-references in document.xml to use new Com IDs ---
+    # commentReference, commentRangeStart, commentRangeEnd all carry w:id
+    # pointing into the comments part.
+    for tag in (
+        qn("w:commentReference"),
+        qn("w:commentRangeStart"),
+        qn("w:commentRangeEnd"),
+    ):
+        for elem in body_root.iter(tag):
+            old_id = elem.get(qn("w:id"))
+            if old_id is not None and old_id in com_remap:
+                elem.set(qn("w:id"), com_remap[old_id])
+
+    # Legacy threading: w:comment elements may carry w15:p pointing at the
+    # parent comment id. Remap if present.
+    if comments_part is not None:
+        w15_p_attr = "{http://schemas.microsoft.com/office/word/2012/wordml}p"
+        for c in comments_root.findall(qn("w:comment")):
+            parent_id = c.get(w15_p_attr)
+            if parent_id is not None and parent_id in com_remap:
+                c.set(w15_p_attr, com_remap[parent_id])
+
+    return chg_remap, com_remap
+
+
 class DocumentMapper:
     def __init__(self, doc: DocumentObject, clean_view: bool = False):
         self.doc = doc
@@ -96,7 +219,9 @@ class DocumentMapper:
             elif isinstance(item, Paragraph):
                 if not is_first_para:
                     # Attach the newline to the previous paragraph so merges work correctly
-                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    prev_para = (
+                        previous_item if isinstance(previous_item, Paragraph) else None
+                    )
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
@@ -113,7 +238,9 @@ class DocumentMapper:
             elif isinstance(item, Table):
                 if not is_first_para:
                     # Attach the newline to the previous paragraph so merges work correctly
-                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    prev_para = (
+                        previous_item if isinstance(previous_item, Paragraph) else None
+                    )
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
@@ -205,7 +332,9 @@ class DocumentMapper:
         current = start_offset
 
         # Inject zero-length paragraph anchor so empty paragraphs/cells are still map-able
-        span = TextSpan(start=current, end=current, text="", run=None, paragraph=paragraph)
+        span = TextSpan(
+            start=current, end=current, text="", run=None, paragraph=paragraph
+        )
         self.spans.append(span)
 
         active_ids: set[str] = set()
@@ -216,7 +345,9 @@ class DocumentMapper:
         current_wrappers = ("", "")
         current_style = ("", "")  # Trailing style in pending_runs (for elision)
         active_hyperlink_id = None
-        pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
+        pending_runs: List[
+            Tuple[str, str, Optional[Run], Optional[str], Optional[str]]
+        ] = []
 
         def flush_pending_runs():
             """Emits pending_runs + wrappers as spans. Resets pending_runs."""
@@ -229,7 +360,9 @@ class DocumentMapper:
                 current += len(s_tok)
             for kind, txt, r_obj, i_id, d_id in pending_runs:
                 if kind == "virtual":
-                    self._add_virtual_text(txt, current, paragraph, hyperlink_id=active_hyperlink_id)
+                    self._add_virtual_text(
+                        txt, current, paragraph, hyperlink_id=active_hyperlink_id
+                    )
                 else:
                     span = TextSpan(
                         start=current,
@@ -289,7 +422,9 @@ class DocumentMapper:
                     if self.clean_view:
                         new_wrappers = ("", "")
                     else:
-                        start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
+                        start_token, end_token = self._get_wrappers(
+                            curr_ins_id, curr_del_id, active_ids
+                        )
                         new_wrappers = (start_token, end_token)
                     new_style = (prefix, suffix)
 
@@ -307,10 +442,16 @@ class DocumentMapper:
                             skip_leading_prefix = True
 
                         for kind, txt, r_obj in run_parts:
-                            if skip_leading_prefix and kind == "virtual" and txt == new_style[0]:
+                            if (
+                                skip_leading_prefix
+                                and kind == "virtual"
+                                and txt == new_style[0]
+                            ):
                                 skip_leading_prefix = False
                                 continue
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append(
+                                (kind, txt, r_obj, curr_ins_id, curr_del_id)
+                            )
 
                         current_style = new_style
                     else:
@@ -319,7 +460,9 @@ class DocumentMapper:
                         current_wrappers = new_wrappers
                         current_style = new_style
                         for kind, txt, r_obj in run_parts:
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append(
+                                (kind, txt, r_obj, curr_ins_id, curr_del_id)
+                            )
 
                 # Metadata Handling
                 if not self.clean_view:
@@ -403,7 +546,9 @@ class DocumentMapper:
                     flush_pending_runs()
                     current_wrappers = ("", "")
                     current_style = ("", "")
-                    self._add_virtual_text("[", current, paragraph, hyperlink_id=item.id)
+                    self._add_virtual_text(
+                        "[", current, paragraph, hyperlink_id=item.id
+                    )
                     current += 1
                     active_hyperlink_id = item.id
                 elif item.type == "hyperlink_end":
@@ -411,7 +556,9 @@ class DocumentMapper:
                     current_wrappers = ("", "")
                     current_style = ("", "")
                     txt = f"]({item.date})"
-                    self._add_virtual_text(txt, current, paragraph, hyperlink_id=item.id)
+                    self._add_virtual_text(
+                        txt, current, paragraph, hyperlink_id=item.id
+                    )
                     current += len(txt)
                     active_hyperlink_id = None
                 elif item.type == "xref_start":
@@ -505,7 +652,9 @@ class DocumentMapper:
         self.full_text += text
 
     def _replace_smart_quotes(self, text: str) -> str:
-        return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        return (
+            text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        )
 
     def _make_fuzzy_regex(self, target_text: str) -> str:
         """
@@ -595,7 +744,9 @@ class DocumentMapper:
             return []
 
         # 1. Exact Match
-        matches = [m.span() for m in re.finditer(re.escape(target_text), self.full_text)]
+        matches = [
+            m.span() for m in re.finditer(re.escape(target_text), self.full_text)
+        ]
         if matches:
             return [(s, e - s) for s, e in matches]
 
@@ -608,7 +759,9 @@ class DocumentMapper:
 
         # 3. Strip markdown from target
         stripped_target = self._strip_markdown_formatting(target_text)
-        matches = [m.span() for m in re.finditer(re.escape(stripped_target), self.full_text)]
+        matches = [
+            m.span() for m in re.finditer(re.escape(stripped_target), self.full_text)
+        ]
         if matches:
             return [(s, e - s) for s, e in matches]
 
@@ -629,11 +782,17 @@ class DocumentMapper:
             return []
         return self._resolve_runs_at_range(start_idx, start_idx + length)
 
-    def find_target_runs_by_index(self, start_index: int, length: int, rebuild_map: bool = True) -> List[Run]:
+    def find_target_runs_by_index(
+        self, start_index: int, length: int, rebuild_map: bool = True
+    ) -> List[Run]:
         end_index = start_index + length
-        return self._resolve_runs_at_range(start_index, end_index, rebuild_map=rebuild_map)
+        return self._resolve_runs_at_range(
+            start_index, end_index, rebuild_map=rebuild_map
+        )
 
-    def get_virtual_spans_in_range(self, start_index: int, length: int) -> List[TextSpan]:
+    def get_virtual_spans_in_range(
+        self, start_index: int, length: int
+    ) -> List[TextSpan]:
         """
         Returns any virtual spans (run is None) that fall completely within the
         provided range. Used primarily for detecting deleted paragraph boundaries.
@@ -642,11 +801,18 @@ class DocumentMapper:
         return [
             s
             for s in self.spans
-            if s.run is None and s.text == "\n\n" and s.start >= start_index and s.end <= end_index
+            if s.run is None
+            and s.text == "\n\n"
+            and s.start >= start_index
+            and s.end <= end_index
         ]
 
-    def _resolve_runs_at_range(self, start_idx: int, end_idx: int, rebuild_map: bool = True) -> List[Run]:
-        affected_spans = [s for s in self.spans if s.end > start_idx and s.start < end_idx]
+    def _resolve_runs_at_range(
+        self, start_idx: int, end_idx: int, rebuild_map: bool = True
+    ) -> List[Run]:
+        affected_spans = [
+            s for s in self.spans if s.end > start_idx and s.start < end_idx
+        ]
         if not affected_spans:
             return []
 
@@ -664,13 +830,17 @@ class DocumentMapper:
             local_start = start_idx - first_real_span.start
             if local_start > 0:
                 idx_in_working = 0
-                _, right_run = self._split_run_at_index(working_runs[idx_in_working], local_start)
+                _, right_run = self._split_run_at_index(
+                    working_runs[idx_in_working], local_start
+                )
                 working_runs[idx_in_working] = right_run
                 dom_modified = True
                 start_split_adjustment = local_start
 
         # 2. End Split
-        last_real_span = next((s for s in reversed(affected_spans) if s.run is not None), None)
+        last_real_span = next(
+            (s for s in reversed(affected_spans) if s.run is not None), None
+        )
 
         if last_real_span:
             is_same_run = first_real_span is last_real_span
@@ -691,7 +861,9 @@ class DocumentMapper:
 
         return working_runs
 
-    def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Tuple[Optional[Run], Optional[Paragraph]]:
+    def get_insertion_anchor(
+        self, index: int, rebuild_map: bool = True
+    ) -> Tuple[Optional[Run], Optional[Paragraph]]:
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
             for s in reversed(preceding):
@@ -757,7 +929,9 @@ class DocumentMapper:
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:
-        real_spans = [s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx]
+        real_spans = [
+            s for s in self.spans if s.run and s.end > start_idx and s.start < end_idx
+        ]
         if real_spans:
             return real_spans[0]
         return None

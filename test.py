@@ -1,13 +1,18 @@
-# FILE: verify_bug3_fix.py
+# FILE: verify_bug5_fix.py
 """
-Verifies Bug 3 fix: Live Word path now runs validate_edit_strings (Category A)
-and RedlineEngine.validate_edits (Category B) before applying any edits.
+Verifies Bug 5 fix: Live Word snapshot IDs are renumbered to the disk path's
+two-pool scheme.
 
-We can't run the real Live Word COM path without Word, but we CAN:
-1. Verify validate_edit_strings produces the expected messages for each rule.
-2. Verify validate_edit_strings produces identical messages to what
-   RedlineEngine.validate_edits emits (parity check).
-3. Verify the disk path's validate_edits still works end-to-end.
+Strategy:
+1. Build a doc with disk-path edits (creates Chg:1..4 and Com:1,2 in a pool-
+   independent way).
+2. Save the doc, then re-load it as a python-docx Document — this represents
+   the disk-style snapshot we want to mimic.
+3. Manipulate that snapshot to simulate Word's single-pool numbering by
+   shifting all comment IDs upward (e.g., Com:1 -> Com:5).
+4. Apply renumber_snapshot_ids to the simulated-Word snapshot.
+5. Assert that the renumbered snapshot's projection produces the same Chg/Com
+   IDs as the original disk snapshot.
 
 Self-contained.
 """
@@ -19,9 +24,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from docx import Document
+from docx.oxml.ns import qn
 
+from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.models import ModifyText
-from adeu.redline.engine import RedlineEngine, validate_edit_strings
+from adeu.redline.engine import RedlineEngine
+from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
 
 
 def section(title):
@@ -31,194 +39,285 @@ def section(title):
     print("=" * 78)
 
 
-def make_minimal_docx():
+def strip_appendix(text):
+    APPENDIX = "<!-- READONLY_BOUNDARY_START -->"
+    if APPENDIX in text:
+        return text[: text.find(APPENDIX)].rstrip()
+    return text
+
+
+def make_doc_with_changes_and_comments():
     doc = Document()
-    doc.add_paragraph("This is the body of the document.")
-    doc.add_paragraph("Microsoft Teams remains essential to how people meet.")
+    doc.add_paragraph("Quarterly revenue rose by twelve percent.")
+    doc.add_paragraph("The team launched three new products this year.")
     stream = BytesIO()
     doc.save(stream)
     stream.seek(0)
-    return stream
+
+    engine = RedlineEngine(stream, author="Reviewer")
+    engine.process_batch(
+        [
+            ModifyText(
+                type="modify",
+                target_text="twelve",
+                new_text="fifteen",
+                comment="Verify with finance",
+            ),
+            ModifyText(
+                type="modify",
+                target_text="three",
+                new_text="four",
+                comment="Confirm product count",
+            ),
+        ]
+    )
+    return engine.save_to_stream().getvalue()
 
 
-def disk_validate(edits):
-    stream = make_minimal_docx()
-    engine = RedlineEngine(stream, author="Test")
-    return engine.validate_edits(edits)
+def get_id_inventory(doc_bytes):
+    """Returns (chg_ids_in_order, com_ids_in_order) as found in the projection."""
+    text = strip_appendix(
+        extract_text_from_stream(BytesIO(doc_bytes), clean_view=False)
+    )
+    import re
+
+    chg = re.findall(r"\bChg:(\d+)\b", text)
+    com = re.findall(r"\bCom:(\d+)\b", text)
+    return chg, com, text
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Category A rules — all six should fire from validate_edit_strings.
+# Test 1: Confirm baseline - the disk path's natural ID emission.
 # ---------------------------------------------------------------------------
+section("Test 1: Disk path's natural ID emission (baseline)")
 
-CATEGORY_A_CASES = [
-    (
-        "Manual CriticMarkup",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="{++HALLUCINATED++} Microsoft Teams",
-        ),
-        "Do not manually write CriticMarkup tags",
-    ),
-    (
-        "Heading level > 6",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="####### Subsection\n\nMicrosoft Teams",
-        ),
-        "Heading level 7 is not supported",
-    ),
-    (
-        "Inserting footnote marker",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="Microsoft Teams[^fn-99]",
-        ),
-        "Cannot insert footnote/endnote markers",
-    ),
-    (
-        "Inserting hyperlink",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="[Microsoft Teams](https://example.com)",
-        ),
-        "Cannot insert hyperlinks via text replace",
-    ),
-    (
-        "Inserting cross-reference",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="[~Section 1~](#sec1) Microsoft Teams",
-        ),
-        "Cannot insert cross-references",
-    ),
-    (
-        "Inserting internal anchor",
-        ModifyText(
-            type="modify",
-            target_text="Microsoft Teams",
-            new_text="{#anchor1} Microsoft Teams",
-        ),
-        "Cannot modify or insert internal anchor markers",
-    ),
-]
+disk_bytes = make_doc_with_changes_and_comments()
+chg_ids, com_ids, text = get_id_inventory(disk_bytes)
+print(f"Chg IDs in order: {chg_ids}")
+print(f"Com IDs in order: {com_ids}")
+print(f"\nProjection (first 500 chars):")
+print(text[:500])
 
-section("Test 1: validate_edit_strings catches all Category A rules")
-all_pass = True
-for label, edit, expected_substring in CATEGORY_A_CASES:
-    errors = validate_edit_strings([edit])
-    if errors and expected_substring in errors[0]:
-        print(f"  [PASS] {label}")
-        print(f"         {errors[0]}")
+baseline_chg_set = set(chg_ids)
+baseline_com_set = set(com_ids)
+
+
+# ---------------------------------------------------------------------------
+# Test 2: Simulate Word's single-pool numbering, then renumber, then verify
+# we get back to the disk-style two-pool scheme.
+# ---------------------------------------------------------------------------
+section("Test 2: Simulate Word numbering -> renumber -> verify disk parity")
+
+# Load the disk-saved doc.
+doc = Document(BytesIO(disk_bytes))
+
+# Step A: manually reshuffle IDs to look like Word would have allocated them.
+# Word's pool: Chg gets 0..N-1, Com gets N..N+M-1.
+# Currently we have Chg in {1,2,3,4} and Com in {1,2}.
+# To simulate Word: shift comment IDs by max(Chg) so Com becomes {5,6}, and
+# shift Chg ids down by 1 to start at 0.
+
+print("Before simulation:")
+chg_in_xml = []
+for tag in (qn("w:ins"), qn("w:del")):
+    for el in doc.element.iter(tag):
+        chg_in_xml.append(el.get(qn("w:id")))
+print(f"  Chg IDs in document.xml: {sorted(set(chg_in_xml), key=int)}")
+
+com_in_doc = []
+for el in doc.element.iter(qn("w:commentReference")):
+    com_in_doc.append(el.get(qn("w:id")))
+print(f"  Com IDs in document.xml refs: {sorted(set(com_in_doc), key=int)}")
+
+# Find the comments part.
+comments_part = None
+for part in doc.part.package.parts:
+    if (
+        part.content_type
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+    ):
+        comments_part = part
+        break
+
+if comments_part is not None:
+    if hasattr(comments_part, "element"):
+        comments_root = comments_part.element
     else:
-        print(f"  [FAIL] {label}")
-        print(f"         expected substring: {expected_substring!r}")
-        print(f"         got: {errors!r}")
-        all_pass = False
+        from docx.oxml import parse_xml
+
+        if not hasattr(comments_part, "_adeu_element"):
+            comments_part._adeu_element = parse_xml(comments_part.blob)
+        comments_root = comments_part._adeu_element
+
+    com_in_xml = [c.get(qn("w:id")) for c in comments_root.findall(qn("w:comment"))]
+    print(f"  Com IDs in comments.xml: {sorted(set(com_in_xml), key=int)}")
+
+# Now simulate Word's numbering.
+print("\nApplying simulated-Word renumbering:")
+SHIFT = 100  # Push Com IDs into a non-overlapping range to mimic Word's single pool.
+
+# Shift comments AND their references.
+if comments_part is not None:
+    for c in comments_root.findall(qn("w:comment")):
+        old = c.get(qn("w:id"))
+        if old is not None:
+            c.set(qn("w:id"), str(int(old) + SHIFT))
+
+for tag in (
+    qn("w:commentReference"),
+    qn("w:commentRangeStart"),
+    qn("w:commentRangeEnd"),
+):
+    for el in doc.element.iter(tag):
+        old = el.get(qn("w:id"))
+        if old is not None:
+            el.set(qn("w:id"), str(int(old) + SHIFT))
+
+# Verify the simulation took effect.
+sim_com_in_doc = []
+for el in doc.element.iter(qn("w:commentReference")):
+    sim_com_in_doc.append(el.get(qn("w:id")))
 print(
-    f"\n{'All Category A checks PASS.' if all_pass else 'Some Category A checks FAILED.'}"
+    f"  After simulation, Com IDs in document.xml refs: {sorted(set(sim_com_in_doc), key=int)}"
 )
 
+# Project the simulated doc - should show shifted IDs.
+sim_text = _extract_text_from_doc(doc, clean_view=False)
+sim_text = strip_appendix(sim_text)
+import re
+
+sim_chg = re.findall(r"\bChg:(\d+)\b", sim_text)
+sim_com = re.findall(r"\bCom:(\d+)\b", sim_text)
+print(f"\nSimulated projection IDs:")
+print(f"  Chg: {sorted(set(sim_chg), key=int)}")
+print(f"  Com: {sorted(set(sim_com), key=int)} (should be in 100+ range)")
+
+if not all(int(c) >= SHIFT for c in sim_com):
+    print(f"  [FAIL] Simulation didn't shift comment IDs correctly")
+else:
+    print(f"  [PASS] Simulation produced shifted Com IDs as expected")
+
+
+# Step B: Apply renumber_snapshot_ids.
+print("\nApplying renumber_snapshot_ids():")
+chg_remap, com_remap = renumber_snapshot_ids(doc)
+print(f"  Chg remap: {chg_remap}")
+print(f"  Com remap: {com_remap}")
+
+
+# Step C: Project again and verify IDs match the original disk-style.
+final_text = strip_appendix(_extract_text_from_doc(doc, clean_view=False))
+final_chg = re.findall(r"\bChg:(\d+)\b", final_text)
+final_com = re.findall(r"\bCom:(\d+)\b", final_text)
+print(f"\nFinal renumbered projection IDs:")
+print(f"  Chg: {sorted(set(final_chg), key=int)}")
+print(f"  Com: {sorted(set(final_com), key=int)}")
+
+# Assertions:
+final_chg_set = set(final_chg)
+final_com_set = set(final_com)
+
+if final_chg_set == baseline_chg_set:
+    print(
+        f"\n[PASS] Chg IDs after renumber match baseline disk-style: {sorted(final_chg_set, key=int)}"
+    )
+else:
+    print(f"\n[FAIL] Chg ID mismatch")
+    print(f"  baseline: {sorted(baseline_chg_set, key=int)}")
+    print(f"  after   : {sorted(final_chg_set, key=int)}")
+
+if final_com_set == baseline_com_set:
+    print(
+        f"[PASS] Com IDs after renumber match baseline disk-style: {sorted(final_com_set, key=int)}"
+    )
+else:
+    print(f"[FAIL] Com ID mismatch")
+    print(f"  baseline: {sorted(baseline_com_set, key=int)}")
+    print(f"  after   : {sorted(final_com_set, key=int)}")
+
 
 # ---------------------------------------------------------------------------
-# Test 2: Parity — validate_edit_strings(edits) == disk_validate(edits) for
-# Category A inputs (since Category A errors fire before Category B logic
-# even runs against the document).
+# Test 3: Determinism - running renumber twice should be idempotent on a
+# fresh snapshot.
 # ---------------------------------------------------------------------------
+section("Test 3: Idempotence")
 
-section("Test 2: Disk-vs-helper parity for Category A inputs")
-parity_ok = True
-for label, edit, _ in CATEGORY_A_CASES:
-    helper_errors = validate_edit_strings([edit])
-    disk_errors = disk_validate([edit])
-    # Disk errors may include Category B error too (target text not found, etc.)
-    # but we expect the Category A error to appear at the top.
-    if not helper_errors:
-        print(f"  [SKIP] {label} — no Category A error")
-        continue
-    helper_msg = helper_errors[0]
-    found_in_disk = any(helper_msg == err for err in disk_errors)
-    if found_in_disk:
-        print(f"  [PASS] {label}: helper message appears verbatim in disk output")
+doc1 = Document(BytesIO(disk_bytes))
+doc2 = Document(BytesIO(disk_bytes))
+
+renumber_snapshot_ids(doc1)
+renumber_snapshot_ids(doc2)
+
+text1 = strip_appendix(_extract_text_from_doc(doc1, clean_view=False))
+text2 = strip_appendix(_extract_text_from_doc(doc2, clean_view=False))
+
+if text1 == text2:
+    print(
+        "[PASS] Two independent renumbers of the same input produce identical projections."
+    )
+else:
+    print("[FAIL] Renumber is non-deterministic.")
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Comment <-> reference linkage preserved after renumber.
+# Take a renumbered doc, look at a Com:N reference, find the corresponding
+# comment, and verify the text matches what we expect.
+# ---------------------------------------------------------------------------
+section("Test 4: Comment -> reference linkage preserved")
+
+doc3 = Document(BytesIO(disk_bytes))
+# Apply our SHIFT trick to mimic Word's pool.
+comments_part = None
+for part in doc3.part.package.parts:
+    if (
+        part.content_type
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+    ):
+        comments_part = part
+        break
+if comments_part is not None:
+    if hasattr(comments_part, "element"):
+        comments_root = comments_part.element
     else:
-        print(f"  [FAIL] {label}: messages differ")
-        print(f"         helper: {helper_msg!r}")
-        print(f"         disk:   {disk_errors!r}")
-        parity_ok = False
-print(f"\n{'Parity confirmed.' if parity_ok else 'Parity FAILED.'}")
+        from docx.oxml import parse_xml
 
+        if not hasattr(comments_part, "_adeu_element"):
+            comments_part._adeu_element = parse_xml(comments_part.blob)
+        comments_root = comments_part._adeu_element
+    for c in comments_root.findall(qn("w:comment")):
+        old = c.get(qn("w:id"))
+        if old is not None:
+            c.set(qn("w:id"), str(int(old) + SHIFT))
+for tag in (
+    qn("w:commentReference"),
+    qn("w:commentRangeStart"),
+    qn("w:commentRangeEnd"),
+):
+    for el in doc3.element.iter(tag):
+        old = el.get(qn("w:id"))
+        if old is not None:
+            el.set(qn("w:id"), str(int(old) + SHIFT))
 
-# ---------------------------------------------------------------------------
-# Test 3: Empty/well-formed edit batch produces no errors.
-# ---------------------------------------------------------------------------
+# Renumber.
+renumber_snapshot_ids(doc3)
 
-section("Test 3: Well-formed edits produce no Category A errors")
-good_edits = [
-    ModifyText(type="modify", target_text="Microsoft Teams", new_text="Teams"),
-    ModifyText(type="modify", target_text="meet", new_text="collaborate"),
-]
-errors = validate_edit_strings(good_edits)
-if errors:
-    print(f"  [FAIL] Expected no errors, got: {errors}")
+# Build mapper to extract comments_map.
+mapper = DocumentMapper(doc3)
+print(f"After renumber, comments_map keys: {list(mapper.comments_map.keys())}")
+print(f"After renumber, comments_map content:")
+for cid, info in mapper.comments_map.items():
+    print(f"  Com:{cid} -> {info!r}")
+
+# Expected: same content as baseline.
+print()
+print("Expected (from baseline):")
+baseline_doc = Document(BytesIO(disk_bytes))
+baseline_mapper = DocumentMapper(baseline_doc)
+for cid, info in baseline_mapper.comments_map.items():
+    print(f"  Com:{cid} -> {info!r}")
+
+if dict(mapper.comments_map) == dict(baseline_mapper.comments_map):
+    print("\n[PASS] Renumbered comments_map equals baseline comments_map.")
 else:
-    print("  [PASS] No errors for well-formed edits.")
-
-
-# ---------------------------------------------------------------------------
-# Test 4: Empty list returns empty errors.
-# ---------------------------------------------------------------------------
-
-section("Test 4: Empty edit list returns empty error list")
-errors = validate_edit_strings([])
-if errors:
-    print(f"  [FAIL] Expected no errors, got: {errors}")
-else:
-    print("  [PASS] Empty list → empty errors.")
-
-
-# ---------------------------------------------------------------------------
-# Test 5: Edit numbering — the i+1 indexing should reflect position in the batch.
-# ---------------------------------------------------------------------------
-
-section("Test 5: Edit numbering reflects position in the batch")
-mixed = [
-    ModifyText(type="modify", target_text="ok", new_text="ok2"),  # Edit 1, valid
-    ModifyText(
-        type="modify", target_text="bad", new_text="{++bad++}"
-    ),  # Edit 2, Cat-A fail
-    ModifyText(type="modify", target_text="ok3", new_text="ok4"),  # Edit 3, valid
-    ModifyText(
-        type="modify", target_text="bad2", new_text="####### bad"
-    ),  # Edit 4, Cat-A fail
-]
-errors = validate_edit_strings(mixed)
-print(f"  Errors emitted: {len(errors)}")
-for e in errors:
-    print(f"    {e}")
-if len(errors) == 2 and "Edit 2" in errors[0] and "Edit 4" in errors[1]:
-    print("\n  [PASS] Edit numbering correct: positions 2 and 4 flagged.")
-else:
-    print("\n  [FAIL] Edit numbering does not match expected positions.")
-
-
-# ---------------------------------------------------------------------------
-# Test 6: Disk path still works end-to-end (regression check).
-# ---------------------------------------------------------------------------
-
-section("Test 6: Disk path validate_edits still produces correct messages")
-edit = ModifyText(
-    type="modify",
-    target_text="Microsoft Teams",
-    new_text="{++HALLUCINATED++} Microsoft Teams",
-)
-errors = disk_validate([edit])
-print(f"  Errors: {errors}")
-if errors and "Do not manually write CriticMarkup" in errors[0]:
-    print("  [PASS] Disk path still rejects manual CriticMarkup.")
-else:
-    print("  [FAIL] Disk path validation regressed.")
+    print("\n[FAIL] Renumbered comments_map differs from baseline.")
