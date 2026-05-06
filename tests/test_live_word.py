@@ -6,9 +6,7 @@ import pytest
 from tests.utils import extract_content, get_mock_ctx, run_async
 
 # Only run these tests on Windows since COM requires it
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32", reason="Live Word COM tests require Windows platform"
-)
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Live Word COM tests require Windows platform")
 
 if sys.platform == "win32":
     from adeu.mcp_components.tools.live_word import (
@@ -35,9 +33,7 @@ def test_live_word_read_and_modify(active_word_app):
                 new_text="fully verified dynamic canvas",
             )
         ]
-        result = await process_active_word_batch(
-            ctx, changes=changes, author_name="Testing Agent"
-        )
+        result = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
         assert "Applied: 1, Failed: 0" in result
 
         # Step 3: Re-read to verify CriticMarkup injection
@@ -64,9 +60,7 @@ def test_live_word_modify_with_comment(active_word_app):
                 comment="Foxes are very tired today.",
             )
         ]
-        res = await process_active_word_batch(
-            ctx, changes=changes, author_name="Testing Agent"
-        )
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
         assert "Applied: 1, Failed: 0" in res
 
         # Check if comment was physically added and extracted back
@@ -218,9 +212,7 @@ def test_live_word_accept_reject_reply(active_word_app):
     doc.TrackRevisions = False
 
     async def run_test():
-        content = extract_content(
-            await read_active_word_document(ctx, clean_view=False)
-        )
+        content = extract_content(await read_active_word_document(ctx, clean_view=False))
         assert "{--brown --}" in content and "{++red ++}" in content
 
         changes = [
@@ -230,9 +222,7 @@ def test_live_word_accept_reject_reply(active_word_app):
         ]
         await process_active_word_batch(ctx, changes=changes, author_name="QA Agent")
 
-        final_content = extract_content(
-            await read_active_word_document(ctx, clean_view=False)
-        )
+        final_content = extract_content(await read_active_word_document(ctx, clean_view=False))
         assert "{++" not in final_content and "{--" not in final_content
         assert "red fox" in final_content
         assert "Yes, absolutely." in final_content
@@ -436,9 +426,7 @@ def test_live_word_bug_04_garbled_text(active_word_app):
 
         assert "{--business identity code [ID]--}" in content
         assert "{++**business identity code** [ID]++}" in content
-        assert "the laws of [Country], business identity code" not in content.replace(
-            original, ""
-        )
+        assert "the laws of [Country], business identity code" not in content.replace(original, "")
 
     run_async(run_test())
 
@@ -464,15 +452,11 @@ def test_live_word_obs_01_author_name_respected(active_word_app):
             )
         ]
 
-        res = await process_active_word_batch(
-            ctx, changes=changes, author_name="Sherlock Holmes"
-        )
+        res = await process_active_word_batch(ctx, changes=changes, author_name="Sherlock Holmes")
 
         assert "Warning: Live Word natively enforces M365 identities" not in res
 
-        content = extract_content(
-            await read_active_word_document(ctx, clean_view=False)
-        )
+        content = extract_content(await read_active_word_document(ctx, clean_view=False))
         assert "Sherlock Holmes" in content
 
     run_async(run_test())
@@ -488,9 +472,7 @@ def test_live_word_obs_02_deletion_insertion_order(active_word_app):
 
     async def run_test():
         changes = [ModifyText(target_text="brown", new_text="red")]
-        await process_active_word_batch(
-            ctx, changes=changes, author_name="Testing Agent"
-        )
+        await process_active_word_batch(ctx, changes=changes, author_name="Testing Agent")
         content = extract_content(await read_active_word_document(ctx))
 
         assert "{--brown--}{++red++}" in content
@@ -506,6 +488,7 @@ def test_live_word_batch_fixes_ambiguity_and_comment_duplication(active_word_app
     3. AcceptChange uses Semantic/Proximity mapping to survive ID drift (Issue 1 & 5).
     """
     from docx import Document
+
     from adeu.mcp_components.tools.live_word import (
         _build_mock_docx_stream,
         process_active_word_batch,
@@ -518,9 +501,7 @@ def test_live_word_batch_fixes_ambiguity_and_comment_duplication(active_word_app
 
     # 1. Setup specific edge-case state
     doc.TrackRevisions = False
-    doc.Range(0, doc.Content.End).Text = (
-        "Banana. Banana.\rThis is a CommentRegion.\rWe have DeletedText here.\n"
-    )
+    doc.Range(0, doc.Content.End).Text = "Banana. Banana.\rThis is a CommentRegion.\rWe have DeletedText here.\n"
 
     doc.TrackRevisions = True
     app.UserName = "Test Reviewer"
@@ -545,48 +526,34 @@ def test_live_word_batch_fixes_ambiguity_and_comment_duplication(active_word_app
             (s.del_id for s in mapper.spans if "DeletedText" in s.text and s.del_id),
             None,
         )
-        assert (
-            target_chg_id is not None
-        ), "Failed to setup: Could not find XML ID for DeletedText."
+        assert target_chg_id is not None, "Failed to setup: Could not find XML ID for DeletedText."
 
         # 3. Build Batch Payloads
         ambiguous_batch = [
-            ModifyText(
-                type="modify", target_text="Banana", new_text="Apple", comment=None
-            ),
+            ModifyText(type="modify", target_text="Banana", new_text="Apple", comment=None),
         ]
         valid_batch = [
-            ModifyText(
-                type="modify", target_text="Region", new_text="Zone", comment=None
-            ),
+            ModifyText(type="modify", target_text="Region", new_text="Zone", comment=None),
             AcceptChange(type="accept", target_id=f"Chg:{target_chg_id}", comment=None),
         ]
 
         # 4. Execute Batches
-        ambig_res = await process_active_word_batch(
-            ctx=ctx, changes=ambiguous_batch, author_name="Adeu AI"
-        )
+        ambig_res = await process_active_word_batch(ctx=ctx, changes=ambiguous_batch, author_name="Adeu AI")
         assert "Failed: 1" in ambig_res
         assert "Ambiguous match" in ambig_res
 
-        result = await process_active_word_batch(
-            ctx=ctx, changes=valid_batch, author_name="Adeu AI"
-        )
+        result = await process_active_word_batch(ctx=ctx, changes=valid_batch, author_name="Adeu AI")
 
         # 5. Assertions
         assert "Applied: 2" in result, f"Expected 2 applied edits. Result: {result}"
         assert "Failed: 0" in result, f"Expected 0 failed edits. Result: {result}"
 
         # The original deletion should be accepted (gone).
-        assert (
-            doc.Revisions.Count == 2
-        ), f"Expected 2 revisions remaining, found {doc.Revisions.Count}."
+        assert doc.Revisions.Count == 2, f"Expected 2 revisions remaining, found {doc.Revisions.Count}."
         assert "Zone" in doc.Revisions(2).Range.Text, "New revision text mismatch."
 
         # The comment must not be duplicated.
-        assert (
-            doc.Comments.Count == 1
-        ), f"Expected exactly 1 comment, found {doc.Comments.Count} (Duplication bug!)."
+        assert doc.Comments.Count == 1, f"Expected exactly 1 comment, found {doc.Comments.Count} (Duplication bug!)."
 
     run_async(run_test())
 
@@ -600,9 +567,7 @@ def test_live_word_structured_insertion_at_boundary(active_word_app):
     app, doc = active_word_app
     ctx = get_mock_ctx()
 
-    doc.Range(0, doc.Content.End).Text = (
-        "OUR MISSION\nAlthough we have made outstanding progress over the past year.\n"
-    )
+    doc.Range(0, doc.Content.End).Text = "OUR MISSION\nAlthough we have made outstanding progress over the past year.\n"
     doc.Paragraphs(1).Range.Style = doc.Styles("Heading 1")
 
     async def run_test():
