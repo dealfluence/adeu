@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from tests.utils import run_async, get_mock_ctx, extract_content
+from tests.utils import extract_content, get_mock_ctx, run_async
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
@@ -21,7 +21,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 if sys.platform == "win32":
-    from fastmcp.tools.tool import ToolResult
     from adeu.mcp_components.tools.live_word import (
         process_active_word_batch,
         read_active_word_document,
@@ -231,4 +230,3 @@ def test_simple_inline_replacement_unchanged(active_word_app):
     assert "{++**red**++}" in content
     # bold is applied inside the insertion; when read raw it's markdown-wrapped
     assert "**red**" in content
-

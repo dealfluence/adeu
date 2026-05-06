@@ -1,36 +1,31 @@
-from adeu import AcceptChange, RedlineEngine
-from adeu import ModifyText, RedlineEngine
-from adeu import ModifyText, RedlineEngine, ReplyComment
-from adeu.ingest import extract_text_from_stream
-from adeu.mcp_components.tools.document import PROCESS_BATCH_OPERATIONS_DESC
-from adeu.mcp_components.tools.sanitize import sanitize_docx
-from adeu.models import ModifyText
-from adeu.redline.engine import BatchValidationError
-from adeu.redline.engine import BatchValidationError, RedlineEngine
-from adeu.redline.engine import RedlineEngine
-from adeu.sanitize.report import SanitizeReport
-from adeu.sanitize.transforms import remove_all_comments
-from adeu.utils.docx import _coalesce_runs_in_paragraph
-from adeu.utils.docx import get_visible_runs
-from docx import Document
-from docx.opc.constants import CONTENT_TYPE as CT
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
-from docx.opc.part import XmlPart
-from docx.oxml import OxmlElement
-from docx.oxml import parse_xml
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
-from io import BytesIO
-from unittest.mock import AsyncMock, MagicMock, patch
-from unittest.mock import MagicMock
 import asyncio
-import docx
 import io
-import pytest
 import subprocess
 import sys
 import time
 import zipfile
+from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import docx
+import pytest
+from docx import Document
+from docx.opc.constants import CONTENT_TYPE as CT
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.opc.part import XmlPart
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+
+from adeu import AcceptChange, ReplyComment
+from adeu.ingest import extract_text_from_stream
+from adeu.mcp_components.tools.document import PROCESS_BATCH_OPERATIONS_DESC
+from adeu.mcp_components.tools.sanitize import sanitize_docx
+from adeu.models import ModifyText
+from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.sanitize.report import SanitizeReport
+from adeu.sanitize.transforms import remove_all_comments
+from adeu.utils.docx import _coalesce_runs_in_paragraph, get_visible_runs
 
 
 def test_batch_engine_accept_fake_id_attribute_error():
@@ -49,6 +44,7 @@ def test_batch_engine_accept_fake_id_attribute_error():
 
     with pytest.raises(BatchValidationError):
         engine.process_batch([AcceptChange(target_id="Chg:999")])
+
 
 def test_batch_engine_deletes_special_content():
     """
@@ -96,6 +92,7 @@ def test_batch_engine_deletes_special_content():
     )
     assert len(drawings_after) == 1, "BUG: The drawing element was destroyed by the text modification!"
 
+
 def test_batch_engine_heading_depth_enforcement():
     """
     Reproduces a bug where the Batch Engine fails to enforce the maximum
@@ -113,6 +110,7 @@ def test_batch_engine_heading_depth_enforcement():
     with pytest.raises(BatchValidationError):
         engine.process_batch([ModifyText(target_text="Target Text", new_text="####### Heading 7")])
 
+
 def test_batch_engine_reply_to_fake_comment():
     """
     Reproduces a bug where replying to a non-existent comment
@@ -128,6 +126,7 @@ def test_batch_engine_reply_to_fake_comment():
 
     with pytest.raises(BatchValidationError):
         engine.process_batch([ReplyComment(target_id="Com:999", text="Hello")])
+
 
 def test_batch_engine_formatting_removal_fails():
     """
@@ -156,6 +155,7 @@ def test_batch_engine_formatting_removal_fails():
     xml = d2.paragraphs[0]._element.xml
     assert "<w:b/>" in xml.split("<w:ins")[1], "Bug fixed? The bold tag was properly stripped from the insertion."
 
+
 def test_batch_engine_corrupts_multipara_insertion():
     """
     Reproduces a bug where replacing a space with multiple paragraphs
@@ -182,6 +182,7 @@ def test_batch_engine_corrupts_multipara_insertion():
     texts = [p.text for p in d2.paragraphs]
     assert texts == ["Cell", "New", "Text"], f"BUG: Text mapping corruption! Got {texts}"
 
+
 def test_batch_engine_swallows_trailing_deletions():
     """
     Reproduces Bug 9: When replacing text that includes a deletion at the end
@@ -205,6 +206,7 @@ def test_batch_engine_swallows_trailing_deletions():
     # The first paragraph should have '; and' deleted. Let's check the XML.
     xml = d2.paragraphs[0]._element.xml
     assert "<w:del" in xml, "BUG: The trailing deletion of '; and' was swallowed entirely!"
+
 
 def test_diff_engine_ignores_formatting_changes(tmp_path):
     """
@@ -236,6 +238,7 @@ def test_diff_engine_ignores_formatting_changes(tmp_path):
         "Diff engine completely missed the bold -> italic formatting change."
     )
 
+
 def test_diff_engine_splits_markdown_tokens(tmp_path):
     """
     Reproduces Bug 8: Diff engine breaks mid-markdown token.
@@ -257,6 +260,7 @@ def test_diff_engine_splits_markdown_tokens(tmp_path):
 
     # The bug produces `- *(In millions)**` which is invalid markdown.
     assert "- *(In millions)**" not in diff_output, "BUG: Diff engine split a markdown token!"
+
 
 def test_extract_handles_tabs_and_breaks():
     """
@@ -290,6 +294,7 @@ def test_extract_handles_tabs_and_breaks():
     assert "Word One" in text
     assert "WordOne" not in text
 
+
 def test_heuristic_header_detection():
     """
     REPRO: 'Normal' style paragraphs that are BOLD and ALL-CAPS should
@@ -313,6 +318,7 @@ def test_heuristic_header_detection():
     # EXPECTATION: "## **LIABILITY CAP**"
     # The header heuristic adds ##. The inline processor adds **...**.
     assert "## **LIABILITY CAP**" in text
+
 
 def test_disk_engine_drops_comment_on_multipara_insertion():
     """
@@ -356,6 +362,7 @@ def test_disk_engine_drops_comment_on_multipara_insertion():
 
     assert "This comment will be dropped" in comments_xml, "Comment text not found in comments.xml"
 
+
 def test_extractor_ignores_tracked_formatting(tmp_path):
     """
     Reproduces Bug 10: Extractor fails to generate CriticMarkup for <w:rPrChange>.
@@ -381,6 +388,7 @@ def test_extractor_ignores_tracked_formatting(tmp_path):
         "BUG: Tracked formatting change was completely ignored by the extractor."
     )
 
+
 def test_suppress_inherited_removes_complex_scripts():
     """
     Bug #12: Suppressing inherited formatting must strip <w:bCs/> and <w:iCs/>
@@ -402,6 +410,7 @@ def test_suppress_inherited_removes_complex_scripts():
     assert len(rPr.findall(qn("w:bCs"))) == 0, "w:bCs should be stripped (Bug #12)"
     assert len(rPr.findall(qn("w:iCs"))) == 0, "w:iCs should be stripped (Bug #12)"
 
+
 def test_process_document_batch_docstring_mentions_attribution():
     """
     OBS-01 Update: The process_document_batch docstring must explicitly state
@@ -415,6 +424,7 @@ def test_process_document_batch_docstring_mentions_attribution():
     assert "used for attribution" in desc.lower(), (
         "Docstring must explicitly state that author_name is used for attribution."
     )
+
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Live Word is Windows only")
 def test_live_word_trims_common_context():
@@ -454,6 +464,7 @@ def test_live_word_trims_common_context():
         if original_get:
             win32com.client.GetActiveObject = original_get
 
+
 def test_markdown_headers_leak_into_docx():
     doc = Document()
     p1 = doc.add_paragraph("Section 1.")
@@ -491,6 +502,7 @@ def test_markdown_headers_leak_into_docx():
     p2_text = "".join(r.text for r in get_visible_runs(doc_result.paragraphs[1]))
     assert "New Section." in p2_text
 
+
 def test_paragraph_merge_on_newline_deletion():
     """
     Test Case: When replacing text that spans a paragraph boundary (`\\n\\n`)
@@ -519,6 +531,7 @@ def test_paragraph_merge_on_newline_deletion():
 
     visible_text = "".join(r.text for r in get_visible_runs(doc_result.paragraphs[0]))
     assert "Paragraph 1 end. Paragraph 2 start." in visible_text
+
 
 def test_run_coalescing_ooxml_compliance():
     """
@@ -552,9 +565,11 @@ def test_run_coalescing_ooxml_compliance():
     assert len(t_nodes) == 1, f"Expected 1 <w:t> node, got {len(t_nodes)}! Invalid OOXML."
     assert t_nodes[0].text == "Contract", "Text should be concatenated"
 
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
 
 @pytest.mark.anyio
 async def test_sanitize_docx_does_not_block_event_loop():
@@ -601,6 +616,7 @@ async def test_sanitize_docx_does_not_block_event_loop():
         first_tick_delay = loop_ticks[0] - start
         assert first_tick_delay < 0.2, f"Event loop was blocked! First tick took {first_tick_delay}s"
 
+
 def test_sanitize_purges_empty_comment_parts():
     """
     Reproduces a bug where `remove_all_comments` physically ejects empty comment parts
@@ -636,6 +652,7 @@ def test_sanitize_purges_empty_comment_parts():
         "Violation of Architectural Decision #8: Empty comment parts were violently ejected instead of left intact."
     )
 
+
 def test_report_routes_comment_lines_to_structural():
     """
     Reproduces a bug where the SanitizeReport heuristic incorrectly routes
@@ -659,6 +676,7 @@ def test_report_routes_comment_lines_to_structural():
     assert '  [Open] "Updated term." (Counterparty)' not in report.structural_lines, (
         "BUG: The comment line incorrectly landed in structural_lines."
     )
+
 
 def test_repro_split_insertion_coalescing():
     """
@@ -711,6 +729,7 @@ def test_repro_split_insertion_coalescing():
     # We do NOT want them split
     assert "{++rapala++}" not in text
 
+
 def test_engine_init_does_not_strip_proof_err():
     """
     Bug #11: RedlineEngine should not perform global document normalization
@@ -738,6 +757,7 @@ def test_engine_init_does_not_strip_proof_err():
     surviving = engine.doc.element.xpath("//w:proofErr")
     assert len(surviving) == 1, "proofErr was stripped! Engine init should not trigger global normalization."
 
+
 def test_cross_table_cell_edit_validation_error():
     """
     Test Case: When an edit tries to replace text that spans across table cells
@@ -761,6 +781,7 @@ def test_cross_table_cell_edit_validation_error():
         engine.apply_edits([edit])
 
     assert "Target text spans 2 table cells, but replacement provides 1" in str(exc_info.value)
+
 
 def test_repro_unbound_local_curr_ins_id_failure():
     """
@@ -801,6 +822,7 @@ def test_repro_unbound_local_curr_ins_id_failure():
         # If the fix works, we might get other errors (e.g. not found), but NOT UnboundLocal
         if "local variable 'curr_ins_id' referenced before assignment" in str(e):
             pytest.fail(f"Regression: UnboundLocalError raised (wrapped)! Details: {e}")
+
 
 def test_dk1_cell_split_empty_cell_placement():
     """
@@ -850,6 +872,7 @@ def test_dk1_cell_split_empty_cell_placement():
     assert final_doc.tables[0].cell(0, 0).text == "Site Organization"
     assert final_doc.tables[0].cell(0, 1).text == "10%"
 
+
 def test_markdown_numbered_list_leak():
     """
     Test Case: Injecting a new numbered list item using Markdown syntax (`\\n\\n1. Numbered Item`)
@@ -892,6 +915,7 @@ def test_markdown_numbered_list_leak():
     is_list_style = p_new.style is not None and "List" in p_new.style.name
 
     assert has_numPr or is_list_style, "Paragraph is not formatted as a list."
+
 
 def test_markdown_bullet_leak():
     """
@@ -945,6 +969,7 @@ def test_markdown_bullet_leak():
 
     assert has_numPr or is_list_style, "Paragraph is not formatted as a list."
 
+
 def test_multiline_insert_does_not_create_nested_paragraphs():
     """
     Validates Issue Fix: Paragraph merge during wholesale replacement.
@@ -995,6 +1020,7 @@ def test_multiline_insert_does_not_create_nested_paragraphs():
     # Ensure the new paragraph was successfully inserted
     assert "Entire Agreement" in doc_xml
 
+
 def test_val_obs_new_7_paragraph_break_tracking():
     """
     VAL-OBS-NEW-7: When a multi-line string is inserted, the paragraph break
@@ -1019,6 +1045,7 @@ def test_val_obs_new_7_paragraph_break_tracking():
     new_p = p_elements[1]
     ins_marker = new_p.xpath("./w:pPr/w:rPr/w:ins")
     assert len(ins_marker) > 0, "Paragraph break must be tracked with an <w:ins> inside <w:pPr>"
+
 
 def test_external_relationship_does_not_crash_comments_manager():
     """
@@ -1060,6 +1087,7 @@ def test_external_relationship_does_not_crash_comments_manager():
         if "target mode is External" in str(e):
             pytest.fail(f"Regression: Failed to handle external relationship in _ensure_xml_part: {e}")
         raise e
+
 
 def test_repro_comments_namespace_xml_syntax_error():
     """
@@ -1113,4 +1141,3 @@ def test_repro_comments_namespace_xml_syntax_error():
     # We expect the start tag to end with >
     # A rough check:
     assert 'mc:Ignorable="w14 w15 w16cid w16cex">' in xml_str or 'mc:Ignorable="w14 w15 w16cid w16cex" >' in xml_str
-

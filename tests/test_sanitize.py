@@ -2,7 +2,6 @@
 
 import io
 import os
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -16,9 +15,9 @@ from lxml import etree
 from adeu.sanitize import transforms
 from adeu.sanitize.core import SanitizeError, sanitize_docx
 
+from .docx_fixtures import save_to_temp_docx
 from .verify_sanitized import (
     check_full_scrub,
-    check_global_scrub,
     check_keep_markup,
 )
 
@@ -29,38 +28,12 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 # ---------------------------------------------------------------------------
 
 
-import io
-import os
-import zipfile
-from pathlib import Path
-
-import pytest
-from docx import Document
-from docx.opc.part import Part
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from lxml import etree
-
-from adeu.sanitize import transforms
-from adeu.sanitize.core import SanitizeError, sanitize_docx
-
-from .verify_sanitized import (
-    check_full_scrub,
-    check_global_scrub,
-    check_keep_markup,
-)
-from .docx_fixtures import (
-    save_to_temp_docx,
-    make_doc_with_track_changes,
-    make_doc_with_comments,
-    make_doc_with_custom_props,
-)
-
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Specific Helpers for Sanitize
 # ---------------------------------------------------------------------------
+
 
 def _make_doc_with_track_changes() -> io.BytesIO:
     """Create a DOCX with track changes (insertion + deletion)."""
@@ -98,6 +71,7 @@ def _make_doc_with_track_changes() -> io.BytesIO:
     stream.seek(0)
     return stream
 
+
 def _make_doc_with_rsids() -> io.BytesIO:
     doc = Document()
     p = doc.add_paragraph("Hello World")
@@ -111,13 +85,16 @@ def _make_doc_with_rsids() -> io.BytesIO:
     stream.seek(0)
     return stream
 
+
 def _save_to_tmp(stream: io.BytesIO) -> str:
     path = save_to_temp_docx(Document(stream))
     return path
 
+
 # ---------------------------------------------------------------------------
 # Transform unit tests
 # ---------------------------------------------------------------------------
+
 
 class TestTransforms:
     def test_strip_rsid(self):
@@ -154,8 +131,11 @@ class TestTransforms:
     def test_scrub_doc_properties(self):
         doc = Document()
         app_part = next(p for p in doc.part.package.parts if str(p.partname).endswith("app.xml"))
-        app_part._blob = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <Properties xmlns="{transforms.EXTENDED_NS}"><TotalTime>15</TotalTime><Template>T.dotm</Template></Properties>'''.encode("utf-8")
+        app_part._blob = (
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            f'<Properties xmlns="{transforms.EXTENDED_NS}">'
+            f"<TotalTime>15</TotalTime><Template>T.dotm</Template></Properties>"
+        ).encode("utf-8")
         transforms.scrub_doc_properties(doc)
         tree = etree.fromstring(app_part.blob)
         ns = {"app": transforms.EXTENDED_NS}
@@ -167,7 +147,7 @@ class TestTransforms:
         pkg = doc.part.package
         custom_part = Part(pkg.next_partname("/customXml/item%d.xml"), "application/xml", b"<t/>", pkg)
         pkg.parts.append(custom_part)
-        
+
         # Add content control with binding
         sdt = OxmlElement("w:sdt")
         sdtPr = OxmlElement("w:sdtPr")
@@ -176,14 +156,16 @@ class TestTransforms:
         sdtPr.append(binding)
         sdt.append(sdtPr)
         doc.add_paragraph()._element.append(sdt)
-        
+
         transforms.strip_custom_xml(doc)
         assert custom_part not in pkg.parts
         assert len(doc.element.findall(f".//{qn('w:dataBinding')}")) == 0
 
+
 # ---------------------------------------------------------------------------
 # Orchestrator integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestSanitizeIntegration:
     def test_full_sanitize_flow(self, tmp_path):
@@ -199,7 +181,7 @@ class TestSanitizeIntegration:
         input_path = _save_to_tmp(_make_doc_with_track_changes())
         with pytest.raises(SanitizeError, match="unresolved"):
             sanitize_docx(input_path)
-        
+
         # 3. Accept all
         result = sanitize_docx(input_path, accept_all=True)
         assert result.tracked_changes_accepted > 0
@@ -219,19 +201,21 @@ class TestSanitizeIntegration:
         baseline_doc = Document()
         baseline_doc.add_paragraph("The Vendor shall provide services.")
         b_path = save_to_temp_docx(baseline_doc)
-        
+
         working_doc = Document()
         working_doc.add_paragraph("The Supplier shall provide services.")
         w_path = save_to_temp_docx(working_doc)
-        
+
         result = sanitize_docx(w_path, baseline_path=b_path, author="Tester")
         assert result.tracked_changes_found > 0
-        os.unlink(b_path); os.unlink(w_path)
+        os.unlink(b_path)
+        os.unlink(w_path)
 
     def test_e2e_dirty_sample(self, tmp_path):
         dirty_doc = FIXTURE_DIR / "dirty_sample.docx"
-        if not dirty_doc.exists(): pytest.skip("Fixture missing")
-        
+        if not dirty_doc.exists():
+            pytest.skip("Fixture missing")
+
         out_full = tmp_path / "full.docx"
         sanitize_docx(str(dirty_doc), str(out_full), accept_all=True)
         with zipfile.ZipFile(out_full, "r") as zf:

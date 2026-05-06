@@ -4,6 +4,7 @@ Tests for the pure text CriticMarkup transformation function.
 """
 
 import re
+
 import pytest
 
 from adeu.markup import (
@@ -19,83 +20,148 @@ from adeu.models import ModifyText
 class TestHelperFunctions:
     """Tests for internal helper functions."""
 
-    @pytest.mark.parametrize("text, expected", [
-        ("\"Hello\" and 'World'", "\"Hello\" and 'World'"),
-        ("Smart “quotes” and ‘apostrophes’", "Smart \"quotes\" and 'apostrophes'"),
-    ])
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("\"Hello\" and 'World'", "\"Hello\" and 'World'"),
+            ("Smart “quotes” and ‘apostrophes’", "Smart \"quotes\" and 'apostrophes'"),
+        ],
+    )
     def test_replace_smart_quotes(self, text, expected):
         result = _replace_smart_quotes(text)
         assert result == expected
 
-    @pytest.mark.parametrize("input_str, matches", [
-        ("hello world", ["hello world", "hello  world", "hello   world"]),
-        ("[___]", ["[___]", "[_____]", "[__________]"]),
-    ])
+    @pytest.mark.parametrize(
+        "input_str, matches",
+        [
+            ("hello world", ["hello world", "hello  world", "hello   world"]),
+            ("[___]", ["[___]", "[_____]", "[__________]"]),
+        ],
+    )
     def test_make_fuzzy_regex(self, input_str, matches):
         pattern = _make_fuzzy_regex(input_str)
         for m in matches:
             assert re.match(pattern, m)
 
-    @pytest.mark.parametrize("text, target, expected_start, expected_end", [
-        ("The quick brown fox", "quick", 4, 9),
-        ('"Hello" said the fox', '"Hello"', 0, 7),
-        ("hello   world", "hello world", 0, 13),
-        ("The quick brown fox", "elephant", -1, -1),
-        ("Some text", "", -1, -1),
-    ])
+    @pytest.mark.parametrize(
+        "text, target, expected_start, expected_end",
+        [
+            ("The quick brown fox", "quick", 4, 9),
+            ('"Hello" said the fox', '"Hello"', 0, 7),
+            ("hello   world", "hello world", 0, 13),
+            ("The quick brown fox", "elephant", -1, -1),
+            ("Some text", "", -1, -1),
+        ],
+    )
     def test_find_match_in_text(self, text, target, expected_start, expected_end):
         start, end = _find_match_in_text(text, target)
         assert start == expected_start
         assert end == expected_end
 
 
-@pytest.mark.parametrize("params, expected", [
-    # Basic scenarios
-    ({"target_text": "old", "new_text": ""}, "{--old--}"),
-    ({"target_text": "", "new_text": "new"}, "{++new++}"),
-    ({"target_text": "old", "new_text": "new"}, "{--old--}{++new++}"),
-    ({"target_text": "old", "new_text": "new", "comment": "Changed this"}, "{--old--}{++new++}{>>Changed this<<}"),
-    ({"target_text": "old", "new_text": "new", "edit_index": 3, "include_index": True}, "{--old--}{++new++}{>>[Edit:3]<<}"),
-    ({"target_text": "old", "new_text": "new", "comment": "Reason", "edit_index": 5, "include_index": True}, "{--old--}{++new++}{>>Reason [Edit:5]<<}"),
-    ({"target_text": "target", "new_text": "ignored", "highlight_only": True}, "{==target==}"),
-    ({"target_text": "target", "new_text": "ignored", "comment": "Note", "edit_index": 2, "include_index": True, "highlight_only": True}, "{==target==}{>>Note [Edit:2]<<}"),
-    # Advanced / Formatting
-    ({"target_text": "**Important**", "new_text": "**Critical**"}, "**{--Important--}{++Critical++}**"),
-    ({"target_text": "_emphasis_", "new_text": "_strong emphasis_"}, "_{--emphasis--}{++strong emphasis++}_"),
-    ({"target_text": "**_nested_**", "new_text": "**_deeply nested_**"}, "**{--_nested_--}{++_deeply nested_++}**"),
-    ({"target_text": "**unbalanced", "new_text": "**still unbalanced"}, "{--**unbalanced--}{++**still unbalanced++}"),
-    ({"target_text": "__0__", "new_text": "__1__"}, "{--__0__--}{++__1__++}"),
-    ({"target_text": "Sign: [___]", "new_text": "Sign: John Doe"}, "{--Sign: [___]--}{++Sign: John Doe++}"),
-    ({"target_text": "**Term**", "highlight_only": True}, "**{==Term==}**"),
-    ({"target_text": "_definition_", "highlight_only": True}, "_{==definition==}_"),
-    ({"target_text": "", "new_text": ""}, ""),
-    ({"target_text": "   ", "new_text": "text"}, "{--   --}{++text++}"),
-    ({"target_text": "Line1\nLine2", "new_text": "SingleLine"}, "{--Line1\nLine2--}{++SingleLine++}"),
-    ({"target_text": "Use {curly} braces", "new_text": "Use [square] brackets"}, "{--Use {curly} braces--}{++Use [square] brackets++}"),
-    ({"target_text": "A--B", "new_text": "A-B"}, "{--A--B--}{++A-B++}"),
-    ({"target_text": "C++", "new_text": "Python"}, "{--C++--}{++Python++}"),
-    ({"target_text": "old", "new_text": "new", "comment": "Check {this} & <that>"}, "{--old--}{++new++}{>>Check {this} & <that><<}"),
-    ({"target_text": "日本語", "new_text": "中文", "comment": "Changed: 한국어"}, "{--日本語--}{++中文++}{>>Changed: 한국어<<}"),
-    ({"target_text": "Hello 👋", "new_text": "Goodbye 👋"}, "{--Hello 👋--}{++Goodbye 👋++}"),
-    ({"target_text": "<div>content</div>", "new_text": "<span>content</span>"}, "{--<div>content</div>--}{++<span>content</span>++}"),
-    ({"target_text": "**A** and **B**", "new_text": "**X** and **Y**"}, "{--**A** and **B**--}{++**X** and **Y**++}"),
-    ({"target_text": "2*3*4", "new_text": "2*4*6"}, "{--2*3*4--}{++2*4*6++}"),
-    ({"target_text": "Section 3.2(a)(i)", "new_text": "Section 4.1(b)(ii)", "comment": "Updated reference", "edit_index": 5, "include_index": True}, "{--Section 3.2(a)(i)--}{++Section 4.1(b)(ii)++}{>>Updated reference [Edit:5]<<}"),
-    # Edge Cases
-    ({"target_text": "****", "new_text": "text"}, "{--****--}{++text++}"),
-    ({"target_text": "**bold_", "new_text": "fixed"}, "{--**bold_--}{++fixed++}"),
-    ({"target_text": "___", "new_text": "---"}, "{--___--}{++---++}"),
-    ({"target_text": "_*text*_", "new_text": "_*other*_"}, "_{--*text*--}{++*other*++}_"),    ({"target_text": "C:\\Users\\file.txt", "new_text": "C:\\Documents\\file.txt"}, "{--C:\\Users\\file.txt--}{++C:\\Documents\\file.txt++}"),
-    ({"target_text": "Price: $100.00 (USD)", "new_text": "Price: $200.00 (EUR)"}, "{--Price: $100.00 (USD)--}{++Price: $200.00 (EUR)++}"),
-    ({"target_text": "Col1\tCol2", "new_text": "Column1\tColumn2"}, "{--Col1\tCol2--}{++Column1\tColumn2++}"),
-    ({"target_text": "Line1\r\nLine2", "new_text": "Line1\nLine2"}, "{--Line1\r\nLine2--}{++Line1\nLine2++}"),
-    ({"target_text": "null", "new_text": "None"}, "{--null--}{++None++}"),
-    ({"target_text": "a", "new_text": "b", "edit_index": 0, "include_index": True}, "{--a--}{++b++}{>>[Edit:0]<<}"),
-    ({"target_text": "a", "new_text": "b", "edit_index": 99999, "include_index": True}, "{--a--}{++b++}{>>[Edit:99999]<<}"),
-    ({"target_text": "old", "new_text": "new", "comment": "   "}, "{--old--}{++new++}{>>   <<}"),
-    ({"target_text": "old", "new_text": "new", "comment": ""}, "{--old--}{++new++}"),
-    ({"target_text": "", "new_text": "ignored", "highlight_only": True}, ""),
-])
+@pytest.mark.parametrize(
+    "params, expected",
+    [
+        # Basic scenarios
+        ({"target_text": "old", "new_text": ""}, "{--old--}"),
+        ({"target_text": "", "new_text": "new"}, "{++new++}"),
+        ({"target_text": "old", "new_text": "new"}, "{--old--}{++new++}"),
+        ({"target_text": "old", "new_text": "new", "comment": "Changed this"}, "{--old--}{++new++}{>>Changed this<<}"),
+        (
+            {"target_text": "old", "new_text": "new", "edit_index": 3, "include_index": True},
+            "{--old--}{++new++}{>>[Edit:3]<<}",
+        ),
+        (
+            {"target_text": "old", "new_text": "new", "comment": "Reason", "edit_index": 5, "include_index": True},
+            "{--old--}{++new++}{>>Reason [Edit:5]<<}",
+        ),
+        ({"target_text": "target", "new_text": "ignored", "highlight_only": True}, "{==target==}"),
+        (
+            {
+                "target_text": "target",
+                "new_text": "ignored",
+                "comment": "Note",
+                "edit_index": 2,
+                "include_index": True,
+                "highlight_only": True,
+            },
+            "{==target==}{>>Note [Edit:2]<<}",
+        ),
+        # Advanced / Formatting
+        ({"target_text": "**Important**", "new_text": "**Critical**"}, "**{--Important--}{++Critical++}**"),
+        ({"target_text": "_emphasis_", "new_text": "_strong emphasis_"}, "_{--emphasis--}{++strong emphasis++}_"),
+        ({"target_text": "**_nested_**", "new_text": "**_deeply nested_**"}, "**{--_nested_--}{++_deeply nested_++}**"),
+        (
+            {"target_text": "**unbalanced", "new_text": "**still unbalanced"},
+            "{--**unbalanced--}{++**still unbalanced++}",
+        ),
+        ({"target_text": "__0__", "new_text": "__1__"}, "{--__0__--}{++__1__++}"),
+        ({"target_text": "Sign: [___]", "new_text": "Sign: John Doe"}, "{--Sign: [___]--}{++Sign: John Doe++}"),
+        ({"target_text": "**Term**", "highlight_only": True}, "**{==Term==}**"),
+        ({"target_text": "_definition_", "highlight_only": True}, "_{==definition==}_"),
+        ({"target_text": "", "new_text": ""}, ""),
+        ({"target_text": "   ", "new_text": "text"}, "{--   --}{++text++}"),
+        ({"target_text": "Line1\nLine2", "new_text": "SingleLine"}, "{--Line1\nLine2--}{++SingleLine++}"),
+        (
+            {"target_text": "Use {curly} braces", "new_text": "Use [square] brackets"},
+            "{--Use {curly} braces--}{++Use [square] brackets++}",
+        ),
+        ({"target_text": "A--B", "new_text": "A-B"}, "{--A--B--}{++A-B++}"),
+        ({"target_text": "C++", "new_text": "Python"}, "{--C++--}{++Python++}"),
+        (
+            {"target_text": "old", "new_text": "new", "comment": "Check {this} & <that>"},
+            "{--old--}{++new++}{>>Check {this} & <that><<}",
+        ),
+        (
+            {"target_text": "日本語", "new_text": "中文", "comment": "Changed: 한국어"},
+            "{--日本語--}{++中文++}{>>Changed: 한국어<<}",
+        ),
+        ({"target_text": "Hello 👋", "new_text": "Goodbye 👋"}, "{--Hello 👋--}{++Goodbye 👋++}"),
+        (
+            {"target_text": "<div>content</div>", "new_text": "<span>content</span>"},
+            "{--<div>content</div>--}{++<span>content</span>++}",
+        ),
+        (
+            {"target_text": "**A** and **B**", "new_text": "**X** and **Y**"},
+            "{--**A** and **B**--}{++**X** and **Y**++}",
+        ),
+        ({"target_text": "2*3*4", "new_text": "2*4*6"}, "{--2*3*4--}{++2*4*6++}"),
+        (
+            {
+                "target_text": "Section 3.2(a)(i)",
+                "new_text": "Section 4.1(b)(ii)",
+                "comment": "Updated reference",
+                "edit_index": 5,
+                "include_index": True,
+            },
+            "{--Section 3.2(a)(i)--}{++Section 4.1(b)(ii)++}{>>Updated reference [Edit:5]<<}",
+        ),
+        # Edge Cases
+        ({"target_text": "****", "new_text": "text"}, "{--****--}{++text++}"),
+        ({"target_text": "**bold_", "new_text": "fixed"}, "{--**bold_--}{++fixed++}"),
+        ({"target_text": "___", "new_text": "---"}, "{--___--}{++---++}"),
+        ({"target_text": "_*text*_", "new_text": "_*other*_"}, "_{--*text*--}{++*other*++}_"),
+        (
+            {"target_text": "C:\\Users\\file.txt", "new_text": "C:\\Documents\\file.txt"},
+            "{--C:\\Users\\file.txt--}{++C:\\Documents\\file.txt++}",
+        ),
+        (
+            {"target_text": "Price: $100.00 (USD)", "new_text": "Price: $200.00 (EUR)"},
+            "{--Price: $100.00 (USD)--}{++Price: $200.00 (EUR)++}",
+        ),
+        ({"target_text": "Col1\tCol2", "new_text": "Column1\tColumn2"}, "{--Col1\tCol2--}{++Column1\tColumn2++}"),
+        ({"target_text": "Line1\r\nLine2", "new_text": "Line1\nLine2"}, "{--Line1\r\nLine2--}{++Line1\nLine2++}"),
+        ({"target_text": "null", "new_text": "None"}, "{--null--}{++None++}"),
+        ({"target_text": "a", "new_text": "b", "edit_index": 0, "include_index": True}, "{--a--}{++b++}{>>[Edit:0]<<}"),
+        (
+            {"target_text": "a", "new_text": "b", "edit_index": 99999, "include_index": True},
+            "{--a--}{++b++}{>>[Edit:99999]<<}",
+        ),
+        ({"target_text": "old", "new_text": "new", "comment": "   "}, "{--old--}{++new++}{>>   <<}"),
+        ({"target_text": "old", "new_text": "new", "comment": ""}, "{--old--}{++new++}"),
+        ({"target_text": "", "new_text": "ignored", "highlight_only": True}, ""),
+    ],
+)
 def test_build_critic_markup_parametrized(params, expected):
     """Unified test for _build_critic_markup covering basic, advanced, and edge cases."""
     full_params = {
@@ -117,21 +183,29 @@ def test_build_critic_markup_parametrized(params, expected):
 class TestApplyEditsToMarkdown:
     """Tests for the main transformation function using parametrization where appropriate."""
 
-    @pytest.mark.parametrize("text, target, new, expected", [
-        ("Notice of Termination", "Notice of Termination", "Notice of Immediate Termination", "Notice of {++Immediate ++}Termination"),
-        ("Hello World", "Hello World", "Hello Universe", "Hello {--World--}{++Universe++}"),
-        ("Old Item", "Old Item", "New Item", "{--Old--}{++New++} Item"),
-        ("Original text", "none", "none", "Original text"), # No edits applied
-        ("Remove this word please.", "this ", "", "Remove {--this --}word please."),
-        ("The quick brown fox.", "quick", "slow", "{--quick--}{++slow++}"),
-        ("Hello world.", "world", "universe", "{--world--}{++universe++}"),
-        ("Start of text.", "Start", "Beginning", "{--Start--}{++Beginning++}"),
-        ("End of text.", "text.", "document.", "{--text.--}{++document.++}"),
-        ("", "x", "y", ""), # Empty text
-        ("Price is $100.00 (USD).", "$100.00", "$200.00", "{--$100.00--}{++$200.00++}"),
-        ("Use {curly} and [square] brackets.", "{curly}", "{braces}", "{--{curly}--}{++{braces}++}"),
-        ("Héllo wörld 你好", "wörld", "world", "{--wörld--}{++world++}"),
-    ])
+    @pytest.mark.parametrize(
+        "text, target, new, expected",
+        [
+            (
+                "Notice of Termination",
+                "Notice of Termination",
+                "Notice of Immediate Termination",
+                "Notice of {++Immediate ++}Termination",
+            ),
+            ("Hello World", "Hello World", "Hello Universe", "Hello {--World--}{++Universe++}"),
+            ("Old Item", "Old Item", "New Item", "{--Old--}{++New++} Item"),
+            ("Original text", "none", "none", "Original text"),  # No edits applied
+            ("Remove this word please.", "this ", "", "Remove {--this --}word please."),
+            ("The quick brown fox.", "quick", "slow", "{--quick--}{++slow++}"),
+            ("Hello world.", "world", "universe", "{--world--}{++universe++}"),
+            ("Start of text.", "Start", "Beginning", "{--Start--}{++Beginning++}"),
+            ("End of text.", "text.", "document.", "{--text.--}{++document.++}"),
+            ("", "x", "y", ""),  # Empty text
+            ("Price is $100.00 (USD).", "$100.00", "$200.00", "{--$100.00--}{++$200.00++}"),
+            ("Use {curly} and [square] brackets.", "{curly}", "{braces}", "{--{curly}--}{++{braces}++}"),
+            ("Héllo wörld 你好", "wörld", "world", "{--wörld--}{++world++}"),
+        ],
+    )
     def test_apply_edits_basic_and_edge(self, text, target, new, expected):
         if target == "none":
             result = apply_edits_to_markdown(text, [])
@@ -219,17 +293,23 @@ class TestApplyEditsToMarkdown:
         assert "NEW" not in result
         assert "{--world--}{++universe++}" in result
 
-    @pytest.mark.parametrize("text, target, expected_match", [
-        ("hello   world", "hello world", "{--hello   world--}"),
-        ("Sign here: [__________]", "[___]", "{--[__________]--}"),
-        ('"Hello" said the fox.', '"Hello"', '{--"Hello"--}'),
-    ])
+    @pytest.mark.parametrize(
+        "text, target, expected_match",
+        [
+            ("hello   world", "hello world", "{--hello   world--}"),
+            ("Sign here: [__________]", "[___]", "{--[__________]--}"),
+            ('"Hello" said the fox.', '"Hello"', '{--"Hello"--}'),
+        ],
+    )
     def test_fuzzy_and_smart_quotes(self, text, target, expected_match):
         result = apply_edits_to_markdown(text, [ModifyText(target_text=target, new_text="replacement")])
         assert expected_match in result
 
     def test_complex_legal_scenario(self):
-        text = "# Service Agreement\nThe Tenant shall pay rent monthly.\n## Termination\nEither party may terminate with 30 days notice."
+        text = (
+            "# Service Agreement\nThe Tenant shall pay rent monthly.\n"
+            + "## Termination\nEither party may terminate with 30 days notice."
+        )
         edits = [
             ModifyText(target_text="Tenant", new_text="Lessee", comment="Standardizing terminology"),
             ModifyText(target_text="30 days", new_text="60 days", comment="Extended notice period"),
@@ -238,14 +318,22 @@ class TestApplyEditsToMarkdown:
         assert "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<}" in result
         assert "{--30--}{++60++}{>>Extended notice period [Edit:1]<<} days" in result
 
-    @pytest.mark.parametrize("text, target, new, expected", [
-        ("The **quick brown fox** jumped.", "quick brown fox", "slow red dog", "The **{--quick brown fox--}{++slow red dog++}** jumped."),
-        ("This is _emphasized_ text.", "emphasized", "highlighted", "_{--emphasized--}{++highlighted++}_"),
-        ("This is **_very important_** indeed.", "very important", "extremely critical", "extremely critical"),
-        ("Variable __init__ is special.", "__init__", "__setup__", "__{--init--}{++setup++}__"),
-        ("The **Vendor** shall pay.", "The Vendor shall", "ignored", "{==The **Vendor** shall==}"),
-        ("**Note:** Prices are net.", "Prices are net", "ignored", "**Note:** {==Prices are net==}."),
-    ])
+    @pytest.mark.parametrize(
+        "text, target, new, expected",
+        [
+            (
+                "The **quick brown fox** jumped.",
+                "quick brown fox",
+                "slow red dog",
+                "The **{--quick brown fox--}{++slow red dog++}** jumped.",
+            ),
+            ("This is _emphasized_ text.", "emphasized", "highlighted", "_{--emphasized--}{++highlighted++}_"),
+            ("This is **_very important_** indeed.", "very important", "extremely critical", "extremely critical"),
+            ("Variable __init__ is special.", "__init__", "__setup__", "__{--init--}{++setup++}__"),
+            ("The **Vendor** shall pay.", "The Vendor shall", "ignored", "{==The **Vendor** shall==}"),
+            ("**Note:** Prices are net.", "Prices are net", "ignored", "**Note:** {==Prices are net==}."),
+        ],
+    )
     def test_formatting_noise_and_preservation(self, text, target, new, expected):
         highlight = new == "ignored"
         result = apply_edits_to_markdown(text, [ModifyText(target_text=target, new_text=new)], highlight_only=highlight)
@@ -257,12 +345,19 @@ class TestApplyEditsToMarkdown:
         result = apply_edits_to_markdown(text, edits)
         assert "WORD1" in result and "WORD2" in result
 
-    @pytest.mark.parametrize("text, target, expected_substring", [
-        ("Payment of $1,000.00 (USD) due.", "$1,000.00", "{--$1,000.00--}"),
-        ("Interest rate of 5.5% per annum.", "5.5%", "{--5.5%--}"),
-        ("Contact: john.doe@example.com", "john.doe@example.com", "{--john.doe@example.com--}"),
-        ("Visit https://old-site.com/page for info.", "https://old-site.com/page", "{--https://old-site.com/page--}"),
-    ])
+    @pytest.mark.parametrize(
+        "text, target, expected_substring",
+        [
+            ("Payment of $1,000.00 (USD) due.", "$1,000.00", "{--$1,000.00--}"),
+            ("Interest rate of 5.5% per annum.", "5.5%", "{--5.5%--}"),
+            ("Contact: john.doe@example.com", "john.doe@example.com", "{--john.doe@example.com--}"),
+            (
+                "Visit https://old-site.com/page for info.",
+                "https://old-site.com/page",
+                "{--https://old-site.com/page--}",
+            ),
+        ],
+    )
     def test_special_content_types(self, text, target, expected_substring):
         result = apply_edits_to_markdown(text, [ModifyText(target_text=target, new_text="replacement")])
         assert expected_substring in result

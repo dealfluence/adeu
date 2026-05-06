@@ -1,6 +1,8 @@
 import sys
+
 import pytest
-from tests.utils import run_async, get_mock_ctx, extract_content
+
+from tests.utils import extract_content, get_mock_ctx, run_async
 
 # Only run these tests on Windows since COM requires it
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Live Word COM tests require Windows platform")
@@ -61,6 +63,7 @@ def test_live_word_modify_with_comment(active_word_app):
 def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
     """Ensures parity between LiveWordEngine (COM) and XML-based RedlineEngine."""
     import io
+
     from adeu.ingest import extract_text_from_stream
 
     app, doc = active_word_app
@@ -73,7 +76,7 @@ def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
 
     async def run_test():
         live_text = extract_content(await read_active_word_document(ctx))
-        
+
         temp_file = tmp_path / "parity.docx"
         doc.SaveAs2(str(temp_file))
 
@@ -88,9 +91,12 @@ def test_live_word_vs_redline_engine_parity(active_word_app, tmp_path):
     run_async(run_test())
 
 
-@pytest.mark.parametrize("target, new, expected_markup", [
-    ("brown fox", "**bold** and _italic_", "{++**bold** and _italic_++}"),
-])
+@pytest.mark.parametrize(
+    "target, new, expected_markup",
+    [
+        ("brown fox", "**bold** and _italic_", "{++**bold** and _italic_++}"),
+    ],
+)
 def test_live_word_complex_formatting(active_word_app, target, new, expected_markup):
     """Ensures Markdown via Live COM is correctly parsed and applied."""
     app, doc = active_word_app

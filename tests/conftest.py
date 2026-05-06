@@ -1,7 +1,9 @@
 import io
 import sys
+
 import pytest
 from docx import Document
+
 
 @pytest.fixture
 def simple_docx_stream():
@@ -15,6 +17,7 @@ def simple_docx_stream():
     doc.save(stream)
     stream.seek(0)
     return stream
+
 
 # Only define COM fixtures on Windows
 if sys.platform == "win32":
