@@ -72,6 +72,39 @@ def _make_doc_with_track_changes() -> io.BytesIO:
     return stream
 
 
+def _make_doc_with_multi_author_track_changes() -> io.BytesIO:
+    """Create a DOCX with track changes from multiple authors."""
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+
+    d = OxmlElement("w:del")
+    d.set(qn("w:id"), "1")
+    d.set(qn("w:author"), "Adeu Reviewer")
+    d.set(qn("w:date"), "2025-01-15T10:00:00Z")
+    rd = OxmlElement("w:r")
+    rt = OxmlElement("w:delText")
+    rt.text = "Vendor"
+    rd.append(rt)
+    d.append(rd)
+    p._element.append(d)
+
+    ins2 = OxmlElement("w:ins")
+    ins2.set(qn("w:id"), "3")
+    ins2.set(qn("w:author"), "Sneaky Counterparty")
+    ri2 = OxmlElement("w:r")
+    ti2 = OxmlElement("w:t")
+    ti2.text = "Supplier"
+    ri2.append(ti2)
+    ins2.append(ri2)
+    p._element.append(ins2)
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    return stream
+
+
 def _make_doc_with_rsids() -> io.BytesIO:
     doc = Document()
     p = doc.add_paragraph("Hello World")
@@ -187,6 +220,18 @@ class TestSanitizeIntegration:
         assert result.tracked_changes_accepted > 0
         os.unlink(input_path)
 
+    def test_full_sanitize_with_accept_all_warns_multi_author(self):
+        """Full sanitize with --accept-all warns if multiple authors are detected (VAL-OBS-NEW-9)."""
+        stream = _make_doc_with_multi_author_track_changes()
+        input_path = _save_to_tmp(stream)
+        
+        result = sanitize_docx(input_path, accept_all=True)
+        assert result.status == "clean_with_warnings"
+        assert any("Multiple authors detected" in w for w in result.warnings)
+        assert "Adeu Reviewer" in result.report_text
+        assert "Sneaky Counterparty" in result.report_text
+        os.unlink(input_path)
+
     def test_keep_markup_and_author_replace(self):
         input_path = _save_to_tmp(_make_doc_with_track_changes())
         result = sanitize_docx(input_path, keep_markup=True, author="Firm X")
@@ -210,6 +255,16 @@ class TestSanitizeIntegration:
         assert result.tracked_changes_found > 0
         os.unlink(b_path)
         os.unlink(w_path)
+
+    def test_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            sanitize_docx("/nonexistent/file.docx")
+
+    def test_baseline_not_found(self):
+        input_path = _save_to_tmp(_make_doc_with_track_changes())
+        with pytest.raises(FileNotFoundError):
+            sanitize_docx(input_path, baseline_path="/nonexistent/baseline.docx")
+        os.unlink(input_path)
 
     def test_e2e_dirty_sample(self, tmp_path):
         dirty_doc = FIXTURE_DIR / "dirty_sample.docx"
