@@ -50,14 +50,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### Install via Smithery
 
-Adeu is published on the Smithery MCP Registry. You can install it globally via the Smithery CLI:
-
-bash +npx -y @smithery/cli install adeu/adeu --client claude +
-
-<details>
-<summary><b>Other Clients (Cursor, Windsurf)</b></summary>
-Select your preferred client in the installation command: npx -y @smithery/cli install adeu/adeu --client cursor
-</details>
+Adeu is published on the Smithery MCP Registry. Check instructions for your client from: ![Smithery Adeu site](https://smithery.ai/servers/adeu/adeu)
 
 ### Claude Desktop Integration
 
