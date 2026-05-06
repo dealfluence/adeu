@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/dealfluence/adeu/actions/workflows/ci.yml/badge.svg)](https://github.com/dealfluence/adeu/actions/workflows/ci.yml)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
+[![smithery badge](https://smithery.ai/badge/adeu/adeu)](https://smithery.ai/servers/adeu/adeu)
 
 **LLMs speak Markdown; Lawyers speak "Track Changes."** 
 
@@ -45,6 +46,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+</details>
+
+### Install via Smithery
+
+Adeu is published on the Smithery MCP Registry. You can install it globally via the Smithery CLI:
+
+bash +npx -y @smithery/cli install adeu/adeu --client claude +
+
+<details>
+<summary><b>Other Clients (Cursor, Windsurf)</b></summary>
+Select your preferred client in the installation command: npx -y @smithery/cli install adeu/adeu --client cursor
 </details>
 
 ### Claude Desktop Integration

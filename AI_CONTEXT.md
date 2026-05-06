@@ -32,6 +32,8 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   **Auto-Configuration**: The `adeu init` command manages the injection of tools into `claude_desktop_config.json`.
     *   *Safety*: It must always create a timestamped backup (`.bak`) before modifying the user's config.
     *   *OS Agnostic*: It handles path resolution for Windows (`%APPDATA%`) and macOS (`~/Library`) automatically.
+*   **Desktop Extension (MCPB)**: We ship a lightweight Node.js bootstrapper (`desktop-extension/index.js`) for the Claude Desktop `.mcpb` bundle. This bridges Claude's embedded Node environment and Adeu's Python requirement by securely auto-healing the PATH and launching `uvx`.
+*   **Smithery Marketplace Publishing**: To bypass the "Schema Deadlock" (Anthropic's `mcpb pack` rejects tool schemas, but Smithery's registry requires them), we use a dynamic patch strategy. The `scripts/patch_smithery_mcpb.py` script boots the local server, extracts live schemas via JSON-RPC (`tools/list`), and injects them into the packaged `.mcpb` manifest before publishing.
 
 ### 5. Block-Level Parsing & Tables
 *   **Sequential Iteration**: We iterate over document elements (`w:p` and `w:tbl`) in strict XML order using `iter_block_items`. We do *not* iterate `part.paragraphs` and `part.tables` separately, as this destroys document flow (e.g., tables appearing after all text).
@@ -132,6 +134,10 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
+- **v1.5.2**: Smithery Marketplace & Desktop Extensions.
+    - Published `adeu/adeu` to the Smithery.ai registry.
+    - Implemented a Node.js bootstrapper for native Claude Desktop `.mcpb` installation, automatically managing `uvx` dependencies.
+    - Resolved schema validation deadlocks between Anthropic and Smithery tooling via dynamic JSON-RPC schema injection.
 - **v1.4.2**: Structural Table Edits & Live Word Stabilization.
     - Added `InsertTableRow` and `DeleteTableRow` intent-based models for safe OOXML gridspan manipulation.
     - Resolved COM extraction fragmentation by properly coalescing partial formatting revisions.

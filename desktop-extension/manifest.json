@@ -1,0 +1,29 @@
+{
+  "manifest_version": "0.2",
+  "name": "Adeu",
+  "version": "1.5.2",
+  "description": "DOCX <-> LLM context engine.",
+  "author": {
+    "name": "mikko@adeu.ai",
+    "email": "mikko@adeu.ai",
+    "url": "https://adeu.ai"
+  },
+  "homepage": "https://adeu.ai",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/index.js"
+      ],
+      "env": {}
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dealfluence/adeu"
+  }
+}
