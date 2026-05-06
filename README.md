@@ -2,12 +2,13 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/adeu.svg)](https://pypi.org/project/adeu/)
 [![Python versions](https://img.shields.io/pypi/pyversions/adeu.svg)](https://pypi.org/project/adeu/)
+[![Downloads](https://img.shields.io/pepy/dt/adeu)](https://pepy.tech/project/adeu)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/dealfluence/adeu/actions/workflows/ci.yml/badge.svg)](https://github.com/dealfluence/adeu/actions/workflows/ci.yml)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
-[![smithery badge](https://smithery.ai/badge/adeu/adeu)](https://smithery.ai/servers/adeu/adeu)
+[![Smithery](https://img.shields.io/badge/Smithery-Available-blue.svg)](https://smithery.ai/servers/adeu/adeu)
 
-**LLMs speak Markdown; Lawyers speak "Track Changes."** 
+**LLMs speak Markdown; Lawyers speak "Track Changes."**
 
 Adeu is a Model Context Protocol (MCP) server and Python SDK that acts as a **"Virtual DOM" for Microsoft Word**. It provides a two-way abstraction layer that lets AI agents freely edit document text without destroying the underlying formatting or complex DOCX XML.
 
