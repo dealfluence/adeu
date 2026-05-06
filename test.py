@@ -1,12 +1,13 @@
-# FILE: verify_bug4_fix.py
+# FILE: verify_bug3_fix.py
 """
-Verifies Bug 4 fix: disk and Live Word ambiguity messages are now consistent
-and bounded.
+Verifies Bug 3 fix: Live Word path now runs validate_edit_strings (Category A)
+and RedlineEngine.validate_edits (Category B) before applying any edits.
 
-The Live Word path is Windows-only and requires Word to be open. We test it
-indirectly by calling format_ambiguity_error directly with the same data
-the Live Word path would feed it. The DISK path is tested end-to-end by
-running validate_edits on a doc with many matches.
+We can't run the real Live Word COM path without Word, but we CAN:
+1. Verify validate_edit_strings produces the expected messages for each rule.
+2. Verify validate_edit_strings produces identical messages to what
+   RedlineEngine.validate_edits emits (parity check).
+3. Verify the disk path's validate_edits still works end-to-end.
 
 Self-contained.
 """
@@ -19,13 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from docx import Document
 
-from adeu.markup import (
-    AMBIGUITY_EXAMPLES_CAP,
-    _find_match_in_text,
-    format_ambiguity_error,
-)
 from adeu.models import ModifyText
-from adeu.redline.engine import RedlineEngine
+from adeu.redline.engine import RedlineEngine, validate_edit_strings
 
 
 def section(title):
@@ -35,151 +31,194 @@ def section(title):
     print("=" * 78)
 
 
-def make_docx_with_many_microsofts(n=50):
+def make_minimal_docx():
     doc = Document()
-    contexts = [
-        "Microsoft is a technology company.",
-        "Our partner Microsoft delivered the report.",
-        "We at Microsoft believe in innovation.",
-        "Co-pilot from Microsoft launched globally.",
-        "The Microsoft team announced new products.",
-    ]
-    for i in range(n):
-        doc.add_paragraph(contexts[i % len(contexts)] + f" (paragraph {i + 1})")
+    doc.add_paragraph("This is the body of the document.")
+    doc.add_paragraph("Microsoft Teams remains essential to how people meet.")
     stream = BytesIO()
     doc.save(stream)
     stream.seek(0)
     return stream
 
 
-# ---------------------------------------------------------------------------
-# Test 1: Disk path with 50 matches — message must be bounded.
-# ---------------------------------------------------------------------------
-section("Test 1: Disk path message is bounded for 50 matches")
-
-stream = make_docx_with_many_microsofts(n=50)
-engine = RedlineEngine(stream, author="Test")
-edit = ModifyText(type="modify", target_text="Microsoft", new_text="MSFT")
-errors = engine.validate_edits([edit])
-assert len(errors) == 1
-disk_message = errors[0]
-
-print(disk_message)
-print(f"\n[Length: {len(disk_message)} characters]")
-
-# Bound check: previous version was ~6500 chars for 50 matches.
-# New version with 5-example cap should be roughly 700-900 chars.
-example_count = disk_message.count("    ")  # crude — counts the indented examples
-print(f"[Indented example lines: ~{example_count}]")
-
-assert len(disk_message) < 2000, f"Disk message exceeds 2000 chars: {len(disk_message)}"
-assert "and 45 more" in disk_message, "Should indicate 45 more matches not shown"
-assert "Microsoft" in disk_message
-print("\n[PASS] Disk message is bounded and includes overflow indicator.")
+def disk_validate(edits):
+    stream = make_minimal_docx()
+    engine = RedlineEngine(stream, author="Test")
+    return engine.validate_edits(edits)
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Disk path with exactly cap+1 matches — exactly cap shown, 1 not shown.
+# Test 1: Category A rules — all six should fire from validate_edit_strings.
 # ---------------------------------------------------------------------------
-section(f"Test 2: Disk path with exactly {AMBIGUITY_EXAMPLES_CAP + 1} matches")
 
-stream = make_docx_with_many_microsofts(n=AMBIGUITY_EXAMPLES_CAP + 1)
-engine = RedlineEngine(stream, author="Test")
-edit = ModifyText(type="modify", target_text="Microsoft", new_text="MSFT")
-errors = engine.validate_edits([edit])
-assert len(errors) == 1
-print(errors[0])
-assert f"and 1 more" in errors[0]
-print(f"\n[PASS] Shows {AMBIGUITY_EXAMPLES_CAP} examples + 'and 1 more' indicator.")
+CATEGORY_A_CASES = [
+    (
+        "Manual CriticMarkup",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="{++HALLUCINATED++} Microsoft Teams",
+        ),
+        "Do not manually write CriticMarkup tags",
+    ),
+    (
+        "Heading level > 6",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="####### Subsection\n\nMicrosoft Teams",
+        ),
+        "Heading level 7 is not supported",
+    ),
+    (
+        "Inserting footnote marker",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="Microsoft Teams[^fn-99]",
+        ),
+        "Cannot insert footnote/endnote markers",
+    ),
+    (
+        "Inserting hyperlink",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="[Microsoft Teams](https://example.com)",
+        ),
+        "Cannot insert hyperlinks via text replace",
+    ),
+    (
+        "Inserting cross-reference",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="[~Section 1~](#sec1) Microsoft Teams",
+        ),
+        "Cannot insert cross-references",
+    ),
+    (
+        "Inserting internal anchor",
+        ModifyText(
+            type="modify",
+            target_text="Microsoft Teams",
+            new_text="{#anchor1} Microsoft Teams",
+        ),
+        "Cannot modify or insert internal anchor markers",
+    ),
+]
 
-
-# ---------------------------------------------------------------------------
-# Test 3: Disk path with exactly cap matches — all shown, no overflow indicator.
-# ---------------------------------------------------------------------------
-section(f"Test 3: Disk path with exactly {AMBIGUITY_EXAMPLES_CAP} matches")
-
-stream = make_docx_with_many_microsofts(n=AMBIGUITY_EXAMPLES_CAP)
-engine = RedlineEngine(stream, author="Test")
-edit = ModifyText(type="modify", target_text="Microsoft", new_text="MSFT")
-errors = engine.validate_edits([edit])
-assert len(errors) == 1
-print(errors[0])
-assert "more occurrence" not in errors[0], "Should NOT have overflow indicator"
-print(f"\n[PASS] Exactly {AMBIGUITY_EXAMPLES_CAP} examples, no overflow indicator.")
-
-
-# ---------------------------------------------------------------------------
-# Test 4: Disk path with 2 matches — minimum ambiguity case.
-# ---------------------------------------------------------------------------
-section("Test 4: Disk path with exactly 2 matches (minimum ambiguity)")
-
-stream = make_docx_with_many_microsofts(n=2)
-engine = RedlineEngine(stream, author="Test")
-edit = ModifyText(type="modify", target_text="Microsoft", new_text="MSFT")
-errors = engine.validate_edits([edit])
-assert len(errors) == 1
-print(errors[0])
-assert "appears 2 times" in errors[0]
-assert "more occurrence" not in errors[0]
-print("\n[PASS] 2-match case formatted correctly, no overflow indicator.")
-
-
-# ---------------------------------------------------------------------------
-# Test 5: Live Word formatter parity. Simulate what Live Word would feed it.
-# ---------------------------------------------------------------------------
-section("Test 5: Live Word formatter call produces same shape as disk")
-
-# Re-build a haystack the way Live Word's _clean_chars would for a doc with
-# many Microsofts. We use the disk haystack as a proxy (the format helper
-# doesn't care which haystack source it gets).
-stream = make_docx_with_many_microsofts(n=50)
-engine = RedlineEngine(stream, author="Test")
-haystack = engine.mapper.full_text
-appendix_start = engine.mapper.appendix_start_index
-if appendix_start != -1:
-    haystack = haystack[:appendix_start]
-
-# Enumerate matches the way the Live Word path will after this fix.
-all_positions = []
-search_offset = 0
-while True:
-    rel_start, rel_end = _find_match_in_text(haystack[search_offset:], "Microsoft")
-    if rel_start == -1:
-        break
-    abs_start = search_offset + rel_start
-    abs_end = search_offset + rel_end
-    all_positions.append((abs_start, abs_end))
-    search_offset = abs_end
-
-live_message = format_ambiguity_error(
-    edit_index=1,
-    target_text="Microsoft",
-    haystack=haystack,
-    match_positions=all_positions,
+section("Test 1: validate_edit_strings catches all Category A rules")
+all_pass = True
+for label, edit, expected_substring in CATEGORY_A_CASES:
+    errors = validate_edit_strings([edit])
+    if errors and expected_substring in errors[0]:
+        print(f"  [PASS] {label}")
+        print(f"         {errors[0]}")
+    else:
+        print(f"  [FAIL] {label}")
+        print(f"         expected substring: {expected_substring!r}")
+        print(f"         got: {errors!r}")
+        all_pass = False
+print(
+    f"\n{'All Category A checks PASS.' if all_pass else 'Some Category A checks FAILED.'}"
 )
 
-print(live_message)
-print(f"\n[Length: {len(live_message)} characters]")
 
-# Should be substantially identical to the disk version.
-assert len(live_message) < 2000
-assert "appears 50 times" in live_message
-assert "and 45 more" in live_message
-print("\n[PASS] Live Word formatter call produces equivalent bounded message.")
+# ---------------------------------------------------------------------------
+# Test 2: Parity — validate_edit_strings(edits) == disk_validate(edits) for
+# Category A inputs (since Category A errors fire before Category B logic
+# even runs against the document).
+# ---------------------------------------------------------------------------
+
+section("Test 2: Disk-vs-helper parity for Category A inputs")
+parity_ok = True
+for label, edit, _ in CATEGORY_A_CASES:
+    helper_errors = validate_edit_strings([edit])
+    disk_errors = disk_validate([edit])
+    # Disk errors may include Category B error too (target text not found, etc.)
+    # but we expect the Category A error to appear at the top.
+    if not helper_errors:
+        print(f"  [SKIP] {label} — no Category A error")
+        continue
+    helper_msg = helper_errors[0]
+    found_in_disk = any(helper_msg == err for err in disk_errors)
+    if found_in_disk:
+        print(f"  [PASS] {label}: helper message appears verbatim in disk output")
+    else:
+        print(f"  [FAIL] {label}: messages differ")
+        print(f"         helper: {helper_msg!r}")
+        print(f"         disk:   {disk_errors!r}")
+        parity_ok = False
+print(f"\n{'Parity confirmed.' if parity_ok else 'Parity FAILED.'}")
 
 
 # ---------------------------------------------------------------------------
-# Test 6: format_ambiguity_error rejects single-match input.
+# Test 3: Empty/well-formed edit batch produces no errors.
 # ---------------------------------------------------------------------------
-section("Test 6: format_ambiguity_error rejects single-match input")
 
-try:
-    format_ambiguity_error(
-        edit_index=1,
-        target_text="Microsoft",
-        haystack="Microsoft is here.",
-        match_positions=[(0, 9)],
-    )
-    print("[FAIL] Should have raised ValueError")
-except ValueError as e:
-    print(f"[PASS] Raised ValueError as expected: {e}")
+section("Test 3: Well-formed edits produce no Category A errors")
+good_edits = [
+    ModifyText(type="modify", target_text="Microsoft Teams", new_text="Teams"),
+    ModifyText(type="modify", target_text="meet", new_text="collaborate"),
+]
+errors = validate_edit_strings(good_edits)
+if errors:
+    print(f"  [FAIL] Expected no errors, got: {errors}")
+else:
+    print("  [PASS] No errors for well-formed edits.")
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Empty list returns empty errors.
+# ---------------------------------------------------------------------------
+
+section("Test 4: Empty edit list returns empty error list")
+errors = validate_edit_strings([])
+if errors:
+    print(f"  [FAIL] Expected no errors, got: {errors}")
+else:
+    print("  [PASS] Empty list → empty errors.")
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Edit numbering — the i+1 indexing should reflect position in the batch.
+# ---------------------------------------------------------------------------
+
+section("Test 5: Edit numbering reflects position in the batch")
+mixed = [
+    ModifyText(type="modify", target_text="ok", new_text="ok2"),  # Edit 1, valid
+    ModifyText(
+        type="modify", target_text="bad", new_text="{++bad++}"
+    ),  # Edit 2, Cat-A fail
+    ModifyText(type="modify", target_text="ok3", new_text="ok4"),  # Edit 3, valid
+    ModifyText(
+        type="modify", target_text="bad2", new_text="####### bad"
+    ),  # Edit 4, Cat-A fail
+]
+errors = validate_edit_strings(mixed)
+print(f"  Errors emitted: {len(errors)}")
+for e in errors:
+    print(f"    {e}")
+if len(errors) == 2 and "Edit 2" in errors[0] and "Edit 4" in errors[1]:
+    print("\n  [PASS] Edit numbering correct: positions 2 and 4 flagged.")
+else:
+    print("\n  [FAIL] Edit numbering does not match expected positions.")
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Disk path still works end-to-end (regression check).
+# ---------------------------------------------------------------------------
+
+section("Test 6: Disk path validate_edits still produces correct messages")
+edit = ModifyText(
+    type="modify",
+    target_text="Microsoft Teams",
+    new_text="{++HALLUCINATED++} Microsoft Teams",
+)
+errors = disk_validate([edit])
+print(f"  Errors: {errors}")
+if errors and "Do not manually write CriticMarkup" in errors[0]:
+    print("  [PASS] Disk path still rejects manual CriticMarkup.")
+else:
+    print("  [FAIL] Disk path validation regressed.")

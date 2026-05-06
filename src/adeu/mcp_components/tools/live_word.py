@@ -1,4 +1,6 @@
 # FILE: src/adeu/mcp_components/tools/live_word.py
+from adeu.redline.engine import validate_edit_strings
+from adeu import RedlineEngine
 import io
 import re
 import sys
@@ -437,18 +439,45 @@ if sys.platform == "win32":
             cached_current_text = None
             cached_mapping = None
 
-        try:
-            actions = [
-                c
-                for c in changes
-                if isinstance(c, (AcceptChange, RejectChange, ReplyComment))
-            ]
-            edits = [
-                c
-                for c in changes
-                if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
-            ]
+        actions = [
+            c
+            for c in changes
+            if isinstance(c, (AcceptChange, RejectChange, ReplyComment))
+        ]
+        edits = [
+            c
+            for c in changes
+            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
+        ]
 
+        # Category A: document-context-free string-shape validation.
+        category_a_errors = validate_edit_strings(edits)
+        if category_a_errors:
+            stats["failed"] = len(category_a_errors)
+            stats["skipped_details"].extend(category_a_errors)
+            return stats
+
+        # Category B: document-aware validation (target found, unambiguous,
+        # not in Structural Appendix). Build a snapshot of the live document
+        # via the same Flat OPC -> python-docx pipeline used by the read path,
+        # then run RedlineEngine.validate_edits against it.
+        if edits:
+            try:
+                xml_str = doc.WordOpenXML
+                snapshot_stream = _build_mock_docx_stream(xml_str)
+                snapshot_engine = RedlineEngine(snapshot_stream, author=author_name)
+                category_b_errors = snapshot_engine.validate_edits(edits)
+            except Exception as e:
+                logger.warning(f"Could not run Category B validation: {e}")
+                category_b_errors = []
+
+            if category_b_errors:
+                stats["failed"] = len(category_b_errors)
+                stats["skipped_details"].extend(category_b_errors)
+                return stats
+
+        # --- Validation passed; proceed with COM-based application ---
+        try:
             # --- FIX 1: PROCESS ACTIONS FIRST & SURVIVE DRIFT ---
             if actions:
                 from docx import Document as load_document
