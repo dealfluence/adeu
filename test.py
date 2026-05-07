@@ -1,167 +1,132 @@
-# FILE: repro_bug2.py
+# FILE: repro_bug1.py
 """
-Reproduction script for Bug 2: outline detector misses custom heading styles
-whose name doesn't START with "Heading" but contains "Heading2" (or similar)
-somewhere in the name. This pattern is common when a user does
-"Save Selection as a New Quick Style" in Word — Word generates a name like
-'StyleHeading2NotItalicBefore0ptAfter0ptLinespa' that is *based on* Heading 2
-but has a mangled name.
+Reproduction script for Bug 1: accept_all_revisions() does not remove comments.
+
+The failing test (test_issue_10_accept_all_changes_removes_comments):
+  1. Creates a doc with one paragraph.
+  2. Adds a comment via process_batch with a same-text 'modify' that carries
+     a `comment` parameter (routes through COMMENT_ONLY).
+  3. Asserts comments_manager.extract_comments_data() returns 1 entry.
+  4. Calls accept_all_revisions().
+  5. Asserts the comment count drops to 0.
+
+Current behavior: accept_all_revisions only sweeps w:ins / w:del / paragraph
+del markers in document.xml. It never touches comments.xml or the
+commentRangeStart/End/Reference anchors in the body, so comment data survives.
 
 This script:
-  1. Builds a minimal DOCX with a custom paragraph style whose:
-       - styleId = 'StyleHeading2NotItalicBefore0ptAfter0ptLinespa'
-       - w:name  = same as styleId
-       - basedOn = (NOT SET — to mirror the test exactly)
-       - no explicit outlineLvl
-  2. Builds a SECOND DOCX where the same custom style explicitly basedOn
-     "Heading2" — to see what get_paragraph_prefix does in that scenario.
-  3. Dumps the resolved style cache for the doc so we can see exactly what
-     get_paragraph_prefix sees.
-  4. Runs get_paragraph_prefix on the lone paragraph in each doc and prints
-     the result.
+  - Reproduces the test scenario exactly.
+  - Dumps comment state BEFORE accept_all_revisions (count + raw comment IDs
+    in comments.xml + body-side anchor counts).
+  - Calls accept_all_revisions().
+  - Dumps comment state AFTER.
+  - Reports whether the comment data and anchors are gone.
 """
 
 import io
-import zipfile
 
 from docx import Document
+from docx.oxml.ns import qn
 
-from adeu.utils.docx import _get_style_cache, get_paragraph_prefix
-
-W_NS_DECL = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-
-
-def _wrap_docx(document_xml: str, styles_xml: str) -> io.BytesIO:
-    rels = (
-        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        b'<Relationship Id="rId1"'
-        b' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"'
-        b' Target="word/document.xml"/>'
-        b"</Relationships>"
-    )
-    doc_rels = (
-        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        b'<Relationship Id="rId1"'
-        b' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"'
-        b' Target="styles.xml"/>'
-        b"</Relationships>"
-    )
-    ct = (
-        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        b'<Default Extension="rels"'
-        b' ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        b'<Override PartName="/word/document.xml"'
-        b' ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-        b'<Override PartName="/word/styles.xml"'
-        b' ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
-        b"</Types>"
-    )
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("[Content_Types].xml", ct)
-        z.writestr("_rels/.rels", rels)
-        z.writestr("word/_rels/document.xml.rels", doc_rels)
-        z.writestr("word/document.xml", document_xml.encode("utf-8"))
-        z.writestr("word/styles.xml", styles_xml.encode("utf-8"))
-    buf.seek(0)
-    return buf
+from adeu.models import ModifyText
+from adeu.redline.engine import RedlineEngine
 
 
-def section(title):
+def section(title: str) -> None:
     print()
     print("=" * 72)
     print(title)
     print("=" * 72)
 
 
-def case_a_no_basedon():
-    """Test scenario as written: no basedOn, no outlineLvl."""
-    style_name = "StyleHeading2NotItalicBefore0ptAfter0ptLinespa"
-    styles_xml = (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f"<w:styles {W_NS_DECL}>"
-        f'<w:style w:type="paragraph" w:styleId="{style_name}">'
-        f'<w:name w:val="{style_name}"/>'
-        f"</w:style>"
-        f"</w:styles>"
-    )
-    document_xml = (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f"<w:document {W_NS_DECL}><w:body>"
-        f'<w:p><w:pPr><w:pStyle w:val="{style_name}"/></w:pPr>'
-        f"<w:r><w:t>Sub Heading</w:t></w:r></w:p>"
-        f"<w:sectPr/></w:body></w:document>"
-    )
-    return (
-        Document(_wrap_docx(document_xml, styles_xml)),
-        style_name,
-        "no basedOn, no outlineLvl",
-    )
-
-
-def case_b_with_basedon():
-    """Same custom style but explicitly basedOn 'Heading2' (Word's typical export)."""
-    style_name = "StyleHeading2NotItalicBefore0ptAfter0ptLinespa"
-    styles_xml = (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f"<w:styles {W_NS_DECL}>"
-        # Define Heading2 itself with outlineLvl=1
-        f'<w:style w:type="paragraph" w:styleId="Heading2">'
-        f'<w:name w:val="heading 2"/>'
-        f'<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'
-        f"</w:style>"
-        # Custom style basedOn Heading2
-        f'<w:style w:type="paragraph" w:styleId="{style_name}">'
-        f'<w:name w:val="{style_name}"/>'
-        f'<w:basedOn w:val="Heading2"/>'
-        f"</w:style>"
-        f"</w:styles>"
-    )
-    document_xml = (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f"<w:document {W_NS_DECL}><w:body>"
-        f'<w:p><w:pPr><w:pStyle w:val="{style_name}"/></w:pPr>'
-        f"<w:r><w:t>Sub Heading</w:t></w:r></w:p>"
-        f"<w:sectPr/></w:body></w:document>"
-    )
-    return (
-        Document(_wrap_docx(document_xml, styles_xml)),
-        style_name,
-        "basedOn Heading2 (no outlineLvl on child)",
-    )
-
-
-def dump_case(label, doc, style_name):
+def dump_comment_state(engine: RedlineEngine, label: str) -> None:
     section(label)
-    p = doc.paragraphs[0]
-    cache, default_pstyle = _get_style_cache(p.part)
-    print(f"default_pstyle = {default_pstyle!r}")
-    print(f"style_cache size = {len(cache)}")
-    for sid, info in cache.items():
-        print(f"  styleId={sid!r}  -> {info}")
 
-    print()
-    print(f"Looking up style {style_name!r} in cache:")
-    info = cache.get(style_name)
-    print(f"  cache.get(...) = {info}")
+    # 1. Comments via the manager (the test's lens)
+    comments = engine.comments_manager.extract_comments_data()
+    print(f"comments_manager.extract_comments_data() -> {len(comments)} entries")
+    for cid, data in comments.items():
+        print(f"  Com:{cid}  author={data['author']!r}  text={data['text']!r}")
 
-    print()
-    prefix = get_paragraph_prefix(p)
-    print(f"get_paragraph_prefix() returned: {prefix!r}")
-    expected = "## "
-    marker = "PASS" if prefix == expected else "FAIL"
-    print(f"  [{marker}] expected {expected!r}")
+    # 2. Raw <w:comment> entries in comments.xml
+    comments_part = engine.comments_manager._get_existing_part_by_type(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+    )
+    if comments_part is None:
+        print("comments.xml part: <not present>")
+    else:
+        if hasattr(comments_part, "element"):
+            root = comments_part.element
+        else:
+            from docx.oxml import parse_xml
+
+            root = parse_xml(comments_part.blob)
+        raw_comments = root.findall(qn("w:comment"))
+        print(f"comments.xml <w:comment> elements: {len(raw_comments)}")
+        for c in raw_comments:
+            cid = c.get(qn("w:id"))
+            author = c.get(qn("w:author"))
+            print(f"  raw w:id={cid}  author={author!r}")
+
+    # 3. Body-side anchors
+    body = engine.doc.element
+    starts = body.findall(f".//{qn('w:commentRangeStart')}")
+    ends = body.findall(f".//{qn('w:commentRangeEnd')}")
+    refs = body.findall(f".//{qn('w:commentReference')}")
+    print(
+        f"body anchors: {len(starts)} commentRangeStart, "
+        f"{len(ends)} commentRangeEnd, {len(refs)} commentReference"
+    )
+    for s in starts:
+        print(f"  commentRangeStart w:id={s.get(qn('w:id'))}")
+    for e in ends:
+        print(f"  commentRangeEnd   w:id={e.get(qn('w:id'))}")
+    for r in refs:
+        print(f"  commentReference  w:id={r.get(qn('w:id'))}")
 
 
 def main():
-    doc_a, style_a, desc_a = case_a_no_basedon()
-    dump_case(f"CASE A — {desc_a}", doc_a, style_a)
+    # --- Build the same doc the failing test builds ---
+    doc = Document()
+    doc.add_paragraph("Text with comment.")
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
 
-    doc_b, style_b, desc_b = case_b_with_basedon()
-    dump_case(f"CASE B — {desc_b}", doc_b, style_b)
+    engine = RedlineEngine(stream)
+
+    # --- Step 1: attach a comment via a same-text modify (COMMENT_ONLY path) ---
+    section("STEP 1 — attach comment via process_batch")
+    result = engine.process_batch(
+        [ModifyText(target_text="comment", new_text="comment", comment="QA Comment")]
+    )
+    print(f"process_batch stats: {result}")
+
+    # --- Step 2: state BEFORE accept_all_revisions ---
+    dump_comment_state(engine, "STATE BEFORE accept_all_revisions")
+
+    pre_count = len(engine.comments_manager.extract_comments_data())
+
+    # --- Step 3: accept_all_revisions ---
+    section("STEP 3 — call accept_all_revisions()")
+    engine.accept_all_revisions()
+    print("accept_all_revisions() returned")
+
+    # --- Step 4: state AFTER ---
+    dump_comment_state(engine, "STATE AFTER accept_all_revisions")
+
+    post_count = len(engine.comments_manager.extract_comments_data())
+
+    # --- Step 5: test assertion preview ---
+    section("TEST ASSERTION PREVIEW")
+    print(f"comments before: {pre_count}")
+    print(f"comments after:  {post_count}")
+    pre_marker = "PASS" if pre_count == 1 else "FAIL"
+    post_marker = "PASS" if post_count == 0 else "FAIL"
+    print(f"  [{pre_marker}] expected 1 comment before accept_all_revisions")
+    print(
+        f"  [{post_marker}] expected 0 comments after accept_all_revisions  (THE BUG)"
+    )
 
 
 if __name__ == "__main__":
