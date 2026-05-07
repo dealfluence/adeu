@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/dealfluence-adeu-badge.png)](https://mseep.ai/app/dealfluence-adeu)
+
 # Adeu: Native Track Changes for AI
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/dealfluence/adeu?style=social)](https://github.com/dealfluence/adeu)
