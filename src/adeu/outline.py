@@ -63,6 +63,32 @@ class _BlockRecord:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def _direct_has_table(
+    block_records: List[_BlockRecord],
+    range_start: int,
+    range_end: int,
+) -> bool:
+    """
+    Returns True iff a Table appears in block_records[range_start:range_end]
+    BEFORE any nested child heading. This prevents `has_table` from bubbling
+    up to ancestor headings: a heading only advertises a table if it is the
+    nearest heading that owns the table.
+
+    Example:
+        H1
+          H2
+            <table>
+        # H2 has_table=True (table appears before any deeper heading)
+        # H1 has_table=False (table is "claimed" by H2 first)
+    """
+    for idx in range(range_start, range_end):
+        rec = block_records[idx]
+        if rec.is_paragraph and _is_heading(rec.item):
+            # We hit a child heading before finding a table — child claims any tables.
+            return False
+        if rec.is_table:
+            return True
+    return False
 
 
 def extract_outline(
@@ -125,7 +151,7 @@ def extract_outline(
         owned_end = _find_owned_end(block_records, heading_indices, h_pos, level)
         owned_blocks = block_records[rec_idx + 1 : owned_end]
 
-        has_table = any(b.is_table for b in owned_blocks)
+        has_table = _direct_has_table(block_records, rec_idx + 1, owned_end)
         footnote_ids = _collect_footnote_ids(owned_blocks)
 
         page_num = _offset_to_page(rec.start_offset, body_page_offsets)
@@ -604,7 +630,9 @@ def _determine_heading_style(paragraph: Paragraph) -> str:
       1. outline_level (any 0..8) → return style name if it's a Heading/Title,
          otherwise "(outline_level)"
       2. style.name starts with "Heading" or equals "Title" → return that name
-      3. fallthrough → all-caps + bold heuristic → "(heuristic)"
+      3. style name contains a 'Heading N' token (custom Word-generated
+         quick styles like 'StyleHeading2NotItalicBefore0pt') → return name
+      4. fallthrough → all-caps + bold heuristic → "(heuristic)"
     """
     # 1. Outline level
     try:
@@ -622,7 +650,16 @@ def _determine_heading_style(paragraph: Paragraph) -> str:
     if style and (style.startswith("Heading") or style == "Title"):
         return style
 
-    # 3. All-caps + bold heuristic
+    # 3. Custom heading style name fallback (e.g. 'StyleHeading2...').
+    # Treat as a real heading style so it isn't demoted to "(heuristic)"
+    # and rejected by _heading_passes_quality_filter.
+    if style:
+        from adeu.utils.docx import _detect_heading_level_from_name
+
+        if _detect_heading_level_from_name(style) is not None:
+            return style
+
+    # 4. All-caps + bold heuristic
     return "(heuristic)"
 
 
