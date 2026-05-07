@@ -120,29 +120,145 @@ class TestQaIssuesV2:
         assert "## \n" not in text, f"Heading 2 rendered with a newline after prefix: {repr(text)}"
 
     def test_issue_8_heading_level_change_leaves_empty_paragraph(self):
-        """Issue 8: Changing ## X -> # Y leaves behind an empty paragraph after accept_all_changes."""
-        doc = Document()
-        doc.add_paragraph("Heading 2 Content", style="Heading 2")
-        doc.add_paragraph("Body text.")
-        stream = io.BytesIO()
-        doc.save(stream)
-        stream.seek(0)
+        """Issue 8: Changing ## X -> # Y should produce a clean whole-paragraph
+        replacement, not fragmented edits or orphan empty paragraphs.
 
-        engine = RedlineEngine(stream)
-        # Change ## X to # Y
-        # In projected text, H2 is "## Heading 2 Content"
-        edit = ModifyText(target_text="## Heading 2 Content", new_text="# Heading 1 Content")
+        This test verifies all three phases of the edit:
+          1. Pre-accept (tracked-changes state): both old and new paragraphs
+             exist as adjacent siblings with proper deletion/insertion markers
+             on both content and paragraph break.
+          2. Post-accept: clean two-paragraph result with new style.
+          3. Post-reject: full revert to original two-paragraph state.
+        """
+        from docx.oxml.ns import qn
+
+        from adeu.models import RejectChange
+
+        def build_engine():
+            doc = Document()
+            doc.add_paragraph("Heading 2 Content", style="Heading 2")
+            doc.add_paragraph("Body text.")
+            stream = io.BytesIO()
+            doc.save(stream)
+            stream.seek(0)
+            return RedlineEngine(stream, author="Test Author")
+
+        def get_pstyle(p_el):
+            pPr = p_el.find(qn("w:pPr"))
+            if pPr is None:
+                return None
+            pStyle = pPr.find(qn("w:pStyle"))
+            return pStyle.get(qn("w:val")) if pStyle is not None else None
+
+        def has_p_break_marker(p_el, kind):
+            """kind is 'w:ins' or 'w:del'. Returns True if pPr/rPr carries it."""
+            pPr = p_el.find(qn("w:pPr"))
+            if pPr is None:
+                return False
+            rPr = pPr.find(qn("w:rPr"))
+            if rPr is None:
+                return False
+            return rPr.find(qn(kind)) is not None
+
+        # --- Phase 1: tracked-changes state ---
+        engine = build_engine()
+        edit = ModifyText(
+            target_text="## Heading 2 Content",
+            new_text="# Heading 1 Content",
+        )
+        result = engine.process_batch([edit])
+        assert result["edits_applied"] == 1
+        assert result["edits_skipped"] == 0
+
+        body = engine.doc.element.body
+        p_elements = body.findall(qn("w:p"))
+        assert len(p_elements) == 3, (
+            f"Pre-accept expected 3 paragraphs (deleted H2, inserted H1, body), got {len(p_elements)}"
+        )
+
+        old_p, new_p, body_p = p_elements
+
+        # The old paragraph keeps its Heading2 style and carries deletion markers
+        # on both its content runs and its paragraph break.
+        assert get_pstyle(old_p) == "Heading2", (
+            f"Original paragraph should retain Heading2 style during review, got {get_pstyle(old_p)!r}"
+        )
+        assert has_p_break_marker(old_p, "w:del"), (
+            "Original paragraph should carry pPr/rPr/<w:del> so the entire paragraph disappears on accept_all_revisions"
+        )
+        old_dels = old_p.findall(f".//{qn('w:del')}")
+        old_inline_del_text = "".join((dt.text or "") for d in old_dels for dt in d.findall(f".//{qn('w:delText')}"))
+        assert old_inline_del_text == "Heading 2 Content", (
+            f"Original content should be tracked-deleted in full, got {old_inline_del_text!r}"
+        )
+
+        # The new paragraph is Heading1-styled and carries insertion markers
+        # on both its content and its paragraph break.
+        assert get_pstyle(new_p) == "Heading1", f"New paragraph should be Heading1-styled, got {get_pstyle(new_p)!r}"
+        assert has_p_break_marker(new_p, "w:ins"), (
+            "New paragraph should carry pPr/rPr/<w:ins> marking the inserted paragraph break"
+        )
+        new_ins_elements = new_p.findall(f".//{qn('w:ins')}")
+        # One inline <w:ins> for content + one in pPr/rPr for the paragraph break.
+        assert len(new_ins_elements) == 2, (
+            f"Expected exactly 2 <w:ins> on the new paragraph (content + paragraph break), got {len(new_ins_elements)}"
+        )
+        new_inline_text = "".join((t.text or "") for ins in new_ins_elements for t in ins.findall(f".//{qn('w:t')}"))
+        assert new_inline_text == "Heading 1 Content", (
+            f"New content should be tracked-inserted in full, got {new_inline_text!r}"
+        )
+
+        # Authorship is consistent: the agent name we passed.
+        for el in old_dels + new_ins_elements:
+            assert el.get(qn("w:author")) == "Test Author", (
+                f"Tracked change attributed to wrong author: {el.get(qn('w:author'))!r}"
+            )
+
+        # Body paragraph is untouched.
+        assert get_pstyle(body_p) is None
+        assert body_p.findall(f".//{qn('w:ins')}") == []
+        assert body_p.findall(f".//{qn('w:del')}") == []
+
+        # --- Phase 2: post-accept ---
+        engine.accept_all_revisions()
+        paragraphs = [p.text for p in engine.doc.paragraphs]
+        assert paragraphs == [
+            "Heading 1 Content",
+            "Body text.",
+        ], f"Post-accept paragraphs: {paragraphs}"
+        post_accept_p_elements = engine.doc.element.body.findall(qn("w:p"))
+        assert get_pstyle(post_accept_p_elements[0]) == "Heading1"
+        # No tracked-change residue.
+        assert engine.doc.element.findall(f".//{qn('w:ins')}") == []
+        assert engine.doc.element.findall(f".//{qn('w:del')}") == []
+
+        # --- Phase 3: post-reject (rebuild and reject instead) ---
+        engine = build_engine()
         engine.process_batch([edit])
 
-        engine.accept_all_revisions()
+        # Discover the Chg ID from mapper spans.
+        engine.mapper._build_map()
+        chg_id = None
+        for span in engine.mapper.spans:
+            if span.ins_id:
+                chg_id = f"Chg:{span.ins_id}"
+                break
+        assert chg_id is not None, "No insertion found to reject"
 
-        # Check all paragraphs, including empty ones
-        paragraphs = [p.text for p in engine.doc.paragraphs]
+        engine.process_batch([RejectChange(target_id=chg_id)])
 
-        # The bug is that the old paragraph remains as an empty one.
-        # So we expect ["", "Heading 1 Content", "Body text."] if it fails.
-        assert len(paragraphs) == 2, f"Expected 2 paragraphs, but got {len(paragraphs)}: {paragraphs}"
-        assert paragraphs == ["Heading 1 Content", "Body text."]
+        # The matching deletion (w:id=1) is paired with the insertion
+        # (w:id=2) by the engine's _get_paired_nodes walk, so a single
+        # reject should restore both sides.
+        post_reject_paragraphs = [p.text for p in engine.doc.paragraphs]
+        assert post_reject_paragraphs == [
+            "Heading 2 Content",
+            "Body text.",
+        ], f"Post-reject paragraphs: {post_reject_paragraphs}"
+        post_reject_p_elements = engine.doc.element.body.findall(qn("w:p"))
+        assert get_pstyle(post_reject_p_elements[0]) == "Heading2", "Reject should restore the original Heading2 style"
+        assert engine.doc.element.findall(f".//{qn('w:ins')}") == []
+        assert engine.doc.element.findall(f".//{qn('w:del')}") == []
 
     def test_issue_9_reject_multi_paragraph_leaves_break(self):
         """Issue 9: Rejecting multi-paragraph insertion leaves behind the paragraph break."""
@@ -200,7 +316,12 @@ class TestQaIssuesV2:
         body = text  # Simplified
         pagination_result = paginate(body)
 
-        nodes = extract_outline(doc_obj, body, pagination_result.body_pages, pagination_result.body_page_offsets)
+        nodes = extract_outline(
+            doc_obj,
+            body,
+            pagination_result.body_pages,
+            pagination_result.body_page_offsets,
+        )
 
         # Expected:
         # H1: has_table=True (because it owns H2 which has a table)

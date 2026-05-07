@@ -11,6 +11,7 @@ class EditOperationType:
     INSERTION = "INSERTION"
     DELETION = "DELETION"
     MODIFICATION = "MODIFICATION"
+    PARAGRAPH_REPLACE = "PARAGRAPH_REPLACE"
 
 
 class ModifyText(BaseModel):
@@ -107,6 +108,13 @@ class DeleteTableRow(BaseModel):
 
 
 DocumentChange = Annotated[
-    Union[AcceptChange, RejectChange, ReplyComment, ModifyText, InsertTableRow, DeleteTableRow],
+    Union[
+        AcceptChange,
+        RejectChange,
+        ReplyComment,
+        ModifyText,
+        InsertTableRow,
+        DeleteTableRow,
+    ],
     Field(discriminator="type"),
 ]

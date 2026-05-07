@@ -1,6 +1,7 @@
 # FILE: src/adeu/redline/engine.py
 import datetime
 import re
+from collections import defaultdict
 from copy import deepcopy
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -33,6 +34,10 @@ logger = structlog.get_logger(__name__)
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
 if "w16du" not in nsmap:
     nsmap["w16du"] = w16du_ns
+
+
+def _empty_bounds() -> List[Optional[int]]:
+    return [None, None]
 
 
 class BatchValidationError(Exception):
@@ -641,6 +646,123 @@ class RedlineEngine:
 
         return ins_elem, last_p
 
+    def _apply_paragraph_replace(self, edit: ModifyText) -> bool:
+        """
+        Implements PARAGRAPH_REPLACE: deletes an entire source paragraph
+        (content + paragraph-break marker) and inserts a fresh styled
+        paragraph after it. After accept_all_revisions, only the new
+        paragraph remains.
+        """
+        target_para = getattr(edit, "_target_paragraph", None)
+        if target_para is None:
+            return False
+        p_el = target_para._element
+
+        # Mint shared revision IDs so the agent sees this as one logical
+        # change (mirrors the reuse_id pattern used by track_insert).
+        shared_id = self._get_next_id()
+        del_id = shared_id
+        ins_id = shared_id
+
+        # 1. Track-delete every content run in the source paragraph.
+        runs_to_delete = []
+        for child in list(p_el):
+            if child.tag == qn("w:r"):
+                runs_to_delete.append(Run(child, target_para))
+            elif child.tag == qn("w:ins"):
+                # Already-inserted content inside this paragraph: take
+                # its child runs verbatim (we'll delete them too).
+                for grand in list(child):
+                    if grand.tag == qn("w:r"):
+                        runs_to_delete.append(Run(grand, target_para))
+
+        first_del_element = None
+        for r in runs_to_delete:
+            del_elem = self.track_delete_run(r, reuse_id=del_id)
+            if first_del_element is None:
+                first_del_element = del_elem
+
+        # 2. Track-delete the paragraph break itself by stamping
+        # pPr/rPr/<w:del>. accept_all_revisions removes any <w:p>
+        # carrying this marker.
+        pPr = p_el.find(qn("w:pPr"))
+        if pPr is None:
+            pPr = create_element("w:pPr")
+            p_el.insert(0, pPr)
+        rPr = pPr.find(qn("w:rPr"))
+        if rPr is None:
+            rPr = create_element("w:rPr")
+            pPr.append(rPr)
+        # Avoid stacking duplicate markers.
+        if rPr.find(qn("w:del")) is None:
+            del_break = self._create_track_change_tag("w:del", reuse_id=del_id)
+            rPr.append(del_break)
+
+        # 3. Build the new paragraph and insert it after the original.
+        new_text = edit.new_text or ""
+        new_clean, new_style_name = self._parse_markdown_style(new_text)
+
+        body = p_el.getparent()
+        if body is None:
+            return False
+        try:
+            p_index = body.index(p_el)
+        except ValueError:
+            return False
+
+        new_p = create_element("w:p")
+        if new_style_name:
+            self._set_paragraph_style(new_p, new_style_name)
+        else:
+            # Carry over the original paragraph's style if no marker was
+            # given (rare but possible if new_text is plain text replacing
+            # a heading).
+            if pPr is not None:
+                new_p.append(deepcopy(pPr))
+                # Strip any tracked-change markers we just stamped.
+                new_pPr = new_p.find(qn("w:pPr"))
+                new_rPr = new_pPr.find(qn("w:rPr")) if new_pPr is not None else None
+                if new_rPr is not None:
+                    for d in new_rPr.findall(qn("w:del")):
+                        new_rPr.remove(d)
+
+        # Mark the new paragraph break itself as tracked-inserted so the
+        # paragraph as a structural unit is part of the revision.
+        new_pPr = new_p.find(qn("w:pPr"))
+        if new_pPr is None:
+            new_pPr = create_element("w:pPr")
+            new_p.insert(0, new_pPr)
+        new_rPr = new_pPr.find(qn("w:rPr"))
+        if new_rPr is None:
+            new_rPr = create_element("w:rPr")
+            new_pPr.append(new_rPr)
+        new_rPr.append(self._create_track_change_tag("w:ins", reuse_id=ins_id))
+
+        # Inline content goes inside a single <w:ins>.
+        new_ins = self._create_track_change_tag("w:ins", reuse_id=ins_id)
+        for seg_text, seg_props in self._parse_inline_markdown(new_clean):
+            new_run = create_element("w:r")
+            self._apply_run_props(new_run, seg_props, suppress_inherited=False)
+            t = create_element("w:t")
+            self._set_text_content(t, seg_text)
+            new_run.append(t)
+            new_ins.append(new_run)
+        new_p.append(new_ins)
+
+        body.insert(p_index + 1, new_p)
+
+        # 4. Attach the comment if any, spanning the source paragraph's
+        # first deletion through the new paragraph's insertion.
+        if edit.comment:
+            if first_del_element is not None:
+                self._attach_comment_spanning(p_el, first_del_element, new_p, new_ins, edit.comment)
+            else:
+                # Source paragraph was empty (no content runs). Anchor on
+                # the new paragraph alone.
+                self._attach_comment(new_p, new_ins, new_ins, edit.comment)
+
+        return True
+
     def _apply_run_props(self, run_element, props: Dict[str, Any], suppress_inherited: bool = False) -> None:
         """
         Applies Bold/Italic properties to a run.
@@ -1212,6 +1334,96 @@ class RedlineEngine:
 
         return True
 
+    def _maybe_paragraph_replace(
+        self,
+        edit: ModifyText,
+        start_idx: int,
+        match_len: int,
+        active_mapper: DocumentMapper,
+    ) -> Optional[ModifyText]:
+        """
+        If the edit's target spans exactly one full paragraph (its heading
+        prefix included), and new_text is a single paragraph involving a
+        heading style change, returns a synthesized ModifyText tagged with
+        the PARAGRAPH_REPLACE internal op. Otherwise returns None.
+
+        See _pre_resolve_heuristic_edit for context on why this fast path
+        exists.
+        """
+        new_text = edit.new_text or ""
+        if not new_text:
+            return None
+
+        # new_text must be a single paragraph — '\n\n' would mean
+        # multi-paragraph and is out of scope for this fast path.
+        if "\n\n" in new_text:
+            return None
+
+        # Identify the paragraph whose full projected span equals the
+        # matched range. We look for a paragraph p such that:
+        #   - the leftmost span belonging to p starts at start_idx
+        #   - the rightmost span belonging to p ends at start_idx + match_len
+        end_idx = start_idx + match_len
+        target_para = None
+
+        # Spans for each paragraph: collect min start / max end.
+        # We only consider spans that are tagged with a paragraph (real or
+        # virtual prefix), and we require coverage by both endpoints.
+
+        bounds: Dict[Any, List[Optional[int]]] = defaultdict(_empty_bounds)
+        for s in active_mapper.spans:
+            if s.paragraph is None:
+                continue
+            # Skip the inter-paragraph "\n\n" virtual separator
+            # (run is None and text == "\n\n" with paragraph != None means
+            # the separator was attached to s.paragraph as the trailing
+            # newline; we exclude it from the boundary calculation).
+            if s.run is None and s.text == "\n\n":
+                continue
+            lo, hi = bounds[s.paragraph]
+            if lo is None or s.start < lo:
+                lo = s.start
+            if hi is None or s.end > hi:
+                hi = s.end
+            bounds[s.paragraph] = [lo, hi]
+
+        for p, (lo, hi) in bounds.items():
+            if lo == start_idx and hi == end_idx:
+                target_para = p
+
+                break
+
+        if target_para is None:
+            return None
+
+        # At least one side must be a heading. If neither the source
+        # paragraph nor the new_text is heading-styled, the existing
+        # inline-edit path handles it correctly — don't intercept.
+        from adeu.utils.docx import is_heading_paragraph
+
+        source_is_heading = is_heading_paragraph(target_para)
+
+        # Detect whether new_text starts with a heading marker.
+        new_clean, new_style = self._parse_markdown_style(new_text)
+        new_is_heading = new_style is not None and (new_style.startswith("Heading") or new_style == "Title")
+
+        if not source_is_heading and not new_is_heading:
+            return None
+
+        # Synthesize a proxy edit pointing at the original paragraph.
+        proxy_edit = ModifyText(
+            type="modify",
+            target_text=edit.target_text,
+            new_text=edit.new_text,
+            comment=edit.comment,
+        )
+        proxy_edit._match_start_index = start_idx
+        proxy_edit._internal_op = EditOperationType.PARAGRAPH_REPLACE
+        proxy_edit._active_mapper_ref = active_mapper
+        # Stash the resolved paragraph for the apply step.
+        proxy_edit._target_paragraph = target_para  # type: ignore[attr-defined]
+        return proxy_edit
+
     def _pre_resolve_heuristic_edit(self, edit: ModifyText) -> Union[ModifyText, List[ModifyText], None]:
         if not edit.target_text:
             return None
@@ -1231,6 +1443,19 @@ class RedlineEngine:
                 return None
 
         active_mapper = self.clean_mapper if use_clean_map else self.mapper
+        assert active_mapper is not None
+        # --- Whole-paragraph replacement fast path ---
+        # Detects: an edit whose target_text exactly matches one full
+        # projected paragraph (heading prefix + content), where new_text is
+        # a single new paragraph (no '\n\n') and where at least one side is
+        # a heading. In that case we route to the PARAGRAPH_REPLACE op,
+        # which track-deletes the entire <w:p> (paragraph break included)
+        # and inserts a fresh styled <w:p>. This avoids the
+        # context-trimming + block-element-insertion path that produces
+        # garbled output for heading-level changes (e.g., '## X' -> '# Y').
+        para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
+        if para_replace is not None:
+            return para_replace
 
         effective_new_text = edit.new_text or ""
         actual_doc_text = self.mapper.full_text[start_idx : start_idx + match_len]
@@ -1452,6 +1677,12 @@ class RedlineEngine:
         length = len(target_text) if target_text else 0
 
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
+
+        # Whole-paragraph replacement: track-delete the entire source
+        # paragraph (content + paragraph break) and emit a new tracked
+        # paragraph with the new style.
+        if op == EditOperationType.PARAGRAPH_REPLACE:
+            return self._apply_paragraph_replace(edit)
 
         # Allocate logical-edit IDs up front. A single ModifyText that spans
         # multiple XML runs (e.g. a target containing a bold word, which OOXML
