@@ -301,9 +301,10 @@ class RedlineEngine:
         self.current_id += 1
         return str(self.current_id)
 
-    def _create_track_change_tag(self, tag_name: str, author: str = ""):
+    def _create_track_change_tag(self, tag_name: str, author: str = "", reuse_id: Optional[str] = None):
         tag = create_element(tag_name)
-        create_attribute(tag, "w:id", self._get_next_id())
+        wid = reuse_id if reuse_id is not None else self._get_next_id()
+        create_attribute(tag, "w:id", wid)
         create_attribute(tag, "w:author", author or self.author)
         create_attribute(tag, "w:date", self.timestamp)
         create_attribute(tag, "w16du:dateUtc", self.timestamp)
@@ -399,9 +400,16 @@ class RedlineEngine:
         comment: Optional[str] = None,
         suppress_inherited: bool = False,
         insert_before: bool = False,
+        reuse_id: Optional[str] = None,
     ) -> Tuple[Optional[Any], Optional[Any]]:
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs.
+
+        If `reuse_id` is provided, every <w:ins> element minted by this call
+        (the inline insert, per-paragraph block inserts, and paragraph-break
+        tracking markers in pPr/rPr) shares that w:id. This collapses multi-
+        paragraph and multi-run insertions into a single logical revision
+        from the agent's point of view.
         """
         lines = re.split(r"[\r\n]+", text)
         if not lines:
@@ -459,10 +467,10 @@ class RedlineEngine:
                 if rPr is None:
                     rPr = create_element("w:rPr")
                     pPr.append(rPr)
-                ins_mark = self._create_track_change_tag("w:ins")
+                ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
                 rPr.append(ins_mark)
 
-                new_ins = self._create_track_change_tag("w:ins")
+                new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
 
                 segments = self._parse_inline_markdown(c_text)
 
@@ -500,7 +508,12 @@ class RedlineEngine:
 
         # 1. Inline Logic
         first_line = lines[0]
-        ins_elem = self._track_insert_inline(first_line, anchor_run, suppress_inherited=suppress_inherited)
+        ins_elem = self._track_insert_inline(
+            first_line,
+            anchor_run,
+            suppress_inherited=suppress_inherited,
+            reuse_id=reuse_id,
+        )
 
         remaining_lines = lines[1:]
 
@@ -594,10 +607,10 @@ class RedlineEngine:
                 if rPr is None:
                     rPr = create_element("w:rPr")
                     pPr.append(rPr)
-                ins_mark = self._create_track_change_tag("w:ins")
+                ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
                 rPr.append(ins_mark)
 
-                new_ins = self._create_track_change_tag("w:ins")
+                new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
 
                 segments = self._parse_inline_markdown(clean_text)
                 for seg_text, seg_props in segments:
@@ -696,8 +709,9 @@ class RedlineEngine:
         text: str,
         anchor_run: Optional[Run] = None,
         suppress_inherited: bool = False,
+        reuse_id: Optional[str] = None,
     ):
-        ins = self._create_track_change_tag("w:ins")
+        ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
 
         segments = self._parse_inline_markdown(text)
 
@@ -764,8 +778,8 @@ class RedlineEngine:
 
         grandparent.remove(parent_ins)
 
-    def track_delete_run(self, run: Run):
-        del_tag = self._create_track_change_tag("w:del")
+    def track_delete_run(self, run: Run, reuse_id: Optional[str] = None):
+        del_tag = self._create_track_change_tag("w:del", reuse_id=reuse_id)
 
         # Clone the run to preserve special content (w:drawing, w:commentReference)
         new_run = deepcopy(run._r)
@@ -1439,6 +1453,24 @@ class RedlineEngine:
 
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
 
+        # Allocate logical-edit IDs up front. A single ModifyText that spans
+        # multiple XML runs (e.g. a target containing a bold word, which OOXML
+        # stores as a separate <w:r> element) or whose new_text spans multiple
+        # paragraphs used to mint a fresh w:id per <w:ins>/<w:del> element,
+        # surfacing as N [Chg:N] entries in the projected bubble even though
+        # Word renders the change as a single review entry. We now allocate one
+        # id for the delete side and one for the insert side per logical
+        # operation, and reuse them across every <w:ins>/<w:del> element this
+        # edit produces. The mapper's _build_merged_meta_block already
+        # deduplicates repeated IDs via seen_sigs, so this collapses the bubble
+        # automatically without any projection-side change to the engine.
+        del_id: Optional[str] = None
+        ins_id: Optional[str] = None
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
+            del_id = self._get_next_id()
+        if op in (EditOperationType.INSERTION, EditOperationType.MODIFICATION):
+            ins_id = self._get_next_id()
+
         if op == "URL_RETARGET":
             target_spans = [s for s in active_mapper.spans if s.start <= start_idx < s.end]
             if target_spans and target_spans[0].hyperlink_id:
@@ -1504,6 +1536,7 @@ class RedlineEngine:
                     anchor_paragraph=anchor_paragraph,
                     comment=edit.comment,
                     insert_before=True,
+                    reuse_id=ins_id,
                 )
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
@@ -1532,6 +1565,7 @@ class RedlineEngine:
                     anchor_paragraph=anchor_paragraph,
                     comment=edit.comment,
                     insert_before=insert_before,
+                    reuse_id=ins_id,
                 )
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):
@@ -1567,7 +1601,7 @@ class RedlineEngine:
             first_del_element = None
             last_del_element = None
             for run in target_runs:
-                del_elem = self.track_delete_run(run)
+                del_elem = self.track_delete_run(run, reuse_id=del_id)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
@@ -1590,7 +1624,7 @@ class RedlineEngine:
             first_del_element = None
             last_del_element = None
             for run in target_runs:
-                del_elem = self.track_delete_run(run)
+                del_elem = self.track_delete_run(run, reuse_id=del_id)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
@@ -1620,6 +1654,7 @@ class RedlineEngine:
                         anchor_run=Run(del_r, target_runs[-1]._parent),
                         comment=None,
                         suppress_inherited=False,
+                        reuse_id=ins_id,
                     )
                     if ins_elem is not None:
                         parent.insert(del_index + 1, ins_elem)
@@ -1665,7 +1700,12 @@ class RedlineEngine:
                     last_runs = p1_el.findall(f".//{qn('w:r')}")
                     anchor = Run(last_runs[-1], first_span.paragraph) if last_runs else None
 
-                    ins_elem, _ = self.track_insert(edit.new_text, anchor_run=anchor, comment=edit.comment)
+                    ins_elem, _ = self.track_insert(
+                        edit.new_text,
+                        anchor_run=anchor,
+                        comment=edit.comment,
+                        reuse_id=ins_id,
+                    )
                     if ins_elem is not None:
                         p1_el.append(ins_elem)
 

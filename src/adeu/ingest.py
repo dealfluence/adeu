@@ -426,13 +426,24 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
                 render_comment(child_id)
 
     for ins_map, del_map, comments_set, fmt_map in states_list:
-        for map_obj in (ins_map, del_map, fmt_map):
-            for uid, meta in map_obj.items():
-                sig = f"Chg:{uid}"
-                if sig not in seen_sigs:
-                    auth = meta.author or "Unknown"
-                    change_lines.append(f"[{sig}] {auth}")
-                    seen_sigs.add(sig)
+        for uid, meta in ins_map.items():
+            sig = f"Chg:{uid}"
+            if sig not in seen_sigs:
+                auth = meta.author or "Unknown"
+                change_lines.append(f"[{sig} insert] {auth}")
+                seen_sigs.add(sig)
+        for uid, meta in del_map.items():
+            sig = f"Chg:{uid}"
+            if sig not in seen_sigs:
+                auth = meta.author or "Unknown"
+                change_lines.append(f"[{sig} delete] {auth}")
+                seen_sigs.add(sig)
+        for uid, meta in fmt_map.items():
+            sig = f"Chg:{uid}"
+            if sig not in seen_sigs:
+                auth = meta.author or "Unknown"
+                change_lines.append(f"[{sig} format] {auth}")
+                seen_sigs.add(sig)
 
         for root_id in sorted(comments_set):
             render_comment(root_id)

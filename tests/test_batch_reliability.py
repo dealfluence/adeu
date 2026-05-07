@@ -37,12 +37,12 @@ def test_batch_accept_does_not_corrupt():
 
     # Verify IDs exist
     text = extract_text_from_stream(stream_redlined)
-    assert "[Chg:1]" in text
-    assert "[Chg:2]" in text
-    assert "[Chg:3]" in text
-    assert "[Chg:4]" in text
-    assert "[Chg:5]" in text
-    assert "[Chg:6]" in text
+    assert "[Chg:1 " in text
+    assert "[Chg:2 " in text
+    assert "[Chg:3 " in text
+    assert "[Chg:4 " in text
+    assert "[Chg:5 " in text
+    assert "[Chg:6 " in text
 
     # BATCH ACCEPT ALL
     # We accept the Insertions (2, 4, 6) AND the Deletions (1, 3, 5)

@@ -61,7 +61,7 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     assert "{++1st++}" in mid_text
 
     # Extract dynamically generated Change IDs for the Accept action
-    chg_ids = set(re.findall(r"\[Chg:(\d+)\]", mid_text))
+    chg_ids = set(re.findall(r"\[Chg:(\d+)(?:\s+\w+)?\]", mid_text))
     assert len(chg_ids) > 0, "Tracked changes were not generated."
 
     # 3. Execute the Atomic Batch (Simulating Round 2)

@@ -581,13 +581,18 @@ class DocumentMapper:
         seen_sigs = set()
 
         for ins_map, del_map, comments_set in states_list:
-            for map_obj in (ins_map, del_map):
-                for uid, meta in map_obj.items():
-                    sig = f"Chg:{uid}"
-                    if sig not in seen_sigs:
-                        auth = meta.author or "Unknown"
-                        change_lines.append(f"[{sig}] {auth}")
-                        seen_sigs.add(sig)
+            for uid, meta in ins_map.items():
+                sig = f"Chg:{uid}"
+                if sig not in seen_sigs:
+                    auth = meta.author or "Unknown"
+                    change_lines.append(f"[{sig} insert] {auth}")
+                    seen_sigs.add(sig)
+            for uid, meta in del_map.items():
+                sig = f"Chg:{uid}"
+                if sig not in seen_sigs:
+                    auth = meta.author or "Unknown"
+                    change_lines.append(f"[{sig} delete] {auth}")
+                    seen_sigs.add(sig)
 
             sorted_ids = sorted(list(comments_set))
             for c_id in sorted_ids:

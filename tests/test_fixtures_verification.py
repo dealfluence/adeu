@@ -35,8 +35,8 @@ def normalize_adeu_extract(text):
     text = re.sub(r" @ \d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?", "", text)
     # Remove IDs: "[Com:0]" -> "[Com:X]"
     text = re.sub(r"\[Com:\d+\]", "[Com:X]", text)
-    # Remove Change IDs: "[Chg:1]" -> "[Chg:X]"
-    text = re.sub(r"\[Chg:\d+\]", "[Chg:X]", text)
+    # Remove Change IDs: "[Chg:1]" or "[Chg:1 delete]" / "[Chg:1 insert]" / "[Chg:1 format]" -> "[Chg:X]"
+    text = re.sub(r"\[Chg:\d+(?:\s+\w+)?\]", "[Chg:X]", text)
 
     # Normalize whitespace artifacts
     text = re.sub(r"(\s+)(?=--\}|\+\+\})", "", text)
@@ -94,7 +94,10 @@ def test_oracle_golden_replica(clean_result_file):
     if norm_golden != norm_result:
         print("\n--- EXTRACT DIFF ---")
         diff = difflib.unified_diff(
-            norm_golden.splitlines(), norm_result.splitlines(), fromfile="Golden Extract", tofile="Result Extract"
+            norm_golden.splitlines(),
+            norm_result.splitlines(),
+            fromfile="Golden Extract",
+            tofile="Result Extract",
         )
         print("\n".join(diff))
         pytest.fail("Adeu Extract does not match Golden Extract")
@@ -109,13 +112,20 @@ def test_oracle_golden_replica(clean_result_file):
         print("\n--- XML STRUCTURE DIFF ---")
 
         diff = difflib.unified_diff(
-            golden_xml.splitlines(), result_xml.splitlines(), fromfile="Golden XML", tofile="Result XML", n=3
+            golden_xml.splitlines(),
+            result_xml.splitlines(),
+            fromfile="Golden XML",
+            tofile="Result XML",
+            n=3,
         )
         print("\n".join(diff))
         print("WARNING: XML Structure mismatch (Likely run coalescing differences)")
 
 
-@pytest.mark.skipif(not os.path.exists(GOLDEN_DOC) or not os.path.exists(GOLDEN2_DOC), reason="Golden fixtures missing")
+@pytest.mark.skipif(
+    not os.path.exists(GOLDEN_DOC) or not os.path.exists(GOLDEN2_DOC),
+    reason="Golden fixtures missing",
+)
 def test_repro_golden_to_golden2(clean_result_file):
     """
     Reproduction of 'Invisible Comment Bug'.
@@ -161,7 +171,11 @@ def test_repro_golden_to_golden2(clean_result_file):
     if expected_xml != actual_xml:
         print("\n--- XML STRUCTURE DIFF (GOLDEN2 vs RESULT) ---")
         diff = difflib.unified_diff(
-            expected_xml.splitlines(), actual_xml.splitlines(), fromfile="Golden2 XML", tofile="Result XML", n=3
+            expected_xml.splitlines(),
+            actual_xml.splitlines(),
+            fromfile="Golden2 XML",
+            tofile="Result XML",
+            n=3,
         )
         print("\n".join(diff))
         print("WARNING: XML Structure mismatch (Likely run coalescing or property diffs)")
