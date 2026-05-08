@@ -12,7 +12,6 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
@@ -172,6 +171,7 @@ class DocumentMapper:
     def _build_map(self):
         current_offset = 0
         self.spans = []
+        self._text_chunks: List[str] = []
         self.full_text = ""
 
         for part in iter_document_parts(self.doc):
@@ -185,12 +185,12 @@ class DocumentMapper:
         # Cleanup trailing newlines
         while self.spans and self.spans[-1].text == "\n\n":
             self.spans.pop()
-            self.full_text = self.full_text[:-2]
+            self._text_chunks.pop()
 
-        appendix_text = build_structural_appendix(self.doc, self.full_text)
-        if appendix_text:
-            self.appendix_start_index = len(self.full_text)
-            self._add_virtual_text(appendix_text, self.appendix_start_index, None)
+        self.full_text = "".join(self._text_chunks)
+        # We no longer calculate the appendix for the mapping engine.
+        # It's an unnecessary O(N) calculation that isn't needed for redlining.
+        self.appendix_start_index = -1
 
     def _map_blocks(self, container, offset: int) -> int:
         current = offset
@@ -371,7 +371,7 @@ class DocumentMapper:
                         hyperlink_id=active_hyperlink_id,
                     )
                     self.spans.append(span)
-                    self.full_text += txt
+                    self._text_chunks.append(txt)
                 current += len(txt)
             if e_tok:
                 self._add_virtual_text(e_tok, current, paragraph)
@@ -661,7 +661,7 @@ class DocumentMapper:
             hyperlink_id=hyperlink_id,
         )
         self.spans.append(span)
-        self.full_text += text
+        self._text_chunks.append(text)
 
     def _replace_smart_quotes(self, text: str) -> str:
         return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")

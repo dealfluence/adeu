@@ -1,10 +1,11 @@
 # FILE: src/adeu/mcp_components/tools/document.py
+import asyncio
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Any, List, Literal, Optional
 
 from docx import Document as load_document
 from fastmcp import Context
@@ -123,52 +124,48 @@ async def _process_document_batch_disk(
         },
     )
 
-    try:
-        if not author_name or not author_name.strip():
-            await ctx.warning("Batch processing rejected: author_name is empty.")
-            return "Error: author_name cannot be empty."
+    if not author_name or not author_name.strip():
+        await ctx.warning("Batch processing rejected: author_name is empty.")
+        return "Error: author_name cannot be empty."
 
-        if not changes:
-            await ctx.warning("Batch processing rejected: No actions or edits provided.")
-            return "Error: No changes provided."
+    if not changes:
+        await ctx.warning("Batch processing rejected: No actions or edits provided.")
+        return "Error: No changes provided."
 
+    def _run_batch_sync() -> tuple[bool, Any, str]:
         stream = read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name)
-        await ctx.debug("Redline Engine initialized successfully")
 
         try:
-            await ctx.debug("Processing document batch")
             stats = engine.process_batch(changes)
-            await ctx.info("Changes processed successfully", extra=stats)
         except BatchValidationError as e:
-            await ctx.error(
-                "Batch validation failed",
-                extra={
-                    "error_count": len(e.errors),
-                    "errors": e.errors,
-                },
-            )
-            error_report = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
-            return error_report
+            return False, e.errors, ""
 
-        if not output_path:
+        final_output = output_path
+        if not final_output:
             p = Path(original_docx_path)
             if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
-                output_path = str(p)
+                final_output = str(p)
             else:
-                output_path = str(p.parent / f"{p.stem}_processed{p.suffix}")
+                final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
-        await ctx.debug(
-            "Saving processed document stream to disk",
-            extra={"output_path": output_path},
-        )
         result_stream = engine.save_to_stream()
-        save_stream(result_stream, output_path)
+        save_stream(result_stream, final_output)
+        return True, stats, final_output
 
-        await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
+    try:
+        await ctx.debug("Offloading RedlineEngine to background thread")
+        success, result_data, final_output_path = await asyncio.to_thread(_run_batch_sync)
 
+        if not success:
+            await ctx.error("Batch validation failed", extra={"error_count": len(result_data)})
+            return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(result_data)
+
+        await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
+
+        stats = result_data
         res = (
-            f"Batch complete. Saved to: {output_path}\n"
+            f"Batch complete. Saved to: {final_output_path}\n"
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
             f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
         )

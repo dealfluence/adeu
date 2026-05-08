@@ -1,38 +1,61 @@
-# FILE: smoke_step4_correctness.py
-import asyncio
-import sys
+# FILE: prof_batch.py
+import cProfile
+import pstats
+import time
+from io import BytesIO
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from unittest.mock import AsyncMock
-
-from adeu.mcp_components.tools.document import _read_docx_disk
+from adeu.models import ModifyText
+from adeu.redline.engine import RedlineEngine
 
 
-async def main(path):
-    ctx = AsyncMock()
-    ctx.info = AsyncMock()
-    ctx.debug = AsyncMock()
-    ctx.error = AsyncMock()
-    ctx.warning = AsyncMock()
+def main():
+    target_file = r"C:\Users\Uzair\Desktop\VVBIG.docx"
 
-    # Run outline at default depth, then verbose, then deep
-    for kwargs in [
-        {"outline_max_level": 2, "outline_verbose": False},
-        {"outline_max_level": 2, "outline_verbose": True},
-        {"outline_max_level": 6, "outline_verbose": False},
-    ]:
-        res = await _read_docx_disk(path, ctx, clean_view=True, mode="outline", **kwargs)
-        text = res.content[0].text
-        print(f"\n=== outline {kwargs} ===")
-        print(f"len: {len(text):,} chars")
-        # Print first 5 heading lines so we can eyeball correctness
-        lines = [ln for ln in text.split("\n") if ln.startswith("#")]
-        print("First 5 heading lines:")
-        for line in lines[:5]:
-            print(f"  {line}")
+    if not Path(target_file).exists():
+        print(f"Error: {target_file} not found.")
+        return
+
+    print(f"Loading {target_file} into memory...")
+    with open(target_file, "rb") as f:
+        stream_bytes = f.read()
+
+    print("Initializing RedlineEngine...")
+    t0 = time.time()
+
+    # Engine initialization includes parsing the XML and the first mapper build
+    engine = RedlineEngine(BytesIO(stream_bytes), author="QA Agent")
+
+    t1 = time.time()
+    print(f"Engine Init took {t1 - t0:.2f} seconds.")
+
+    # The exact change that timed out
+    changes = [
+        ModifyText(
+            type="modify",
+            target_text="Use Ctrl+F to search on words or phrases.",
+            new_text="Use Ctrl+F to **rapidly locate** specific words or phrases within this Handbook.",
+            comment="QA Phase 2: Verifying that modify+bold+comment operations work.",
+        )
+    ]
+
+    print("Processing batch... (Profiling)")
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    t2 = time.time()
+    stats = engine.process_batch(changes)
+
+    profiler.disable()
+    t3 = time.time()
+
+    print(f"Process Batch took {t3 - t2:.2f} seconds.")
+    print(f"Result stats: {stats}")
+
+    print("\n--- TOP 25 TIME-CONSUMING FUNCTIONS ---")
+    ps = pstats.Stats(profiler).sort_stats("cumtime")
+    ps.print_stats(25)
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1]))
+    main()
