@@ -18,9 +18,7 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 
 
 # FILE: src/adeu/domain.py
-def extract_definitions_and_diagnostics(
-    doc, base_text: str
-) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """
     Heuristically extracts terms wrapped in quotes (Glossary & Inline)
     and generates semantic diagnostics (Unresolved, Unused, Duplicate, Typo).
@@ -28,9 +26,7 @@ def extract_definitions_and_diagnostics(
     definitions: Dict[str, Dict[str, Any]] = {}
     duplicates = set()
 
-    leading_re = re.compile(
-        r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]"
-    )
+    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
     inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
 
     for item in iter_block_items(doc):
@@ -75,9 +71,7 @@ def extract_definitions_and_diagnostics(
                 duplicates.discard(term)
 
     for term in duplicates:
-        diagnostics.append(
-            f"[Error] Duplicate Definition: '{term}' is defined multiple times."
-        )
+        diagnostics.append(f"[Error] Duplicate Definition: '{term}' is defined multiple times.")
 
     stop_words = {
         "The",
@@ -190,14 +184,11 @@ def extract_anchors(doc) -> Dict[str, Dict[str, Any]]:
             for node in item._element.iter():
                 if node.tag == qn("w:bookmarkStart"):
                     b_name = node.get(qn("w:name"))
-                    if b_name and (
-                        not b_name.startswith("_") or b_name.startswith("_Ref")
-                    ):
+                    if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                         if b_name not in anchors:
                             text = _get_paragraph_text(item).strip()
                             anchors[b_name] = {
-                                "anchored_to": text[:60]
-                                + ("..." if len(text) > 60 else ""),
+                                "anchored_to": text[:60] + ("..." if len(text) > 60 else ""),
                                 "referenced_from": [],
                             }
 
@@ -219,9 +210,7 @@ def extract_anchors(doc) -> Dict[str, Dict[str, Any]]:
                         target = parts[1]
 
                 if target and target in anchors:
-                    anchors[target]["referenced_from"].append(
-                        p_text[:60] + ("..." if len(p_text) > 60 else "")
-                    )
+                    anchors[target]["referenced_from"].append(p_text[:60] + ("..." if len(p_text) > 60 else ""))
 
     return anchors
 
@@ -239,9 +228,7 @@ def extract_all_domain_metadata(
     raw_anchors: Dict[str, Dict[str, Any]] = {}
     raw_references: List[Tuple[str, str]] = []  # (target_bookmark, referencing_text)
 
-    leading_re = re.compile(
-        r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]"
-    )
+    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
     inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
 
     # --- SINGLE DOCUMENT WALK ---
@@ -322,9 +309,7 @@ def extract_all_domain_metadata(
                 duplicates.discard(term)
 
     for term in duplicates:
-        diagnostics.append(
-            f"[Error] Duplicate Definition: '{term}' is defined multiple times."
-        )
+        diagnostics.append(f"[Error] Duplicate Definition: '{term}' is defined multiple times.")
 
     stop_words = {
         "The",
