@@ -96,18 +96,22 @@ def extract_outline(
     projected_body: str,
     body_pages: List[str],
     body_page_offsets: List[int],
+    paragraph_offsets: dict | None = None,
 ) -> List[OutlineNode]:
     """
     Walks the document and returns a flat list of OutlineNode records in document order.
 
     Args:
         doc: the python-docx Document.
-        projected_body: post-projection Markdown, BODY ONLY (no appendix). Required
-            for sanity (length validation against walked blocks); not currently
-            consumed beyond that.
+        projected_body: post-projection Markdown, BODY ONLY (no appendix).
         body_pages: pre-appendix-injection page bodies, in order.
         body_page_offsets: start offset (in projected_body) of each entry in body_pages.
             Must satisfy len(body_pages) == len(body_page_offsets).
+        paragraph_offsets: when provided (Step 4 / Option A), this is the offset
+            map produced by _extract_text_from_doc(return_paragraph_offsets=True).
+            Used to fast-path heading text extraction by slicing projected_body
+            instead of re-projecting each paragraph. When None, falls back to the
+            legacy walk that re-projects (slow on large docs).
 
     Returns:
         Flat list of OutlineNode. Empty if no headings detected.
@@ -117,6 +121,12 @@ def extract_outline(
             f"body_pages ({len(body_pages)}) and body_page_offsets ({len(body_page_offsets)}) length mismatch"
         )
 
+    # Fast path: we have authoritative paragraph offsets from the body
+    # projection. Skip the legacy walk entirely.
+    if paragraph_offsets is not None:
+        return _extract_outline_fast(doc, projected_body, body_page_offsets, paragraph_offsets)
+
+    # Legacy slow path (no offset map).
     # Build the comments map once — required by build_paragraph_text.
     comments_map = CommentsManager(doc).extract_comments_data()
 
@@ -168,6 +178,189 @@ def extract_outline(
         )
 
     return nodes
+
+
+def _extract_outline_fast(
+    doc: DocumentObject,
+    projected_body: str,
+    body_page_offsets: List[int],
+    paragraph_offsets: dict,
+) -> List[OutlineNode]:
+    """
+    Fast outline extraction using the pre-computed paragraph offset map.
+
+    For each paragraph in the document, we already know its (start, length) in
+    projected_body. Heading text is extracted by slicing projected_body and
+    stripping markdown markers — no per-paragraph re-projection.
+
+    has_table and footnote_ids are computed by walking the tree, which is
+    fast (lxml structural traversal, not text projection). Owned-range
+    determination is unchanged from the legacy path.
+    """
+    # Walk paragraphs and tables in projection order, but ONLY to detect
+    # heading-eligible paragraphs. We do not re-project text.
+    paragraphs_and_tables: list = []
+    seen_cells: set = set()
+
+    def walk(container):
+        for item in iter_block_items(container):
+            i_type = type(item).__name__
+            if i_type == "FootnoteItem":
+                walk(item)
+            elif isinstance(item, Paragraph):
+                paragraphs_and_tables.append(("p", item))
+            elif isinstance(item, Table):
+                paragraphs_and_tables.append(("t", item))
+                for row in item.rows:
+                    for cell in row.cells:
+                        cid = id(cell._tc)
+                        if cid in seen_cells:
+                            continue
+                        seen_cells.add(cid)
+                        walk(cell)
+
+    # Body part only — header/footer/notes don't contribute to outline.
+    walk(doc)
+
+    # Identify heading paragraphs.
+    heading_indices: list[int] = []
+    for idx, (kind, item) in enumerate(paragraphs_and_tables):
+        if kind != "p":
+            continue
+        # If the paragraph has no offset, it was skipped during projection
+        # (e.g. inside a deleted table row in clean_view). It cannot be a heading.
+        if id(item._element) not in paragraph_offsets:
+            continue
+        if not _is_heading(item):
+            continue
+        if not _heading_passes_quality_filter_fast(item, projected_body, paragraph_offsets):
+            continue
+        heading_indices.append(idx)
+
+    if not heading_indices:
+        return []
+
+    nodes: List[OutlineNode] = []
+    for h_pos, item_idx in enumerate(heading_indices):
+        _, paragraph = paragraphs_and_tables[item_idx]
+        level = _heading_level(paragraph)
+        text = _heading_text_fast(paragraph, projected_body, paragraph_offsets)
+        style = _determine_heading_style(paragraph)
+
+        # Owned range: items strictly between this heading and the next
+        # equal-or-higher heading.
+        owned_end = item_idx
+        for next_h_pos in range(h_pos + 1, len(heading_indices)):
+            next_idx = heading_indices[next_h_pos]
+            next_paragraph = paragraphs_and_tables[next_idx][1]
+            if _heading_level(next_paragraph) <= level:
+                owned_end = next_idx
+                break
+        else:
+            owned_end = len(paragraphs_and_tables)
+
+        owned = paragraphs_and_tables[item_idx + 1 : owned_end]
+
+        # has_table: nearest-claim semantics (no bubbling to ancestors).
+        has_table = False
+        for kind2, item2 in owned:
+            if kind2 == "p" and _is_heading(item2):
+                break
+            if kind2 == "t":
+                has_table = True
+                break
+
+        # Footnote IDs in document order, deduped.
+        footnote_ids = _collect_footnote_ids_fast(owned)
+
+        # Page resolution from the paragraph's known offset.
+        para_offset = paragraph_offsets.get(id(paragraph._element))
+        if para_offset is not None:
+            start_offset, _length, _proxy = para_offset
+            page_num = _offset_to_page(start_offset, body_page_offsets)
+        else:
+            page_num = 1
+
+        nodes.append(
+            OutlineNode(
+                level=level,
+                text=text,
+                page=page_num,
+                style=style,
+                has_table=has_table,
+                footnote_ids=footnote_ids,
+            )
+        )
+
+    return nodes
+
+
+def _heading_passes_quality_filter_fast(
+    paragraph: Paragraph,
+    projected_body: str,
+    paragraph_offsets: dict,
+) -> bool:
+    """
+    Fast variant of _heading_passes_quality_filter that uses the offset map
+    for heuristic-promoted headings instead of calling build_paragraph_text.
+    """
+    style = _determine_heading_style(paragraph)
+    if style != "(heuristic)":
+        return True
+
+    text = _heading_text_fast(paragraph, projected_body, paragraph_offsets)
+    if not text:
+        return False
+    word_count = len(re.findall(r"\w+", text))
+    return word_count >= _HEURISTIC_MIN_WORDS
+
+
+def _heading_text_fast(
+    paragraph: Paragraph,
+    projected_body: str,
+    paragraph_offsets: dict,
+) -> str:
+    """
+    Fast variant of _heading_text using the offset map. Slices projected_body
+    instead of re-projecting the paragraph.
+    """
+    offset = paragraph_offsets.get(id(paragraph._element))
+    if offset is None:
+        # Defensive fallback — paragraph wasn't projected (shouldn't happen
+        # for body paragraphs, but might for ones in unsupported parts).
+        return ""
+    start, length, _proxy = offset
+    raw = projected_body[start : start + length]
+    cleaned = _strip_critic_markup(raw)
+    cleaned = _strip_inline_formatting(cleaned)
+    # The projection includes the heading prefix ("# ", "## ", ...). Strip it.
+    cleaned = re.sub(r"^#+\s+", "", cleaned)
+    return cleaned.strip()
+
+
+def _collect_footnote_ids_fast(owned_items: list) -> List[str]:
+    """
+    Walks owned (kind, item) tuples, collecting footnote/endnote references
+    in document order, deduplicated, with first-seen order preserved.
+    """
+    seen: set = set()
+    ordered: List[str] = []
+
+    for kind, item in owned_items:
+        if kind != "p":
+            continue
+        for event in _iter_paragraph_events(item):
+            if event.type == "footnote":
+                fn_id = f"fn-{event.id}"
+            elif event.type == "endnote":
+                fn_id = f"en-{event.id}"
+            else:
+                continue
+            if fn_id not in seen:
+                seen.add(fn_id)
+                ordered.append(fn_id)
+
+    return ordered
 
 
 # ---------------------------------------------------------------------------

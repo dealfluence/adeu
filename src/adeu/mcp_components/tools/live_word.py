@@ -13,6 +13,7 @@ from fastmcp.tools.tool import ToolResult
 
 from adeu import RedlineEngine
 from adeu.mcp_components._response_builders import (
+    build_appendix_response,
     build_outline_response,
     build_paginated_response,
 )
@@ -23,7 +24,7 @@ from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from docx.document import Document as DocumentObject
+    pass
 
 
 def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
@@ -215,12 +216,21 @@ if sys.platform == "win32":
         raise LiveDocumentNotOpenError(f"Document {file_path} is not open in Word.")
 
     def _read_active_word_document_core(
-        clean_view: bool = False, file_path: Optional[str] = None
-    ) -> Tuple[str, str, "DocumentObject"]:
+        clean_view: bool = False,
+        file_path: Optional[str] = None,
+        include_appendix: bool = True,
+        return_paragraph_offsets: bool = False,
+    ) -> Tuple:
         """
         Reads the live active Word document (or specific open file) by extracting its
         Flat OPC XML via doc.WordOpenXML, wrapping it into an in-memory DOCX zip stream,
         and routing it through the same ingest pipeline used for disk files.
+
+        Args:
+            clean_view: simulate "Accept All Changes" view.
+            include_appendix: when False, skip building the structural appendix.
+                Callers that won't ship the appendix in their response (mode='full',
+                mode='outline') should pass False to save ~8.5s on large docs.
 
         Returns (extracted_text, absolute_file_path, python_docx_document).
 
@@ -256,7 +266,17 @@ if sys.platform == "win32":
 
         renumber_snapshot_ids(py_doc)
 
-        text = _extract_text_from_doc(py_doc, clean_view=clean_view)
+        # Caller may also request paragraph offsets for the fast outline path.
+        # We piggyback on the same _extract_text_from_doc call.
+        if return_paragraph_offsets:
+            text, paragraph_offsets = _extract_text_from_doc(
+                py_doc,
+                clean_view=clean_view,
+                include_appendix=include_appendix,
+                return_paragraph_offsets=True,
+            )
+            return text, actual_path, py_doc, paragraph_offsets
+        text = _extract_text_from_doc(py_doc, clean_view=clean_view, include_appendix=include_appendix)
         return text, actual_path, py_doc
 
     async def read_active_word_document(
@@ -265,23 +285,54 @@ if sys.platform == "win32":
         file_path: Optional[str] = None,
         mode: str = "full",
         page: int = 1,
+        outline_max_level: int = 2,
+        outline_verbose: bool = False,
     ) -> ToolResult:
         await ctx.info(
             f"Extracting live Word document via WordOpenXML "
-            f"(clean_view={clean_view}, path={file_path}, mode={mode}, page={page})"
+            f"(clean_view={clean_view}, path={file_path}, mode={mode}, page={page}, "
+            f"outline_max_level={outline_max_level}, outline_verbose={outline_verbose})"
         )
         try:
+            # Step 3: Only mode='appendix' actually consumes the structural appendix
+            # in the response. Skip building it for the other modes (~8.5s saved on
+            # large docs).
+            needs_appendix = mode == "appendix"
+            # Step 4 / Option A: outline mode uses paragraph offsets to avoid
+            # re-projecting each paragraph.
+            needs_offsets = mode == "outline"
+
             # Note: extraction errors (LiveDocumentNotOpenError, "Could not connect to
             # active Word", etc.) are NOT caught here. They propagate as their original
             # exception types so the disk-fallback dispatcher in document.py can
             # distinguish "Word doesn't have this doc open, try disk" from
             # "Live Word read it fine but the request was invalid (e.g. page OOR)".
-            final_text, actual_path, py_doc = _read_active_word_document_core(clean_view, file_path)
+            paragraph_offsets = None
+            if needs_offsets:
+                final_text, actual_path, py_doc, paragraph_offsets = _read_active_word_document_core(
+                    clean_view,
+                    file_path,
+                    include_appendix=needs_appendix,
+                    return_paragraph_offsets=True,
+                )
+            else:
+                final_text, actual_path, py_doc = _read_active_word_document_core(
+                    clean_view, file_path, include_appendix=needs_appendix
+                )
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
                 if mode == "outline":
-                    res = build_outline_response(py_doc, final_text, actual_path)
+                    res = build_outline_response(
+                        py_doc,
+                        final_text,
+                        actual_path,
+                        outline_max_level=outline_max_level,
+                        outline_verbose=outline_verbose,
+                        paragraph_offsets=paragraph_offsets,
+                    )
+                elif mode == "appendix":
+                    res = build_appendix_response(final_text, page, actual_path)
                 else:
                     res = build_paginated_response(final_text, page, actual_path)
             except ToolError:
@@ -1013,8 +1064,11 @@ else:
     from adeu.models import DocumentChange
 
     def _read_active_word_document_core(
-        clean_view: bool = False, file_path: Optional[str] = None
-    ) -> Tuple[str, str, "DocumentObject"]:
+        clean_view: bool = False,
+        file_path: Optional[str] = None,
+        include_appendix: bool = True,
+        return_paragraph_offsets: bool = False,
+    ) -> Tuple:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
     def _process_active_word_batch_core(
@@ -1028,6 +1082,8 @@ else:
         file_path: Optional[str] = None,
         mode: str = "full",
         page: int = 1,
+        outline_max_level: int = 2,
+        outline_verbose: bool = False,
     ) -> ToolResult:
         raise NotImplementedError("Live Word is only supported on Windows.")
 

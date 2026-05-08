@@ -12,7 +12,6 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
@@ -20,6 +19,7 @@ from adeu.utils.docx import (
     get_run_style_markers,
     get_run_text,
     is_heading_paragraph,
+    is_native_heading,
     iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
@@ -38,9 +38,6 @@ class TextSpan:
     ins_id: Optional[str] = None
     del_id: Optional[str] = None
     hyperlink_id: Optional[str] = None
-
-
-# FILE: src/adeu/redline/mapper.py
 
 
 def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
@@ -174,6 +171,7 @@ class DocumentMapper:
     def _build_map(self):
         current_offset = 0
         self.spans = []
+        self._text_chunks: List[str] = []
         self.full_text = ""
 
         for part in iter_document_parts(self.doc):
@@ -187,16 +185,21 @@ class DocumentMapper:
         # Cleanup trailing newlines
         while self.spans and self.spans[-1].text == "\n\n":
             self.spans.pop()
-            self.full_text = self.full_text[:-2]
+            self._text_chunks.pop()
 
-        appendix_text = build_structural_appendix(self.doc, self.full_text)
-        if appendix_text:
-            self.appendix_start_index = len(self.full_text)
-            self._add_virtual_text(appendix_text, self.appendix_start_index, None)
+        self.full_text = "".join(self._text_chunks)
+        # We no longer calculate the appendix for the mapping engine.
+        # It's an unnecessary O(N) calculation that isn't needed for redlining.
+        self.appendix_start_index = -1
 
     def _map_blocks(self, container, offset: int) -> int:
         current = offset
         c_type = type(container).__name__
+
+        part = getattr(container, "part", container)
+        from adeu.utils.docx import _get_style_cache
+
+        style_cache, default_pstyle = _get_style_cache(part)
 
         if c_type == "NotesPart":
             header = "## Footnotes" if container.note_type == "fn" else "## Endnotes"
@@ -221,14 +224,14 @@ class DocumentMapper:
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
-                prefix = get_paragraph_prefix(item)
+                prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
                 if is_first_para and c_type == "FootnoteItem":
                     prefix = f"[^{container.note_type}-{container.id}]: " + prefix
                 if prefix:
                     self._add_virtual_text(prefix, current, item)
                     current += len(prefix)
 
-                current = self._map_paragraph_content(item, current)
+                current = self._map_paragraph_content(item, current, style_cache, default_pstyle)
                 is_first_para = False
                 previous_item = item
             elif isinstance(item, Table):
@@ -319,28 +322,33 @@ class DocumentMapper:
 
         return result
 
-    def _map_paragraph_content(self, paragraph: Paragraph, start_offset: int) -> int:
+    def _map_paragraph_content(
+        self,
+        paragraph: Paragraph,
+        start_offset: int,
+        style_cache: Optional[dict] = None,
+        default_pstyle: Optional[str] = None,
+    ) -> int:
         """
         Maps Runs to Spans, handling Flattened CriticMarkup generation.
         """
         current = start_offset
 
-        # Inject zero-length paragraph anchor so empty paragraphs/cells are still map-able
         span = TextSpan(start=current, end=current, text="", run=None, paragraph=paragraph)
         self.spans.append(span)
 
         active_ids: set[str] = set()
         active_ins: dict[str, DocxEvent] = {}
         active_del: dict[str, DocxEvent] = {}
+        active_fmt: dict[str, DocxEvent] = {}
 
         deferred_meta_states: List[Tuple] = []
         current_wrappers = ("", "")
-        current_style = ("", "")  # Trailing style in pending_runs (for elision)
+        current_style = ("", "")
         active_hyperlink_id = None
         pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
 
         def flush_pending_runs():
-            """Emits pending_runs + wrappers as spans. Resets pending_runs."""
             nonlocal current, pending_runs
             if not pending_runs:
                 return
@@ -363,7 +371,7 @@ class DocumentMapper:
                         hyperlink_id=active_hyperlink_id,
                     )
                     self.spans.append(span)
-                    self.full_text += txt
+                    self._text_chunks.append(txt)
                 current += len(txt)
             if e_tok:
                 self._add_virtual_text(e_tok, current, paragraph)
@@ -372,23 +380,19 @@ class DocumentMapper:
 
         items = list(iter_paragraph_content(paragraph))
 
-        # Heading-leading-whitespace strip — must stay in lockstep with
-        # ingest.build_paragraph_text. See that function for rationale.
-        leading_strip_active = is_heading_paragraph(paragraph)
+        is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle)
+        native_heading = is_native_heading(paragraph, style_cache, default_pstyle)
+        leading_strip_active = is_heading
 
         for i, item in enumerate(items):
             if isinstance(item, Run):
-                prefix, suffix = get_run_style_markers(item)
+                prefix, suffix = get_run_style_markers(item, native_heading)
                 run_parts: List[Tuple[str, str, Optional[Run]]] = []
 
                 text = get_run_text(item)
 
                 if leading_strip_active:
                     if text == "" or text.isspace():
-                        # Skip this leading whitespace-only run entirely;
-                        # do not register a span for it. The mapper's
-                        # offsets stay in sync with ingest's projected text
-                        # because ingest applies the same skip.
                         continue
                     leading_strip_active = False
 
@@ -423,12 +427,11 @@ class DocumentMapper:
                     if self.clean_view:
                         new_wrappers = ("", "")
                     else:
-                        start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids)
+                        start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids, active_fmt)
                         new_wrappers = (start_token, end_token)
                     new_style = (prefix, suffix)
 
                     if pending_runs and new_wrappers == current_wrappers:
-                        # MERGE: same redline wrapper group.
                         skip_leading_prefix = False
                         if (
                             new_style == current_style
@@ -448,30 +451,32 @@ class DocumentMapper:
 
                         current_style = new_style
                     else:
-                        # FLUSH and open new wrapper group.
                         flush_pending_runs()
                         current_wrappers = new_wrappers
                         current_style = new_style
                         for kind, txt, r_obj in run_parts:
                             pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
 
-                # Metadata Handling
                 if not self.clean_view:
-                    state_snapshot = (
-                        active_ins.copy(),
-                        active_del.copy(),
-                        active_ids.copy(),
-                    )
-                    deferred_meta_states.append(state_snapshot)
+                    has_meta = active_ins or active_del or active_ids or active_fmt
+                    if has_meta:
+                        state_snapshot = (
+                            active_ins.copy() if active_ins else {},
+                            active_del.copy() if active_del else {},
+                            active_ids.copy() if active_ids else set(),
+                            active_fmt.copy() if active_fmt else {},
+                        )
+                        deferred_meta_states.append(state_snapshot)
 
                     should_defer = False
-                    is_redline = bool(curr_ins_id) or bool(curr_del_id)
+                    is_redline = bool(curr_ins_id) or bool(curr_del_id) or bool(active_fmt)
 
                     if is_redline:
                         j = i + 1
                         next_is_redline = False
                         temp_ins_count = len(active_ins)
                         temp_del_count = len(active_del)
+                        temp_fmt_count = len(active_fmt)
 
                         while j < len(items):
                             next_item = items[j]
@@ -479,7 +484,7 @@ class DocumentMapper:
                                 if not get_run_text(next_item):
                                     j += 1
                                     continue
-                                if temp_ins_count > 0 or temp_del_count > 0:
+                                if temp_ins_count > 0 or temp_del_count > 0 or temp_fmt_count > 0:
                                     next_is_redline = True
                                 break
                             elif isinstance(next_item, DocxEvent):
@@ -491,12 +496,16 @@ class DocumentMapper:
                                     temp_del_count += 1
                                 elif next_item.type == "del_end":
                                     temp_del_count = max(0, temp_del_count - 1)
+                                elif next_item.type == "fmt_start":
+                                    temp_fmt_count += 1
+                                elif next_item.type == "fmt_end":
+                                    temp_fmt_count = max(0, temp_fmt_count - 1)
                             j += 1
 
                         if next_is_redline:
                             should_defer = True
 
-                    if not should_defer:
+                    if not should_defer and deferred_meta_states:
                         meta_block = self._build_merged_meta_block(deferred_meta_states)
                         if meta_block:
                             flush_pending_runs()
@@ -508,8 +517,6 @@ class DocumentMapper:
                         deferred_meta_states = []
 
             elif isinstance(item, DocxEvent):
-                # Once we see any event, leading whitespace stripping must stop —
-                # mirrors ingest.build_paragraph_text.
                 leading_strip_active = False
                 flush_pending_runs()
                 current_wrappers = ("", "")
@@ -528,6 +535,10 @@ class DocumentMapper:
                     active_del[item.id] = item
                 elif item.type == "del_end":
                     active_del.pop(item.id, None)
+                elif item.type == "fmt_start":
+                    active_fmt[item.id] = item
+                elif item.type == "fmt_end":
+                    active_fmt.pop(item.id, None)
                 elif item.type in ("footnote", "endnote"):
                     flush_pending_runs()
                     current_wrappers = ("", "")
@@ -583,12 +594,12 @@ class DocumentMapper:
 
         return current
 
-    def _get_wrappers(self, ins_id, del_id, active_ids):
+    def _get_wrappers(self, ins_id, del_id, active_ids, active_fmt):
         if del_id:
             return "{--", "--}"
         elif ins_id:
             return "{++", "++}"
-        elif active_ids:
+        elif active_ids or active_fmt:
             return "{==", "==}"
         return "", ""
 
@@ -597,7 +608,7 @@ class DocumentMapper:
         comment_lines = []
         seen_sigs = set()
 
-        for ins_map, del_map, comments_set in states_list:
+        for ins_map, del_map, comments_set, fmt_map in states_list:
             for uid, meta in ins_map.items():
                 sig = f"Chg:{uid}"
                 if sig not in seen_sigs:
@@ -609,6 +620,12 @@ class DocumentMapper:
                 if sig not in seen_sigs:
                     auth = meta.author or "Unknown"
                     change_lines.append(f"[{sig} delete] {auth}")
+                    seen_sigs.add(sig)
+            for uid, meta in fmt_map.items():
+                sig = f"Chg:{uid}"
+                if sig not in seen_sigs:
+                    auth = meta.author or "Unknown"
+                    change_lines.append(f"[{sig} format] {auth}")
                     seen_sigs.add(sig)
 
             sorted_ids = sorted(list(comments_set))
@@ -644,7 +661,7 @@ class DocumentMapper:
             hyperlink_id=hyperlink_id,
         )
         self.spans.append(span)
-        self.full_text += text
+        self._text_chunks.append(text)
 
     def _replace_smart_quotes(self, text: str) -> str:
         return text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")

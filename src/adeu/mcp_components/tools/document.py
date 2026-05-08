@@ -1,10 +1,11 @@
 # FILE: src/adeu/mcp_components/tools/document.py
+import asyncio
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Any, List, Literal, Optional
 
 from docx import Document as load_document
 from fastmcp import Context
@@ -15,6 +16,7 @@ from fastmcp.tools.tool import ToolResult
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.mcp_components._response_builders import (
+    build_appendix_response,
     build_outline_response,
     build_paginated_response,
 )
@@ -34,6 +36,8 @@ async def _read_docx_disk(
     clean_view: bool,
     mode: str = "full",
     page: int = 1,
+    outline_max_level: int = 2,
+    outline_verbose: bool = False,
 ) -> ToolResult:
     """Core logic for reading a DOCX from disk. Dispatches on `mode`."""
     await ctx.info(
@@ -43,6 +47,8 @@ async def _read_docx_disk(
             "clean_view": clean_view,
             "mode": mode,
             "page": page,
+            "outline_max_level": outline_max_level,
+            "outline_verbose": outline_verbose,
         },
     )
 
@@ -54,11 +60,40 @@ async def _read_docx_disk(
         )
 
         doc = load_document(stream)
-        text = _extract_text_from_doc(doc, clean_view=clean_view)
+
+        # Only mode='appendix' actually consumes the structural appendix in
+        # the response. Skipping it for the other modes saves the
+        # build_structural_appendix() cost (~8.5s on a 1000-page doc).
+        needs_appendix = mode == "appendix"
+        # mode='outline' uses paragraph offsets to avoid re-projecting each
+        # paragraph (Step 4 / Option A).
+        needs_offsets = mode == "outline"
+
+        extract_result = _extract_text_from_doc(
+            doc,
+            clean_view=clean_view,
+            include_appendix=needs_appendix,
+            return_paragraph_offsets=needs_offsets,
+        )
+        if needs_offsets:
+            text, paragraph_offsets = extract_result
+        else:
+            text = extract_result
+            paragraph_offsets = None
+
         await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
 
         if mode == "outline":
-            return build_outline_response(doc, text, file_path)
+            return build_outline_response(
+                doc,
+                text,
+                file_path,
+                outline_max_level=outline_max_level,
+                outline_verbose=outline_verbose,
+                paragraph_offsets=paragraph_offsets,
+            )
+        if mode == "appendix":
+            return build_appendix_response(text, page, file_path)
         # mode == "full"
         return build_paginated_response(text, page, file_path)
 
@@ -89,52 +124,48 @@ async def _process_document_batch_disk(
         },
     )
 
-    try:
-        if not author_name or not author_name.strip():
-            await ctx.warning("Batch processing rejected: author_name is empty.")
-            return "Error: author_name cannot be empty."
+    if not author_name or not author_name.strip():
+        await ctx.warning("Batch processing rejected: author_name is empty.")
+        return "Error: author_name cannot be empty."
 
-        if not changes:
-            await ctx.warning("Batch processing rejected: No actions or edits provided.")
-            return "Error: No changes provided."
+    if not changes:
+        await ctx.warning("Batch processing rejected: No actions or edits provided.")
+        return "Error: No changes provided."
 
+    def _run_batch_sync() -> tuple[bool, Any, str]:
         stream = read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name)
-        await ctx.debug("Redline Engine initialized successfully")
 
         try:
-            await ctx.debug("Processing document batch")
             stats = engine.process_batch(changes)
-            await ctx.info("Changes processed successfully", extra=stats)
         except BatchValidationError as e:
-            await ctx.error(
-                "Batch validation failed",
-                extra={
-                    "error_count": len(e.errors),
-                    "errors": e.errors,
-                },
-            )
-            error_report = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
-            return error_report
+            return False, e.errors, ""
 
-        if not output_path:
+        final_output = output_path
+        if not final_output:
             p = Path(original_docx_path)
             if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
-                output_path = str(p)
+                final_output = str(p)
             else:
-                output_path = str(p.parent / f"{p.stem}_processed{p.suffix}")
+                final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
-        await ctx.debug(
-            "Saving processed document stream to disk",
-            extra={"output_path": output_path},
-        )
         result_stream = engine.save_to_stream()
-        save_stream(result_stream, output_path)
+        save_stream(result_stream, final_output)
+        return True, stats, final_output
 
-        await ctx.info("Batch process complete and saved", extra={"output_path": output_path})
+    try:
+        await ctx.debug("Offloading RedlineEngine to background thread")
+        success, result_data, final_output_path = await asyncio.to_thread(_run_batch_sync)
 
+        if not success:
+            await ctx.error("Batch validation failed", extra={"error_count": len(result_data)})
+            return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(result_data)
+
+        await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
+
+        stats = result_data
         res = (
-            f"Batch complete. Saved to: {output_path}\n"
+            f"Batch complete. Saved to: {final_output_path}\n"
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
             f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
         )
@@ -324,69 +355,51 @@ async def open_local_file(
 # ==========================================
 
 READ_DOCX_COMMON_DESC = (
-    "Reads a DOCX file and extracts its text content. Use this to ingest documents into your context window.\n"
+    "Reads a DOCX file. Returns text with inline CriticMarkup for "
+    "Tracked Changes and Comments: {++inserted++}, {--deleted--}, "
+    "{==highlighted==}{>>comment<<}. Set clean_view=True for the "
+    "finalized 'Accepted' text without markup.\n\n"
 )
+
 READ_DOCX_WIN32_EXTRA = (
-    "Auto-Routing: If the provided file is currently open in Microsoft Word, "
-    "Adeu will automatically sync with the live window. "
-    "If you don't know the file path yet and want to read whatever document "
-    "the user is currently working on, LEAVE `file_path` EMPTY!\n"
+    "If the file is open in Word, reads from the live canvas automatically. "
+    "Leave file_path empty to read whatever document is currently active.\n\n"
 )
+
 READ_DOCX_TAIL = (
-    "By default (clean_view=False), it returns text with inline CriticMarkup "
-    "(e.g., {++inserted++}, {--deleted--}, {==highlighted==}{>>comment<<}) "
-    "representing Tracked Changes and Comments. "
-    "Set clean_view=True ONLY if you want to read the final, clean text, ignoring all redlines and comments.\n\n"
-    "PAGINATION & OUTLINE:\n"
-    "- mode='outline' returns a structural map of headings with page numbers, styles, "
-    "table presence, and referenced footnotes. Body content is omitted. Use this first "
-    "on large documents to plan targeted reads.\n"
-    "- mode='full' (default) returns the document body. Documents over ~19,000 characters "
-    "are split into pages; use page=N to read a specific page (1-indexed). Documents under "
-    "the limit are returned in full on page 1.\n"
-    "- Page boundaries differ between clean_view=True and clean_view=False.\n"
-    "- The Structural Appendix (defined terms, anchors, diagnostics) is repeated on every page."
+    "Modes:\n"
+    "- 'full' (default): paginated body content. Use page=N to navigate.\n"
+    "- 'outline': heading map only — start here for large docs to plan targeted reads. "
+    "Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n"
+    "- 'appendix': defined terms, anchors, and cross-reference targets. "
+    "Consult before editing legal/technical docs to avoid breaking references."
 )
 
 PROCESS_BATCH_COMMON_DESC = (
-    "Applies a batch of structural edits, text modifications, and review actions to a document. "
-    "This is your primary tool for editing DOCX files.\n\n"
-    "CRITICAL: All changes in the batch evaluate against the ORIGINAL document state. "
-    "Do not send sequential edits that depend on each other within the same batch "
-    "(e.g. rename X to Y, then modify Y). "
-    "Instead, apply the rename in one batch, then modify Y in a subsequent batch.\n\n"
+    "Applies a batch of edits and review actions to a DOCX.\n\n"
+    "All changes evaluate against the ORIGINAL document state — do not chain "
+    "dependent edits within one batch (e.g. rename X to Y, then modify Y). "
+    "Apply the rename first, then send a second batch.\n\n"
 )
 PROCESS_BATCH_WIN32_EXTRA = (
-    "Auto-Routing: If the provided file is currently open in Microsoft Word, "
-    "Adeu will automatically execute these edits live on the canvas. "
-    "If you want to apply edits to the user's currently active document "
-    "and don't know the path, LEAVE `original_docx_path` EMPTY!\n\n"
+    "If the file is open in Word, edits run live on the canvas. "
+    "Leave original_docx_path empty to edit whatever document is currently active.\n\n"
 )
 PROCESS_BATCH_OPERATIONS_DESC = (
-    "The `changes` parameter is a list of operations. Each item MUST have a `type`:\n"
-    "1. 'modify': Search-and-replace text. Provide exact `target_text` (CRITICAL: include "
-    "surrounding context if the word appears multiple times to ensure unique matching) and "
-    "`new_text` (the replacement). `new_text` supports full Markdown structure: "
-    "'# Heading 1' through '###### Heading 6' at the start of a line for heading styles, "
-    "'**bold**' and '_italic_' inline formatting, and blank lines ('\\n\\n') to split "
-    "`new_text` into multiple paragraphs. Multi-paragraph inserts are tracked as one "
-    "logical revision. To delete text, make `new_text` empty. Do NOT manually write "
-    "CriticMarkup tags ({++, {--, {>>). To add a comment, use the 'comment' parameter.\n"
-    "2. 'accept': Finalize a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-    "3. 'reject': Revert a tracked change. Requires `target_id` (e.g., 'Chg:12').\n"
-    "4. 'reply': Reply to a comment. Requires `target_id` (e.g., 'Com:5') and `text`.\n"
-    "5. 'insert_row': Insert table row. Requires `target_text` (anchor), `position` "
-    "('above'/'below'), and `cells` (Markdown strings). NOTE: Not supported in Live Word canvas.\n"
-    "6. 'delete_row': Delete table row. Requires `target_text` inside the row to be deleted. "
-    "NOTE: Not supported in Live Word canvas.\n\n"
-    "CRITICAL ID VOLATILITY: Tracked Change and Comment IDs (e.g. 'Chg:12', 'Com:5') are derived "
-    "from the document state at the moment of the most recent `read_docx` call. They are stable across "
-    "the disk path and the Live Word path for the same document state, but Microsoft Word may renumber "
-    "internal IDs dynamically (e.g., during background AutoSaves), and any user edits between reads can "
-    "shift the projection. You MUST call `read_docx` immediately before executing any `accept`, `reject`, "
-    "or `reply` operations to guarantee you have the freshest IDs. Do not cache IDs across tool calls.\n\n"
-    "Always provide a realistic `author_name` for Tracked Changes. This name will be used for "
-    "attribution in the document's tracked changes and comments."
+    "Each item in `changes` must specify a `type`:\n"
+    "1. 'modify': Search-and-replace. `target_text` must uniquely match — include "
+    "surrounding context if the phrase is ambiguous. `new_text` supports Markdown: "
+    "'# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' "
+    "to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write "
+    "CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n"
+    "2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n"
+    "3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n"
+    "4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
+    "ID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. "
+    "Always call `read_docx` immediately before any accept/reject/reply — "
+    "do not reuse IDs from earlier in the conversation.\n\n"
+    "`author_name` is used for attribution on all tracked changes and comments, "
+    "in both disk and Live Word modes."
 )
 
 
@@ -418,23 +431,52 @@ if sys.platform == "win32":
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline"],
-            "'full' returns body content (paginated for large docs). 'outline' returns "
-            "a structural heading map with page numbers; body content is omitted.",
+            Literal["full", "outline", "appendix"],
+            "'full' returns body content (paginated). 'outline' returns a structural "
+            "heading map. 'appendix' returns defined terms, anchors, and diagnostics — "
+            "consult before editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
             int,
             "Page number (1-indexed) for mode='full'. Defaults to 1. Ignored when mode='outline'.",
         ] = 1,
+        outline_max_level: Annotated[
+            int,
+            "For mode='outline' only: only show headings at this level or shallower (1-6). "
+            "Default 2 keeps output usable on large documents. Raise to 3-6 to see deeper "
+            "headings. Ignored when mode='full'.",
+        ] = 2,
+        outline_verbose: Annotated[
+            bool,
+            "For mode='outline' only: when True, includes per-heading style name, table "
+            "presence, and footnote IDs. Off by default to minimize payload size. "
+            "Ignored when mode='full'.",
+        ] = False,
     ) -> ToolResult:
         start_time = time.perf_counter()
         if not file_path:
             # Read active document directly. No disk fallback available if this fails.
-            res = await read_active_word_document(ctx, clean_view, None, mode=mode, page=page)
+            res = await read_active_word_document(
+                ctx,
+                clean_view,
+                None,
+                mode=mode,
+                page=page,
+                outline_max_level=outline_max_level,
+                outline_verbose=outline_verbose,
+            )
         else:
             # Try Live Word first. Fallback to Disk if Word is closed or document isn't open.
             try:
-                res = await read_active_word_document(ctx, clean_view, file_path, mode=mode, page=page)
+                res = await read_active_word_document(
+                    ctx,
+                    clean_view,
+                    file_path,
+                    mode=mode,
+                    page=page,
+                    outline_max_level=outline_max_level,
+                    outline_verbose=outline_verbose,
+                )
                 await ctx.debug("Read document via Live Word COM.")
             except ToolError:
                 # ToolError = Live Word read succeeded but the request itself failed
@@ -445,7 +487,15 @@ if sys.platform == "win32":
                 # Any other exception means Live Word couldn't extract at all
                 # (e.g. doc not open, COM unavailable). Fall back to disk.
                 await ctx.debug("Document not open in live Word, falling back to disk read.")
-                res = await _read_docx_disk(file_path, ctx, clean_view, mode, page)
+                res = await _read_docx_disk(
+                    file_path,
+                    ctx,
+                    clean_view,
+                    mode,
+                    page,
+                    outline_max_level=outline_max_level,
+                    outline_verbose=outline_verbose,
+                )
         return add_timing_if_debug(start_time, res)
 
     @tool(
@@ -598,9 +648,29 @@ else:
             int,
             "Page number (1-indexed) for mode='full'. Defaults to 1. Ignored when mode='outline'.",
         ] = 1,
+        outline_max_level: Annotated[
+            int,
+            "For mode='outline' only: only show headings at this level or shallower (1-6). "
+            "Default 2 keeps output usable on large documents. Raise to 3-6 to see deeper "
+            "headings. Ignored when mode='full'.",
+        ] = 2,
+        outline_verbose: Annotated[
+            bool,
+            "For mode='outline' only: when True, includes per-heading style name, table "
+            "presence, and footnote IDs. Off by default to minimize payload size. "
+            "Ignored when mode='full'.",
+        ] = False,
     ) -> ToolResult:
         start_time = time.perf_counter()
-        res = await _read_docx_disk(file_path, ctx, clean_view, mode, page)
+        res = await _read_docx_disk(
+            file_path,
+            ctx,
+            clean_view,
+            mode,
+            page,
+            outline_max_level=outline_max_level,
+            outline_verbose=outline_verbose,
+        )
         return add_timing_if_debug(start_time, res)
 
     @tool(

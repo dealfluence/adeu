@@ -19,19 +19,116 @@ logger = structlog.get_logger(__name__)
 
 _CUSTOM_HEADING_NAME_RE = re.compile(r"Heading[ ]?([1-6])(?![0-9])")
 
+# Cache qn() strings for massive performance gains in the extraction hot loop
+QN_W_P = qn("w:p")
+QN_W_R = qn("w:r")
+QN_W_T = qn("w:t")
+QN_W_DELTEXT = qn("w:delText")
+QN_W_TAB = qn("w:tab")
+QN_W_BR = qn("w:br")
+QN_W_CR = qn("w:cr")
+QN_W_RPR = qn("w:rPr")
+QN_W_RPRCHANGE = qn("w:rPrChange")
+QN_W_COMMENTREFERENCE = qn("w:commentReference")
+QN_W_FOOTNOTEREFERENCE = qn("w:footnoteReference")
+QN_W_ENDNOTEREFERENCE = qn("w:endnoteReference")
+QN_W_FLDCHAR = qn("w:fldChar")
+QN_W_FLDCHARTYPE = qn("w:fldCharType")
+QN_W_INSTRTEXT = qn("w:instrText")
+QN_W_INS = qn("w:ins")
+QN_W_DEL = qn("w:del")
+QN_W_ID = qn("w:id")
+QN_W_AUTHOR = qn("w:author")
+QN_W_DATE = qn("w:date")
+QN_W_COMMENTRANGESTART = qn("w:commentRangeStart")
+QN_W_COMMENTRANGEEND = qn("w:commentRangeEnd")
+QN_W_HYPERLINK = qn("w:hyperlink")
+QN_R_ID = qn("r:id")
+QN_W_FLDSIMPLE = qn("w:fldSimple")
+QN_W_INSTR = qn("w:instr")
+QN_W_BOOKMARKSTART = qn("w:bookmarkStart")
+QN_W_NAME = qn("w:name")
+QN_W_SDT = qn("w:sdt")
+QN_W_SMARTTAG = qn("w:smartTag")
+QN_W_SDTCONTENT = qn("w:sdtContent")
+QN_W_B = qn("w:b")
+QN_W_I = qn("w:i")
+QN_W_VAL = qn("w:val")
+QN_W_PPR = qn("w:pPr")
+QN_W_PSTYLE = qn("w:pStyle")
+QN_W_OUTLINELVL = qn("w:outlineLvl")
+QN_W_NUMPR = qn("w:numPr")
+QN_W_NUMID = qn("w:numId")
+QN_W_ILVL = qn("w:ilvl")
 
-def is_heading_paragraph(paragraph: Paragraph) -> bool:
+
+def is_heading_paragraph(
+    paragraph: Paragraph,
+    style_cache: Optional[dict] = None,
+    default_pstyle: Optional[str] = None,
+) -> bool:
     """
     Returns True iff `paragraph` projects with a Markdown heading prefix
     ('# ' through '###### '). Used by ingest and the mapper to decide
     whether to strip leading whitespace-only runs (which would otherwise
-    project as '## \\nText' instead of '## Text').
+    project as '## \nText' instead of '## Text').
     """
-    prefix = get_paragraph_prefix(paragraph)
+    prefix = get_paragraph_prefix(paragraph, style_cache, default_pstyle)
     if not prefix:
         return False
     stripped = prefix.rstrip()
     return bool(stripped) and stripped == "#" * len(stripped)
+
+
+def is_native_heading(
+    paragraph: Paragraph,
+    style_cache: Optional[dict] = None,
+    default_pstyle: Optional[str] = None,
+) -> bool:
+    """
+    Returns True if the paragraph is a native heading (Outline Level 0-8 or Heading style),
+    excluding heuristic headings.
+    """
+    if style_cache is None:
+        style_cache, default_pstyle = _get_style_cache(paragraph.part)
+    p_el = paragraph._element
+    pPr = p_el.find(QN_W_PPR)
+
+    # 1. Outline Level
+    if pPr is not None:
+        oLvl = pPr.find(QN_W_OUTLINELVL)
+        if oLvl is not None:
+            val = oLvl.get(QN_W_VAL)
+            if val and val.isdigit():
+                lvl = int(val)
+                if 0 <= lvl <= 8:
+                    return True
+
+    # 2. Style Name
+    style_id = default_pstyle
+    if pPr is not None:
+        pStyle = pPr.find(QN_W_PSTYLE)
+        if pStyle is not None:
+            style_id = pStyle.get(QN_W_VAL) or default_pstyle
+
+    style_info = style_cache.get(style_id) if style_cache and style_id else None
+
+    if style_info:
+        lvl = style_info.get("outline_level")
+        if lvl is not None and 0 <= lvl <= 8:
+            return True
+
+    style_name = style_info["name"] if style_info else None
+
+    if style_name and style_name.startswith("Heading"):
+        return True
+    if style_name == "Title":
+        return True
+    if style_name and style_name != "Normal":
+        if _detect_heading_level_from_name(style_name) is not None:
+            return True
+
+    return False
 
 
 def _detect_heading_level_from_name(name: str) -> Optional[int]:
@@ -66,17 +163,18 @@ def _get_style_cache(part):
     Parses styles.xml natively and builds an O(1) dictionary cache of styles.
     Bypasses the extreme overhead of python-docx's lazy-loading style wrappers.
     """
-    main_part = part.package.main_document_part
-    if hasattr(main_part, "_adeu_style_cache"):
-        return main_part._adeu_style_cache
+    pkg = part.package
+    if hasattr(pkg, "_adeu_style_cache"):
+        return pkg._adeu_style_cache
 
     cache: Dict[str, Any] = {}
     default_pstyle = None
+    main_part = pkg.main_document_part
 
     try:
         styles_xml = main_part.styles.element
     except Exception:
-        main_part._adeu_style_cache = (cache, None)
+        pkg._adeu_style_cache = (cache, None)
         return cache, None
 
     raw_styles = {}
@@ -148,7 +246,7 @@ def _get_style_cache(part):
     for s_id in raw_styles:
         resolve_style(s_id, set())
 
-    main_part._adeu_style_cache = (cache, default_pstyle)
+    pkg._adeu_style_cache = (cache, default_pstyle)
     return cache, default_pstyle
 
 
@@ -201,20 +299,26 @@ def _is_page_instr(instr: str) -> bool:
     return parts[0] in ("PAGE", "NUMPAGES")
 
 
-def get_paragraph_prefix(paragraph: Paragraph) -> str:
+def get_paragraph_prefix(
+    paragraph: Paragraph,
+    style_cache: Optional[dict] = None,
+    default_pstyle: Optional[str] = None,
+) -> str:
     """
     Returns the Markdown prefix for a paragraph based on its style.
     Uses the Fast XML Cache to avoid python-docx performance penalties.
     """
-    cache, default_pstyle = _get_style_cache(paragraph.part)
+    if style_cache is None:
+        style_cache, default_pstyle = _get_style_cache(paragraph.part)
+    cache = style_cache
     p_el = paragraph._element
-    pPr = p_el.find(qn("w:pPr"))
+    pPr = p_el.find(QN_W_PPR)
 
     # 1. Check Outline Level on the paragraph itself (Structural Truth)
     if pPr is not None:
-        oLvl = pPr.find(qn("w:outlineLvl"))
+        oLvl = pPr.find(QN_W_OUTLINELVL)
         if oLvl is not None:
-            val = oLvl.get(qn("w:val"))
+            val = oLvl.get(QN_W_VAL)
             if val and val.isdigit():
                 lvl = int(val)
                 if 0 <= lvl <= 8:
@@ -223,9 +327,9 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
     # 2. Get Style Name & properties from Cache
     style_id = default_pstyle
     if pPr is not None:
-        pStyle = pPr.find(qn("w:pStyle"))
+        pStyle = pPr.find(QN_W_PSTYLE)
         if pStyle is not None:
-            style_id = pStyle.get(qn("w:val")) or default_pstyle
+            style_id = pStyle.get(QN_W_VAL) or default_pstyle
 
     style_info = cache.get(style_id) if style_id else None
 
@@ -249,16 +353,16 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
 
     # 3. Check for List Formatting
     if pPr is not None:
-        numPr = pPr.find(qn("w:numPr"))
+        numPr = pPr.find(QN_W_NUMPR)
         if numPr is not None:
-            numId = numPr.find(qn("w:numId"))
+            numId = numPr.find(QN_W_NUMID)
             if numId is not None:
-                val = numId.get(qn("w:val"))
+                val = numId.get(QN_W_VAL)
                 if val and val != "0":
                     ilvl_str = "0"
-                    ilvl = numPr.find(qn("w:ilvl"))
+                    ilvl = numPr.find(QN_W_ILVL)
                     if ilvl is not None:
-                        val_attr = ilvl.get(qn("w:val"))
+                        val_attr = ilvl.get(QN_W_VAL)
                         if val_attr is not None:
                             ilvl_str = val_attr
                     try:
@@ -268,11 +372,6 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
                     return ("    " * level) + "* "
 
     # 4. Custom heading style name fallback.
-    # Catches styles generated by Word's "Save Selection as a New Quick Style"
-    # flow whose name contains a "Heading N" token but which lack both
-    # outlineLvl and a basedOn link to a real Heading style.
-    # We deliberately exclude style_id="Normal" / "Default Paragraph Font" type
-    # cases by gating on style_name being non-empty and not equal to "Normal".
     if style_name and style_name != "Normal":
         custom_level = _detect_heading_level_from_name(style_name)
         if custom_level is not None:
@@ -289,15 +388,15 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
                 is_bold = True
             else:
                 # Check if the first visible run is explicitly bold in XML
-                runs = p_el.findall(f".//{qn('w:r')}")
+                runs = p_el.findall(f".//{QN_W_R}")
                 for r in runs:
-                    t = r.find(f".//{qn('w:t')}")
+                    t = r.find(f".//{QN_W_T}")
                     if t is not None and t.text and t.text.strip():
-                        rPr_run = r.find(qn("w:rPr"))
+                        rPr_run = r.find(QN_W_RPR)
                         if rPr_run is not None:
-                            b = rPr_run.find(qn("w:b"))
+                            b = rPr_run.find(QN_W_B)
                             if b is not None:
-                                val = b.get(qn("w:val"))
+                                val = b.get(QN_W_VAL)
                                 if val not in ("0", "false", "off"):
                                     is_bold = True
                         break
@@ -308,7 +407,7 @@ def get_paragraph_prefix(paragraph: Paragraph) -> str:
     return ""
 
 
-def get_run_style_markers(run: Run) -> tuple[str, str]:
+def get_run_style_markers(run: Run, is_heading: Optional[bool] = None) -> tuple[str, str]:
     """
     Returns markdown prefix/suffix for run formatting (bold/italic).
     Bypasses `run.bold` and `run.italic` attributes for massive OXML performance gains.
@@ -316,47 +415,27 @@ def get_run_style_markers(run: Run) -> tuple[str, str]:
     prefix = ""
     suffix = ""
 
-    # 1. Determine if paragraph is a heading (using fast cache)
-    para_el = run._element.getparent()
-    while para_el is not None and para_el.tag != qn("w:p"):
-        para_el = para_el.getparent()
-
-    is_heading = False
-    if para_el is not None:
-        para_part = getattr(run._parent, "part", None)
-        if para_part:
-            cache, default_pstyle = _get_style_cache(para_part)
-
-            pPr = para_el.find(qn("w:pPr"))
-            style_id = default_pstyle
-            if pPr is not None:
-                pStyle = pPr.find(qn("w:pStyle"))
-                if pStyle is not None:
-                    style_id = pStyle.get(qn("w:val")) or default_pstyle
-
-            style_info = cache.get(style_id) if style_id else None
-            if style_info:
-                name = style_info["name"]
-                if name.startswith("Heading") or name == "Title":
-                    is_heading = True
-
-    # 2. Check explicitly defined run properties in XML
-    rPr = run._element.find(qn("w:rPr"))
+    # Check explicitly defined run properties in XML
+    rPr = run._element.find(QN_W_RPR)
     is_bold = False
     is_italic = False
 
     if rPr is not None:
-        b = rPr.find(qn("w:b"))
+        b = rPr.find(QN_W_B)
         if b is not None:
-            val = b.get(qn("w:val"))
+            val = b.get(QN_W_VAL)
             if val not in ("0", "false", "off"):
                 is_bold = True
 
-        i = rPr.find(qn("w:i"))
+        i = rPr.find(QN_W_I)
         if i is not None:
-            val = i.get(qn("w:val"))
+            val = i.get(QN_W_VAL)
             if val not in ("0", "false", "off"):
                 is_italic = True
+
+    if is_heading is None:
+        parent = run._parent
+        is_heading = is_native_heading(parent) if isinstance(parent, Paragraph) else False
 
     # Nesting order: Bold outer, Italic inner -> **_text_**
     if is_bold and not is_heading:
@@ -400,105 +479,94 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
     def process_run_element(r_element):
         nonlocal in_complex_field, current_instr, hide_result
 
+        c_id = None
         # Check for inline Tracked Formatting (w:rPrChange)
-        rPr = r_element.find(qn("w:rPr"))
-        rPrChange = rPr.find(qn("w:rPrChange")) if rPr is not None else None
-        if rPrChange is not None:
-            c_id = rPrChange.get(qn("w:id"))
-            c_auth = rPrChange.get(qn("w:author"))
-            c_date = rPrChange.get(qn("w:date"))
-            yield DocxEvent("fmt_start", c_id, c_auth, c_date)
+        rPr = r_element.find(QN_W_RPR)
+        if rPr is not None:
+            rPrChange = rPr.find(QN_W_RPRCHANGE)
+            if rPrChange is not None:
+                c_id = rPrChange.get(QN_W_ID)
+                c_auth = rPrChange.get(QN_W_AUTHOR)
+                c_date = rPrChange.get(QN_W_DATE)
+                yield DocxEvent("fmt_start", c_id, c_auth, c_date)
 
-        # Check for inline Tracked Formatting (w:rPrChange) anywhere in the run
-        rPrChange = r_element.find(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPrChange")
-        if rPrChange is not None:
-            c_id = rPrChange.get(qn("w:id"))
-            c_auth = rPrChange.get(qn("w:author"))
-            c_date = rPrChange.get(qn("w:date"))
-            yield DocxEvent("fmt_start", c_id, c_auth, c_date)
-
-        # Check for inline commentReference (sometimes embedded in run)
+        # Iterate children once to handle references, fields, and text
         for child in r_element:
-            if child.tag == qn("w:commentReference"):
-                c_id = child.get(qn("w:id"))
-                if c_id:
-                    yield DocxEvent("ref", c_id)
-            elif child.tag == qn("w:footnoteReference"):
-                f_id = child.get(qn("w:id"))
+            tag = child.tag
+            if tag == QN_W_COMMENTREFERENCE:
+                ref_id = child.get(QN_W_ID)
+                if ref_id:
+                    yield DocxEvent("ref", ref_id)
+            elif tag == QN_W_FOOTNOTEREFERENCE:
+                f_id = child.get(QN_W_ID)
                 if f_id:
                     yield DocxEvent("footnote", f_id)
-            elif child.tag == qn("w:endnoteReference"):
-                e_id = child.get(qn("w:id"))
+            elif tag == QN_W_ENDNOTEREFERENCE:
+                e_id = child.get(QN_W_ID)
                 if e_id:
                     yield DocxEvent("endnote", e_id)
+            elif tag == QN_W_FLDCHAR:
+                fld_type = child.get(QN_W_FLDCHARTYPE)
+                if fld_type == "begin":
+                    in_complex_field = True
+                    current_instr = ""
+                elif fld_type == "separate":
+                    if _is_page_instr(current_instr):
+                        hide_result = True
+                    else:
+                        parts = current_instr.strip().split()
+                        if parts and parts[0] == "REF" and len(parts) > 1:
+                            yield DocxEvent("xref_start", parts[1])
+                elif fld_type == "end":
+                    if not hide_result:
+                        parts = current_instr.strip().split()
+                        if parts and parts[0] == "REF" and len(parts) > 1:
+                            yield DocxEvent("xref_end", parts[1])
+                    in_complex_field = False
+                    current_instr = ""
+                    hide_result = False
+            elif tag == QN_W_INSTRTEXT and in_complex_field and not hide_result:
+                if child.text:
+                    current_instr += child.text
 
-        # 1. Parse Field Characters (begin/separate/end)
-        for fchar in r_element.findall(qn("w:fldChar")):
-            fld_type = fchar.get(qn("w:fldCharType"))
-            if fld_type == "begin":
-                in_complex_field = True
-                current_instr = ""
-            elif fld_type == "separate":
-                # End of instruction, start of visible result
-                if _is_page_instr(current_instr):
-                    hide_result = True
-                else:
-                    parts = current_instr.strip().split()
-                    if parts and parts[0] == "REF" and len(parts) > 1:
-                        yield DocxEvent("xref_start", parts[1])
-            elif fld_type == "end":
-                if not hide_result:
-                    parts = current_instr.strip().split()
-                    if parts and parts[0] == "REF" and len(parts) > 1:
-                        yield DocxEvent("xref_end", parts[1])
-                in_complex_field = False
-                current_instr = ""
-                hide_result = False
-
-        # 2. Accumulate Instruction Text
-        if in_complex_field and not hide_result:
-            for instr in r_element.findall(qn("w:instrText")):
-                if instr.text:
-                    current_instr += instr.text
-
-        # 3. Yield Run (if not hidden)
+        # Yield Run (if not hidden)
         if not hide_result:
             yield Run(r_element, paragraph)
 
-        if rPrChange is not None:
+        if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
 
     def traverse_node(node):
         for child in node:
             tag = child.tag
-            if tag == qn("w:r"):
+            if tag == QN_W_R:
                 # Standard run
                 yield from process_run_element(child)
-            elif tag == qn("w:ins"):
-                i_id = child.get(qn("w:id"))
-                i_auth = child.get(qn("w:author"))
-                i_date = child.get(qn("w:date"))
+            elif tag == QN_W_INS:
+                i_id = child.get(QN_W_ID)
+                i_auth = child.get(QN_W_AUTHOR)
+                i_date = child.get(QN_W_DATE)
                 yield DocxEvent("ins_start", i_id, i_auth, i_date)
                 yield from traverse_node(child)
                 yield DocxEvent("ins_end", i_id)
-            elif tag == qn("w:del"):
-                d_id = child.get(qn("w:id"))
-                d_auth = child.get(qn("w:author"))
-                d_date = child.get(qn("w:date"))
+            elif tag == QN_W_DEL:
+                d_id = child.get(QN_W_ID)
+                d_auth = child.get(QN_W_AUTHOR)
+                d_date = child.get(QN_W_DATE)
                 yield DocxEvent("del_start", d_id, d_auth, d_date)
                 yield from traverse_node(child)
                 yield DocxEvent("del_end", d_id)
-            elif tag == qn("w:commentRangeStart"):
-                c_id = child.get(qn("w:id"))
+            elif tag == QN_W_COMMENTRANGESTART:
+                c_id = child.get(QN_W_ID)
                 yield DocxEvent("start", c_id)
-            elif tag == qn("w:commentRangeEnd"):
-                c_id = child.get(qn("w:id"))
+            elif tag == QN_W_COMMENTRANGEEND:
+                c_id = child.get(QN_W_ID)
                 yield DocxEvent("end", c_id)
-            elif tag == qn("w:commentReference"):
+            elif tag == QN_W_COMMENTREFERENCE:
                 # Reference directly in paragraph
                 pass
-            elif tag == qn("w:hyperlink"):
-                rId = child.get(qn("r:id"))
+            elif tag == QN_W_HYPERLINK:
+                rId = child.get(QN_R_ID)
                 url = ""
                 if rId and paragraph.part:
                     try:
@@ -512,8 +580,8 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 yield from traverse_node(child)
                 if url:
                     yield DocxEvent("hyperlink_end", rId, date=url)
-            elif tag == qn("w:fldSimple"):
-                instr = child.get(qn("w:instr"), "")
+            elif tag == QN_W_FLDSIMPLE:
+                instr = child.get(QN_W_INSTR, "")
                 target = ""
                 if " REF " in instr or instr.startswith("REF "):
                     parts = instr.strip().split()
@@ -524,11 +592,11 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 yield from traverse_node(child)
                 if target:
                     yield DocxEvent("xref_end", target)
-            elif tag == qn("w:bookmarkStart"):
-                b_name = child.get(qn("w:name"))
+            elif tag == QN_W_BOOKMARKSTART:
+                b_name = child.get(QN_W_NAME)
                 if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                     yield DocxEvent("bookmark", b_name)
-            elif tag in (qn("w:sdt"), qn("w:smartTag"), qn("w:sdtContent")):
+            elif tag in (QN_W_SDT, QN_W_SMARTTAG, QN_W_SDTCONTENT):
                 yield from traverse_node(child)
 
     yield from traverse_node(paragraph._element)
@@ -550,15 +618,15 @@ def get_run_text(run: Run) -> str:
     """
     text = ""
     for child in run._element:
-        if child.tag == qn("w:t") or child.tag == qn("w:delText"):
+        if child.tag == QN_W_T or child.tag == QN_W_DELTEXT:
             # Fix 5.1: Normalize literal tabs to spaces to match w:tab behavior
             raw = child.text or ""
             text += raw.replace("\t", " ")
-        elif child.tag == qn("w:tab"):
+        elif child.tag == QN_W_TAB:
             text += " "  # Convert tab to space
-        elif child.tag == qn("w:br"):
+        elif child.tag == QN_W_BR:
             text += "\n"
-        elif child.tag == qn("w:cr"):
+        elif child.tag == QN_W_CR:
             text += "\n"
     return text
 

@@ -14,6 +14,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.diff import trim_common_context
+from adeu.markup import format_ambiguity_error
 from adeu.models import (
     AcceptChange,
     DeleteTableRow,
@@ -190,6 +191,18 @@ def validate_edit_strings(
                     if stripped[level:].startswith(" ") or not stripped[level:]:
                         errors.append(f"- Edit {i + 1} Failed: Heading level {level} is not supported (maximum is 6).")
                         break
+
+        # VAL-OBS-10: Appendix Boundary Structural Integrity
+        if (
+            "READONLY_BOUNDARY_START" in t_text
+            or "READONLY_BOUNDARY_START" in n_text
+            or "# Document Structure (Read-Only)" in t_text
+            or "# Document Structure (Read-Only)" in n_text
+        ):
+            errors.append(
+                f"- Edit {i + 1} Failed: Modification targets the read-only boundary "
+                "(Structural Appendix). This section cannot be edited."
+            )
 
     return errors
 
@@ -1023,8 +1036,11 @@ class RedlineEngine:
         """
         errors = []
 
-        # Ensure base mapper is ready
-        self.mapper._build_map()
+        # Ensure base mapper is ready, but DO NOT rebuild it if it already exists!
+        # This saves ~15s of redundant O(N) DOM traversal on large files.
+        if not self.mapper.full_text:
+            self.mapper._build_map()
+
         # Category A: document-context-free string-shape validation.
         # Delegated to module-level helper so the Live Word path can call the
         # same checks. See validate_edit_strings docstring for what is checked.
@@ -1044,39 +1060,13 @@ class RedlineEngine:
                 if len(matches) > 0:
                     active_text = self.clean_mapper.full_text
 
-            # Track 3: Appendix Boundary Validation
-            valid_matches = []
-            if self.mapper.appendix_start_index != -1:
-                for match_start, match_length in matches:
-                    if match_start + match_length > self.mapper.appendix_start_index:
-                        pass  # Skip appendix copies
-                    else:
-                        valid_matches.append((match_start, match_length))
-
-                violates_boundary = False
-                if "READONLY_BOUNDARY_START" in (edit.target_text or "") or "READONLY_BOUNDARY_START" in (
-                    getattr(edit, "new_text", "") or ""
-                ):
-                    violates_boundary = True
-                if "# Document Structure (Read-Only)" in (
-                    edit.target_text or ""
-                ) or "# Document Structure (Read-Only)" in (getattr(edit, "new_text", "") or ""):
-                    violates_boundary = True
-
-                if violates_boundary or (matches and not valid_matches):
-                    errors.append(
-                        f"- Edit {i + 1} Failed: Modification targets the read-only boundary "
-                        "(Structural Appendix). This section cannot be edited."
-                    )
-                    continue
-            else:
-                valid_matches = matches
+            # Since the structural appendix is no longer in the mapper,
+            # all matches are valid document body matches.
+            valid_matches = matches
 
             if len(valid_matches) == 0:
                 errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
             elif len(valid_matches) > 1:
-                from adeu.markup import format_ambiguity_error
-
                 # valid_matches is a list of (start, length); the formatter
                 # expects (start, end).
                 positions = [(start, start + length) for start, length in valid_matches]

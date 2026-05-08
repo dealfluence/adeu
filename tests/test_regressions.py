@@ -180,7 +180,11 @@ def test_batch_engine_corrupts_multipara_insertion():
     d2 = docx.Document(out_stream)
 
     texts = [p.text for p in d2.paragraphs]
-    assert texts == ["Cell", "New", "Text"], f"BUG: Text mapping corruption! Got {texts}"
+    assert texts == [
+        "Cell",
+        "New",
+        "Text",
+    ], f"BUG: Text mapping corruption! Got {texts}"
 
 
 def test_batch_engine_swallows_trailing_deletions():
@@ -372,7 +376,11 @@ def test_extractor_ignores_tracked_formatting(tmp_path):
     p = d.add_paragraph("Test")
     r = p.runs[0]
     r.bold = True
-    r._r.append(
+
+    # FIX: The test previously appended w:rPrChange directly to the run (w:r).
+    # Valid OOXML requires it to be inside w:rPr.
+    rPr = r._r.get_or_add_rPr()
+    rPr.append(
         parse_xml(
             '<w:rPrChange xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
             'w:id="1" w:author="QA" w:date="2026-04-30T00:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange>'
@@ -453,7 +461,13 @@ def test_live_word_trims_common_context():
     original_get = getattr(win32com.client, "GetActiveObject", None)
     win32com.client.GetActiveObject = lambda name: app_mock
     try:
-        changes = [ModifyText(target_text="The quick brown fox", new_text="The fast brown fox", comment="Speed up")]
+        changes = [
+            ModifyText(
+                target_text="The quick brown fox",
+                new_text="The fast brown fox",
+                comment="Speed up",
+            )
+        ]
         stats = lw._process_active_word_batch_core(changes, "Reviewer")
 
         assert stats["failed"] == 0, f"Batch failed with: {stats.get('skipped_details', [])}"
@@ -597,7 +611,11 @@ async def test_sanitize_docx_does_not_block_event_loop():
     ctx.info = AsyncMock()
 
     with (
-        patch("adeu.mcp_components.tools.sanitize._sanitize", side_effect=mock_sanitize_sync, create=True),
+        patch(
+            "adeu.mcp_components.tools.sanitize._sanitize",
+            side_effect=mock_sanitize_sync,
+            create=True,
+        ),
         patch("adeu.sanitize.core.sanitize_docx", side_effect=mock_sanitize_sync),
         patch("pathlib.Path.exists", return_value=True),
     ):
@@ -662,7 +680,10 @@ def test_report_routes_comment_lines_to_structural():
     report = SanitizeReport("test.docx")
 
     # This is what transforms.remove_all_comments() yields
-    lines = ["Comments removed: 1 (0 resolved, 1 open)", '  [Open] "Updated term." (Counterparty)']
+    lines = [
+        "Comments removed: 1 (0 resolved, 1 open)",
+        '  [Open] "Updated term." (Counterparty)',
+    ]
 
     report.add_transform_lines(lines)
 

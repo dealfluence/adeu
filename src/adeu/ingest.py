@@ -1,5 +1,6 @@
 # FILE: src/adeu/ingest.py
 import io
+from typing import Any, Optional
 
 import structlog
 from docx import Document
@@ -12,11 +13,13 @@ from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
+    _get_style_cache,
     apply_formatting_to_segments,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
     is_heading_paragraph,
+    is_native_heading,
     iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
@@ -45,9 +48,30 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
         raise ValueError(f"Could not extract text: {str(e)}") from e
 
 
-def _extract_text_from_doc(doc, clean_view: bool = False) -> str:
+def _extract_text_from_doc(
+    doc,
+    clean_view: bool = False,
+    include_appendix: bool = True,
+    return_paragraph_offsets: bool = False,
+):
     """
     Extracts text from an already-loaded python-docx Document.
+
+    Args:
+        clean_view: if True, simulate "Accept All Changes" view.
+        include_appendix: if True (default), append the structural appendix
+            (defined terms, anchors, diagnostics) to the projected text.
+            Set False when the caller knows it will discard the appendix
+            (e.g. mode='full' / mode='outline' since Step 3 — those modes
+            no longer ship the appendix in the response).
+        return_paragraph_offsets: if True (default False), returns a tuple
+            (text, offset_map) where offset_map is Dict[id(p._element), (start, length)]
+            for every paragraph projected. Used by mode='outline' (Step 4 / Option A)
+            to avoid re-projecting paragraphs to extract heading text.
+
+    Returns:
+        - text: str   (default)
+        - (text, offset_map): tuple   (when return_paragraph_offsets=True)
 
     PERF: We no longer call normalize_docx() here. The ingest pipeline tolerates
     fragmented runs (build_paragraph_text coalesces marker/wrapper boundaries
@@ -58,95 +82,225 @@ def _extract_text_from_doc(doc, clean_view: bool = False) -> str:
     comments_mgr = CommentsManager(doc)
     comments_map = comments_mgr.extract_comments_data()
 
-    full_text = []
+    full_text: list[str] = []
+    # Store the lxml proxy as the 3rd tuple item to keep it alive, preventing
+    # CPython from recycling the id() memory address between passes.
+    offset_map: Optional[dict[int, tuple[int, int, Any]]] = {} if return_paragraph_offsets else None
+    cursor = 0
 
     for part in iter_document_parts(doc):
-        part_text = _extract_blocks(part, comments_map, clean_view)
+        # part_cursor accounts for the \n\n separator that will precede this part
+        # in the final join, ensuring internal offsets align exactly.
+        part_cursor = cursor + 2 if full_text else cursor
+        part_text = _extract_blocks(
+            part,
+            comments_map,
+            clean_view,
+            offset_map=offset_map,
+            cursor=part_cursor,
+        )
         if part_text:
+            if full_text:
+                # The "\n\n" separator that join() inserts between parts must
+                # be reflected in the cursor so subsequent paragraph offsets
+                # remain accurate.
+                cursor += 2
             full_text.append(part_text)
+            cursor += len(part_text)
 
     base_text = "\n\n".join(full_text)
-    appendix = build_structural_appendix(doc, base_text)
-    if appendix:
-        return base_text + appendix
+
+    if include_appendix:
+        appendix = build_structural_appendix(doc, base_text)
+        if appendix:
+            base_text = base_text + appendix
+
+    if return_paragraph_offsets:
+        return base_text, offset_map
     return base_text
 
 
-def _extract_blocks(container, comments_map, clean_view: bool) -> str:
+def _extract_blocks(
+    container,
+    comments_map,
+    clean_view: bool,
+    offset_map: dict | None = None,
+    cursor: int = 0,
+) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
     iterating over Paragraphs and Tables in order.
     """
+    # Fetch style cache exactly once per container block
+    part = getattr(container, "part", container)
+
+    style_cache, default_pstyle = _get_style_cache(part)
+
     blocks = []
+    local_cursor = cursor
 
     c_type = type(container).__name__
     if c_type == "NotesPart":
         header = "## Footnotes" if container.note_type == "fn" else "## Endnotes"
         blocks.append(f"---\n{header}")
+        local_cursor += len(header) + 4  # "---\n" + header chars
+        # Note: the +4 above is "---\n" length. The actual block append uses
+        # f"---\n{header}" which has length 4 + len(header). The local_cursor
+        # advance must match. Below we'll add the inter-block "\n\n" before
+        # the next block.
+
+    # Replay the join behavior: blocks are joined by "\n\n", which means
+    # we add 2 to the cursor between blocks (not before the first).
+    is_first_block = len(blocks) == 0
 
     is_first_para = True
     for item in iter_block_items(container):
         i_type = type(item).__name__
 
+        if not is_first_block:
+            local_cursor += 2  # "\n\n" between blocks
+
+        block_start = local_cursor
+
         if i_type == "FootnoteItem":
-            fn_text = _extract_blocks(item, comments_map, clean_view)
+            fn_text = _extract_blocks(
+                item,
+                comments_map,
+                clean_view,
+                offset_map=offset_map,
+                cursor=block_start,
+            )
             if fn_text:
                 blocks.append(fn_text)
+                local_cursor = block_start + len(fn_text)
+                is_first_block = False
+            else:
+                # Empty footnote contributes nothing; rewind the "\n\n" we
+                # speculatively added.
+                if not is_first_block:
+                    local_cursor -= 2
         elif isinstance(item, Paragraph):
-            prefix = get_paragraph_prefix(item)
+            prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
-            p_text = build_paragraph_text(item, comments_map, clean_view)
-            blocks.append(prefix + p_text)
+            p_text = build_paragraph_text(item, comments_map, clean_view, style_cache, default_pstyle)
+            full_block = prefix + p_text
+            blocks.append(full_block)
+            if offset_map is not None:
+                offset_map[id(item._element)] = (
+                    block_start,
+                    len(full_block),
+                    item._element,
+                )
+            local_cursor = block_start + len(full_block)
             is_first_para = False
+            is_first_block = False
 
         elif isinstance(item, Table):
-            table_text = extract_table(item, comments_map, clean_view)
+            table_text = extract_table(
+                item,
+                comments_map,
+                clean_view,
+                offset_map=offset_map,
+                cursor=block_start,
+            )
             if table_text:
                 blocks.append(table_text)
+                local_cursor = block_start + len(table_text)
+                is_first_block = False
+            else:
+                if not is_first_block:
+                    local_cursor -= 2
             is_first_para = False
 
     return "\n\n".join(blocks)
 
 
-def extract_table(table: Table, comments_map, clean_view: bool) -> str:
-    rows_text = []
+def extract_table(
+    table: Table,
+    comments_map,
+    clean_view: bool,
+    offset_map: dict | None = None,
+    cursor: int = 0,
+) -> str:
+    """
+    Args:
+        offset_map: see _extract_blocks docstring.
+        cursor: absolute offset where this table begins in the final body.
+    """
+    rows_text: list[str] = []
+    rows_processed = 0
+    local_cursor = cursor
+
     for row in table.rows:
-        cell_texts = []
-        seen_cells = set()
+        cell_texts: list[str] = []
+        seen_cells: set = set()
+
+        # Structural Row Tracking — figure out wrapper offsets first so cell
+        # offsets land correctly inside the wrapped row text.
+        tr = row._element
+        trPr = tr.find(qn("w:trPr"))
+        ins = trPr.find(qn("w:ins")) if trPr is not None else None
+        del_node = trPr.find(qn("w:del")) if trPr is not None else None
+
+        if clean_view and del_node is not None:
+            continue
+
+        # Row separator "\n" between rows
+        row_start = local_cursor + (1 if rows_processed > 0 else 0)
+
+        # Wrapper prefix (e.g. "{++ ") shifts the inner content
+        wrapper_prefix_len = 0
+        if not clean_view:
+            if ins is not None:
+                wrapper_prefix_len = len("{++ ")
+            elif del_node is not None:
+                wrapper_prefix_len = len("{-- ")
+
+        cell_cursor = row_start + wrapper_prefix_len
+        first_cell = True
 
         for cell in row.cells:
             if cell in seen_cells:
                 continue
             seen_cells.add(cell)
 
-            cell_content = _extract_blocks(cell, comments_map, clean_view)
+            if not first_cell:
+                cell_cursor += 3  # " | " between cells
+
+            cell_content = _extract_blocks(
+                cell,
+                comments_map,
+                clean_view,
+                offset_map=offset_map,
+                cursor=cell_cursor,
+            )
             cell_texts.append(cell_content)
+            cell_cursor += len(cell_content)
+            first_cell = False
 
         row_str = " | ".join(cell_texts)
 
-        # Structural Row Tracking
-        tr = row._element
-        trPr = tr.find(qn("w:trPr"))
-        if trPr is not None:
-            ins = trPr.find(qn("w:ins"))
-            del_node = trPr.find(qn("w:del"))
-
-            if clean_view and del_node is not None:
-                continue
-
-            if not clean_view:
-                if ins is not None:
-                    row_str = f"{{++ {row_str} |Chg:{ins.get(qn('w:id'))}++}}"
-                elif del_node is not None:
-                    row_str = f"{{-- {row_str} |Chg:{del_node.get(qn('w:id'))}--}}"
+        if not clean_view:
+            if ins is not None:
+                row_str = f"{{++ {row_str} |Chg:{ins.get(qn('w:id'))}++}}"
+            elif del_node is not None:
+                row_str = f"{{-- {row_str} |Chg:{del_node.get(qn('w:id'))}--}}"
 
         rows_text.append(row_str)
+        local_cursor = row_start + len(row_str)
+        rows_processed += 1
 
     return "\n".join(rows_text)
 
 
-def build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
+def build_paragraph_text(
+    paragraph,
+    comments_map,
+    clean_view: bool = False,
+    style_cache: Optional[dict] = None,
+    default_pstyle: Optional[str] = None,
+):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
     Merges metadata for adjacent Redline blocks (Substitutions).
@@ -190,12 +344,13 @@ def build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
     # event (e.g. a tracked-change boundary), at which point heading content
     # has effectively begun and stripping must stop. Mid-content breaks
     # (e.g. "Line 1\nLine 2" in a heading) are preserved.
-    is_heading = is_heading_paragraph(paragraph)
+    is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle)
+    native_heading = is_native_heading(paragraph, style_cache, default_pstyle)
     leading_strip_active = is_heading
 
     for i, item in enumerate(items):
         if isinstance(item, Run):
-            prefix, suffix = get_run_style_markers(item)
+            prefix, suffix = get_run_style_markers(item, native_heading)
             text = get_run_text(item)
 
             if clean_view and active_del:
@@ -242,13 +397,15 @@ def build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
 
                 # Handle Metadata (always accumulate state snapshot)
                 if not clean_view:
-                    current_state = (
-                        active_ins.copy(),
-                        active_del.copy(),
-                        active_comments.copy(),
-                        active_fmt.copy(),
-                    )
-                    deferred_meta_states.append(current_state)
+                    has_meta = active_ins or active_del or active_comments or active_fmt
+                    if has_meta:
+                        current_state = (
+                            active_ins.copy() if active_ins else {},
+                            active_del.copy() if active_del else {},
+                            active_comments.copy() if active_comments else set(),
+                            active_fmt.copy() if active_fmt else {},
+                        )
+                        deferred_meta_states.append(current_state)
 
                     should_defer = False
                     is_redline = bool(active_ins) or bool(active_del) or bool(active_fmt)
@@ -287,7 +444,7 @@ def build_paragraph_text(paragraph, comments_map, clean_view: bool = False):
                         if next_is_redline:
                             should_defer = True
 
-                    if not should_defer:
+                    if not should_defer and deferred_meta_states:
                         meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
                         if meta_block:
                             if pending_text:
