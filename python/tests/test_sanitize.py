@@ -21,14 +21,13 @@ from .verify_sanitized import (
     check_keep_markup,
 )
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
+FIXTURE_DIR = Path(__file__).parent.parent.parent / "shared" / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
+# Duplicated declaration removed
 
 # ---------------------------------------------------------------------------
 # Specific Helpers for Sanitize

@@ -20,21 +20,21 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "python/uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install Dependencies
-        run: uv sync --all-extras --dev
+        run: cd python && uv sync --all-extras --dev
 
       - name: Lint (Ruff)
         run: |
-          uv run ruff check .
-          uv run ruff format --check .
+          cd python && uv run ruff check .
+          cd python && uv run ruff format --check .
 
       - name: Type Check (Mypy)
-        run: uv run mypy src
+        run: cd python && uv run mypy src
 
       - name: Run Tests
-        run: uv run pytest
+        run: cd python && uv run pytest

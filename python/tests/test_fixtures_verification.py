@@ -10,7 +10,7 @@ from adeu.models import ModifyText, ReplyComment
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.xml_debug import get_abstracted_xml_snapshot
 
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "shared", "fixtures")
 INITIAL_DOC = os.path.join(FIXTURES_DIR, "initial.docx")
 GOLDEN_DOC = os.path.join(FIXTURES_DIR, "golden.docx")
 GOLDEN2_DOC = os.path.join(FIXTURES_DIR, "golden2.docx")

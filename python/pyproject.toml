@@ -6,9 +6,9 @@ authors = [
     { name = "Mikko Korpela" },
     { name = "Uzair Ahmed" }
 ]
-readme = "README.md"
+readme = "../README.md"
 requires-python = ">=3.12"
-license = { file = "LICENSE" }
+license = { file = "../LICENSE" }
 keywords = ["docx", "redlining", "llm", "mcp", "agent", "virtual-dom"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

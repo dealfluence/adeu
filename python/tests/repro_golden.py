@@ -17,7 +17,7 @@ def generate_golden_replica(output_path: str):
     4. Second Reply (Triad)
     """
     # Use initial.docx as base to avoid huge style XMLs from default template
-    base_path = "tests/fixtures/initial.docx"
+    base_path = "../shared/fixtures/initial.docx"
     if os.path.exists(base_path):
         doc = Document(base_path)
         # Clear existing paragraphs to start fresh
@@ -64,4 +64,4 @@ def generate_golden_replica(output_path: str):
 
 
 if __name__ == "__main__":
-    generate_golden_replica("tests/fixtures/replica_golden.docx")
+    generate_golden_replica("../shared/fixtures/replica_golden.docx")

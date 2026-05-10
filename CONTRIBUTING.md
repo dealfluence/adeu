@@ -12,7 +12,7 @@ Clone the repository and install the dependencies:
 
 ```bash
 git clone https://github.com/dealfluence/adeu.git
-cd adeu
+cd adeu/python
 uv sync --all-extras --dev
 ```
 
@@ -24,18 +24,18 @@ Before submitting a pull request, ensure all checks pass:
 
 ```bash
 # Format code
-uv run ruff format .
+cd python && uv run ruff format .
 
 # Run linter
-uv run ruff check . --fix
+cd python && uv run ruff check . --fix
 
 # Run static type checker
-uv run mypy src
+cd python && uv run mypy src
 ```
 
 We also recommend installing the pre-commit hooks to automate this:
 ```bash
-uv run pre-commit install
+cd python && uv run pre-commit install
 ```
 
 ### 3. Testing
@@ -46,10 +46,10 @@ Run the test suite using `pytest`:
 
 ```bash
 # Run all tests
-uv run pytest
+cd python && uv run pytest
 
 # Run tests with coverage
-uv run pytest --cov=src
+cd python && uv run pytest --cov=src
 ```
 
 *(Note: Tests involving the Live Word COM engine are automatically skipped on non-Windows platforms).*

@@ -42,7 +42,7 @@ def inspect_for_duplicates(docx_path: str):
 
 
 def main():
-    base_dir = Path("tests/fixtures")
+    base_dir = Path("../shared/fixtures")
     input_path = base_dir / "golden.docx"
     output_path = Path("testing.docx")
 

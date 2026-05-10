@@ -24,16 +24,16 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "python/uv.lock"
 
       - name: Set up Python
         run: uv python install 3.12
 
       - name: Install Dependencies
-        run: uv sync
+        run: cd python && uv sync
 
       - name: Build package
-        run: uv build
+        run: cd python && uv build
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
