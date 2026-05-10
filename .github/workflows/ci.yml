@@ -26,15 +26,19 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install Dependencies
-        run: cd python && uv sync --all-extras --dev
+        working-directory: ./python
+        run: uv sync --all-extras --dev
 
       - name: Lint (Ruff)
+        working-directory: ./python
         run: |
-          cd python && uv run ruff check .
-          cd python && uv run ruff format --check .
+          uv run ruff check .
+          uv run ruff format --check .
 
       - name: Type Check (Mypy)
-        run: cd python && uv run mypy src
+        working-directory: ./python
+        run: uv run mypy src
 
       - name: Run Tests
-        run: cd python && uv run pytest
+        working-directory: ./python
+        run: uv run pytest

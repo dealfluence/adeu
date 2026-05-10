@@ -30,10 +30,12 @@ jobs:
         run: uv python install 3.12
 
       - name: Install Dependencies
-        run: cd python && uv sync
+        working-directory: ./python
+        run: uv sync
 
       - name: Build package
-        run: cd python && uv build
+        working-directory: ./python
+        run: uv build
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
