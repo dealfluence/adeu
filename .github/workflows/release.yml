@@ -35,7 +35,12 @@ jobs:
 
       - name: Build package
         working-directory: ./python
-        run: uv build
+        run: |
+          # Copy monorepo root files into the python build context and strip the '../' relative paths
+          cp ../LICENSE ./LICENSE
+          sed -i 's/\.\.\/LICENSE/LICENSE/g' pyproject.toml
+          if grep -q "\.\./README.md" pyproject.toml; then cp ../README.md ./README.md; sed -i 's/\.\.\/README\.md/README.md/g' pyproject.toml; fi
+          uv build
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
