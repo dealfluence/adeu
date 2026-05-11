@@ -54,11 +54,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
-
-      - name: Upgrade npm (Required for OIDC Trusted Publishing)
-        run: npm install -g npm@latest
 
       - name: Install Dependencies
         working-directory: ./node
