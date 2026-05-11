@@ -10,13 +10,31 @@ on:
 jobs:
   draft-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    name: Create Draft Release
+    name: Create Draft Release & Attach Bundle
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - name: Generate Draft Release
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install Dependencies
+        working-directory: ./node
+        run: npm install
+
+      - name: Build Packages
+        working-directory: ./node
+        run: npm run build
+
+      - name: Pack MCPB Bundle
+        working-directory: ./desktop-extension
+        run: zip -r Adeu.mcpb index.js manifest.json icon.png package.json
+
+      - name: Generate Draft Release and Upload Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -24,6 +42,8 @@ jobs:
             --draft \
             --title "Release ${{ github.ref_name }}" \
             --generate-notes
+          
+          gh release upload ${{ github.ref_name }} ./desktop-extension/Adeu.mcpb
 
   pypi-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
@@ -63,13 +83,15 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
 
-  npm-and-github-release:
+  npm-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
-    name: Publish to NPM and GitHub Releases
+    name: Publish to NPM
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to upload release assets
+      contents: read
       id-token: write  # Needed for NPM provenance
 
     steps:
