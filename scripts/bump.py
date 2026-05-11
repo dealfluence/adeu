@@ -123,7 +123,7 @@ def main():
     print(f"  1. Review changes: git diff")
     print(f"  2. git commit -am \"chore(release): bump version to {target_version}\"")
     print(f"  3. git push origin main")
-    print(f"  4. Go to GitHub and draft a new release with tag v{target_version}")
+    print(f"  4. Wait for CI to create the Draft Release, then go to GitHub to add notes and click 'Publish'")
 
 if __name__ == "__main__":
     main()
