@@ -215,3 +215,5 @@ AI_SESSION.md
 # Node / Monorepo
 node_modules/
 dist/
+
+desktop-extension/index.js

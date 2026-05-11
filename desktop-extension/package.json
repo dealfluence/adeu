@@ -1,0 +1,5 @@
+{
+  "name": "adeu-desktop-extension",
+  "type": "module",
+  "private": true
+}

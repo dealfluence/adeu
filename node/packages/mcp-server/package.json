@@ -1,0 +1,31 @@
+{
+  "name": "@adeu/mcp-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "adeu-mcp-server": "./dist/index.js"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "start": "node ./dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dealfluence/adeu.git",
+    "directory": "node/packages/mcp-server"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Mikko Korpela <mikko@adeu.ai>",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@adeu/core": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

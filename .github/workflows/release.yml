@@ -39,3 +39,43 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm-and-github-release:
+    if: github.repository == 'dealfluence/adeu'
+    name: Publish to NPM and GitHub Releases
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to upload release assets
+      id-token: write  # Needed for NPM provenance
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install Dependencies
+        working-directory: ./node
+        run: npm install
+
+      - name: Build Packages
+        working-directory: ./node
+        run: npm run build
+
+      - name: Publish to NPM
+        working-directory: ./node
+        run: npm publish --workspaces --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack MCPB Bundle
+        working-directory: ./desktop-extension
+        run: zip -r Adeu.mcpb index.js manifest.json icon.png package.json
+
+      - name: Upload to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} ./desktop-extension/Adeu.mcpb

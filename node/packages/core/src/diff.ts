@@ -1,0 +1,251 @@
+import diff_match_patch from 'diff-match-patch';
+import { ModifyText } from './models.js';
+
+export function trim_common_context(target: string, new_val: string): [number, number] {
+  if (!target || !new_val) return [0, 0];
+
+  const isSpace = (char: string) => /\s/.test(char);
+
+  // 1. Prefix with Word Boundary Check
+  let prefix_len = 0;
+  let limit = Math.min(target.length, new_val.length);
+  while (prefix_len < limit && target[prefix_len] === new_val[prefix_len]) {
+    prefix_len++;
+  }
+
+  // Backtrack to nearest whitespace if we split a word
+  if (prefix_len < target.length && prefix_len < new_val.length) {
+    while (prefix_len > 0) {
+      const target_split = !isSpace(target[prefix_len - 1]) && !isSpace(target[prefix_len]);
+      const new_split = !isSpace(new_val[prefix_len - 1]) && !isSpace(new_val[prefix_len]);
+      if (target_split || new_split) {
+        prefix_len--;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Backtrack prefix to avoid splitting markdown markers
+  while (prefix_len > 0) {
+    if (prefix_len < target.length) {
+      const charSeq = target.substring(prefix_len - 1, prefix_len + 1);
+      if (charSeq === '**' || charSeq === '__') {
+        prefix_len--;
+        continue;
+      }
+    }
+
+    const left = target.substring(0, prefix_len);
+    const b_count = (left.match(/\*\*/g) || []).length;
+    const u2_count = (left.match(/__/g) || []).length;
+    const u1_count = (left.replace(/__/g, '').match(/_/g) || []).length;
+
+    if (b_count % 2 !== 0) {
+      prefix_len = left.lastIndexOf('**');
+      continue;
+    }
+    if (u2_count % 2 !== 0) {
+      prefix_len = left.lastIndexOf('__');
+      continue;
+    }
+    if (u1_count % 2 !== 0) {
+      let idx = left.length - 1;
+      while (idx >= 0) {
+        if (left[idx] === '_' && 
+           (idx === 0 || left[idx - 1] !== '_') && 
+           (idx === left.length - 1 || left[idx + 1] !== '_')) {
+          prefix_len = idx;
+          break;
+        }
+        idx--;
+      }
+      continue;
+    }
+
+    // Safety: Backtrack if we consumed a Markdown Header marker (#)
+    let temp_len = prefix_len;
+    let hit_header = false;
+    while (temp_len > 0) {
+      const char = target[temp_len - 1];
+      if (char === '#') {
+        prefix_len = temp_len - 1;
+        while (prefix_len > 0 && target[prefix_len - 1] !== '\n') {
+          prefix_len--;
+        }
+        hit_header = true;
+        break;
+      }
+      if (char === '\n') break;
+      temp_len--;
+    }
+    if (hit_header) continue;
+
+    break;
+  }
+
+  // 2. Suffix with Word Boundary Check
+  let suffix_len = 0;
+  const target_rem_len = target.length - prefix_len;
+  const new_rem_len = new_val.length - prefix_len;
+  const limit_suffix = Math.min(target_rem_len, new_rem_len);
+
+  while (suffix_len < limit_suffix && target[target.length - 1 - suffix_len] === new_val[new_val.length - 1 - suffix_len]) {
+    suffix_len++;
+  }
+
+  if (suffix_len > 0) {
+    while (suffix_len > 0) {
+      let target_split = false;
+      if (suffix_len < target.length) {
+        target_split = !isSpace(target[target.length - 1 - suffix_len]) && !isSpace(target[target.length - suffix_len]);
+      }
+      let new_split = false;
+      if (suffix_len < new_val.length) {
+        new_split = !isSpace(new_val[new_val.length - 1 - suffix_len]) && !isSpace(new_val[new_val.length - suffix_len]);
+      }
+      if (target_split || new_split) {
+        suffix_len--;
+      } else {
+        break;
+      }
+    }
+  }
+
+  while (suffix_len > 0) {
+    const idx = target.length - suffix_len;
+    if (idx > 0) {
+      const charSeq = target.substring(idx - 1, idx + 1);
+      if (charSeq === '**' || charSeq === '__') {
+        suffix_len--;
+        continue;
+      }
+    }
+
+    const right = target.substring(target.length - suffix_len);
+    const b_count = (right.match(/\*\*/g) || []).length;
+    const u2_count = (right.match(/__/g) || []).length;
+    const u1_count = (right.replace(/__/g, '').match(/_/g) || []).length;
+
+    if (b_count % 2 !== 0) {
+      suffix_len -= right.indexOf('**') + 2;
+      continue;
+    }
+    if (u2_count % 2 !== 0) {
+      suffix_len -= right.indexOf('__') + 2;
+      continue;
+    }
+    if (u1_count % 2 !== 0) {
+      let idx_in_right = 0;
+      while (idx_in_right < right.length) {
+        if (right[idx_in_right] === '_' && 
+           (idx_in_right === 0 || right[idx_in_right - 1] !== '_') && 
+           (idx_in_right === right.length - 1 || right[idx_in_right + 1] !== '_')) {
+          suffix_len -= idx_in_right + 1;
+          break;
+        }
+        idx_in_right++;
+      }
+      continue;
+    }
+    break;
+  }
+
+  if (suffix_len > 0 && /^\s+$/.test(target.substring(target.length - suffix_len))) {
+    suffix_len = 0;
+  }
+
+  // Absorb balanced wrappers
+  for (const marker of ['**', '__', '_']) {
+    const mlen = marker.length;
+    const tgt_rem = target.substring(prefix_len, target.length - suffix_len);
+    const new_rem = new_val.substring(prefix_len, new_val.length - suffix_len);
+
+    if (
+      tgt_rem.startsWith(marker) && new_rem.startsWith(marker) &&
+      tgt_rem.endsWith(marker) && new_rem.endsWith(marker) &&
+      tgt_rem.length >= 2 * mlen && new_rem.length >= 2 * mlen
+    ) {
+      prefix_len += mlen;
+      suffix_len += mlen;
+    }
+  }
+
+  return [prefix_len, suffix_len];
+}
+
+function _words_to_chars(text1: string, text2: string): [string, string, string[]] {
+  const token_array: string[] = [];
+  const token_hash: Record<string, number> = {};
+  
+  // RegExp equivalent to Python's r"(\s+|\w+|[^\w\s])" with unicode support
+  const split_pattern = /(\s+|[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s])/gu;
+
+  const encode_text = (text: string) => {
+    // Keep delimiters via capture group in split
+    const tokens = text.split(split_pattern).filter(Boolean);
+    let encoded_chars = '';
+    for (const token of tokens) {
+      if (token in token_hash) {
+        encoded_chars += String.fromCharCode(token_hash[token]);
+      } else {
+        const code = token_array.length;
+        token_hash[token] = code;
+        token_array.push(token);
+        encoded_chars += String.fromCharCode(code);
+      }
+    }
+    return encoded_chars;
+  };
+
+  return [encode_text(text1), encode_text(text2), token_array];
+}
+
+export function generate_edits_from_text(original_text: string, modified_text: string): ModifyText[] {
+  const dmp = new diff_match_patch.diff_match_patch();
+  
+  const [chars1, chars2, token_array] = _words_to_chars(original_text, modified_text);
+  const diffs = dmp.diff_main(chars1, chars2, false);
+  dmp.diff_cleanupSemantic(diffs);
+  
+  // Manually map characters back to words to bypass prototype volatility (diff_charsToLines_)
+  for (let i = 0; i < diffs.length; i++) {
+    const chars = diffs[i][1];
+    let text = '';
+    for (let j = 0; j < chars.length; j++) text += token_array[chars.charCodeAt(j)];
+    diffs[i][1] = text;
+  }
+
+  const edits: ModifyText[] = [];
+  let current_original_index = 0;
+  let pending_delete: [number, string] | null = null;
+
+  for (const [op, text] of diffs) {
+    if (op === 0) { // Equal
+      if (pending_delete) {
+        const [idx, del_txt] = pending_delete;
+        edits.push({ type: 'modify', target_text: del_txt, new_text: '', comment: 'Diff: Text deleted', _match_start_index: idx });
+        pending_delete = null;
+      }
+      current_original_index += text.length;
+    } else if (op === -1) { // Delete
+      pending_delete = [current_original_index, text];
+      current_original_index += text.length;
+    } else if (op === 1) { // Insert
+      if (pending_delete) {
+        const [idx, del_txt] = pending_delete;
+        edits.push({ type: 'modify', target_text: del_txt, new_text: text, comment: 'Diff: Replacement', _match_start_index: idx });
+        pending_delete = null;
+      } else {
+        edits.push({ type: 'modify', target_text: '', new_text: text, comment: 'Diff: Text inserted', _match_start_index: current_original_index });
+      }
+    }
+  }
+
+  if (pending_delete) {
+    const [idx, del_txt] = pending_delete;
+    edits.push({ type: 'modify', target_text: del_txt, new_text: '', comment: 'Diff: Text deleted', _match_start_index: idx });
+  }
+
+  return edits;
+}

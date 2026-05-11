@@ -1,0 +1,38 @@
+{
+  "name": "@adeu/core",
+  "version": "1.0.0",
+  "description": "",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dealfluence/adeu.git",
+    "directory": "node/packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "Mikko Korpela <mikko@adeu.ai>",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.10",
+    "diff-match-patch": "^1.0.5",
+    "jszip": "^3.10.1",
+    "xpath": "^0.0.34"
+  },
+  "devDependencies": {
+    "@types/diff-match-patch": "^1.0.36"
+  }
+}

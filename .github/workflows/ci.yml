@@ -42,3 +42,23 @@ jobs:
       - name: Run Tests
         working-directory: ./python
         run: uv run pytest
+
+  node-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["20.x", "22.x"]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install dependencies
+        working-directory: ./node
+        run: npm install
+      - name: Build and Test
+        working-directory: ./node
+        run: |
+          npm run build
+          npm test

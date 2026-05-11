@@ -27,13 +27,13 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
 *   `ingest.py` and `mapper.py` must be strictly synchronized.
 *   If `ingest.py` produces virtual characters (e.g., `{==` or `**`), `mapper.py` must explicitly account for them as `virtual` spans so the `RedlineEngine` knows they do not exist in the DOM.
 
-### 4. Agentic Distribution Strategy
-*   **Zero-Install**: We prioritize `uvx` (ephemeral execution) over global installation for end-users. The MCP server runs via `uvx adeu adeu-server`.
-*   **Auto-Configuration**: The `adeu init` command manages the injection of tools into `claude_desktop_config.json`.
+### 4. Agentic Distribution Strategy & Monorepo
+*   **Dual Engine Architecture**: Adeu maintains parallel backends in Python (FastMCP, rich CLI) and TypeScript/Node.js (`@adeu/core`, `@adeu/mcp-server`).
+*   **Native Desktop Extension (MCPB)**: We ship a fully self-contained Node.js backend bundled as a zero-dependency `index.js` for Claude Desktop extensions. This eliminates Python/`uvx` environment constraints for end-users. The 1.2MB bundle is ignored in `.gitignore`, built entirely via CI/CD, and distributed via NPM and GitHub Releases to avoid repository bloat.
+*   **Auto-Configuration**: The Python CLI `adeu init` command still manages local dev injections into `claude_desktop_config.json`.
     *   *Safety*: It must always create a timestamped backup (`.bak`) before modifying the user's config.
     *   *OS Agnostic*: It handles path resolution for Windows (`%APPDATA%`) and macOS (`~/Library`) automatically.
-*   **Desktop Extension (MCPB)**: We ship a lightweight Node.js bootstrapper (`desktop-extension/index.js`) for the Claude Desktop `.mcpb` bundle. This bridges Claude's embedded Node environment and Adeu's Python requirement by securely auto-healing the PATH and launching `uvx`.
-*   **Smithery Marketplace Publishing**: To bypass the "Schema Deadlock" (Anthropic's `mcpb pack` rejects tool schemas, but Smithery's registry requires them), we use a dynamic patch strategy. The `scripts/patch_smithery_mcpb.py` script boots the local server, extracts live schemas via JSON-RPC (`tools/list`), and injects them into the packaged `.mcpb` manifest before publishing.
+*   **Smithery Marketplace Publishing**: To bypass the "Schema Deadlock" (Anthropic's `mcpb pack` rejects tool schemas, but Smithery's registry requires them), we use a dynamic patch strategy. `scripts/patch_smithery_mcpb.py` boots the compiled Node server, extracts live schemas via JSON-RPC (`tools/list`), and injects them into the packaged `.mcpb` manifest before publishing.
 
 ### 5. Block-Level Parsing & Tables
 *   **Sequential Iteration**: We iterate over document elements (`w:p` and `w:tbl`) in strict XML order using `iter_block_items`. We do *not* iterate `part.paragraphs` and `part.tables` separately, as this destroys document flow (e.g., tables appearing after all text).
@@ -119,6 +119,14 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
     *   *Language-Agnostic Extraction*: Terms are extracted structurally via typography (leading/inline quotes), not brittle English regexes. Terms must be used ≥1 time to be included.
     *   *High-Signal Diagnostics*: Typo candidates are grouped by target term. False positives are pruned via stop-word filtering, singular/plural exclusion, and a strict rule for short acronyms (≤5 chars: max edit distance of 1 and identical first letter).
 
+### 14. TypeScript / Node.js Engine Constraints
+*   **DOM Simulation**: `python-docx` is emulated via `jszip` and `@xmldom/xmldom`. Strict shim functions (`findChild`, `findAllDescendants`) simulate `lxml`'s direct-child vs recursive search to prevent catastrophic DOM traversal mismatches.
+*   **Regex Engine Limits**: JS regex does not support Python's atomic grouping `(?>...)`. Catastrophic backtracking in fuzzy matchers is prevented using mathematically equivalent character classes (e.g., `[*_]*`).
+*   **Whitespace Evaluation**: Python's `isspace()` checks the whole string, whereas JS requires explicit regex anchors (`/^\s+$/`) to prevent aggressive context-trimming bugs.
+*   **diff-match-patch Volatility**: To prevent JS minifier and API inconsistencies across standard JS library releases, `diff_charsToLines_` is bypassed using manual array-mapping loops.
+*   **Package Mutation Parity**: Emulating `python-docx`'s save flow requires manually serializing mutated `@xmldom/xmldom` elements via `XMLSerializer` and dynamically updating `[Content_Types].xml` and `.rels` files inside `JSZip` to prevent OPC package corruption.
+*   **Test Utilities**: Because JS lacks `python-docx`'s in-memory factory methods, `test-utils.ts` shims document building by dynamically wiping and mutating an empty `initial.docx` fixture with raw OOXML node injection.
+
 ## Developer Workflows
 
 ### Testing
@@ -134,6 +142,10 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
 
 ## Current Status
+- **v1.6.0**: Native Node.js Monorepo Transition.
+    - Ported the entire XML Redline Engine to TypeScript (`@adeu/core` and `@adeu/mcp-server`).
+    - Replaced the Python `uvx` wrapper in the Claude Desktop extension with a fully standalone Node.js bundle, permanently eliminating Python dependency requirements for end users.
+    - Automated NPM package publishing and GitHub Release bundle generation via CI/CD.
 - **v1.5.2**: Smithery Marketplace & Desktop Extensions.
     - Published `adeu/adeu` to the Smithery.ai registry.
     - Implemented a Node.js bootstrapper for native Claude Desktop `.mcpb` installation, automatically managing `uvx` dependencies.
