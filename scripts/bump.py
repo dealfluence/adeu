@@ -9,17 +9,22 @@ FILES_TO_BUMP = [
     "node/packages/core/package.json",
     "node/packages/mcp-server/package.json",
     "desktop-extension/manifest.json",
+    "gemini-extension.json",
 ]
+
 
 def run_cmd(cmd, cwd=None, check=True):
     """Helper to run shell commands."""
     use_shell = sys.platform == "win32"
-    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, shell=use_shell)
+    result = subprocess.run(
+        cmd, cwd=cwd, text=True, capture_output=True, shell=use_shell
+    )
     if check and result.returncode != 0:
         print(f"❌ Command failed: {' '.join(cmd)}")
         print(result.stderr)
         sys.exit(1)
     return result
+
 
 def update_json_version(filepath, version):
     path = Path(filepath)
@@ -32,23 +37,21 @@ def update_json_version(filepath, version):
 
     data = json.loads(content)
     old_version = data.get("version", "unknown")
-    
+
     if old_version == version:
         return False
 
     # Regex replace to preserve exact file formatting (indents/newlines)
     new_content = re.sub(
-        r'("version"\s*:\s*)"[^"]+"',
-        f'\\g<1>"{version}"',
-        content,
-        count=1
+        r'("version"\s*:\s*)"[^"]+"', f'\\g<1>"{version}"', content, count=1
     )
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
-        
+
     print(f"✅ Updated {filepath} ({old_version} -> {version})")
     return True
+
 
 def update_toml_version(filepath, version):
     path = Path(filepath)
@@ -60,11 +63,11 @@ def update_toml_version(filepath, version):
         content = f.read()
 
     new_content = re.sub(
-        r'^version\s*=\s*"[^"]+"', 
-        f'version = "{version}"', 
-        content, 
+        r'^version\s*=\s*"[^"]+"',
+        f'version = "{version}"',
+        content,
         count=1,
-        flags=re.MULTILINE
+        flags=re.MULTILINE,
     )
 
     if new_content == content:
@@ -75,9 +78,10 @@ def update_toml_version(filepath, version):
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
-        
+
     print(f"✅ Updated {filepath} ({old_version} -> {version})")
     return True
+
 
 def main():
     if len(sys.argv) != 2:
@@ -87,7 +91,9 @@ def main():
 
     target_version = sys.argv[1].lstrip("v")
     if not re.match(r"^\d+\.\d+\.\d+(-\w+(\.\d+)?)?$", target_version):
-        print(f"❌ Error: '{target_version}' does not look like a valid semver (e.g. 1.6.0).")
+        print(
+            f"❌ Error: '{target_version}' does not look like a valid semver (e.g. 1.6.0)."
+        )
         sys.exit(1)
 
     print(f"🚀 Synchronizing monorepo to version {target_version}...\n")
@@ -108,11 +114,11 @@ def main():
         sys.exit(0)
 
     print("\n📦 Updating lockfiles...")
-    
+
     # Update uv.lock
     print("   Running 'uv lock' in python/...")
     run_cmd(["uv", "lock"], cwd="python")
-    
+
     # Update package-lock.json
     print("   Running 'npm install --package-lock-only' in node/...")
     # --package-lock-only avoids downloading node_modules, just updates the lockfile quickly
@@ -121,9 +127,12 @@ def main():
     print("\n🎉 Files and lockfiles updated successfully!")
     print("\nNext steps:")
     print(f"  1. Review changes: git diff")
-    print(f"  2. git commit -am \"chore(release): bump version to {target_version}\"")
+    print(f'  2. git commit -am "chore(release): bump version to {target_version}"')
     print(f"  3. git push origin main")
-    print(f"  4. Wait for CI to create the Draft Release, then go to GitHub to add notes and click 'Publish'")
+    print(
+        f"  4. Wait for CI to create the Draft Release, then go to GitHub to add notes and click 'Publish'"
+    )
+
 
 if __name__ == "__main__":
     main()
