@@ -249,3 +249,57 @@ export function generate_edits_from_text(original_text: string, modified_text: s
 
   return edits;
 }
+
+export function create_unified_diff(original_text: string, modified_text: string, context_lines: number = 3): string {
+  const dmp = new diff_match_patch.diff_match_patch();
+  const a = dmp.diff_linesToChars_(original_text, modified_text);
+  const diffs = dmp.diff_main(a.chars1, a.chars2, false);
+  dmp.diff_charsToLines_(diffs, a.lineArray);
+  
+  const output: string[] = [];
+  output.push('--- Original');
+  output.push('+++ Modified');
+  
+  let i = 0;
+  while (i < diffs.length) {
+    while (i < diffs.length && diffs[i][0] === 0) i++;
+    if (i >= diffs.length) break;
+    
+    let start = i;
+    let preContext: string[] = [];
+    if (start > 0 && diffs[start - 1][0] === 0) {
+      const lines = diffs[start - 1][1].replace(/\n$/, '').split('\n');
+      preContext = lines.slice(-context_lines);
+    }
+    
+    const chunk: string[] = [];
+    chunk.push(...preContext.map(l => ` ${l}`));
+    
+    while (i < diffs.length) {
+      const [op, text] = diffs[i];
+      const lines = text.replace(/\n$/, '').split('\n');
+      
+      if (op === 0) {
+        if (lines.length > context_lines * 2) break;
+        chunk.push(...lines.map(l => ` ${l}`));
+      } else {
+        const prefix = op === -1 ? '-' : '+';
+        chunk.push(...lines.map(l => `${prefix}${l}`));
+      }
+      i++;
+    }
+    
+    let postContext: string[] = [];
+    if (i < diffs.length && diffs[i][0] === 0) {
+      const lines = diffs[i][1].replace(/\n$/, '').split('\n');
+      postContext = lines.slice(0, context_lines);
+    }
+    chunk.push(...postContext.map(l => ` ${l}`));
+    
+    output.push('@@ ... @@');
+    output.push(...chunk);
+  }
+  
+  if (output.length === 2) return ''; // No changes
+  return output.join('\n');
+}

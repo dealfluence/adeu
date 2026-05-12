@@ -8,7 +8,8 @@ import {
   extractTextFromBuffer, 
   DocumentObject, 
   RedlineEngine, 
-  BatchValidationError 
+  BatchValidationError,
+  create_unified_diff
 } from '@adeu/core';
 import { 
   build_paginated_response, 
@@ -22,6 +23,8 @@ const READ_DOCX_TAIL = "Modes:\n- 'full' (default): paginated body content. Use 
 
 const PROCESS_BATCH_COMMON_DESC = "Applies a batch of edits and review actions to a DOCX.\n\nAll changes evaluate against the ORIGINAL document state — do not chain dependent edits within one batch (e.g. rename X to Y, then modify Y). Apply the rename first, then send a second batch.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC = "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. `target_text` must uniquely match — include surrounding context if the phrase is ambiguous. `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
+
+const DIFF_DOCX_DESC = "Compares two DOCX files and returns a unified diff of their text content. Useful for analyzing differences between versions before editing.";
 
 // --- Server Setup ---
 const server = new Server(
@@ -84,6 +87,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             output_path: { type: 'string', description: 'Optional output path.' }
           },
           required: ['docx_path']
+        }
+      },
+      {
+        name: `${TOOL_PREFIX}diff_docx_files`,
+        description: DIFF_DOCX_DESC,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            original_path: { type: 'string', description: 'Absolute path to the baseline DOCX file.' },
+            modified_path: { type: 'string', description: 'Absolute path to the modified DOCX file.' }
+          },
+          required: ['original_path', 'modified_path']
         }
       }
     ]
@@ -185,6 +200,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> =>
 
       return {
         content: [{ type: 'text', text: `Accepted all changes. Saved to: ${outPath}` }]
+      };
+    }
+
+    if (name === 'diff_docx_files') {
+      const origPath = args?.original_path as string;
+      const modPath = args?.modified_path as string;
+
+      const origBuf = readFileSync(origPath);
+      const modBuf = readFileSync(modPath);
+
+      const origText = await extractTextFromBuffer(origBuf, true);
+      const modText = await extractTextFromBuffer(modBuf, true);
+
+      const diff = create_unified_diff(origText, modText);
+      
+      return {
+        content: [{ type: 'text', text: diff || "No differences found." }]
       };
     }
 

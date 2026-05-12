@@ -370,6 +370,14 @@ function _is_page_instr(instr: string): boolean {
   return parts.length > 0 && (parts[0] === 'PAGE' || parts[0] === 'NUMPAGES');
 }
 
+export function _get_part(parent: any): any {
+  if (!parent) return null;
+  if (parent.part) return parent.part;
+  if (parent.pkg && parent.pkg.mainDocumentPart) return parent.pkg.mainDocumentPart;
+  if (parent._parent) return _get_part(parent._parent);
+  return null;
+}
+
 export function* iter_paragraph_content(paragraph: Paragraph): Generator<Run | DocxEvent> {
   let in_complex_field = false;
   let current_instr = '';
@@ -449,10 +457,11 @@ export function* iter_paragraph_content(paragraph: Paragraph): Generator<Run | D
       } else if (tag === QN_W_COMMENTRANGESTART) yield { type: 'start', id: child.getAttribute(QN_W_ID)! };
       else if (tag === QN_W_COMMENTRANGEEND) yield { type: 'end', id: child.getAttribute(QN_W_ID)! };
       else if (tag === QN_W_HYPERLINK) {
-        const rId = child.getAttribute(QN_R_ID);
+        const rId = child.getAttribute(QN_R_ID) || child.getAttribute('id');
         let url = '';
-        if (rId && paragraph._parent.part) {
-          const rel = paragraph._parent.part.rels.get(rId);
+        const part = _get_part(paragraph._parent);
+        if (rId && part) {
+          const rel = part.rels.get(rId);
           if (rel && rel.isExternal) url = rel.target;
         }
         if (url) yield { type: 'hyperlink_start', id: rId!, date: url };

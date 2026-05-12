@@ -26,11 +26,12 @@ export class Part {
   public addRelationship(id: string, type: string, target: string, isExternal: boolean = false) {
     this.rels.set(id, new Relationship(id, type, target, isExternal));
     
-    // If this part represents a .rels file, update the XML directly
-    if (this._element.tagName === 'Relationships') {
+    // Directly append the relationship element to the document structure
+    if (this.partname.endsWith('.rels')) {
       const doc = this._element.ownerDocument;
       if (doc) {
-        const relEl = doc.createElement('Relationship');
+        // Use strict namespace to ensure it parses successfully on reload
+        const relEl = doc.createElementNS('http://schemas.openxmlformats.org/package/2006/relationships', 'Relationship');
         relEl.setAttribute('Id', id);
         relEl.setAttribute('Type', type);
         relEl.setAttribute('Target', target);
@@ -174,6 +175,17 @@ export class DocumentObject {
     this.part.rels.set(id, new Relationship(id, relType, target, false));
     const relsPart = this.pkg.getOrCreateRelsPart(this.part.partname);
     relsPart.addRelationship(id, relType, target, false);
+  }
+
+  public relateToExternal(target: string, relType: string): string {
+    let rId = 1;
+    while (this.part.rels.has(`rId${rId}`)) rId++;
+    const id = `rId${rId}`;
+    
+    this.part.rels.set(id, new Relationship(id, relType, target, true));
+    const relsPart = this.pkg.getOrCreateRelsPart(this.part.partname);
+    relsPart.addRelationship(id, relType, target, true);
+    return id;
   }
 
   public async save(): Promise<Buffer> {
