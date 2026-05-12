@@ -1,3 +1,4 @@
+# FILE: .github/workflows/release.yml
 name: Release
 
 on:
@@ -20,7 +21,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
+          node-version: "24.x"
 
       - name: Install Dependencies
         working-directory: ./node
@@ -42,8 +43,23 @@ jobs:
             --draft \
             --title "Release ${{ github.ref_name }}" \
             --generate-notes
-          
+
           gh release upload ${{ github.ref_name }} ./desktop-extension/Adeu.mcpb
+
+      - name: Package Gemini Extension Archive
+        run: |
+          mkdir -p gemini-release/adeu
+          cp desktop-extension/index.js gemini-release/adeu/index.js
+          cp gemini-extension.json gemini-release/adeu/gemini-extension.json
+          cp GEMINI.md gemini-release/adeu/GEMINI.md
+          cd gemini-release
+          tar -czf ../adeu.tar.gz adeu/
+
+      - name: Upload Gemini Extension Archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} ./adeu.tar.gz
 
   pypi-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
@@ -53,7 +69,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/adeu
     permissions:
-      id-token: write  # IMPORTANT: Mandatory for trusted publishing
+      id-token: write
       contents: read
 
     steps:
@@ -75,7 +91,6 @@ jobs:
       - name: Build package
         working-directory: ./python
         run: |
-          # Copy monorepo root files into the python build context and strip the '../' relative paths
           cp ../LICENSE ./LICENSE
           sed -i 's/\.\.\/LICENSE/LICENSE/g' pyproject.toml
           if grep -q "\.\./README.md" pyproject.toml; then cp ../README.md ./README.md; sed -i 's/\.\.\/README\.md/README.md/g' pyproject.toml; fi
@@ -92,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # Needed for NPM provenance
+      id-token: write
 
     steps:
       - uses: actions/checkout@v6
@@ -100,8 +115,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install Dependencies
         working-directory: ./node

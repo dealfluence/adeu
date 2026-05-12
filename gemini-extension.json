@@ -1,0 +1,12 @@
+{
+  "name": "adeu",
+  "version": "1.6.6",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "adeu": {
+      "command": "node",
+      "args": ["${extensionPath}${/}index.js"],
+      "cwd": "${extensionPath}"
+    }
+  }
+}
