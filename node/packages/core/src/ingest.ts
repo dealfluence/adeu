@@ -49,6 +49,14 @@ function _extract_blocks(container: any, comments_map: any, cleanView: boolean, 
   let is_first_block = true;
   let is_first_para = true;
 
+  if (container.constructor && container.constructor.name === 'NotesPart') {
+    const header = container.note_type === 'fn' ? '## Footnotes' : '## Endnotes';
+    const sep = `---\n${header}`;
+    blocks.push(sep);
+    local_cursor += sep.length;
+    is_first_block = false;
+  }
+
   for (const item of iter_block_items(container)) {
     if (!is_first_block) local_cursor += 2;
     const block_start = local_cursor;
