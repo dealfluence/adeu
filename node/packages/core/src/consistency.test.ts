@@ -14,6 +14,7 @@ const __dirname = dirname(__filename);
 
 const CORPUS_DIR = resolve(__dirname, "../../../../shared/cross_platform_tests");
 const PYTHON_ABSTRACT_CMD = resolve(__dirname, "../../../../python/scripts/abstract_xml.py");
+const PYTHON_DIR = resolve(__dirname, "../../../../python");
 
 function normalizeMdTimestamps(mdText: string): string {
   return mdText.replace(/@ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, "@ DATE");
@@ -70,7 +71,7 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
             try {
               // Pipe to Python to bypass Node vs Python XML serialization differences
               const cmd = `uv run python "${PYTHON_ABSTRACT_CMD}" "${tmpDocx}"`;
-              const actualXml = execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "inherit"] });
+              const actualXml = execSync(cmd, { cwd: PYTHON_DIR, encoding: "utf-8", stdio: ["pipe", "pipe", "inherit"] });
 
               // Normalize line endings for reliable string comparison
               const normExpected = expectedXml.replace(/\r\n/g, "\n").trim();
