@@ -1,4 +1,4 @@
-import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
+import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 
 /**
  * Simulates docx.oxml.ns.qn. In xmldom, namespaces are preserved in tagName.
@@ -11,7 +11,10 @@ export const qn = (name: string) => name;
 export function findChild(element: Element, tagName: string): Element | null {
   for (let i = 0; i < element.childNodes.length; i++) {
     const child = element.childNodes[i];
-    if (child.nodeType === 1 /* ELEMENT_NODE */ && (child as Element).tagName === tagName) {
+    if (
+      child.nodeType === 1 /* ELEMENT_NODE */ &&
+      (child as Element).tagName === tagName
+    ) {
       return child as Element;
     }
   }
@@ -35,7 +38,10 @@ export function findChildren(element: Element, tagName: string): Element[] {
 /**
  * Simulates lxml element.findall(".//w:tag") - searches ALL descendants.
  */
-export function findAllDescendants(element: Element, tagName: string): Element[] {
+export function findAllDescendants(
+  element: Element,
+  tagName: string,
+): Element[] {
   return Array.from(element.getElementsByTagName(tagName));
 }
 
@@ -43,12 +49,58 @@ export function findAllDescendants(element: Element, tagName: string): Element[]
  * Parses raw XML strings into xmldom Documents.
  */
 export function parseXml(xmlString: string): Document {
-  return new DOMParser().parseFromString(xmlString, 'text/xml');
+  return new DOMParser().parseFromString(xmlString, "text/xml");
 }
 
 /**
- * Serializes an xmldom Document or Element back to a string.
+ * Serializes an xmldom Document or Element back to a string,
+ * enforcing deterministic attribute ordering on the root element.
  */
 export function serializeXml(node: Node): string {
-  return new XMLSerializer().serializeToString(node);
+  let xml = new XMLSerializer().serializeToString(node);
+
+  // BUG-11: Deterministic namespace ordering on root elements.
+  // Extract just the root element opening tag (ignoring <?xml...?>)
+  const rootTagRegex = /<([a-zA-Z0-9_:]+)(\s+[^>]+?)(>|\/>)/;
+  const match = rootTagRegex.exec(xml);
+
+  if (match && !match[1].startsWith("?")) {
+    // Confirm this is truly the root tag (no other tags before it except <?xml)
+    const index = match.index;
+    const textBefore = xml.substring(0, index);
+    if (!textBefore.includes("<") || textBefore.trim().startsWith("<?xml")) {
+      const fullTag = match[0];
+      const elemStart = `<${match[1]}`;
+      const attrsStr = match[2];
+      const tagEnd = match[3];
+
+      // XMLSerializer standardizes to double quotes, but we match both just in case
+      const attrRegex = /([a-zA-Z0-9_:]+)=["']([^"']*)["']/g;
+      const attrs: string[] = [];
+      let m;
+      while ((m = attrRegex.exec(attrsStr)) !== null) {
+        attrs.push(m[0]);
+      }
+
+      // Sort attributes: xmlns definitions first (alphabetically), then standard attributes (alphabetically)
+      attrs.sort((a, b) => {
+        const aIsXmlns = a.startsWith("xmlns");
+        const bIsXmlns = b.startsWith("xmlns");
+        if (aIsXmlns && !bIsXmlns) return -1;
+        if (!aIsXmlns && bIsXmlns) return 1;
+        return a < b ? -1 : a > b ? 1 : 0; // Strict ASCII sort for determinism
+      });
+
+      const newTag =
+        attrs.length > 0
+          ? `${elemStart} ${attrs.join(" ")}${tagEnd}`
+          : `${elemStart}${tagEnd}`;
+      xml =
+        xml.substring(0, index) +
+        newTag +
+        xml.substring(index + fullTag.length);
+    }
+  }
+
+  return xml;
 }
