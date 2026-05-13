@@ -179,7 +179,7 @@ export function validate_edit_strings(edits: any[]): string[] {
     }
 
     if (edit.type === "modify" && n_text) {
-      const lines = n_text.split("\n");
+      const lines = n_text.split(/[\r\n]+/);
       for (const line of lines) {
         const stripped = line.trimStart();
         if (stripped.startsWith("#######")) {
@@ -260,28 +260,98 @@ export class RedlineEngine {
   }
 
   public accept_all_revisions() {
-    const dels = findAllDescendants(this.doc.element, "w:del");
-    for (const d of dels) {
-      const parent = d.parentNode as Element | null;
-      if (parent?.tagName === "w:trPr") {
-        const tr = parent.parentNode;
-        tr?.parentNode?.removeChild(tr);
-      } else {
-        parent?.removeChild(d);
+    const parts_to_process: Element[] = [this.doc.element];
+
+    for (const part of this.doc.pkg.parts) {
+      if (part === this.doc.part) continue;
+      if (
+        part.contentType.includes("wordprocessingml") &&
+        part.contentType.endsWith("+xml")
+      ) {
+        parts_to_process.push(part._element);
       }
     }
-    const insNodes = findAllDescendants(this.doc.element, "w:ins");
-    for (const i of insNodes) {
-      const parent = i.parentNode as Element | null;
-      if (parent?.tagName === "w:trPr") {
-        parent.removeChild(i);
-      } else {
-        while (i.firstChild) parent?.insertBefore(i.firstChild, i);
-        parent?.removeChild(i);
+
+    for (const root_element of parts_to_process) {
+      const insNodes = findAllDescendants(root_element, "w:ins");
+      for (const ins of insNodes) {
+        this._clean_wrapping_comments(ins);
+        const parent = ins.parentNode as Element | null;
+        if (!parent) continue;
+
+        if (parent.tagName === "w:trPr") {
+          parent.removeChild(ins);
+          continue;
+        }
+
+        while (ins.firstChild) {
+          parent.insertBefore(ins.firstChild, ins);
+        }
+        parent.removeChild(ins);
       }
+
+      const pNodes = findAllDescendants(root_element, "w:p");
+      for (const p of pNodes) {
+        const pPr = findChild(p, "w:pPr");
+        if (pPr) {
+          const rPr = findChild(pPr, "w:rPr");
+          if (rPr && findChild(rPr, "w:del")) {
+            this._clean_wrapping_comments(p);
+            this._delete_comments_in_element(p);
+            if (p.parentNode) {
+              p.parentNode.removeChild(p);
+            }
+          }
+        }
+      }
+
+      const delNodes = findAllDescendants(root_element, "w:del");
+      for (const d of delNodes) {
+        this._clean_wrapping_comments(d);
+        this._delete_comments_in_element(d);
+        const parent = d.parentNode as Element | null;
+        if (parent) {
+          if (parent.tagName === "w:trPr") {
+            const row = parent.parentNode as Element | null;
+            if (row && row.parentNode) {
+              row.parentNode.removeChild(row);
+            }
+          } else {
+            parent.removeChild(d);
+          }
+        }
+      }
+    }
+
+    // Final pass: remove any free-standing comments
+    const comment_ids = new Set<string>();
+    for (const tag of [
+      "w:commentRangeStart",
+      "w:commentRangeEnd",
+      "w:commentReference",
+    ]) {
+      for (const node of findAllDescendants(this.doc.element, tag)) {
+        const cid = node.getAttribute("w:id");
+        if (cid) comment_ids.add(cid);
+      }
+    }
+
+    const comments_part = this.doc.pkg.parts.find(
+      (p) =>
+        p.contentType ===
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+    );
+    if (comments_part) {
+      for (const c of findAllDescendants(comments_part._element, "w:comment")) {
+        const cid = c.getAttribute("w:id");
+        if (cid) comment_ids.add(cid);
+      }
+    }
+
+    for (const cid of comment_ids) {
+      this.comments_manager.deleteComment(cid);
     }
   }
-
   private _getNextId(): string {
     this.current_id++;
     return this.current_id.toString();
@@ -463,7 +533,7 @@ export class RedlineEngine {
     }
 
     const xmlDoc = this.doc.part._element.ownerDocument!;
-    const lines = text.split(/\r?\n/);
+    const lines = text.split(/[\r\n]+/);
 
     // Resolve the containing <w:p> (current_p) for the anchor.
     let current_p: Element | null = null;
@@ -848,6 +918,114 @@ export class RedlineEngine {
 
     insertAfter(ref_run, new_end);
   }
+  private _clean_wrapping_comments(element: Element) {
+    let first_node: Element = element;
+    while (true) {
+      const prev = getPreviousElement(first_node);
+      if (prev && (prev.tagName === "w:ins" || prev.tagName === "w:del")) {
+        first_node = prev;
+      } else {
+        break;
+      }
+    }
+
+    let last_node: Element = element;
+    while (true) {
+      const nxt = getNextElement(last_node);
+      if (nxt && (nxt.tagName === "w:ins" || nxt.tagName === "w:del")) {
+        last_node = nxt;
+      } else {
+        break;
+      }
+    }
+
+    const starts_to_remove: Element[] = [];
+    let prev = getPreviousElement(first_node);
+    while (prev) {
+      if (prev.tagName === "w:commentRangeStart") {
+        starts_to_remove.push(prev);
+        prev = getPreviousElement(prev);
+      } else if (prev.tagName === "w:rPr" || prev.tagName === "w:pPr") {
+        prev = getPreviousElement(prev);
+      } else {
+        break;
+      }
+    }
+
+    const ends_to_remove: Element[] = [];
+    let nxt = getNextElement(last_node);
+    while (nxt) {
+      if (nxt.tagName === "w:commentRangeEnd") {
+        ends_to_remove.push(nxt);
+        nxt = getNextElement(nxt);
+      } else if (
+        nxt.tagName === "w:r" &&
+        findAllDescendants(nxt, "w:commentReference").length > 0
+      ) {
+        ends_to_remove.push(nxt);
+        nxt = getNextElement(nxt);
+      } else if (nxt.tagName === "w:commentReference") {
+        ends_to_remove.push(nxt);
+        nxt = getNextElement(nxt);
+      } else {
+        break;
+      }
+    }
+
+    const end_ids = new Set<string>();
+    for (const e of ends_to_remove) {
+      if (e.tagName === "w:commentRangeEnd") {
+        const eid = e.getAttribute("w:id");
+        if (eid) end_ids.add(eid);
+      } else {
+        let ref = findAllDescendants(e, "w:commentReference")[0];
+        if (!ref && e.tagName === "w:commentReference") ref = e;
+        if (ref) {
+          const eid = ref.getAttribute("w:id");
+          if (eid) end_ids.add(eid);
+        }
+      }
+    }
+
+    for (const s of starts_to_remove) {
+      const c_id = s.getAttribute("w:id");
+      if (c_id && end_ids.has(c_id)) {
+        this.comments_manager.deleteComment(c_id);
+        if (s.parentNode) s.parentNode.removeChild(s);
+        for (const e of ends_to_remove) {
+          let e_id: string | null = null;
+          if (e.tagName === "w:commentRangeEnd") {
+            e_id = e.getAttribute("w:id");
+          } else {
+            let ref = findAllDescendants(e, "w:commentReference")[0];
+            if (!ref && e.tagName === "w:commentReference") ref = e;
+            if (ref) e_id = ref.getAttribute("w:id");
+          }
+          if (e_id === c_id && e.parentNode) {
+            e.parentNode.removeChild(e);
+          }
+        }
+      }
+    }
+  }
+
+  private _delete_comments_in_element(element: Element) {
+    const refs = findAllDescendants(element, "w:commentReference");
+    for (const ref of refs) {
+      const c_id = ref.getAttribute("w:id");
+      if (c_id) {
+        this.comments_manager.deleteComment(c_id);
+        for (const tag of ["w:commentRangeStart", "w:commentRangeEnd"]) {
+          const nodes = findAllDescendants(this.doc.element, tag);
+          for (const node of nodes) {
+            if (node.getAttribute("w:id") === c_id && node.parentNode) {
+              node.parentNode.removeChild(node);
+            }
+          }
+        }
+      }
+    }
+  }
   public validate_edits(edits: any[]): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
@@ -1128,6 +1306,7 @@ export class RedlineEngine {
 
         if (type === "accept") {
           if (is_ins) {
+            this._clean_wrapping_comments(node);
             if (is_trPr) node.parentNode?.removeChild(node);
             else {
               while (node.firstChild)
@@ -1135,6 +1314,8 @@ export class RedlineEngine {
               node.parentNode?.removeChild(node);
             }
           } else {
+            this._clean_wrapping_comments(node);
+            this._delete_comments_in_element(node);
             if (is_trPr) {
               const tr = node.parentNode?.parentNode;
               tr?.parentNode?.removeChild(tr);
@@ -1144,11 +1325,14 @@ export class RedlineEngine {
           }
         } else if (type === "reject") {
           if (is_ins) {
+            this._clean_wrapping_comments(node);
+            this._delete_comments_in_element(node);
             if (is_trPr) {
               const tr = node.parentNode?.parentNode;
               tr?.parentNode?.removeChild(tr);
             } else node.parentNode?.removeChild(node);
           } else {
+            this._clean_wrapping_comments(node);
             if (is_trPr) node.parentNode?.removeChild(node);
             else {
               const delTexts = Array.from(
