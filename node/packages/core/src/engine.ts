@@ -859,7 +859,46 @@ export class RedlineEngine {
     }
     return errors;
   }
+  public validate_review_actions(actions: any[]): string[] {
+    const errors: string[] = [];
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i];
+      const type = action.type;
 
+      if (type === "reply") {
+        const cid = action.target_id.replace("Com:", "");
+        let found = false;
+        const part = this.doc.pkg.parts.find(
+          (p) =>
+            p.contentType ===
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+        );
+        if (part) {
+          const comments = findAllDescendants(part._element, "w:comment");
+          found = comments.some((c) => c.getAttribute("w:id") === cid);
+        }
+        if (!found) {
+          errors.push(
+            `- Action ${i + 1} Failed: Target comment ID ${action.target_id} not found.`,
+          );
+        }
+      } else if (type === "accept" || type === "reject") {
+        const target_id = action.target_id.replace("Chg:", "");
+        const all_ins = findAllDescendants(this.doc.element, "w:ins").filter(
+          (n) => n.getAttribute("w:id") === target_id,
+        );
+        const all_del = findAllDescendants(this.doc.element, "w:del").filter(
+          (n) => n.getAttribute("w:id") === target_id,
+        );
+        if (all_ins.length === 0 && all_del.length === 0) {
+          errors.push(
+            `- Action ${i + 1} Failed: Target ID ${action.target_id} not found.`,
+          );
+        }
+      }
+    }
+    return errors;
+  }
   public process_batch(changes: DocumentChange[]): any {
     this.skipped_details = [];
     const actions = changes.filter((c) =>
@@ -868,6 +907,19 @@ export class RedlineEngine {
     const edits = changes.filter(
       (c) => !["accept", "reject", "reply"].includes(c.type),
     );
+
+    const all_errors: string[] = [];
+
+    if (actions.length > 0) {
+      all_errors.push(...this.validate_review_actions(actions));
+    }
+    if (edits.length > 0) {
+      all_errors.push(...this.validate_edits(edits));
+    }
+
+    if (all_errors.length > 0) {
+      throw new BatchValidationError(all_errors);
+    }
 
     let applied_actions = 0,
       skipped_actions = 0;
@@ -879,11 +931,6 @@ export class RedlineEngine {
         this.mapper["_build_map"]();
         if (this.clean_mapper) this.clean_mapper["_build_map"]();
       }
-    }
-
-    if (edits.length > 0) {
-      const errors = this.validate_edits(edits);
-      if (errors.length > 0) throw new BatchValidationError(errors);
     }
 
     let applied_edits = 0,
