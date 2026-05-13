@@ -1,58 +1,100 @@
-// FILE: test_bug8.mjs
-import { readFileSync } from "node:fs";
+// FILE: test_bug9.mjs
+import { spawn } from "node:child_process";
+import { resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
 import {
   DocumentObject,
   RedlineEngine,
 } from "../node/packages/core/dist/index.js";
 
 async function run() {
-  const fixturePath =
-    "C:\\Users\\Uzair\\Desktop\\NDA\\NDA_Acme_Vertex_clean.docx";
-  const buf = readFileSync(fixturePath);
+  const docPath = "C:\\Users\\Uzair\\Desktop\\NDA\\NDA_Acme_Vertex_clean.docx";
+  const dirtyPath =
+    "C:\\Users\\Uzair\\Desktop\\NDA\\NDA_Acme_Vertex_dirty.docx";
+
+  // 1. Create a dirty document with tracked changes
+  console.log("1. Creating dirty fixture...");
+  const buf = readFileSync(docPath);
   const doc = await DocumentObject.load(buf);
-
   const engine = new RedlineEngine(doc);
-
-  // 1. Create a parent comment
-  console.log("1. Applying edit with comment...");
   engine.process_batch([
-    {
-      type: "modify",
-      target_text: "entered into",
-      new_text: "entered into",
-      comment: "Parent comment",
+    { type: "modify", target_text: "entered into", new_text: "agreed to" },
+  ]);
+  const dirtyBuf = await doc.save();
+  writeFileSync(dirtyPath, dirtyBuf);
+
+  // 2. Boot Server
+  const serverPath = resolve("./packages/mcp-server/dist/index.js");
+  console.log("2. Booting MCP server...");
+  const child = spawn("node", [serverPath]);
+
+  child.stdout.on("data", (data) => {
+    const lines = data.toString().trim().split("\n");
+    for (const line of lines) {
+      if (!line.startsWith("{")) continue;
+      try {
+        const response = JSON.parse(line);
+        if (response.id === 1) {
+          const text = response.result.content[0].text;
+          console.log("\n--- diff_docx_files (compare_clean=true) ---");
+          if (text.includes("agreed to") && !text.includes("{++")) {
+            console.log("✅ PASS: Clean diff produced.");
+          } else {
+            console.error(
+              "❌ FAIL: Diff contains CriticMarkup or missing text.",
+              text.substring(0, 200),
+            );
+          }
+
+          // Send request 2
+          child.stdin.write(JSON.stringify(req2) + "\n");
+        } else if (response.id === 2) {
+          const text = response.result.content[0].text;
+          console.log("\n--- diff_docx_files (compare_clean=false) ---");
+          if (text.includes("{++agreed to++}")) {
+            console.log("✅ PASS: Raw CriticMarkup diff produced.");
+          } else {
+            console.error(
+              "❌ FAIL: Diff missing CriticMarkup.",
+              text.substring(0, 200),
+            );
+          }
+          child.kill();
+          process.exit(0);
+        }
+      } catch (e) {}
+    }
+  });
+
+  const req1 = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "diff_docx_files",
+      arguments: {
+        original_path: docPath,
+        modified_path: dirtyPath,
+        compare_clean: true,
+      },
     },
-  ]);
+  };
 
-  // Find the generated comment ID
-  const allStarts = doc.element.getElementsByTagName("w:commentRangeStart");
-  const parentId = allStarts[0].getAttribute("w:id");
-  console.log(`-> Created parent comment with ID: ${parentId}`);
+  const req2 = {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "diff_docx_files",
+      arguments: {
+        original_path: docPath,
+        modified_path: dirtyPath,
+        compare_clean: false,
+      },
+    },
+  };
 
-  // 2. Reply to it
-  console.log("2. Replying to comment...");
-  engine.process_batch([
-    { type: "reply", target_id: `Com:${parentId}`, text: "This is a reply!" },
-  ]);
-
-  // 3. Verify
-  const xml = doc.element.toString();
-
-  const starts = xml.match(/<w:commentRangeStart w:id="\d+"\/>/g) || [];
-  const ends = xml.match(/<w:commentRangeEnd w:id="\d+"\/>/g) || [];
-  const refs = xml.match(/<w:commentReference w:id="\d+"\/>/g) || [];
-
-  console.log(`Found starts: ${starts.length} (Expected 2)`);
-  console.log(`Found ends: ${ends.length} (Expected 2)`);
-  console.log(`Found refs: ${refs.length} (Expected 2)`);
-
-  if (starts.length === 2 && ends.length === 2 && refs.length === 2) {
-    console.log(
-      "✅ PASS: Reply comment range was emitted correctly (1:1 parity with Python).",
-    );
-  } else {
-    console.error("❌ FAIL: Comment markers missing.");
-  }
+  child.stdin.write(JSON.stringify(req1) + "\n");
 }
 
 run().catch(console.error);

@@ -157,6 +157,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Absolute path to the modified DOCX file.",
             },
+            compare_clean: {
+              type: "boolean",
+              description:
+                "If True, compares 'Accepted' state. If False, compares raw text.",
+              default: true,
+            },
           },
           required: ["original_path", "modified_path"],
         },
@@ -341,16 +347,16 @@ server.setRequestHandler(
           ],
         };
       }
-
       if (name === "diff_docx_files") {
         const origPath = args?.original_path as string;
         const modPath = args?.modified_path as string;
-
+        const compareClean = (args?.compare_clean as boolean) ?? true;
         const origBuf = readFileSync(origPath);
         const modBuf = readFileSync(modPath);
 
-        const origText = await extractTextFromBuffer(origBuf, true);
-        const modText = await extractTextFromBuffer(modBuf, true);
+        // Pass compareClean flag into extraction
+        const origText = await extractTextFromBuffer(origBuf, compareClean);
+        const modText = await extractTextFromBuffer(modBuf, compareClean);
 
         const diff = create_unified_diff(origText, modText);
 
