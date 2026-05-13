@@ -186,7 +186,7 @@ export function is_native_heading(
     return true;
   }
 
-  const style_name = style_info ? style_info.name : null;
+  const style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
   if (style_name?.startsWith("Heading")) return true;
   if (style_name === "Title") return true;
   if (style_name && style_name !== "Normal") {
@@ -195,7 +195,6 @@ export function is_native_heading(
 
   return false;
 }
-
 export function get_paragraph_prefix(
   paragraph: Paragraph,
   style_cache?: Record<string, any>,
@@ -235,7 +234,7 @@ export function get_paragraph_prefix(
     return "#".repeat(style_info.outline_level + 1) + " ";
   }
 
-  const style_name = style_info ? style_info.name : null;
+  const style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
   if (style_name?.startsWith("Heading")) {
     const match = style_name.replace("Heading", "").trim();
     if (/^\d+$/.test(match)) return "#".repeat(parseInt(match, 10)) + " ";

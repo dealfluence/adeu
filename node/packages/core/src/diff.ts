@@ -1,7 +1,10 @@
-import diff_match_patch from 'diff-match-patch';
-import { ModifyText } from './models.js';
+import diff_match_patch from "diff-match-patch";
+import { ModifyText } from "./models.js";
 
-export function trim_common_context(target: string, new_val: string): [number, number] {
+export function trim_common_context(
+  target: string,
+  new_val: string,
+): [number, number] {
   if (!target || !new_val) return [0, 0];
 
   const isSpace = (char: string) => /\s/.test(char);
@@ -16,8 +19,10 @@ export function trim_common_context(target: string, new_val: string): [number, n
   // Backtrack to nearest whitespace if we split a word
   if (prefix_len < target.length && prefix_len < new_val.length) {
     while (prefix_len > 0) {
-      const target_split = !isSpace(target[prefix_len - 1]) && !isSpace(target[prefix_len]);
-      const new_split = !isSpace(new_val[prefix_len - 1]) && !isSpace(new_val[prefix_len]);
+      const target_split =
+        !isSpace(target[prefix_len - 1]) && !isSpace(target[prefix_len]);
+      const new_split =
+        !isSpace(new_val[prefix_len - 1]) && !isSpace(new_val[prefix_len]);
       if (target_split || new_split) {
         prefix_len--;
       } else {
@@ -30,7 +35,7 @@ export function trim_common_context(target: string, new_val: string): [number, n
   while (prefix_len > 0) {
     if (prefix_len < target.length) {
       const charSeq = target.substring(prefix_len - 1, prefix_len + 1);
-      if (charSeq === '**' || charSeq === '__') {
+      if (charSeq === "**" || charSeq === "__") {
         prefix_len--;
         continue;
       }
@@ -39,22 +44,24 @@ export function trim_common_context(target: string, new_val: string): [number, n
     const left = target.substring(0, prefix_len);
     const b_count = (left.match(/\*\*/g) || []).length;
     const u2_count = (left.match(/__/g) || []).length;
-    const u1_count = (left.replace(/__/g, '').match(/_/g) || []).length;
+    const u1_count = (left.replace(/__/g, "").match(/_/g) || []).length;
 
     if (b_count % 2 !== 0) {
-      prefix_len = left.lastIndexOf('**');
+      prefix_len = left.lastIndexOf("**");
       continue;
     }
     if (u2_count % 2 !== 0) {
-      prefix_len = left.lastIndexOf('__');
+      prefix_len = left.lastIndexOf("__");
       continue;
     }
     if (u1_count % 2 !== 0) {
       let idx = left.length - 1;
       while (idx >= 0) {
-        if (left[idx] === '_' && 
-           (idx === 0 || left[idx - 1] !== '_') && 
-           (idx === left.length - 1 || left[idx + 1] !== '_')) {
+        if (
+          left[idx] === "_" &&
+          (idx === 0 || left[idx - 1] !== "_") &&
+          (idx === left.length - 1 || left[idx + 1] !== "_")
+        ) {
           prefix_len = idx;
           break;
         }
@@ -68,15 +75,15 @@ export function trim_common_context(target: string, new_val: string): [number, n
     let hit_header = false;
     while (temp_len > 0) {
       const char = target[temp_len - 1];
-      if (char === '#') {
+      if (char === "#") {
         prefix_len = temp_len - 1;
-        while (prefix_len > 0 && target[prefix_len - 1] !== '\n') {
+        while (prefix_len > 0 && target[prefix_len - 1] !== "\n") {
           prefix_len--;
         }
         hit_header = true;
         break;
       }
-      if (char === '\n') break;
+      if (char === "\n") break;
       temp_len--;
     }
     if (hit_header) continue;
@@ -90,7 +97,11 @@ export function trim_common_context(target: string, new_val: string): [number, n
   const new_rem_len = new_val.length - prefix_len;
   const limit_suffix = Math.min(target_rem_len, new_rem_len);
 
-  while (suffix_len < limit_suffix && target[target.length - 1 - suffix_len] === new_val[new_val.length - 1 - suffix_len]) {
+  while (
+    suffix_len < limit_suffix &&
+    target[target.length - 1 - suffix_len] ===
+      new_val[new_val.length - 1 - suffix_len]
+  ) {
     suffix_len++;
   }
 
@@ -98,11 +109,15 @@ export function trim_common_context(target: string, new_val: string): [number, n
     while (suffix_len > 0) {
       let target_split = false;
       if (suffix_len < target.length) {
-        target_split = !isSpace(target[target.length - 1 - suffix_len]) && !isSpace(target[target.length - suffix_len]);
+        target_split =
+          !isSpace(target[target.length - 1 - suffix_len]) &&
+          !isSpace(target[target.length - suffix_len]);
       }
       let new_split = false;
       if (suffix_len < new_val.length) {
-        new_split = !isSpace(new_val[new_val.length - 1 - suffix_len]) && !isSpace(new_val[new_val.length - suffix_len]);
+        new_split =
+          !isSpace(new_val[new_val.length - 1 - suffix_len]) &&
+          !isSpace(new_val[new_val.length - suffix_len]);
       }
       if (target_split || new_split) {
         suffix_len--;
@@ -116,7 +131,7 @@ export function trim_common_context(target: string, new_val: string): [number, n
     const idx = target.length - suffix_len;
     if (idx > 0) {
       const charSeq = target.substring(idx - 1, idx + 1);
-      if (charSeq === '**' || charSeq === '__') {
+      if (charSeq === "**" || charSeq === "__") {
         suffix_len--;
         continue;
       }
@@ -125,22 +140,24 @@ export function trim_common_context(target: string, new_val: string): [number, n
     const right = target.substring(target.length - suffix_len);
     const b_count = (right.match(/\*\*/g) || []).length;
     const u2_count = (right.match(/__/g) || []).length;
-    const u1_count = (right.replace(/__/g, '').match(/_/g) || []).length;
+    const u1_count = (right.replace(/__/g, "").match(/_/g) || []).length;
 
     if (b_count % 2 !== 0) {
-      suffix_len -= right.indexOf('**') + 2;
+      suffix_len -= right.indexOf("**") + 2;
       continue;
     }
     if (u2_count % 2 !== 0) {
-      suffix_len -= right.indexOf('__') + 2;
+      suffix_len -= right.indexOf("__") + 2;
       continue;
     }
     if (u1_count % 2 !== 0) {
       let idx_in_right = 0;
       while (idx_in_right < right.length) {
-        if (right[idx_in_right] === '_' && 
-           (idx_in_right === 0 || right[idx_in_right - 1] !== '_') && 
-           (idx_in_right === right.length - 1 || right[idx_in_right + 1] !== '_')) {
+        if (
+          right[idx_in_right] === "_" &&
+          (idx_in_right === 0 || right[idx_in_right - 1] !== "_") &&
+          (idx_in_right === right.length - 1 || right[idx_in_right + 1] !== "_")
+        ) {
           suffix_len -= idx_in_right + 1;
           break;
         }
@@ -151,20 +168,26 @@ export function trim_common_context(target: string, new_val: string): [number, n
     break;
   }
 
-  if (suffix_len > 0 && /^\s+$/.test(target.substring(target.length - suffix_len))) {
+  if (
+    suffix_len > 0 &&
+    /^\s+$/.test(target.substring(target.length - suffix_len))
+  ) {
     suffix_len = 0;
   }
 
   // Absorb balanced wrappers
-  for (const marker of ['**', '__', '_']) {
+  for (const marker of ["**", "__", "_"]) {
     const mlen = marker.length;
     const tgt_rem = target.substring(prefix_len, target.length - suffix_len);
     const new_rem = new_val.substring(prefix_len, new_val.length - suffix_len);
 
     if (
-      tgt_rem.startsWith(marker) && new_rem.startsWith(marker) &&
-      tgt_rem.endsWith(marker) && new_rem.endsWith(marker) &&
-      tgt_rem.length >= 2 * mlen && new_rem.length >= 2 * mlen
+      tgt_rem.startsWith(marker) &&
+      new_rem.startsWith(marker) &&
+      tgt_rem.endsWith(marker) &&
+      new_rem.endsWith(marker) &&
+      tgt_rem.length >= 2 * mlen &&
+      new_rem.length >= 2 * mlen
     ) {
       prefix_len += mlen;
       suffix_len += mlen;
@@ -174,17 +197,20 @@ export function trim_common_context(target: string, new_val: string): [number, n
   return [prefix_len, suffix_len];
 }
 
-function _words_to_chars(text1: string, text2: string): [string, string, string[]] {
+function _words_to_chars(
+  text1: string,
+  text2: string,
+): [string, string, string[]] {
   const token_array: string[] = [];
   const token_hash: Record<string, number> = {};
-  
+
   // RegExp equivalent to Python's r"(\s+|\w+|[^\w\s])" with unicode support
   const split_pattern = /(\s+|[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s])/gu;
 
   const encode_text = (text: string) => {
     // Keep delimiters via capture group in split
     const tokens = text.split(split_pattern).filter(Boolean);
-    let encoded_chars = '';
+    let encoded_chars = "";
     for (const token of tokens) {
       if (token in token_hash) {
         encoded_chars += String.fromCharCode(token_hash[token]);
@@ -201,18 +227,26 @@ function _words_to_chars(text1: string, text2: string): [string, string, string[
   return [encode_text(text1), encode_text(text2), token_array];
 }
 
-export function generate_edits_from_text(original_text: string, modified_text: string): ModifyText[] {
+export function generate_edits_from_text(
+  original_text: string,
+  modified_text: string,
+): ModifyText[] {
   const dmp = new diff_match_patch.diff_match_patch();
-  
-  const [chars1, chars2, token_array] = _words_to_chars(original_text, modified_text);
+  dmp.Diff_Timeout = 2.0; // Enforce strict 2-second timeout to prevent deep recursion hangs
+
+  const [chars1, chars2, token_array] = _words_to_chars(
+    original_text,
+    modified_text,
+  );
   const diffs = dmp.diff_main(chars1, chars2, false);
   dmp.diff_cleanupSemantic(diffs);
-  
+
   // Manually map characters back to words to bypass prototype volatility (diff_charsToLines_)
   for (let i = 0; i < diffs.length; i++) {
     const chars = diffs[i][1];
-    let text = '';
-    for (let j = 0; j < chars.length; j++) text += token_array[chars.charCodeAt(j)];
+    let text = "";
+    for (let j = 0; j < chars.length; j++)
+      text += token_array[chars.charCodeAt(j)];
     diffs[i][1] = text;
   }
 
@@ -221,85 +255,117 @@ export function generate_edits_from_text(original_text: string, modified_text: s
   let pending_delete: [number, string] | null = null;
 
   for (const [op, text] of diffs) {
-    if (op === 0) { // Equal
+    if (op === 0) {
+      // Equal
       if (pending_delete) {
         const [idx, del_txt] = pending_delete;
-        edits.push({ type: 'modify', target_text: del_txt, new_text: '', comment: 'Diff: Text deleted', _match_start_index: idx });
+        edits.push({
+          type: "modify",
+          target_text: del_txt,
+          new_text: "",
+          comment: "Diff: Text deleted",
+          _match_start_index: idx,
+        });
         pending_delete = null;
       }
       current_original_index += text.length;
-    } else if (op === -1) { // Delete
+    } else if (op === -1) {
+      // Delete
       pending_delete = [current_original_index, text];
       current_original_index += text.length;
-    } else if (op === 1) { // Insert
+    } else if (op === 1) {
+      // Insert
       if (pending_delete) {
         const [idx, del_txt] = pending_delete;
-        edits.push({ type: 'modify', target_text: del_txt, new_text: text, comment: 'Diff: Replacement', _match_start_index: idx });
+        edits.push({
+          type: "modify",
+          target_text: del_txt,
+          new_text: text,
+          comment: "Diff: Replacement",
+          _match_start_index: idx,
+        });
         pending_delete = null;
       } else {
-        edits.push({ type: 'modify', target_text: '', new_text: text, comment: 'Diff: Text inserted', _match_start_index: current_original_index });
+        edits.push({
+          type: "modify",
+          target_text: "",
+          new_text: text,
+          comment: "Diff: Text inserted",
+          _match_start_index: current_original_index,
+        });
       }
     }
   }
 
   if (pending_delete) {
     const [idx, del_txt] = pending_delete;
-    edits.push({ type: 'modify', target_text: del_txt, new_text: '', comment: 'Diff: Text deleted', _match_start_index: idx });
+    edits.push({
+      type: "modify",
+      target_text: del_txt,
+      new_text: "",
+      comment: "Diff: Text deleted",
+      _match_start_index: idx,
+    });
   }
 
   return edits;
 }
-
-export function create_unified_diff(original_text: string, modified_text: string, context_lines: number = 3): string {
+export function create_unified_diff(
+  original_text: string,
+  modified_text: string,
+  context_lines: number = 3,
+): string {
   const dmp = new diff_match_patch.diff_match_patch();
+  dmp.Diff_Timeout = 2.0;
+
   const a = dmp.diff_linesToChars_(original_text, modified_text);
   const diffs = dmp.diff_main(a.chars1, a.chars2, false);
   dmp.diff_charsToLines_(diffs, a.lineArray);
-  
+
   const output: string[] = [];
-  output.push('--- Original');
-  output.push('+++ Modified');
-  
+  output.push("--- Original");
+  output.push("+++ Modified");
+
   let i = 0;
   while (i < diffs.length) {
     while (i < diffs.length && diffs[i][0] === 0) i++;
     if (i >= diffs.length) break;
-    
+
     let start = i;
     let preContext: string[] = [];
     if (start > 0 && diffs[start - 1][0] === 0) {
-      const lines = diffs[start - 1][1].replace(/\n$/, '').split('\n');
+      const lines = diffs[start - 1][1].replace(/\n$/, "").split("\n");
       preContext = lines.slice(-context_lines);
     }
-    
+
     const chunk: string[] = [];
-    chunk.push(...preContext.map(l => ` ${l}`));
-    
+    chunk.push(...preContext.map((l) => ` ${l}`));
+
     while (i < diffs.length) {
       const [op, text] = diffs[i];
-      const lines = text.replace(/\n$/, '').split('\n');
-      
+      const lines = text.replace(/\n$/, "").split("\n");
+
       if (op === 0) {
         if (lines.length > context_lines * 2) break;
-        chunk.push(...lines.map(l => ` ${l}`));
+        chunk.push(...lines.map((l) => ` ${l}`));
       } else {
-        const prefix = op === -1 ? '-' : '+';
-        chunk.push(...lines.map(l => `${prefix}${l}`));
+        const prefix = op === -1 ? "-" : "+";
+        chunk.push(...lines.map((l) => `${prefix}${l}`));
       }
       i++;
     }
-    
+
     let postContext: string[] = [];
     if (i < diffs.length && diffs[i][0] === 0) {
-      const lines = diffs[i][1].replace(/\n$/, '').split('\n');
+      const lines = diffs[i][1].replace(/\n$/, "").split("\n");
       postContext = lines.slice(0, context_lines);
     }
-    chunk.push(...postContext.map(l => ` ${l}`));
-    
-    output.push('@@ ... @@');
+    chunk.push(...postContext.map((l) => ` ${l}`));
+
+    output.push("@@ ... @@");
     output.push(...chunk);
   }
-  
-  if (output.length === 2) return ''; // No changes
-  return output.join('\n');
+
+  if (output.length === 2) return ""; // No changes
+  return output.join("\n");
 }

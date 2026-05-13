@@ -1,53 +1,64 @@
-// FILE: verify_bug2.js
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+// FILE: verify_bugs_3_and_9.js
+import { readFileSync } from "node:fs";
 import {
   DocumentObject,
-  RedlineEngine,
   extractTextFromBuffer,
+  extract_outline,
+  paginate,
+  create_unified_diff,
 } from "./packages/core/dist/index.js";
 
 async function main() {
   const inputPath = "C:\\Users\\Uzair\\Desktop\\NDA\\NDA_Acme_Vertex.docx";
-  const outPath =
-    "C:\\Users\\Uzair\\Desktop\\NDA\\NDA_Acme_Vertex_Bug2_Cleaned.docx";
 
   console.log(`Loading ${inputPath}...`);
   const buf = readFileSync(inputPath);
   const doc = await DocumentObject.load(buf);
 
-  const engine = new RedlineEngine(doc, "Bug Tester");
+  // 1. Verify BUG-3 (Outline Mode)
+  console.log("--- Checking BUG-3 (Outline Reader) ---");
+  const fullText = await extractTextFromBuffer(buf, false);
+  const body = fullText.split("<!-- READONLY_BOUNDARY_START -->")[0];
+  const pages = paginate(body, "");
 
-  console.log("Injecting multi-line tracked change with \\n\\n ...");
-  engine.process_batch([
-    {
-      type: "modify",
-      target_text: "Mutual Confidentiality Agreement",
-      new_text:
-        "Mutual Confidentiality Contract\n\n# New Added Section\n\nMore text added here.",
-      comment: "Testing markdown injection with double newlines",
-    },
-  ]);
+  const outlineNodes = extract_outline(
+    doc,
+    body,
+    pages.body_pages,
+    pages.body_page_offsets,
+  );
 
-  const outBuf = await doc.save();
-  writeFileSync(outPath, outBuf);
-  console.log(`Saved document to ${outPath}`);
-
-  // Extract clean text to verify layout
-  const text = await extractTextFromBuffer(outBuf, true);
-
-  // extractTextFromBuffer joins blocks with \n\n.
-  // If an empty paragraph was created, we will see \n\n\n\n.
-  const hasEmptyParagraph = text.includes("\n\n\n\n");
-
-  console.log("\n--- DIAGNOSTICS ---");
-  if (hasEmptyParagraph) {
+  if (outlineNodes.length < 3) {
     console.error(
-      "❌ BUG-2 is still present: Extra empty paragraphs detected in the extracted text.",
+      `❌ BUG-3: Outline found only ${outlineNodes.length} headings (expected at least 3).`,
     );
   } else {
     console.log(
-      "✅ PASS: No extra empty paragraphs detected. \\n\\n correctly collapsed.",
+      `✅ PASS: Outline correctly discovered ${outlineNodes.length} headings.`,
+    );
+    console.log(
+      outlineNodes.map((n) => `   -> L${n.level}: ${n.text}`).join("\n"),
+    );
+  }
+
+  // 2. Verify BUG-9b (Diff Hangs)
+  console.log("\n--- Checking BUG-9b (Diff Hangs) ---");
+  console.log("Generating dummy diff (ensuring it does not hang)...");
+  const startTime = Date.now();
+
+  // Duplicate the text and artificially fragment it with a large number of
+  // differences to trigger the O(N^2) path.
+  const badText = fullText.replace(/e/g, "E").replace(/a/g, "A").repeat(5);
+  const diffOut = create_unified_diff(fullText, badText);
+
+  const elapsed = Date.now() - startTime;
+  if (elapsed > 5000) {
+    console.error(
+      `❌ BUG-9b: Diff took ${elapsed}ms. Timeout did not successfully intercept.`,
+    );
+  } else {
+    console.log(
+      `✅ PASS: Diff completed instantly (${elapsed}ms). Timeout engaged successfully.`,
     );
   }
 }
