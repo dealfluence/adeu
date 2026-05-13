@@ -60,37 +60,42 @@ export function serializeXml(node: Node): string {
   let xml = new XMLSerializer().serializeToString(node);
 
   // BUG-11: Deterministic namespace ordering on root elements.
-  // Extract just the root element opening tag (ignoring <?xml...?>)
   const rootTagRegex = /<([a-zA-Z0-9_:]+)(\s+[^>]+?)(>|\/>)/;
   const match = rootTagRegex.exec(xml);
 
   if (match && !match[1].startsWith("?")) {
-    // Confirm this is truly the root tag (no other tags before it except <?xml)
     const index = match.index;
     const textBefore = xml.substring(0, index);
-    if (!textBefore.includes("<") || textBefore.trim().startsWith("<?xml")) {
+
+    // Ensure this is the absolute root tag (only <?xml...?> allowed before it)
+    const isRoot =
+      !textBefore.includes("<") ||
+      (textBefore.trim().startsWith("<?xml") &&
+        (textBefore.match(/</g) || []).length === 1);
+
+    if (isRoot) {
       const fullTag = match[0];
       const elemStart = `<${match[1]}`;
       const attrsStr = match[2];
       const tagEnd = match[3];
 
-      // XMLSerializer standardizes to double quotes, but we match both just in case
-      const attrRegex = /([a-zA-Z0-9_:]+)=["']([^"']*)["']/g;
+      // Robust extraction matching any quote style and internal spacing
+      const attrRegex = /([a-zA-Z0-9_:]+)\s*=\s*(["'])(.*?)\2/g;
       const attrs: string[] = [];
       let m;
       while ((m = attrRegex.exec(attrsStr)) !== null) {
-        attrs.push(m[0]);
+        attrs.push(m[0].trim());
       }
 
-      // Sort attributes: xmlns definitions first (alphabetically), then standard attributes (alphabetically)
+      // Sort attributes: xmlns definitions first, then standard attributes
       attrs.sort((a, b) => {
-        const aName = a.split("=")[0];
-        const bName = b.split("=")[0];
+        const aName = a.split("=")[0].trim();
+        const bName = b.split("=")[0].trim();
         const aIsXmlns = aName.startsWith("xmlns");
         const bIsXmlns = bName.startsWith("xmlns");
         if (aIsXmlns && !bIsXmlns) return -1;
         if (!aIsXmlns && bIsXmlns) return 1;
-        return aName < bName ? -1 : aName > bName ? 1 : 0; // Strict ASCII sort by attribute name
+        return aName < bName ? -1 : aName > bName ? 1 : 0;
       });
 
       const newTag =

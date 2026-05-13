@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  readdirSync,
+  writeFileSync,
+  unlinkSync,
+} from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
@@ -12,8 +18,14 @@ import { extractTextFromBuffer } from "./ingest.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const CORPUS_DIR = resolve(__dirname, "../../../../shared/cross_platform_tests");
-const PYTHON_ABSTRACT_CMD = resolve(__dirname, "../../../../python/scripts/abstract_xml.py");
+const CORPUS_DIR = resolve(
+  __dirname,
+  "../../../../shared/cross_platform_tests",
+);
+const PYTHON_ABSTRACT_CMD = resolve(
+  __dirname,
+  "../../../../python/scripts/abstract_xml.py",
+);
 const PYTHON_DIR = resolve(__dirname, "../../../../python");
 
 function normalizeMdTimestamps(mdText: string): string {
@@ -65,14 +77,21 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           if (existsSync(goldenXmlPath)) {
             const expectedXml = readFileSync(goldenXmlPath, "utf-8");
 
-            const tmpDocx = resolve(tmpdir(), `adeu_test_${folder}_${Date.now()}.docx`);
+            const tmpDocx = resolve(
+              tmpdir(),
+              `adeu_test_${folder}_${Date.now()}.docx`,
+            );
             writeFileSync(tmpDocx, outBuffer);
 
             try {
               // Pipe to Python to bypass Node vs Python XML serialization differences
               const cmd = `uv run python "${PYTHON_ABSTRACT_CMD}" "${tmpDocx}"`;
-              const actualXml = execSync(cmd, { cwd: PYTHON_DIR, encoding: "utf-8", stdio: ["pipe", "pipe", "inherit"] });
-
+              const actualXml = execSync(cmd, {
+                cwd: PYTHON_DIR,
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "inherit"],
+                env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+              });
               // Normalize line endings for reliable string comparison
               const normExpected = expectedXml.replace(/\r\n/g, "\n").trim();
               const normActual = actualXml.replace(/\r\n/g, "\n").trim();
@@ -87,16 +106,26 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
         // 3. Assert Markdown Extraction Parity (Raw View)
         const rawMdPath = resolve(testDir, "golden_raw.md");
         if (existsSync(rawMdPath)) {
-          const expectedRaw = readFileSync(rawMdPath, "utf-8").replace(/\r\n/g, "\n");
-          const actualRaw = normalizeMdTimestamps(await extractTextFromBuffer(outBuffer, false)).replace(/\r\n/g, "\n");
+          const expectedRaw = readFileSync(rawMdPath, "utf-8").replace(
+            /\r\n/g,
+            "\n",
+          );
+          const actualRaw = normalizeMdTimestamps(
+            await extractTextFromBuffer(outBuffer, false),
+          ).replace(/\r\n/g, "\n");
           expect(actualRaw).toBe(expectedRaw);
         }
 
         // 4. Assert Markdown Extraction Parity (Clean View)
         const cleanMdPath = resolve(testDir, "golden_clean.md");
         if (existsSync(cleanMdPath)) {
-          const expectedClean = readFileSync(cleanMdPath, "utf-8").replace(/\r\n/g, "\n");
-          const actualClean = normalizeMdTimestamps(await extractTextFromBuffer(outBuffer, true)).replace(/\r\n/g, "\n");
+          const expectedClean = readFileSync(cleanMdPath, "utf-8").replace(
+            /\r\n/g,
+            "\n",
+          );
+          const actualClean = normalizeMdTimestamps(
+            await extractTextFromBuffer(outBuffer, true),
+          ).replace(/\r\n/g, "\n");
           expect(actualClean).toBe(expectedClean);
         }
       });

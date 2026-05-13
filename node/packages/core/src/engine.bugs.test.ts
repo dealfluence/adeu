@@ -5,6 +5,9 @@ import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import { parseXml, serializeXml } from "./docx/dom.js";
+import { create_unified_diff } from "./diff.js";
+import { extract_outline } from "./outline.js";
+import { paginate } from "./pagination.js";
 
 describe("Resolved Bugs Core Engine Verification", () => {
   it("BUG-3 & BUG-4: Links parts to package and yields headers for extraction", async () => {
@@ -132,5 +135,95 @@ describe("Resolved Bugs Core Engine Verification", () => {
     const expected = `<w:document xmlns:mc="urn:mc" xmlns:w="urn:w" xmlns:w10="urn:w10" a="1" b="2" mc:Ignorable="w14"/>`;
     // Direct string equality so Vitest prints the exact diff if they mismatch!
     expect(serialized).toBe(expected);
+  });
+  it("BUG-11b: Sweeps orphaned comment anchors when accepting tracked changes", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Confidential Information");
+    const engine = new RedlineEngine(doc, "Reviewer");
+
+    // Add a tracked change with a comment attached
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "Confidential Information",
+        new_text: "Confidential Data",
+        comment: "Changed term",
+      },
+    ]);
+
+    let xml = doc.element.toString();
+    expect(xml).toContain("w:commentRangeStart");
+    expect(xml).toContain("w:commentReference");
+
+    // Accept it
+    engine.accept_all_revisions();
+
+    xml = doc.element.toString();
+    // Assert clean up
+    expect(xml).not.toContain("w:commentRangeStart");
+    expect(xml).not.toContain("w:commentReference");
+  });
+
+  it("BUG-2: Collapses multiple newlines to prevent empty paragraphs", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Section 1");
+    const engine = new RedlineEngine(doc, "Reviewer");
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "Section 1",
+        new_text: "Section 1\n\n# Section 2\n\nSection 3",
+      },
+    ]);
+
+    const buf = await doc.save();
+    const cleanText = await extractTextFromBuffer(buf, true);
+
+    // We shouldn't see four newlines in a row
+    expect(cleanText).toContain("Section 1\n\n# Section 2\n\nSection 3");
+    expect(cleanText).not.toContain("\n\n\n\n");
+  });
+
+  it("BUG-3: Outline reader gracefully falls back to style_id for headings missing in cache", async () => {
+    const doc = await createTestDocument();
+    const p = addParagraph(doc, "Dynamically Assigned Heading");
+
+    // Force a heading style without explicitly putting it in a styles.xml cache
+    const docEl = p.ownerDocument!;
+    const pPr = docEl.createElement("w:pPr");
+    const pStyle = docEl.createElement("w:pStyle");
+    pStyle.setAttribute("w:val", "Heading2");
+    pPr.appendChild(pStyle);
+    p.insertBefore(pPr, p.firstChild);
+
+    const buf = await doc.save();
+    const body = await extractTextFromBuffer(buf, false);
+    const pages = paginate(body, "");
+
+    const outlineNodes = extract_outline(
+      doc,
+      body,
+      pages.body_pages,
+      pages.body_page_offsets,
+    );
+
+    expect(outlineNodes.length).toBe(1);
+    expect(outlineNodes[0].text).toBe("Dynamically Assigned Heading");
+    expect(outlineNodes[0].level).toBe(2);
+  });
+
+  it("BUG-9b: Enforces strict timeout on pathologically complex diffs to prevent hanging", () => {
+    // Create highly complex, repetitive, slightly altered text that induces O(N^2) explosion
+    const base = "The quick brown fox jumps over the lazy dog. ".repeat(200);
+    const mod = base.replace(/e/g, "E").replace(/a/g, "A").replace(/o/g, "O");
+
+    const start = Date.now();
+    const diff = create_unified_diff(base, mod);
+    const elapsed = Date.now() - start;
+
+    // Should finish well under 5 seconds (target is ~2.0s due to timeout, + setup overhead)
+    expect(elapsed).toBeLessThan(5000);
+    expect(diff.length).toBeGreaterThan(0);
   });
 });
