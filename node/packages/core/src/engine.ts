@@ -794,6 +794,60 @@ export class RedlineEngine {
     // pPr is the first child of <w:p> per OOXML schema.
     p_element.insertBefore(pPr, p_element.firstChild);
   }
+  private _anchor_reply_comment(parent_id: string, new_id: string) {
+    const docEl = this.doc.part._element.ownerDocument!;
+
+    const starts = findAllDescendants(
+      this.doc.element,
+      "w:commentRangeStart",
+    ).filter((n) => n.getAttribute("w:id") === parent_id);
+    if (starts.length === 0) return;
+    const parent_start = starts[0];
+
+    const new_start = docEl.createElement("w:commentRangeStart");
+    new_start.setAttribute("w:id", new_id);
+    insertAfter(new_start, parent_start);
+
+    const ends = findAllDescendants(
+      this.doc.element,
+      "w:commentRangeEnd",
+    ).filter((n) => n.getAttribute("w:id") === parent_id);
+    if (ends.length === 0) return;
+    const parent_end = ends[0];
+
+    const parent_refs = findAllDescendants(
+      this.doc.element,
+      "w:commentReference",
+    ).filter((n) => n.getAttribute("w:id") === parent_id);
+
+    let insertion_point = parent_end;
+    if (parent_refs.length > 0) {
+      const ref_el = parent_refs[0];
+      if (
+        ref_el.parentNode &&
+        (ref_el.parentNode as Element).tagName === "w:r"
+      ) {
+        insertion_point = ref_el.parentNode as Element;
+      }
+    }
+
+    const new_end = docEl.createElement("w:commentRangeEnd");
+    new_end.setAttribute("w:id", new_id);
+    insertAfter(new_end, insertion_point);
+
+    const ref_run = docEl.createElement("w:r");
+    const rPr = docEl.createElement("w:rPr");
+    const rStyle = docEl.createElement("w:rStyle");
+    rStyle.setAttribute("w:val", "CommentReference");
+    rPr.appendChild(rStyle);
+    ref_run.appendChild(rPr);
+
+    const ref = docEl.createElement("w:commentReference");
+    ref.setAttribute("w:id", new_id);
+    ref_run.appendChild(ref);
+
+    insertAfter(ref_run, new_end);
+  }
   public validate_edits(edits: any[]): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
@@ -1038,7 +1092,12 @@ export class RedlineEngine {
       const type = action.type;
       if (type === "reply") {
         const cid = action.target_id.replace("Com:", "");
-        this.comments_manager.addComment(this.author, action.text, cid);
+        const new_id = this.comments_manager.addComment(
+          this.author,
+          action.text,
+          cid,
+        );
+        this._anchor_reply_comment(cid, new_id);
         applied++;
         continue;
       }
