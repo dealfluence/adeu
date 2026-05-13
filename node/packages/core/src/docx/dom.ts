@@ -84,11 +84,13 @@ export function serializeXml(node: Node): string {
 
       // Sort attributes: xmlns definitions first (alphabetically), then standard attributes (alphabetically)
       attrs.sort((a, b) => {
-        const aIsXmlns = a.startsWith("xmlns");
-        const bIsXmlns = b.startsWith("xmlns");
+        const aName = a.split("=")[0];
+        const bName = b.split("=")[0];
+        const aIsXmlns = aName.startsWith("xmlns");
+        const bIsXmlns = bName.startsWith("xmlns");
         if (aIsXmlns && !bIsXmlns) return -1;
         if (!aIsXmlns && bIsXmlns) return 1;
-        return a < b ? -1 : a > b ? 1 : 0; // Strict ASCII sort for determinism
+        return aName < bName ? -1 : aName > bName ? 1 : 0; // Strict ASCII sort by attribute name
       });
 
       const newTag =
