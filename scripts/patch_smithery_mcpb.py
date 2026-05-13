@@ -14,7 +14,7 @@ def get_tools_from_server():
         sys.exit(1)
 
     print("Booting Adeu Node server to extract live tool schemas...")
-    
+
     # We capture stderr so we can actually see if Node crashes
     try:
         proc = subprocess.Popen(
@@ -34,7 +34,7 @@ def get_tools_from_server():
             proc.stdin.flush()
         except Exception as e:
             print(f"❌ Error writing to server: {e}")
-            
+
     def wait_for_id(target_id):
         while True:
             line = proc.stdout.readline()
@@ -46,7 +46,7 @@ def get_tools_from_server():
                     return data
             except json.JSONDecodeError:
                 continue
-        
+
         # If we break out of the loop without returning, the process died
         _, errs = proc.communicate()
         print(f"❌ Server process died unexpectedly.\nNode Stderr: {errs}")
@@ -65,7 +65,7 @@ def get_tools_from_server():
             },
         }
     )
-    
+
     init_resp = wait_for_id(1)
     if not init_resp:
         sys.exit(1)
@@ -103,7 +103,9 @@ def main():
 
         if not src_mcpb:
             print("❌ Could not find Adeu.mcpb or desktop-extension.mcpb.")
-            print("Please run `npx @anthropic-ai/mcpb pack` inside desktop-extension/ first.")
+            print(
+                "Please run `npx @anthropic-ai/mcpb pack` inside desktop-extension/ first."
+            )
             sys.exit(1)
 
         dest_mcpb = "adeu-smithery.mcpb"
@@ -127,7 +129,7 @@ def main():
                         zout.writestr(item, zin.read(item.filename))
 
         print(f"✅ Success! Created Smithery-compatible bundle: {dest_mcpb}")
-        
+
     except Exception as e:
         print(f"❌ Script failed with exception:\n{traceback.format_exc()}")
 

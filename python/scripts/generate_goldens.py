@@ -29,13 +29,16 @@ MODEL_MAP = {
     "delete_row": DeleteTableRow,
 }
 
+
 def normalize_md_timestamps(md_text: str) -> str:
     """
     Replaces volatile ISO-8601 timestamps in CriticMarkup projections
     with a static string to ensure deterministic cross-platform diffing.
     """
     import re
+
     return re.sub(r"@ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "@ DATE", md_text)
+
 
 def main():
     base_dir = Path(__file__).resolve().parent.parent.parent / "shared" / "cross_platform_tests"

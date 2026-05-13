@@ -51,7 +51,7 @@ def abstract_docx_xml(xml_str: str, filename: str) -> str:
     xml_str = re.sub(r'<Relationship [^>]*Target="people\.xml"[^>]*/>', "", xml_str)
 
     # 9. Strip empty lines to prevent minidom/regex whitespace drift
-    xml_str = re.sub(r'\n\s*\n', '\n', xml_str.strip())
+    xml_str = re.sub(r"\n\s*\n", "\n", xml_str.strip())
 
     return xml_str
 
