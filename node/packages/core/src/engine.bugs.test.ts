@@ -8,6 +8,7 @@ import { parseXml, serializeXml } from "./docx/dom.js";
 import { create_unified_diff } from "./diff.js";
 import { extract_outline } from "./outline.js";
 import { paginate } from "./pagination.js";
+import { is_native_heading } from "./utils/docx.js";
 
 describe("Resolved Bugs Core Engine Verification", () => {
   it("BUG-3 & BUG-4: Links parts to package and yields headers for extraction", async () => {
@@ -337,5 +338,57 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(xml).toContain("w:commentRangeStart");
     expect(xml).toContain("w:commentRangeEnd");
     expect(xml).toContain("Section 1");
+  });
+
+  it("BUG-OUTLINE-1: Normalizes lowercase 'heading N' style names to 'Heading N' for parity", async () => {
+    const doc = await createTestDocument();
+    const p = addParagraph(doc, "My lowercase heading");
+
+    // Force a heading style with lowercase name in styles.xml
+    const docEl = p.ownerDocument!;
+    const pPr = docEl.createElement("w:pPr");
+    const pStyle = docEl.createElement("w:pStyle");
+    pStyle.setAttribute("w:val", "heading1");
+    pPr.appendChild(pStyle);
+    p.insertBefore(pPr, p.firstChild);
+
+    // Mock the styles.xml
+    const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+      <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:style w:type="paragraph" w:styleId="heading1">
+          <w:name w:val="heading 1"/>
+          <w:pPr><w:outlineLvl w:val="0"/></w:pPr>
+        </w:style>
+      </w:styles>`;
+
+    const existingStyles = doc.pkg.getPartByPath("word/styles.xml");
+    if (existingStyles) {
+      existingStyles._element = parseXml(stylesXml).documentElement;
+    } else {
+      const stylesPart = doc.pkg.addPart(
+        "/word/styles.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+        stylesXml,
+      );
+      doc.relateTo(
+        stylesPart,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+      );
+    }
+
+    const buf = await doc.save();
+    const body = await extractTextFromBuffer(buf, false);
+    const pages = paginate(body, "");
+
+    const outlineNodes = extract_outline(
+      doc,
+      body,
+      pages.body_pages,
+      pages.body_page_offsets,
+    );
+
+    expect(outlineNodes.length).toBe(1);
+    expect(outlineNodes[0].style).toBe("Heading 1"); // Instead of (outline_level)
+    expect(outlineNodes[0].text).toBe("My lowercase heading");
   });
 });

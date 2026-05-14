@@ -83,7 +83,15 @@ export function _get_style_cache(
     if (s_type === "paragraph" && is_default) default_pstyle = s_id;
 
     const name_el = findChild(s, "w:name");
-    const name = name_el ? name_el.getAttribute("w:val") : s_id;
+    let name = name_el ? name_el.getAttribute("w:val") : s_id;
+
+    if (name && typeof name === "string") {
+      if (name.toLowerCase().startsWith("heading")) {
+        name = name.replace(/^heading/i, "Heading");
+      } else if (name.toLowerCase() === "title") {
+        name = "Title";
+      }
+    }
 
     const based_on_el = findChild(s, "w:basedOn");
     const based_on = based_on_el ? based_on_el.getAttribute("w:val") : null;
@@ -186,7 +194,10 @@ export function is_native_heading(
     return true;
   }
 
-  const style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
+  let style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
+  if (style_name && typeof style_name === "string" && style_name.toLowerCase().startsWith("heading")) {
+    style_name = style_name.replace(/^heading/i, "Heading");
+  }
   if (style_name?.startsWith("Heading")) return true;
   if (style_name === "Title") return true;
   if (style_name && style_name !== "Normal") {
@@ -234,7 +245,10 @@ export function get_paragraph_prefix(
     return "#".repeat(style_info.outline_level + 1) + " ";
   }
 
-  const style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
+  let style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
+  if (style_name && typeof style_name === "string" && style_name.toLowerCase().startsWith("heading")) {
+    style_name = style_name.replace(/^heading/i, "Heading");
+  }
   if (style_name?.startsWith("Heading")) {
     const match = style_name.replace("Heading", "").trim();
     if (/^\d+$/.test(match)) return "#".repeat(parseInt(match, 10)) + " ";

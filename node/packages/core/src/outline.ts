@@ -413,21 +413,30 @@ function _determine_heading_style(paragraph: Paragraph): string {
       ? style_cache[style_id].name
       : style_id;
 
+  let normalized_style_name = style_name;
+  if (normalized_style_name && typeof normalized_style_name === "string") {
+    if (normalized_style_name.toLowerCase().startsWith("heading")) {
+      normalized_style_name = normalized_style_name.replace(/^heading/i, "Heading");
+    } else if (normalized_style_name.toLowerCase() === "title") {
+      normalized_style_name = "Title";
+    }
+  }
+
   if (outline_level !== null && outline_level >= 0 && outline_level <= 8) {
-    if (style_name && (style_name.startsWith("Heading") || style_name === "Title")) {
-      return style_name;
+    if (normalized_style_name && (normalized_style_name.startsWith("Heading") || normalized_style_name === "Title")) {
+      return normalized_style_name;
     }
     return "(outline_level)";
   }
 
   if (
-    style_name &&
-    (style_name.startsWith("Heading") || style_name === "Title")
+    normalized_style_name &&
+    (normalized_style_name.startsWith("Heading") || normalized_style_name === "Title")
   )
-    return style_name;
+    return normalized_style_name;
 
-  if (style_name && /Heading[ ]?([1-6])(?![0-9])/.test(style_name))
-    return style_name;
+  if (normalized_style_name && /Heading[ ]?([1-6])(?![0-9])/.test(normalized_style_name))
+    return normalized_style_name;
 
   return "(heuristic)";
 }
