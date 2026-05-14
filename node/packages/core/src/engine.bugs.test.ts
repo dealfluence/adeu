@@ -391,4 +391,49 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(outlineNodes[0].style).toBe("Heading 1"); // Instead of (outline_level)
     expect(outlineNodes[0].text).toBe("My lowercase heading");
   });
+
+  it("BUG-EXPLORE-1: Full-paragraph deletion safely removes the paragraph mark", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Paragraph 1");
+    const pTarget = addParagraph(doc, "Target paragraph to delete.");
+    addParagraph(doc, "Paragraph 3");
+
+    const engine = new RedlineEngine(doc, "Reviewer");
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "Target paragraph to delete.",
+        new_text: "",
+      },
+    ]);
+
+    engine.accept_all_revisions();
+
+    // If the paragraph mark <w:del> was successfully injected into pPr/rPr,
+    // accept_all_revisions will completely remove the <w:p> element.
+    // If the bug is present, the <w:p> will survive as an empty orphaned node.
+    expect(pTarget.parentNode).toBeNull();
+  });
+
+  it("BUG-EXPLORE-2: Nested redline validation error includes actionable hint", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Original baseline.");
+
+    // Author A makes an insertion
+    const engineA = new RedlineEngine(doc, "Author A");
+    engineA.process_batch([
+      {
+        type: "modify",
+        target_text: "Original baseline.",
+        new_text: "Original baseline. Inserted by A.",
+      },
+    ]);
+
+    // Author B tries to modify Author A's pending insertion
+    const engineB = new RedlineEngine(doc, "Author B");
+    
+    expect(() => {
+      engineB.process_batch([{ type: "modify", target_text: "Inserted by A.", new_text: "Modified by B." }]);
+    }).toThrowError(/Accept that change first or scope your edit outside of it/);
+  });
 });

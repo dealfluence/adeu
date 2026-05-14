@@ -1076,7 +1076,7 @@ export class RedlineEngine {
         }
         if (nestedAuthors.size > 0) {
           errors.push(
-            `- Edit ${i + 1} Failed: Modification targets an active insertion from another author (${Array.from(nestedAuthors).join(", ")}).`,
+            `- Edit ${i + 1} Failed: Modification targets an active insertion from another author (${Array.from(nestedAuthors).join(", ")}). Accept that change first or scope your edit outside of it.`,
           );
         }
       }
@@ -1636,6 +1636,13 @@ export class RedlineEngine {
     );
     if (target_runs.length === 0) return false;
 
+    const affected_ps = new Set<Element>();
+    for (const run of target_runs) {
+      let p: Element | null = run._element.parentNode as Element;
+      while (p && p.tagName !== "w:p") p = p.parentNode as Element;
+      if (p) affected_ps.add(p);
+    }
+
     let first_del: Element | null = null;
     let last_del: Element | null = null;
     for (const run of target_runs) {
@@ -1743,6 +1750,48 @@ export class RedlineEngine {
           end_anchor,
           edit.comment,
         );
+      }
+    }
+
+    // PHASE 2: Check for orphaned paragraphs with zero visible content remaining
+    for (const p_elem of affected_ps) {
+      let has_visible = false;
+      for (const tag of ["w:t", "w:tab", "w:br"]) {
+        const nodes = findAllDescendants(p_elem, tag);
+        for (const node of nodes) {
+          let is_deleted = false;
+          let curr = node.parentNode as Element | null;
+          while (curr && curr !== p_elem.parentNode) {
+            if (curr.tagName === "w:del") {
+              is_deleted = true;
+              break;
+            }
+            curr = curr.parentNode as Element | null;
+          }
+          if (!is_deleted) {
+            if (tag === "w:t" && !node.textContent) continue;
+            has_visible = true;
+            break;
+          }
+        }
+        if (has_visible) break;
+      }
+
+      if (!has_visible) {
+        let pPr = findChild(p_elem, "w:pPr");
+        if (!pPr) {
+          pPr = p_elem.ownerDocument!.createElement("w:pPr");
+          p_elem.insertBefore(pPr, p_elem.firstChild);
+        }
+        let rPr = findChild(pPr, "w:rPr");
+        if (!rPr) {
+          rPr = p_elem.ownerDocument!.createElement("w:rPr");
+          pPr.appendChild(rPr);
+        }
+        if (!findChild(rPr, "w:del")) {
+          const del_mark = this._create_track_change_tag("w:del");
+          rPr.appendChild(del_mark);
+        }
       }
     }
 
