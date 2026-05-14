@@ -672,8 +672,8 @@ export class RedlineEngine {
       last_p = new_p;
       last_ins = content_ins;
 
-      // In block mode, the first new paragraph IS first_node.
-      if (block_mode && i === 0) {
+      // In block mode (or if the inline line was completely empty), the first new paragraph IS first_node.
+      if (!first_node) {
         first_node = new_p;
       }
     }
@@ -696,15 +696,7 @@ export class RedlineEngine {
     const ins = this._create_track_change_tag("w:ins", "", reuse_id);
     const segments = this._parse_inline_markdown(line_text);
     if (segments.length === 0) {
-      // Even for "" we still want an empty paragraph to project the break.
-      // We achieve that by producing no run; xmldom will serialize <w:ins/>.
-      // But Word prefers at least one empty <w:t/>, so emit a minimal run.
-      const r = xmlDoc.createElement("w:r");
-      const t = xmlDoc.createElement("w:t");
-      t.setAttribute("xml:space", "preserve");
-      r.appendChild(t);
-      ins.appendChild(r);
-      return ins;
+      return null;
     }
     for (const [segText, segProps] of segments) {
       const r = xmlDoc.createElement("w:r");

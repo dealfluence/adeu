@@ -392,21 +392,34 @@ function _determine_heading_style(paragraph: Paragraph): string {
   let style_id = default_pstyle;
 
   if (pPr) {
-    const oLvl = findChild(pPr, "w:outlineLvl");
-    if (oLvl && /^\d+$/.test(oLvl.getAttribute("w:val") || "")) {
-      const style = _safe_style_name(paragraph, style_cache, default_pstyle);
-      if (style && (style.startsWith("Heading") || style === "Title"))
-        return style;
-      return "(outline_level)";
-    }
     const pStyle = findChild(pPr, "w:pStyle");
     if (pStyle) style_id = pStyle.getAttribute("w:val") || default_pstyle;
+  }
+
+  let outline_level: number | null = null;
+  if (pPr) {
+    const oLvl = findChild(pPr, "w:outlineLvl");
+    if (oLvl && /^\d+$/.test(oLvl.getAttribute("w:val") || "")) {
+      outline_level = parseInt(oLvl.getAttribute("w:val") as string, 10);
+    }
+  }
+  
+  if (outline_level === null && style_id && style_cache && style_cache[style_id]) {
+    outline_level = style_cache[style_id].outline_level;
   }
 
   const style_name =
     style_id && style_cache && style_cache[style_id]
       ? style_cache[style_id].name
       : style_id;
+
+  if (outline_level !== null && outline_level >= 0 && outline_level <= 8) {
+    if (style_name && (style_name.startsWith("Heading") || style_name === "Title")) {
+      return style_name;
+    }
+    return "(outline_level)";
+  }
+
   if (
     style_name &&
     (style_name.startsWith("Heading") || style_name === "Title")

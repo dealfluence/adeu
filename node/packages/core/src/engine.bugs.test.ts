@@ -226,4 +226,89 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(elapsed).toBeLessThan(5000);
     expect(diff.length).toBeGreaterThan(0);
   });
+
+  it("BUG-2.1: _track_insert_inline with empty string returns null instead of empty <w:ins>", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Target word.");
+    const engine = new RedlineEngine(doc);
+
+    // Call internal method directly via any to match Python parity test
+    const ins = (engine as any)._build_tracked_ins_for_line(
+      "",
+      null,
+      "123",
+      doc.element.ownerDocument!
+    );
+    expect(ins).toBeNull();
+  });
+
+  it("BUG-3.1: Outline reader detects inherited outlineLvl from style cache", async () => {
+    const doc = await createTestDocument();
+    const p = addParagraph(doc, "Short heading");
+
+    const fakeCache = {
+      "CustomHeading": { name: "Custom Heading", outline_level: 2, bold: true }
+    };
+    (doc.pkg as any)._adeu_style_cache = [fakeCache, "Normal"];
+
+    const docEl = p.ownerDocument!;
+    const pPr = docEl.createElement("w:pPr");
+    const pStyle = docEl.createElement("w:pStyle");
+    pStyle.setAttribute("w:val", "CustomHeading");
+    pPr.appendChild(pStyle);
+    p.insertBefore(pPr, p.firstChild);
+
+    const buf = await doc.save();
+    const body = await extractTextFromBuffer(buf, false);
+    const pages = paginate(body, "");
+    
+    const outlineNodes = extract_outline(
+      doc,
+      body,
+      pages.body_pages,
+      pages.body_page_offsets,
+    );
+
+    expect(outlineNodes.length).toBe(1);
+    expect(outlineNodes[0].text).toBe("Short heading");
+    expect(outlineNodes[0].level).toBe(3);
+  });
+
+  it("VAL-OBS-NEW-5: Orphaned comment anchors spanning redlines are swept on accept", async () => {
+    const doc = await createTestDocument();
+    const p = addParagraph(doc, "");
+    const engine = new RedlineEngine(doc);
+
+    const c_id = engine.comments_manager.addComment("Test", "Spanning comment");
+    const xmlDoc = doc.element.ownerDocument!;
+
+    const start = xmlDoc.createElement("w:commentRangeStart");
+    start.setAttribute("w:id", c_id);
+    p.appendChild(start);
+
+    const del_tag = xmlDoc.createElement("w:del");
+    del_tag.setAttribute("w:id", "1");
+    p.appendChild(del_tag);
+
+    const ins_tag = xmlDoc.createElement("w:ins");
+    ins_tag.setAttribute("w:id", "1");
+    p.appendChild(ins_tag);
+
+    const end = xmlDoc.createElement("w:commentRangeEnd");
+    end.setAttribute("w:id", c_id);
+    p.appendChild(end);
+    
+    const ref_run = xmlDoc.createElement("w:r");
+    const ref = xmlDoc.createElement("w:commentReference");
+    ref.setAttribute("w:id", c_id);
+    ref_run.appendChild(ref);
+    p.appendChild(ref_run);
+
+    engine.accept_all_revisions();
+
+    const xml = doc.element.toString();
+    expect(xml).not.toContain("w:commentRangeStart");
+    expect(xml).not.toContain("w:commentRangeEnd");
+    expect(xml).not.toContain("w:commentReference");
+  });
 });
