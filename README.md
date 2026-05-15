@@ -2,6 +2,7 @@
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/dealfluence/adeu?style=social)](https://github.com/dealfluence/adeu)
 [![PyPI version](https://img.shields.io/pypi/v/adeu.svg)](https://pypi.org/project/adeu/)
+[![npm version](https://img.shields.io/npm/v/@adeu/core.svg)](https://www.npmjs.com/package/@adeu/core)
 [![Downloads](https://img.shields.io/pepy/dt/adeu)](https://pepy.tech/project/adeu)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 [![Smithery](https://img.shields.io/badge/Smithery-Available-blue.svg)](https://smithery.ai/servers/adeu/adeu)
@@ -129,7 +130,28 @@ with open("MSA_Redlined.docx", "wb") as f:
 ```
 
 ### The TypeScript SDK
-The entire core parsing and diffing engine is also available in pure TypeScript. See the [@adeu/core documentation](node/packages/core/README.md) for installation and usage details.
+The entire core parsing and diffing engine is also available in pure TypeScript.
+
+```typescript
+import { readFileSync, writeFileSync } from "fs";
+import { DocumentObject, RedlineEngine } from "@adeu/core";
+
+const buffer = readFileSync("MSA.docx");
+const doc = await DocumentObject.load(buffer);
+
+const engine = new RedlineEngine(doc, "AI Copilot");
+engine.process_batch([{
+  type: "modify",
+  target_text: "State of New York",
+  new_text: "State of Delaware",
+  comment: "Standardizing governing law."
+}]);
+
+const outBuffer = await doc.save();
+writeFileSync("MSA_Redlined.docx", outBuffer);
+```
+
+See the [@adeu/core documentation](https://github.com/dealfluence/adeu/tree/main/node/packages/core#readme) for full installation and usage details.
 
 ---
 
