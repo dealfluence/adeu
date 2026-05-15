@@ -56,7 +56,7 @@ Adeu is published on the Smithery MCP Registry. Check instructions for your clie
 
 ### Gemini CLI Integration
 
-Adeu is available as a native [Gemini CLI](https://github.com/google/gemini-cli) extension. The Gemini extension uses our zero-dependency Node.js engine, meaning it works immediately out of the box without requiring Python.
+Adeu is available as a native [Gemini CLI extension](https://geminicli.com/extensions/). The Gemini extension uses our zero-dependency Node.js engine, meaning it works immediately out of the box without requiring Python.
 
 To install the extension, run:
 
