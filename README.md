@@ -202,7 +202,7 @@ adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --repo
 
 ## Ecosystem & Integrations
 
-Adeu is designed as a core infrastructure primitive un-opinionated Virtual DOM for DOCX. Because we keep the core strictly focused on OpenXML safety, we maintain a dedicated [`ecosystem/`](ecosystem/) directory for third-party integrations.
+Adeu is designed as a Virtual DOM for DOCX. Because we keep the core strictly focused on OpenXML safety, we maintain a dedicated [`ecosystem/`](ecosystem/) directory for third-party integrations.
 
 In the ecosystem folder, you will find advanced workflows, wrappers, and tools built by the community and LegalTech vendors, including:
 - Legal validation and case-law routing before applying edits.
