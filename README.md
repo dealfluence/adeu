@@ -17,7 +17,7 @@ While standard libraries like `python-docx` excel at generating documents from s
 
 Adeu acts as an **intelligent proxy**, processing AI edits as safe, atomic transactions:
 
-1. **Read:** Translates the document (from disk or live Word) into LLM-friendly **CriticMarkup** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. The agent starts with semantic structure, not raw data.
+1. **Read:** Translates the document (from disk or live Word) into LLM-friendly **[CriticMarkup](http://criticmarkup.com/)** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. The agent starts with semantic structure, not raw data.
 2. **Validate:** Acts as a strict safety gate. It protects the document's integrity by automatically blocking ambiguous text matches or invalid structural changes before they touch the file.
 3. **Apply:** Translates the AI's text edits into native Word Track Changes. Adeu handles the complex XML under the hood, ensuring existing layouts, fonts, and margin comments are perfectly preserved.
 
@@ -200,47 +200,9 @@ adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --repo
 
 ---
 
-## Key Features
-
-### Format Safety
-
-Adeu does not "rewrite" the document. It patches it.
-
-- **Images & Layouts:** Untouched.
-- **Numbering & Headers:** Preserved.
-- **Tables & Lists:** Complex gridspans and multi-level legal numbering are explicitly protected.
-- **Complex XML:** It only modifies the text runs targeted by the edit.
-
-### CriticMarkup Representation
-
-Intermediate representations matter. Adeu uses [CriticMarkup](http://criticmarkup.com/) to visualize changes.
-
-| Markup       | Meaning   | Example                   |
-| :----------- | :-------- | :------------------------ |
-| `{--text--}` | Deletion  | `{--Tenant--}`            |
-| `{++text++}` | Insertion | `{++Lessee++}`            |
-| `{>>text<<}` | Comment   | `{>>Clarify this term<<}` |
-
-### Semantic Appendix
-
-Contracts are full of landmines that an LLM will miss on a first pass: defined terms used inconsistently, broken cross-references, and OCR-style typos in messy documents. Adeu pre-computes these on extract and hands the agent a structured appendix alongside the text.
-
-### Intelligent Mapping
-
-Word documents are messy. A word like "Contract" might be split into XML runs like `["Con", "tract"]` due to spellcheck or formatting history.
-
-- **Run Coalescing:** Adeu normalizes these splits so the AI sees "Contract".
-- **Fuzzy Matching:** It handles minor whitespace discrepancies between the LLM's memory and the actual document content.
-
-### Metadata Sanitization
-
-Existing metadata scrubbers break redlines or silently strip data. Adeu's `sanitize` command surgically removes dangerous trackers (rsids, templates, internal paths, timestamps) and orphaned content while preserving valid track changes. Crucially, it generates a transparent audit report proving exactly what was stripped and what will be visible to the recipient.
-
----
-
 ## Ecosystem & Integrations
 
-Adeu is designed as a core infrastructure primitive—an un-opinionated Virtual DOM for DOCX. Because we keep the core strictly focused on OpenXML safety, we maintain a dedicated [`ecosystem/`](ecosystem/) directory for third-party integrations.
+Adeu is designed as a core infrastructure primitive un-opinionated Virtual DOM for DOCX. Because we keep the core strictly focused on OpenXML safety, we maintain a dedicated [`ecosystem/`](ecosystem/) directory for third-party integrations.
 
 In the ecosystem folder, you will find advanced workflows, wrappers, and tools built by the community and LegalTech vendors, including:
 - Legal validation and case-law routing before applying edits.
