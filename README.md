@@ -90,8 +90,9 @@ If everything is set up correctly, Claude will confirm it has access to the Adeu
 <details>
 <summary><b>Manual / Other MCP Client Configuration</b></summary>
 <br>
-If you are using another MCP client (like Cursor, Windsurf, or a custom app), add the following to your MCP configuration file.
+If you are using another MCP client (like Cursor, Windsurf, or a custom app), you can configure either the Python or Node.js backend:
 
+**Python Backend (Requires Python 3.12+)**  
 Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading the correct Python version and running the server:
 
 ```json
@@ -105,6 +106,19 @@ Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading 
 }
 ```
 
+**Node.js Backend (Requires Node 20+)**  
+If your environment does not support Python, you can use our zero-dependency Node.js server via `npx`:
+
+```json
+{
+  "mcpServers": {
+    "adeu-node": {
+      "command": "npx",
+      "args": ["-y", "@adeu/mcp-server"]
+    }
+  }
+}
+```
 </details>
 
 ---
@@ -132,9 +146,11 @@ If you are running on Windows with Microsoft Word installed, Adeu can act as a r
 - `read_active_word_document`: Extracts text, tracked changes, and comments directly from the live, open Word window.
 - `process_active_word_batch`: Translates the LLM's edits into native COM macros, watching Word type, delete, and add comments on the canvas automatically.
 
-### 2. For Builders (Python SDK)
+### 2. For Builders (Python & TypeScript)
 
-If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation.
+If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation. 
+
+*(Note: Adeu is available for Python via `pip install adeu` and for Node 20+ via `npm install @adeu/core`. See [Node Packages](node/README.md) for TS docs).*
 
 ```python
 from adeu import RedlineEngine, ModifyText
