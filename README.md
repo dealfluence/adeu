@@ -25,178 +25,111 @@ Built and maintained by the team at [Adeu](https://adeu.ai).
 
 ---
 
-## Setup
+## Installation
 
-**Prerequisite:** Adeu uses [uv](https://docs.astral.sh/uv/) for fast, isolated execution. The easiest way to install it is via pip:
+Adeu can be installed directly into AI assistants as an MCP server, or used locally as a developer toolchain.
 
-```bash
-pip install uv
-```
+### Claude Desktop
+You can install Adeu directly into Claude Desktop using the official extension package:
+1. Download the latest `Adeu.mcpb` file from the [GitHub Releases](https://github.com/dealfluence/adeu/releases) page.
+2. Open Claude Desktop and navigate to **Settings > Extensions**.
+3. Click **Advanced settings** and find the Extension Developer section.
+4. Click **Install Extension...**, select the downloaded `.mcpb` file, and follow the prompts.
 
-<details>
-<summary><b>Alternative OS-Specific Installers</b></summary>
-<br>
-
-**macOS**
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-**Windows**
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-</details>
-
-### Install via Smithery
-
-Adeu is published on the Smithery MCP Registry. Check instructions for your client from: [Smithery Adeu site](https://smithery.ai/servers/adeu/adeu)
-
-### Gemini CLI Integration
-
-Adeu is available as a native [Gemini CLI extension](https://geminicli.com/extensions/). The Gemini extension uses our zero-dependency Node.js engine, meaning it works immediately out of the box without requiring Python.
-
-To install the extension, run:
-
+### Gemini CLI
+Adeu is available as a native [Gemini CLI extension](https://geminicli.com/extensions/). To install:
 ```bash
 gemini extensions install https://github.com/dealfluence/adeu
 ```
 
-> [!NOTE]  
-> The Gemini CLI will automatically download the correct pre-built bundle for your platform directly from our GitHub Releases. Restart your Gemini CLI session after installing to load the tools.
-
-### Claude Desktop Integration
-
-To instantly add Adeu to **Claude Desktop**, run:
-
-```bash
-uvx adeu init
-```
-
-> [!IMPORTANT]
-> This command **automatically detects and updates** your `claude_desktop_config.json`.
-> **Restart Claude Desktop** afterward to load the new tools.
-
-### Verify It's Working
-
-Once Claude Desktop has restarted, you can confirm Adeu is connected by typing the following message directly into Claude:
-
-> **"Can you read a DOCX file using the Adeu tool?"**
-
-If everything is set up correctly, Claude will confirm it has access to the Adeu tools and describe what it can do. If it doesn't mention Adeu or says it doesn't have file tools, double-check that you restarted Claude Desktop after running `uvx adeu init`.
-
-<details>
-<summary><b>Manual / Other MCP Client Configuration</b></summary>
-<br>
-If you are using another MCP client (like Cursor, Windsurf, or a custom app), you can configure either the Python or Node.js backend:
-
-**Python Backend (Requires Python 3.12+)**  
-Because Adeu requires Python 3.12+, `uvx` will automatically handle downloading the correct Python version and running the server:
-
+### Other MCP Clients (Cursor, Windsurf, etc.)
+For IDEs or clients that configure MCP servers via JSON, use `npx`:
 ```json
 {
   "mcpServers": {
     "adeu": {
-      "command": "uvx",
-      "args": ["--from", "adeu", "adeu-server"]
-    }
-  }
-}
-```
-
-**Node.js Backend (Requires Node 20+)**  
-If your environment does not support Python, you can use our zero-dependency Node.js server via `npx`:
-
-```json
-{
-  "mcpServers": {
-    "adeu-node": {
       "command": "npx",
       "args": ["-y", "@adeu/mcp-server"]
     }
   }
 }
 ```
-</details>
+
+### Smithery
+To install Adeu using the Smithery package manager:
+```bash
+npx -y @smithery/cli install adeu --client claude
+```
 
 ---
 
-## Workflows
+## Agent Workflows
 
-### 1. For Agents (Claude / MCP)
+Adeu provides agents with specific tools to read, review, and edit documents safely.
 
-Adeu runs as a Model Context Protocol (MCP) server. It provides agents with specific tools to read, review, and edit documents safely.
-
-> **MCP Apps UI:** The `read_docx` tool supports the latest **MCP Apps UI** protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown UI view directly inside your Claude chat window—allowing you to visually review the extracted text and formatting alongside the AI's reasoning!
+> **MCP Apps UI:** The `read_docx` tool supports the MCP Apps UI protocol. When an agent reads a document, Adeu dynamically renders a custom, interactive Markdown view directly inside the chat window.
 
 **Recommended Agent Prompt:**
-While Adeu's tools automatically describe their own schemas to the LLM, you can guarantee the best behavioral results by adding this context to Claude's **Project Instructions** or your agent's System Prompt:
+You can guarantee the best behavioral results by adding this context to your agent's system prompt or project instructions:
 
 > **Role:** Document Specialist
 > **Tools:**
 >
 > - `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context.
 > - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified list of changes. Use `type: "modify"` for specific search-and-replace text edits, and `type: "accept"`, `"reject"`, or `"reply"` to manage existing Track Changes and Comments by ID.
-> - `sanitize_docx`: **Pre-Send Scrub.** Strip dangerous metadata, author names, and internal tracking IDs before sharing. Can preserve existing markup (`keep_markup=True`) or generate a clean delta against a baseline.
+> - `finalize_document`: **Pre-Send Scrub.** Strip dangerous metadata, author names, and internal tracking IDs, lock the document (`protection_mode="read_only"`), and prepare it for distribution.
 
-#### Live MS Word Integration
-If you are running on Windows with Microsoft Word installed, Adeu can act as a real-time copilot, editing the active document right in front of you.
-- `read_active_word_document`: Extracts text, tracked changes, and comments directly from the live, open Word window.
-- `process_active_word_batch`: Translates the LLM's edits into native COM macros, watching Word type, delete, and add comments on the canvas automatically.
+### Live MS Word Integration
+If you are running on Windows with Microsoft Word installed, Adeu can act as a real-time copilot, editing the active document right in front of you. This requires running the Python MCP server backend (see Developer Tools below).
 
-### 2. For Builders (Python & TypeScript)
+---
 
-If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation. 
+## Developer Tools (Python & TypeScript)
 
-*(Note: Adeu is available for Python via `pip install adeu` and for Node 20+ via `npm install @adeu/core`. See [@adeu/core documentation](node/packages/core/README.md) for TS details).*
+If you are building a legal-tech application, an automated pipeline, or want to use the local CLI, use our SDKs.
 
+### The Python CLI
+The Python toolchain is managed via [uv](https://docs.astral.sh/uv/).
+
+```bash
+pip install uv
+
+# Extract clean text for RAG or prompting
+uvx adeu extract contract.docx -o contract.md
+
+# Generate a visual diff between two versions
+uvx adeu diff v1.docx v2.docx
+
+# Apply edits to the DOCX
+uvx adeu apply contract.docx edits.json --author "Review Bot"
+
+# Scrub author metadata and internal trackers
+uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
+```
+
+### The Python SDK
 ```python
 from adeu import RedlineEngine, ModifyText
 from io import BytesIO
 
-# 1. Load the contract
 with open("MSA.docx", "rb") as f:
     stream = BytesIO(f.read())
 
-# 2. Define the edit (e.g., from an LLM response)
-# Adeu uses fuzzy matching to locate the target text, even if whitespace varies.
 edit = ModifyText(
     target_text="State of New York",
     new_text="State of Delaware",
     comment="Standardizing governing law."
 )
 
-# 3. Apply changes
 engine = RedlineEngine(stream, author="AI Copilot")
 engine.apply_edits([edit])
 
-# 4. Save the result
 with open("MSA_Redlined.docx", "wb") as f:
     f.write(engine.save_to_stream().getvalue())
 ```
 
-### 3. The CLI
-
-Quickly inspect documents or apply batches of edits from your terminal.
-
-```bash
-# Extract clean text for RAG or prompting
-adeu extract contract.docx -o contract.md
-
-# Generate a visual diff between two versions
-adeu diff v1.docx v2.docx
-
-# Preview what an edit list (JSON) would look like
-adeu markup contract.docx edits.json --output preview.md
-
-# Apply edits to the DOCX
-adeu apply contract.docx edits.json --author "Review Bot"
-
-# Scrub author metadata and internal trackers, but keep the visual redlines for the counterparty
-adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
-```
+### The TypeScript SDK
+The entire core parsing and diffing engine is also available in pure TypeScript. See the [@adeu/core documentation](node/packages/core/README.md) for installation and usage details.
 
 ---
 
