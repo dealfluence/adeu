@@ -1768,16 +1768,16 @@ export class RedlineEngine {
           if (p2_element && p2_element.tagName === "w:p") {
             let pPr = findChild(p1_element, "w:pPr");
             if (!pPr) {
-              pPr = p1_element.ownerDocument!.createElement("w:pPr");
-              p1_element.insertBefore(pPr, p1_element.firstChild);
+              pPr = p1_element.ownerDocument!.createElement("w:pPr") as Element;
+              p1_element.insertBefore(pPr, p1_element.firstChild as Node | null);
             }
-            let rPr = findChild(pPr, "w:rPr");
+            let rPr = findChild(pPr!, "w:rPr");
             if (!rPr) {
-              rPr = p1_element.ownerDocument!.createElement("w:rPr");
-              pPr.appendChild(rPr);
+              rPr = p1_element.ownerDocument!.createElement("w:rPr") as Element;
+              pPr!.appendChild(rPr);
             }
             const del_mark = this._create_track_change_tag("w:del");
-            rPr.appendChild(del_mark);
+            rPr!.appendChild(del_mark);
 
             const children = Array.from(p2_element.childNodes);
             for (const child of children) {
@@ -1869,17 +1869,17 @@ export class RedlineEngine {
       if (!has_visible) {
         let pPr = findChild(p_elem, "w:pPr");
         if (!pPr) {
-          pPr = p_elem.ownerDocument!.createElement("w:pPr");
-          p_elem.insertBefore(pPr, p_elem.firstChild);
+          pPr = p_elem.ownerDocument!.createElement("w:pPr") as Element;
+          p_elem.insertBefore(pPr, p_elem.firstChild as Node | null);
         }
-        let rPr = findChild(pPr, "w:rPr");
+        let rPr = findChild(pPr!, "w:rPr");
         if (!rPr) {
-          rPr = p_elem.ownerDocument!.createElement("w:rPr");
-          pPr.appendChild(rPr);
+          rPr = p_elem.ownerDocument!.createElement("w:rPr") as Element;
+          pPr!.appendChild(rPr);
         }
-        if (!findChild(rPr, "w:del")) {
+        if (!findChild(rPr!, "w:del")) {
           const del_mark = this._create_track_change_tag("w:del");
-          rPr.appendChild(del_mark);
+          rPr!.appendChild(del_mark);
         }
       }
     }
