@@ -43,13 +43,27 @@ gemini extensions install https://github.com/dealfluence/adeu
 ```
 
 ### Other MCP Clients (Cursor, Windsurf, etc.)
-For IDEs or clients that configure MCP servers via JSON, use `npx`:
+For IDEs or clients that configure MCP servers via JSON, you can use either the Node.js or Python backend:
+
+**Node.js**
 ```json
 {
   "mcpServers": {
     "adeu": {
       "command": "npx",
       "args": ["-y", "@adeu/mcp-server"]
+    }
+  }
+}
+```
+
+**Python (Required for Live MS Word integration on Windows)**
+```json
+{
+  "mcpServers": {
+    "adeu": {
+      "command": "uvx",
+      "args": ["--from", "adeu", "adeu-server"]
     }
   }
 }
