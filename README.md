@@ -150,7 +150,7 @@ If you are running on Windows with Microsoft Word installed, Adeu can act as a r
 
 If you are building a legal-tech application or an automated pipeline, use the `RedlineEngine` directly. It handles the heavy lifting of XML manipulation. 
 
-*(Note: Adeu is available for Python via `pip install adeu` and for Node 20+ via `npm install @adeu/core`. See [Node Packages](node/README.md) for TS docs).*
+*(Note: Adeu is available for Python via `pip install adeu` and for Node 20+ via `npm install @adeu/core`. See [@adeu/core documentation](node/packages/core/README.md) for TS details).*
 
 ```python
 from adeu import RedlineEngine, ModifyText
