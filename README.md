@@ -1,4 +1,4 @@
-# Adeu: Native Track Changes for AI
+# Adeu: Track Changes for the LLM era
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/dealfluence/adeu?style=social)](https://github.com/dealfluence/adeu)
 [![PyPI version](https://img.shields.io/pypi/v/adeu.svg)](https://pypi.org/project/adeu/)
