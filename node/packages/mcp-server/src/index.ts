@@ -12,7 +12,7 @@ import {
   DocumentObject,
   RedlineEngine,
   BatchValidationError,
-  create_unified_diff,
+  create_word_patch_diff,
   finalize_document,
 } from "@adeu/core";
 import {
@@ -367,7 +367,12 @@ server.setRequestHandler(
         const origText = await extractTextFromBuffer(origBuf, compareClean);
         const modText = await extractTextFromBuffer(modBuf, compareClean);
 
-        const diff = create_unified_diff(origText, modText);
+        const diff = create_word_patch_diff(
+          origText, 
+          modText, 
+          basename(origPath), 
+          basename(modPath)
+        );
 
         return {
           content: [{ type: "text", text: diff || "No differences found." }],

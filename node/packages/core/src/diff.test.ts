@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { trim_common_context, generate_edits_from_text } from './diff.js';
+import { trim_common_context, generate_edits_from_text, create_word_patch_diff } from './diff.js';
 
 describe('Diff Logic & Context Trimming', () => {
   it('handles basic prefix and suffix', () => {
@@ -58,5 +58,17 @@ describe('Diff Logic & Context Trimming', () => {
       expect(edit.target_text).toContain('Contract');
       expect(edit.new_text).toContain('Big');
     }
+  });
+
+  it('generates a Word Patch formatted diff matching Python parity', () => {
+    const original = "This agreement is made between the Company and the Contractor.";
+    const modified = "This agreement is made between the Corporation and the Contractor.";
+    
+    const diff = create_word_patch_diff(original, modified);
+    
+    expect(diff).toContain("@@ Word Patch @@");
+    expect(diff).toContain("- Company");
+    expect(diff).toContain("+ Corporation");
+    expect(diff).toContain(" This agreement is made between the"); // Within 40-char context window so no truncation
   });
 });

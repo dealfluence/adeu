@@ -295,11 +295,34 @@ export class RedlineEngine {
         const pPr = findChild(p, "w:pPr");
         if (pPr) {
           const rPr = findChild(pPr, "w:rPr");
-          if (rPr && findChild(rPr, "w:del")) {
-            this._clean_wrapping_comments(p);
-            this._delete_comments_in_element(p);
-            if (p.parentNode) {
-              p.parentNode.removeChild(p);
+          const delMark = rPr ? findChild(rPr, "w:del") : null;
+          if (rPr && delMark) {
+            let has_content = false;
+            for (const child of findAllDescendants(p, "w:t")) {
+              if (child.textContent) {
+                let is_deleted = false;
+                let curr = child.parentNode as Element | null;
+                while (curr && curr !== p) {
+                  if (curr.tagName === "w:del") {
+                    is_deleted = true;
+                    break;
+                  }
+                  curr = curr.parentNode as Element | null;
+                }
+                if (!is_deleted) {
+                  has_content = true;
+                  break;
+                }
+              }
+            }
+            if (has_content) {
+              rPr.removeChild(delMark);
+            } else {
+              this._clean_wrapping_comments(p);
+              this._delete_comments_in_element(p);
+              if (p.parentNode) {
+                p.parentNode.removeChild(p);
+              }
             }
           }
         }
@@ -1634,7 +1657,9 @@ export class RedlineEngine {
       length,
       rebuild_map,
     );
-    if (target_runs.length === 0) return false;
+    const virtual_spans = active_mapper.get_virtual_spans_in_range(start_idx, length);
+
+    if (target_runs.length === 0 && virtual_spans.length === 0) return false;
 
     const affected_ps = new Set<Element>();
     for (const run of target_runs) {
@@ -1703,6 +1728,62 @@ export class RedlineEngine {
         }
         mod_last_p = result.last_p;
         mod_last_ins = result.last_ins;
+      }
+    }
+
+    // PHASE 2: OOXML Paragraph Merge Protocol
+    if (op === "DELETION" || op === "MODIFICATION") {
+      if (op === "MODIFICATION" && target_runs.length === 0 && virtual_spans.length > 0 && edit.new_text) {
+        const first_span = virtual_spans[0];
+        if (first_span.paragraph) {
+          const p1_el = first_span.paragraph._element;
+          const last_runs = findAllDescendants(p1_el, "w:r");
+          const anchor = last_runs.length > 0 ? new Run(last_runs[last_runs.length - 1], first_span.paragraph) : null;
+          
+          const result = this._track_insert_multiline(
+            edit.new_text,
+            anchor,
+            first_span.paragraph,
+            ins_id!
+          );
+          if (result.first_node) {
+            p1_el.appendChild(result.first_node);
+          }
+        }
+      }
+
+      for (const span of virtual_spans) {
+        if (span.paragraph) {
+          const p1_element = span.paragraph._element;
+          const p2_element = getNextElement(p1_element);
+
+          if (p2_element && p2_element.tagName === "w:p") {
+            let pPr = findChild(p1_element, "w:pPr");
+            if (!pPr) {
+              pPr = p1_element.ownerDocument!.createElement("w:pPr");
+              p1_element.insertBefore(pPr, p1_element.firstChild);
+            }
+            let rPr = findChild(pPr, "w:rPr");
+            if (!rPr) {
+              rPr = p1_element.ownerDocument!.createElement("w:rPr");
+              pPr.appendChild(rPr);
+            }
+            const del_mark = this._create_track_change_tag("w:del");
+            rPr.appendChild(del_mark);
+
+            const children = Array.from(p2_element.childNodes);
+            for (const child of children) {
+              if (child.nodeType === 1 && (child as Element).tagName === "w:pPr") {
+                continue;
+              }
+              p1_element.appendChild(child);
+            }
+
+            if (p2_element.parentNode) {
+              p2_element.parentNode.removeChild(p2_element);
+            }
+          }
+        }
       }
     }
 

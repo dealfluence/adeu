@@ -1,14 +1,11 @@
-// FILE: node/packages/core/src/engine.bugs.test.ts
 import { describe, it, expect } from "vitest";
 import { createTestDocument, addParagraph } from "./test-utils.js";
-import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import { parseXml, serializeXml } from "./docx/dom.js";
 import { create_unified_diff } from "./diff.js";
 import { extract_outline } from "./outline.js";
 import { paginate } from "./pagination.js";
-import { is_native_heading } from "./utils/docx.js";
 
 describe("Resolved Bugs Core Engine Verification", () => {
   it("BUG-3 & BUG-4: Links parts to package and yields headers for extraction", async () => {
@@ -435,5 +432,28 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(() => {
       engineB.process_batch([{ type: "modify", target_text: "Inserted by A.", new_text: "Modified by B." }]);
     }).toThrowError(/Accept that change first or scope your edit outside of it/);
+  });
+
+  it("BUG-CROSS-PARA-1: Cross-paragraph modify coalesces paragraphs and tracks para-mark deletion", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Clause 1 ends here.");
+    addParagraph(doc, "Clause 2 begins here.");
+    const engine = new RedlineEngine(doc, "Reviewer");
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "ends here.\n\nClause 2 begins",
+        new_text: "ends here. MERGED",
+      },
+    ]);
+
+    engine.accept_all_revisions();
+
+    const buf = await doc.save();
+    const cleanText = await extractTextFromBuffer(buf, true);
+    
+    expect(cleanText).not.toContain("ends here.\n\n");
+    expect(cleanText).toContain("Clause 1 ends here. MERGED here.");
   });
 });

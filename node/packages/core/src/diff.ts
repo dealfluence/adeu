@@ -369,3 +369,56 @@ export function create_unified_diff(
   if (output.length === 2) return ""; // No changes
   return output.join("\n");
 }
+
+export function create_word_patch_diff(
+  original_text: string,
+  modified_text: string,
+  original_path: string = "Original",
+  modified_path: string = "Modified"
+): string {
+  const edits = generate_edits_from_text(original_text, modified_text);
+  const output: string[] = [
+    `--- ${original_path}`,
+    `+++ ${modified_path}`,
+    ""
+  ];
+  
+  const CONTEXT_SIZE = 40;
+
+  for (const edit of edits) {
+    const raw_start = edit._match_start_index || 0;
+    const raw_target = edit.target_text || "";
+    const raw_new = edit.new_text || "";
+
+    const [prefix_len, suffix_len] = trim_common_context(raw_target, raw_new);
+
+    const target_end_in_target = raw_target.length - suffix_len;
+    const new_end_in_new = raw_new.length - suffix_len;
+
+    const display_target = raw_target.substring(prefix_len, target_end_in_target);
+    const display_new = raw_new.substring(prefix_len, new_end_in_new);
+
+    const change_start = raw_start + prefix_len;
+    const change_end = change_start + display_target.length;
+
+    let pre_start = Math.max(0, change_start - CONTEXT_SIZE);
+    let pre_context = original_text.substring(pre_start, change_start);
+    if (pre_start > 0) pre_context = "..." + pre_context;
+
+    let post_end = Math.min(original_text.length, change_end + CONTEXT_SIZE);
+    let post_context = original_text.substring(change_end, post_end);
+    if (post_end < original_text.length) post_context = post_context + "...";
+
+    pre_context = pre_context.replace(/\n/g, " ").replace(/\r/g, "");
+    post_context = post_context.replace(/\n/g, " ").replace(/\r/g, "");
+
+    output.push("@@ Word Patch @@");
+    output.push(` ${pre_context}`);
+    if (display_target) output.push(`- ${display_target}`);
+    if (display_new) output.push(`+ ${display_new}`);
+    output.push(` ${post_context}`);
+    output.push("");
+  }
+
+  return output.join("\n");
+}
