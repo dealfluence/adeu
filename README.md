@@ -17,7 +17,7 @@ While standard libraries like `python-docx` excel at generating documents from s
 
 Adeu acts as an **intelligent proxy**, processing AI edits as safe, atomic transactions:
 
-1. **Read:** Translates the document (from disk or live Word) into LLM-friendly **[CriticMarkup](http://criticmarkup.com/)** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. The agent starts with semantic structure, not raw data.
+1. **Read:** Translates the document (from disk or live Word) into LLM-friendly **[CriticMarkup](https://fletcher.github.io/MultiMarkdown-6/syntax/critic.html)** with a **Semantic Appendix** of defined terms, cross-references, and likely typos. The agent starts with semantic structure, not raw data.
 2. **Validate:** Acts as a strict safety gate. It protects the document's integrity by automatically blocking ambiguous text matches or invalid structural changes before they touch the file.
 3. **Apply:** Translates the AI's text edits into native Word Track Changes. Adeu handles the complex XML under the hood, ensuring existing layouts, fonts, and margin comments are perfectly preserved.
 
