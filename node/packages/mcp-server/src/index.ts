@@ -20,6 +20,8 @@ import {
   build_outline_response,
   build_appendix_response,
 } from "./response-builders.js";
+import { login_to_adeu_cloud, logout_of_adeu_cloud } from "./tools/auth.js";
+import { search_and_fetch_emails, create_email_draft } from "./tools/email.js";
 function readFileBytesOrThrow(filePath: string): Buffer {
   try {
     return readFileSync(filePath);
@@ -225,6 +227,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["file_path"],
         },
       },
+      {
+        name: "login_to_adeu_cloud",
+        description:
+          "Logs the user into the Adeu Cloud backend. Securely opens a browser window for authentication.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "logout_of_adeu_cloud",
+        description:
+          "Logs out of the Adeu Cloud backend by clearing the local API key.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "search_and_fetch_emails",
+        description:
+          "Searches the user's live email inbox. By default, searches only the Inbox folder. Returns a list of lightweight previews. Call again with `email_id` to fetch the full body and download attachments.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sender: { type: "string" },
+            subject: { type: "string" },
+            has_attachments: { type: "boolean" },
+            attachment_name: { type: "string" },
+            is_unread: { type: "boolean" },
+            days_ago: { type: "number" },
+            folder: { type: "string", enum: ["inbox", "sent", "all"] },
+            limit: { type: "number", default: 10 },
+            offset: { type: "number", default: 0 },
+            email_id: { type: "string" },
+            working_directory: { type: "string" },
+          },
+        },
+      },
+      {
+        name: "create_email_draft",
+        description:
+          "Creates an email draft in the user's native draft box. Provide `reply_to_email_id` to reply, or `subject` and `to_recipients` for a new email.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            body_markdown: { type: "string" },
+            reply_to_email_id: { type: "string" },
+            subject: { type: "string" },
+            to_recipients: { type: "array", items: { type: "string" } },
+            attachment_paths: { type: "array", items: { type: "string" } },
+          },
+          required: ["body_markdown"],
+        },
+      },
     ],
   };
 });
@@ -368,10 +419,10 @@ server.setRequestHandler(
         const modText = await extractTextFromBuffer(modBuf, compareClean);
 
         const diff = create_word_patch_diff(
-          origText, 
-          modText, 
-          basename(origPath), 
-          basename(modPath)
+          origText,
+          modText,
+          basename(origPath),
+          basename(modPath),
         );
 
         return {
@@ -414,7 +465,18 @@ server.setRequestHandler(
           ],
         };
       }
-
+      if (name === "login_to_adeu_cloud") {
+        return await login_to_adeu_cloud();
+      }
+      if (name === "logout_of_adeu_cloud") {
+        return await logout_of_adeu_cloud();
+      }
+      if (name === "search_and_fetch_emails") {
+        return await search_and_fetch_emails(args || {});
+      }
+      if (name === "create_email_draft") {
+        return await create_email_draft(args || {});
+      }
       throw new Error(`Unknown tool: ${name}`);
     } catch (error: any) {
       return {
