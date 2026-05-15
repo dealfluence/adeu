@@ -52,7 +52,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### Install via Smithery
 
-Adeu is published on the Smithery MCP Registry. Check instructions for your client from: ![Smithery Adeu site](https://smithery.ai/servers/adeu/adeu)
+Adeu is published on the Smithery MCP Registry. Check instructions for your client from: [Smithery Adeu site](https://smithery.ai/servers/adeu/adeu)
 
 ### Gemini CLI Integration
 
