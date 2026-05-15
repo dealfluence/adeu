@@ -53,13 +53,23 @@ jobs:
           cp gemini-extension.json gemini-release/gemini-extension.json
           cp GEMINI.md gemini-release/GEMINI.md
           cd gemini-release
-          tar -czf ../adeu.tar.gz .
+          # Use zip and * to ensure a perfectly flat archive without './' prefixes
+          zip -r ../adeu.zip *
+          cd ..
+          # Duplicate to platform-specific names to guarantee CLI resolution
+          cp adeu.zip darwin.adeu.zip
+          cp adeu.zip linux.adeu.zip
+          cp adeu.zip win32.adeu.zip
 
-      - name: Upload Gemini Extension Archive
+      - name: Upload Gemini Extension Archives
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.ref_name }} ./adeu.tar.gz
+          gh release upload ${{ github.ref_name }} \
+            ./adeu.zip \
+            ./darwin.adeu.zip \
+            ./linux.adeu.zip \
+            ./win32.adeu.zip
 
   pypi-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
