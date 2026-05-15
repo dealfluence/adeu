@@ -54,6 +54,19 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 Adeu is published on the Smithery MCP Registry. Check instructions for your client from: ![Smithery Adeu site](https://smithery.ai/servers/adeu/adeu)
 
+### Gemini CLI Integration
+
+Adeu is available as a native [Gemini CLI](https://github.com/google/gemini-cli) extension. The Gemini extension uses our zero-dependency Node.js engine, meaning it works immediately out of the box without requiring Python.
+
+To install the extension, run:
+
+```bash
+gemini extensions install https://github.com/dealfluence/adeu
+```
+
+> [!NOTE]  
+> The Gemini CLI will automatically download the correct pre-built bundle for your platform directly from our GitHub Releases. Restart your Gemini CLI session after installing to load the tools.
+
 ### Claude Desktop Integration
 
 To instantly add Adeu to **Claude Desktop**, run:
