@@ -298,8 +298,10 @@ export class RedlineEngine {
           const delMark = rPr ? findChild(rPr, "w:del") : null;
           if (rPr && delMark) {
             let has_content = false;
-            for (const child of findAllDescendants(p, "w:t")) {
-              if (child.textContent) {
+            for (const tag of ["w:t", "w:tab", "w:br"]) {
+              for (const child of findAllDescendants(p, tag)) {
+                if (tag === "w:t" && !child.textContent) continue;
+                
                 let is_deleted = false;
                 let curr = child.parentNode as Element | null;
                 while (curr && curr !== p) {
@@ -313,6 +315,9 @@ export class RedlineEngine {
                   has_content = true;
                   break;
                 }
+              }
+              if (has_content) {
+                break;
               }
             }
             if (has_content) {
@@ -1755,7 +1760,10 @@ export class RedlineEngine {
       for (const span of virtual_spans) {
         if (span.paragraph) {
           const p1_element = span.paragraph._element;
-          const p2_element = getNextElement(p1_element);
+          let p2_element = getNextElement(p1_element);
+          while (p2_element && p2_element.tagName !== "w:p") {
+            p2_element = getNextElement(p2_element);
+          }
 
           if (p2_element && p2_element.tagName === "w:p") {
             let pPr = findChild(p1_element, "w:pPr");

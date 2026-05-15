@@ -1934,6 +1934,8 @@ class RedlineEngine:
                 if span.paragraph:
                     p1_element = span.paragraph._element
                     p2_element = p1_element.getnext()
+                    while p2_element is not None and p2_element.tag != qn("w:p"):
+                        p2_element = p2_element.getnext()
 
                     if p2_element is not None and p2_element.tag == qn("w:p"):
                         # 1. Track pilcrow deletion in p1
@@ -2383,11 +2385,33 @@ class RedlineEngine:
                 pPr = p.find(qn("w:pPr"))
                 if pPr is not None:
                     rPr = pPr.find(qn("w:rPr"))
-                    if rPr is not None and rPr.find(qn("w:del")) is not None:
-                        self._clean_wrapping_comments(p)
-                        self._delete_comments_in_element(p)
-                        if p.getparent() is not None:
-                            p.getparent().remove(p)
+                    del_mark = rPr.find(qn("w:del")) if rPr is not None else None
+                    if rPr is not None and del_mark is not None:
+                        has_content = False
+                        for tag in ["w:t", "w:tab", "w:br"]:
+                            for child in p.findall(f".//{qn(tag)}"):
+                                if tag == "w:t" and not child.text:
+                                    continue
+                                is_deleted = False
+                                curr = child.getparent()
+                                while curr is not None and curr != p:
+                                    if curr.tag == qn("w:del"):
+                                        is_deleted = True
+                                        break
+                                    curr = curr.getparent()
+                                if not is_deleted:
+                                    has_content = True
+                                    break
+                            if has_content:
+                                break
+
+                        if has_content:
+                            rPr.remove(del_mark)
+                        else:
+                            self._clean_wrapping_comments(p)
+                            self._delete_comments_in_element(p)
+                            if p.getparent() is not None:
+                                p.getparent().remove(p)
 
             for d in root_element.findall(f".//{qn('w:del')}"):
                 self._clean_wrapping_comments(d)
