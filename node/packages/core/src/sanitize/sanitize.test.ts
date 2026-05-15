@@ -162,8 +162,8 @@ describe('Finalize Document (Core)', () => {
     });
     
     const finalSettings = settingsPart._element.toString();
-    
-    expect(res.reportText).toContain('Result: SECURE & READY TO SEND');
+
+    expect(res.reportText).toContain('Result: CLEAN');
     expect(res.reportText).toContain('Document locked (Read-Only');
     
     // Validate mathematical injection

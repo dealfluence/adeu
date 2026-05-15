@@ -116,7 +116,7 @@ export class SanitizeReport {
     if (this.warnings.length > 0) {
       lines.push(`Result: CLEAN WITH WARNINGS (${this.warnings.length} warning${this.warnings.length > 1 ? 's' : ''})`);
     } else {
-      lines.push("Result: SECURE & READY TO SEND");
+      lines.push(`Result: CLEAN (${this.tracked_changes_found} changes resolved, ${this.comments_removed} comments removed)`);
     }
     lines.push(sep);
 

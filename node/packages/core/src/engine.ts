@@ -1757,7 +1757,7 @@ export class RedlineEngine {
         }
       }
 
-      for (const span of virtual_spans) {
+      for (const span of [...virtual_spans].reverse()) {
         if (span.paragraph) {
           const p1_element = span.paragraph._element;
           let p2_element = getNextElement(p1_element);

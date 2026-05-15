@@ -456,4 +456,26 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(cleanText).not.toContain("ends here.\n\n");
     expect(cleanText).toContain("Clause 1 ends here. MERGED here.");
   });
+
+  it("BUG-CROSS-PARA-3: 3-paragraph modify cleanly merges bottom-up without leaving orphans", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Paragraph 1 ends here.");
+    addParagraph(doc, "Paragraph 2 is in the middle.");
+    addParagraph(doc, "Paragraph 3 begins here.");
+    const engine = new RedlineEngine(doc, "Reviewer");
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "ends here.\n\nParagraph 2 is in the middle.\n\nParagraph 3 begins",
+        new_text: "ends here. MERGED",
+      },
+    ]);
+
+    engine.accept_all_revisions();
+    const cleanText = await extractTextFromBuffer(await doc.save(), true);
+    
+    expect(cleanText).not.toContain("Paragraph 2");
+    expect(cleanText).toContain("Paragraph 1 ends here. MERGED here.");
+  });
 });
