@@ -6,7 +6,6 @@
 [![Downloads](https://img.shields.io/pepy/dt/adeu)](https://pepy.tech/project/adeu)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 [![Smithery](https://img.shields.io/badge/Smithery-Available-blue.svg)](https://smithery.ai/servers/adeu/adeu)
-[![Python versions](https://img.shields.io/pypi/pyversions/adeu.svg)](https://pypi.org/project/adeu/)
 [![CI](https://github.com/dealfluence/adeu/actions/workflows/ci.yml/badge.svg)](https://github.com/dealfluence/adeu/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
