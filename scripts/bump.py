@@ -10,6 +10,7 @@ FILES_TO_BUMP = [
     "node/packages/mcp-server/package.json",
     "desktop-extension/manifest.json",
     "gemini-extension.json",
+    "python/server.json",
 ]
 
 

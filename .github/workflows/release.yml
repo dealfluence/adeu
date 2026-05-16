@@ -35,6 +35,16 @@ jobs:
         working-directory: ./desktop-extension
         run: zip -r Adeu.mcpb index.js manifest.json icon.png package.json
 
+      - name: Build Smithery Bundle
+        run: python scripts/patch_smithery_mcpb.py
+
+      - name: Publish to Smithery
+        env:
+          SMITHERY_TOKEN: ${{ secrets.SMITHERY_TOKEN }}
+        # Using --yes to suppress any interactive CLI prompts
+        run: |
+          npx --yes smithery@latest mcp publish adeu-smithery.mcpb -n adeu/adeu
+
       - name: Generate Draft Release and Upload Asset
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,6 +2,7 @@
   "name": "@adeu/mcp-server",
   "version": "1.6.9",
   "description": "",
+  "mcpName": "ai.adeu/adeu",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {

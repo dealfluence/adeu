@@ -4,6 +4,7 @@ from docx import Document
 from adeu.redline.engine import RedlineEngine
 from adeu.models import ModifyText
 
+
 def test_three_paragraph_merge():
     """
     BUG 3 REPRO: Tests that modifying text across 3 paragraphs (2 newline boundaries)
@@ -20,13 +21,15 @@ def test_three_paragraph_merge():
     buf.seek(0)
 
     engine = RedlineEngine(buf, author="Test AI")
-    engine.process_batch([
-        ModifyText(
-            type="modify",
-            target_text="ends here.\n\nParagraph 2 is in the middle.\n\nParagraph 3 begins",
-            new_text="ends here. MERGED",
-        )
-    ])
+    engine.process_batch(
+        [
+            ModifyText(
+                type="modify",
+                target_text="ends here.\n\nParagraph 2 is in the middle.\n\nParagraph 3 begins",
+                new_text="ends here. MERGED",
+            )
+        ]
+    )
 
     engine.accept_all_revisions()
 
