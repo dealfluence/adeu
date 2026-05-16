@@ -40,7 +40,7 @@ jobs:
 
       - name: Publish to Smithery
         env:
-          SMITHERY_TOKEN: ${{ secrets.SMITHERY_TOKEN }}
+          SMITHERY_API_KEY: ${{ secrets.SMITHERY_TOKEN }}
         # Using --yes to suppress any interactive CLI prompts
         run: |
           npx --yes smithery@latest mcp publish adeu-smithery.mcpb -n adeu/adeu
