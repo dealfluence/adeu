@@ -43,9 +43,7 @@ def update_json_version(filepath, version):
         return False
 
     # Regex replace to preserve exact file formatting (indents/newlines)
-    new_content = re.sub(
-        r'("version"\s*:\s*)"[^"]+"', f'\\g<1>"{version}"', content, count=1
-    )
+    new_content = re.sub(r'("version"\s*:\s*)"[^"]+"', f'\\g<1>"{version}"', content)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
