@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check for expired Vendor SLAs
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             // SLA defined by VENDOR_POLICY.md
