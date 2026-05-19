@@ -26,6 +26,7 @@ export class Adeu implements INodeType {
     defaults: {
       name: "Adeu",
     },
+    usableAsTool: true,
     inputs: [NodeConnectionTypes.Main],
     outputs: [NodeConnectionTypes.Main],
     credentials: [],
