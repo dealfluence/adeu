@@ -91,7 +91,12 @@ export class Adeu implements INodeType {
           });
           continue;
         }
-        throw mapAdeuErrorToNodeApiError.call(this, error as Error);
+        const err = error as Error;
+
+        if (err.name === "NodeOperationError" || err.name === "NodeApiError") {
+          throw err;
+        }
+        throw mapAdeuErrorToNodeApiError.call(this, err);
       }
     }
 
