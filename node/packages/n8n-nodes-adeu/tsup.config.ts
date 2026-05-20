@@ -1,9 +1,11 @@
 // FILE: node/packages/n8n-nodes-adeu/tsup.config.ts
 import { defineConfig } from "tsup";
-import { createRequire } from "node:module";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const EMPTY_SHIM = require.resolve("./shims/empty.js");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const EMPTY_SHIM = resolve(__dirname, "shims", "empty.js");
+const MODULE_SHIM = resolve(__dirname, "shims", "module.js");
 
 export default defineConfig({
   entry: ["nodes/Adeu/Adeu.node.ts"],
@@ -25,6 +27,8 @@ export default defineConfig({
       "process/browser": EMPTY_SHIM,
       "process/browser.js": EMPTY_SHIM,
       setimmediate: EMPTY_SHIM,
+      module: MODULE_SHIM,
+      worker_threads: MODULE_SHIM,
     };
     options.drop = ["console", "debugger"];
     options.legalComments = "none";
