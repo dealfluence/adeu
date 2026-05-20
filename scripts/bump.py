@@ -11,6 +11,7 @@ FILES_TO_BUMP = [
     "desktop-extension/manifest.json",
     "gemini-extension.json",
     "python/server.json",
+    "node/packages/n8n-nodes-adeu/package.json",
 ]
 
 

@@ -148,4 +148,4 @@ jobs:
 
       - name: Publish to NPM
         working-directory: ./node
-        run: npm publish --workspaces --access public
+        run: npm publish --workspaces --access public --provenance
