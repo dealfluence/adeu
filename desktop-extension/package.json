@@ -1,5 +1,8 @@
 {
   "name": "adeu-desktop-extension",
   "type": "module",
-  "private": true
+  "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  }
 }

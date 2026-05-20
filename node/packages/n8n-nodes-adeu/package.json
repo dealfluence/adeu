@@ -24,6 +24,9 @@
     "url": "git+https://github.com/dealfluence/adeu.git",
     "directory": "node/packages/n8n-nodes-adeu"
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "main": "dist/nodes/Adeu/Adeu.node.js",
   "scripts": {
     "build": "tsup && npm run copy-assets",

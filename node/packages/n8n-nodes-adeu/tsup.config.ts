@@ -5,7 +5,7 @@ export default defineConfig({
   entry: ["nodes/Adeu/Adeu.node.ts"],
   format: ["cjs"],
   outDir: "dist/nodes/Adeu",
-  target: "node18",
+  target: "node22",
   clean: true,
   dts: false,
   minify: false,
