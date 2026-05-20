@@ -32,7 +32,7 @@
   "dependencies": {
     "@xmldom/xmldom": "^0.9.10",
     "diff-match-patch": "^1.0.5",
-    "jszip": "^3.10.1",
+    "fflate": "^0.8.2",
     "xpath": "^0.0.34"
   },
   "devDependencies": {

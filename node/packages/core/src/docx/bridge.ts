@@ -1,4 +1,5 @@
-import JSZip from "jszip";
+// FILE: node/packages/core/src/docx/bridge.ts
+import { unzipSync, zipSync, strFromU8, strToU8 } from "fflate";
 import {
   parseXml,
   findChild,
@@ -59,10 +60,10 @@ export class DocxPackage {
   public parts: Part[] = [];
   public mainDocumentPart!: Part;
 
-  constructor(public zip: JSZip) {}
+  constructor(public unzipped: Record<string, Uint8Array>) {}
 
   public getPartByPath(path: string): Part | undefined {
-    // Strip leading slash for jszip compat
+    // Strip leading slash for zip compat
     const searchPath = path.startsWith("/") ? path.substring(1) : path;
     return this.parts.find(
       (p) => p.partname === searchPath || p.partname === "/" + searchPath,
@@ -151,14 +152,15 @@ export class DocumentObject {
   public static async load(
     buffer: Buffer | ArrayBuffer,
   ): Promise<DocumentObject> {
-    const zip = await JSZip.loadAsync(buffer);
-    const pkg = new DocxPackage(zip);
+    const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const unzipped = unzipSync(u8);
+    const pkg = new DocxPackage(unzipped);
 
     // 1. Load Content Types
-    const ctFile = zip.file("[Content_Types].xml");
+    const ctFile = unzipped["[Content_Types].xml"];
     let contentTypes: Record<string, string> = {};
     if (ctFile) {
-      const ctXml = parseXml(await ctFile.async("text"));
+      const ctXml = parseXml(strFromU8(ctFile));
       const overrides = findAllDescendants(ctXml.documentElement, "Override");
       for (const override of overrides) {
         contentTypes[override.getAttribute("PartName") || ""] =
@@ -167,9 +169,9 @@ export class DocumentObject {
     }
 
     // 2. Pre-load all XML parts to allow synchronous traversal later
-    for (const [path, file] of Object.entries(zip.files)) {
-      if (!file.dir && (path.endsWith(".xml") || path.endsWith(".rels"))) {
-        const text = await file.async("text");
+    for (const [path, fileData] of Object.entries(unzipped)) {
+      if (path.endsWith(".xml") || path.endsWith(".rels")) {
+        const text = strFromU8(fileData);
         const doc = parseXml(text);
         const cType = contentTypes["/" + path] || "application/xml";
         const part = new Part("/" + path, text, doc.documentElement, cType);
@@ -236,8 +238,8 @@ export class DocumentObject {
         xmlStr =
           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xmlStr;
       }
-      this.pkg.zip.file(part.partname.substring(1), xmlStr); // Strip leading slash for JSZip
+      this.pkg.unzipped[part.partname.substring(1)] = strToU8(xmlStr); // Strip leading slash
     }
-    return this.pkg.zip.generateAsync({ type: "nodebuffer" });
+    return Buffer.from(zipSync(this.pkg.unzipped));
   }
 }
