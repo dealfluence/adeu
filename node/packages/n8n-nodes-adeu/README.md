@@ -9,6 +9,37 @@ This node bridges the gap between Large Language Models (LLMs) and Microsoft Wor
 
 ---
 
+## 📦 Installation
+
+Depending on your self-hosted n8n configuration, you can install this node via the UI, environment variables, or manually.
+
+### Method 1: GUI Installation (Recommended)
+1. In n8n, go to **Settings** > **Community Nodes**.
+2. Select **Install**.
+3. Enter `n8n-nodes-adeu` in the **Enter npm package name** field.
+4. Check **I understand the risks of installing unverified code from a public source**.
+5. Select **Install**.
+
+### Method 2: Environment Variables
+For automated deployments, you can bootstrap your n8n instance with a fixed set of packages via environment variables:
+```bash
+export N8N_COMMUNITY_PACKAGES_MANAGED_BY_ENV=true
+export N8N_COMMUNITY_PACKAGES='[{"name":"n8n-nodes-adeu"}]'
+```
+*Note: Enabling this makes the Community Nodes settings UI read-only and will automatically uninstall any packages not listed in the JSON array.*
+
+### Method 3: Manual Installation (Queue Mode)
+If your n8n instance runs in queue mode or you prefer terminal installation, you can install the node manually:
+```bash
+docker exec -it n8n sh
+mkdir -p ~/.n8n/nodes
+cd ~/.n8n/nodes
+npm i n8n-nodes-adeu
+```
+Restart your n8n instance after installation.
+
+---
+
 ## 🚀 Key Capabilities
 
 - **CriticMarkup Projection**: Translates existing Word tracked changes into standard Markdown (`{++inserted++}`, `{--deleted--}`).
