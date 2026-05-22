@@ -1,0 +1,23 @@
+# FILE: langchain/.gitignore
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.python-version
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# uv lockfile lives in repo; nothing to ignore here for it.
