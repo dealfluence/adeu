@@ -14,9 +14,30 @@ Adeu MCP server directly for those workflows.
 
 from importlib.metadata import PackageNotFoundError, version
 
+from langchain_adeu.accept_all_changes import (
+    AdeuAcceptAllChanges,
+    AdeuAcceptAllChangesInput,
+)
+from langchain_adeu.apply_changes import AdeuApplyChanges, AdeuApplyChangesInput
+from langchain_adeu.diff_docx import AdeuDiffDocx, AdeuDiffDocxInput
+from langchain_adeu.read_docx import AdeuReadDocx, AdeuReadDocxInput
+from langchain_adeu.sanitize_docx import AdeuSanitizeDocx, AdeuSanitizeDocxInput
+
 try:
     __version__ = version("langchain-adeu")
 except PackageNotFoundError:
     __version__ = "0.0.0-dev"
 
-__all__ = ["__version__"]
+__all__ = [
+    "AdeuAcceptAllChanges",
+    "AdeuAcceptAllChangesInput",
+    "AdeuApplyChanges",
+    "AdeuApplyChangesInput",
+    "AdeuDiffDocx",
+    "AdeuDiffDocxInput",
+    "AdeuReadDocx",
+    "AdeuReadDocxInput",
+    "AdeuSanitizeDocx",
+    "AdeuSanitizeDocxInput",
+    "__version__",
+]
