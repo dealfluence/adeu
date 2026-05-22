@@ -101,4 +101,5 @@ class TestAdeuSanitizeDocxBehavior:
         assert output_path.exists()
         assert msg.artifact["status"] in {"clean", "clean_with_warnings"}
         # We assert on `tracked_changes_found` rather than a "kept"
-        # field — `tracked_changes_found` is the fie
+        # field — `tracked_changes_found` is the count of changes preserved.
+        assert msg.artifact.get("tracked_changes_found", 0) > 0
