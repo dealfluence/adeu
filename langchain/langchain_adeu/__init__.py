@@ -10,6 +10,16 @@ the underlying OOXML structure.
 Live MS Word integration (Windows-only COM) and Adeu Cloud features
 (email, validation) are intentionally excluded from this package. Use the
 Adeu MCP server directly for those workflows.
+
+Quick start:
+
+    from langchain.agents import create_agent
+    from langchain_adeu import AdeuToolkit
+
+    agent = create_agent(
+        model="anthropic:claude-sonnet-4-6",
+        tools=AdeuToolkit().get_tools(),
+    )
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -22,6 +32,7 @@ from langchain_adeu.apply_changes import AdeuApplyChanges, AdeuApplyChangesInput
 from langchain_adeu.diff_docx import AdeuDiffDocx, AdeuDiffDocxInput
 from langchain_adeu.read_docx import AdeuReadDocx, AdeuReadDocxInput
 from langchain_adeu.sanitize_docx import AdeuSanitizeDocx, AdeuSanitizeDocxInput
+from langchain_adeu.toolkit import AdeuToolkit, get_tools
 
 try:
     __version__ = version("langchain-adeu")
@@ -39,5 +50,7 @@ __all__ = [
     "AdeuReadDocxInput",
     "AdeuSanitizeDocx",
     "AdeuSanitizeDocxInput",
+    "AdeuToolkit",
     "__version__",
+    "get_tools",
 ]
