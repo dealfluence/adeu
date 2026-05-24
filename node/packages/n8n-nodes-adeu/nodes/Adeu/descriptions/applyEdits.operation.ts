@@ -1,10 +1,15 @@
 // FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/descriptions/applyEdits.operation.ts
+
 import type {
   IExecuteFunctions,
   INodeExecutionData,
   INodeProperties,
 } from "n8n-workflow";
-import { DocumentObject, RedlineEngine } from "@adeu/core";
+import {
+  DocumentObject,
+  RedlineEngine,
+  extractTextFromBuffer,
+} from "@adeu/core";
 
 import {
   DOCX_MIME_TYPE,
@@ -71,14 +76,14 @@ export const applyEditsDescription: INodeProperties[] = [
     description: "Where to read the list of changes from",
     options: [
       {
-        name: "From Input JSON",
-        value: "fromInputJson",
-        description: "Read the changes array from the incoming item JSON",
-      },
-      {
         name: "Define Below",
         value: "defineBelow",
         description: "Provide a JSON literal directly in this node",
+      },
+      {
+        name: "From Input JSON",
+        value: "fromInputJson",
+        description: "Read the changes array from the incoming item JSON",
       },
     ],
     displayOptions: {
@@ -113,7 +118,13 @@ export const applyEditsDescription: INodeProperties[] = [
       '[\n  {\n    "type": "modify",\n    "target_text": "State of New York",\n    "new_text": "State of Delaware",\n    "comment": "Standardizing governing law."\n  }\n]',
     required: true,
     description:
-      "Array of DocumentChange objects. Supported types: modify, accept, reject, reply, insert_row, delete_row.",
+      "Array of DocumentChange objects. Valid object schemas:\n" +
+      "- type: 'modify' | Required: 'target_text' (string, copy exactly from source), 'new_text' (string) | Optional: 'comment'\n" +
+      "- type: 'accept' | Required: 'target_id' (string, e.g. 'Chg:12') | Optional: 'comment'\n" +
+      "- type: 'reject' | Required: 'target_id' (string, e.g. 'Chg:12') | Optional: 'comment'\n" +
+      "- type: 'reply' | Required: 'target_id' (string, e.g. 'Com:45'), 'text' (string)\n" +
+      "- type: 'insert_row' | Required: 'target_text' (string), 'position' ('above' | 'below'), 'cells' (array of strings)\n" +
+      "- type: 'delete_row' | Required: 'target_text' (string)",
     typeOptions: {
       rows: 10,
     },
@@ -122,6 +133,20 @@ export const applyEditsDescription: INodeProperties[] = [
         resource: ["document"],
         operation: ["applyEdits"],
         editsSource: ["defineBelow"],
+      },
+    },
+  },
+  {
+    displayName: "Return Markdown Output",
+    name: "returnMarkdown",
+    type: "boolean",
+    default: true,
+    description:
+      "Whether to auto-extract the updated document text as Markdown and include it in the JSON output. Useful for downstream AI context.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
       },
     },
   },
@@ -141,6 +166,10 @@ export async function executeApplyEdits(
   ) as string;
   const author = this.getNodeParameter("author", itemIndex) as string;
   const editsSource = this.getNodeParameter("editsSource", itemIndex) as string;
+  const returnMarkdown = this.getNodeParameter(
+    "returnMarkdown",
+    itemIndex,
+  ) as boolean;
 
   // Resolve the changes array
   let changes: unknown;
@@ -152,7 +181,6 @@ export async function executeApplyEdits(
     const inputJson = this.getInputData()[itemIndex].json;
     changes = getNestedProperty(inputJson as Record<string, unknown>, jsonPath);
     if (changes === undefined) {
-      // Surface a clear error rather than silently passing undefined to the engine
       throw new Error(
         `No property "${jsonPath}" found on the input item JSON. Verify the upstream node produced it, or switch "Edits Source" to "Define Below".`,
       );
@@ -187,7 +215,12 @@ export async function executeApplyEdits(
     DOCX_MIME_TYPE,
   );
 
-  // Preserve other binaries the upstream item carried (e.g. sibling attachments)
+  // Auto-extract post-edit markdown if requested (using CriticMarkup view as preferred)
+  let markdown: string | undefined;
+  if (returnMarkdown) {
+    markdown = await extractTextFromBuffer(outBuffer, false);
+  }
+
   const incomingBinary = this.getInputData()[itemIndex].binary ?? {};
 
   return [
@@ -196,6 +229,7 @@ export async function executeApplyEdits(
         fileName: outName,
         author,
         stats,
+        ...(markdown !== undefined ? { markdown } : {}),
       },
       binary: {
         ...incomingBinary,

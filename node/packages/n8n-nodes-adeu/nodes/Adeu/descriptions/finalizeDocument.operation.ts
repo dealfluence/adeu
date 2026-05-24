@@ -51,6 +51,12 @@ export const finalizeDocumentDescription: INodeProperties[] = [
     default: "full",
     options: [
       {
+        name: "Baseline",
+        value: "baseline",
+        description:
+          "Minimal sanitization (strip rsid, paraIds, proof errors only)",
+      },
+      {
         name: "Full",
         value: "full",
         description:
@@ -61,12 +67,6 @@ export const finalizeDocumentDescription: INodeProperties[] = [
         value: "keep-markup",
         description:
           "Strip metadata but preserve visible tracked changes and comments",
-      },
-      {
-        name: "Baseline",
-        value: "baseline",
-        description:
-          "Minimal sanitization (strip rsid, paraIds, proof errors only)",
       },
     ],
     displayOptions: {

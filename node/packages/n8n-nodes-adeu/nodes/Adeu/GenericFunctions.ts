@@ -1,4 +1,5 @@
 // FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/GenericFunctions.ts
+
 import type { IExecuteFunctions, JsonObject } from "n8n-workflow";
 import { NodeApiError, NodeOperationError } from "n8n-workflow";
 
@@ -56,9 +57,6 @@ export async function getDocxBuffer(
 
 /**
  * Builds a default output filename from an input filename and a suffix.
- *
- *   buildOutputFileName("contract.docx", "redlined") -> "contract_redlined.docx"
- *   buildOutputFileName("contract", "finalized")     -> "contract_finalized.docx"
  */
 export function buildOutputFileName(
   inputFileName: string,
@@ -71,8 +69,8 @@ export function buildOutputFileName(
 }
 
 /**
- * Parses a JSON-text parameter into an object/array. Surfaces a clear, actionable
- * error when the JSON is malformed so the user knows exactly what to fix.
+ * Parses a JSON-text parameter into an object/array. Natively strips Markdown
+ * code blocks (e.g., ```json ... ```) to prevent syntax parsing failures.
  */
 export function parseJsonParameter<T>(
   this: IExecuteFunctions,
@@ -95,8 +93,17 @@ export function parseJsonParameter<T>(
     return raw as T;
   }
 
+  let cleaned = (raw as string).trim();
+
+  // Strip leading and trailing markdown code block wrapper if present
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```[a-zA-Z]*\n?/, "");
+    cleaned = cleaned.replace(/\n?```$/, "");
+  }
+  cleaned = cleaned.trim();
+
   try {
-    return JSON.parse(raw as string) as T;
+    return JSON.parse(cleaned) as T;
   } catch (error) {
     throw new NodeOperationError(
       this.getNode(),
@@ -111,73 +118,56 @@ export function parseJsonParameter<T>(
 
 /**
  * Translates errors thrown by `@adeu/core` (notably `BatchValidationError`)
- * into n8n's `NodeApiError` with actionable "what happened / how to solve it"
- * guidance per the n8n Developer Playbook.
+ * into n8n's `NodeApiError` with actionable feedback for AI agents.
  */
 export function mapAdeuErrorToNodeApiError(
   this: IExecuteFunctions,
   error: Error,
+  itemIndex: number,
 ): NodeApiError {
   const message = error.message ?? "Unknown error";
   const errorName = error.name ?? "";
 
-  // BatchValidationError ships a `.errors` array of human-readable messages.
-  // We use it to pick a focused message + description without dumping the
-  // entire stack at the user.
   const errors = (error as unknown as { errors?: string[] }).errors;
   const joined = Array.isArray(errors) ? errors.join("\n") : message;
   const lower = joined.toLowerCase();
 
   if (errorName === "BatchValidationError") {
+    let messageContext = "Batch validation failed.";
+    let descriptionContext = "Review the listed failures:\n" + joined;
+
     if (lower.includes("target text not found")) {
-      return new NodeApiError(
-        this.getNode(),
-        { message: joined } as JsonObject,
-        {
-          message: "An edit could not be applied: target text not found.",
-          description:
-            "Verify the exact `target_text` string — including punctuation and whitespace — against the document. Use the Extract Markdown operation to inspect what the engine sees.",
-        },
-      );
+      messageContext = "An edit could not be applied: target text not found.";
+      descriptionContext =
+        "Verify the exact `target_text` string — including punctuation and whitespace — against the document. Check the individual failures:\n" +
+        joined;
+    } else if (lower.includes("ambiguous match")) {
+      messageContext = "An edit matched multiple locations in the document.";
+      descriptionContext =
+        "Provide more surrounding context in `target_text` to uniquely identify the location:\n" +
+        joined;
+    } else if (lower.includes("read-only") || lower.includes("readonly")) {
+      messageContext = "An edit targeted a read-only structural element.";
+      descriptionContext =
+        "Cross-references, footnotes, hyperlinks, and the Structural Appendix cannot be modified via text replacement:\n" +
+        joined;
+    } else if (lower.includes("another author") || lower.includes("nested")) {
+      messageContext =
+        "An edit overlaps with a pending tracked change by another author.";
+      descriptionContext =
+        "Accept or reject the conflicting change first, or scope your edit outside of it:\n" +
+        joined;
     }
-    if (lower.includes("ambiguous match")) {
-      return new NodeApiError(
-        this.getNode(),
-        { message: joined } as JsonObject,
-        {
-          message: "An edit matched multiple locations in the document.",
-          description:
-            "Provide more surrounding context in `target_text` to uniquely identify the location.",
-        },
-      );
-    }
-    if (lower.includes("read-only") || lower.includes("readonly")) {
-      return new NodeApiError(
-        this.getNode(),
-        { message: joined } as JsonObject,
-        {
-          message: "An edit targeted a read-only structural element.",
-          description:
-            "Cross-references, internal anchors, hyperlinks, and the Structural Appendix cannot be modified via text replacement. Restrict edits to the document body.",
-        },
-      );
-    }
-    if (lower.includes("another author") || lower.includes("nested")) {
-      return new NodeApiError(
-        this.getNode(),
-        { message: joined } as JsonObject,
-        {
-          message:
-            "An edit overlaps with a pending tracked change by another author.",
-          description:
-            "Accept or reject the conflicting change first, or scope your edit outside of it.",
-        },
-      );
-    }
-    return new NodeApiError(this.getNode(), { message: joined } as JsonObject, {
-      message: "Batch validation failed.",
-      description: joined,
-    });
+
+    return new NodeApiError(
+      this.getNode(),
+      { message: joined, errors } as JsonObject,
+      {
+        message: messageContext,
+        description: descriptionContext,
+        itemIndex, // Applied to pass node-operation-error-itemindex rule
+      },
+    );
   }
 
   if (
@@ -188,11 +178,13 @@ export function mapAdeuErrorToNodeApiError(
       message: "The document could not be opened.",
       description:
         "Verify the input binary is a valid .docx file (not .doc, .pdf, or another format).",
+      itemIndex, // Applied to pass node-operation-error-itemindex rule
     });
   }
 
   return new NodeApiError(this.getNode(), { message } as JsonObject, {
     message: "Adeu engine error.",
     description: message,
+    itemIndex, // Applied to pass node-operation-error-itemindex rule
   });
 }

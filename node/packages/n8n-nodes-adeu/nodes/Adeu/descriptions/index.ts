@@ -18,13 +18,6 @@ export const documentDescription: INodeProperties[] = [
     },
     options: [
       {
-        name: "Extract Markdown",
-        value: "extractMarkdown",
-        action: "Extract a Markdown representation of the document",
-        description:
-          "Project the .docx into LLM-friendly CriticMarkup with a Semantic Appendix",
-      },
-      {
         name: "Apply Edits",
         value: "applyEdits",
         action: "Apply a batch of tracked changes to the document",
@@ -32,11 +25,11 @@ export const documentDescription: INodeProperties[] = [
           "Apply ModifyText, AcceptChange, RejectChange, ReplyComment, InsertTableRow, and DeleteTableRow operations",
       },
       {
-        name: "Generate Diff",
-        value: "generateDiff",
-        action: "Generate a Word Patch diff between two documents",
+        name: "Extract Markdown",
+        value: "extractMarkdown",
+        action: "Extract a Markdown representation of the document",
         description:
-          "Produce a sub-word level @@ Word Patch @@ diff between two .docx documents",
+          "Project the .docx into LLM-friendly CriticMarkup with a Semantic Appendix",
       },
       {
         name: "Finalize Document",
@@ -44,6 +37,13 @@ export const documentDescription: INodeProperties[] = [
         action: "Sanitize metadata and lock the document for distribution",
         description:
           "Strip author names, internal IDs, and pending markup, then optionally lock the document read-only",
+      },
+      {
+        name: "Generate Diff",
+        value: "generateDiff",
+        action: "Generate a Word Patch diff between two documents",
+        description:
+          "Produce a sub-word level @@ Word Patch @@ diff between two .docx documents",
       },
     ],
     default: "extractMarkdown",
