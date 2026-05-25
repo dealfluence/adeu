@@ -35,7 +35,8 @@ export class Adeu implements INodeType {
       "type='insert_row' requires target_text (string), position ('above' or 'below'), and cells (array of strings). " +
       "type='delete_row' requires target_text (string). " +
       "Never wrap new_text in CriticMarkup tags like {++ ++} or {-- --}; the engine applies tracking automatically. " +
-      "Never target text already wrapped in another author's pending tracked change; accept or reject their change first by target_id.",
+      "Never target text already wrapped in another author's pending tracked change; accept or reject their change first by target_id. " +
+      "Binary handling for AI Agents: this tool cannot receive .docx files through JSON arguments because JSON cannot carry binary data. To process a document, set 'Document Source' to 'From Another Node' and 'Source Node Name' to the exact name of the workflow node that produced the .docx binary (typically the trigger node, e.g. 'Gmail Trigger', 'When clicking Test workflow', or an HTTP Request node configured to download a file). Node names are case-sensitive and must match the canvas label exactly. For the Generate Diff operation, set both 'Original Source Node Name' and 'Modified Source Node Name' independently.",
     defaults: {
       name: "Adeu",
     },

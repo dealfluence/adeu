@@ -12,9 +12,10 @@ import {
 } from "@adeu/core";
 
 import {
+  type BinarySource,
   DOCX_MIME_TYPE,
   buildOutputFileName,
-  getDocxBuffer,
+  getDocxBufferFromSource,
   getNestedProperty,
   parseJsonParameter,
 } from "../GenericFunctions";
@@ -28,7 +29,7 @@ export const applyEditsDescription: INodeProperties[] = [
     required: true,
     placeholder: "e.g. data",
     description:
-      "Name of the binary property on the incoming item that holds the .docx file (string, e.g. 'data'). The file must be a valid .docx.",
+      "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. The file must be a valid .docx.",
     displayOptions: {
       show: {
         resource: ["document"],
@@ -198,10 +199,29 @@ export async function executeApplyEdits(
     throw new Error("Changes must be an array of DocumentChange objects.");
   }
 
-  const { buffer, fileName } = await getDocxBuffer.call(
+  const documentSource = this.getNodeParameter(
+    "documentSource",
+    itemIndex,
+    "fromInput",
+  ) as "fromInput" | "fromNode";
+
+  const source: BinarySource =
+    documentSource === "fromNode"
+      ? {
+          mode: "fromNode",
+          sourceNodeName: this.getNodeParameter(
+            "sourceNodeName",
+            itemIndex,
+            "",
+          ) as string,
+          binaryPropertyName: inputBinaryPropertyName,
+        }
+      : { mode: "fromInput", binaryPropertyName: inputBinaryPropertyName };
+
+  const { buffer, fileName } = await getDocxBufferFromSource.call(
     this,
     itemIndex,
-    inputBinaryPropertyName,
+    source,
   );
 
   const doc = await DocumentObject.load(buffer);

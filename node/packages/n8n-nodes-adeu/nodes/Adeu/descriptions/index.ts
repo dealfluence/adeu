@@ -48,6 +48,51 @@ export const documentDescription: INodeProperties[] = [
     ],
     default: "extractMarkdown",
   },
+  {
+    displayName: "Document Source",
+    name: "documentSource",
+    type: "options",
+    default: "fromInput",
+    description:
+      "Where to read the .docx file from. 'From Connected Input' reads the binary on the current input item — use this in deterministic pipelines (e.g. Gmail Trigger → Adeu → Gmail Reply). 'From Another Node' fetches the binary from a named upstream node by name — use this when the Adeu node is called as an AI Agent tool, since the Agent cannot pass binary data through JSON arguments.",
+    options: [
+      {
+        name: "From Connected Input",
+        value: "fromInput",
+        description:
+          "Read the binary from the current item's binary attachment. Default behavior for deterministic workflows.",
+      },
+      {
+        name: "From Another Node",
+        value: "fromNode",
+        description:
+          "Read the binary from a named upstream node. Required when this node is used as an AI Agent tool.",
+      },
+    ],
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits", "extractMarkdown", "finalizeDocument"],
+      },
+    },
+  },
+  {
+    displayName: "Source Node Name",
+    name: "sourceNodeName",
+    type: "string",
+    default: "",
+    required: true,
+    placeholder: "e.g. Gmail Trigger",
+    description:
+      "Exact name of the node in this workflow whose output binary holds the .docx file (string, case-sensitive). Must match the node's label in the canvas exactly, including spaces and punctuation. The referenced node must have already executed in this run and produced binary output on the property named in 'Input Binary Property'.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits", "extractMarkdown", "finalizeDocument"],
+        documentSource: ["fromNode"],
+      },
+    },
+  },
   ...extractMarkdownDescription,
   ...applyEditsDescription,
   ...generateDiffDescription,

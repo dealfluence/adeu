@@ -6,9 +6,10 @@ import type {
 import { DocumentObject, finalize_document } from "@adeu/core";
 
 import {
+  type BinarySource,
   DOCX_MIME_TYPE,
   buildOutputFileName,
-  getDocxBuffer,
+  getDocxBufferFromSource,
 } from "../GenericFunctions";
 
 export const finalizeDocumentDescription: INodeProperties[] = [
@@ -20,7 +21,7 @@ export const finalizeDocumentDescription: INodeProperties[] = [
     required: true,
     placeholder: "e.g. data",
     description:
-      "Name of the binary property on the incoming item that holds the .docx file (string, e.g. 'data'). The file must be a valid .docx.",
+      "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. The file must be a valid .docx.",
     displayOptions: {
       show: {
         resource: ["document"],
@@ -164,12 +165,30 @@ export async function executeFinalizeDocument(
   const protectionMode: "read_only" | null =
     protectionParam === "read_only" ? "read_only" : null;
 
-  const { buffer, fileName } = await getDocxBuffer.call(
+  const documentSource = this.getNodeParameter(
+    "documentSource",
+    itemIndex,
+    "fromInput",
+  ) as "fromInput" | "fromNode";
+
+  const source: BinarySource =
+    documentSource === "fromNode"
+      ? {
+          mode: "fromNode",
+          sourceNodeName: this.getNodeParameter(
+            "sourceNodeName",
+            itemIndex,
+            "",
+          ) as string,
+          binaryPropertyName: inputBinaryPropertyName,
+        }
+      : { mode: "fromInput", binaryPropertyName: inputBinaryPropertyName };
+
+  const { buffer, fileName } = await getDocxBufferFromSource.call(
     this,
     itemIndex,
-    inputBinaryPropertyName,
+    source,
   );
-
   const doc = await DocumentObject.load(buffer);
   const { reportText, outBuffer } = await finalize_document(doc, {
     filename: fileName,

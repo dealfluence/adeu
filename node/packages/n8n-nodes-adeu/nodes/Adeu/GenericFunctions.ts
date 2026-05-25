@@ -1,6 +1,6 @@
 // FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/GenericFunctions.ts
 
-import type { IExecuteFunctions, JsonObject } from "n8n-workflow";
+import type { IExecuteFunctions, IBinaryData, JsonObject } from "n8n-workflow";
 import { NodeApiError, NodeOperationError } from "n8n-workflow";
 
 export const DOCX_MIME_TYPE =
@@ -54,7 +54,149 @@ export async function getDocxBuffer(
 
   return { buffer, fileName };
 }
+/**
+ * Discriminated union describing where to read a .docx binary from.
+ * - `fromInput`: current item's `.binary[binaryPropertyName]` (default deterministic behavior)
+ * - `fromNode`: a sibling node's output, resolved via `evaluateExpression`. Used by
+ *   AI Agent tool calls, which cannot pass binary data through JSON arguments.
+ */
+export type BinarySource =
+  | { mode: "fromInput"; binaryPropertyName: string }
+  | {
+      mode: "fromNode";
+      sourceNodeName: string;
+      binaryPropertyName: string;
+    };
 
+/**
+ * Resolves a .docx binary from either the current item or a named upstream node.
+ * Throws `NodeApiError` with AI-Agent-readable messages on every failure path,
+ * so an Agent can self-correct on the next tool call.
+ */
+export async function getDocxBufferFromSource(
+  this: IExecuteFunctions,
+  itemIndex: number,
+  source: BinarySource,
+): Promise<{ buffer: Buffer; fileName: string }> {
+  if (source.mode === "fromInput") {
+    return getDocxBuffer.call(this, itemIndex, source.binaryPropertyName);
+  }
+
+  // --- fromNode branch ---
+  const { sourceNodeName, binaryPropertyName } = source;
+
+  // Pre-validate: empty source node name is the #1 expected mistake for AI Agents
+  // that haven't been told to set the source node correctly.
+  if (!sourceNodeName || sourceNodeName.trim() === "") {
+    throw new NodeApiError(
+      this.getNode(),
+      { message: "Source Node Name is empty" } as JsonObject,
+      {
+        message:
+          "Source Node Name is required when Document Source is 'From Another Node'.",
+        description:
+          "Set 'Source Node Name' to the exact name of the node in this workflow whose output holds the .docx binary (e.g. the trigger node). Node names are case-sensitive and must match the node label in the canvas exactly.",
+        itemIndex,
+      },
+    );
+  }
+
+  // Resolve the binary metadata via expression. We escape single quotes in the
+  // node name to prevent expression injection (n8n node names can legally
+  // contain apostrophes).
+  const escapedNodeName = sourceNodeName.replace(/'/g, "\\'");
+  const expression = `{{ $('${escapedNodeName}').first().binary.${binaryPropertyName} }}`;
+
+  let resolvedBinaryBag: IBinaryData | undefined;
+  try {
+    resolvedBinaryBag = this.evaluateExpression(expression, itemIndex) as
+      | IBinaryData
+      | undefined;
+  } catch (err) {
+    throw new NodeApiError(
+      this.getNode(),
+      { message: (err as Error).message } as JsonObject,
+      {
+        message: `Failed to resolve binary from source node '${sourceNodeName}'.`,
+        description:
+          `Could not evaluate '${expression}'. Verify the source node name is exactly correct (case-sensitive, including spaces and punctuation). ` +
+          `Underlying error: ${(err as Error).message}`,
+        itemIndex,
+      },
+    );
+  }
+
+  if (
+    resolvedBinaryBag === undefined ||
+    resolvedBinaryBag === null ||
+    typeof resolvedBinaryBag !== "object"
+  ) {
+    const typeofValue = typeof resolvedBinaryBag;
+    const stringifiedValue =
+      resolvedBinaryBag !== undefined
+        ? JSON.stringify(resolvedBinaryBag)
+        : "undefined";
+    throw new NodeApiError(
+      this.getNode(),
+      { message: "Binary property not found" } as JsonObject,
+      {
+        message: `Source node '${sourceNodeName}' has no binary on property '${binaryPropertyName}'.`,
+        description: `Verify that the source node outputs the .docx on the expected property '${binaryPropertyName}'. (Resolved Type: ${typeofValue}, Resolved Value: ${stringifiedValue})`,
+        itemIndex,
+      },
+    );
+  }
+
+  const binaryData = resolvedBinaryBag;
+  if (!binaryData) {
+    const availableProps = Object.keys(resolvedBinaryBag);
+    const availableList =
+      availableProps.length > 0
+        ? `Available binary properties on '${sourceNodeName}': ${availableProps.map((p) => `'${p}'`).join(", ")}.`
+        : `Source node '${sourceNodeName}' has no binary properties at all.`;
+    throw new NodeApiError(
+      this.getNode(),
+      { message: "Binary property not found" } as JsonObject,
+      {
+        message: `Source node '${sourceNodeName}' has no binary on property '${binaryPropertyName}'.`,
+        description: `${availableList} Update 'Binary Property Name' to one of the available property names, or change the source node so it outputs the .docx on the expected property.`,
+        itemIndex,
+      },
+    );
+  }
+
+  // Decode the binary. n8n supports two storage modes:
+  // - External storage (S3/filesystem): `id` is set, `data` is empty.
+  // - Inline storage (default): `data` holds base64 directly.
+  let buffer: Buffer;
+  try {
+    if (binaryData.id) {
+      const stream = await this.helpers.getBinaryStream(binaryData.id);
+      buffer = await this.helpers.binaryToBuffer(stream);
+    } else if (binaryData.data) {
+      buffer = Buffer.from(binaryData.data, "base64");
+    } else {
+      throw new Error(
+        "Resolved binary metadata has neither an 'id' nor 'data' field.",
+      );
+    }
+  } catch (err) {
+    throw new NodeApiError(
+      this.getNode(),
+      { message: (err as Error).message } as JsonObject,
+      {
+        message: `Failed to read binary content from source node '${sourceNodeName}'.`,
+        description:
+          `The binary metadata was found on property '${binaryPropertyName}', but its contents could not be loaded. ` +
+          `Underlying error: ${(err as Error).message}`,
+        itemIndex,
+      },
+    );
+  }
+
+  const fileName = binaryData.fileName ?? "document.docx";
+  return { buffer, fileName };
+}
 /**
  * Builds a default output filename from an input filename and a suffix.
  */

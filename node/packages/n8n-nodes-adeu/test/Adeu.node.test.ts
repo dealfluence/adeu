@@ -70,6 +70,7 @@ function createMockExecuteFunctions(): IExecuteFunctions {
     continueOnFail: vi.fn().mockReturnValue(false),
     getInputData: vi.fn(),
     getNodeParameter: vi.fn(),
+    evaluateExpression: vi.fn(),
     helpers: {
       prepareBinaryData: vi.fn().mockResolvedValue({
         data: "mock-base64-string",
@@ -78,10 +79,11 @@ function createMockExecuteFunctions(): IExecuteFunctions {
         fileName: "output.docx",
       }),
       getBinaryDataBuffer: vi.fn(),
+      getBinaryStream: vi.fn(),
+      binaryToBuffer: vi.fn(),
     },
   } as unknown as IExecuteFunctions;
 }
-
 describe("Test Adeu n8n Node", () => {
   let node: Adeu;
   let mockExecuteFunctions: ReturnType<typeof createMockExecuteFunctions>;
@@ -260,6 +262,99 @@ describe("Test Adeu n8n Node", () => {
       expect(result[0][0].json).toHaveProperty("error");
       expect((result[0][0].json.error as string).toLowerCase()).toContain(
         "no binary data found",
+      );
+    });
+  });
+  describe("Document Source: fromNode (AI Agent tool path)", () => {
+    beforeEach(() => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([{ json: {} }]);
+
+      // Mock evaluateExpression to return an inline binary metadata object
+      // pointing at the golden buffer.
+      (
+        mockExecuteFunctions.evaluateExpression as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        data: {
+          data: goldenBuffer.toString("base64"),
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          fileName: "from-trigger.docx",
+        },
+      });
+
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractMarkdown";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "cleanView") return false;
+        if (paramName === "documentSource") return "fromNode";
+        if (paramName === "sourceNodeName") return "Trigger";
+        return fallback;
+      });
+    });
+
+    it("should resolve binary from a sibling node and extract markdown successfully", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toHaveLength(1);
+      expect(result[0][0].json).toHaveProperty("fileName", "from-trigger.docx");
+      expect(result[0][0].json).toHaveProperty("markdown");
+      expect(typeof result[0][0].json.markdown).toBe("string");
+      expect(
+        mockExecuteFunctions.evaluateExpression as ReturnType<typeof vi.fn>,
+      ).toHaveBeenCalledWith(
+        "{{ $('Trigger').first().binary.data }}",
+        expect.any(Number),
+      );
+    });
+    it("should throw a clear NodeApiError when the source node has no output", async () => {
+      (
+        mockExecuteFunctions.evaluateExpression as ReturnType<typeof vi.fn>
+      ).mockReturnValue(undefined);
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
+        /Source node 'Trigger' has no output/i,
+      );
+    });
+
+    it("should throw a clear NodeApiError when the binary property is missing on the source node", async () => {
+      (
+        mockExecuteFunctions.evaluateExpression as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        // 'data' is missing; only 'attachment_0' is present
+        attachment_0: {
+          data: goldenBuffer.toString("base64"),
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          fileName: "from-trigger.docx",
+        },
+      });
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
+        /no binary on property 'data'/i,
+      );
+    });
+
+    it("should throw a clear NodeApiError when Source Node Name is empty", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractMarkdown";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "cleanView") return false;
+        if (paramName === "documentSource") return "fromNode";
+        if (paramName === "sourceNodeName") return ""; // ← empty
+        return fallback;
+      });
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
+        /Source Node Name is required/i,
       );
     });
   });

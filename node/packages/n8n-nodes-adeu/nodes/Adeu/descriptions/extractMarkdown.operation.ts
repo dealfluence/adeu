@@ -5,8 +5,10 @@ import type {
 } from "n8n-workflow";
 import { extractTextFromBuffer } from "@adeu/core";
 
-import { getDocxBuffer } from "../GenericFunctions";
-
+import {
+  type BinarySource,
+  getDocxBufferFromSource,
+} from "../GenericFunctions";
 export const extractMarkdownDescription: INodeProperties[] = [
   {
     displayName: "Input Binary Property",
@@ -16,7 +18,7 @@ export const extractMarkdownDescription: INodeProperties[] = [
     required: true,
     placeholder: "e.g. data",
     description:
-      "Name of the binary property on the incoming item that holds the .docx file. Must reference an existing binary attachment (string, e.g. 'data'). The file must be a valid .docx (not .doc, .pdf, or another format).",
+      "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. Must be a valid .docx (not .doc, .pdf, or another format).",
     displayOptions: {
       show: {
         resource: ["document"],
@@ -50,10 +52,29 @@ export async function executeExtractMarkdown(
   ) as string;
   const cleanView = this.getNodeParameter("cleanView", itemIndex) as boolean;
 
-  const { buffer, fileName } = await getDocxBuffer.call(
+  const documentSource = this.getNodeParameter(
+    "documentSource",
+    itemIndex,
+    "fromInput",
+  ) as "fromInput" | "fromNode";
+
+  const source: BinarySource =
+    documentSource === "fromNode"
+      ? {
+          mode: "fromNode",
+          sourceNodeName: this.getNodeParameter(
+            "sourceNodeName",
+            itemIndex,
+            "",
+          ) as string,
+          binaryPropertyName,
+        }
+      : { mode: "fromInput", binaryPropertyName };
+
+  const { buffer, fileName } = await getDocxBufferFromSource.call(
     this,
     itemIndex,
-    binaryPropertyName,
+    source,
   );
   const markdown = await extractTextFromBuffer(buffer, cleanView);
 
