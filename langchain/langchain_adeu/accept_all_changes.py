@@ -12,14 +12,13 @@ tracked-change history remains. The input document is left untouched.
 """
 
 from __future__ import annotations
-from adeu import RedlineEngine
-from io import BytesIO
-
 
 import asyncio
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
+from adeu import RedlineEngine
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,9 +31,7 @@ class AdeuAcceptAllChangesInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     file_path: str = Field(
-        description=(
-            "Absolute path to the .docx file containing tracked changes " "to accept."
-        ),
+        description=("Absolute path to the .docx file containing tracked changes to accept."),
     )
     output_path: str | None = Field(
         default=None,

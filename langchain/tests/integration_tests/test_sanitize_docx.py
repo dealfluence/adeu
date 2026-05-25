@@ -43,9 +43,7 @@ class TestAdeuSanitizeDocxStandard(ToolsIntegrationTests):
 
 
 class TestAdeuSanitizeDocxBehavior:
-    def test_full_sanitize_with_accept_all_writes_clean_file(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_full_sanitize_with_accept_all_writes_clean_file(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuSanitizeDocx()
         tool_call = {
             "name": "adeu_sanitize_docx",
@@ -76,13 +74,10 @@ class TestAdeuSanitizeDocxBehavior:
                 }
             )
         assert not output_path.exists(), (
-            "Output file was written despite SanitizeError — sanitize "
-            "engine failed but artifact still leaked."
+            "Output file was written despite SanitizeError — sanitize engine failed but artifact still leaked."
         )
 
-    def test_keep_markup_mode_writes_redline(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_keep_markup_mode_writes_redline(self, working_docx: Path, output_path: Path) -> None:
         # keep_markup=True doesn't require accept_all because tracked
         # changes are explicitly preserved.
         tool = AdeuSanitizeDocx()

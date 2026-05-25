@@ -49,9 +49,7 @@ class TestAdeuDiffDocxStandard(ToolsIntegrationTests):
 
 
 class TestAdeuDiffDocxBehavior:
-    def test_identical_files_returns_no_differences(
-        self, working_docx: Path, golden_docx_path: Path
-    ) -> None:
+    def test_identical_files_returns_no_differences(self, working_docx: Path, golden_docx_path: Path) -> None:
 
         tool = AdeuDiffDocx()
         result = tool.invoke(
@@ -102,10 +100,7 @@ class TestAdeuDiffDocxBehavior:
         # met. The test is asserting diff behavior, not apply behavior,
         # so we skip rather than fail in that case.
         if "Batch rejected" in apply_result:
-            pytest.skip(
-                f"apply_changes precondition failed: {apply_result[:200]} — "
-                "cannot run diff behavior test."
-            )
+            pytest.skip(f"apply_changes precondition failed: {apply_result[:200]} — cannot run diff behavior test.")
 
         diff_tool = AdeuDiffDocx()
         diff_result = diff_tool.invoke(
@@ -126,9 +121,7 @@ class TestAdeuDiffDocxBehavior:
         assert "+ agreement" in diff_result or "+agreement" in diff_result
 
     @pytest.mark.asyncio
-    async def test_ainvoke_matches_invoke(
-        self, working_docx: Path, golden_docx_path: Path
-    ) -> None:
+    async def test_ainvoke_matches_invoke(self, working_docx: Path, golden_docx_path: Path) -> None:
         tool = AdeuDiffDocx()
         args = {
             "original_path": str(golden_docx_path),

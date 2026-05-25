@@ -27,17 +27,16 @@ Three behaviors distinguish this tool from the others:
 """
 
 from __future__ import annotations
-from io import BytesIO
 
-from adeu.models import DocumentChange
-from adeu.redline.engine import BatchValidationError, RedlineEngine
-from pydantic import TypeAdapter, ValidationError
 import asyncio
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
+from adeu.models import DocumentChange
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 from langchain_core.tools import BaseTool, ToolException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
 
@@ -144,8 +143,7 @@ class AdeuApplyChanges(BaseTool):
 
         if not author_name.strip():
             raise ToolException(
-                "author_name cannot be empty or whitespace-only. "
-                "Provide a non-blank identifier such as 'AI Reviewer'."
+                "author_name cannot be empty or whitespace-only. Provide a non-blank identifier such as 'AI Reviewer'."
             )
 
         if not changes:
@@ -175,13 +173,8 @@ class AdeuApplyChanges(BaseTool):
         try:
             stats = engine.process_batch(validated_changes)
         except BatchValidationError as e:
-
-            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(
-                e.errors
-            )
-            return content, _failure_artifact(
-                source, output_path, author_name, e.errors
-            )
+            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
+            return content, _failure_artifact(source, output_path, author_name, e.errors)
 
         # Success path: write the output and return per-edit stats.
         result_stream = engine.save_to_stream()
@@ -220,9 +213,7 @@ class AdeuApplyChanges(BaseTool):
         changes: list[dict[str, Any]],
         output_path: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(
-            self._run, file_path, author_name, changes, output_path
-        )
+        return await asyncio.to_thread(self._run, file_path, author_name, changes, output_path)
 
 
 def _resolve_output_path(source: Path, requested: str | None) -> Path:
@@ -243,9 +234,7 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not (
-        source.stem.endswith("_processed") or source.stem.endswith("_redlined")
-    ):
+    if target == source and not (source.stem.endswith("_processed") or source.stem.endswith("_redlined")):
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "
@@ -288,11 +277,7 @@ def _format_validation_failure_content(e: Any) -> str:
     line that frames this as a recoverable validation step the LLM can
     fix and retry, not a generic tool failure.
     """
-    return (
-        "Batch rejected during schema validation. Fix the per-field errors "
-        "below and resubmit:\n\n"
-        f"{e}"
-    )
+    return f"Batch rejected during schema validation. Fix the per-field errors below and resubmit:\n\n{e}"
 
 
 __all__ = ["AdeuApplyChanges", "AdeuApplyChangesInput"]

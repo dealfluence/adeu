@@ -54,9 +54,7 @@ class TestAdeuApplyChangesStandard(ToolsIntegrationTests):
 
 
 class TestAdeuApplyChangesBehavior:
-    def test_successful_modify_writes_file_and_artifact(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_successful_modify_writes_file_and_artifact(self, working_docx: Path, output_path: Path) -> None:
         # _UNIQUE_TARGET appears once in golden.docx outside any
         # CriticMarkup wrapper, so the edit must succeed cleanly.
         tool = AdeuApplyChanges()
@@ -90,9 +88,7 @@ class TestAdeuApplyChangesBehavior:
         assert msg.artifact["output_path"] == str(output_path)
         assert output_path.exists()
 
-    def test_modification_is_visible_in_output(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_modification_is_visible_in_output(self, working_docx: Path, output_path: Path) -> None:
         # Round-trip: apply edit → read result → verify the new text
         # appears in the projected output (as a tracked insertion).
         apply_tool = AdeuApplyChanges()
@@ -114,19 +110,14 @@ class TestAdeuApplyChangesBehavior:
         # meaningless. Surface the rejection reason rather than letting
         # the next read fail with a confusing "file not found".
         assert output_path.exists(), (
-            f"apply_changes did not write an output file. Content head: "
-            f"{apply_msg_content[:300]}"
+            f"apply_changes did not write an output file. Content head: {apply_msg_content[:300]}"
         )
 
         read_tool = AdeuReadDocx()
         raw = read_tool.invoke({"file_path": str(output_path), "clean_view": False})
-        assert _REPLACEMENT in raw, (
-            f"New text {_REPLACEMENT!r} not found in read-back of edited " "file."
-        )
+        assert _REPLACEMENT in raw, f"New text {_REPLACEMENT!r} not found in read-back of edited file."
 
-    def test_input_file_is_not_modified(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_input_file_is_not_modified(self, working_docx: Path, output_path: Path) -> None:
         original_bytes = working_docx.read_bytes()
         tool = AdeuApplyChanges()
         tool.invoke(
@@ -145,9 +136,7 @@ class TestAdeuApplyChangesBehavior:
         )
         assert working_docx.read_bytes() == original_bytes
 
-    def test_batch_validation_error_returns_failure_artifact(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_batch_validation_error_returns_failure_artifact(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
         tool_call = {
             "name": "adeu_apply_changes",
@@ -173,9 +162,7 @@ class TestAdeuApplyChangesBehavior:
         assert "Batch rejected" in msg.content
         assert not output_path.exists()
 
-    def test_schema_validation_failure_returns_failure_artifact(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_schema_validation_failure_returns_failure_artifact(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
         tool_call = {
             "name": "adeu_apply_changes",
@@ -195,9 +182,7 @@ class TestAdeuApplyChangesBehavior:
         assert not output_path.exists()
 
     @pytest.mark.asyncio
-    async def test_ainvoke_applies_edit(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    async def test_ainvoke_applies_edit(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
         result = await tool.ainvoke(
             {
@@ -213,7 +198,5 @@ class TestAdeuApplyChangesBehavior:
                 "output_path": str(output_path),
             }
         )
-        assert output_path.exists(), (
-            f"ainvoke did not write an output file. Result head: " f"{result[:300]}"
-        )
+        assert output_path.exists(), f"ainvoke did not write an output file. Result head: {result[:300]}"
         assert "Batch complete" in result

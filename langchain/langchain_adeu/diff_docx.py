@@ -9,13 +9,12 @@ hunks than about line-level patches that lump unrelated edits together.
 """
 
 from __future__ import annotations
-from adeu.diff import generate_edits_from_text
-
 
 import asyncio
 from pathlib import Path
 from typing import Literal
 
+from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 
 # Intentional import from a non-public path: `_create_diff_output` is the
@@ -24,7 +23,7 @@ from adeu.ingest import extract_text_from_stream
 # the formatter; in a future Adeu release this helper should be promoted
 # to `adeu.diff` proper. Track in the adeu monorepo when that happens.
 from adeu.mcp_components.tools.document import _create_diff_output
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
@@ -36,9 +35,7 @@ class AdeuDiffDocxInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     original_path: str = Field(
-        description=(
-            "Absolute path to the baseline .docx file (the 'before' document)."
-        ),
+        description=("Absolute path to the baseline .docx file (the 'before' document)."),
     )
     modified_path: str = Field(
         description=("Absolute path to the new .docx file (the 'after' document)."),

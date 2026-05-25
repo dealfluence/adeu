@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.tools import ToolException
+from pydantic import ValidationError
 
 from langchain_adeu import AdeuReadDocx, AdeuReadDocxInput
 
@@ -26,9 +27,7 @@ class TestAdeuReadDocxSchema:
 
     def test_description_is_non_trivial(self) -> None:
         tool = AdeuReadDocx()
-        assert (
-            len(tool.description) > 100
-        )  # Sanity floor — must actually explain itself.
+        assert len(tool.description) > 100  # Sanity floor — must actually explain itself.
         assert "CriticMarkup" in tool.description  # The critical concept must be named.
 
     def test_args_schema_is_pydantic_model(self) -> None:
@@ -43,9 +42,7 @@ class TestAdeuReadDocxSchema:
     def test_args_schema_rejects_extra_fields(self) -> None:
 
         with pytest.raises(ValueError):
-            AdeuReadDocxInput.model_validate(
-                {"file_path": "/tmp/x.docx", "bogus_param": True}
-            )
+            AdeuReadDocxInput.model_validate({"file_path": "/tmp/x.docx", "bogus_param": True})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         # If this assertion breaks, our _run signature also needs to change
@@ -76,19 +73,17 @@ class TestAdeuReadDocxValidation:
     def test_page_must_be_positive(self) -> None:
         # ge=1 on the field schema; Pydantic raises ValidationError on invoke.
         tool = AdeuReadDocx()
-        with pytest.raises(
-            Exception
-        ):  # noqa: B017  Pydantic raises ValidationError under the hood.
+        with pytest.raises(ValidationError):
             tool.invoke({"file_path": "/tmp/x.docx", "page": 0})
 
     def test_outline_max_level_bounds(self) -> None:
         tool = AdeuReadDocx()
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(ValidationError):
             tool.invoke({"file_path": "/tmp/x.docx", "outline_max_level": 0})
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(ValidationError):
             tool.invoke({"file_path": "/tmp/x.docx", "outline_max_level": 7})
 
     def test_mode_must_be_valid_literal(self) -> None:
         tool = AdeuReadDocx()
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(ValidationError):
             tool.invoke({"file_path": "/tmp/x.docx", "mode": "unsupported_mode"})

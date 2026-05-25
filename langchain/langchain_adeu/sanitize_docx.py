@@ -20,13 +20,13 @@ human-readable report text.
 """
 
 from __future__ import annotations
-from adeu.sanitize import sanitize_docx as _sanitize_docx
 
 import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
+from adeu.sanitize import sanitize_docx as _sanitize_docx
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -133,9 +133,7 @@ class AdeuSanitizeDocx(BaseTool):
 
         baseline_resolved: Path | None = None
         if baseline_path is not None:
-            baseline_resolved = validate_docx_path(
-                baseline_path, label="baseline document"
-            )
+            baseline_resolved = validate_docx_path(baseline_path, label="baseline document")
 
         target.parent.mkdir(parents=True, exist_ok=True)
         result = _sanitize_docx(

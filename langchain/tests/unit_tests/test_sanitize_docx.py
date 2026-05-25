@@ -38,9 +38,7 @@ class TestAdeuSanitizeDocxSchema:
 
     def test_args_schema_rejects_extra_fields(self) -> None:
         with pytest.raises(ValueError):
-            AdeuSanitizeDocxInput.model_validate(
-                {"file_path": "/a.docx", "preset": "loose"}
-            )
+            AdeuSanitizeDocxInput.model_validate({"file_path": "/a.docx", "preset": "loose"})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         tool = AdeuSanitizeDocx()

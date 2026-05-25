@@ -66,14 +66,11 @@ class TestAdeuReadDocxBehavior:
         result = tool.invoke({"file_path": str(golden_docx_path)})
         assert isinstance(result, str)
         assert "TextContent(" not in result, (
-            "Output contains FastMCP block repr — content extraction "
-            "regressed. Expected plain Markdown string."
+            "Output contains FastMCP block repr — content extraction regressed. Expected plain Markdown string."
         )
         assert "File Path:" in result, "Expected the file-path hint prefix."
 
-    def test_tool_call_returns_artifact_with_expected_keys(
-        self, golden_docx_path: Path
-    ) -> None:
+    def test_tool_call_returns_artifact_with_expected_keys(self, golden_docx_path: Path) -> None:
         # ToolCall invoke is the path agents actually take. Verify the
         # ToolMessage carries the artifact dict with the contract keys.
         tool = AdeuReadDocx()
@@ -100,9 +97,7 @@ class TestAdeuReadDocxBehavior:
                 f"token {token!r}; expected fully accepted text."
             )
 
-    def test_raw_view_includes_critic_markup_when_present(
-        self, golden_docx_path: Path
-    ) -> None:
+    def test_raw_view_includes_critic_markup_when_present(self, golden_docx_path: Path) -> None:
 
         tool = AdeuReadDocx()
         raw = tool.invoke({"file_path": str(golden_docx_path), "clean_view": False})
@@ -113,14 +108,10 @@ class TestAdeuReadDocxBehavior:
             "none. Either the fixture changed or the projection broke."
         )
 
-    def test_outline_mode_returns_outline_view_banner(
-        self, golden_docx_path: Path
-    ) -> None:
+    def test_outline_mode_returns_outline_view_banner(self, golden_docx_path: Path) -> None:
         tool = AdeuReadDocx()
         result = tool.invoke({"file_path": str(golden_docx_path), "mode": "outline"})
-        assert (
-            "Outline view" in result
-        ), "Expected the outline banner to appear in mode='outline' output."
+        assert "Outline view" in result, "Expected the outline banner to appear in mode='outline' output."
 
     @pytest.mark.asyncio
     async def test_ainvoke_matches_invoke(self, golden_docx_path: Path) -> None:

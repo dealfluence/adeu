@@ -25,10 +25,7 @@ class TestAdeuAcceptAllChangesSchema:
         # no tracked-change history — this is the most important property
         # for an agent to understand before invoking.
         tool = AdeuAcceptAllChanges()
-        assert (
-            "history" in tool.description.lower()
-            or "finalized" in tool.description.lower()
-        )
+        assert "history" in tool.description.lower() or "finalized" in tool.description.lower()
 
     def test_args_schema_required_fields(self) -> None:
         # Only file_path is required; output_path has a default of None.
@@ -38,9 +35,7 @@ class TestAdeuAcceptAllChangesSchema:
     def test_args_schema_rejects_extra_fields(self) -> None:
 
         with pytest.raises(ValueError):
-            AdeuAcceptAllChangesInput.model_validate(
-                {"file_path": "/a.docx", "policy": "auto"}
-            )
+            AdeuAcceptAllChangesInput.model_validate({"file_path": "/a.docx", "policy": "auto"})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         tool = AdeuAcceptAllChanges()

@@ -87,8 +87,7 @@ class TestAdeuToolkitInstancing:
         assert first_by_name.keys() == second_by_name.keys()
         for name in first_by_name:
             assert first_by_name[name] is not second_by_name[name], (
-                f"Toolkit returned the SAME instance of {name!r} across "
-                f"two calls; expected fresh instances per call."
+                f"Toolkit returned the SAME instance of {name!r} across two calls; expected fresh instances per call."
             )
 
     def test_same_toolkit_instance_also_returns_fresh_tools(self) -> None:

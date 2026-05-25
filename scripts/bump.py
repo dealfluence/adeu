@@ -6,6 +6,7 @@ from pathlib import Path
 
 FILES_TO_BUMP = [
     "python/pyproject.toml",
+    "langchain/pyproject.toml",
     "node/packages/core/package.json",
     "node/packages/mcp-server/package.json",
     "desktop-extension/manifest.json",
@@ -118,6 +119,10 @@ def main():
     # Update uv.lock
     print("   Running 'uv lock' in python/...")
     run_cmd(["uv", "lock"], cwd="python")
+
+    # Update uv.lock in langchain/
+    print("   Running 'uv lock' in langchain/...")
+    run_cmd(["uv", "lock"], cwd="langchain")
 
     # Update package-lock.json
     print("   Running 'npm install --package-lock-only' in node/...")

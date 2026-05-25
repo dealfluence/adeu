@@ -35,6 +35,10 @@ Adeu acts as a "Virtual DOM" for DOCX files, enabling LLMs to edit documents via
     *   *Safety*: It must always create a timestamped backup (`.bak`) before modifying the user's config.
     *   *OS Agnostic*: It handles path resolution for Windows (`%APPDATA%`) and macOS (`~/Library`) automatically.
 *   **Smithery Marketplace Publishing**: To bypass the "Schema Deadlock" (Anthropic's `mcpb pack` rejects tool schemas, but Smithery's registry requires them), we use a dynamic patch strategy. `scripts/patch_smithery_mcpb.py` boots the compiled Node server, extracts live schemas via JSON-RPC (`tools/list`), and injects them into the packaged `.mcpb` manifest before publishing.
+*   **Unified Monorepo & LangChain Integration**: We maintain a dedicated `langchain-adeu` package inside `langchain/` that wraps our offline-capable core Python engine as native LangChain tools.
+    *   *Version Alignment*: To maintain a cohesive release footprint, all sub-projects (Python, Node, and LangChain) are synchronized to the exact same semantic version number via `scripts/bump.py`, which automatically triggers lockfile updates (`uv.lock` and `package-lock.json`) across workspaces.
+    *   *Hatchling Relative Workspace Sandbox*: Hatchling prohibits scanning parent relative directories outside the workspace root during isolated builds. We bypass this constraint by programmatically localizing files (e.g. copying the repository root `LICENSE` file locally into packaging subdirectories) and referencing local paths in `pyproject.toml`.
+    *   *OIDC Trusted Publishing*: In our release pipeline, package uploads to PyPI are handled securely via GitHub Actions OIDC Trusted Publishers (configured for both `adeu` and `langchain-adeu` environments), completely eliminating the storage of static credentials in GitHub Secrets.
 
 ### 5. Block-Level Parsing & Tables
 *   **Sequential Iteration**: We iterate over document elements (`w:p` and `w:tbl`) in strict XML order using `iter_block_items`. We do *not* iterate `part.paragraphs` and `part.tables` separately, as this destroys document flow (e.g., tables appearing after all text).

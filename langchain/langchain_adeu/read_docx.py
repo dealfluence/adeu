@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-from adeu.domain import build_structural_appendix
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
@@ -24,7 +23,7 @@ from adeu.mcp_components._response_builders import (
     build_paginated_response,
 )
 from docx import Document as load_document
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
@@ -171,13 +170,8 @@ class AdeuReadDocx(BaseTool):
         ui_markdown = artifact.get("markdown")
 
         if ui_markdown is None:
-
-            blocks = (
-                result.content if isinstance(result.content, list) else [result.content]
-            )
-            ui_markdown = "".join(
-                getattr(b, "text", str(b)) for b in blocks if b is not None
-            )
+            blocks = result.content if isinstance(result.content, list) else [result.content]
+            ui_markdown = "".join(getattr(b, "text", str(b)) for b in blocks if b is not None)
 
         content = f"> **File Path:** `{path}`\n\n{ui_markdown}"
 

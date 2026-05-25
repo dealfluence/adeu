@@ -18,18 +18,14 @@ from __future__ import annotations
 import functools
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from langchain_core.tools import ToolException
 
 _DOCX_SUFFIX = ".docx"
 
-F = TypeVar("F", bound=Callable[..., Any])
 
-
-def validate_path(
-    path_str: str, *, must_exist: bool = True, label: str = "path"
-) -> Path:
+def validate_path(path_str: str, *, must_exist: bool = True, label: str = "path") -> Path:
     """Validate a filesystem path string and return a resolved `Path`.
 
     Args:
@@ -51,9 +47,7 @@ def validate_path(
     try:
         p = Path(path_str).expanduser().resolve()
     except (OSError, RuntimeError) as e:
-        raise ToolException(
-            f"The {label} '{path_str}' is not a valid filesystem path: {e}"
-        ) from e
+        raise ToolException(f"The {label} '{path_str}' is not a valid filesystem path: {e}") from e
 
     if must_exist and not p.exists():
         raise ToolException(f"The {label} does not exist: {p}")
@@ -61,9 +55,7 @@ def validate_path(
     return p
 
 
-def validate_docx_path(
-    path_str: str, *, must_exist: bool = True, label: str = "DOCX file"
-) -> Path:
+def validate_docx_path(path_str: str, *, must_exist: bool = True, label: str = "DOCX file") -> Path:
     """Validate a path that must point to a `.docx` file.
 
     Performs the same checks as `validate_path`, then verifies the suffix.
@@ -95,7 +87,7 @@ def validate_docx_path(
     return p
 
 
-def wrap_tool_errors(func: F) -> F:
+def wrap_tool_errors[F: Callable[..., Any]](func: F) -> F:
     """Decorator that converts Adeu/python-docx exceptions to `ToolException`.
 
     Why: agents are far more useful when tool failures arrive as readable

@@ -10,8 +10,6 @@ with other tools or agents.
 
 from __future__ import annotations
 
-from langchain_adeu import AdeuApplyChanges
-
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -19,6 +17,7 @@ from langchain_tests.unit_tests import ToolsUnitTests
 
 from langchain_adeu import (
     AdeuAcceptAllChanges,
+    AdeuApplyChanges,
     AdeuDiffDocx,
     AdeuReadDocx,
     AdeuSanitizeDocx,

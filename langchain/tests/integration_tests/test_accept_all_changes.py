@@ -51,8 +51,7 @@ class TestAdeuAcceptAllChangesStandard(ToolsIntegrationTests):
         repo_root = Path(__file__).resolve().parents[3]
         fixture = str(repo_root / "shared" / "fixtures" / "golden.docx")
         assert self._tmp_output is not None, (
-            "Output path tmp dir not initialized — _setup_tmp_output "
-            "fixture did not run."
+            "Output path tmp dir not initialized — _setup_tmp_output fixture did not run."
         )
         return {
             "file_path": fixture,
@@ -66,14 +65,10 @@ class TestAdeuAcceptAllChangesBehavior:
         tool = AdeuAcceptAllChanges()
         result = tool.invoke({"file_path": str(working_docx)})
         expected = working_docx.with_name(f"{working_docx.stem}_clean.docx")
-        assert (
-            expected.exists()
-        ), f"Expected default output at {expected}, but it was not created."
+        assert expected.exists(), f"Expected default output at {expected}, but it was not created."
         assert str(expected) in result
 
-    def test_explicit_output_path_is_written(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_explicit_output_path_is_written(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuAcceptAllChanges()
         tool_call = {
             "name": "adeu_accept_all_changes",
@@ -89,49 +84,36 @@ class TestAdeuAcceptAllChangesBehavior:
         assert msg.artifact["output_path"] == str(output_path)
         assert msg.artifact["input_path"] == str(working_docx)
 
-    def test_input_file_is_not_modified(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_input_file_is_not_modified(self, working_docx: Path, output_path: Path) -> None:
         # The source file must be untouched — accept_all_changes is
         # "produce a clean copy", not "modify in place".
         original_bytes = working_docx.read_bytes()
         tool = AdeuAcceptAllChanges()
         tool.invoke({"file_path": str(working_docx), "output_path": str(output_path)})
         assert working_docx.read_bytes() == original_bytes, (
-            "Source file was modified by accept_all_changes — should be " "read-only."
+            "Source file was modified by accept_all_changes — should be read-only."
         )
 
-    def test_output_has_no_tracked_changes(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    def test_output_has_no_tracked_changes(self, working_docx: Path, output_path: Path) -> None:
         # The whole point of accept_all_changes: the output should have
         # no remaining CriticMarkup when read in raw mode.
         accept_tool = AdeuAcceptAllChanges()
-        accept_tool.invoke(
-            {"file_path": str(working_docx), "output_path": str(output_path)}
-        )
+        accept_tool.invoke({"file_path": str(working_docx), "output_path": str(output_path)})
 
         read_tool = AdeuReadDocx()
-        raw_after = read_tool.invoke(
-            {"file_path": str(output_path), "clean_view": False}
-        )
+        raw_after = read_tool.invoke({"file_path": str(output_path), "clean_view": False})
 
         # No insertion/deletion markup should remain. Comments may or may
         # not survive depending on the engine's final-pass logic, so we
         # only assert on the tracked-change tokens here.
         for token in ("{++", "++}", "{--", "--}"):
             assert token not in raw_after, (
-                f"Output still contains {token!r} after accept_all_changes. "
-                "Tracked changes were not fully accepted."
+                f"Output still contains {token!r} after accept_all_changes. Tracked changes were not fully accepted."
             )
 
     @pytest.mark.asyncio
-    async def test_ainvoke_writes_file(
-        self, working_docx: Path, output_path: Path
-    ) -> None:
+    async def test_ainvoke_writes_file(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuAcceptAllChanges()
-        result = await tool.ainvoke(
-            {"file_path": str(working_docx), "output_path": str(output_path)}
-        )
+        result = await tool.ainvoke({"file_path": str(working_docx), "output_path": str(output_path)})
         assert output_path.exists()
         assert str(output_path) in result
