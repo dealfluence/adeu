@@ -147,7 +147,7 @@ To achieve the highest batch success rate when prompting models like Gemini, GPT
 
 ## 🤖 AI Agent Tool Setup: `$fromAI` Recipes
 
-When wiring this node into an AI Agent as a tool, n8n auto-generates `$fromAI()` expressions for AI-bindable fields. The **second argument** of `$fromAI` is the only per-parameter schema description the LLM actually receives — but n8n does **not** propagate node-source `description` metadata into that slot ([n8n#28261](https://github.com/n8n-io/n8n/issues/28261)). Auto-generated stubs look like:
+When wiring this node into an AI Agent as a tool, n8n auto-generates `$fromAI()` expressions for AI-bindable fields. The **second argument** of `$fromAI` is the only per-parameter schema description the LLM actually receives — but n8n does **not** propagate node-source `description` metadata into that slot. Auto-generated stubs look like:
 
 ```
 {{ $fromAI('Changes__JSON_', ``, 'string') }}
