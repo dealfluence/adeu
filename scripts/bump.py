@@ -101,14 +101,14 @@ def main():
 
     modified = False
 
-    # 1. Update Python
-    if update_toml_version(FILES_TO_BUMP[0], target_version):
-        modified = True
-
-    # 2. Update Node Workspaces & Manifest
-    for filepath in FILES_TO_BUMP[1:]:
-        if update_json_version(filepath, target_version):
-            modified = True
+    # Dynamically determine the updater based on file extension
+    for filepath in FILES_TO_BUMP:
+        if filepath.endswith(".toml"):
+            if update_toml_version(filepath, target_version):
+                modified = True
+        else:
+            if update_json_version(filepath, target_version):
+                modified = True
 
     if not modified:
         print("\n⚠️  No files were modified. Are they already at this version?")
@@ -126,7 +126,6 @@ def main():
 
     # Update package-lock.json
     print("   Running 'npm install --package-lock-only' in node/...")
-    # --package-lock-only avoids downloading node_modules, just updates the lockfile quickly
     run_cmd(["npm", "install", "--package-lock-only"], cwd="node", check=False)
 
     print("\n🎉 Files and lockfiles updated successfully!")

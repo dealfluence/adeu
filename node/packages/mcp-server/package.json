@@ -1,6 +1,6 @@
 {
   "name": "@adeu/mcp-server",
-  "version": "1.7.5",
+  "version": "1.8.0",
   "description": "",
   "mcpName": "ai.adeu/adeu",
   "main": "./dist/index.js",
