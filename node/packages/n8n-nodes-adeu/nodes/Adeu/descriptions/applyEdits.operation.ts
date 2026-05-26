@@ -75,17 +75,19 @@ export const applyEditsDescription: INodeProperties[] = [
     noDataExpression: true,
     default: "fromInputJson",
     description:
-      "Where to read the list of DocumentChange objects from. Use 'From Input JSON' to read an array from an upstream node (typical for AI Agent workflows). Use 'Define Below' to paste a literal JSON array directly in this node.",
+      "Where to read the list of DocumentChange objects from. Use 'Define Below' to read the array from the Changes (JSON) field on this node — this is the typical AI Agent path, since the LLM generates the array as a tool call argument that lands on that field via $fromAI(). Use 'From Input JSON' to read the array from a property on the upstream item's JSON, for deterministic pipelines where a non-AI node (HTTP Request, Code, etc.) has pre-populated it.",
     options: [
       {
         name: "Define Below",
         value: "defineBelow",
-        description: "Provide a JSON literal directly in this node",
+        description:
+          "Read the array from the Changes (JSON) field on this node. Use for AI Agent workflows — the LLM populates that field via $fromAI() as a tool call argument.",
       },
       {
         name: "From Input JSON",
         value: "fromInputJson",
-        description: "Read the changes array from the incoming item JSON",
+        description:
+          "Read the array from a property on the upstream item's JSON. Use for deterministic pipelines where a non-AI node has pre-populated the changes array.",
       },
     ],
     displayOptions: {

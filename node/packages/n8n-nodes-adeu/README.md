@@ -161,8 +161,16 @@ The empty backticks mean the LLM sees no schema for that field and will hallucin
 
 ### What you do NOT bind to the LLM
 
-`Document Source` (`fromInput` vs `fromNode`) and `Input Binary Property` are workflow-topology decisions, not per-call decisions. Set them manually in the node editor. AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that's why `fromNode` exists: it resolves the binary from a named upstream node (e.g. `Read Binary File`, `Gmail Trigger`) at execution time.
+Some fields are **plumbing** — they configure which input/output port the node uses, not semantic content. Plumbing fields belong in the node editor; binding them to `$fromAI` lets the LLM produce confusing errors unrelated to the user's actual request.
 
+**Set these manually in the node editor — do NOT use `$fromAI`:**
+
+- **`Document Source`** (`fromInput` vs `fromNode`) — workflow topology decision.
+- **`Input Binary Property`** — wiring decision; downstream of the source node, not per-call.
+- **`Output Binary Property`** (Apply Edits, Finalize Document) — names where the outgoing binary lands on the workflow item. Downstream nodes need this fixed; an LLM picking `output_data` one call and `result` the next would break the pipeline. Default `'data'` is almost always correct.
+- **`Edits Source`** (Apply Edits) — controls whether the node reads the changes array from the `Changes (JSON)` field on the node itself (`defineBelow`) or from a property on the upstream item (`fromInputJson`). For AI Agent workflows, **set this to `Define Below` in the editor**. This is what activates the `Changes (JSON)` field as the LLM's entry point — the recipe in the Apply Edits section below populates that field via `$fromAI`, and the LLM hands its generated `Changes_JSON` string directly to the tool as a call argument. The `fromInputJson` branch is only for deterministic pipelines where an upstream non-AI node has pre-populated a `changes` property on the item.
+
+AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that's why `fromNode` exists: it resolves the binary from a named upstream node (e.g. `Read Binary File`, `Gmail Trigger`) at execution time. The trigger source is `$fromAI`-bindable below because a system prompt can legitimately offer the LLM a choice between multiple binary-producing nodes.
 ---
 
 ### Extract Markdown
@@ -186,9 +194,6 @@ The empty backticks mean the LLM sees no schema for that field and will hallucin
 ={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label in the canvas exactly. If your system prompt specifies which node holds the document, always use that name.`, 'string') }}
 ```
 
-**Output Binary Property:**
-```
-={{ $fromAI('Output_Binary_Property', `Name of the binary property on the outgoing item that will hold the redlined .docx (string, e.g. 'data'). If equal to the input binary property name, the original binary is overwritten on the outgoing item. Use 'data' unless your downstream nodes expect a different property name.`, 'string', 'data') }}
 ```
 
 **Author:**
@@ -196,10 +201,6 @@ The empty backticks mean the LLM sees no schema for that field and will hallucin
 ={{ $fromAI('Author', `Author name attached to every tracked change and comment produced by this batch (string, e.g. 'AI Reviewer' or 'Acme Legal AI'). Appears in Word's review pane as the author of every redline. Choose a name your end users will recognize as the AI reviewer.`, 'string', 'Adeu AI') }}
 ```
 
-**Edits Source:**
-```
-={{ $fromAI('Edits_Source', `One of 'defineBelow' or 'fromInputJson'. Set to 'defineBelow' (default) when you are generating the JSON array directly inside this tool call via the Changes_JSON parameter — this is the standard AI Agent pattern. Set to 'fromInputJson' only if an earlier node has already placed the changes array on the input item.`, 'string', 'defineBelow') }}
-```
 
 **Changes (JSON):**
 ```
@@ -239,10 +240,7 @@ The empty backticks mean the LLM sees no schema for that field and will hallucin
 ={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label exactly.`, 'string') }}
 ```
 
-**Output Binary Property:**
-```
-={{ $fromAI('Output_Binary_Property', `Name of the binary property on the outgoing item that will hold the finalized .docx (string, e.g. 'data'). Use 'data' unless downstream nodes expect a different property name.`, 'string', 'data') }}
-```
+
 
 **Sanitize Mode:**
 ```
