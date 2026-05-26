@@ -145,6 +145,131 @@ To achieve the highest batch success rate when prompting models like Gemini, GPT
 
 ---
 
+## 🤖 AI Agent Tool Setup: `$fromAI` Recipes
+
+When wiring this node into an AI Agent as a tool, n8n auto-generates `$fromAI()` expressions for AI-bindable fields. The **second argument** of `$fromAI` is the only per-parameter schema description the LLM actually receives — but n8n does **not** propagate node-source `description` metadata into that slot ([n8n#28261](https://github.com/n8n-io/n8n/issues/28261)). Auto-generated stubs look like:
+
+```
+{{ $fromAI('Changes__JSON_', ``, 'string') }}
+```
+
+The empty backticks mean the LLM sees no schema for that field and will hallucinate the structure.
+
+**To apply any recipe below:** Open the tool node → click the target field → **disable** "Let the model define this parameter" (it locks the field to n8n's auto-generated empty-description stub) → switch to **Expression** mode → paste the recipe. The `$fromAI()` call inside your expression still binds the field to the LLM — you're just bypassing the auto-stub so you can supply a richer schema description.
+
+> **Stub caching gotcha:** Once a `$fromAI` expression is saved into a workflow, n8n caches it permanently in that workflow's JSON. Updating this package does not retroactively update expressions in existing workflows — you must hand-edit them or delete and re-add the tool node.
+
+### What you do NOT bind to the LLM
+
+`Document Source` (`fromInput` vs `fromNode`) and `Input Binary Property` are workflow-topology decisions, not per-call decisions. Set them manually in the node editor. AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that's why `fromNode` exists: it resolves the binary from a named upstream node (e.g. `Read Binary File`, `Gmail Trigger`) at execution time.
+
+---
+
+### Extract Markdown
+
+**Source Node Name** (when `Document Source` is `From Another Node`):
+```
+={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive, e.g. 'Read Binary File' or 'Gmail Trigger'). Must match the node label in the canvas exactly. If your system prompt specifies which node holds the document, always use that name.`, 'string') }}
+```
+
+**Clean View:**
+```
+={{ $fromAI('Clean_View', `Boolean. Set false (default) to surface all pending tracked changes as CriticMarkup tags {++ins++}, {--del--}, {>>comment<<} — use when reviewing counterparty edits or any document with pending markup. Set true to project the document as if all tracked changes were accepted (simulates Accept All) — use only when generating net-new redlines against a clean baseline.`, 'boolean', false) }}
+```
+
+---
+
+### Apply Edits
+
+**Source Node Name** (when `Document Source` is `From Another Node`):
+```
+={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label in the canvas exactly. If your system prompt specifies which node holds the document, always use that name.`, 'string') }}
+```
+
+**Output Binary Property:**
+```
+={{ $fromAI('Output_Binary_Property', `Name of the binary property on the outgoing item that will hold the redlined .docx (string, e.g. 'data'). If equal to the input binary property name, the original binary is overwritten on the outgoing item. Use 'data' unless your downstream nodes expect a different property name.`, 'string', 'data') }}
+```
+
+**Author:**
+```
+={{ $fromAI('Author', `Author name attached to every tracked change and comment produced by this batch (string, e.g. 'AI Reviewer' or 'Acme Legal AI'). Appears in Word's review pane as the author of every redline. Choose a name your end users will recognize as the AI reviewer.`, 'string', 'Adeu AI') }}
+```
+
+**Edits Source:**
+```
+={{ $fromAI('Edits_Source', `One of 'defineBelow' or 'fromInputJson'. Set to 'defineBelow' (default) when you are generating the JSON array directly inside this tool call via the Changes_JSON parameter — this is the standard AI Agent pattern. Set to 'fromInputJson' only if an earlier node has already placed the changes array on the input item.`, 'string', 'defineBelow') }}
+```
+
+**Changes (JSON):**
+```
+={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Each object is one of: {"type":"modify","target_text":"<verbatim from source>","new_text":"<replacement>","comment":"<optional>"} | {"type":"accept","target_id":"Chg:12","comment":"<optional>"} | {"type":"reject","target_id":"Chg:12","comment":"<optional>"} | {"type":"reply","target_id":"Com:45","text":"<reply>"} | {"type":"insert_row","target_text":"<cell text anchoring row>","position":"above" or "below","cells":["col1","col2"]} | {"type":"delete_row","target_text":"<cell text anchoring row>"}. RULES: target_text must be copied VERBATIM from the source including punctuation/whitespace/case and must uniquely anchor one location; never include CriticMarkup tags like {++ or {-- in new_text — the engine applies tracking automatically; use Chg:N and Com:N IDs exactly as surfaced by extract_markdown; the entire array must be a single JSON-encoded string. Atomic batch: if any single edit is invalid the whole array is rejected with an error telling you which edit failed — use that to self-correct on the next call.`, 'string') }}
+```
+
+**Return Markdown Output:**
+```
+={{ $fromAI('Return_Markdown', `Boolean. When true (default), the tool returns the post-edit document as Markdown with CriticMarkup so you can verify what changed and reason about follow-up edits. Set false only to skip extraction when you are confident no follow-up review is needed.`, 'boolean', true) }}
+```
+
+---
+
+### Generate Diff
+
+**Original Source Node Name** (when `Original Document Source` is `From Another Node`):
+```
+={{ $fromAI('Original_Source_Node_Name', `Exact name of the workflow node that produced the baseline (before) .docx binary (string, case-sensitive). Must match the node label exactly.`, 'string') }}
+```
+
+**Modified Source Node Name** (when `Modified Document Source` is `From Another Node`):
+```
+={{ $fromAI('Modified_Source_Node_Name', `Exact name of the workflow node that produced the modified (after) .docx binary (string, case-sensitive). Must match the node label exactly. Must reference a different node from the original source — otherwise the diff will be empty.`, 'string') }}
+```
+
+**Clean View:**
+```
+={{ $fromAI('Clean_View', `Boolean. Set true (recommended default) to compare the Accept All clean view of both documents — diffs reflect final content as if all tracked changes were accepted. Set false to diff the raw CriticMarkup-projected text including pending change markers — useful for auditing tracked-change differences themselves.`, 'boolean', true) }}
+```
+
+---
+
+### Finalize Document
+
+**Source Node Name** (when `Document Source` is `From Another Node`):
+```
+={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label exactly.`, 'string') }}
+```
+
+**Output Binary Property:**
+```
+={{ $fromAI('Output_Binary_Property', `Name of the binary property on the outgoing item that will hold the finalized .docx (string, e.g. 'data'). Use 'data' unless downstream nodes expect a different property name.`, 'string', 'data') }}
+```
+
+**Sanitize Mode:**
+```
+={{ $fromAI('Sanitize_Mode', `One of 'baseline', 'full', or 'keep-markup'. 'full' (recommended for distribution) strips author metadata, RSIDs, paragraph IDs, and proof errors AND requires all tracked changes to be resolved — pair with Accept_All=true to auto-accept. 'keep-markup' strips metadata but preserves visible tracked changes and comments — use when sending markup for counterparty review; pair with Author_Override to rewrite author names. 'baseline' is minimal cleanup only (RSIDs and proof errors) — leaves tracked changes and metadata intact.`, 'string', 'full') }}
+```
+
+**Accept All Tracked Changes** (only meaningful when `Sanitize Mode` is `full`):
+```
+={{ $fromAI('Accept_All', `Boolean. Only applies when Sanitize_Mode is 'full'. Set true to auto-accept all pending tracked changes before sanitization. Set false (default) to block finalization and raise an error if any pending tracked changes exist, forcing them to be resolved explicitly. If multiple distinct authors are detected in pending changes when true, the report will include a warning about potential silent smuggles.`, 'boolean', false) }}
+```
+
+**Author Override** (only meaningful when `Sanitize Mode` is `keep-markup`):
+```
+={{ $fromAI('Author_Override', `Optional string. Only applies when Sanitize_Mode is 'keep-markup'. When set, replaces the author name on every preserved tracked change and comment with this value (e.g. 'Acme Legal'). Leave empty to keep original authors intact.`, 'string', '') }}
+```
+
+**Protection Mode:**
+```
+={{ $fromAI('Protection_Mode', `One of 'none' or 'read_only'. 'none' (default) leaves the document unlocked. 'read_only' injects a native Word read-only enforcement flag into settings.xml — Word users see a read-only banner and cannot edit without explicitly unlocking. Use 'read_only' for distribution to signers or counterparties when you want to discourage casual edits.`, 'string', 'none') }}
+```
+
+---
+
+> **Tip:** The default-value (4th) argument of `$fromAI()` lets the LLM omit the parameter entirely and fall back to a sensible default. Use defaults aggressively on optional fields so the LLM only has to specify what actually varies per call.
+
+---
+
 ## 🛠️ Error Handling & Troubleshooting
 
 Because Adeu enforces **Atomic Batch Validation**, any error in the LLM's JSON will throw a `NodeApiError` and halt the node. The error message will tell you exactly which edit failed and why.
