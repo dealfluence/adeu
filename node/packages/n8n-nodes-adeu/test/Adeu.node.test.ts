@@ -1,4 +1,5 @@
-// FILE: node/packages/n8n-nodes-adeu/test/Adeu.node.test.ts
+// FILE: test/Adeu.node.test.ts
+
 import { describe, beforeAll, beforeEach, it, expect, vi } from "vitest";
 import type { IExecuteFunctions, INode } from "n8n-workflow";
 import { readFileSync } from "node:fs";
@@ -71,6 +72,7 @@ function createMockExecuteFunctions(): IExecuteFunctions {
     getInputData: vi.fn(),
     getNodeParameter: vi.fn(),
     evaluateExpression: vi.fn(),
+    getWorkflowStaticData: vi.fn(),
     helpers: {
       prepareBinaryData: vi.fn().mockResolvedValue({
         data: "mock-base64-string",
@@ -225,6 +227,7 @@ describe("Test Adeu n8n Node", () => {
       expect(item.binary).toHaveProperty("data");
     });
   });
+
   describe("continueOnFail logic", () => {
     beforeEach(() => {
       (
@@ -265,6 +268,7 @@ describe("Test Adeu n8n Node", () => {
       );
     });
   });
+
   describe("Document Source: fromNode (AI Agent tool path)", () => {
     beforeEach(() => {
       (
@@ -311,6 +315,7 @@ describe("Test Adeu n8n Node", () => {
         expect.any(Number),
       );
     });
+
     it("should throw a clear NodeApiError when the source node has no output", async () => {
       // Both the binary leaf probe and the `.json` disambiguation probe
       // return undefined — i.e., the source node truly did not execute.
@@ -364,6 +369,61 @@ describe("Test Adeu n8n Node", () => {
 
       await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
         /Source Node Name is required/i,
+      );
+    });
+  });
+
+  describe("Operation: Hydrate Tool Output", () => {
+    beforeEach(() => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([{ json: {} }]);
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "hydrateToolOutput";
+        if (paramName === "staticDataKey") return "adeu_last_redlined";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "onMissing") return "emit_empty";
+        if (paramName === "clearAfterRead") return true;
+        if (paramName === "outputPathTemplate")
+          return "C:\\test\\{baseName}_{timestamp}.docx";
+        return undefined;
+      });
+
+      (
+        mockExecuteFunctions.getWorkflowStaticData as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        adeu_last_redlined: {
+          id: "stash-id-123",
+          fileName: "contract.docx",
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          timestamp: 123456789,
+        },
+      });
+
+      (
+        mockExecuteFunctions.helpers.getBinaryStream as ReturnType<typeof vi.fn>
+      ).mockResolvedValue("mock-stream");
+      (
+        mockExecuteFunctions.helpers.binaryToBuffer as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(Buffer.from("dummy content"));
+    });
+
+    it("should hydrate a stashed tool output and compute the outputPath template correctly", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toHaveLength(1);
+
+      const item = result[0][0];
+      expect(item.json).toHaveProperty("hydrated", true);
+      expect(item.json).toHaveProperty("fileName", "contract.docx");
+      expect(item.json).toHaveProperty("outputPath");
+      expect(item.json.outputPath).toMatch(
+        /^C:\\test\\contract_[0-9-T]+.docx$/,
       );
     });
   });

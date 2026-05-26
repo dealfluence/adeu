@@ -5,7 +5,7 @@ import type {
   INodeTypeDescription,
 } from "n8n-workflow";
 import { NodeConnectionTypes } from "n8n-workflow";
-
+import { executeHydrateToolOutput } from "./descriptions/hydrateToolOutput.operation";
 import { documentDescription } from "./descriptions";
 import { executeExtractMarkdown } from "./descriptions/extractMarkdown.operation";
 import { executeApplyEdits } from "./descriptions/applyEdits.operation";
@@ -86,6 +86,9 @@ export class Adeu implements INodeType {
               break;
             case "finalizeDocument":
               result = await executeFinalizeDocument.call(this, i);
+              break;
+            case "hydrateToolOutput":
+              result = await executeHydrateToolOutput.call(this, i);
               break;
             default:
               throw new Error(`Unsupported operation: ${operation}`);

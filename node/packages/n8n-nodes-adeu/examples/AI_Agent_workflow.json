@@ -1,0 +1,311 @@
+{
+  "name": "Adeu AI Contract Assistant - Local File Demo",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [800, 272],
+      "id": "b7e9a0a6-81d4-4dc6-a928-800624884960",
+      "name": "When chat message received",
+      "webhookId": "YOUR_WEBHOOK_ID"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1a2b3d4-e5f6-7890-abcd-ef1234567890",
+              "name": "chatInput",
+              "value": "={{ $('When chat message received').item.json.chatInput }}",
+              "type": "string"
+            },
+            {
+              "id": "c1a2b3d4-e5f6-7890-abcd-ef1234567891",
+              "name": "sessionId",
+              "value": "={{ $('When chat message received').item.json.sessionId }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1104, 272],
+      "id": "aebab4ff-6779-4561-8577-43aa6bddc9e4",
+      "name": "Restore Chat Context",
+      "notes": "Re-injects chatInput and sessionId (dropped by Read Binary File) so the AI Agent can find the user's prompt. The binary on 'data' passes through automatically because 'includeOtherFields' is true."
+    },
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "=You are the Adeu Contract Assistant, a specialized AI for analyzing and redlining Microsoft Word contracts using the Adeu engine.\n\n## How This Workflow Is Wired\n- A node named 'Read Binary File' has already loaded the contract .docx into the workflow's binary context BEFORE you were invoked. You cannot see its path, and you do not need to.\n- The 'extract_markdown' and 'apply_edits' tools both read their input .docx from that node by name. You MUST set 'Source Node Name' to exactly 'Read Binary File' on every tool call.\n- File handling is deterministic and outside your control. Your job is purely semantic: read the document, reason about it, propose edits, and summarize the outcome.\n\n## How to Work With the User\n1. When the user asks you to read or review the document, call 'extract_markdown' with Source Node Name = 'Read Binary File'. Examine the returned Markdown carefully — pay attention to defined terms, cross-references, and any pre-existing tracked changes (marked with Chg:N and Com:N identifiers in CriticMarkup syntax).\n2. When the user requests changes, formulate a JSON array of DocumentChange objects and call 'apply_edits' with Source Node Name = 'Read Binary File' and your changes encoded as a JSON string in Changes_JSON. The tool will return the post-edit Markdown so you can verify what changed and reason about follow-up actions.\n3. After every tool call, summarize what you did or found in plain English. If apply_edits ran successfully, tell the user the redlined .docx will be written to the same directory as the input file with a '_redlined_<timestamp>' suffix.\n\n## DocumentChange Schema (for apply_edits)\nThe Changes_JSON parameter must be a JSON-encoded string containing an array. Each element is one of:\n- {\"type\":\"modify\",\"target_text\":\"<copied VERBATIM from the source document>\",\"new_text\":\"<your replacement>\",\"comment\":\"<optional reviewer note>\"}\n- {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<your reply>\"}\n- {\"type\":\"insert_row\",\"target_text\":\"<text anchoring the target row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]}\n- {\"type\":\"delete_row\",\"target_text\":\"<text anchoring the row to remove>\"}\n\n## Critical Rules\n- target_text must be copied VERBATIM from the document — same punctuation, same whitespace, same capitalization. The engine's anchor is a fuzzy match but it errors out on ambiguous or missing targets.\n- target_text must be unique enough to anchor exactly one location. If a phrase appears multiple times, include surrounding context to disambiguate.\n- NEVER include CriticMarkup tags ({++, ++}, {--, --}, {>>, <<}) in new_text. The engine applies tracking automatically.\n- Use Chg:N and Com:N identifiers exactly as they appear in the Markdown output of extract_markdown. Do not invent IDs.\n- The whole changes array must be a single JSON-encoded string. Escape inner quotes properly.\n- If any single edit in a batch is invalid, the engine atomically rejects the WHOLE batch and returns an error. Read the error message carefully; it tells you exactly which edit failed and why. Use that to self-correct on the next call.\n- Source Node Name is always 'Read Binary File' for this workflow. Never invent or guess other node names."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [1296, 272],
+      "id": "7aa5a0a9-831e-4b0e-91e0-6522bf327994",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.1-pro-preview-customtools",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [1136, 480],
+      "id": "a2970d17-7daf-44e7-9fa6-b316c74272dc",
+      "name": "Connect Gemini",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "YOUR_CREDENTIALS_ID",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 30
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [1296, 480],
+      "id": "8e7197f2-52ad-4d53-8bf5-a57919b8267c",
+      "name": "Conversation Memory"
+    },
+    {
+      "parameters": {
+        "documentSource": "fromNode",
+        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
+        "cleanView": "={{ $fromAI('Clean_View', `Whether to project the document with all tracked changes accepted (Clean View, true) or with all pending tracked changes surfaced as CriticMarkup tags like {++ins++}, {--del--}, {>>comment<<} (Raw View, false). Use false (default) when reviewing counterparty edits or any document with pending tracked changes. Use true only when generating new redlines against a clean baseline.`, 'boolean', false) }}"
+      },
+      "type": "n8n-nodes-adeu.adeuTool",
+      "typeVersion": 1,
+      "position": [1456, 528],
+      "id": "5c293f3d-ce50-4b08-bc26-d114ac077eba",
+      "name": "extract_markdown"
+    },
+    {
+      "parameters": {
+        "operation": "applyEdits",
+        "documentSource": "fromNode",
+        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
+        "author": "Adeu AI Reviewer",
+        "editsSource": "defineBelow",
+        "editsJson": "={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Each object is one of: {\"type\":\"modify\",\"target_text\":\"<verbatim from source>\",\"new_text\":\"<replacement>\",\"comment\":\"<optional>\"} | {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<reply>\"} | {\"type\":\"insert_row\",\"target_text\":\"<cell text anchoring row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]} | {\"type\":\"delete_row\",\"target_text\":\"<cell text anchoring row>\"}. RULES: target_text must be copied VERBATIM from the source including punctuation/whitespace/case and must uniquely anchor one location; never include CriticMarkup tags like {++ or {-- in new_text — the engine applies tracking automatically; use Chg:N and Com:N IDs exactly as surfaced by extract_markdown; the entire array must be a single JSON-encoded string. Atomic batch: if any single edit is invalid the whole array is rejected with an error telling you which edit failed — use that to self-correct on the next call.`, 'string') }}"
+      },
+      "type": "n8n-nodes-adeu.adeuTool",
+      "typeVersion": 1,
+      "position": [1648, 544],
+      "id": "4679e76b-2791-4c64-8efb-e9eede382ddd",
+      "name": "apply_edits"
+    },
+    {
+      "parameters": {
+        "fileSelector": "YOUR_PATH_TO_FOLDER\\NDA_Acme_Vertex_clean.docx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [944, 272],
+      "id": "8b09c247-ea82-4632-952c-3e6e06f742fe",
+      "name": "Read Binary File",
+      "notes": "EDIT 'fileSelector' to the absolute path of your local .docx file before running the demo. The file is read once per chat turn into the 'data' binary property. The AI Agent NEVER sees this path — it only references this node by name ('Read Binary File') when calling Adeu tools."
+    },
+    {
+      "parameters": {
+        "operation": "hydrateToolOutput",
+        "staticDataKey": "adeu_last_redlined",
+        "outputBinaryPropertyName": "data",
+        "onMissing": "emit_empty",
+        "clearAfterRead": true,
+        "outputPathTemplate": "YOUR_PATH_TO_FOLDER\\{baseName}_{timestamp}.docx"
+      },
+      "type": "n8n-nodes-adeu.adeu",
+      "typeVersion": 1,
+      "position": [1488, 272],
+      "id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+      "name": "Hydrate Redlined Binary",
+      "notes": "Reads the redlined .docx binary id from workflow static data (where apply_edits stashes it when running as a tool, because n8n's tool wrapper strips binaries from tool outputs). Fetches the buffer via getBinaryStream, prepares a fresh IBinaryData, attaches it on 'data', and clears the static data entry. On turns where apply_edits was not called, emits json.hydrated=false with no binary so the downstream If can skip the write."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d2b3c4e5-f6a7-8901-bcde-f23456789012",
+              "leftValue": "={{ $json.hydrated }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1680, 272],
+      "id": "5a6b7c8d-9e0f-1a2b-3c4d-5e6f7a8b9c0d",
+      "name": "Has Redlined Binary?",
+      "notes": "Gates the Write step on json.hydrated, which Hydrate Redlined Binary sets to true only when apply_edits actually produced a binary this turn."
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.outputPath }}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1872, 192],
+      "id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+      "name": "Write Redlined File",
+      "notes": "Writes the hydrated redlined file to disk using the calculated output path constructed in TypeScript."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Read Binary File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Chat Context": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Hydrate Redlined Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hydrate Redlined Binary": {
+      "main": [
+        [
+          {
+            "node": "Has Redlined Binary?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Redlined Binary?": {
+      "main": [
+        [
+          {
+            "node": "Write Redlined File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Connect Gemini": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract_markdown": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "apply_edits": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Binary File": {
+      "main": [
+        [
+          {
+            "node": "Restore Chat Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "30668aed-0896-44aa-a258-c7f67459b6cc",
+  "meta": {
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "id": "YOUR_WORKFLOW_ID",
+  "tags": []
+}

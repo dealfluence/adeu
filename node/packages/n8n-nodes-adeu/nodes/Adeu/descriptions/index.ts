@@ -4,6 +4,7 @@ import { extractMarkdownDescription } from "./extractMarkdown.operation";
 import { applyEditsDescription } from "./applyEdits.operation";
 import { generateDiffDescription } from "./generateDiff.operation";
 import { finalizeDocumentDescription } from "./finalizeDocument.operation";
+import { hydrateToolOutputDescription } from "./hydrateToolOutput.operation";
 
 export const documentDescription: INodeProperties[] = [
   {
@@ -44,6 +45,15 @@ export const documentDescription: INodeProperties[] = [
         action: "Generate a Word Patch diff between two documents",
         description:
           "Produce a sub-word level @@ Word Patch @@ diff between two .docx files. Reads the document text via the same Markdown projection used by Extract Markdown, so the diff respects CriticMarkup and Clean View settings.",
+      },
+      {
+        name: "Hydrate Tool Output",
+        value: "hydrateToolOutput",
+        action: "Hydrate a redlined binary stashed by Apply Edits as a tool",
+        description:
+          "Read a binary's storage id from workflow static data (where Apply Edits stashes it when run as an AI Agent tool) and re-attach the binary to a main-flow item. " +
+          "Necessary because n8n's AI Agent tool wrapper strips binaries from tool outputs, so the redlined .docx produced by an apply_edits tool call cannot reach downstream nodes directly. " +
+          "Place this node downstream of the AI Agent on the main connection, then route its output into Write Binary File, Gmail (attachment), Slack (file upload), etc.",
       },
     ],
     default: "extractMarkdown",
@@ -97,4 +107,5 @@ export const documentDescription: INodeProperties[] = [
   ...applyEditsDescription,
   ...generateDiffDescription,
   ...finalizeDocumentDescription,
+  ...hydrateToolOutputDescription,
 ];

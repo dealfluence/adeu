@@ -158,7 +158,6 @@ export const applyEditsDescription: INodeProperties[] = [
     },
   },
 ];
-
 export async function executeApplyEdits(
   this: IExecuteFunctions,
   itemIndex: number,
@@ -241,6 +240,31 @@ export async function executeApplyEdits(
     DOCX_MIME_TYPE,
   );
 
+  // AI Agent tool wrapper strips `binary` from the return value before
+  // anything downstream can see it, so when running as a tool we stash the
+  // binary's storage id in workflow static data. A downstream Code node can
+  // call `getBinaryStream(id)` to reconstruct the buffer and re-attach it as
+  // binary on a main-flow item. Static data is a JSON object that the tool
+  // wrapper has no reason to touch, so it survives the round-trip.
+  //
+  // `isToolExecution()` was added relatively recently — older n8n versions
+  // may not have it. Guard with a typeof check so the node degrades cleanly
+  // (regular-node behavior, no stash) instead of throwing.
+  const isToolExec =
+    typeof this.isToolExecution === "function" && this.isToolExecution();
+
+  let redlinedBinaryId: string | undefined;
+  if (isToolExec && binary.id) {
+    const staticData = this.getWorkflowStaticData("global");
+    staticData.adeu_last_redlined = {
+      id: binary.id,
+      fileName: outName,
+      mimeType: DOCX_MIME_TYPE,
+      timestamp: Date.now(),
+    };
+    redlinedBinaryId = binary.id;
+  }
+
   // Auto-extract post-edit markdown if requested (using CriticMarkup view as preferred)
   let markdown: string | undefined;
   if (returnMarkdown) {
@@ -256,6 +280,7 @@ export async function executeApplyEdits(
         author,
         stats,
         ...(markdown !== undefined ? { markdown } : {}),
+        ...(redlinedBinaryId !== undefined ? { redlinedBinaryId } : {}),
       },
       binary: {
         ...incomingBinary,
