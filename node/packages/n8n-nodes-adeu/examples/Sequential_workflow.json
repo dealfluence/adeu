@@ -1,0 +1,300 @@
+{
+  "name": "Adeu AI Contract Assistant - Sequential Redline Demo",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 100],
+      "id": "d0571d17-9195-4eb7-a77a-225fb0042f4c",
+      "name": "When clicking Test workflow"
+    },
+    {
+      "parameters": {
+        "fileSelector": "YOUR_PATH_TO_FOLDER/contract.docx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [-1000, 100],
+      "id": "e4a27521-729f-43b9-a477-dcb8299a9cfc",
+      "name": "Read Baseline Doc"
+    },
+    {
+      "parameters": {
+        "documentSource": "fromInput",
+        "binaryPropertyName": "data",
+        "cleanView": true
+      },
+      "type": "n8n-nodes-adeu.adeu",
+      "typeVersion": 1,
+      "position": [-800, 100],
+      "id": "ce66de4b-f288-4bfb-b467-f2df00da7d25",
+      "name": "Extract Baseline Markdown"
+    },
+    {
+      "parameters": {
+        "jsCode": "const markdown = $input.first().json.markdown;\n\nconst systemInstruction = `You are a contract editing assistant. Analyze the provided Markdown document and generate exactly 2 distinct modifications in a JSON array. Return ONLY the raw JSON array containing exactly 2 items conforming to the DocumentChange schema. Do not add markdown blocks, formatting or metadata.\n\nSchema:\n[\n  {\n    \"type\": \"modify\",\n    \"target_text\": \"<copied verbatim from document>\",\n    \"new_text\": \"<replacement>\",\n    \"comment\": \"<reviewer note>\"\n  }\n]`;\n\nconst userText = `Here is the document:\\n\\n${markdown}`;\n\nconst geminiPayload = {\n  contents: [\n    {\n      role: \"user\",\n      parts: [\n        {\n          text: userText\n        }\n      ]\n    }\n  ],\n  systemInstruction: {\n    parts: [\n      {\n        text: systemInstruction\n      }\n    ]\n  },\n  generationConfig: {\n    responseMimeType: \"application/json\",\n    temperature: 0\n  }\n};\n\nreturn { json: { geminiPayload } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-600, 100],
+      "id": "f5f084a1-06cb-437a-aba4-6fa69c0d16bf",
+      "name": "Build Turn 1 Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=YOUR_GEMINI_API_KEY",
+        "sendHeaders": false,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.geminiPayload }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [-400, 100],
+      "id": "aa15de2c-cf0e-437b-aba4-6fa69c0d16bf",
+      "name": "LLM Turn 1: Generate Redlines"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst content = response.candidates[0].content.parts[0].text.trim();\nlet cleaned = content;\nif (cleaned.startsWith('```')) {\n  cleaned = cleaned.replace(/^```[a-zA-Z]*\\n?/, '');\n  cleaned = cleaned.replace(/\\n?```$/, '');\n}\nconst changes = JSON.parse(cleaned.trim());\n\n// Forward the binary forward to Apply Turn 1 Edits port\nreturn {\n  json: { changes },\n  binary: $('Read Baseline Doc').first().binary\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-200, 100],
+      "id": "848da05f-e5cb-4751-a1e6-2ca42bb95f55",
+      "name": "Parse Redlines"
+    },
+    {
+      "parameters": {
+        "operation": "applyEdits",
+        "documentSource": "fromInput",
+        "binaryPropertyName": "data",
+        "editsSource": "fromInputJson",
+        "editsJsonPath": "changes",
+        "returnMarkdown": true
+      },
+      "type": "n8n-nodes-adeu.adeu",
+      "typeVersion": 1,
+      "position": [0, 100],
+      "id": "893c834a-9bcf-4f5c-89a1-cb03c2bb0de5",
+      "name": "Apply Turn 1 Edits"
+    },
+    {
+      "parameters": {
+        "documentSource": "fromNode",
+        "sourceNodeName": "Apply Turn 1 Edits",
+        "cleanView": false
+      },
+      "type": "n8n-nodes-adeu.adeu",
+      "typeVersion": 1,
+      "position": [200, 100],
+      "id": "e8fbde44-67fa-47cc-ae98-0c6a2ba27e57",
+      "name": "Extract Tracked Markdown"
+    },
+    {
+      "parameters": {
+        "jsCode": "const markdown = $input.first().json.markdown;\n\nconst systemInstruction = `You are a contract reviewer. You will be provided with a raw Markdown document containing CriticMarkup tags representing active tracked changes (such as {++inserted++} or {--deleted--}) along with their IDs (e.g. Chg:1 or Chg:2). Generate a JSON array with exactly two operations: 1) Accept the first change (using its exact Chg:N target_id), and 2) Reply to the comment or change representing the second change (using its exact target_id Com:N or Chg:N, and providing a reply text). Output ONLY the raw JSON array with no formatting or markdown.\n\nSchema:\n[\n  {\n    \"type\": \"accept\",\n    \"target_id\": \"Chg:1\"\n  },\n  {\n    \"type\": \"reply\",\n    \"target_id\": \"Com:2\",\n    \"text\": \"<reply text>\"\n  }\n]`;\n\nconst userText = `Here is the document containing tracked changes:\\n\\n${markdown}`;\n\nconst geminiPayload = {\n  contents: [\n    {\n      role: \"user\",\n      parts: [\n        {\n          text: userText\n        }\n      ]\n    }\n  ],\n  systemInstruction: {\n    parts: [\n      {\n        text: systemInstruction\n      }\n    ]\n  },\n  generationConfig: {\n    responseMimeType: \"application/json\",\n    temperature: 0\n  }\n};\n\nreturn { json: { geminiPayload } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 100],
+      "id": "cbf084a1-06cb-437a-aba4-6fa69c0d16bf",
+      "name": "Build Turn 2 Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=YOUR_GEMINI_API_KEY",
+        "sendHeaders": false,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.geminiPayload }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [600, 100],
+      "id": "ccf5e92c-15a0-482d-864a-2fa94cb10da1",
+      "name": "LLM Turn 2: Accept & Reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst content = response.candidates[0].content.parts[0].text.trim();\nlet cleaned = content;\nif (cleaned.startsWith('```')) {\n  cleaned = cleaned.replace(/^```[a-zA-Z]*\\n?/, '');\n  cleaned = cleaned.replace(/\\n?```$/, '');\n}\nconst changes = JSON.parse(cleaned.trim());\nreturn { json: { changes } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 100],
+      "id": "761da12c-cf0e-437b-aba4-6fa69c0d16bf",
+      "name": "Parse Turn 2 Actions"
+    },
+    {
+      "parameters": {
+        "operation": "applyEdits",
+        "documentSource": "fromNode",
+        "sourceNodeName": "Apply Turn 1 Edits",
+        "editsSource": "fromInputJson",
+        "editsJsonPath": "changes",
+        "returnMarkdown": false
+      },
+      "type": "n8n-nodes-adeu.adeu",
+      "typeVersion": 1,
+      "position": [1000, 100],
+      "id": "e93d844a-9bcf-4f5c-89a1-cb03c2bb0de5",
+      "name": "Apply Turn 2 Edits"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "YOUR_PATH_TO_FOLDER/contract_sequential_final.docx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1200, 100],
+      "id": "1e15de2c-cf0e-437b-aba4-6fa69c0d16bf",
+      "name": "Write Final Doc"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking Test workflow": {
+      "main": [
+        [
+          {
+            "node": "Read Baseline Doc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Baseline Doc": {
+      "main": [
+        [
+          {
+            "node": "Extract Baseline Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Baseline Markdown": {
+      "main": [
+        [
+          {
+            "node": "Build Turn 1 Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Turn 1 Payload": {
+      "main": [
+        [
+          {
+            "node": "LLM Turn 1: Generate Redlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Turn 1: Generate Redlines": {
+      "main": [
+        [
+          {
+            "node": "Parse Redlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Redlines": {
+      "main": [
+        [
+          {
+            "node": "Apply Turn 1 Edits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Turn 1 Edits": {
+      "main": [
+        [
+          {
+            "node": "Extract Tracked Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Tracked Markdown": {
+      "main": [
+        [
+          {
+            "node": "Build Turn 2 Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Turn 2 Payload": {
+      "main": [
+        [
+          {
+            "node": "LLM Turn 2: Accept & Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Turn 2: Accept & Reply": {
+      "main": [
+        [
+          {
+            "node": "Parse Turn 2 Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Turn 2 Actions": {
+      "main": [
+        [
+          {
+            "node": "Apply Turn 2 Edits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Turn 2 Edits": {
+      "main": [
+        [
+          {
+            "node": "Write Final Doc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
