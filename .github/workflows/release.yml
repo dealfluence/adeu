@@ -33,7 +33,7 @@ jobs:
 
       - name: Pack MCPB Bundle
         working-directory: ./desktop-extension
-        run: zip -r Adeu.mcpb index.js manifest.json icon.png package.json
+        run: zip -r Adeu.mcpb manifest.json icon.png package.json *.js assets/ templates/
 
       - name: Build Smithery Bundle
         run: python scripts/patch_smithery_mcpb.py
@@ -59,7 +59,11 @@ jobs:
       - name: Package Gemini Extension Archive
         run: |
           mkdir -p gemini-release
-          cp desktop-extension/index.js gemini-release/index.js
+          # Copy all JS files (index + chunks) and the UI asset directories
+          cp desktop-extension/*.js gemini-release/
+          cp -r desktop-extension/assets gemini-release/
+          cp -r desktop-extension/templates gemini-release/
+
           cp gemini-extension.json gemini-release/gemini-extension.json
           cp GEMINI.md gemini-release/GEMINI.md
           cd gemini-release
