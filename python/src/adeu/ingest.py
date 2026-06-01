@@ -1,5 +1,4 @@
 # FILE: src/adeu/ingest.py
-from adeu.utils.docx import strip_bom_from_docx_bytes
 import io
 from typing import Any, Optional
 
@@ -24,14 +23,13 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
+    strip_bom_from_docx_bytes,
 )
 
 logger = structlog.get_logger(__name__)
 
 
-def extract_text_from_stream(
-    file_stream: io.BytesIO, filename: str = "document.docx", clean_view: bool = False
-) -> str:
+def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.docx", clean_view: bool = False) -> str:
     """
     Extracts text from a file stream using raw run concatenation.
     Includes Markdown headers (#) and CriticMarkup Comments ({==Text==}{>>Comment<<}).
@@ -90,9 +88,7 @@ def _extract_text_from_doc(
     full_text: list[str] = []
     # Store the lxml proxy as the 3rd tuple item to keep it alive, preventing
     # CPython from recycling the id() memory address between passes.
-    offset_map: Optional[dict[int, tuple[int, int, Any]]] = (
-        {} if return_paragraph_offsets else None
-    )
+    offset_map: Optional[dict[int, tuple[int, int, Any]]] = {} if return_paragraph_offsets else None
     cursor = 0
 
     for part in iter_document_parts(doc):
@@ -190,9 +186,7 @@ def _extract_blocks(
             prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
-            p_text = build_paragraph_text(
-                item, comments_map, clean_view, style_cache, default_pstyle
-            )
+            p_text = build_paragraph_text(item, comments_map, clean_view, style_cache, default_pstyle)
             full_block = prefix + p_text
             blocks.append(full_block)
             if offset_map is not None:
@@ -376,9 +370,7 @@ def build_paragraph_text(
                 if clean_view:
                     new_wrappers = ("", "")
                 else:
-                    new_wrappers = _get_wrappers(
-                        active_ins, active_del, active_comments, active_fmt
-                    )
+                    new_wrappers = _get_wrappers(active_ins, active_del, active_comments, active_fmt)
                 new_style = (prefix, suffix)
 
                 if pending_text and new_wrappers == current_wrappers:
@@ -393,10 +385,7 @@ def build_paragraph_text(
                         and pending_text.endswith(current_style[1])
                         and seg.startswith(new_style[0])
                     ):
-                        pending_text = (
-                            pending_text[: -len(current_style[1])]
-                            + seg[len(new_style[0]) :]
-                        )
+                        pending_text = pending_text[: -len(current_style[1])] + seg[len(new_style[0]) :]
                     else:
                         pending_text += seg
                     current_style = new_style
@@ -422,9 +411,7 @@ def build_paragraph_text(
                         deferred_meta_states.append(current_state)
 
                     should_defer = False
-                    is_redline = (
-                        bool(active_ins) or bool(active_del) or bool(active_fmt)
-                    )
+                    is_redline = bool(active_ins) or bool(active_del) or bool(active_fmt)
 
                     if is_redline:
                         j = i + 1
@@ -439,11 +426,7 @@ def build_paragraph_text(
                                 if not get_run_text(next_item):
                                     j += 1
                                     continue
-                                if (
-                                    temp_ins_count > 0
-                                    or temp_del_count > 0
-                                    or temp_fmt_count > 0
-                                ):
+                                if temp_ins_count > 0 or temp_del_count > 0 or temp_fmt_count > 0:
                                     next_is_redline = True
                                 break
                             elif isinstance(next_item, DocxEvent):
@@ -465,9 +448,7 @@ def build_paragraph_text(
                             should_defer = True
 
                     if not should_defer and deferred_meta_states:
-                        meta_block = _build_merged_meta_block(
-                            deferred_meta_states, comments_map
-                        )
+                        meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
                         if meta_block:
                             if pending_text:
                                 s_tok, e_tok = current_wrappers

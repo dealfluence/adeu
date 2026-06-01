@@ -233,11 +233,7 @@ def _get_style_cache(part):
 
         if based_on_id:
             parent = resolve_style(based_on_id, visited)
-            o_lvl = (
-                raw["outline_level"]
-                if raw["outline_level"] is not None
-                else parent["outline_level"]
-            )
+            o_lvl = raw["outline_level"] if raw["outline_level"] is not None else parent["outline_level"]
             bold_val = raw["bold"] if raw["bold"] is not None else parent["bold"]
         else:
             o_lvl = raw["outline_level"]
@@ -411,9 +407,7 @@ def get_paragraph_prefix(
     return ""
 
 
-def get_run_style_markers(
-    run: Run, is_heading: Optional[bool] = None
-) -> tuple[str, str]:
+def get_run_style_markers(run: Run, is_heading: Optional[bool] = None) -> tuple[str, str]:
     """
     Returns markdown prefix/suffix for run formatting (bold/italic).
     Bypasses `run.bold` and `run.italic` attributes for massive OXML performance gains.
@@ -441,9 +435,7 @@ def get_run_style_markers(
 
     if is_heading is None:
         parent = run._parent
-        is_heading = (
-            is_native_heading(parent) if isinstance(parent, Paragraph) else False
-        )
+        is_heading = is_native_heading(parent) if isinstance(parent, Paragraph) else False
 
     # Nesting order: Bold outer, Italic inner -> **_text_**
     if is_bold and not is_heading:
@@ -584,9 +576,7 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                     except KeyError:
                         pass
                 if url:
-                    yield DocxEvent(
-                        "hyperlink_start", rId, date=url
-                    )  # reuse date field for url
+                    yield DocxEvent("hyperlink_start", rId, date=url)  # reuse date field for url
                 yield from traverse_node(child)
                 if url:
                     yield DocxEvent("hyperlink_end", rId, date=url)
@@ -696,11 +686,7 @@ def _coalesce_runs_in_container(container_element, parent_paragraph):
                     for child in list(nxt):
                         if child.tag == qn("w:rPr"):
                             continue
-                        if (
-                            child.tag in (qn("w:t"), qn("w:delText"))
-                            and last_t is not None
-                            and last_t.tag == child.tag
-                        ):
+                        if child.tag in (qn("w:t"), qn("w:delText")) and last_t is not None and last_t.tag == child.tag:
                             # Concatenate text instead of creating sibling text nodes
                             t1 = last_t.text or ""
                             t2 = child.text or ""
@@ -887,9 +873,7 @@ def strip_bom_from_docx_bytes(data: bytes) -> bytes:
             with zipfile.ZipFile(out_stream, "w", zipfile.ZIP_DEFLATED) as z_out:
                 for item in z_in.infolist():
                     content = z_in.read(item.filename)
-                    if item.filename.endswith(".xml") or item.filename.endswith(
-                        ".rels"
-                    ):
+                    if item.filename.endswith(".xml") or item.filename.endswith(".rels"):
                         if content.startswith(b"\xef\xbb\xbf"):
                             content = content[3:]
                     z_out.writestr(item, content)

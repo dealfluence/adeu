@@ -5,7 +5,6 @@ Coordinates the transform pipeline based on mode (full / keep-markup / baseline)
 and produces the sanitized DOCX + report.
 """
 
-from adeu.utils.docx import strip_bom_from_docx_bytes
 import enum
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -22,6 +21,7 @@ from adeu.redline.comments import CommentsManager
 from adeu.redline.engine import RedlineEngine
 from adeu.sanitize import transforms
 from adeu.sanitize.report import SanitizeReport
+from adeu.utils.docx import strip_bom_from_docx_bytes
 
 logger = structlog.get_logger(__name__)
 
@@ -92,7 +92,6 @@ def sanitize_docx(
 
     # Load document
     with open(input_p, "rb") as f:
-
         sanitized_bytes = strip_bom_from_docx_bytes(f.read())
         doc = Document(BytesIO(sanitized_bytes))
 
@@ -214,9 +213,7 @@ def _sanitize_keep_markup(doc, report: SanitizeReport, *, author: Optional[str])
     remaining = transforms.get_comments_summary(doc)
     for c in remaining["comments"]:
         if not c["resolved"]:
-            report.kept_comment_lines.append(
-                f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})'
-            )
+            report.kept_comment_lines.append(f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
 
 def _sanitize_baseline(
@@ -251,9 +248,7 @@ def _sanitize_baseline(
         longer = max(len(baseline_text), len(working_text))
         if longer > 0:
             # Count matching characters at same positions
-            matches = sum(
-                1 for a, b in zip(baseline_text, working_text, strict=False) if a == b
-            )
+            matches = sum(1 for a, b in zip(baseline_text, working_text, strict=False) if a == b)
             similarity = matches / longer
             if similarity < 0.5:
                 divergence_pct = int((1 - similarity) * 100)
@@ -301,28 +296,20 @@ def _sanitize_baseline(
     # Identify comments unique to working doc
     baseline_texts = {info["text"] for info in baseline_comments.values()}
     new_comments = [
-        info
-        for info in working_comments.values()
-        if info["text"] not in baseline_texts and not info.get("resolved")
+        info for info in working_comments.values() if info["text"] not in baseline_texts and not info.get("resolved")
     ]
     removed_comments = [
-        info
-        for info in working_comments.values()
-        if info["text"] in baseline_texts or info.get("resolved")
+        info for info in working_comments.values() if info["text"] in baseline_texts or info.get("resolved")
     ]
 
     report.comments_kept = len(new_comments)
     report.comments_removed = len(removed_comments)
 
     for c in new_comments:
-        report.kept_comment_lines.append(
-            f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})'
-        )
+        report.kept_comment_lines.append(f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})')
     for c in removed_comments:
         status = "[Resolved]" if c.get("resolved") else "[Baseline]"
-        report.removed_comment_lines.append(
-            f'{status} "{transforms._truncate(c["text"], 60)}" ({c["author"]})'
-        )
+        report.removed_comment_lines.append(f'{status} "{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
     # We need to replace the doc object. Since we can't reassign it in the caller,
     # we'll modify the approach: return the stream and let caller handle it.
