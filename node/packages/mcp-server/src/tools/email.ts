@@ -109,6 +109,7 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
     folder: args.folder,
     limit: args.limit ?? 10,
     offset: args.offset ?? 0,
+    mailbox_address: args.mailbox_address,
   };
 
   // Remove undefined fields
@@ -271,6 +272,9 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
     );
   }
   if (args.subject) formData.append("subject", args.subject);
+  if (args.mailbox_address) {
+    formData.append("mailbox_address", args.mailbox_address);
+  }
 
   if (args.to_recipients) {
     const recips =
@@ -315,5 +319,54 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
         text: `Successfully created email draft! Draft ID: ${data.id}`,
       },
     ],
+  };
+}
+export async function list_available_mailboxes(): Promise<ToolResult> {
+  const apiKey = await getCloudAuthToken();
+
+  const res = await fetch(`${BACKEND_URL}/api/v1/users/me/shared-mailboxes`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (res.status === 401) {
+    DesktopAuthManager.clearApiKey();
+    throw new Error(
+      "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.",
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`Failed to list available mailboxes: ${await res.text()}`);
+  }
+
+  const mailboxes: any[] = await res.json();
+  if (!mailboxes.length) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "No configured mailboxes found for your profile.",
+        },
+      ],
+    };
+  }
+
+  const lines = [
+    "### Connected Mailboxes",
+    "Below is the list of connected mailboxes you have access to. Use the `email_address` as the `mailbox_address` parameter in other tools to query or draft from a specific mailbox:",
+    "",
+  ];
+
+  for (const box of mailboxes) {
+    lines.push(
+      `- **${box.display_name || "Personal Mailbox"}**\n  - **Email Address**: \`${box.email_address}\`\n  - **Auto-Processing**: ${box.auto_process_enabled ? "Enabled" : "Disabled"}\n  - **Write-Back Mode**: \`${box.write_back_preference}\``,
+    );
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
   };
 }

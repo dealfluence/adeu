@@ -27,7 +27,11 @@ import {
 } from "./response-builders.js";
 
 import { login_to_adeu_cloud, logout_of_adeu_cloud } from "./tools/auth.js";
-import { search_and_fetch_emails, create_email_draft } from "./tools/email.js";
+import {
+  search_and_fetch_emails,
+  create_email_draft,
+  list_available_mailboxes,
+} from "./tools/email.js";
 import { MARKDOWN_UI_URI, EMAIL_UI_URI } from "./shared.js";
 
 function readFileBytesOrThrow(filePath: string): Buffer {
@@ -250,6 +254,10 @@ registerAppTool(
       offset: z.number().default(0),
       email_id: z.string().optional(),
       working_directory: z.string().optional(),
+      mailbox_address: z
+        .string()
+        .optional()
+        .describe("Optional target mailbox email address to search within."),
     }),
     _meta: { ui: { resourceUri: EMAIL_UI_URI } },
   },
@@ -556,11 +564,32 @@ server.registerTool(
       subject: z.string().optional(),
       to_recipients: z.array(z.string()).optional(),
       attachment_paths: z.array(z.string()).optional(),
+      mailbox_address: z
+        .string()
+        .optional()
+        .describe(
+          "Optional target mailbox email address to create the draft in.",
+        ),
     },
   },
   async (args) => {
     try {
       return (await create_email_draft(args)) as any;
+    } catch (e: any) {
+      return { isError: true, content: [{ type: "text", text: e.message }] };
+    }
+  },
+);
+server.registerTool(
+  "list_available_mailboxes",
+  {
+    description:
+      "Lists all personal and shared delegated mailboxes configured for the authenticated profile. Use this to discover valid email addresses to scope search and draft operations.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      return (await list_available_mailboxes()) as any;
     } catch (e: any) {
       return { isError: true, content: [{ type: "text", text: e.message }] };
     }

@@ -92,7 +92,20 @@ describe("Cloud Auth & Email Tools MCP Verification", () => {
     expect(res.result.content[0].text).toContain("Authentication Required");
     expect(res.result.content[0].text).toContain("login_to_adeu_cloud");
   });
+  it("CLOUD-1b: Enforces authentication trap for list_available_mailboxes", async () => {
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "list_available_mailboxes",
+        arguments: {},
+      },
+      204,
+    );
 
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("Authentication Required");
+    expect(res.result.content[0].text).toContain("login_to_adeu_cloud");
+  });
   it("CLOUD-2: Validates create_email_draft missing required arguments", async () => {
     // To bypass the auth trap for this test, we inject a dummy credential file
     mkdirSync(adeuConfigDir, { recursive: true });
