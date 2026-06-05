@@ -12,6 +12,7 @@ export async function login_to_adeu_cloud(): Promise<ToolResult> {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
       },
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (res.status === 401) {

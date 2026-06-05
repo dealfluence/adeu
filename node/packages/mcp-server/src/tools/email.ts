@@ -7,8 +7,21 @@ import { BACKEND_URL } from "../shared.js";
 import { ToolResult } from "../response-builders.js";
 import { createHash } from "node:crypto";
 
+function isTimeoutError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 const CACHE_FILE = join(homedir(), ".adeu", "mcp_id_cache.json");
 const MAX_CACHE_SIZE = 1000;
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function loadIdCache(): Record<string, string> {
   if (existsSync(CACHE_FILE)) {
@@ -44,34 +57,133 @@ function minifyEmailId(realId: string, cache: Record<string, string>): string {
   return shortId;
 }
 
+class StaleShortIdError extends Error {
+  constructor(shortId: string) {
+    super(
+      `Short ID '${shortId}' is not in the local cache (it may have been evicted, or it came from a different machine/session). ` +
+        `Short IDs only persist on the machine where they were generated. ` +
+        `Re-run search_and_fetch_emails with filters (sender, subject, days_ago) to fetch fresh IDs, then use the new ID from those results.`,
+    );
+    this.name = "StaleShortIdError";
+  }
+}
+
 function resolveEmailId(shortId: string): string {
   if (!shortId) return shortId;
+  // adeu_<id> references are resolved server-side, pass through.
+  if (shortId.startsWith("adeu_")) return shortId;
   const cache = loadIdCache();
-  return cache[shortId] || shortId;
+  const resolved = cache[shortId];
+  if (resolved) return resolved;
+  // If it looks like one of our short IDs but isn't in the cache, fail loudly
+  // instead of silently passing a meaningless string to the provider.
+  if (shortId.startsWith("msg_")) {
+    throw new StaleShortIdError(shortId);
+  }
+  // Otherwise treat it as a raw provider ID
+  return shortId;
 }
 
 function stripTags(html: string): string {
   if (!html) return "";
-  let text = html.replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, "");
+
+  // 1. Strip suppressed blocks (style/script/head/title) — loop until stable to
+  //    handle nested or malformed blocks. Matches Python MLStripper's structural
+  //    suppression rather than relying on a single greedy pass.
+  let text = html;
+  const suppressPattern =
+    /<(style|script|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+  let prev: string;
+  do {
+    prev = text;
+    text = text.replace(suppressPattern, "");
+  } while (text !== prev);
+
+  // 2. Also strip orphan open tags for suppressed blocks (unclosed <style ...>)
+  //    by killing from the open tag to end of document — safer than leaking CSS
+  //    into the LLM output.
+  text = text.replace(/<(style|script|head|title)\b[^>]*>[\s\S]*$/gi, "");
+
+  // 3. Convert block-level closing tags to newlines so paragraph structure survives
   text = text.replace(
     /<\/?(p|div|br|hr|tr|li|h[1-6]|blockquote)\b[^>]*>/gi,
     "\n",
   );
+
+  // 4. Strip all remaining tags
   text = text.replace(/<[^>]+>/g, "");
+
+  // 5. Decode the most common HTML entities (the rest are harmless as-is)
+  text = text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'");
+
+  // 6. Collapse triple-or-more newlines down to a paragraph break
   return text.replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
 }
 
 function removeNestedQuotes(text: string): string {
   if (!text) return "";
-  const patterns = [
-    /_{10,}/m,
-    /^From:\s.*?\n(?:.*\n){0,5}?Sent:\s/m,
-    /-----Original Message-----/m,
-    /On .{1,200}? wrote:/m,
-    /^Original Message$/m,
+
+  // Localized "From:" header tokens from Outlook in major European locales.
+  // Order matters only for readability; matching is anchored independently.
+  const fromTokens = [
+    "From", // English
+    "Lähettäjä", // Finnish
+    "Från", // Swedish
+    "Von", // German
+    "De", // French / Spanish / Portuguese
+    "Da", // Italian
+    "Van", // Dutch
+    "Fra", // Norwegian / Danish
+    "Mittente", // Italian (alt)
   ];
+
+  // Localized "Sent:" tokens (paired with From: in Outlook quote blocks)
+  const sentTokens = [
+    "Sent",
+    "Lähetetty",
+    "Skickat",
+    "Gesendet",
+    "Envoyé",
+    "Enviado",
+    "Inviato",
+    "Verzonden",
+    "Sendt",
+  ];
+
+  // Localized "On ... wrote:" / "X wrote on Y:" patterns from Gmail-style clients
+  const wrotePatterns = [
+    /On .{1,200}? wrote:/, // English
+    /Le .{1,200}? a écrit\s*:/i, // French
+    /Am .{1,200}? schrieb .{1,100}?:/i, // German
+    /El .{1,200}? escribió\s*:/i, // Spanish
+    /Il .{1,200}? ha scritto\s*:/i, // Italian
+    /Op .{1,200}? schreef .{1,100}?:/i, // Dutch
+    /Den .{1,200}? skrev .{1,100}?:/i, // Swedish/Norwegian/Danish
+    /Em .{1,200}? escreveu\s*:/i, // Portuguese
+    /Em\b.{1,200}?, .{1,200}? escreveu\s*:/i, // Portuguese (date prefix)
+    new RegExp(
+      `^(${fromTokens.join("|")})\\s*:.*?\\n(?:.*\\n){0,5}?(${sentTokens.join("|")})\\s*:`,
+      "m",
+    ),
+  ];
+
+  const dividerPatterns = [
+    /_{10,}/m,
+    /-----\s*(Original Message|Alkuperäinen viesti|Ursprüngliches Nachricht|Message d'origine|Mensaje original|Messaggio originale|Oorspronkelijk bericht|Original meddelande)\s*-----/im,
+    /^(Original Message|Alkuperäinen viesti|Ursprüngliches Nachricht|Message d'origine|Mensaje original|Messaggio originale|Oorspronkelijk bericht)$/im,
+  ];
+
+  const allPatterns = [...wrotePatterns, ...dividerPatterns];
+
   let earliestCut = text.length;
-  for (const pattern of patterns) {
+  for (const pattern of allPatterns) {
     const match = pattern.exec(text);
     if (match && match.index < earliestCut) {
       earliestCut = match.index;
@@ -96,7 +208,23 @@ function getUniqueFilepath(saveDir: string, filename: string): string {
 
 export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
   const apiKey = await getCloudAuthToken();
-  const realEmailId = args.email_id ? resolveEmailId(args.email_id) : undefined;
+  const maxAttachmentSizeMb: number =
+    typeof args.max_attachment_size_mb === "number" &&
+    args.max_attachment_size_mb > 0
+      ? args.max_attachment_size_mb
+      : 10;
+  let realEmailId: string | undefined;
+  try {
+    realEmailId = args.email_id ? resolveEmailId(args.email_id) : undefined;
+  } catch (err) {
+    if (err instanceof StaleShortIdError) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: err.message }],
+      };
+    }
+    throw err;
+  }
 
   const payload = {
     email_id: realEmailId,
@@ -117,14 +245,25 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
     (k) => (payload as any)[k] === undefined && delete (payload as any)[k],
   );
 
-  const res = await fetch(`${BACKEND_URL}/api/v1/emails/search`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BACKEND_URL}/api/v1/emails/search`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(45_000),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new Error(
+        "Email search timed out after 45s. The mail provider (Outlook/Gmail) may be slow. Try narrowing the search with more filters (sender, subject, days_ago), or retry shortly.",
+      );
+    }
+    throw err;
+  }
 
   if (res.status === 401) {
     DesktopAuthManager.clearApiKey();
@@ -188,27 +327,57 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
     );
     mkdirSync(saveDir, { recursive: true });
 
-    async function processAttachments(msg: any): Promise<string[]> {
+    interface SkippedAttachment {
+      filename: string;
+      size_bytes: number | null;
+      reason: string;
+    }
+
+    async function processAttachments(
+      msg: any,
+    ): Promise<{ localFiles: string[]; skipped: SkippedAttachment[] }> {
       const localFiles: string[] = [];
+      const skipped: SkippedAttachment[] = [];
+      const maxBytes = maxAttachmentSizeMb * 1024 * 1024;
+
       for (const att of msg.attachments || []) {
+        const filename = att.filename || "unnamed_file";
+        const size: number | null =
+          typeof att.size_bytes === "number" ? att.size_bytes : null;
+
+        // Size cap: skip download but record it so the agent knows the file exists
+        if (size != null && size > maxBytes) {
+          skipped.push({
+            filename,
+            size_bytes: size,
+            reason: `exceeds ${maxAttachmentSizeMb} MB cap`,
+          });
+          delete att.base64_data; // Drop payload from structured response too
+          continue;
+        }
+
         if (att.base64_data) {
           try {
-            const filepath = getUniqueFilepath(
-              saveDir,
-              att.filename || "unnamed_file",
-            );
+            const filepath = getUniqueFilepath(saveDir, filename);
             writeFileSync(filepath, Buffer.from(att.base64_data, "base64"));
             localFiles.push(filepath);
+            att.local_path = filepath; // For UI rendering (matches Python parity)
             delete att.base64_data; // Free memory
           } catch (e) {
-            console.error(`Failed to save attachment ${att.filename}`, e);
+            console.error(`Failed to save attachment ${filename}`, e);
+            skipped.push({
+              filename,
+              size_bytes: size,
+              reason: `download failed: ${(e as Error).message}`,
+            });
           }
         }
       }
-      return localFiles;
+      return { localFiles, skipped };
     }
 
-    const targetFiles = await processAttachments(full);
+    const { localFiles: targetFiles, skipped: targetSkipped } =
+      await processAttachments(full);
     const lines = [
       `# Email Thread: ${full.subject}`,
       "",
@@ -222,6 +391,17 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
       targetFiles.forEach((f) => lines.push(`- 📎 \`${f}\``));
     }
 
+    if (targetSkipped.length) {
+      lines.push(
+        `**Attachments Skipped (not downloaded)** — pass \`max_attachment_size_mb\` to raise the ${maxAttachmentSizeMb} MB cap:`,
+      );
+      targetSkipped.forEach((s) =>
+        lines.push(
+          `- ⚠️ \`${s.filename}\` (${formatBytes(s.size_bytes)}, ${s.reason})`,
+        ),
+      );
+    }
+
     const cleanBody = removeNestedQuotes(stripTags(full.body_html || ""));
     lines.push(`**Body**:\n\`\`\`\n${cleanBody}\n\`\`\`\n`);
 
@@ -229,13 +409,24 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
       lines.push("## Previous Messages in Thread (Historical Context):");
       for (let i = 0; i < full.messages.length; i++) {
         const histMsg = full.messages[i];
-        const histFiles = await processAttachments(histMsg);
+        const { localFiles: histFiles, skipped: histSkipped } =
+          await processAttachments(histMsg);
         lines.push(
           `### Message -${i + 1} (Older)\n**From**: ${histMsg.sender_name} <${histMsg.sender_email}>\n**Date**: ${histMsg.received_datetime}`,
         );
         if (histFiles.length) {
           lines.push("**Attachments Saved Locally**:");
           histFiles.forEach((f) => lines.push(`- 📎 \`${f}\``));
+        }
+        if (histSkipped.length) {
+          lines.push(
+            `**Attachments Skipped (not downloaded)** — pass \`max_attachment_size_mb\` to raise the ${maxAttachmentSizeMb} MB cap:`,
+          );
+          histSkipped.forEach((s) =>
+            lines.push(
+              `- ⚠️ \`${s.filename}\` (${formatBytes(s.size_bytes)}, ${s.reason})`,
+            ),
+          );
         }
         lines.push(
           `**Body**:\n\`\`\`\n${removeNestedQuotes(stripTags(histMsg.body_html || ""))}\n\`\`\`\n`,
@@ -266,10 +457,20 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
   formData.append("body_markdown", args.body_markdown);
 
   if (args.reply_to_email_id) {
-    formData.append(
-      "reply_to_email_id",
-      resolveEmailId(args.reply_to_email_id),
-    );
+    try {
+      formData.append(
+        "reply_to_email_id",
+        resolveEmailId(args.reply_to_email_id),
+      );
+    } catch (err) {
+      if (err instanceof StaleShortIdError) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: err.message }],
+        };
+      }
+      throw err;
+    }
   }
   if (args.subject) formData.append("subject", args.subject);
   if (args.mailbox_address) {
@@ -296,11 +497,25 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
     }
   }
 
-  const res = await fetch(`${BACKEND_URL}/api/v1/emails/drafts/new`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-    body: formData as any,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BACKEND_URL}/api/v1/emails/drafts/new`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+      body: formData as any,
+      signal: AbortSignal.timeout(90_000),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new Error(
+        "Draft creation timed out after 90s. If the draft includes large attachments, try splitting them across multiple drafts or omitting the largest files.",
+      );
+    }
+    throw err;
+  }
 
   if (res.status === 401) {
     DesktopAuthManager.clearApiKey();
@@ -324,13 +539,24 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
 export async function list_available_mailboxes(): Promise<ToolResult> {
   const apiKey = await getCloudAuthToken();
 
-  const res = await fetch(`${BACKEND_URL}/api/v1/users/me/shared-mailboxes`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BACKEND_URL}/api/v1/users/me/shared-mailboxes`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new Error(
+        "Listing mailboxes timed out after 15s. The Adeu backend may be temporarily unavailable; retry shortly.",
+      );
+    }
+    throw err;
+  }
 
   if (res.status === 401) {
     DesktopAuthManager.clearApiKey();

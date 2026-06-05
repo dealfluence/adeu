@@ -60,12 +60,39 @@ def minify_email_id(real_id: str, cache: dict[str, str]) -> str:
     return short_id
 
 
+class StaleShortIdError(ToolError):
+    """Raised when a short-form `msg_xxx` ID isn't in the local cache."""
+
+
 def resolve_email_id(short_id: str) -> str:
-    """Looks up a short ID from disk and returns the real provider ID."""
+    """Looks up a short ID from disk and returns the real provider ID.
+
+    Behavior:
+    - Empty string → return as-is.
+    - 'adeu_<id>' → server-side reference; pass through untouched.
+    - 'msg_<hash>' present in cache → return real provider ID.
+    - 'msg_<hash>' NOT in cache → raise StaleShortIdError. The short ID was
+      generated on a different machine, a previous session, or has been
+      evicted from the local LRU. The agent should re-run search_and_fetch_emails
+      to get fresh IDs.
+    - Anything else → assume raw provider ID and pass through.
+    """
     if not short_id:
         return short_id
+    if short_id.startswith("adeu_"):
+        return short_id
     cache = load_id_cache()
-    return cache.get(short_id, short_id)
+    resolved = cache.get(short_id)
+    if resolved:
+        return resolved
+    if short_id.startswith("msg_"):
+        raise StaleShortIdError(
+            f"Short ID '{short_id}' is not in the local cache (it may have been evicted, "
+            f"or it came from a different machine/session). Short IDs only persist on the "
+            f"machine where they were generated. Re-run search_and_fetch_emails with filters "
+            f"(sender, subject, days_ago) to fetch fresh IDs, then use the new ID from those results."
+        )
+    return short_id
 
 
 class MLStripper(HTMLParser):
@@ -118,16 +145,72 @@ def strip_tags(html: str) -> str:
 
 
 def remove_nested_quotes(text: str) -> str:
-    """Heuristically strips trailing quoted replies from email bodies."""
+    """Heuristically strips trailing quoted replies from email bodies.
+
+    Supports English, Finnish, Swedish, German, French, Spanish, Italian,
+    Dutch, Norwegian, Danish, and Portuguese Outlook/Gmail quote markers.
+    """
     if not text:
         return ""
 
+    # Localized "From:" / "Sent:" header tokens from Outlook in major European locales.
+    from_tokens = "|".join(
+        [
+            "From",
+            "Lähettäjä",
+            "Från",
+            "Von",
+            "De",
+            "Da",
+            "Van",
+            "Fra",
+            "Mittente",
+        ]
+    )
+    sent_tokens = "|".join(
+        [
+            "Sent",
+            "Lähetetty",
+            "Skickat",
+            "Gesendet",
+            "Envoyé",
+            "Enviado",
+            "Inviato",
+            "Verzonden",
+            "Sendt",
+        ]
+    )
+
+    original_message_tokens = "|".join(
+        [
+            "Original Message",
+            "Alkuperäinen viesti",
+            "Ursprüngliches Nachricht",
+            "Message d'origine",
+            "Mensaje original",
+            "Messaggio originale",
+            "Oorspronkelijk bericht",
+            "Original meddelande",
+        ]
+    )
+
     divider_patterns = [
         re.compile(r"_{10,}", re.MULTILINE),
-        re.compile(r"^From:\s.*?\n(?:.*\n){0,5}?Sent:\s", re.MULTILINE | re.DOTALL),
-        re.compile(r"-----Original Message-----", re.MULTILINE),
+        re.compile(
+            rf"^({from_tokens})\s*:.*?\n(?:.*\n){{0,5}}?({sent_tokens})\s*:",
+            re.MULTILINE | re.DOTALL,
+        ),
+        re.compile(rf"-----\s*({original_message_tokens})\s*-----", re.IGNORECASE),
+        re.compile(rf"^({original_message_tokens})$", re.MULTILINE | re.IGNORECASE),
+        # "On ... wrote:" style across locales
         re.compile(r"On .{1,200}? wrote:", re.MULTILINE | re.DOTALL),
-        re.compile(r"^Original Message$", re.MULTILINE),
+        re.compile(r"Le .{1,200}? a écrit\s*:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"Am .{1,200}? schrieb .{1,100}?:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"El .{1,200}? escribió\s*:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"Il .{1,200}? ha scritto\s*:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"Op .{1,200}? schreef .{1,100}?:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"Den .{1,200}? skrev .{1,100}?:", re.IGNORECASE | re.DOTALL),
+        re.compile(r"Em .{1,200}? escreveu\s*:", re.IGNORECASE | re.DOTALL),
     ]
 
     earliest_cut = None
@@ -151,6 +234,17 @@ def _resolve_attachment_dir(working_directory: str | None, email_id: str) -> Pat
     return Path(tempfile.gettempdir()) / "adeu_downloads" / email_id
 
 
+def _format_bytes(size_bytes: int | None) -> str:
+    """Human-readable byte count for LLM-facing messages."""
+    if size_bytes is None:
+        return "unknown size"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
 def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
     base_path = save_dir / filename
     if not base_path.exists():
@@ -167,7 +261,14 @@ def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
 
 
 @tool(
-    description="Lists all mailboxes (both personal and shared) configured for the authenticated user on Adeu Cloud.",
+    description=(
+        "Lists all personal and shared delegated mailboxes the authenticated user has access to. "
+        "Returns each mailbox's email_address, display_name, auto-processing settings, and write-back preference.\n\n"
+        "Call this FIRST when the user mentions a specific mailbox or shared inbox by name, to resolve "
+        "the canonical email_address. Then pass that address as `mailbox_address` to "
+        "`search_and_fetch_emails` or `create_email_draft` to scope the operation.\n\n"
+        "Omitting `mailbox_address` on those tools targets the user's primary personal mailbox."
+    ),
     annotations={"readOnlyHint": True},
 )
 async def list_available_mailboxes(
@@ -188,7 +289,7 @@ async def list_available_mailboxes(
     )
 
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             mailboxes = json.loads(response.read().decode("utf-8"))
 
             if not mailboxes:
@@ -198,49 +299,79 @@ async def list_available_mailboxes(
             for mb in mailboxes:
                 display_name = mb.get("display_name") or "Unnamed"
                 email = mb.get("email_address", "")
-                auto_process = "Auto-Process Enabled" if mb.get("auto_process_enabled") else "Manual Review Only"
+                auto_process = (
+                    "Auto-Process Enabled"
+                    if mb.get("auto_process_enabled")
+                    else "Manual Review Only"
+                )
                 writeback = mb.get("write_back_preference", "INTERNAL")
 
                 lines.append(f"- **{display_name}** (`{email}`)")
-                lines.append(f"  Preferences: {auto_process} | Writeback Mode: {writeback}")
+                lines.append(
+                    f"  Preferences: {auto_process} | Writeback Mode: {writeback}"
+                )
                 lines.append("")
 
             return "\n".join(lines)
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(f"Failed to fetch mailboxes (HTTP {e.code}): {error_body}") from e
+        raise ToolError(
+            f"Failed to fetch mailboxes (HTTP {e.code}): {error_body}"
+        ) from e
+    except TimeoutError as e:
+        raise ToolError(
+            "Listing mailboxes timed out after 15s. The Adeu backend may be temporarily unavailable; retry shortly."
+        ) from e
     except Exception as e:
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
 
 
 @tool(
     description=(
-        "Searches the user's live email inbox. By default, searches only the Inbox folder "
-        "(matching what the user sees in their mail client) — this excludes deleted items, "
-        "drafts, and spam. "
-        "Use filters to find specific emails (e.g., 'is_unread=True' for new emails, "
-        "'days_ago=7' for last week, 'folder=sent' for sent items, 'folder=all' to "
-        "search the entire mailbox including trash). "
-        "It returns a list of lightweight email previews. "
-        "To read the full email body, thread history, and automatically download attachments "
-        "to local disk, call this tool again and provide the specific `email_id`. "
-        "Emails often contain attachments. It is highly recommended to always provide "
-        "the `working_directory` parameter so attachments are saved directly to the user's "
-        "actual project folder. This directory path refers to the user's native operating system, "
-        "not the LLM's sandbox environment."
+        "Searches the user's live email inbox via the Adeu cloud backend.\n\n"
+        "TWO MODES:\n"
+        "1. Search mode (no `email_id`): returns up to `limit` lightweight previews. Use filters "
+        "(`sender`, `subject`, `is_unread`, `days_ago`, `folder`, `has_attachments`, `attachment_name`) to narrow down.\n"
+        "2. Fetch mode (with `email_id`): returns the full email body, thread history, and downloads "
+        "attachments under `max_attachment_size_mb` to the local disk.\n\n"
+        "AUTO-ESCALATION: If a search returns exactly one preview, the backend automatically fetches "
+        "the full email in the same call. Plan around the response shape — check the `type` field "
+        "(`previews` vs `full_email`) before assuming.\n\n"
+        "EMAIL ID FORMATS (`email_id` parameter accepts any of):\n"
+        "- `msg_<6 chars>` — short ID returned by previews on THIS machine. NOT portable across machines "
+        "or sessions; the local cache holds the most recent 1000. If you reference one that's been evicted, "
+        "the tool returns a StaleShortIdError telling you to re-search.\n"
+        "- `adeu_<numeric>` — server-side reference for emails Adeu has previously processed. Portable "
+        "across machines and sessions for the same authenticated user.\n"
+        "- Raw provider ID (Gmail/Outlook native ID) — works if you have it, but you usually won't.\n\n"
+        "FOLDER DEFAULT: omitting `folder` searches the Inbox only (matching what the user sees in their "
+        "mail client). Use `folder='sent'` for sent items, `folder='all'` to include Deleted Items, "
+        "Drafts, and other folders.\n\n"
+        "ATTACHMENTS: attachments larger than `max_attachment_size_mb` (default 10) are listed in the "
+        "response but NOT downloaded — raise the cap if you need them. Always set `working_directory` "
+        "when calling from a project so attachments land alongside the user's other files. This directory "
+        "path refers to the user's native operating system, not the LLM's sandbox environment."
     ),
     annotations={"openWorldHint": True, "readOnlyHint": True},
     meta={"ui": {"resourceUri": EMAIL_UI_URI}},
 )
 async def search_and_fetch_emails(
     ctx: Context,
-    sender: Annotated[Optional[str], "Filter by the sender's email address or name."] = None,
+    sender: Annotated[
+        Optional[str], "Filter by the sender's email address or name."
+    ] = None,
     subject: Annotated[Optional[str], "Filter by keywords in the subject line."] = None,
-    has_attachments: Annotated[Optional[bool], "If True, only returns emails that contain file attachments."] = None,
-    attachment_name: Annotated[Optional[str], "Filter by a specific attachment filename."] = None,
+    has_attachments: Annotated[
+        Optional[bool], "If True, only returns emails that contain file attachments."
+    ] = None,
+    attachment_name: Annotated[
+        Optional[str], "Filter by a specific attachment filename."
+    ] = None,
     is_unread: Annotated[
         Optional[bool],
         "If True, returns ONLY unread emails. If False, returns ONLY read emails. Leave empty for both.",
@@ -276,6 +407,11 @@ async def search_and_fetch_emails(
         Optional[str],
         "Optional. The specific mailbox email address to search (e.g. 'sales@org.com'). "
         "Omit to use the user's primary mailbox.",
+    ] = None,
+    max_attachment_size_mb: Annotated[
+        Optional[int],
+        "Maximum attachment size in MB to download (default 10). Attachments larger than this "
+        "are listed in the response but not downloaded. Raise this to fetch large files.",
     ] = None,
     api_key: str = Depends(get_cloud_auth_token),
 ) -> ToolResult:
@@ -319,14 +455,21 @@ async def search_and_fetch_emails(
 
     try:
         await ctx.debug("Sending search request to Adeu Cloud", extra={"url": url})
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=45) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         error_body = e.read().decode("utf-8")
         raise ToolError(f"Cloud search failed (HTTP {e.code}): {error_body}") from e
+    except TimeoutError as e:
+        raise ToolError(
+            "Email search timed out after 45s. The mail provider (Outlook/Gmail) may be slow. "
+            "Try narrowing the search with more filters (sender, subject, days_ago), or retry shortly."
+        ) from e
     except Exception as e:
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e
 
@@ -374,11 +517,17 @@ async def search_and_fetch_emails(
     elif response_type == "full_email":
         full_email = data.get("full_email", {})
         if not full_email:
-            return ToolResult(content="Failed to retrieve full email.", structured_content=data)
+            return ToolResult(
+                content="Failed to retrieve full email.", structured_content=data
+            )
 
         email_id_str = full_email.get("id", "unknown_id")
         id_cache = load_id_cache()
-        short_target_id = minify_email_id(email_id_str, id_cache) if email_id_str != "unknown_id" else "unknown_id"
+        short_target_id = (
+            minify_email_id(email_id_str, id_cache)
+            if email_id_str != "unknown_id"
+            else "unknown_id"
+        )
         full_email["id"] = short_target_id
         for hist_msg in full_email.get("messages", []):
             if "id" in hist_msg:
@@ -389,12 +538,37 @@ async def search_and_fetch_emails(
         save_dir = _resolve_attachment_dir(working_directory, short_target_id)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        async def process_message_attachments(message_data: dict) -> list[str]:
-            local_files = []
+        effective_cap_mb = (
+            max_attachment_size_mb
+            if (isinstance(max_attachment_size_mb, int) and max_attachment_size_mb > 0)
+            else 10
+        )
+        max_bytes = effective_cap_mb * 1024 * 1024
+
+        async def process_message_attachments(
+            message_data: dict,
+        ) -> tuple[list[str], list[dict]]:
+            local_files: list[str] = []
+            skipped: list[dict] = []
+
             for att in message_data.get("attachments", []):
                 filename = att.get("filename", "unnamed_file")
-                b64_data = att.pop("base64_data", None)
+                size_bytes = att.get("size_bytes")
 
+                # Size cap: skip download but record for the agent
+                if isinstance(size_bytes, int) and size_bytes > max_bytes:
+                    skipped.append(
+                        {
+                            "filename": filename,
+                            "size_bytes": size_bytes,
+                            "reason": f"exceeds {effective_cap_mb} MB cap",
+                        }
+                    )
+                    # Drop the payload from the structured response too
+                    att.pop("base64_data", None)
+                    continue
+
+                b64_data = att.pop("base64_data", None)
                 if b64_data:
                     try:
                         file_path = _get_unique_filepath(save_dir, filename)
@@ -403,22 +577,44 @@ async def search_and_fetch_emails(
                         att["local_path"] = str(file_path)
                     except Exception as e:
                         await ctx.warning(f"Failed to save attachment {filename}: {e}")
-            return local_files
+                        skipped.append(
+                            {
+                                "filename": filename,
+                                "size_bytes": size_bytes,
+                                "reason": f"download failed: {e}",
+                            }
+                        )
+
+            return local_files, skipped
 
         llm_lines = [f"# Email Thread: {full_email.get('subject')}", ""]
 
-        target_local_files = await process_message_attachments(full_email)
+        target_local_files, target_skipped = await process_message_attachments(
+            full_email
+        )
         raw_clean_body = strip_tags(full_email.get("body_html", ""))
         clean_body = remove_nested_quotes(raw_clean_body)
 
         llm_lines.append("## Target Message (Newest):")
-        llm_lines.append(f"**From**: {full_email.get('sender_name')} <{full_email.get('sender_email')}>")
+        llm_lines.append(
+            f"**From**: {full_email.get('sender_name')} <{full_email.get('sender_email')}>"
+        )
         llm_lines.append(f"**Date**: {full_email.get('received_datetime')}")
 
         if target_local_files:
             llm_lines.append("**Attachments Saved Locally**:")
             for path in target_local_files:
                 llm_lines.append(f"- 📎 `{path}`")
+
+        if target_skipped:
+            llm_lines.append(
+                f"**Attachments Skipped (not downloaded)** — pass `max_attachment_size_mb` "
+                f"to raise the {effective_cap_mb} MB cap:"
+            )
+            for s in target_skipped:
+                llm_lines.append(
+                    f"- ⚠️ `{s['filename']}` ({_format_bytes(s['size_bytes'])}, {s['reason']})"
+                )
 
         llm_lines.append(f"**Body**:\n```\n{clean_body}\n```\n")
 
@@ -435,13 +631,17 @@ async def search_and_fetch_emails(
         if full_email.get("is_thread") and full_email.get("messages"):
             llm_lines.append("## Previous Messages in Thread (Historical Context):")
             for idx, hist_msg in enumerate(full_email.get("messages", [])):
-                hist_local_files = await process_message_attachments(hist_msg)
+                hist_local_files, hist_skipped = await process_message_attachments(
+                    hist_msg
+                )
 
                 raw_clean_hist = strip_tags(hist_msg.get("body_html", ""))
                 clean_hist = remove_nested_quotes(raw_clean_hist)
 
                 llm_lines.append(f"### Message {-1 * (idx + 1)} (Older)")
-                llm_lines.append(f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>")
+                llm_lines.append(
+                    f"**From**: {hist_msg.get('sender_name')} <{hist_msg.get('sender_email')}>"
+                )
                 llm_lines.append(f"**Date**: {hist_msg.get('received_datetime')}")
 
                 if hist_local_files:
@@ -449,36 +649,65 @@ async def search_and_fetch_emails(
                     for path in hist_local_files:
                         llm_lines.append(f"- 📎 `{path}`")
 
+                if hist_skipped:
+                    llm_lines.append(
+                        f"**Attachments Skipped (not downloaded)** — pass `max_attachment_size_mb` "
+                        f"to raise the {effective_cap_mb} MB cap:"
+                    )
+                    for s in hist_skipped:
+                        llm_lines.append(
+                            f"- ⚠️ `{s['filename']}` ({_format_bytes(s['size_bytes'])}, {s['reason']})"
+                        )
+
                 llm_lines.append(f"**Body**:\n```\n{clean_hist}\n```\n")
             llm_lines.append("---")
 
-        if target_local_files or any(m.get("attachments") for m in full_email.get("messages", [])):
+        if target_local_files or any(
+            m.get("attachments") for m in full_email.get("messages", [])
+        ):
             llm_lines.append(
                 "\n*You can now use tools like `read_docx`, `diff_docx_files`, or `validate_documents` "
                 "on the local file paths listed under each message.*"
             )
 
         return ToolResult(content="\n".join(llm_lines), structured_content=data)
-    return ToolResult(content="Unknown response format from backend.", structured_content=data)
+    return ToolResult(
+        content="Unknown response format from backend.", structured_content=data
+    )
 
 
 @tool(
     name="create_email_draft",
     description=(
-        "Creates an email draft in the user's native draft box (e.g., Outlook/Gmail). "
-        "Can either start a NEW email, or REPLY to an existing thread. "
-        "To REPLY, provide 'reply_to_email_id' (the short ID from search_and_fetch_emails). "
-        "To start a NEW email, omit the ID but provide 'subject' and 'to_recipients'. "
-        "Allows attaching local files (PDF/DOCX) by providing their absolute paths. "
-        "The body should be formatted in Markdown."
+        "Creates an email draft in the user's native draft box (Outlook Drafts or Gmail Drafts).\n\n"
+        "TWO MODES:\n"
+        "1. Reply mode: pass `reply_to_email_id` to create a threaded reply. The draft inherits subject, "
+        "recipients, and threading headers from the original — do NOT pass `subject` or `to_recipients`.\n"
+        "2. New email mode: omit `reply_to_email_id` and pass BOTH `subject` and `to_recipients`.\n\n"
+        "`reply_to_email_id` accepts the same ID formats as search_and_fetch_emails (`msg_*` short IDs, "
+        "`adeu_*` references, or raw provider IDs). Short IDs are validated against the local cache before "
+        "the call; stale ones fail fast with a clear error telling you to re-search.\n\n"
+        "`body_markdown` is converted server-side to styled HTML with inlined CSS for email-client "
+        "compatibility. Write the body in plain Markdown — do not pre-render HTML.\n\n"
+        "`attachment_paths` takes absolute file paths on the user's local disk and uploads them with the "
+        "draft. Useful right after search_and_fetch_emails downloaded attachments — those local paths can "
+        "be passed directly here."
     ),
 )
 async def create_email_draft(
     ctx: Context,
-    body_markdown: Annotated[str, "The body of the email in Markdown format. Will be converted to HTML."],
-    reply_to_email_id: Annotated[Optional[str], "Provide the short email ID to reply to an existing thread."] = None,
-    subject: Annotated[Optional[str], "The subject line. Required if starting a NEW email."] = None,
-    to_recipients: Annotated[Optional[list[str] | str], "List of emails. Required if starting a NEW email."] = None,
+    body_markdown: Annotated[
+        str, "The body of the email in Markdown format. Will be converted to HTML."
+    ],
+    reply_to_email_id: Annotated[
+        Optional[str], "Provide the short email ID to reply to an existing thread."
+    ] = None,
+    subject: Annotated[
+        Optional[str], "The subject line. Required if starting a NEW email."
+    ] = None,
+    to_recipients: Annotated[
+        Optional[list[str] | str], "List of emails. Required if starting a NEW email."
+    ] = None,
     attachment_paths: Annotated[
         Optional[list[str] | str],
         "List of absolute file paths on the local system to attach to the draft.",
@@ -519,7 +748,9 @@ async def create_email_draft(
     parsed_recipients = _parse_list(to_recipients)
     parsed_attachments = _parse_list(attachment_paths)
 
-    real_reply_to_id = resolve_email_id(reply_to_email_id) if reply_to_email_id else None
+    real_reply_to_id = (
+        resolve_email_id(reply_to_email_id) if reply_to_email_id else None
+    )
 
     fields = {
         "body_markdown": body_markdown,
@@ -558,15 +789,26 @@ async def create_email_draft(
 
     try:
         await ctx.debug("Sending draft request to Adeu Cloud")
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=90) as response:
             data = json.loads(response.read().decode("utf-8"))
             draft_id = data.get("id")
-            return ToolResult(content=f"Successfully created email draft! Draft ID: {draft_id}")
+            return ToolResult(
+                content=f"Successfully created email draft! Draft ID: {draft_id}"
+            )
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
-            raise ToolError("Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+            raise ToolError(
+                "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+            ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(f"Cloud draft creation failed (HTTP {e.code}): {error_body}") from e
+        raise ToolError(
+            f"Cloud draft creation failed (HTTP {e.code}): {error_body}"
+        ) from e
+    except TimeoutError as e:
+        raise ToolError(
+            "Draft creation timed out after 90s. If the draft includes large attachments, "
+            "try splitting them across multiple drafts or omitting the largest files."
+        ) from e
     except Exception as e:
         raise ToolError(f"Failed to communicate with Adeu Cloud: {str(e)}") from e

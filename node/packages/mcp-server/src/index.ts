@@ -241,7 +241,17 @@ registerAppTool(
   {
     title: "Search & Fetch Emails",
     description:
-      "Searches the user's live email inbox. Returns previews. Call again with `email_id` to fetch the full body.",
+      "Searches the user's live email inbox via the Adeu cloud backend.\n\n" +
+      "TWO MODES:\n" +
+      "1. Search mode (no `email_id`): returns up to `limit` lightweight previews. Use filters (`sender`, `subject`, `is_unread`, `days_ago`, `folder`, `has_attachments`, `attachment_name`) to narrow down.\n" +
+      "2. Fetch mode (with `email_id`): returns the full email body, thread history, and downloads attachments under `max_attachment_size_mb` to the local disk.\n\n" +
+      "AUTO-ESCALATION: If a search returns exactly one preview, the backend automatically fetches the full email in the same call. Plan around the response shape — check the `type` field (`previews` vs `full_email`) before assuming.\n\n" +
+      "EMAIL ID FORMATS (`email_id` parameter accepts any of):\n" +
+      "- `msg_<6 chars>` — short ID returned by previews on THIS machine. NOT portable across machines or sessions; the local cache holds the most recent 1000. If you reference one that's been evicted, the tool returns a StaleShortIdError telling you to re-search.\n" +
+      "- `adeu_<numeric>` — server-side reference for emails Adeu has previously processed. Portable across machines and sessions for the same authenticated user.\n" +
+      "- Raw provider ID (Gmail/Outlook native ID) — works if you have it, but you usually won't.\n\n" +
+      "FOLDER DEFAULT: omitting `folder` searches the Inbox only (matching what the user sees in their mail client). Use `folder='sent'` for sent items, `folder='all'` to include Deleted Items, Drafts, and other folders.\n\n" +
+      "ATTACHMENTS: attachments larger than `max_attachment_size_mb` (default 10) are listed in the response but NOT downloaded — raise the cap if you need them. Always set `working_directory` when calling from a project so attachments land alongside the user's other files.",
     inputSchema: z.object({
       sender: z.string().optional(),
       subject: z.string().optional(),
@@ -258,6 +268,12 @@ registerAppTool(
         .string()
         .optional()
         .describe("Optional target mailbox email address to search within."),
+      max_attachment_size_mb: z
+        .number()
+        .optional()
+        .describe(
+          "Maximum attachment size in MB to download (default 10). Attachments larger than this are listed in the response but not downloaded. Raise this to fetch large files.",
+        ),
     }),
     _meta: { ui: { resourceUri: EMAIL_UI_URI } },
   },
@@ -557,7 +573,14 @@ server.registerTool(
 server.registerTool(
   "create_email_draft",
   {
-    description: "Creates an email draft in the user's native draft box.",
+    description:
+      "Creates an email draft in the user's native draft box (Outlook Drafts or Gmail Drafts).\n\n" +
+      "TWO MODES:\n" +
+      "1. Reply mode: pass `reply_to_email_id` to create a threaded reply. The draft inherits subject, recipients, and threading headers from the original — do NOT pass `subject` or `to_recipients`.\n" +
+      "2. New email mode: omit `reply_to_email_id` and pass BOTH `subject` and `to_recipients`.\n\n" +
+      "`reply_to_email_id` accepts the same ID formats as search_and_fetch_emails (`msg_*` short IDs, `adeu_*` references, or raw provider IDs). Short IDs are validated against the local cache before the call; stale ones fail fast with a clear error telling you to re-search.\n\n" +
+      "`body_markdown` is converted server-side to styled HTML with inlined CSS for email-client compatibility. Write the body in plain Markdown — do not pre-render HTML.\n\n" +
+      "`attachment_paths` takes absolute file paths on the user's local disk and uploads them with the draft. Useful right after search_and_fetch_emails downloaded attachments — those local paths can be passed directly here.",
     inputSchema: {
       body_markdown: z.string(),
       reply_to_email_id: z.string().optional(),
@@ -584,7 +607,9 @@ server.registerTool(
   "list_available_mailboxes",
   {
     description:
-      "Lists all personal and shared delegated mailboxes configured for the authenticated profile. Use this to discover valid email addresses to scope search and draft operations.",
+      "Lists all personal and shared delegated mailboxes the authenticated user has access to. Returns each mailbox's `email_address`, `display_name`, auto-processing settings, and write-back preference.\n\n" +
+      "Call this FIRST when the user mentions a specific mailbox or shared inbox by name, to resolve the canonical `email_address`. Then pass that address as `mailbox_address` to `search_and_fetch_emails` or `create_email_draft` to scope the operation.\n\n" +
+      "Omitting `mailbox_address` on those tools targets the user's primary personal mailbox.",
     inputSchema: {},
   },
   async () => {
