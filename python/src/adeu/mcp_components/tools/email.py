@@ -27,6 +27,52 @@ from adeu.mcp_components.shared import (
 CACHE_FILE = Path.home() / ".adeu" / "mcp_id_cache.json"
 MAX_CACHE_SIZE = 1000
 
+_KNOWN_ERROR_HINTS: dict[str, str] = {
+    "Email not found.": (
+        "The email ID was not found. If this was a short ID (msg_*), it may have been "
+        "evicted from the local cache or come from a different machine — re-run "
+        "search_and_fetch_emails with filters to get a fresh ID. If it was an "
+        "adeu_<numeric> or raw provider ID, verify it's correct."
+    ),
+    "Adeu email reference not found.": (
+        "The adeu_<id> reference doesn't resolve to any processed email for this user. "
+        "Verify the ID, or re-run search_and_fetch_emails with filters to find the message."
+    ),
+    "Invalid adeu_ email ID format.": (
+        "The adeu_<id> reference is malformed. Expected format: adeu_<integer>."
+    ),
+}
+
+
+def _format_backend_error(status_code: int, response_body: str) -> str:
+    """Wrap a backend HTTPError into a single-format message with recovery hints when possible.
+
+    The wrapper format is consistent across all calls: `Cloud search failed (HTTP {code}): {message}`.
+    When the backend returns a known error detail (or a Mailbox-not-found error), we substitute
+    the raw detail with actionable guidance instead.
+    """
+    detail = response_body
+    try:
+        parsed = json.loads(response_body)
+        if isinstance(parsed, dict) and "detail" in parsed:
+            detail = str(parsed["detail"])
+    except Exception:
+        pass
+
+    hint = _KNOWN_ERROR_HINTS.get(detail)
+    if hint is None:
+        # Mailbox-not-found has a dynamic name baked into the string; match by prefix/suffix.
+        if detail.startswith("Mailbox '") and detail.endswith("' not found."):
+            mailbox = detail[len("Mailbox '") : -len("' not found.")]
+            hint = (
+                f"The mailbox '{mailbox}' is not connected to your Adeu account. "
+                "Call list_available_mailboxes to see valid mailbox addresses, then retry "
+                "with one of those as `mailbox_address`."
+            )
+
+    message = hint if hint else detail
+    return f"Cloud search failed (HTTP {status_code}): {message}"
+
 
 def load_id_cache() -> dict[str, str]:
     """Loads the ID mapping cache from disk."""
@@ -194,6 +240,23 @@ def remove_nested_quotes(text: str) -> str:
         ]
     )
 
+    # Localized "Forwarded message" markers across the same locale set
+    forwarded_tokens = "|".join(
+        [
+            "Forwarded message",
+            "Välitetty viesti",
+            "Vidarebefordrat meddelande",
+            "Weitergeleitete Nachricht",
+            "Message transféré",
+            "Mensaje reenviado",
+            "Messaggio inoltrato",
+            "Doorgestuurd bericht",
+            "Videresendt melding",
+            "Videresendt meddelelse",
+            "Mensagem encaminhada",
+        ]
+    )
+
     divider_patterns = [
         re.compile(r"_{10,}", re.MULTILINE),
         re.compile(
@@ -202,6 +265,11 @@ def remove_nested_quotes(text: str) -> str:
         ),
         re.compile(rf"-----\s*({original_message_tokens})\s*-----", re.IGNORECASE),
         re.compile(rf"^({original_message_tokens})$", re.MULTILINE | re.IGNORECASE),
+        # Forwarded message dividers (Gmail/Outlook): "---------- Forwarded message ---------"
+        # or just the bare localized phrase on its own line. Once this marker is hit,
+        # everything below is a quoted historical message and should be cut.
+        re.compile(rf"-+\s*({forwarded_tokens})\s*-+", re.IGNORECASE),
+        re.compile(rf"^({forwarded_tokens})$", re.MULTILINE | re.IGNORECASE),
         # "On ... wrote:" style across locales
         re.compile(r"On .{1,200}? wrote:", re.MULTILINE | re.DOTALL),
         re.compile(r"Le .{1,200}? a écrit\s*:", re.IGNORECASE | re.DOTALL),
@@ -246,18 +314,14 @@ def _format_bytes(size_bytes: int | None) -> str:
 
 
 def _get_unique_filepath(save_dir: Path, filename: str) -> Path:
-    base_path = save_dir / filename
-    if not base_path.exists():
-        return base_path
+    """Return the target filepath for an attachment.
 
-    stem = base_path.stem
-    suffix = base_path.suffix
-    counter = 1
-    while True:
-        new_path = save_dir / f"{stem}_{counter}{suffix}"
-        if not new_path.exists():
-            return new_path
-        counter += 1
+    Re-fetches of the same email overwrite the existing file rather than
+    accumulating `_1`, `_2`, `_3` copies. The `<short_id>/` subdirectory
+    already disambiguates across emails, so collisions inside it always
+    mean the same logical attachment.
+    """
+    return save_dir / filename
 
 
 @tool(
@@ -295,24 +359,38 @@ async def list_available_mailboxes(
             if not mailboxes:
                 return "No mailboxes configured on Adeu Cloud."
 
-            lines = ["Available Mailboxes:", ""]
+            # Sort alphabetically by email for deterministic ordering across clients.
+            mailboxes = sorted(
+                mailboxes, key=lambda mb: (mb.get("email_address") or "").lower()
+            )
+
+            lines = [
+                "### Connected Mailboxes",
+                (
+                    "Below is the list of connected mailboxes you have access to. "
+                    "Use the `email_address` as the `mailbox_address` parameter in other "
+                    "tools to query or draft from a specific mailbox:"
+                ),
+                "",
+            ]
             for mb in mailboxes:
-                display_name = mb.get("display_name") or "Unnamed"
+                display_name = mb.get("display_name") or "Personal Mailbox"
                 email = mb.get("email_address", "")
                 auto_process = (
-                    "Auto-Process Enabled"
-                    if mb.get("auto_process_enabled")
-                    else "Manual Review Only"
+                    "Enabled" if mb.get("auto_process_enabled") else "Disabled"
                 )
                 writeback = mb.get("write_back_preference", "INTERNAL")
 
-                lines.append(f"- **{display_name}** (`{email}`)")
                 lines.append(
-                    f"  Preferences: {auto_process} | Writeback Mode: {writeback}"
+                    f"- **{display_name}**\n"
+                    f"  - **Email Address**: `{email}`\n"
+                    f"  - **Auto-Processing**: {auto_process}\n"
+                    f"  - **Write-Back Mode**: `{writeback}`"
                 )
-                lines.append("")
 
             return "\n".join(lines)
+    # FILE: python/src/adeu/mcp_components/tools/email.py
+
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
@@ -320,9 +398,7 @@ async def list_available_mailboxes(
                 "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
             ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(
-            f"Failed to fetch mailboxes (HTTP {e.code}): {error_body}"
-        ) from e
+        raise ToolError(_format_backend_error(e.code, error_body)) from e
     except TimeoutError as e:
         raise ToolError(
             "Listing mailboxes timed out after 15s. The Adeu backend may be temporarily unavailable; retry shortly."
@@ -457,6 +533,7 @@ async def search_and_fetch_emails(
         await ctx.debug("Sending search request to Adeu Cloud", extra={"url": url})
         with urllib.request.urlopen(req, timeout=45) as response:
             data = json.loads(response.read().decode("utf-8"))
+
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
@@ -464,7 +541,7 @@ async def search_and_fetch_emails(
                 "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
             ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(f"Cloud search failed (HTTP {e.code}): {error_body}") from e
+        raise ToolError(_format_backend_error(e.code, error_body)) from e
     except TimeoutError as e:
         raise ToolError(
             "Email search timed out after 45s. The mail provider (Outlook/Gmail) may be slow. "
@@ -511,6 +588,8 @@ async def search_and_fetch_emails(
         )
         return ToolResult(content="\n".join(llm_lines), structured_content=data)
 
+    # FILE: python/src/adeu/mcp_components/tools/email.py
+
     # ==========================================
     # SCENARIO B: FULL EMAIL (Single Email Drill-down)
     # ==========================================
@@ -520,6 +599,23 @@ async def search_and_fetch_emails(
             return ToolResult(
                 content="Failed to retrieve full email.", structured_content=data
             )
+
+        # Detect auto-escalation: the caller asked for previews (no email_id) but
+        # the backend found exactly one match and returned a full email instead.
+        # Flag it so the agent doesn't get blindsided by a wall of body text when
+        # it asked for a list.
+        auto_escalated = email_id is None and any(
+            v is not None
+            for v in (
+                sender,
+                subject,
+                has_attachments,
+                attachment_name,
+                is_unread,
+                days_ago,
+                folder,
+            )
+        )
 
         email_id_str = full_email.get("id", "unknown_id")
         id_cache = load_id_cache()
@@ -587,7 +683,13 @@ async def search_and_fetch_emails(
 
             return local_files, skipped
 
-        llm_lines = [f"# Email Thread: {full_email.get('subject')}", ""]
+        llm_lines = []
+        if auto_escalated:
+            llm_lines.append(
+                "_(Search returned exactly one result; auto-fetched full email below.)_\n"
+            )
+        llm_lines.append(f"# Email Thread: {full_email.get('subject')}")
+        llm_lines.append("")
 
         target_local_files, target_skipped = await process_message_attachments(
             full_email
@@ -620,13 +722,14 @@ async def search_and_fetch_emails(
 
         brief_html = full_email.get("brief_content")
         if brief_html:
-            clean_brief = strip_tags(brief_html)
-            llm_lines.append("## 🧠 AI Strategy Brief (Previously Generated):")
-            llm_lines.append(f"```\n{clean_brief}\n```\n")
-            llm_lines.append(
-                "*This brief was previously generated by Adeu for this email. "
-                "It reflects the AI's analysis at the time of processing.*\n"
-            )
+            clean_brief = strip_tags(brief_html).strip()
+            if clean_brief:
+                llm_lines.append("## 🧠 AI Strategy Brief (Previously Generated):")
+                llm_lines.append(f"```\n{clean_brief}\n```\n")
+                llm_lines.append(
+                    "*This brief was previously generated by Adeu for this email. "
+                    "It reflects the AI's analysis at the time of processing.*\n"
+                )
 
         if full_email.get("is_thread") and full_email.get("messages"):
             llm_lines.append("## Previous Messages in Thread (Historical Context):")
@@ -795,6 +898,8 @@ async def create_email_draft(
             return ToolResult(
                 content=f"Successfully created email draft! Draft ID: {draft_id}"
             )
+    # FILE: python/src/adeu/mcp_components/tools/email.py
+
     except urllib.error.HTTPError as e:
         if e.code == 401:
             DesktopAuthManager.clear_api_key()
@@ -802,9 +907,7 @@ async def create_email_draft(
                 "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
             ) from e
         error_body = e.read().decode("utf-8")
-        raise ToolError(
-            f"Cloud draft creation failed (HTTP {e.code}): {error_body}"
-        ) from e
+        raise ToolError(_format_backend_error(e.code, error_body)) from e
     except TimeoutError as e:
         raise ToolError(
             "Draft creation timed out after 90s. If the draft includes large attachments, "

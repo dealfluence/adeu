@@ -283,12 +283,7 @@ registerAppTool(
     } catch (e: any) {
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Error executing tool search_and_fetch_emails: ${e.message}`,
-          },
-        ],
+        content: [{ type: "text", text: e.message }],
       };
     }
   },

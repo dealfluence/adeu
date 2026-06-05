@@ -6,7 +6,46 @@ import { DesktopAuthManager, getCloudAuthToken } from "../desktop-auth.js";
 import { BACKEND_URL } from "../shared.js";
 import { ToolResult } from "../response-builders.js";
 import { createHash } from "node:crypto";
+const KNOWN_ERROR_HINTS: Record<string, string> = {
+  "Email not found.":
+    "The email ID was not found. If this was a short ID (msg_*), it may have been " +
+    "evicted from the local cache or come from a different machine — re-run " +
+    "search_and_fetch_emails with filters to get a fresh ID. If it was an " +
+    "adeu_<numeric> or raw provider ID, verify it's correct.",
+  "Adeu email reference not found.":
+    "The adeu_<id> reference doesn't resolve to any processed email for this user. " +
+    "Verify the ID, or re-run search_and_fetch_emails with filters to find the message.",
+  "Invalid adeu_ email ID format.":
+    "The adeu_<id> reference is malformed. Expected format: adeu_<integer>.",
+};
 
+function formatBackendError(statusCode: number, responseBody: string): string {
+  let detail = responseBody;
+  try {
+    const parsed = JSON.parse(responseBody);
+    if (parsed && typeof parsed === "object" && "detail" in parsed) {
+      detail = String(parsed.detail);
+    }
+  } catch {
+    // responseBody isn't JSON — use it as-is
+  }
+
+  let hint = KNOWN_ERROR_HINTS[detail];
+  if (
+    !hint &&
+    detail.startsWith("Mailbox '") &&
+    detail.endsWith("' not found.")
+  ) {
+    const mailbox = detail.slice("Mailbox '".length, -"' not found.".length);
+    hint =
+      `The mailbox '${mailbox}' is not connected to your Adeu account. ` +
+      "Call list_available_mailboxes to see valid mailbox addresses, then retry " +
+      "with one of those as `mailbox_address`.";
+  }
+
+  const message = hint ?? detail;
+  return `Cloud search failed (HTTP ${statusCode}): ${message}`;
+}
 function isTimeoutError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const name = (err as { name?: string }).name;
@@ -84,6 +123,59 @@ function resolveEmailId(shortId: string): string {
   return shortId;
 }
 
+const HTML_NAMED_ENTITIES: Record<string, string> = {
+  nbsp: " ",
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  copy: "\u00A9",
+  reg: "\u00AE",
+  trade: "\u2122",
+  hellip: "\u2026",
+  mdash: "\u2014",
+  ndash: "\u2013",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  ldquo: "\u201C",
+  rdquo: "\u201D",
+  laquo: "\u00AB",
+  raquo: "\u00BB",
+  bull: "\u2022",
+  middot: "\u00B7",
+  deg: "\u00B0",
+  plusmn: "\u00B1",
+  times: "\u00D7",
+  divide: "\u00F7",
+  euro: "\u20AC",
+  pound: "\u00A3",
+  yen: "\u00A5",
+  cent: "\u00A2",
+  sect: "\u00A7",
+  para: "\u00B6",
+  iexcl: "\u00A1",
+  iquest: "\u00BF",
+};
+
+function decodeHtmlEntities(text: string): string {
+  // Numeric: &#1234; (decimal) and &#x1F4A9; (hex)
+  text = text.replace(/&#(\d+);/g, (_, dec: string) => {
+    const code = parseInt(dec, 10);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+  });
+  text = text.replace(/&#[xX]([0-9a-fA-F]+);/g, (_, hex: string) => {
+    const code = parseInt(hex, 16);
+    return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+  });
+  // Named: &amp;, &rsquo;, etc.
+  text = text.replace(/&([a-zA-Z][a-zA-Z0-9]*);/g, (match, name: string) => {
+    const replacement = HTML_NAMED_ENTITIES[name.toLowerCase()];
+    return replacement !== undefined ? replacement : match;
+  });
+  return text;
+}
+
 function stripTags(html: string): string {
   if (!html) return "";
 
@@ -113,15 +205,8 @@ function stripTags(html: string): string {
   // 4. Strip all remaining tags
   text = text.replace(/<[^>]+>/g, "");
 
-  // 5. Decode the most common HTML entities (the rest are harmless as-is)
-  text = text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&apos;/gi, "'");
+  // 5. Decode HTML entities (named + numeric, matches Python's html.unescape).
+  text = decodeHtmlEntities(text);
 
   // 6. Collapse triple-or-more newlines down to a paragraph break
   return text.replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
@@ -174,10 +259,29 @@ function removeNestedQuotes(text: string): string {
     ),
   ];
 
+  // Localized "Forwarded message" markers across the same locale set.
+  // Once hit, everything below is a quoted historical message and should be cut.
+  const forwardedTokens = [
+    "Forwarded message",
+    "Välitetty viesti",
+    "Vidarebefordrat meddelande",
+    "Weitergeleitete Nachricht",
+    "Message transféré",
+    "Mensaje reenviado",
+    "Messaggio inoltrato",
+    "Doorgestuurd bericht",
+    "Videresendt melding",
+    "Videresendt meddelelse",
+    "Mensagem encaminhada",
+  ].join("|");
+
   const dividerPatterns = [
     /_{10,}/m,
     /-----\s*(Original Message|Alkuperäinen viesti|Ursprüngliches Nachricht|Message d'origine|Mensaje original|Messaggio originale|Oorspronkelijk bericht|Original meddelande)\s*-----/im,
     /^(Original Message|Alkuperäinen viesti|Ursprüngliches Nachricht|Message d'origine|Mensaje original|Messaggio originale|Oorspronkelijk bericht)$/im,
+    // Gmail/Outlook-style "---------- Forwarded message ---------" with localized variants
+    new RegExp(`-+\\s*(${forwardedTokens})\\s*-+`, "i"),
+    new RegExp(`^(${forwardedTokens})$`, "im"),
   ];
 
   const allPatterns = [...wrotePatterns, ...dividerPatterns];
@@ -193,19 +297,12 @@ function removeNestedQuotes(text: string): string {
 }
 
 function getUniqueFilepath(saveDir: string, filename: string): string {
-  let filepath = join(saveDir, filename);
-  let counter = 1;
-  const parts = filename.split(".");
-  const ext = parts.length > 1 ? `.${parts.pop()}` : "";
-  const stem = parts.join(".");
-
-  while (existsSync(filepath)) {
-    filepath = join(saveDir, `${stem}_${counter}${ext}`);
-    counter++;
-  }
-  return filepath;
+  // Re-fetches of the same email overwrite the existing file rather than
+  // accumulating `_1`, `_2`, `_3` copies. The `<short_id>/` subdirectory
+  // already disambiguates across emails, so collisions inside it always
+  // mean the same logical attachment.
+  return join(saveDir, filename);
 }
-
 export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
   const apiKey = await getCloudAuthToken();
   const maxAttachmentSizeMb: number =
@@ -271,7 +368,8 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
       "Authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.",
     );
   }
-  if (!res.ok) throw new Error(`Cloud search failed: ${await res.text()}`);
+  if (!res.ok)
+    throw new Error(formatBackendError(res.status, await res.text()));
 
   const data: any = await res.json();
   const cache = loadIdCache();
@@ -300,9 +398,19 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
         `- **ID**: \`${shortId}\`\n  **Subject**: ${p.subject} ${attFlag} ${unreadFlag}\n  **From**: ${p.sender_name} <${p.sender_email}>\n  **Date**: ${p.received_datetime}\n  **Preview**: ${p.preview_text}\n`,
       );
     }
+
     saveIdCache(cache);
+
+    const limit: number = typeof args.limit === "number" ? args.limit : 10;
+    const offset: number = typeof args.offset === "number" ? args.offset : 0;
+    const pageHint =
+      previews.length >= limit
+        ? `\n*(If you need to see more results, call this tool again with offset=${offset + limit})*`
+        : "";
+
     lines.push(
-      "⚠️ **ACTION REQUIRED**: To read the full body of an email and download its attachments, call this tool again and provide the exact `email_id`.",
+      "⚠️ **ACTION REQUIRED**: To read the full body of an email and download its attachments, call this tool again and provide the exact `email_id`." +
+        pageHint,
     );
     return {
       content: [{ type: "text", text: lines.join("\n") }],
@@ -315,6 +423,20 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
     const shortTargetId = minifyEmailId(full.id || "unknown_id", cache);
 
     saveIdCache(cache);
+
+    // Detect auto-escalation: the caller asked for previews (no email_id) but
+    // the backend found exactly one match and returned a full email instead.
+    // Flag it so the agent doesn't get blindsided by a wall of body text when
+    // it asked for a list.
+    const autoEscalated =
+      !args.email_id &&
+      (args.sender !== undefined ||
+        args.subject !== undefined ||
+        args.has_attachments !== undefined ||
+        args.attachment_name !== undefined ||
+        args.is_unread !== undefined ||
+        args.days_ago !== undefined ||
+        args.folder !== undefined);
 
     const baseDir =
       args.working_directory && existsSync(args.working_directory)
@@ -378,13 +500,19 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
 
     const { localFiles: targetFiles, skipped: targetSkipped } =
       await processAttachments(full);
-    const lines = [
+    const lines: string[] = [];
+    if (autoEscalated) {
+      lines.push(
+        "_(Search returned exactly one result; auto-fetched full email below.)_\n",
+      );
+    }
+    lines.push(
       `# Email Thread: ${full.subject}`,
       "",
       "## Target Message (Newest):",
       `**From**: ${full.sender_name} <${full.sender_email}>`,
       `**Date**: ${full.received_datetime}`,
-    ];
+    );
 
     if (targetFiles.length) {
       lines.push("**Attachments Saved Locally**:");
@@ -420,7 +548,7 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
         }
         if (histSkipped.length) {
           lines.push(
-            `**Attachments Skipped (not downloaded)** — pass \`max_attachment_size_mb\` to raise the ${maxAttachmentSizeMb} MB cap:`,
+            `**Attachments Skipped (not downloaded)** — pass \`max_attachment_size_mb\` — raise the cap:`,
           );
           histSkipped.forEach((s) =>
             lines.push(
@@ -433,6 +561,21 @@ export async function search_and_fetch_emails(args: any): Promise<ToolResult> {
         );
       }
     }
+
+    // --- Finding #9 downstream tool suggestions parity ---
+    const hasAttachments =
+      targetFiles.length > 0 ||
+      (full.messages &&
+        full.messages.some(
+          (m: any) => m.attachments && m.attachments.length > 0,
+        ));
+
+    if (hasAttachments) {
+      lines.push(
+        "\n*You can now use tools like `read_docx`, `diff_docx_files`, or `finalize_document` on the local file paths listed under each message.*",
+      );
+    }
+
     return {
       content: [{ type: "text", text: lines.join("\n") }],
       structuredContent: data,
@@ -524,7 +667,7 @@ export async function create_email_draft(args: any): Promise<ToolResult> {
     );
   }
   if (!res.ok)
-    throw new Error(`Cloud draft creation failed: ${await res.text()}`);
+    throw new Error(formatBackendError(res.status, await res.text()));
 
   const data: any = await res.json();
   return {
@@ -565,8 +708,10 @@ export async function list_available_mailboxes(): Promise<ToolResult> {
     );
   }
   if (!res.ok) {
-    throw new Error(`Failed to list available mailboxes: ${await res.text()}`);
+    throw new Error(formatBackendError(res.status, await res.text()));
   }
+
+  // FILE: node/packages/mcp-server/src/tools/email.ts
 
   const mailboxes: any[] = await res.json();
   if (!mailboxes.length) {
@@ -579,6 +724,13 @@ export async function list_available_mailboxes(): Promise<ToolResult> {
       ],
     };
   }
+
+  // Sort alphabetically by email for deterministic ordering across clients.
+  mailboxes.sort((a, b) =>
+    (a.email_address ?? "")
+      .toLowerCase()
+      .localeCompare((b.email_address ?? "").toLowerCase()),
+  );
 
   const lines = [
     "### Connected Mailboxes",
