@@ -17,7 +17,6 @@ cross-platform test scenarios exercises BOTH implementations.
 
 import io
 import json
-import os
 import re
 import shutil
 import subprocess

@@ -23,7 +23,6 @@ from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -163,7 +162,8 @@ class TestCommentsXmlNamespace:
         This is the Node-side blind spot: _ensureNamespaces() is a no-op stub.
         Cross-platform parity: 'BUG-23-1-legacy' in engine.issue23.test.ts
         """
-        from docx.opc.constants import CONTENT_TYPE as CT, RELATIONSHIP_TYPE as RT
+        from docx.opc.constants import CONTENT_TYPE as CT
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
         from docx.opc.part import XmlPart
         from docx.oxml import parse_xml
 
