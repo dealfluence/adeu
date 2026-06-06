@@ -1664,7 +1664,7 @@ export class RedlineEngine {
       let _bug233_target_para: Element | null = null;
       {
         const startingSpans = active_mapper.spans.filter(
-          (s) => s.paragraph !== null && s.start === start_idx,
+          (s: TextSpan) => s.paragraph !== null && s.start === start_idx,
         );
         if (startingSpans.length > 0 && startingSpans[0].paragraph) {
           _bug233_target_para = startingSpans[0].paragraph._element;
@@ -1677,7 +1677,7 @@ export class RedlineEngine {
       ) {
         const body = _bug233_target_para.parentNode as Element;
         const xmlDoc = this.doc.part._element.ownerDocument!;
-        const lines = _bug233_new.split(/[\r\n]+/).filter((l) => l !== "");
+        const lines = _bug233_new.split(/[\r\n]+/).filter((l: string) => l !== "");
         let firstNew: Element | null = null;
         let lastNew: Element | null = null;
         let lastIns: Element | null = null;
