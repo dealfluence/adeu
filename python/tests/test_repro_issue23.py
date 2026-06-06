@@ -305,8 +305,13 @@ class TestDiffPlacement:
             f"Full text: {text!r}"
         )
 
-        # And it must appear BEFORE "fox"
+        # And it must appear BEFORE "fox" — guard that fox was not silently deleted
         fox_pos = text.find("fox")
+        assert fox_pos >= 0, (
+            "BUG-23-3: 'fox' was removed from the output entirely; it must be "
+            "preserved as the anchor.\n"
+            f"Full text: {text!r}"
+        )
         assert inserted.start() < fox_pos, (
             "BUG-23-3: '{++red++}' appears AFTER 'fox' in the output; "
             "the delta should be placed before the anchor.\n"
@@ -404,6 +409,12 @@ class TestMultiParagraphTarget:
                 "or reject them with a clear error.\n"
                 f"Full text: {text!r}"
             )
+            space_collapsed = "First paragraph content. Second paragraph content."
+            assert space_collapsed not in text, (
+                "BUG-23-4: Multi-paragraph target_text was silently accepted and the "
+                "paragraph boundary was collapsed with a space separator.\n"
+                f"Full text: {text!r}"
+            )
         else:
             # An error was raised — it must specifically mention the multi-paragraph issue
             error_msg = str(raised).lower()
@@ -480,5 +491,11 @@ class TestAmbiguousMatchDel:
             f"BUG-23-5: 'Unique' was not inserted as a tracked change into the live text.\n"
             f"If the output contains '{{--Unique--}}' instead, the engine modified the "
             f"text inside a w:del (tracked deletion) rather than the live paragraph.\n"
+            f"Full text: {text2!r}"
+        )
+        assert "{--Unique--}" not in text2, (
+            "BUG-23-5: The engine modified text inside a w:del element — "
+            "{--Unique--} is present, meaning the tracked deletion was edited "
+            "in addition to (or instead of) the live paragraph.\n"
             f"Full text: {text2!r}"
         )

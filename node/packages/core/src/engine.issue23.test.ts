@@ -151,8 +151,14 @@ describe("BUG-23-1: comments.xml xmlns:w14 namespace on fresh document", () => {
 
     const buf = await doc.save();
 
-    // Must not throw — NamespaceError would surface here if xmlns:w14 is missing
+    // Verify the reloaded document still has valid namespace declarations —
+    // a lenient XML parser won't throw, so we check the comments part explicitly.
     const doc2 = await DocumentObject.load(buf);
+    const commentsXml2 = getCommentsXml(doc2);
+    expect(commentsXml2).toContain(
+      'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
+    );
+    xmllint(commentsXml2, "comments_roundtrip.xml");
     const text = await extractTextFromBuffer(buf);
     expect(text).toContain("Hello");
   });
@@ -239,9 +245,6 @@ describe("BUG-23-2: inserted runs must not inherit italic formatting from anchor
     ]);
 
     const buf = await doc.save();
-    const docXmlStr = buf
-      .toString("utf-8")
-      .slice(0, 0); // force-save; we read from zip below
 
     // Re-read the saved zip to check document.xml
     const { unzipSync, strFromU8 } = await import("fflate");
@@ -293,14 +296,17 @@ describe("BUG-23-3: prefix insertion must land BEFORE the anchor, not after", ()
 
     // The inserted prefix must appear
     const insertedMatch = text.match(/\{\+\+red\s*\+\+\}/);
-    expect(insertedMatch).not.toBeNull();
-
-    if (insertedMatch) {
-      const insertedPos = text.indexOf(insertedMatch[0]);
-      const foxPos = text.indexOf("fox");
-      // Must appear BEFORE fox
-      expect(insertedPos).toBeLessThan(foxPos);
+    if (!insertedMatch) {
+      throw new Error(
+        `BUG-23-3: {++red...++} insertion not found in output.\nFull text: ${text}`,
+      );
     }
+    const insertedPos = text.indexOf(insertedMatch[0]);
+    const foxPos = text.indexOf("fox");
+    // fox must not have been silently deleted
+    expect(foxPos).toBeGreaterThanOrEqual(0);
+    // Must appear BEFORE fox
+    expect(insertedPos).toBeLessThan(foxPos);
   });
 
   it(
@@ -390,7 +396,10 @@ describe("BUG-23-4: multi-paragraph target_text must produce actionable feedback
       const collapsed =
         "First paragraph content.Second paragraph content.";
       expect(text).not.toContain(collapsed);
-      // ^ If this fails: BUG-23-4 — the paragraph boundary was silently collapsed.
+      // Also catch space-separated collapse — "content. content." is equally broken
+      const spaceCollapsed =
+        "First paragraph content. Second paragraph content.";
+      expect(text).not.toContain(spaceCollapsed);
     } else {
       // An error was raised — it must mention the multi-paragraph nature
       const msg = raised.message.toLowerCase();
@@ -461,6 +470,8 @@ describe("BUG-23-5: tracked-deleted text must not count toward ambiguity", () =>
       // 'Unique' must appear as a TRACKED INSERTION, not as a tracked deletion.
       // If {--Unique--} is present instead, the engine modified the w:del text.
       expect(text2).toContain("{++Unique++}");
+      // Guard against "edited both copies" — the w:del text must not have been touched
+      expect(text2).not.toContain("{--Unique--}");
     }
   });
 });

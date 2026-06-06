@@ -8,12 +8,13 @@ import {
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 
 import { DocumentObject } from "./docx/bridge.js";
 import { RedlineEngine } from "./engine.js";
 import { extractTextFromBuffer } from "./ingest.js";
+import { serializeXml } from "./docx/dom.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -28,8 +29,58 @@ const PYTHON_ABSTRACT_CMD = resolve(
 );
 const PYTHON_DIR = resolve(__dirname, "../../../../python");
 
+const CT_COMMENTS =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml";
+
 function normalizeMdTimestamps(mdText: string): string {
   return mdText.replace(/@ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, "@ DATE");
+}
+
+function xmllintCheck(xmlContent: string, label: string): void {
+  let xmllintBin: string | null = null;
+  try {
+    xmllintBin = execSync("which xmllint", { encoding: "utf-8" }).trim();
+  } catch {
+    /* not found */
+  }
+  if (!xmllintBin) {
+    throw new Error(
+      "xmllint is required for this test but was not found on PATH.\n" +
+        "Install it with:\n" +
+        "  Ubuntu/Debian : sudo apt install libxml2-utils\n" +
+        "  macOS (Homebrew): brew install libxml2\n" +
+        "  Alpine        : apk add libxml2-utils\n",
+    );
+  }
+  const tmpFile = resolve(tmpdir(), `adeu_consistency_${Date.now()}_${label}`);
+  try {
+    writeFileSync(tmpFile, xmlContent, "utf-8");
+    execFileSync(xmllintBin, ["--noout", tmpFile]);
+  } catch (err: any) {
+    throw new Error(
+      `xmllint validation failed for ${label}:\n${err.stderr ?? err.message}`,
+    );
+  } finally {
+    if (existsSync(tmpFile)) unlinkSync(tmpFile);
+  }
+}
+
+async function validateCommentsXmlNamespaces(
+  outBuffer: Buffer,
+  folder: string,
+): Promise<void> {
+  const doc = await DocumentObject.load(outBuffer);
+  const commentsPart = doc.pkg.parts.find((p) => p.contentType === CT_COMMENTS);
+  if (!commentsPart) return;
+
+  const commentsXml = serializeXml(
+    commentsPart._element.ownerDocument ?? commentsPart._element,
+  );
+
+  expect(commentsXml).toContain(
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
+  );
+  xmllintCheck(commentsXml, `${folder}_comments.xml`);
 }
 
 describe("Polyglot Consistency Framework (TS vs Python)", () => {
@@ -72,7 +123,12 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           engine.process_batch(testConfig.changes || []);
           outBuffer = await doc.save();
 
-          // 2. Assert XML Structure Parity (via Python Bridge)
+          // 2. Validate comments XML namespaces when requested by test.json
+          if (testConfig.validate_comments_xml_namespaces) {
+            await validateCommentsXmlNamespaces(outBuffer, folder);
+          }
+
+          // 3. Assert XML Structure Parity (via Python Bridge)
           const goldenXmlPath = resolve(testDir, "golden_abstract.xml");
           if (existsSync(goldenXmlPath)) {
             const expectedXml = readFileSync(goldenXmlPath, "utf-8");
@@ -103,7 +159,7 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           }
         }
 
-        // 3. Assert Markdown Extraction Parity (Raw View)
+        // 4. Assert Markdown Extraction Parity (Raw View)
         const rawMdPath = resolve(testDir, "golden_raw.md");
         if (existsSync(rawMdPath)) {
           const expectedRaw = readFileSync(rawMdPath, "utf-8").replace(
@@ -116,7 +172,7 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           expect(actualRaw).toBe(expectedRaw);
         }
 
-        // 4. Assert Markdown Extraction Parity (Clean View)
+        // 5. Assert Markdown Extraction Parity (Clean View)
         const cleanMdPath = resolve(testDir, "golden_clean.md");
         if (existsSync(cleanMdPath)) {
           const expectedClean = readFileSync(cleanMdPath, "utf-8").replace(
