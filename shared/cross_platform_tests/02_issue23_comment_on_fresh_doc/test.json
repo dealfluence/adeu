@@ -1,0 +1,15 @@
+{
+  "name": "issue23_comment_on_fresh_doc",
+  "description": "Adds a comment to a document that has NO pre-existing comments.xml. Reproduces Issue #23: the freshly created comments.xml must declare xmlns:w14 so that w14:paraId / w14:textId on <w:p> are valid XML. Both Python and Node implementations must produce identical, xmllint-valid output.",
+  "author": "Adeu AI",
+  "read_only": false,
+  "validate_comments_xml_namespaces": true,
+  "changes": [
+    {
+      "type": "modify",
+      "target_text": "no pre-existing comments",
+      "new_text": "no pre-existing comments",
+      "comment": "Issue-23 namespace test: this comment forces creation of comments.xml from scratch."
+    }
+  ]
+}

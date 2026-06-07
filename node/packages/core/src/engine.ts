@@ -734,8 +734,19 @@ export class RedlineEngine {
         const anchor_rPr = findChild(anchor_run._element, "w:rPr");
         if (anchor_rPr) {
           const clone = anchor_rPr.cloneNode(true) as Element;
-          // Strip vanish / strike to avoid invisible inserts.
-          for (const tag of ["w:vanish", "w:strike", "w:dstrike"]) {
+          // Strip vanish / strike to avoid invisible inserts, and emphasis
+          // (bold/italic) so inserted replacement text does not silently
+          // inherit the anchor run's character formatting (BUG-23-2). Explicit
+          // markdown emphasis is re-applied per-segment via _apply_run_props.
+          for (const tag of [
+            "w:vanish",
+            "w:strike",
+            "w:dstrike",
+            "w:i",
+            "w:iCs",
+            "w:b",
+            "w:bCs",
+          ]) {
             const found = findChild(clone, tag);
             if (found) clone.removeChild(found);
           }
@@ -1066,6 +1077,24 @@ export class RedlineEngine {
         if (matches.length > 0) activeText = this.clean_mapper.full_text;
       }
 
+      // BUG-23-5: a copy of the target that lives entirely inside a tracked
+      // deletion (<w:del>) is not a live, editable occurrence and must not
+      // count toward ambiguity. Drop matches whose overlapping real text is
+      // exclusively deleted. Only applies to the raw mapper (the clean mapper
+      // already omits deleted text).
+      if (activeText === this.mapper.full_text && matches.length > 1) {
+        const liveMatches = matches.filter(([start, length]) => {
+          const realSpans = this.mapper.spans.filter(
+            (s) => s.run !== null && s.end > start && s.start < start + length,
+          );
+          if (realSpans.length === 0) return true; // virtual-only; keep
+          // Keep only if at least one overlapping real span is live (not
+          // part of a tracked deletion).
+          return realSpans.some((s) => !s.del_id);
+        });
+        if (liveMatches.length > 0) matches = liveMatches;
+      }
+
       if (matches.length === 0) {
         errors.push(
           `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"`,
@@ -1083,6 +1112,31 @@ export class RedlineEngine {
             positions,
           ),
         );
+      }
+
+      // BUG-23-4: when the effective (context-trimmed) target spans a
+      // paragraph boundary with real body text on BOTH sides, the deletion
+      // collapses the two paragraph bodies into a single seamless run (the
+      // blank line is structural, not literal text, so it cannot be carried
+      // into the tracked deletion). Boundary-only targets, where one side of
+      // the break is shared context trimmed away, are handled correctly by the
+      // paragraph-merge protocol and are intentionally NOT rejected here.
+      if (matches.length === 1 && /\n[ \t]*\n/.test(edit.target_text)) {
+        const [m_start, m_len] = matches[0];
+        const matched = activeText.substring(m_start, m_start + m_len);
+        const [pfx, sfx] = trim_common_context(matched, edit.new_text || "");
+        const trimmed = matched.substring(pfx, matched.length - sfx);
+        const sepMatch = trimmed.match(/\n[ \t]*\n/);
+        if (sepMatch) {
+          const sepIdx = sepMatch.index!;
+          const before = trimmed.slice(0, sepIdx);
+          const after = trimmed.slice(sepIdx + sepMatch[0].length);
+          if (before.trim() !== "" && after.trim() !== "") {
+            errors.push(
+              `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+            );
+          }
+        }
       }
 
       for (const [start, length] of matches) {
@@ -1427,10 +1481,33 @@ export class RedlineEngine {
     return false;
   }
 
+  /**
+   * Returns the first match of `target_text` in the raw mapper that is NOT
+   * entirely contained within a tracked deletion (<w:del>). Tracked-deleted
+   * copies are not live, editable text, so an edit must resolve to a live
+   * occurrence even when a dead copy appears earlier in the document
+   * (BUG-23-5). Falls back to the plain first match when no live copy is
+   * found (e.g. fuzzy/normalized matches the span filter cannot align).
+   */
+  private _first_live_match(target_text: string): [number, number] {
+    const all = this.mapper.find_all_match_indices(target_text);
+    if (all.length <= 1) {
+      return this.mapper.find_match_index(target_text);
+    }
+    for (const [start, length] of all) {
+      const realSpans = this.mapper.spans.filter(
+        (s) => s.run !== null && s.end > start && s.start < start + length,
+      );
+      if (realSpans.length === 0) return [start, length];
+      if (realSpans.some((s) => !s.del_id)) return [start, length];
+    }
+    return this.mapper.find_match_index(target_text);
+  }
+
   private _pre_resolve_heuristic_edit(edit: any): any {
     if (!edit.target_text) return null;
 
-    let [start_idx, match_len] = this.mapper.find_match_index(edit.target_text);
+    let [start_idx, match_len] = this._first_live_match(edit.target_text);
     let use_clean_map = false;
 
     if (start_idx === -1) {
@@ -1575,6 +1652,88 @@ export class RedlineEngine {
         rebuild_map,
       );
       if (!anchor_run && !anchor_para) return false;
+
+      // BUG-23-3: a prefix insertion whose new_text ends in a paragraph break
+      // (e.g. "Summary\n\n" inserted before "Conclusion") must become a NEW
+      // paragraph placed BEFORE the anchor paragraph, not inline text merged
+      // into a neighbouring paragraph. _track_insert_multiline drops the
+      // trailing break and inlines the remainder, which both loses the
+      // paragraph boundary and mis-orders the content. Handle this case here.
+      const _bug233_new = edit.new_text || "";
+      const _bug233_trailing_break = /\n\s*$/.test(_bug233_new);
+      let _bug233_target_para: Element | null = null;
+      {
+        const startingSpans = active_mapper.spans.filter(
+          (s: TextSpan) => s.paragraph !== null && s.start === start_idx,
+        );
+        if (startingSpans.length > 0 && startingSpans[0].paragraph) {
+          _bug233_target_para = startingSpans[0].paragraph._element;
+        }
+      }
+      if (
+        _bug233_trailing_break &&
+        _bug233_target_para &&
+        _bug233_target_para.parentNode
+      ) {
+        const body = _bug233_target_para.parentNode as Element;
+        const xmlDoc = this.doc.part._element.ownerDocument!;
+        const lines = _bug233_new.split(/[\r\n]+/).filter((l: string) => l !== "");
+        let firstNew: Element | null = null;
+        let lastNew: Element | null = null;
+        let lastIns: Element | null = null;
+        for (const raw_line of lines) {
+          const [clean_text, style_name] = this._parse_markdown_style(raw_line);
+          const new_p = xmlDoc.createElement("w:p");
+          if (style_name) {
+            this._set_paragraph_style(new_p, style_name);
+          } else {
+            const existing_pPr = findChild(_bug233_target_para, "w:pPr");
+            if (existing_pPr) new_p.appendChild(existing_pPr.cloneNode(true));
+          }
+          let pPr = findChild(new_p, "w:pPr");
+          if (!pPr) {
+            pPr = xmlDoc.createElement("w:pPr");
+            new_p.insertBefore(pPr, new_p.firstChild);
+          }
+          let rPr = findChild(pPr, "w:rPr");
+          if (!rPr) {
+            rPr = xmlDoc.createElement("w:rPr");
+            pPr.appendChild(rPr);
+          }
+          rPr.appendChild(this._create_track_change_tag("w:ins", "", ins_id!));
+          const content_ins = this._build_tracked_ins_for_line(
+            clean_text,
+            anchor_run,
+            ins_id!,
+            xmlDoc,
+          );
+          if (content_ins) new_p.appendChild(content_ins);
+          body.insertBefore(new_p, _bug233_target_para);
+          if (!firstNew) firstNew = new_p;
+          lastNew = new_p;
+          lastIns = content_ins;
+        }
+        if (firstNew) {
+          if (edit.comment && lastNew && lastIns) {
+            const ascend = (el: Element, p: Element): Element => {
+              let cur: Element = el;
+              while (cur.parentNode && cur.parentNode !== p)
+                cur = cur.parentNode as Element;
+              return cur;
+            };
+            const startIns =
+              findAllDescendants(firstNew, "w:ins")[0] || firstNew;
+            this._attach_comment_spanning(
+              firstNew,
+              ascend(startIns, firstNew),
+              lastNew,
+              ascend(lastIns, lastNew),
+              edit.comment,
+            );
+          }
+          return true;
+        }
+      }
 
       const result = this._track_insert_multiline(
         edit.new_text || "",

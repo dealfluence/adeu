@@ -711,24 +711,47 @@ class DocumentMapper:
 
         return "".join(parts)
 
+    def _range_in_deletion(self, start: int, length: int) -> bool:
+        """
+        BUG-23-5: Returns True if the [start, start+length) range falls entirely
+        inside tracked-deleted (w:del) real text. Such text is not 'live' and
+        must not be treated as a match for new edits, nor counted toward the
+        ambiguity check. A range qualifies only when there is at least one real
+        (run-bearing) span overlapping it and every such span carries a del_id.
+        """
+        end = start + length
+        real_spans = [s for s in self.spans if s.run is not None and s.end > start and s.start < end]
+        if not real_spans:
+            return False
+        return all(s.del_id for s in real_spans)
+
+    def _first_live_index(self, haystack: str, needle: str) -> int:
+        """
+        Like str.find, but skips occurrences that fall inside tracked deletions.
+        Returns -1 if no live occurrence exists.
+        """
+        idx = haystack.find(needle)
+        while idx != -1:
+            if not self._range_in_deletion(idx, len(needle)):
+                return idx
+            idx = haystack.find(needle, idx + 1)
+        return -1
+
     def find_match_index(self, target_text: str) -> Tuple[int, int]:
         """
         Returns (start_index, match_length).
         Returns (-1, 0) if not found.
         """
-        # 1. Exact Match
-        start_idx = self.full_text.find(target_text)
+        # 1. Exact Match (skipping any occurrence buried inside a w:del)
+        start_idx = self._first_live_index(self.full_text, target_text)
         if start_idx != -1:
             return start_idx, len(target_text)
-
         # 2. Smart Quote Normalization
         norm_full = self._replace_smart_quotes(self.full_text)
         norm_target = self._replace_smart_quotes(target_text)
-        start_idx = norm_full.find(norm_target)
+        start_idx = self._first_live_index(norm_full, norm_target)
         if start_idx != -1:
             return start_idx, len(target_text)
-
-        # 3. Strip markdown from target and try matching against raw haystack.
         stripped_target = self._strip_markdown_formatting(target_text)
         if stripped_target in self.full_text:
             start_idx = self.full_text.find(stripped_target)

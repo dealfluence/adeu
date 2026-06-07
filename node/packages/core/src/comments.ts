@@ -124,9 +124,28 @@ export class CommentsManager {
   }
 
   private _ensureNamespaces() {
-    // In TS we use full xml reconstruction if attributes are missing, but xmldom generally tolerates
-    // runtime attributes if the namespace is declared. For absolute safety, if it's completely missing,
-    // we would rebuild. Assuming the parser caught them if they existed.
+    // When the comments part already existed (e.g. a legacy or pandoc-produced
+    // document) its root <w:comments> may omit the namespaces we rely on —
+    // most importantly w14, which qualifies the w14:paraId / w14:textId
+    // attributes we write on each comment paragraph. Without the declaration
+    // the serialised XML is invalid ("Namespace prefix w14 ... is not defined").
+    // Declare any missing namespace prefixes on the existing root element.
+    const root = this._commentsPart?._element;
+    if (!root) return;
+
+    const required: [string, string][] = [
+      ['xmlns:w', NS.w],
+      ['xmlns:w14', NS.w14],
+      ['xmlns:w15', NS.w15],
+      ['xmlns:w16cid', NS.w16cid],
+      ['xmlns:w16cex', NS.w16cex],
+      ['xmlns:mc', NS.mc],
+    ];
+    for (const [attr, uri] of required) {
+      if (!root.getAttribute(attr)) {
+        root.setAttribute(attr, uri);
+      }
+    }
   }
 
   private _getNextCommentId(): number {

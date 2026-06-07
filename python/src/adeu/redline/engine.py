@@ -528,6 +528,64 @@ class RedlineEngine:
 
         # 1. Inline Logic
         first_line = lines[0]
+
+        # BUG-23-3b: text that ENDS with a paragraph break inserted before an
+        # anchor (e.g. final_new='Summary\n\n' inserted at the start of the
+        # 'Conclusion' paragraph because 'Conclusion' was kept as the common
+        # suffix) must become its OWN new paragraph ahead of the anchor, with a
+        # tracked paragraph break between them. The default inline path can't
+        # create that break when the anchor run is absent (anchor resolves to
+        # the paragraph, not a run), so handle it explicitly here.
+        if insert_before and current_p is not None and len(lines) >= 2 and lines[-1] == "":
+            body = current_p.getparent()
+            p_index = None
+            if body is not None:
+                try:
+                    p_index = body.index(current_p)
+                except ValueError:
+                    p_index = None
+            if body is not None and p_index is not None:
+                content_lines = [ln for ln in lines if ln != ""]
+                created_nodes = []
+                for offset, line_text in enumerate(content_lines):
+                    new_p = create_element("w:p")
+                    if current_p.pPr is not None:
+                        new_p.append(deepcopy(current_p.pPr))
+                    pPr = new_p.find(qn("w:pPr"))
+                    if pPr is None:
+                        pPr = create_element("w:pPr")
+                        new_p.insert(0, pPr)
+                    rPr = pPr.find(qn("w:rPr"))
+                    if rPr is None:
+                        rPr = create_element("w:rPr")
+                        pPr.append(rPr)
+                    rPr.append(self._create_track_change_tag("w:ins", reuse_id=reuse_id))
+
+                    new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
+                    for seg_text, seg_props in self._parse_inline_markdown(line_text):
+                        new_run = create_element("w:r")
+                        if anchor_run and anchor_run._element.rPr is not None:
+                            new_run.append(deepcopy(anchor_run._element.rPr))
+                        self._apply_run_props(new_run, seg_props, suppress_inherited=suppress_inherited)
+                        t = create_element("w:t")
+                        self._set_text_content(t, seg_text)
+                        new_run.append(t)
+                        new_ins.append(new_run)
+                    new_p.append(new_ins)
+                    body.insert(p_index + offset, new_p)
+                    created_nodes.append((new_p, new_ins))
+
+                if comment and created_nodes:
+                    start_p, start_ins = created_nodes[0]
+                    end_p, end_ins = created_nodes[-1]
+                    if start_p == end_p:
+                        self._attach_comment(start_p, start_ins, start_ins, comment)
+                    else:
+                        self._attach_comment_spanning(start_p, start_ins, end_p, end_ins, comment)
+
+                if created_nodes:
+                    return None, created_nodes[-1][0]
+
         ins_elem = self._track_insert_inline(
             first_line,
             anchor_run,
@@ -857,12 +915,16 @@ class RedlineEngine:
 
             if anchor_run and anchor_run._element.rPr is not None:
                 rPr_clone = deepcopy(anchor_run._element.rPr)
-                # Prevent hidden/struck text bugs by stripping vanish and strike from deepcopies
-                for tag in ["w:vanish", "w:strike", "w:dstrike"]:
+                # Prevent hidden/struck text bugs by stripping vanish and strike from deepcopies.
+                # BUG-23-2: italic emphasis from the anchor run is also stripped — an inserted
+                # replacement run must not silently inherit the surrounding italic styling (there
+                # is no agent-facing override mechanism for it). Bold is intentionally preserved
+                # because it usually carries structural meaning (headings, defined terms) that the
+                # reviewer expects the replacement to keep.
+                for tag in ["w:vanish", "w:strike", "w:dstrike", "w:i", "w:iCs"]:
                     for el in rPr_clone.findall(qn(tag)):
                         rPr_clone.remove(el)
                 run.append(rPr_clone)
-
             self._apply_run_props(run, seg_props, suppress_inherited=suppress_inherited)
 
             t = create_element("w:t")
@@ -1617,6 +1679,27 @@ class RedlineEngine:
             final_target = actual_doc_text[prefix_len:t_end]
             final_new = effective_new_text[prefix_len:n_end]
             effective_start_idx = start_idx + prefix_len
+
+            # BUG-23-4: A target that, after trimming, still spans a paragraph
+            # boundary (\n\n) with real content on BOTH sides while the
+            # replacement collapses that boundary (no \n\n in new_text) cannot
+            # be applied without silently merging the two source paragraphs and
+            # losing the break. Reject with an actionable error instead of
+            # producing a corrupt single-token deletion. (A pure paragraph
+            # *merge*, where the trimmed target is only the \n\n separator with
+            # no surrounding content, is still handled correctly below.)
+            if "\n\n" in final_target and "\n\n" not in final_new:
+                before, _, after = final_target.partition("\n\n")
+                if before.strip() and after.strip():
+                    raise BatchValidationError(
+                        [
+                            "- Edit Failed: target_text spans a paragraph boundary "
+                            "(it crosses a newline between two paragraphs). "
+                            "Multi-paragraph targets are not supported \u2014 split the edit "
+                            "into one edit per paragraph, or target text within a single "
+                            "paragraph."
+                        ]
+                    )
 
             if not final_target and final_new:
                 effective_op = EditOperationType.INSERTION
