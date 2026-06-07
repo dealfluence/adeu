@@ -421,6 +421,33 @@ describe("BUG-23-4: multi-paragraph target_text must produce actionable feedback
       expect(isActionable).toBe(true);
     }
   });
+
+  it("BUG-23-4-NN: rejects plain-paragraph N->N modifications spanning a paragraph boundary to prevent silent corruption", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Clause 1 ends here.");
+    addParagraph(doc, "Clause 2 begins here.");
+
+    const engine = new RedlineEngine(doc, "Test Author");
+
+    let raised: any = null;
+    try {
+      engine.process_batch([
+        {
+          type: "modify",
+          target_text: "ends here.\n\nClause 2 begins",
+          new_text: "ends here. MERGED\n\nClause 2 begins CHANGED",
+        },
+      ]);
+    } catch (e: any) {
+      raised = e;
+    }
+
+    expect(raised).not.toBeNull();
+    if (raised) {
+      expect(raised.name).toBe("BatchValidationError");
+      expect(raised.message.toLowerCase()).toContain("paragraph boundary");
+    }
+  });
 });
 
 // ===========================================================================

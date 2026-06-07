@@ -1115,26 +1115,30 @@ export class RedlineEngine {
       }
 
       // BUG-23-4: when the effective (context-trimmed) target spans a
-      // paragraph boundary with real body text on BOTH sides, the deletion
-      // collapses the two paragraph bodies into a single seamless run (the
-      // blank line is structural, not literal text, so it cannot be carried
-      // into the tracked deletion). Boundary-only targets, where one side of
-      // the break is shared context trimmed away, are handled correctly by the
-      // paragraph-merge protocol and are intentionally NOT rejected here.
-      if (matches.length === 1 && /\n[ \t]*\n/.test(edit.target_text)) {
+      // paragraph boundary with real body text on BOTH sides, we must reject
+      // the modification to prevent silent corruption of the paragraph structure.
+      if (matches.length === 1) {
         const [m_start, m_len] = matches[0];
         const matched = activeText.substring(m_start, m_start + m_len);
         const [pfx, sfx] = trim_common_context(matched, edit.new_text || "");
-        const trimmed = matched.substring(pfx, matched.length - sfx);
-        const sepMatch = trimmed.match(/\n[ \t]*\n/);
-        if (sepMatch) {
-          const sepIdx = sepMatch.index!;
-          const before = trimmed.slice(0, sepIdx);
-          const after = trimmed.slice(sepIdx + sepMatch[0].length);
-          if (before.trim() !== "" && after.trim() !== "") {
-            errors.push(
-              `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
-            );
+        const t_end = matched.length - sfx;
+        const final_target = matched.substring(pfx, t_end);
+        const final_new = (edit.new_text || "").substring(pfx, (edit.new_text || "").length - sfx);
+        if (final_target.includes("\n\n")) {
+          if (final_new.includes("\n\n")) {
+            const parts = matched.split("\n\n");
+            if (parts.length >= 2 && parts[0].trim() !== "" && parts[parts.length - 1].trim() !== "") {
+              errors.push(
+                `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+              );
+            }
+          } else {
+            const parts = final_target.split("\n\n");
+            if (parts.length >= 2 && parts[0].trim() !== "" && parts[parts.length - 1].trim() !== "") {
+              errors.push(
+                `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+              );
+            }
           }
         }
       }

@@ -252,6 +252,21 @@ class RedlineEngine:
         self.clean_mapper: Optional[DocumentMapper] = None
         self.skipped_details: List[str] = []
 
+    def _first_live_match(self, target_text: str) -> Tuple[int, int]:
+        all_matches = self.mapper.find_all_match_indices(target_text)
+        if len(all_matches) <= 1:
+            return self.mapper.find_match_index(target_text)
+        for start, length in all_matches:
+            real_spans = [
+                s for s in self.mapper.spans
+                if s.run is not None and s.end > start and s.start < start + length
+            ]
+            if not real_spans:
+                return start, length
+            if any(not s.del_id for s in real_spans):
+                return start, length
+        return self.mapper.find_match_index(target_text)
+
     def _get_paired_nodes(self, node):
         """
         Finds all contiguous w:ins/w:del nodes that form a single logical Modification block.
@@ -1124,6 +1139,40 @@ class RedlineEngine:
                 if len(matches) > 0:
                     active_text = self.clean_mapper.full_text
 
+            # BUG-23-5: a copy of the target that lives entirely inside a tracked
+            # deletion (<w:del>) is not a live, editable occurrence and must not
+            # count toward ambiguity. Drop matches whose overlapping real text is
+            # exclusively deleted. Only applies to the raw mapper (the clean mapper
+            # already omits deleted text).
+            if active_text == self.mapper.full_text and len(matches) > 1:
+                live_matches = []
+                for start, length in matches:
+                    real_spans = [
+                        s for s in self.mapper.spans
+                        if s.run is not None and s.end > start and s.start < start + length
+                    ]
+                    if not real_spans or any(not s.del_id for s in real_spans):
+                        live_matches.append((start, length))
+                if live_matches:
+                    matches = live_matches
+
+            # BUG-23-5: a copy of the target that lives entirely inside a tracked
+            # deletion (<w:del>) is not a live, editable occurrence and must not
+            # count toward ambiguity. Drop matches whose overlapping real text is
+            # exclusively deleted. Only applies to the raw mapper (the clean mapper
+            # already omits deleted text).
+            if active_text == self.mapper.full_text and len(matches) > 1:
+                live_matches = []
+                for start, length in matches:
+                    real_spans = [
+                        s for s in self.mapper.spans
+                        if s.run is not None and s.end > start and s.start < start + length
+                    ]
+                    if not real_spans or any(not s.del_id for s in real_spans):
+                        live_matches.append((start, length))
+                if live_matches:
+                    matches = live_matches
+
             # Since the structural appendix is no longer in the mapper,
             # all matches are valid document body matches.
             valid_matches = matches
@@ -1142,6 +1191,33 @@ class RedlineEngine:
                         match_positions=positions,
                     )
                 )
+
+            if isinstance(edit, ModifyText) and len(valid_matches) == 1:
+                start, length = valid_matches[0]
+                actual_doc_text = active_text[start : start + length]
+                effective_new_text = edit.new_text or ""
+                prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
+                t_end = len(actual_doc_text) - suffix_len
+                final_target = actual_doc_text[prefix_len:t_end]
+                final_new = effective_new_text[prefix_len:len(effective_new_text) - suffix_len]
+
+                if "\n\n" in final_target:
+                    if "\n\n" in final_new:
+                        parts = actual_doc_text.split("\n\n")
+                        if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
+                            errors.append(
+                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. "
+                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
+                                "without corrupting the document. Split this into one edit per paragraph."
+                            )
+                    else:
+                        parts = final_target.split("\n\n")
+                        if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
+                            errors.append(
+                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. "
+                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
+                                "without corrupting the document. Split this into one edit per paragraph."
+                            )
 
             for start, length in valid_matches:
                 spans = [s for s in self.mapper.spans if s.end > start and s.start < start + length]
@@ -1482,7 +1558,7 @@ class RedlineEngine:
         if not edit.target_text:
             return None
 
-        start_idx, match_len = self.mapper.find_match_index(edit.target_text)
+        start_idx, match_len = self._first_live_match(edit.target_text)
 
         # FALLBACK: If Raw View match failed, try matching against Clean View
         use_clean_map = False
@@ -1680,24 +1756,28 @@ class RedlineEngine:
             final_new = effective_new_text[prefix_len:n_end]
             effective_start_idx = start_idx + prefix_len
 
-            # BUG-23-4: A target that, after trimming, still spans a paragraph
-            # boundary (\n\n) with real content on BOTH sides while the
-            # replacement collapses that boundary (no \n\n in new_text) cannot
-            # be applied without silently merging the two source paragraphs and
-            # losing the break. Reject with an actionable error instead of
-            # producing a corrupt single-token deletion. (A pure paragraph
-            # *merge*, where the trimmed target is only the \n\n separator with
-            # no surrounding content, is still handled correctly below.)
-            if "\n\n" in final_target and "\n\n" not in final_new:
-                before, _, after = final_target.partition("\n\n")
-                if before.strip() and after.strip():
-                    raise BatchValidationError(
-                        [
-                            "- Edit Failed: target_text spans a paragraph boundary "
-                            "(it crosses a newline between two paragraphs). "
-                            "Multi-paragraph targets are not supported \u2014 split the edit "
-                            "into one edit per paragraph, or target text within a single "
-                            "paragraph."
+            # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
+            # to prevent structural paragraph-break corruption.
+            if "\n\n" in final_target:
+                if "\n\n" in final_new:
+                    before, _, after = actual_doc_text.partition("\n\n")
+                    if before.strip() and after.strip():
+                        raise BatchValidationError(
+                            [
+                                "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
+                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
+                                "without corrupting the document. Split this into one edit per paragraph."
+                            ]
+                        )
+                else:
+                    before, _, after = final_target.partition("\n\n")
+                    if before.strip() and after.strip():
+                        raise BatchValidationError(
+                            [
+                                "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
+                            "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
+                            "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
+                            "without corrupting the document. Split this into one edit per paragraph."
                         ]
                     )
 

@@ -444,6 +444,29 @@ class TestMultiParagraphTarget:
                 f"Error: {raised!r}"
             )
 
+    def test_multi_paragraph_nn_modification_rejected(self):
+        """
+        target_text="ends here.\\n\\nClause 2 begins"
+        new_text="ends here. MERGED\\n\\nClause 2 begins CHANGED"
+
+        On the current implementation, this slips past the N->1 / N->0 boundary checks
+        because both target and replacement contain '\\n\\n'. It must be caught
+        and rejected with an actionable boundary error.
+        """
+        buf = _make_clean_docx("Clause 1 ends here.", "Clause 2 begins here.")
+        engine = RedlineEngine(buf, author="Test Author")
+
+        with pytest.raises(Exception) as excinfo:
+            engine.process_batch(
+                [
+                    ModifyText(
+                        target_text="ends here.\n\nClause 2 begins",
+                        new_text="ends here. MERGED\n\nClause 2 begins CHANGED",
+                    )
+                ]
+            )
+        
+        assert "paragraph" in str(excinfo.value).lower()
 
 # ===========================================================================
 # Bug #5 — Ambiguous-match check counts text inside w:del (tracked deletions)
