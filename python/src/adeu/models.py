@@ -50,6 +50,10 @@ class ModifyText(BaseModel):
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
     _internal_op: Optional[str] = PrivateAttr(default=None)
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
+    _applied_status: bool = PrivateAttr(default=False)
+    _error_msg: Optional[str] = PrivateAttr(default=None)
+    _parent_edit_ref: Optional["ModifyText"] = PrivateAttr(default=None)
+    _resolved_proxy_edit: Optional["ModifyText"] = PrivateAttr(default=None)
 
 
 class AcceptChange(BaseModel):
@@ -93,6 +97,8 @@ class InsertTableRow(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    _applied_status: bool = PrivateAttr(default=False)
+    _error_msg: Optional[str] = PrivateAttr(default=None)
 
 
 class DeleteTableRow(BaseModel):
@@ -108,6 +114,8 @@ class DeleteTableRow(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    _applied_status: bool = PrivateAttr(default=False)
+    _error_msg: Optional[str] = PrivateAttr(default=None)
 
 
 DocumentChange = Annotated[

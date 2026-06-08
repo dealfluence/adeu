@@ -19,12 +19,12 @@ def _count_standalone_underscores(s: str) -> int:
             is_double = False
             if (i > 0 and s[i - 1] == "_") or (i < n - 1 and s[i + 1] == "_"):
                 is_double = True
-            
+
             # Is it intra-word?
             is_intra = False
             if (i > 0 and s[i - 1].isalnum()) and (i < n - 1 and s[i + 1].isalnum()):
                 is_intra = True
-                
+
             if not is_double and not is_intra:
                 count += 1
         i += 1
@@ -86,7 +86,9 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
                     and (idx == 0 or left[idx - 1] != "_")
                     and (idx == len(left) - 1 or left[idx + 1] != "_")
                 ):
-                    is_intra = (idx > 0 and left[idx - 1].isalnum()) and (idx < len(left) - 1 and left[idx + 1].isalnum())
+                    is_intra = (idx > 0 and left[idx - 1].isalnum()) and (
+                        idx < len(left) - 1 and left[idx + 1].isalnum()
+                    )
                     if not is_intra:
                         prefix_len = idx
                         break
@@ -166,7 +168,9 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
                     and (idx_in_right == 0 or right[idx_in_right - 1] != "_")
                     and (idx_in_right == len(right) - 1 or right[idx_in_right + 1] != "_")
                 ):
-                    is_intra = (idx_in_right > 0 and right[idx_in_right - 1].isalnum()) and (idx_in_right < len(right) - 1 and right[idx_in_right + 1].isalnum())
+                    is_intra = (idx_in_right > 0 and right[idx_in_right - 1].isalnum()) and (
+                        idx_in_right < len(right) - 1 and right[idx_in_right + 1].isalnum()
+                    )
                     if not is_intra:
                         suffix_len -= idx_in_right + 1
                         break

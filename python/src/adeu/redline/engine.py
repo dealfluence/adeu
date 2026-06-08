@@ -263,7 +263,7 @@ class RedlineEngine:
             )
         return None
 
-    def _build_edit_context_previews(self, edit: ModifyText) -> Tuple[Optional[str], Optional[str]]:
+    def _build_edit_context_previews(self, edit: Any) -> Tuple[Optional[str], Optional[str]]:
         if not isinstance(edit, ModifyText):
             return None, None
         if hasattr(edit, "_resolved_proxy_edit") and edit._resolved_proxy_edit is not None:
@@ -283,6 +283,7 @@ class RedlineEngine:
         critic_markup = f"{context_before}{{--{target_text}--}}{{++{new_text}++}}{context_after}"
 
         import re
+
         clean_text = critic_markup
         clean_text = re.sub(r"\{>>.*?<<\}", "", clean_text, flags=re.DOTALL)
         clean_text = re.sub(r"\{--.*?--\}", "", clean_text, flags=re.DOTALL)
@@ -1362,7 +1363,7 @@ class RedlineEngine:
                 applied_edits, skipped_edits = self.apply_edits(cloned_edits)
                 for edit in cloned_edits:
                     success = getattr(edit, "_applied_status", False)
-                    error_msg = getattr(edit, "_error_msg", None)
+                    edit_error_msg = getattr(edit, "_error_msg", None)
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     critic_markup = None
                     clean_text = None
@@ -1374,7 +1375,7 @@ class RedlineEngine:
                             "target_text": getattr(edit, "target_text", ""),
                             "new_text": getattr(edit, "new_text", ""),
                             "warning": warning,
-                            "error": error_msg,
+                            "error": edit_error_msg,
                             "critic_markup": critic_markup,
                             "clean_text": clean_text,
                         }
