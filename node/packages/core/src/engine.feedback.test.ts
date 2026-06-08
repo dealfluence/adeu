@@ -76,4 +76,69 @@ describe("Feedback Layer & Dry Run Verification", () => {
     expect(statsInvalid.edits[0].error).not.toBeNull();
     expect(statsInvalid.edits[0].error.toLowerCase()).toContain("not found");
   });
-});
+
+  it("preview self-consistency on underscore terms", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "ANCHOR_LINE governs the interpretation of this Agreement.");
+    const engine = new RedlineEngine(doc, "Reviewer TS");
+
+    const stats = (engine as any).process_batch([
+      {
+        type: "modify",
+        target_text: "ANCHOR_LINE governs the interpretation of this Agreement.",
+        new_text: "NEW_PARA inserted before.\n\nANCHOR_LINE governs the interpretation of this Agreement.",
+      }
+    ]);
+
+    const buf = await doc.save();
+    const cleanDocText = await extractTextFromBuffer(buf, true);
+
+    const report = stats.edits[0];
+
+    expect(report.clean_text).not.toBeNull();
+    const cleanPreview = report.clean_text.replace(/^\.+|\.+$/g, "");
+    expect(cleanDocText).toContain(cleanPreview);
+  });
+
+  it("preview does not contain duplicate garbling", async () => {
+     const doc = await createTestDocument();
+     
+     addParagraph(doc, "Payment Terms");
+ 
+     const xmlDoc = doc.element.ownerDocument!;
+     const p2 = xmlDoc.createElement("w:p");
+     const del = xmlDoc.createElement("w:del");
+     del.setAttribute("w:id", "900");
+     del.setAttribute("w:author", "Reviewer");
+     del.setAttribute("w:date", "2026-06-01T00:00:00Z");
+     const r = xmlDoc.createElement("w:r");
+     const t = xmlDoc.createElement("w:delText");
+     t.setAttribute("xml:space", "preserve");
+     t.textContent = "DUP_PHRASE shall be paid within thirty days of invoice.";
+     r.appendChild(t);
+     del.appendChild(r);
+     p2.appendChild(del);
+    const firstP = doc.element.getElementsByTagName("w:p")[0];
+    firstP.parentNode!.appendChild(p2);
+ 
+     addParagraph(doc, "DUP_PHRASE shall be paid within thirty days of invoice.");
+     addParagraph(doc, "Late payments accrue interest at the statutory rate.");
+ 
+     const engine = new RedlineEngine(doc, "Reviewer TS");
+     const stats = (engine as any).process_batch([
+       {
+         type: "modify",
+         target_text: "DUP_PHRASE shall be paid within thirty days of invoice.",
+         new_text: "DUP_PHRASE shall be paid within sixty days of invoice.",
+       }
+     ]);
+
+    const buf = await doc.save();
+    const cleanDocText = await extractTextFromBuffer(buf, true);
+    
+    const report = stats.edits[0];
+    expect(report.clean_text).not.toBeNull();
+    const cleanPreview = report.clean_text.replace(/^\.+|\.+$/g, "");
+    expect(cleanDocText).toContain(cleanPreview);
+   });
+ });

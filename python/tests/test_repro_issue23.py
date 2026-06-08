@@ -465,8 +465,9 @@ class TestMultiParagraphTarget:
                     )
                 ]
             )
-        
+
         assert "paragraph" in str(excinfo.value).lower()
+
 
 # ===========================================================================
 # Bug #5 — Ambiguous-match check counts text inside w:del (tracked deletions)

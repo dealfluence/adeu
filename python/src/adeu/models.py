@@ -47,6 +47,7 @@ class ModifyText(BaseModel):
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
+    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
     _internal_op: Optional[str] = PrivateAttr(default=None)
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
 
@@ -91,6 +92,7 @@ class InsertTableRow(BaseModel):
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
+    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
 
 
 class DeleteTableRow(BaseModel):
@@ -105,6 +107,7 @@ class DeleteTableRow(BaseModel):
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
+    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
 
 
 DocumentChange = Annotated[

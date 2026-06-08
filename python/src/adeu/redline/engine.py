@@ -252,14 +252,44 @@ class RedlineEngine:
         self.clean_mapper: Optional[DocumentMapper] = None
         self.skipped_details: List[str] = []
 
+    def _check_punctuation_warning(self, target_text: str) -> Optional[str]:
+        if not target_text:
+            return None
+        if "_" in target_text or "-" in target_text:
+            return (
+                f"Warning: target_text '{target_text}' contains tokenization-splitting punctuation "
+                "('_' or '-'). This can trigger mid-word splits in the diff engine. "
+                "Consider using a longer plain-prose anchor."
+            )
+        return None
+
+    def _build_edit_context_previews(self, edit: ModifyText) -> Tuple[Optional[str], Optional[str]]:
+        if not isinstance(edit, ModifyText):
+            return None, None
+        start_idx = edit._resolved_start_idx
+        if start_idx is None:
+            return None, None
+        target_text = edit.target_text or ""
+        new_text = edit.new_text or ""
+        length = len(target_text)
+        active_mapper = edit._active_mapper_ref or self.mapper
+        full_text = active_mapper.full_text
+        if not full_text:
+            return None, None
+        context_before = full_text[max(0, start_idx - 30) : start_idx]
+        context_after = full_text[start_idx + length : start_idx + length + 30]
+        return (
+            f"{context_before}{{--{target_text}--}}{{++{new_text}++}}{context_after}",
+            f"{context_before}{new_text}{context_after}",
+        )
+
     def _first_live_match(self, target_text: str) -> Tuple[int, int]:
         all_matches = self.mapper.find_all_match_indices(target_text)
         if len(all_matches) <= 1:
             return self.mapper.find_match_index(target_text)
         for start, length in all_matches:
             real_spans = [
-                s for s in self.mapper.spans
-                if s.run is not None and s.end > start and s.start < start + length
+                s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
             ]
             if not real_spans:
                 return start, length
@@ -1148,8 +1178,7 @@ class RedlineEngine:
                 live_matches = []
                 for start, length in matches:
                     real_spans = [
-                        s for s in self.mapper.spans
-                        if s.run is not None and s.end > start and s.start < start + length
+                        s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
                     ]
                     if not real_spans or any(not s.del_id for s in real_spans):
                         live_matches.append((start, length))
@@ -1165,8 +1194,7 @@ class RedlineEngine:
                 live_matches = []
                 for start, length in matches:
                     real_spans = [
-                        s for s in self.mapper.spans
-                        if s.run is not None and s.end > start and s.start < start + length
+                        s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
                     ]
                     if not real_spans or any(not s.del_id for s in real_spans):
                         live_matches.append((start, length))
@@ -1199,24 +1227,29 @@ class RedlineEngine:
                 prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
                 t_end = len(actual_doc_text) - suffix_len
                 final_target = actual_doc_text[prefix_len:t_end]
-                final_new = effective_new_text[prefix_len:len(effective_new_text) - suffix_len]
+                final_new = effective_new_text[prefix_len : len(effective_new_text) - suffix_len]
 
                 if "\n\n" in final_target:
                     if "\n\n" in final_new:
                         parts = actual_doc_text.split("\n\n")
                         if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
                             errors.append(
-                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. "
-                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
-                                "without corrupting the document. Split this into one edit per paragraph."
+                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
+                                "with body text on both sides. The paragraph break is a structural "
+                                "element, not literal text, so it cannot be replaced as "
+                                "a single span without corrupting the document. "
+                                "Split this into one edit per paragraph."
                             )
                     else:
                         parts = final_target.split("\n\n")
                         if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
                             errors.append(
-                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. "
-                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
-                                "without corrupting the document. Split this into one edit per paragraph."
+                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
+                                "with body text on both sides. "
+                                "The paragraph break is a structural element, not literal text, "
+                                "so it cannot be replaced as "
+                                "a single span without corrupting the document. Split this into "
+                                "one edit per paragraph."
                             )
 
             for start, length in valid_matches:
@@ -1237,10 +1270,19 @@ class RedlineEngine:
 
         return errors
 
-    def process_batch(self, changes: List[DocumentChange]) -> dict:
+    def process_batch(self, changes: List[DocumentChange], dry_run: bool = False) -> dict:
         """
         Processes a unified batch of actions and edits safely.
-        Actions are applied first, the Virtual DOM map is rebuilt, and then text edits are validated and applied.
+        """
+        if dry_run:
+            dry_engine = RedlineEngine(self.save_to_stream(), author=self.author)
+            return dry_engine._process_batch_internal(changes, dry_run_mode=True)
+        else:
+            return self._process_batch_internal(changes, dry_run_mode=False)
+
+    def _process_batch_internal(self, changes: List[DocumentChange], dry_run_mode: bool = False) -> dict:
+        """
+        Internal execution engine for batches of edits and actions.
         """
         self.skipped_details = []
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
@@ -1254,14 +1296,84 @@ class RedlineEngine:
             if edits:
                 self.clean_mapper = None
 
-        if edits:
-            errors = self.validate_edits(edits)
-            if errors:
-                raise BatchValidationError(errors)
-
+        edits_reports = []
         applied_edits, skipped_edits = 0, 0
+
         if edits:
-            applied_edits, skipped_edits = self.apply_edits(edits)
+            if dry_run_mode:
+                for edit in edits:
+                    single_errors = self.validate_edits([edit])
+                    warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
+                    if single_errors:
+                        skipped_edits += 1
+                        edits_reports.append(
+                            {
+                                "status": "failed",
+                                "target_text": getattr(edit, "target_text", ""),
+                                "new_text": getattr(edit, "new_text", ""),
+                                "warning": warning,
+                                "error": single_errors[0],
+                                "critic_markup": None,
+                                "clean_text": None,
+                            }
+                        )
+                        continue
+                    applied, skipped = self.apply_edits([edit])
+                    if applied > 0:
+                        applied_edits += 1
+                        critic_markup, clean_text = self._build_edit_context_previews(edit)
+                        edits_reports.append(
+                            {
+                                "status": "applied",
+                                "target_text": getattr(edit, "target_text", ""),
+                                "new_text": getattr(edit, "new_text", ""),
+                                "warning": warning,
+                                "error": None,
+                                "critic_markup": critic_markup,
+                                "clean_text": clean_text,
+                            }
+                        )
+                    else:
+                        skipped_edits += 1
+                        error_msg = self.skipped_details[-1] if self.skipped_details else "Failed to apply edit"
+                        edits_reports.append(
+                            {
+                                "status": "failed",
+                                "target_text": getattr(edit, "target_text", ""),
+                                "new_text": getattr(edit, "new_text", ""),
+                                "warning": warning,
+                                "error": error_msg,
+                                "critic_markup": None,
+                                "clean_text": None,
+                            }
+                        )
+            else:
+                errors = self.validate_edits(edits)
+                if errors:
+                    raise BatchValidationError(errors)
+                cloned_edits = [deepcopy(e) for e in edits]
+                applied_edits, skipped_edits = self.apply_edits(cloned_edits)
+                for edit in cloned_edits:
+                    success = getattr(edit, "_applied_status", False)
+                    error_msg = getattr(edit, "_error_msg", None)
+                    warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
+                    critic_markup = None
+                    clean_text = None
+                    if success:
+                        critic_markup, clean_text = self._build_edit_context_previews(edit)
+                    edits_reports.append(
+                        {
+                            "status": "applied" if success else "failed",
+                            "target_text": getattr(edit, "target_text", ""),
+                            "new_text": getattr(edit, "new_text", ""),
+                            "warning": warning,
+                            "error": error_msg,
+                            "critic_markup": critic_markup,
+                            "clean_text": clean_text,
+                        }
+                    )
+
+        from adeu import __version__
 
         return {
             "actions_applied": applied_actions,
@@ -1269,17 +1381,27 @@ class RedlineEngine:
             "edits_applied": applied_edits,
             "edits_skipped": skipped_edits,
             "skipped_details": self.skipped_details,
+            "edits": edits_reports,
+            "engine": "python",
+            "version": __version__,
         }
 
     def apply_edits(self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]]) -> tuple[int, int]:
         applied = 0
         skipped = 0
 
+        for edit in edits:
+            edit._applied_status = False
+            edit._error_msg = None
+
         resolved_edits = []
 
         # Pre-resolve phase: locate all edits against initial clean state
         for edit in edits:
-            if edit._match_start_index is not None:
+            if edit._resolved_start_idx is not None:
+                resolved_edits.append((edit, getattr(edit, "new_text", None)))
+            elif edit._match_start_index is not None:
+                edit._resolved_start_idx = edit._match_start_index
                 resolved_edits.append((edit, getattr(edit, "new_text", None)))
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
                 # Simplified resolution for structural edits
@@ -1292,7 +1414,7 @@ class RedlineEngine:
 
                 if matches:
                     # validate_edits already ensured uniqueness
-                    edit._match_start_index = matches[0][0]
+                    edit._resolved_start_idx = matches[0][0]
                     resolved_edits.append((edit, None))
                 else:
                     skipped += 1
@@ -1303,11 +1425,19 @@ class RedlineEngine:
                 if resolved:
                     if isinstance(resolved, list):
                         for r in resolved:
+                            r._resolved_start_idx = r._match_start_index
+                            r._parent_edit_ref = edit
+                            if edit._resolved_start_idx is None:
+                                edit._resolved_start_idx = r._resolved_start_idx
                             resolved_edits.append((r, r.new_text))
                     else:
+                        resolved._resolved_start_idx = resolved._match_start_index
+                        resolved._parent_edit_ref = edit
+                        edit._resolved_start_idx = resolved._resolved_start_idx
                         resolved_edits.append((resolved, edit.new_text))
                 else:
                     skipped += 1
+                    edit._applied_status = False
 
                     # N2 Fix: Safe display text fallback for heuristic failures
                     display_text = edit.target_text or "insertion"
@@ -1325,13 +1455,14 @@ class RedlineEngine:
                             "are not supported via text replace)."
                         )
                     self.skipped_details.append(msg)
+                    edit._error_msg = msg
 
         # Process all edits backwards in a single O(N) sweep to avoid index drift and map rebuilds
-        resolved_edits.sort(key=lambda x: x[0]._match_start_index or 0, reverse=True)
+        resolved_edits.sort(key=lambda x: x[0]._resolved_start_idx or 0, reverse=True)
         occupied_ranges: List[Tuple[int, int]] = []
 
         for edit, orig_new in resolved_edits:
-            start = edit._match_start_index or 0
+            start = edit._resolved_start_idx or 0
             end = start + (len(edit.target_text) if edit.target_text else 0)
 
             if any(start < occ_end and end > occ_start for occ_start, occ_end in occupied_ranges):
@@ -1347,6 +1478,12 @@ class RedlineEngine:
                 if getattr(edit, "_is_table_edit", False):
                     msg += ". (Note: Overlapping cell edits in tables must be processed in separate batches)."
                 self.skipped_details.append(msg)
+                edit._applied_status = False
+                edit._error_msg = msg
+                parent = getattr(edit, "_parent_edit_ref", None)
+                if parent is not None:
+                    parent._applied_status = False
+                    parent._error_msg = msg
                 continue
 
             success = False
@@ -1360,6 +1497,10 @@ class RedlineEngine:
             if success:
                 applied += 1
                 occupied_ranges.append((start, end))
+                edit._applied_status = True
+                parent = getattr(edit, "_parent_edit_ref", None)
+                if parent is not None:
+                    parent._applied_status = True
             else:
                 skipped += 1
 
@@ -1377,11 +1518,18 @@ class RedlineEngine:
                         + " edits are not supported via text replace)."
                     )
                 self.skipped_details.append(msg)
+                edit._applied_status = False
+                edit._error_msg = msg
+                parent = getattr(edit, "_parent_edit_ref", None)
+                if parent is not None:
+                    if not getattr(parent, "_applied_status", False):
+                        parent._applied_status = False
+                        parent._error_msg = msg
 
         return applied, skipped
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
-        start_idx = edit._match_start_index
+        start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else edit._match_start_index
         if start_idx is None:
             return False
 
@@ -1438,7 +1586,7 @@ class RedlineEngine:
         return True
 
     def _apply_delete_row(self, edit: DeleteTableRow) -> bool:
-        start_idx = edit._match_start_index
+        start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else edit._match_start_index
         if start_idx is None:
             return False
 
@@ -1549,6 +1697,7 @@ class RedlineEngine:
         )
         proxy_edit._match_start_index = start_idx
         proxy_edit._internal_op = EditOperationType.PARAGRAPH_REPLACE
+        proxy_edit._resolved_start_idx = start_idx
         proxy_edit._active_mapper_ref = active_mapper
         # Stash the resolved paragraph for the apply step.
         proxy_edit._target_paragraph = target_para  # type: ignore[attr-defined]
@@ -1607,6 +1756,7 @@ class RedlineEngine:
                         comment=edit.comment,
                     )
                     txt_edit._match_start_index = start_idx + t_idx
+                    txt_edit._resolved_start_idx = start_idx + t_idx
                     txt_edit._internal_op = EditOperationType.MODIFICATION
                     txt_edit._active_mapper_ref = active_mapper
                     sub_edits.append(txt_edit)
@@ -1614,6 +1764,7 @@ class RedlineEngine:
                 if t_url != n_url:
                     t_idx = actual_doc_text.find(t_url)
                     url_edit = ModifyText(type="modify", target_text=t_url, new_text=n_url, comment=None)
+                    url_edit._resolved_start_idx = start_idx + t_idx
                     url_edit._match_start_index = start_idx + t_idx
                     url_edit._internal_op = "URL_RETARGET"
                     url_edit._active_mapper_ref = active_mapper
@@ -1675,6 +1826,7 @@ class RedlineEngine:
                         sub_edit._is_table_edit = True  # type: ignore[attr-defined]
 
                         if a_clean == n_clean:
+                            sub_edit._resolved_start_idx = actual_start
                             sub_edit._match_start_index = actual_start
                             sub_edit._internal_op = "COMMENT_ONLY"
                         else:
@@ -1686,6 +1838,7 @@ class RedlineEngine:
                             final_new = n_clean[prefix_len:n_end]
                             sub_edit.target_text = final_target
                             sub_edit.new_text = final_new
+                            sub_edit._resolved_start_idx = actual_start + prefix_len
                             sub_edit._match_start_index = actual_start + prefix_len
 
                             if not final_target and final_new:
@@ -1730,6 +1883,7 @@ class RedlineEngine:
                 new_text=actual_doc_text,
                 comment=edit.comment,
             )
+            proxy_edit._resolved_start_idx = start_idx
             proxy_edit._match_start_index = start_idx
             proxy_edit._internal_op = "COMMENT_ONLY"
             proxy_edit._active_mapper_ref = active_mapper
@@ -1764,9 +1918,13 @@ class RedlineEngine:
                     if before.strip() and after.strip():
                         raise BatchValidationError(
                             [
-                                "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
-                                "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
-                                "without corrupting the document. Split this into one edit per paragraph."
+                                "- Edit Failed: target_text spans a paragraph "
+                                "boundary with body text on both sides. "
+                                "The paragraph break is a structural element, "
+                                "not literal text, so it cannot be replaced as "
+                                "a single span "
+                                "without corrupting the document. "
+                                "Split this into one edit per paragraph."
                             ]
                         )
                 else:
@@ -1774,12 +1932,13 @@ class RedlineEngine:
                     if before.strip() and after.strip():
                         raise BatchValidationError(
                             [
-                                "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
-                            "- Edit Failed: target_text spans a paragraph boundary with body text on both sides. "
-                            "The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span "
-                            "without corrupting the document. Split this into one edit per paragraph."
-                        ]
-                    )
+                                "- Edit Failed: target_text spans a paragraph "
+                                "boundary with body text on both sides. "
+                                "The paragraph break is a structural element, "
+                                "not literal text, so it cannot be replaced as a single span "
+                                "without corrupting the document. Split this into one edit per paragraph."
+                            ]
+                        )
 
             if not final_target and final_new:
                 effective_op = EditOperationType.INSERTION
@@ -1805,6 +1964,7 @@ class RedlineEngine:
             new_text=final_new,
             comment=edit.comment,
         )
+        proxy_edit._resolved_start_idx = effective_start_idx
         proxy_edit._match_start_index = effective_start_idx
         proxy_edit._internal_op = effective_op
         proxy_edit._active_mapper_ref = active_mapper
@@ -1827,7 +1987,7 @@ class RedlineEngine:
             else:
                 op = EditOperationType.MODIFICATION
 
-        start_idx = edit._match_start_index or 0
+        start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else (edit._match_start_index or 0)
         target_text = edit.target_text
         length = len(target_text) if target_text else 0
 

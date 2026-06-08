@@ -247,6 +247,35 @@ export class RedlineEngine {
     this.comments_manager = new CommentsManager(this.doc);
   }
 
+  private _check_punctuation_warning(target_text: string): string | null {
+    if (!target_text) return null;
+    if (target_text.includes("_") || target_text.includes("-")) {
+      return `Warning: target_text '${target_text}' contains tokenization-splitting punctuation ('_' or '-'). This can trigger mid-word splits in the diff engine. Consider using a longer plain-prose anchor.`;
+    }
+    return null;
+  }
+
+  private _build_edit_context_previews(edit: any): [string | null, string | null] {
+    if (edit.type !== "modify") return [null, null];
+    const start_idx = edit._resolved_start_idx;
+    if (start_idx === undefined || start_idx === null) return [null, null];
+    const target_text = edit.target_text || "";
+    const new_text = edit.new_text || "";
+    const length = target_text.length;
+    const active_mapper = edit._active_mapper_ref || this.mapper;
+    const full_text = active_mapper.full_text;
+    if (!full_text) return [null, null];
+    
+    const before_start = Math.max(0, start_idx - 30);
+    const context_before = full_text.substring(before_start, start_idx);
+    const context_after = full_text.substring(start_idx + length, start_idx + length + 30);
+    
+    return [
+      `${context_before}{--${target_text}--}{++${new_text}++}${context_after}`,
+      `${context_before}${new_text}${context_after}`
+    ];
+  }
+
   private _scan_existing_ids(): number {
     let maxId = 0;
     for (const tag of ["w:ins", "w:del"]) {
@@ -380,6 +409,7 @@ export class RedlineEngine {
       this.comments_manager.deleteComment(cid);
     }
   }
+
   private _getNextId(): string {
     this.current_id++;
     return this.current_id.toString();
@@ -505,7 +535,9 @@ export class RedlineEngine {
       end_p.appendChild(range_end);
       end_p.appendChild(ref_run);
     }
-  } /**
+  }
+
+  /**
    * Inserts `text` as one or more tracked paragraphs anchored relative to
    * either an existing run or a paragraph. Returns:
    *   { first_node, last_p, last_ins, used_block_mode }
@@ -761,6 +793,7 @@ export class RedlineEngine {
     }
     return ins;
   }
+
   private _parse_markdown_style(text: string): [string, string | null] {
     const stripped_text = text.trimStart();
 
@@ -866,6 +899,7 @@ export class RedlineEngine {
       }
     }
   }
+
   /**
    * Replaces (or creates) a paragraph's <w:pPr> with a single <w:pStyle> entry
    * pointing at `style_name`. Strips any existing pPr to avoid layering a new
@@ -895,6 +929,7 @@ export class RedlineEngine {
     // pPr is the first child of <w:p> per OOXML schema.
     p_element.insertBefore(pPr, p_element.firstChild);
   }
+
   private _anchor_reply_comment(parent_id: string, new_id: string) {
     const docEl = this.doc.part._element.ownerDocument!;
 
@@ -949,6 +984,7 @@ export class RedlineEngine {
 
     insertAfter(ref_run, new_end);
   }
+
   private _clean_wrapping_comments(element: Element) {
     let first_node: Element = element;
     while (true) {
@@ -1057,6 +1093,7 @@ export class RedlineEngine {
       }
     }
   }
+
   public validate_edits(edits: any[]): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
@@ -1169,6 +1206,7 @@ export class RedlineEngine {
     }
     return errors;
   }
+
   public validate_review_actions(actions: any[]): string[] {
     const errors: string[] = [];
     for (let i = 0; i < actions.length; i++) {
@@ -1209,7 +1247,35 @@ export class RedlineEngine {
     }
     return errors;
   }
-  public process_batch(changes: DocumentChange[]): any {
+
+  public process_batch(changes: DocumentChange[], dry_run: boolean = false): any {
+    if (dry_run) {
+      const baselines = new Map<any, Element>();
+      for (const part of this.doc.pkg.parts) {
+        if (part._element) {
+          baselines.set(part, part._element.cloneNode(true) as Element);
+        }
+      }
+      try {
+        return this._process_batch_internal(changes, true);
+      } finally {
+        for (const [part, originalEl] of baselines.entries()) {
+          const doc = part._element.ownerDocument;
+          if (doc && doc.documentElement) {
+            doc.replaceChild(originalEl, doc.documentElement);
+          }
+          part._element = originalEl;
+        }
+        this.mapper = new DocumentMapper(this.doc);
+        this.comments_manager = new CommentsManager(this.doc);
+        this.clean_mapper = null;
+      }
+    } else {
+      return this._process_batch_internal(changes, false);
+    }
+  }
+
+  private _process_batch_internal(changes: DocumentChange[], dry_run_mode: boolean = false): any {
     this.skipped_details = [];
     const actions = changes.filter((c) =>
       ["accept", "reject", "reply"].includes(c.type),
@@ -1218,37 +1284,124 @@ export class RedlineEngine {
       (c) => !["accept", "reject", "reply"].includes(c.type),
     );
 
-    const all_errors: string[] = [];
-
-    if (actions.length > 0) {
-      all_errors.push(...this.validate_review_actions(actions));
+    // BUG-7: Unified single-pass validation in wet-run / standard mode
+    if (!dry_run_mode) {
+      const all_errors: string[] = [];
+      if (actions.length > 0) {
+        all_errors.push(...this.validate_review_actions(actions));
+      }
+      if (edits.length > 0) {
+        all_errors.push(...this.validate_edits(edits));
+      }
+      if (all_errors.length > 0) {
+        throw new BatchValidationError(all_errors);
+      }
+    } else {
+      if (actions.length > 0) {
+        const action_errors = this.validate_review_actions(actions);
+        if (action_errors.length > 0) {
+          throw new BatchValidationError(action_errors);
+        }
+      }
     }
-    if (edits.length > 0) {
-      all_errors.push(...this.validate_edits(edits));
-    }
 
-    if (all_errors.length > 0) {
-      throw new BatchValidationError(all_errors);
-    }
-
-    let applied_actions = 0,
-      skipped_actions = 0;
+    let applied_actions = 0;
+    let skipped_actions = 0;
     if (actions.length > 0) {
       const res = this.apply_review_actions(actions);
       applied_actions = res[0];
       skipped_actions = res[1];
+      if (skipped_actions > 0) {
+        throw new BatchValidationError(this.skipped_details);
+      }
       if (applied_actions > 0) {
         this.mapper["_build_map"]();
         if (this.clean_mapper) this.clean_mapper["_build_map"]();
       }
     }
 
-    let applied_edits = 0,
-      skipped_edits = 0;
+    const edits_reports: any[] = [];
+    let applied_edits = 0;
+    let skipped_edits = 0;
+
     if (edits.length > 0) {
-      const res = this.apply_edits(edits as any[]);
-      applied_edits = res[0];
-      skipped_edits = res[1];
+      if (dry_run_mode) {
+        for (const edit of edits) {
+          const single_errors = this.validate_edits([edit]);
+          const warning = this._check_punctuation_warning((edit as any).target_text || "");
+          if (single_errors.length > 0) {
+            skipped_edits++;
+            edits_reports.push({
+              status: "failed",
+              target_text: (edit as any).target_text || "",
+              new_text: (edit as any).new_text || "",
+              warning: warning,
+              error: single_errors[0],
+              critic_markup: null,
+              clean_text: null,
+            });
+            continue;
+          }
+          const res = this.apply_edits([edit]);
+          const applied = res[0];
+          if (applied > 0) {
+            applied_edits++;
+            const previews = this._build_edit_context_previews(edit);
+            edits_reports.push({
+              status: "applied",
+              target_text: (edit as any).target_text || "",
+              new_text: (edit as any).new_text || "",
+              warning: warning,
+              error: null,
+              critic_markup: previews[0],
+              clean_text: previews[1],
+            });
+          } else {
+            skipped_edits++;
+            const error_msg = this.skipped_details.length > 0 ? this.skipped_details[this.skipped_details.length - 1] : "Failed to apply edit";
+            edits_reports.push({
+              status: "failed",
+              target_text: (edit as any).target_text || "",
+              new_text: (edit as any).new_text || "",
+              warning: warning,
+              error: error_msg,
+              critic_markup: null,
+              clean_text: null,
+            });
+          }
+        }
+      } else {
+        const errors = this.validate_edits(edits);
+        if (errors.length > 0) {
+          throw new BatchValidationError(errors);
+        }
+        const cloned_edits = edits.map(e => JSON.parse(JSON.stringify(e)));
+        const res = this.apply_edits(cloned_edits);
+        applied_edits = res[0];
+        skipped_edits = res[1];
+
+        for (const edit of cloned_edits) {
+          const success = (edit as any)._applied_status || false;
+          const error_msg = (edit as any)._error_msg || null;
+          const warning = this._check_punctuation_warning((edit as any).target_text || "");
+          let critic_markup = null;
+          let clean_text = null;
+          if (success) {
+            const previews = this._build_edit_context_previews(edit);
+            critic_markup = previews[0];
+            clean_text = previews[1];
+          }
+          edits_reports.push({
+            status: success ? "applied" : "failed",
+            target_text: (edit as any).target_text || "",
+            new_text: (edit as any).new_text || "",
+            warning: warning,
+            error: error_msg,
+            critic_markup: critic_markup,
+            clean_text: clean_text,
+          });
+        }
+      }
     }
 
     return {
@@ -1257,6 +1410,9 @@ export class RedlineEngine {
       edits_applied: applied_edits,
       edits_skipped: skipped_edits,
       skipped_details: this.skipped_details,
+      edits: edits_reports,
+      engine: "node",
+      version: "1.9.0",
     };
   }
 
@@ -1266,46 +1422,79 @@ export class RedlineEngine {
     const resolved_edits: [any, string | null][] = [];
 
     for (const edit of edits) {
+      edit._applied_status = false;
+      edit._error_msg = null;
+    }
+
+    for (const edit of edits) {
       if (
+        edit._resolved_start_idx !== undefined &&
+        edit._resolved_start_idx !== null
+      ) {
+        resolved_edits.push([edit, edit.new_text || null]);
+      } else if (
         edit._match_start_index !== undefined &&
         edit._match_start_index !== null
       ) {
+        edit._resolved_start_idx = edit._match_start_index;
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
-        const [idx] = this.mapper.find_match_index(edit.target_text);
-        if (idx !== -1) {
-          edit._match_start_index = idx;
+        let matches = this.mapper.find_all_match_indices(edit.target_text);
+        if (matches.length === 0) {
+          if (!this.clean_mapper) {
+            this.clean_mapper = new DocumentMapper(this.doc, true);
+          }
+          matches = this.clean_mapper.find_all_match_indices(edit.target_text);
+        }
+
+        if (matches.length > 0) {
+          edit._resolved_start_idx = matches[0][0];
           resolved_edits.push([edit, null]);
         } else {
           skipped++;
-          this.skipped_details.push(
-            `- Failed to locate row target: '${(edit.target_text || "").substring(0, 40)}...'`,
-          );
+          edit._applied_status = false;
+          const target_snippet = (edit.target_text || "").trim().substring(0, 40);
+          const msg = `- Failed to locate row target: '${target_snippet}...'`;
+          this.skipped_details.push(msg);
+          edit._error_msg = msg;
         }
       } else {
         const resolved = this._pre_resolve_heuristic_edit(edit);
         if (resolved) {
           if (Array.isArray(resolved)) {
-            for (const r of resolved) resolved_edits.push([r, r.new_text]);
+            for (const r of resolved) {
+              r._resolved_start_idx = r._match_start_index;
+              r._parent_edit_ref = edit;
+              if (edit._resolved_start_idx === undefined || edit._resolved_start_idx === null) {
+                edit._resolved_start_idx = r._resolved_start_idx;
+              }
+              resolved_edits.push([r, r.new_text]);
+            }
           } else {
+            resolved._resolved_start_idx = resolved._match_start_index;
+            resolved._parent_edit_ref = edit;
+            edit._resolved_start_idx = resolved._resolved_start_idx;
             resolved_edits.push([resolved, (resolved as any).new_text]);
           }
         } else {
           skipped++;
-          this.skipped_details.push(
-            `- Failed to apply edit targeting: '${(edit.target_text || "insertion").substring(0, 40)}...'`,
-          );
+          edit._applied_status = false;
+          const display_text = edit.target_text || "insertion";
+          const target_snippet = display_text.trim().substring(0, 40);
+          const msg = `- Failed to apply edit targeting: '${target_snippet}...'`;
+          this.skipped_details.push(msg);
+          edit._error_msg = msg;
         }
       }
     }
 
     resolved_edits.sort(
-      (a, b) => (b[0]._match_start_index || 0) - (a[0]._match_start_index || 0),
+      (a, b) => (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
     );
     const occupied_ranges: [number, number][] = [];
 
     for (const [edit, orig_new] of resolved_edits) {
-      const start = edit._match_start_index || 0;
+      const start = edit._resolved_start_idx || 0;
       const end = start + (edit.target_text ? edit.target_text.length : 0);
 
       const overlaps = occupied_ranges.some(
@@ -1313,9 +1502,17 @@ export class RedlineEngine {
       );
       if (overlaps) {
         skipped++;
-        this.skipped_details.push(
-          `- Skipped overlapping edit targeting: '${(edit.target_text || "insertion").substring(0, 40)}...'`,
-        );
+        const display_text = edit.target_text || "insertion";
+        const target_snippet = display_text.trim().substring(0, 40);
+        const msg = `- Skipped overlapping edit targeting: '${target_snippet}...'`;
+        this.skipped_details.push(msg);
+        edit._applied_status = false;
+        edit._error_msg = msg;
+        const parent = edit._parent_edit_ref;
+        if (parent) {
+          parent._applied_status = false;
+          parent._error_msg = msg;
+        }
         continue;
       }
 
@@ -1329,11 +1526,26 @@ export class RedlineEngine {
       if (success) {
         applied++;
         occupied_ranges.push([start, end]);
+        edit._applied_status = true;
+        const parent = edit._parent_edit_ref;
+        if (parent) {
+          parent._applied_status = true;
+        }
       } else {
         skipped++;
-        this.skipped_details.push(
-          `- Failed to apply edit targeting: '${(edit.target_text || "insertion").substring(0, 40)}...'`,
-        );
+        const display_text = edit.target_text || "insertion";
+        const target_snippet = display_text.trim().substring(0, 40);
+        const msg = `- Failed to apply edit targeting: '${target_snippet}...'`;
+        this.skipped_details.push(msg);
+        edit._applied_status = false;
+        edit._error_msg = msg;
+        const parent = edit._parent_edit_ref;
+        if (parent) {
+          if (!parent._applied_status) {
+            parent._applied_status = false;
+            parent._error_msg = msg;
+          }
+        }
       }
     }
 
@@ -1436,7 +1648,7 @@ export class RedlineEngine {
   }
 
   private _apply_table_edit(edit: any, rebuild_map: boolean): boolean {
-    const start_idx = edit._match_start_index || 0;
+    const start_idx = edit._resolved_start_idx !== undefined && edit._resolved_start_idx !== null ? edit._resolved_start_idx : (edit._match_start_index || 0);
     const [anchor_run, anchor_para] = this.mapper.get_insertion_anchor(
       start_idx,
       rebuild_map,
@@ -1591,7 +1803,7 @@ export class RedlineEngine {
   ): boolean {
     let op = edit._internal_op;
     const active_mapper = edit._active_mapper_ref || this.mapper;
-    const start_idx = edit._match_start_index || 0;
+    const start_idx = edit._resolved_start_idx !== undefined && edit._resolved_start_idx !== null ? edit._resolved_start_idx : (edit._match_start_index || 0);
     const length = edit.target_text ? edit.target_text.length : 0;
 
     const del_id = ["DELETION", "MODIFICATION"].includes(op)

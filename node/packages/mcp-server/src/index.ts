@@ -308,9 +308,14 @@ server.registerTool(
         .array(z.any())
         .describe("List of changes to apply. Each change must specify 'type'."),
       output_path: z.string().optional().describe("Optional output path."),
+      dry_run: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("If True, simulates the changes and returns a detailed preview report without modifying any files."),
     },
   },
-  async ({ original_docx_path, author_name, changes, output_path }) => {
+  async ({ original_docx_path, author_name, changes, output_path, dry_run }) => {
     try {
       if (!author_name || !author_name.trim())
         return {
@@ -337,7 +342,7 @@ server.registerTool(
 
       let stats;
       try {
-        stats = engine.process_batch(changes);
+        stats = engine.process_batch(changes, dry_run);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
           return {
@@ -353,14 +358,12 @@ server.registerTool(
         throw e;
       }
 
-      const outBuf = await doc.save();
-
-      fs.writeFileSync(outPath, outBuf);
-
-      let res = `Batch complete. Saved to: ${outPath}\nActions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped.\nEdits: ${stats.edits_applied} applied, ${stats.edits_skipped} skipped.`;
-      if (stats.skipped_details?.length > 0) {
-        res += `\n\nSkipped Details:\n${stats.skipped_details.join("\n")}`;
+      if (!dry_run) {
+        const outBuf = await doc.save();
+        fs.writeFileSync(outPath, outBuf);
       }
+
+      const res = formatBatchResult(stats, outPath, !!dry_run);
       return { content: [{ type: "text", text: res }] };
     } catch (e: any) {
       return {
@@ -615,6 +618,50 @@ server.registerTool(
     }
   },
 );
+// --- Formatter for process_document_batch ---
+export function formatBatchResult(
+  stats: any,
+  outPath: string,
+  dry_run: boolean,
+): string {
+  let res = "";
+  if (dry_run) {
+    res = `Dry-run simulation complete.\n`;
+  } else {
+    res = `Batch complete. Saved to: ${outPath}\n`;
+  }
+  res += `Actions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped.\n`;
+  res += `Edits: ${stats.edits_applied} applied, ${stats.edits_skipped} skipped.\n`;
+
+  if (stats.edits && stats.edits.length > 0) {
+    res += "\nDetailed Edit Reports:\n";
+    for (let i = 0; i < stats.edits.length; i++) {
+      const report = stats.edits[i];
+      const status_indicator = report.status === "applied" ? "✅ [applied]" : "❌ [failed]";
+      res += `Edit ${i + 1} ${status_indicator}:\n`;
+      res += `  Target: '${report.target_text}'\n`;
+      res += `  New text: '${report.new_text}'\n`;
+      if (report.warning) {
+        res += `  Warning: ${report.warning}\n`;
+      }
+      if (report.error) {
+        res += `  Error: ${report.error}\n`;
+      }
+      if (report.critic_markup) {
+        res += `  Preview (CriticMarkup): ${report.critic_markup}\n`;
+      }
+      if (report.clean_text) {
+        res += `  Clean text preview: ${report.clean_text}\n`;
+      }
+    }
+  }
+
+  if (stats.skipped_details && stats.skipped_details.length > 0) {
+    res += `\n\nSkipped Details:\n${stats.skipped_details.join("\n")}`;
+  }
+  return res;
+}
+
 // --- Startup ---
 async function main() {
   const transport = new StdioServerTransport();

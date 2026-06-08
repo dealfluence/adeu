@@ -144,6 +144,10 @@ def get_abstracted_xml_snapshot(docx_path: str) -> str:
             formatted = format_and_sort_xml(content, fname)
             abstracted = abstract_docx_xml(formatted, fname)
 
+            # Finding C: Exclude empty packaging relationship stubs
+            if fname.endswith(".rels") and "<Relationship" not in abstracted:
+                continue
+
             # Normalize filename (comments1.xml -> comments.xml)
             display_name = re.sub(r"(comments.*?)\d+(\.xml)", r"\1\2", fname)
             display_name = re.sub(r"(comments.*?)\d+(\.xml\.rels)", r"\1\2", display_name)

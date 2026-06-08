@@ -116,6 +116,7 @@ async def _process_document_batch_disk(
     ctx: Context,
     changes: List[DocumentChange],
     output_path: Optional[str],
+    dry_run: bool = False,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     await ctx.info(
@@ -140,9 +141,12 @@ async def _process_document_batch_disk(
         engine = RedlineEngine(stream, author=author_name)
 
         try:
-            stats = engine.process_batch(changes)
+            stats = engine.process_batch(changes, dry_run=dry_run)
         except BatchValidationError as e:
             return False, e.errors, ""
+
+        if dry_run:
+            return True, stats, ""
 
         final_output = output_path
         if not final_output:
@@ -167,11 +171,32 @@ async def _process_document_batch_disk(
         await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
 
         stats = result_data
-        res = (
-            f"Batch complete. Saved to: {final_output_path}\n"
+        if dry_run:
+            res = "Dry-run simulation complete.\n"
+        else:
+            res = f"Batch complete. Saved to: {final_output_path}\n"
+
+        res += (
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
-            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped."
+            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.\n"
         )
+
+        if stats.get("edits"):
+            res += "\nDetailed Edit Reports:\n"
+            for i, report in enumerate(stats["edits"]):
+                status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
+                res += f"Edit {i + 1} {status_indicator}:\n"
+                res += f"  Target: '{report['target_text']}'\n"
+                res += f"  New text: '{report['new_text']}'\n"
+                if report.get("warning"):
+                    res += f"  Warning: {report['warning']}\n"
+                if report.get("error"):
+                    res += f"  Error: {report['error']}\n"
+                if report.get("critic_markup"):
+                    res += f"  Preview (CriticMarkup): {report['critic_markup']}\n"
+                if report.get("clean_text"):
+                    res += f"  Clean text preview: {report['clean_text']}\n"
+
         if stats.get("skipped_details"):
             res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
         return res
@@ -520,9 +545,21 @@ if sys.platform == "win32":
             Optional[str],
             "Optional output path (only used if original_docx_path is provided).",
         ] = None,
+        dry_run: Annotated[
+            bool,
+            "If True, simulates the changes and returns a detailed preview report without modifying any files.",
+        ] = False,
     ) -> str:
         start_time = time.perf_counter()
-        if not original_docx_path:
+        if dry_run:
+            if not original_docx_path:
+                return (
+                    "Dry-run simulation is only supported for disk-based files (original_docx_path must be specified)."
+                )
+            res = await _process_document_batch_disk(
+                original_docx_path, author_name, ctx, changes, output_path, dry_run=True
+            )
+        elif not original_docx_path:
             # Edit active document directly. No disk fallback available.
             res = await process_active_word_batch(ctx, changes, author_name, None)
         else:
@@ -531,7 +568,9 @@ if sys.platform == "win32":
                 res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
             except Exception:
                 await ctx.debug("Document not open in live Word, falling back to disk edit.")
-                res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+                res = await _process_document_batch_disk(
+                    original_docx_path, author_name, ctx, changes, output_path, dry_run=False
+                )
         return add_timing_if_debug(start_time, res)
 
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") in ("1", "true", "True", "yes"):
@@ -583,7 +622,12 @@ if sys.platform == "win32":
                         lineterm="",
                     )
                 )
-                res = "No structural XML differences found." if not diff_lines else "\n".join(diff_lines)
+                if not diff_lines:
+                    res = "RESULT: Documents are content-identical."
+                else:
+                    res = "\n".join(diff_lines)
+                    diff_count = len([line for line in diff_lines if line.startswith("+") or line.startswith("-")]) - 2
+                    res += f"\n\nRESULT: Found {diff_count} structural XML differences."
 
                 # R5 Fix: Truncate inline diff and provide spill file
                 if len(res) > 150_000:
@@ -689,7 +733,13 @@ else:
             "List of changes to apply. Each change must specify 'type'.",
         ],
         output_path: Annotated[Optional[str], "Optional output path."] = None,
+        dry_run: Annotated[
+            bool,
+            "If True, simulates the changes and returns a detailed preview report without modifying any files.",
+        ] = False,
     ) -> str:
         start_time = time.perf_counter()
-        res = await _process_document_batch_disk(original_docx_path, author_name, ctx, changes, output_path)
+        res = await _process_document_batch_disk(
+            original_docx_path, author_name, ctx, changes, output_path, dry_run=dry_run
+        )
         return add_timing_if_debug(start_time, res)
