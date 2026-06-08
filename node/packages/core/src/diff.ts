@@ -1,6 +1,34 @@
 import diff_match_patch from "diff-match-patch";
 import { ModifyText } from "./models.js";
 
+function _count_standalone_underscores(s: string): number {
+  let count = 0;
+  let i = 0;
+  const n = s.length;
+  const isAlnum = (char: string) => /[a-zA-Z0-9]/.test(char);
+  while (i < n) {
+    if (s[i] === "_") {
+      // Is it part of "__"?
+      let is_double = false;
+      if ((i > 0 && s[i - 1] === "_") || (i < n - 1 && s[i + 1] === "_")) {
+        is_double = true;
+      }
+
+      // Is it intra-word?
+      let is_intra = false;
+      if (i > 0 && isAlnum(s[i - 1]) && i < n - 1 && isAlnum(s[i + 1])) {
+        is_intra = true;
+      }
+
+      if (!is_double && !is_intra) {
+        count++;
+      }
+    }
+    i++;
+  }
+  return count;
+}
+
 export function trim_common_context(
   target: string,
   new_val: string,
@@ -44,7 +72,7 @@ export function trim_common_context(
     const left = target.substring(0, prefix_len);
     const b_count = (left.match(/\*\*/g) || []).length;
     const u2_count = (left.match(/__/g) || []).length;
-    const u1_count = (left.replace(/__/g, "").match(/_/g) || []).length;
+    const u1_count = _count_standalone_underscores(left);
 
     if (b_count % 2 !== 0) {
       prefix_len = left.lastIndexOf("**");
@@ -56,14 +84,18 @@ export function trim_common_context(
     }
     if (u1_count % 2 !== 0) {
       let idx = left.length - 1;
+      const isAlnum = (char: string) => /[a-zA-Z0-9]/.test(char);
       while (idx >= 0) {
         if (
           left[idx] === "_" &&
           (idx === 0 || left[idx - 1] !== "_") &&
           (idx === left.length - 1 || left[idx + 1] !== "_")
         ) {
-          prefix_len = idx;
-          break;
+          const is_intra = idx > 0 && isAlnum(left[idx - 1]) && idx < left.length - 1 && isAlnum(left[idx + 1]);
+          if (!is_intra) {
+            prefix_len = idx;
+            break;
+          }
         }
         idx--;
       }
@@ -140,7 +172,7 @@ export function trim_common_context(
     const right = target.substring(target.length - suffix_len);
     const b_count = (right.match(/\*\*/g) || []).length;
     const u2_count = (right.match(/__/g) || []).length;
-    const u1_count = (right.replace(/__/g, "").match(/_/g) || []).length;
+    const u1_count = _count_standalone_underscores(right);
 
     if (b_count % 2 !== 0) {
       suffix_len -= right.indexOf("**") + 2;
@@ -152,14 +184,18 @@ export function trim_common_context(
     }
     if (u1_count % 2 !== 0) {
       let idx_in_right = 0;
+      const isAlnum = (char: string) => /[a-zA-Z0-9]/.test(char);
       while (idx_in_right < right.length) {
         if (
           right[idx_in_right] === "_" &&
           (idx_in_right === 0 || right[idx_in_right - 1] !== "_") &&
           (idx_in_right === right.length - 1 || right[idx_in_right + 1] !== "_")
         ) {
-          suffix_len -= idx_in_right + 1;
-          break;
+          const is_intra = idx_in_right > 0 && isAlnum(right[idx_in_right - 1]) && idx_in_right < right.length - 1 && isAlnum(right[idx_in_right + 1]);
+          if (!is_intra) {
+            suffix_len -= idx_in_right + 1;
+            break;
+          }
         }
         idx_in_right++;
       }

@@ -266,6 +266,8 @@ class RedlineEngine:
     def _build_edit_context_previews(self, edit: ModifyText) -> Tuple[Optional[str], Optional[str]]:
         if not isinstance(edit, ModifyText):
             return None, None
+        if hasattr(edit, "_resolved_proxy_edit") and edit._resolved_proxy_edit is not None:
+            edit = edit._resolved_proxy_edit
         start_idx = edit._resolved_start_idx
         if start_idx is None:
             return None, None
@@ -278,10 +280,15 @@ class RedlineEngine:
             return None, None
         context_before = full_text[max(0, start_idx - 30) : start_idx]
         context_after = full_text[start_idx + length : start_idx + length + 30]
-        return (
-            f"{context_before}{{--{target_text}--}}{{++{new_text}++}}{context_after}",
-            f"{context_before}{new_text}{context_after}",
-        )
+        critic_markup = f"{context_before}{{--{target_text}--}}{{++{new_text}++}}{context_after}"
+
+        import re
+        clean_text = critic_markup
+        clean_text = re.sub(r"\{>>.*?<<\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{--.*?--\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", clean_text, flags=re.DOTALL)
+
+        return critic_markup, clean_text
 
     def _first_live_match(self, target_text: str) -> Tuple[int, int]:
         all_matches = self.mapper.find_all_match_indices(target_text)
@@ -1429,11 +1436,14 @@ class RedlineEngine:
                             r._parent_edit_ref = edit
                             if edit._resolved_start_idx is None:
                                 edit._resolved_start_idx = r._resolved_start_idx
+                            if not hasattr(edit, "_resolved_proxy_edit"):
+                                edit._resolved_proxy_edit = r
                             resolved_edits.append((r, r.new_text))
                     else:
                         resolved._resolved_start_idx = resolved._match_start_index
                         resolved._parent_edit_ref = edit
                         edit._resolved_start_idx = resolved._resolved_start_idx
+                        edit._resolved_proxy_edit = resolved
                         resolved_edits.append((resolved, edit.new_text))
                 else:
                     skipped += 1

@@ -257,6 +257,9 @@ export class RedlineEngine {
 
   private _build_edit_context_previews(edit: any): [string | null, string | null] {
     if (edit.type !== "modify") return [null, null];
+    if (edit._resolved_proxy_edit) {
+      edit = edit._resolved_proxy_edit;
+    }
     const start_idx = edit._resolved_start_idx;
     if (start_idx === undefined || start_idx === null) return [null, null];
     const target_text = edit.target_text || "";
@@ -265,15 +268,19 @@ export class RedlineEngine {
     const active_mapper = edit._active_mapper_ref || this.mapper;
     const full_text = active_mapper.full_text;
     if (!full_text) return [null, null];
-    
+
     const before_start = Math.max(0, start_idx - 30);
     const context_before = full_text.substring(before_start, start_idx);
     const context_after = full_text.substring(start_idx + length, start_idx + length + 30);
-    
-    return [
-      `${context_before}{--${target_text}--}{++${new_text}++}${context_after}`,
-      `${context_before}${new_text}${context_after}`
-    ];
+
+    const critic_markup = `${context_before}{--${target_text}--}{++${new_text}++}${context_after}`;
+
+    let clean_text = critic_markup;
+    clean_text = clean_text.replace(/\{>>.*?<<\}/gs, "");
+    clean_text = clean_text.replace(/\{--.*?--\}/gs, "");
+    clean_text = clean_text.replace(/\{\+\+(.*?)\+\+\}/gs, "$1");
+
+    return [critic_markup, clean_text];
   }
 
   private _scan_existing_ids(): number {
@@ -1468,12 +1475,16 @@ export class RedlineEngine {
               if (edit._resolved_start_idx === undefined || edit._resolved_start_idx === null) {
                 edit._resolved_start_idx = r._resolved_start_idx;
               }
+              if (!edit._resolved_proxy_edit) {
+                edit._resolved_proxy_edit = r;
+              }
               resolved_edits.push([r, r.new_text]);
             }
           } else {
             resolved._resolved_start_idx = resolved._match_start_index;
             resolved._parent_edit_ref = edit;
             edit._resolved_start_idx = resolved._resolved_start_idx;
+            edit._resolved_proxy_edit = resolved;
             resolved_edits.push([resolved, (resolved as any).new_text]);
           }
         } else {

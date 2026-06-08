@@ -22,7 +22,7 @@ describe("Feedback Layer & Dry Run Verification", () => {
     expect(report.new_text).toBe("fast red fox");
 
     // Previews with context window
-    expect(report.critic_markup).toContain("{--quick brown fox--}{++fast red fox++}");
+    expect(report.critic_markup).toContain("{--quick brown--}{++fast red++} fox");
     expect(report.critic_markup).toContain("The ");
     expect(report.critic_markup).toContain(" jumps over");
 

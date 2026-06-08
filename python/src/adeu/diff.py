@@ -9,6 +9,28 @@ from adeu.models import ModifyText
 logger = structlog.get_logger(__name__)
 
 
+def _count_standalone_underscores(s: str) -> int:
+    count = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == "_":
+            # Is it part of "__"?
+            is_double = False
+            if (i > 0 and s[i - 1] == "_") or (i < n - 1 and s[i + 1] == "_"):
+                is_double = True
+            
+            # Is it intra-word?
+            is_intra = False
+            if (i > 0 and s[i - 1].isalnum()) and (i < n - 1 and s[i + 1].isalnum()):
+                is_intra = True
+                
+            if not is_double and not is_intra:
+                count += 1
+        i += 1
+    return count
+
+
 def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     """
     Calculates overlapping prefix/suffix lengths between target and new_val.
@@ -47,7 +69,7 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         left = target[:prefix_len]
         b_count = left.count("**")
         u2_count = left.count("__")
-        u1_count = left.replace("__", "").count("_")
+        u1_count = _count_standalone_underscores(left)
 
         if b_count % 2 != 0:
             prefix_len = left.rfind("**")
@@ -64,8 +86,10 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
                     and (idx == 0 or left[idx - 1] != "_")
                     and (idx == len(left) - 1 or left[idx + 1] != "_")
                 ):
-                    prefix_len = idx
-                    break
+                    is_intra = (idx > 0 and left[idx - 1].isalnum()) and (idx < len(left) - 1 and left[idx + 1].isalnum())
+                    if not is_intra:
+                        prefix_len = idx
+                        break
                 idx -= 1
             continue
 
@@ -123,7 +147,7 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
         right = target[len(target) - suffix_len :]
         b_count = right.count("**")
         u2_count = right.count("__")
-        u1_count = right.replace("__", "").count("_")
+        u1_count = _count_standalone_underscores(right)
 
         if b_count % 2 != 0:
             idx_in_right = right.find("**")
@@ -142,8 +166,10 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
                     and (idx_in_right == 0 or right[idx_in_right - 1] != "_")
                     and (idx_in_right == len(right) - 1 or right[idx_in_right + 1] != "_")
                 ):
-                    suffix_len -= idx_in_right + 1
-                    break
+                    is_intra = (idx_in_right > 0 and right[idx_in_right - 1].isalnum()) and (idx_in_right < len(right) - 1 and right[idx_in_right + 1].isalnum())
+                    if not is_intra:
+                        suffix_len -= idx_in_right + 1
+                        break
                 idx_in_right += 1
             continue
         break

@@ -37,7 +37,7 @@ def test_process_batch_returns_detailed_edit_reports():
     assert edit_report["new_text"] == "fast red fox"
 
     # Contextual check (should include surrounding words)
-    assert "{--quick brown fox--}{++fast red fox++}" in edit_report["critic_markup"]
+    assert "{--quick brown--}{++fast red++} fox" in edit_report["critic_markup"]
     assert "The " in edit_report["critic_markup"]
     assert " jumps over" in edit_report["critic_markup"]
 
@@ -130,7 +130,7 @@ def test_mcp_tool_feedback_formatting():
     assert "✅ [applied]" in res
     assert "Target: 'quick brown fox'" in res
     assert "New text: 'fast red fox'" in res
-    assert "The {--quick brown fox--}{++fast red fox++} jumps over" in res
+    assert "The {--quick brown--}{++fast red++} fox jumps over" in res
 
 
 def test_preview_self_consistency():
