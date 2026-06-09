@@ -493,4 +493,42 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(cleanText).not.toContain("Paragraph 2");
     expect(cleanText).toContain("Paragraph 1 ends here. MERGED here.");
   });
+
+  it("BUG-REPRO: accept_all_revisions leaks comments and in-body comment anchors", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "This is the original text of the agreement.");
+    const engine = new RedlineEngine(doc, "Reviewer AI");
+
+    // Add a tracked change with a comment attached
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "original text",
+        new_text: "updated text",
+        comment: "Should this be updated or kept as original?",
+      },
+    ]);
+
+    // Pre-condition check: comment parts exist
+    const original_comment_parts = doc.pkg.parts.filter(p => p.contentType.includes("comments"));
+    expect(original_comment_parts.length).toBeGreaterThan(0);
+
+    const original_xml = doc.element.toString();
+    expect(original_xml).toContain("w:commentRangeStart");
+    expect(original_xml).toContain("w:commentReference");
+
+    // Accept all
+    engine.accept_all_revisions();
+
+    // Verify comment removal
+    const final_xml = doc.element.toString();
+    
+    // Assert NO in-body comment anchors survive (anchors must be completely gone)
+    expect(final_xml).not.toContain("w:commentRangeStart");
+    expect(final_xml).not.toContain("w:commentRangeEnd");
+    expect(final_xml).not.toContain("w:commentReference");
+
+    const final_comment_parts = doc.pkg.parts.filter(p => p.contentType.includes("comments"));
+    expect(final_comment_parts.length).toBe(0);
+  });
 });

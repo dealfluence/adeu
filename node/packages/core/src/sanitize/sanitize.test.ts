@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { DOMParser } from "@xmldom/xmldom";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DocumentObject, Part, DocxPackage } from "../docx/bridge.js";
 import * as transforms from "./transforms.js";
 import { finalize_document } from "./core.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // --- Helper to build a lightweight in-memory DocumentObject ---
 function createMockDoc(bodyXml: string): DocumentObject {
@@ -262,6 +268,42 @@ describe("Finalize Document (Core)", () => {
       // The final stringified XML of the root document should NOT contain the unused namespace
       const xml = doc.part._element.toString();
       expect(xml).not.toContain("xmlns:w16du");
+    });
+
+    it("BUG-REPRO: finalize_document leaks comment parts in full sanitize mode", async () => {
+      // 1. Load the golden DOCX which we know has comments and comment parts
+      const fixturePath = resolve(__dirname, "../../../../../shared/fixtures/golden.docx");
+      const buf = readFileSync(fixturePath);
+      const doc = await DocumentObject.load(buf);
+
+      // Verify pre-condition: comment parts exist in the loaded package
+      const original_comment_parts = doc.pkg.parts.filter(p => p.contentType.includes("comments"));
+      expect(original_comment_parts.length).toBeGreaterThan(0);
+
+      const original_xml = doc.element.toString();
+      expect(original_xml).toContain("w:commentRangeStart");
+      expect(original_xml).toContain("w:commentReference");
+
+      // Mock the doc.save buffer return
+      doc.save = vi.fn().mockResolvedValue(Buffer.from("mock"));
+
+      // 2. Act: Finalize the document in full sanitize mode with accept_all: true
+      await finalize_document(doc, {
+        filename: "golden.docx",
+        sanitize_mode: "full",
+        accept_all: true,
+      });
+
+      // 3. Assert: All comments and comment parts are completely removed
+      const final_xml = doc.element.toString();
+      
+      // Assert NO in-body comment anchors survive (anchors must be completely gone)
+      expect(final_xml).not.toContain("w:commentRangeStart");
+      expect(final_xml).not.toContain("w:commentRangeEnd");
+      expect(final_xml).not.toContain("w:commentReference");
+
+      const final_comment_parts = doc.pkg.parts.filter(p => p.contentType.includes("comments"));
+      expect(final_comment_parts.length).toBe(0);
     });
   });
 });
