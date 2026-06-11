@@ -255,7 +255,9 @@ export class RedlineEngine {
     return null;
   }
 
-  private _build_edit_context_previews(edit: any): [string | null, string | null] {
+  private _build_edit_context_previews(
+    edit: any,
+  ): [string | null, string | null] {
     if (edit.type !== "modify") return [null, null];
     if (edit._resolved_proxy_edit) {
       edit = edit._resolved_proxy_edit;
@@ -271,7 +273,10 @@ export class RedlineEngine {
 
     const before_start = Math.max(0, start_idx - 30);
     const context_before = full_text.substring(before_start, start_idx);
-    const context_after = full_text.substring(start_idx + length, start_idx + length + 30);
+    const context_after = full_text.substring(
+      start_idx + length,
+      start_idx + length + 30,
+    );
 
     const critic_markup = `${context_before}{--${target_text}--}{++${new_text}++}${context_after}`;
 
@@ -337,7 +342,7 @@ export class RedlineEngine {
             for (const tag of ["w:t", "w:tab", "w:br"]) {
               for (const child of findAllDescendants(p, tag)) {
                 if (tag === "w:t" && !child.textContent) continue;
-                
+
                 let is_deleted = false;
                 let curr = child.parentNode as Element | null;
                 while (curr && curr !== p) {
@@ -401,7 +406,10 @@ export class RedlineEngine {
         if (parent) {
           if (parent.tagName === "w:r" || parent.tagName.endsWith(":r")) {
             const nonRprChildren = Array.from(parent.childNodes).filter(
-              (c) => c.nodeType === 1 && (c as Element).tagName !== "w:rPr" && (c as Element).tagName !== "rPr"
+              (c) =>
+                c.nodeType === 1 &&
+                (c as Element).tagName !== "w:rPr" &&
+                (c as Element).tagName !== "rPr",
             );
             if (nonRprChildren.length <= 1) {
               parent.parentNode?.removeChild(parent);
@@ -420,8 +428,12 @@ export class RedlineEngine {
     for (const part of pkg.parts) {
       if (part.partname.toLowerCase().includes("comments")) {
         comment_partnames.add(part.partname);
-        const withSlash = part.partname.startsWith("/") ? part.partname : "/" + part.partname;
-        const withoutSlash = part.partname.startsWith("/") ? part.partname.substring(1) : part.partname;
+        const withSlash = part.partname.startsWith("/")
+          ? part.partname
+          : "/" + part.partname;
+        const withoutSlash = part.partname.startsWith("/")
+          ? part.partname.substring(1)
+          : part.partname;
         comment_partnames.add(withSlash);
         comment_partnames.add(withoutSlash);
       }
@@ -437,8 +449,10 @@ export class RedlineEngine {
             const target = rel.getAttribute("Target") || "";
             if (target.toLowerCase().includes("comments")) {
               toRemove.push(rel);
-              
-              const sourcePath = part.partname.replace("/_rels/", "/").replace(".rels", "");
+
+              const sourcePath = part.partname
+                .replace("/_rels/", "/")
+                .replace(".rels", "");
               const sourcePart = pkg.getPartByPath(sourcePath);
               if (sourcePart) {
                 const relId = rel.getAttribute("Id");
@@ -459,7 +473,10 @@ export class RedlineEngine {
         const toRemove: Element[] = [];
         for (const override of overrides) {
           const partName = override.getAttribute("PartName") || "";
-          if (comment_partnames.has(partName) || partName.toLowerCase().includes("comments")) {
+          if (
+            comment_partnames.has(partName) ||
+            partName.toLowerCase().includes("comments")
+          ) {
             toRemove.push(override);
           }
         }
@@ -469,7 +486,9 @@ export class RedlineEngine {
       }
 
       // Remove comment parts from pkg.parts
-      pkg.parts = pkg.parts.filter(p => !p.partname.toLowerCase().includes("comments"));
+      pkg.parts = pkg.parts.filter(
+        (p) => !p.partname.toLowerCase().includes("comments"),
+      );
 
       // Remove comment files from pkg.unzipped
       for (const key of Object.keys(pkg.unzipped)) {
@@ -1230,18 +1249,29 @@ export class RedlineEngine {
         const [pfx, sfx] = trim_common_context(matched, edit.new_text || "");
         const t_end = matched.length - sfx;
         const final_target = matched.substring(pfx, t_end);
-        const final_new = (edit.new_text || "").substring(pfx, (edit.new_text || "").length - sfx);
+        const final_new = (edit.new_text || "").substring(
+          pfx,
+          (edit.new_text || "").length - sfx,
+        );
         if (final_target.includes("\n\n")) {
           if (final_new.includes("\n\n")) {
             const parts = matched.split("\n\n");
-            if (parts.length >= 2 && parts[0].trim() !== "" && parts[parts.length - 1].trim() !== "") {
+            if (
+              parts.length >= 2 &&
+              parts[0].trim() !== "" &&
+              parts[parts.length - 1].trim() !== ""
+            ) {
               errors.push(
                 `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
               );
             }
           } else {
             const parts = final_target.split("\n\n");
-            if (parts.length >= 2 && parts[0].trim() !== "" && parts[parts.length - 1].trim() !== "") {
+            if (
+              parts.length >= 2 &&
+              parts[0].trim() !== "" &&
+              parts[parts.length - 1].trim() !== ""
+            ) {
               errors.push(
                 `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
               );
@@ -1318,7 +1348,10 @@ export class RedlineEngine {
     return errors;
   }
 
-  public process_batch(changes: DocumentChange[], dry_run: boolean = false): any {
+  public process_batch(
+    changes: DocumentChange[],
+    dry_run: boolean = false,
+  ): any {
     if (dry_run) {
       const baselines = new Map<any, Element>();
       for (const part of this.doc.pkg.parts) {
@@ -1345,7 +1378,10 @@ export class RedlineEngine {
     }
   }
 
-  private _process_batch_internal(changes: DocumentChange[], dry_run_mode: boolean = false): any {
+  private _process_batch_internal(
+    changes: DocumentChange[],
+    dry_run_mode: boolean = false,
+  ): any {
     this.skipped_details = [];
     const actions = changes.filter((c) =>
       ["accept", "reject", "reply"].includes(c.type),
@@ -1398,7 +1434,9 @@ export class RedlineEngine {
       if (dry_run_mode) {
         for (const edit of edits) {
           const single_errors = this.validate_edits([edit]);
-          const warning = this._check_punctuation_warning((edit as any).target_text || "");
+          const warning = this._check_punctuation_warning(
+            (edit as any).target_text || "",
+          );
           if (single_errors.length > 0) {
             skipped_edits++;
             edits_reports.push({
@@ -1428,7 +1466,10 @@ export class RedlineEngine {
             });
           } else {
             skipped_edits++;
-            const error_msg = this.skipped_details.length > 0 ? this.skipped_details[this.skipped_details.length - 1] : "Failed to apply edit";
+            const error_msg =
+              this.skipped_details.length > 0
+                ? this.skipped_details[this.skipped_details.length - 1]
+                : "Failed to apply edit";
             edits_reports.push({
               status: "failed",
               target_text: (edit as any).target_text || "",
@@ -1445,7 +1486,7 @@ export class RedlineEngine {
         if (errors.length > 0) {
           throw new BatchValidationError(errors);
         }
-        const cloned_edits = edits.map(e => JSON.parse(JSON.stringify(e)));
+        const cloned_edits = edits.map((e) => JSON.parse(JSON.stringify(e)));
         const res = this.apply_edits(cloned_edits);
         applied_edits = res[0];
         skipped_edits = res[1];
@@ -1453,7 +1494,9 @@ export class RedlineEngine {
         for (const edit of cloned_edits) {
           const success = (edit as any)._applied_status || false;
           const error_msg = (edit as any)._error_msg || null;
-          const warning = this._check_punctuation_warning((edit as any).target_text || "");
+          const warning = this._check_punctuation_warning(
+            (edit as any).target_text || "",
+          );
           let critic_markup = null;
           let clean_text = null;
           if (success) {
@@ -1482,7 +1525,7 @@ export class RedlineEngine {
       skipped_details: this.skipped_details,
       edits: edits_reports,
       engine: "node",
-      version: "1.9.0",
+      version: "1.10.0",
     };
   }
 
@@ -1523,7 +1566,9 @@ export class RedlineEngine {
         } else {
           skipped++;
           edit._applied_status = false;
-          const target_snippet = (edit.target_text || "").trim().substring(0, 40);
+          const target_snippet = (edit.target_text || "")
+            .trim()
+            .substring(0, 40);
           const msg = `- Failed to locate row target: '${target_snippet}...'`;
           this.skipped_details.push(msg);
           edit._error_msg = msg;
@@ -1535,7 +1580,10 @@ export class RedlineEngine {
             for (const r of resolved) {
               r._resolved_start_idx = r._match_start_index;
               r._parent_edit_ref = edit;
-              if (edit._resolved_start_idx === undefined || edit._resolved_start_idx === null) {
+              if (
+                edit._resolved_start_idx === undefined ||
+                edit._resolved_start_idx === null
+              ) {
                 edit._resolved_start_idx = r._resolved_start_idx;
               }
               if (!edit._resolved_proxy_edit) {
@@ -1563,7 +1611,8 @@ export class RedlineEngine {
     }
 
     resolved_edits.sort(
-      (a, b) => (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
+      (a, b) =>
+        (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
     );
     const occupied_ranges: [number, number][] = [];
 
@@ -1722,7 +1771,11 @@ export class RedlineEngine {
   }
 
   private _apply_table_edit(edit: any, rebuild_map: boolean): boolean {
-    const start_idx = edit._resolved_start_idx !== undefined && edit._resolved_start_idx !== null ? edit._resolved_start_idx : (edit._match_start_index || 0);
+    const start_idx =
+      edit._resolved_start_idx !== undefined &&
+      edit._resolved_start_idx !== null
+        ? edit._resolved_start_idx
+        : edit._match_start_index || 0;
     const [anchor_run, anchor_para] = this.mapper.get_insertion_anchor(
       start_idx,
       rebuild_map,
@@ -1877,7 +1930,11 @@ export class RedlineEngine {
   ): boolean {
     let op = edit._internal_op;
     const active_mapper = edit._active_mapper_ref || this.mapper;
-    const start_idx = edit._resolved_start_idx !== undefined && edit._resolved_start_idx !== null ? edit._resolved_start_idx : (edit._match_start_index || 0);
+    const start_idx =
+      edit._resolved_start_idx !== undefined &&
+      edit._resolved_start_idx !== null
+        ? edit._resolved_start_idx
+        : edit._match_start_index || 0;
     const length = edit.target_text ? edit.target_text.length : 0;
 
     const del_id = ["DELETION", "MODIFICATION"].includes(op)
@@ -1967,7 +2024,9 @@ export class RedlineEngine {
       ) {
         const body = _bug233_target_para.parentNode as Element;
         const xmlDoc = this.doc.part._element.ownerDocument!;
-        const lines = _bug233_new.split(/[\r\n]+/).filter((l: string) => l !== "");
+        const lines = _bug233_new
+          .split(/[\r\n]+/)
+          .filter((l: string) => l !== "");
         let firstNew: Element | null = null;
         let lastNew: Element | null = null;
         let lastIns: Element | null = null;
@@ -2069,7 +2128,9 @@ export class RedlineEngine {
           if (start_p) {
             let first_anchor_target = result.first_node;
             if (result.first_node.tagName === "w:p") {
-              first_anchor_target = findAllDescendants(result.first_node, "w:ins")[0] || result.first_node;
+              first_anchor_target =
+                findAllDescendants(result.first_node, "w:ins")[0] ||
+                result.first_node;
             }
             const start_anchor = ascend_to_paragraph_child(
               first_anchor_target,
@@ -2086,22 +2147,27 @@ export class RedlineEngine {
               end_anchor,
               edit.comment,
             );
-            }
-          } else {
-            // Inline only: anchor around first_node in its host paragraph.
-            let host_p: Element | null = result.first_node;
-            while (host_p && host_p.tagName !== "w:p")
+          }
+        } else {
+          // Inline only: anchor around first_node in its host paragraph.
+          let host_p: Element | null = result.first_node;
+          while (host_p && host_p.tagName !== "w:p")
             host_p = host_p.parentNode as Element;
-            if (host_p) {
+          if (host_p) {
             let first_anchor_target = result.first_node;
             if (result.first_node.tagName === "w:p") {
-              first_anchor_target = findAllDescendants(result.first_node, "w:ins")[0] || result.first_node;
+              first_anchor_target =
+                findAllDescendants(result.first_node, "w:ins")[0] ||
+                result.first_node;
             }
-            const anchor = ascend_to_paragraph_child(first_anchor_target, host_p);
+            const anchor = ascend_to_paragraph_child(
+              first_anchor_target,
+              host_p,
+            );
             this._attach_comment(host_p, anchor, anchor, edit.comment);
-            }
           }
         }
+      }
       return true;
     }
 
@@ -2111,7 +2177,10 @@ export class RedlineEngine {
       length,
       rebuild_map,
     );
-    const virtual_spans = active_mapper.get_virtual_spans_in_range(start_idx, length);
+    const virtual_spans = active_mapper.get_virtual_spans_in_range(
+      start_idx,
+      length,
+    );
 
     if (target_runs.length === 0 && virtual_spans.length === 0) return false;
 
@@ -2187,18 +2256,26 @@ export class RedlineEngine {
 
     // PHASE 2: OOXML Paragraph Merge Protocol
     if (op === "DELETION" || op === "MODIFICATION") {
-      if (op === "MODIFICATION" && target_runs.length === 0 && virtual_spans.length > 0 && edit.new_text) {
+      if (
+        op === "MODIFICATION" &&
+        target_runs.length === 0 &&
+        virtual_spans.length > 0 &&
+        edit.new_text
+      ) {
         const first_span = virtual_spans[0];
         if (first_span.paragraph) {
           const p1_el = first_span.paragraph._element;
           const last_runs = findAllDescendants(p1_el, "w:r");
-          const anchor = last_runs.length > 0 ? new Run(last_runs[last_runs.length - 1], first_span.paragraph) : null;
-          
+          const anchor =
+            last_runs.length > 0
+              ? new Run(last_runs[last_runs.length - 1], first_span.paragraph)
+              : null;
+
           const result = this._track_insert_multiline(
             edit.new_text,
             anchor,
             first_span.paragraph,
-            ins_id!
+            ins_id!,
           );
           if (result.first_node) {
             p1_el.appendChild(result.first_node);
@@ -2218,7 +2295,10 @@ export class RedlineEngine {
             let pPr = findChild(p1_element, "w:pPr");
             if (!pPr) {
               pPr = p1_element.ownerDocument!.createElement("w:pPr") as Element;
-              p1_element.insertBefore(pPr, p1_element.firstChild as Node | null);
+              p1_element.insertBefore(
+                pPr,
+                p1_element.firstChild as Node | null,
+              );
             }
             let rPr = findChild(pPr!, "w:rPr");
             if (!rPr) {
@@ -2230,7 +2310,10 @@ export class RedlineEngine {
 
             const children = Array.from(p2_element.childNodes);
             for (const child of children) {
-              if (child.nodeType === 1 && (child as Element).tagName === "w:pPr") {
+              if (
+                child.nodeType === 1 &&
+                (child as Element).tagName === "w:pPr"
+              ) {
                 continue;
               }
               p1_element.appendChild(child);
