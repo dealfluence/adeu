@@ -96,7 +96,20 @@ class AdeuApplyChangesInput(BaseModel):
             "'<stem>_processed.docx' in the same directory as the input "
             "(or overwrites the input if its stem already ends in '_processed' "
             "or '_redlined'). Must differ from input_path unless the input is "
-            "already a processed/redlined file."
+            "already a processed/redlined file. Ignored when dry_run=True."
+        ),
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "When True, simulate the batch without writing any file and return a "
+            "detailed per-edit preview report. Each edit's report includes the "
+            "applied/failed status, a CriticMarkup preview of the change in "
+            "context, a clean-text preview of how the document would read after "
+            "acceptance, plus any per-edit warnings or errors. Use this to "
+            "verify ambiguous edits before committing, or to let the agent "
+            "self-review a batch before producing the final output. The input "
+            "file is never modified. Default False."
         ),
     )
 
@@ -120,7 +133,11 @@ _DESCRIPTION = (
     "If validation fails (e.g. target_text doesn't uniquely match), the "
     "tool returns the per-edit error list as content with success=False in "
     "the artifact, so you can correct the errors and retry. Partial success "
-    "is normal — check artifact['edits_applied'] vs artifact['edits_skipped']."
+    "is normal — check artifact['edits_applied'] vs artifact['edits_skipped'].\n\n"
+    "Set dry_run=True to simulate the batch without writing any file. The "
+    "response includes a per-edit preview report (CriticMarkup preview, "
+    "clean-text preview, status, warnings, errors) so you can verify "
+    "ambiguous edits before committing."
 )
 
 
@@ -139,6 +156,7 @@ class AdeuApplyChanges(BaseTool):
         author_name: str,
         changes: list[dict[str, Any]],
         output_path: str | None = None,
+        dry_run: bool = False,
     ) -> tuple[str, dict[str, Any]]:
 
         if not author_name.strip():
@@ -163,7 +181,12 @@ class AdeuApplyChanges(BaseTool):
                 source, output_path, author_name, [_format_pydantic_error(e)]
             )
 
-        target = _resolve_output_path(source, output_path)
+        # Resolve the destination only when we're actually going to write.
+        # For dry-run we still accept output_path (so the agent can pre-plan
+        # the eventual destination) but don't bind it to a target Path —
+        # the overwrite guard would otherwise complain about paths that
+        # will never be touched on this turn.
+        target = None if dry_run else _resolve_output_path(source, output_path)
 
         with open(source, "rb") as f:
             stream = BytesIO(f.read())
@@ -171,31 +194,32 @@ class AdeuApplyChanges(BaseTool):
         engine = RedlineEngine(stream, author=author_name)
 
         try:
-            stats = engine.process_batch(validated_changes)
+            stats = engine.process_batch(validated_changes, dry_run=dry_run)
         except BatchValidationError as e:
-            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
-            return content, _failure_artifact(source, output_path, author_name, e.errors)
+            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(
+                e.errors
+            )
+            return content, _failure_artifact(
+                source, output_path, author_name, e.errors, dry_run=dry_run
+            )
 
-        # Success path: write the output and return per-edit stats.
-        result_stream = engine.save_to_stream()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "wb") as f:
-            f.write(result_stream.getvalue())
+        # Success path: write the output (skipped in dry-run) and return per-edit stats.
+        if not dry_run:
+            assert (
+                target is not None
+            )  # narrow for type-checkers; guaranteed by the branch above
+            result_stream = engine.save_to_stream()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(result_stream.getvalue())
 
-        content_lines = [
-            f"Batch complete. Saved to: {target}",
-            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.",
-            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.",
-        ]
-        if stats.get("skipped_details"):
-            content_lines.append("")
-            content_lines.append("Skipped Details:")
-            content_lines.extend(stats["skipped_details"])
+        content_lines = _build_success_content(stats, target, dry_run=dry_run)
 
         artifact: dict[str, Any] = {
             "input_path": str(source),
-            "output_path": str(target),
+            "output_path": str(target) if target is not None else None,
             "author_name": author_name,
+            "dry_run": dry_run,
             "success": True,
             "validation_errors": None,
             "actions_applied": stats["actions_applied"],
@@ -203,6 +227,7 @@ class AdeuApplyChanges(BaseTool):
             "edits_applied": stats["edits_applied"],
             "edits_skipped": stats["edits_skipped"],
             "skipped_details": stats.get("skipped_details", []),
+            "edits": stats.get("edits", []),
         }
         return "\n".join(content_lines), artifact
 
@@ -212,8 +237,11 @@ class AdeuApplyChanges(BaseTool):
         author_name: str,
         changes: list[dict[str, Any]],
         output_path: str | None = None,
+        dry_run: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(self._run, file_path, author_name, changes, output_path)
+        return await asyncio.to_thread(
+            self._run, file_path, author_name, changes, output_path, dry_run
+        )
 
 
 def _resolve_output_path(source: Path, requested: str | None) -> Path:
@@ -234,7 +262,9 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not (source.stem.endswith("_processed") or source.stem.endswith("_redlined")):
+    if target == source and not (
+        source.stem.endswith("_processed") or source.stem.endswith("_redlined")
+    ):
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "
@@ -248,6 +278,7 @@ def _failure_artifact(
     output_path: str | None,
     author_name: str,
     errors: list[str],
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Build an artifact for a rejected batch — no output file was written."""
     return {
@@ -255,6 +286,7 @@ def _failure_artifact(
         "output_path": None,
         "requested_output_path": output_path,
         "author_name": author_name,
+        "dry_run": dry_run,
         "success": False,
         "validation_errors": errors,
         "actions_applied": 0,
@@ -262,7 +294,63 @@ def _failure_artifact(
         "edits_applied": 0,
         "edits_skipped": 0,
         "skipped_details": [],
+        "edits": [],
     }
+
+
+def _build_success_content(
+    stats: dict[str, Any],
+    target: Path | None,
+    *,
+    dry_run: bool,
+) -> list[str]:
+    """Assemble the human-readable content block for a successful batch.
+
+    Mirrors the per-edit detail format used by the MCP server's
+    `process_document_batch` dry-run path so behavior is consistent across
+    surfaces. Each per-edit report carries enough preview context (CriticMarkup
+    string, clean text, warnings) for an LLM to self-review and decide whether
+    to commit, abort, or rewrite ambiguous edits.
+    """
+    if dry_run:
+        lines = ["Dry-run simulation complete. No file was written."]
+    else:
+        lines = [f"Batch complete. Saved to: {target}"]
+
+    lines.append(
+        f"Actions: {stats['actions_applied']} applied, "
+        f"{stats['actions_skipped']} skipped."
+    )
+    lines.append(
+        f"Edits: {stats['edits_applied']} applied, "
+        f"{stats['edits_skipped']} skipped."
+    )
+
+    edit_reports = stats.get("edits") or []
+    if edit_reports:
+        lines.append("")
+        lines.append("Detailed Edit Reports:")
+        for i, report in enumerate(edit_reports, start=1):
+            status = "applied" if report.get("status") == "applied" else "failed"
+            indicator = "[applied]" if status == "applied" else "[failed]"
+            lines.append(f"Edit {i} {indicator}:")
+            lines.append(f"  Target: '{report.get('target_text', '')}'")
+            lines.append(f"  New text: '{report.get('new_text', '')}'")
+            if report.get("warning"):
+                lines.append(f"  Warning: {report['warning']}")
+            if report.get("error"):
+                lines.append(f"  Error: {report['error']}")
+            if report.get("critic_markup"):
+                lines.append(f"  Preview (CriticMarkup): {report['critic_markup']}")
+            if report.get("clean_text"):
+                lines.append(f"  Clean text preview: {report['clean_text']}")
+
+    if stats.get("skipped_details"):
+        lines.append("")
+        lines.append("Skipped Details:")
+        lines.extend(stats["skipped_details"])
+
+    return lines
 
 
 def _format_pydantic_error(e: Any) -> str:

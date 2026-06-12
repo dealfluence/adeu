@@ -38,7 +38,9 @@ class TestAdeuApplyChangesSchema:
             "insert_row",
             "delete_row",
         ):
-            assert change_type in desc, f"description missing change type '{change_type}'"
+            assert (
+                change_type in desc
+            ), f"description missing change type '{change_type}'"
 
     def test_description_warns_about_batch_semantics(self) -> None:
         # The "do not chain dependent edits in one batch" rule is one of
@@ -52,7 +54,9 @@ class TestAdeuApplyChangesSchema:
         # agents will cache Chg:N from one turn and try to accept/reject
         # in the next, hitting unrelated changes.
         tool = AdeuApplyChanges()
-        assert "ID VOLATILITY" in tool.description or "shift between" in tool.description
+        assert (
+            "ID VOLATILITY" in tool.description or "shift between" in tool.description
+        )
 
     def test_args_schema_required_fields(self) -> None:
         # file_path, author_name, and changes are required. output_path
@@ -76,6 +80,31 @@ class TestAdeuApplyChangesSchema:
         tool = AdeuApplyChanges()
         assert tool.response_format == "content_and_artifact"
 
+    def test_args_schema_has_dry_run_field_with_default_false(self) -> None:
+        # dry_run is optional with default False — existing call sites
+        # that never pass it must continue to perform real writes.
+        schema = AdeuApplyChangesInput.model_json_schema()
+        properties = schema["properties"]
+        assert "dry_run" in properties
+        assert properties["dry_run"].get("default") is False
+        assert "dry_run" not in schema["required"]
+
+    def test_dry_run_field_rejects_non_bool(self) -> None:
+        # Pydantic should refuse strings / ints / None for a bool field.
+        # (Strings like "true" technically coerce; we don't want LLM
+        # ambiguity so confirm the strict-typed path raises.)
+        with pytest.raises(ValueError):
+            AdeuApplyChangesInput.model_validate(
+                {
+                    "file_path": "/a.docx",
+                    "author_name": "AI",
+                    "changes": [
+                        {"type": "modify", "target_text": "x", "new_text": "y"}
+                    ],
+                    "dry_run": "not_a_bool_xyz",
+                }
+            )
+
 
 class TestAdeuApplyChangesValidation:
     def test_rejects_nonexistent_input(self) -> None:
@@ -85,7 +114,9 @@ class TestAdeuApplyChangesValidation:
                 {
                     "file_path": "/nonexistent/file.docx",
                     "author_name": "AI",
-                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
+                    "changes": [
+                        {"type": "modify", "target_text": "x", "new_text": "y"}
+                    ],
                 }
             )
 
@@ -98,7 +129,9 @@ class TestAdeuApplyChangesValidation:
                 {
                     "file_path": str(bad),
                     "author_name": "AI",
-                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
+                    "changes": [
+                        {"type": "modify", "target_text": "x", "new_text": "y"}
+                    ],
                 }
             )
 
@@ -111,7 +144,9 @@ class TestAdeuApplyChangesValidation:
                 {
                     "file_path": str(src),
                     "author_name": "   ",
-                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
+                    "changes": [
+                        {"type": "modify", "target_text": "x", "new_text": "y"}
+                    ],
                 }
             )
 
@@ -139,12 +174,16 @@ class TestAdeuApplyChangesValidation:
                 {
                     "file_path": str(src),
                     "author_name": "AI",
-                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
+                    "changes": [
+                        {"type": "modify", "target_text": "x", "new_text": "y"}
+                    ],
                     "output_path": str(src),
                 }
             )
 
-    def test_schema_validation_failure_returns_content_not_exception(self, tmp_path: Path) -> None:
+    def test_schema_validation_failure_returns_content_not_exception(
+        self, tmp_path: Path
+    ) -> None:
         # A change with an invalid type should be caught by the
         # TypeAdapter and returned as content (success=False), NOT
         # raised as a ToolException. This is the recoverable-validation
@@ -197,7 +236,9 @@ class TestAdeuApplyChangesOutputPathLogic:
         target = _resolve_output_path(src, None)
         assert target == src
 
-    def test_explicit_same_path_allowed_for_processed_stem(self, tmp_path: Path) -> None:
+    def test_explicit_same_path_allowed_for_processed_stem(
+        self, tmp_path: Path
+    ) -> None:
         # Explicit overwrite of a processed file is allowed (iteration).
 
         src = tmp_path / "draft_processed.docx"
