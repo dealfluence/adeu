@@ -196,18 +196,12 @@ class AdeuApplyChanges(BaseTool):
         try:
             stats = engine.process_batch(validated_changes, dry_run=dry_run)
         except BatchValidationError as e:
-            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(
-                e.errors
-            )
-            return content, _failure_artifact(
-                source, output_path, author_name, e.errors, dry_run=dry_run
-            )
+            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
+            return content, _failure_artifact(source, output_path, author_name, e.errors, dry_run=dry_run)
 
         # Success path: write the output (skipped in dry-run) and return per-edit stats.
         if not dry_run:
-            assert (
-                target is not None
-            )  # narrow for type-checkers; guaranteed by the branch above
+            assert target is not None  # narrow for type-checkers; guaranteed by the branch above
             result_stream = engine.save_to_stream()
             target.parent.mkdir(parents=True, exist_ok=True)
             with open(target, "wb") as f:
@@ -239,9 +233,7 @@ class AdeuApplyChanges(BaseTool):
         output_path: str | None = None,
         dry_run: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(
-            self._run, file_path, author_name, changes, output_path, dry_run
-        )
+        return await asyncio.to_thread(self._run, file_path, author_name, changes, output_path, dry_run)
 
 
 def _resolve_output_path(source: Path, requested: str | None) -> Path:
@@ -262,9 +254,7 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not (
-        source.stem.endswith("_processed") or source.stem.endswith("_redlined")
-    ):
+    if target == source and not (source.stem.endswith("_processed") or source.stem.endswith("_redlined")):
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "
@@ -317,14 +307,8 @@ def _build_success_content(
     else:
         lines = [f"Batch complete. Saved to: {target}"]
 
-    lines.append(
-        f"Actions: {stats['actions_applied']} applied, "
-        f"{stats['actions_skipped']} skipped."
-    )
-    lines.append(
-        f"Edits: {stats['edits_applied']} applied, "
-        f"{stats['edits_skipped']} skipped."
-    )
+    lines.append(f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.")
+    lines.append(f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.")
 
     edit_reports = stats.get("edits") or []
     if edit_reports:
