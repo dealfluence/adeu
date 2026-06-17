@@ -401,6 +401,7 @@ function _determine_heading_style(paragraph: Paragraph): string {
   }
 
   let outline_level: number | null = null;
+  let outline_level_from_style = false;
   if (pPr) {
     const oLvl = findChild(pPr, "w:outlineLvl");
     if (oLvl && /^\d+$/.test(oLvl.getAttribute("w:val") || "")) {
@@ -410,6 +411,7 @@ function _determine_heading_style(paragraph: Paragraph): string {
   
   if (outline_level === null && style_id && style_cache && style_cache[style_id]) {
     outline_level = style_cache[style_id].outline_level;
+    outline_level_from_style = true;
   }
 
   const style_name =
@@ -423,6 +425,15 @@ function _determine_heading_style(paragraph: Paragraph): string {
       normalized_style_name = normalized_style_name.replace(/^heading/i, "Heading");
     } else if (normalized_style_name.toLowerCase() === "title") {
       normalized_style_name = "Title";
+    }
+  }
+
+  if (outline_level_from_style && outline_level !== null) {
+    const is_heading_or_title =
+      normalized_style_name &&
+      (normalized_style_name.startsWith("Heading") || normalized_style_name === "Title");
+    if (!is_heading_or_title) {
+      outline_level = null;
     }
   }
 

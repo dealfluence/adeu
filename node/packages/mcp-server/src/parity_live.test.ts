@@ -143,7 +143,7 @@ describe("Parity Live Server Integration Verification", () => {
   });
 
   it("GAP 1 (Live): read_docx mode=outline heading count and content parity with Python", async () => {
-    const gap1FixturePath = resolve(__dirname, "../tests/fixtures/gap1_minimal_repro.docx");
+    const gap1FixturePath = resolve(__dirname, "../tests/fixtures/gap1_deleted_row_repro.docx");
     const { execSync } = await import("node:child_process");
     const projectRoot = resolve(__dirname, "../../../..");
     const pythonCli = join(projectRoot, "python/.venv/bin/adeu");
@@ -199,5 +199,42 @@ describe("Parity Live Server Integration Verification", () => {
     expect(nodeHeadingsDirty).toEqual(["# Active Heading (p1)", "# Deleted Heading (p1)"]);
     expect(pythonHeadingsDirty).toEqual(["# Active Heading (p1)", "# Deleted Heading (p1)"]);
     expect(nodeHeadingsDirty).toEqual(pythonHeadingsDirty);
+  });
+
+  it("GAP 1 - Style Def (Live): style-definition outlineLvl on non-heading style classification parity", async () => {
+    const gap1FixturePath = resolve(__dirname, "../tests/fixtures/gap1_minimal_repro.docx");
+    const { execSync } = await import("node:child_process");
+    const projectRoot = resolve(__dirname, "../../../..");
+    const pythonCli = join(projectRoot, "python/.venv/bin/adeu");
+
+    // 1. clean_view = true (both engines must return exactly 2 headings, excluding Subtitle)
+    const nodeResClean = await sendRpc("tools/call", {
+      name: "read_docx",
+      arguments: {
+        file_path: gap1FixturePath,
+        mode: "outline",
+        clean_view: true,
+      },
+    }, 206);
+
+    expect(nodeResClean.result).toBeDefined();
+    const nodeTextClean = nodeResClean.result.content[0].text;
+
+    const pythonOutClean = execSync(`"${pythonCli}" extract "${gap1FixturePath}" --mode outline --clean-view`, {
+      encoding: "utf-8",
+    });
+
+    const getHeadings = (text: string) => text.split("\n").filter(line => line.startsWith("#")).map(l => l.trim());
+
+    const nodeHeadingsClean = getHeadings(nodeTextClean);
+    const pythonHeadingsClean = getHeadings(pythonOutClean);
+
+    // Assert exact count parity (must be exactly 2 for both)
+    expect(nodeHeadingsClean.length).toBe(2);
+    expect(pythonHeadingsClean.length).toBe(2);
+
+    expect(nodeHeadingsClean).toEqual(["# Real Heading One (p1)", "# Real Heading Two (p1)"]);
+    expect(pythonHeadingsClean).toEqual(["# Real Heading One (p1)", "# Real Heading Two (p1)"]);
+    expect(nodeHeadingsClean).toEqual(pythonHeadingsClean);
   });
 });

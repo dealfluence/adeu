@@ -42,7 +42,7 @@ p._p.append(ins)
 doc.save('node/packages/mcp-server/tests/fixtures/gap2_minimal_repro.docx')
 print("Successfully generated node/packages/mcp-server/tests/fixtures/gap2_minimal_repro.docx")
 
-# Generate GAP 1 minimal fixture
+# Generate GAP 1 deleted row fixture
 doc1 = Document()
 doc1.add_paragraph("Active Heading").style = doc1.styles['Heading 1']
 
@@ -65,5 +65,5 @@ del_node.set(qn('w:author'), 'Test Negotiator')
 del_node.set(qn('w:date'), '2026-01-22T12:06:55Z')
 trPr.append(del_node)
 
-doc1.save('node/packages/mcp-server/tests/fixtures/gap1_minimal_repro.docx')
-print("Successfully generated node/packages/mcp-server/tests/fixtures/gap1_minimal_repro.docx")
+doc1.save('node/packages/mcp-server/tests/fixtures/gap1_deleted_row_repro.docx')
+print("Successfully generated node/packages/mcp-server/tests/fixtures/gap1_deleted_row_repro.docx")

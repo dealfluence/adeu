@@ -251,14 +251,14 @@ describe("Resolved Bugs Core Engine Verification", () => {
     const p = addParagraph(doc, "Short heading");
 
     const fakeCache = {
-      CustomHeading: { name: "Custom Heading", outline_level: 2, bold: true },
+      Heading3: { name: "Heading 3", outline_level: 2, bold: true },
     };
     (doc.pkg as any)._adeu_style_cache = [fakeCache, "Normal"];
 
     const docEl = p.ownerDocument!;
     const pPr = docEl.createElement("w:pPr");
     const pStyle = docEl.createElement("w:pStyle");
-    pStyle.setAttribute("w:val", "CustomHeading");
+    pStyle.setAttribute("w:val", "Heading3");
     pPr.appendChild(pStyle);
     p.insertBefore(pPr, p.firstChild);
 
