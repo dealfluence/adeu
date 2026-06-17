@@ -291,14 +291,25 @@ def handle_diff(args):
     else:
         if not args.original.exists():
             _print_sandbox_warning_and_exit(args.original)
-        with open(args.original, "rb") as f:
-            stream = BytesIO(f.read())
-        from adeu.utils.docx import strip_bom_from_docx_bytes
+        import zipfile
 
-        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-        from docx import Document as load_document
+        try:
+            with open(args.original, "rb") as f:
+                stream = BytesIO(f.read())
+            from adeu.utils.docx import strip_bom_from_docx_bytes
 
-        doc = load_document(BytesIO(sanitized_bytes))
+            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+            from docx import Document as load_document
+
+            doc = load_document(BytesIO(sanitized_bytes))
+        except (ValueError, zipfile.BadZipFile) as e:
+            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
+                print(
+                    f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            raise
 
         from adeu.ingest import _extract_text_from_doc
 
@@ -312,17 +323,17 @@ def handle_diff(args):
         edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
 
     if args.json:
-        output = [e.model_dump(exclude={"_match_start_index"}) for e in edits]
+        output = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
         print(json.dumps(output, indent=2))
     else:
         print(f"Found {len(edits)} changes:", file=sys.stderr)
-        for e in edits:
-            if not e.new_text:
-                print(f"[-] {e.target_text}")
-            elif not e.target_text:
-                print(f"[+] {e.new_text}")
+        for edit in edits:
+            if not edit.new_text:
+                print(f"[-] {edit.target_text}")
+            elif not edit.target_text:
+                print(f"[+] {edit.new_text}")
             else:
-                print(f"[~] '{e.target_text}' -> '{e.new_text}'")
+                print(f"[~] '{edit.target_text}' -> '{edit.new_text}'")
 
 
 def handle_apply(args):
@@ -362,14 +373,29 @@ def handle_apply(args):
                 sys.exit(1)
             if not args.original.exists():
                 _print_sandbox_warning_and_exit(args.original)
-            with open(args.original, "rb") as f:
-                stream = BytesIO(f.read())
-            from adeu.utils.docx import strip_bom_from_docx_bytes
+            import zipfile
 
-            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-            from docx import Document as load_document
+            try:
+                with open(args.original, "rb") as f:
+                    stream = BytesIO(f.read())
+                from adeu.utils.docx import strip_bom_from_docx_bytes
 
-            doc = load_document(BytesIO(sanitized_bytes))
+                sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+                from docx import Document as load_document
+
+                doc = load_document(BytesIO(sanitized_bytes))
+            except (ValueError, zipfile.BadZipFile) as e:
+                if (
+                    "bad zip signature" in str(e)
+                    or "not a zip file" in str(e).lower()
+                    or isinstance(e, zipfile.BadZipFile)
+                ):
+                    print(
+                        f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                raise
 
             from adeu.ingest import _extract_text_from_doc
 

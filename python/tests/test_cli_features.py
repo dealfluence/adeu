@@ -300,3 +300,77 @@ def test_docx_vs_text_diff_precision(tmp_path, capsys):
     # Localized edit size should be small
     assert len(edit["target_text"]) < 50
     assert len(edit["new_text"]) < 50
+
+
+def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
+    import zipfile
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    # Create a valid zip file named fake.docx
+    fake_docx = tmp_path / "fake.docx"
+    with zipfile.ZipFile(fake_docx, "w") as z:
+        z.writestr("a.txt", "hi")
+        z.writestr("b.txt", "yo")
+
+    # 1. extract
+    test_args = ["adeu", "extract", str(fake_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # 2. apply
+    fake_changes = tmp_path / "changes.json"
+    fake_changes.write_text("[]", encoding="utf-8")
+    test_args = ["adeu", "apply", str(fake_docx), str(fake_changes), "--dry-run"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # 3. diff (fake.docx vs mod.txt)
+    mod_txt = tmp_path / "mod.txt"
+    mod_txt.write_text("some modification text", encoding="utf-8")
+    test_args = ["adeu", "diff", str(fake_docx), str(mod_txt)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # 4. sanitize
+    test_args = ["adeu", "sanitize", str(fake_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+
+def test_cli_diff_corrupt_docx_regression(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    empty_docx = tmp_path / "empty.docx"
+    empty_docx.write_bytes(b"")
+
+    mod_txt = tmp_path / "mod.txt"
+    mod_txt.write_text("some text", encoding="utf-8")
+
+    # Run diff with corrupt/empty original
+    test_args = ["adeu", "diff", str(empty_docx), str(mod_txt)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
