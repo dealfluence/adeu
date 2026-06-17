@@ -56,61 +56,24 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 
 from adeu.outline import extract_outline
-from adeu.pagination import paginate, split_structural_appendix
+from adeu.pagination import (
+    build_appendix_pointer,
+    build_page_banner,
+    build_page_footer,
+    paginate,
+    split_structural_appendix,
+)
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentObject
-
-
-def _build_appendix_pointer(file_path: str, has_appendix: bool) -> str:
-    """
-    Returns the one-line footer appended to body pages telling the agent that
-    structural metadata (defined terms, cross-references, bookmarks, diagnostics)
-    is available via mode='appendix'. Empty string when the document has no
-    appendix content.
-
-    This footer is the agent's signal that it should consult the appendix
-    before making edits that touch defined terms or referenced sections.
-    """
-    if not has_appendix:
-        return ""
-    return (
-        "\n\n---\n\n"
-        "> **Appendix available.** This document has structural metadata "
-        "(defined terms, cross-references, bookmarks, diagnostics) that may "
-        "be relevant when editing. Call `read_docx` with `mode='appendix'` "
-        "to load it before submitting edits."
-    )
-
-
-def _build_page_banner(page: int, total: int) -> str:
-    """
-    Returns the top-of-page banner injected into LLM-facing markdown.
-    Empty string when there is only one page (no navigation needed).
-    """
-    if total <= 1:
-        return ""
-    return (
-        f"> **Page {page} of {total}** — "
-        f"call `read_docx` with `mode='outline'` for a heading map of the full document.\n\n"
-        f"---\n\n"
-    )
-
-
-def _build_page_footer(page: int, total: int, has_next: bool) -> str:
-    """
-    Returns the bottom-of-page continuation marker. Empty when this is the
-    last page or the only page.
-    """
-    if total <= 1 or not has_next:
-        return ""
-    return f"\n\n---\n\n> **Continues on page {page + 1} of {total}.**"
 
 
 def render_outline_tree(
     nodes: List[Any],
     max_level: int = 2,
     verbose: bool = False,
+    is_cli: bool = False,
+    file_path: str = "document.docx",
 ) -> str:
     """
     Renders a flat list of OutlineNode objects as a Markdown tree.
@@ -131,11 +94,14 @@ def render_outline_tree(
     visible = [n for n in nodes if n.level <= max_level]
 
     if not visible:
+        if is_cli:
+            hint = f"Run `adeu extract {file_path} --mode outline --outline-max-level N` (up to 6) to see them."
+        else:
+            hint = "Call read_docx with mode='outline' and outline_max_level=N (up to 6) to see them."
         return (
             f"# (No headings at level <= {max_level})\n\n"
             f"Document has {len(nodes)} headings, all at deeper levels. "
-            f"Call read_docx with mode='outline' and outline_max_level=N "
-            f"(up to 6) to see them."
+            f"{hint}"
         )
 
     lines = []
@@ -151,10 +117,9 @@ def render_outline_tree(
             lines.append(f"{prefix} {node.text} ({meta})")
         else:
             lines.append(f"{prefix} {node.text} (p{node.page})")
-    return "\n".join(lines)
 
 
-def build_paginated_response(text: str, page: int, file_path: str) -> ToolResult:
+def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool = False) -> ToolResult:
     """
     Splits projected Markdown into pages and returns the requested page.
 
@@ -177,9 +142,9 @@ def build_paginated_response(text: str, page: int, file_path: str) -> ToolResult
     selected = result.pages[page - 1]
 
     # Build the original UI markdown
-    banner = _build_page_banner(selected.page, selected.total_pages)
-    footer = _build_page_footer(selected.page, selected.total_pages, selected.has_next)
-    appendix_pointer = _build_appendix_pointer(file_path, has_appendix)
+    banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
+    footer = build_page_footer(selected.page, selected.total_pages, selected.has_next, file_path, is_cli=is_cli)
+    appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
     ui_markdown = banner + selected.page_content + footer + appendix_pointer
 
     # Prepend the path ONLY for the LLM
@@ -202,6 +167,7 @@ def build_outline_response(
     outline_max_level: int = 2,
     outline_verbose: bool = False,
     paragraph_offsets: dict | None = None,
+    is_cli: bool = False,
 ) -> ToolResult:
     """
     Returns a structural map of headings as a Markdown tree.
@@ -231,18 +197,25 @@ def build_outline_response(
         nodes,
         max_level=outline_max_level,
         verbose=outline_verbose,
+        is_cli=is_cli,
+        file_path=file_path,
     )
 
     visible_count = sum(1 for n in nodes if n.level <= outline_max_level)
     deeper_count = len(nodes) - visible_count
     deeper_hint = f" ({deeper_count} more at deeper levels, raise outline_max_level to see)" if deeper_count > 0 else ""
 
+    if is_cli:
+        read_hint = f"Run `adeu extract {file_path} --page N` to read a section."
+    else:
+        read_hint = "Call `read_docx` with `mode='full'` and `page=N` to read a section."
+
     # Build the original UI markdown
     header = (
         f"> **Outline view** — showing {visible_count} of {len(nodes)} headings "
         f"(L1-L{outline_max_level}{deeper_hint}) across "
         f"{pagination_result.total_pages} page(s). "
-        f"Call `read_docx` with `mode='full'` and `page=N` to read a section.\n\n"
+        f"{read_hint}\n\n"
         f"---\n\n"
     )
     ui_markdown = header + rendered
@@ -259,7 +232,7 @@ def build_outline_response(
     )
 
 
-def build_appendix_response(text: str, page: int, file_path: str) -> ToolResult:
+def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool = False) -> ToolResult:
     """
     Returns the structural appendix (defined terms, anchors, diagnostics) for
     the document, paginated. The appendix is treated AS the body for pagination
@@ -306,11 +279,21 @@ def build_appendix_response(text: str, page: int, file_path: str) -> ToolResult:
             f"> **Appendix page {selected.page} of {selected.total_pages}** — "
             f"structural metadata for this document.\n\n---\n\n"
         )
-        footer = (
-            (f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} of {selected.total_pages}.**")
-            if selected.has_next
-            else ""
-        )
+        if is_cli:
+            cmd = f"adeu extract {file_path} --mode appendix --page {selected.page + 1}"
+            footer = (
+                (
+                    f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} of {selected.total_pages}.** Run `{cmd}` for the next page."
+                )
+                if selected.has_next
+                else ""
+            )
+        else:
+            footer = (
+                (f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} of {selected.total_pages}.**")
+                if selected.has_next
+                else ""
+            )
     else:
         banner = "> **Appendix** — structural metadata for this document.\n\n---\n\n"
         footer = ""

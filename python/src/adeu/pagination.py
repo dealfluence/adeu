@@ -360,3 +360,65 @@ def _assemble_pages(
 def _count_tracked_changes(page_content: str) -> int:
     """Counts distinct Chg:N IDs visible on a page."""
     return len(set(_CHG_ID_PATTERN.findall(page_content)))
+
+
+# ---------------------------------------------------------------------------
+# UI/Formatting: Page banners, footers, and pointers
+# ---------------------------------------------------------------------------
+
+
+def build_page_banner(page: int, total: int, file_path: str, is_cli: bool = False) -> str:
+    """
+    Returns the top-of-page banner injected into LLM-facing markdown.
+    Empty string when there is only one page (no navigation needed).
+    """
+    if total <= 1:
+        return ""
+    if is_cli:
+        cmd = f"adeu extract {file_path} --mode outline"
+        return f"> **Page {page} of {total}** — run `{cmd}` for a heading map of the full document.\n\n---\n\n"
+    return (
+        f"> **Page {page} of {total}** — "
+        f"call `read_docx` with `mode='outline'` for a heading map of the full document.\n\n"
+        f"---\n\n"
+    )
+
+
+def build_page_footer(page: int, total: int, has_next: bool, file_path: str, is_cli: bool = False) -> str:
+    """
+    Returns the bottom-of-page continuation marker. Empty when this is the
+    last page or the only page.
+    """
+    if total <= 1 or not has_next:
+        return ""
+    if is_cli:
+        cmd = f"adeu extract {file_path} --page {page + 1}"
+        return f"\n\n---\n\n> **Continues on page {page + 1} of {total}.** Run `{cmd}` for the next page."
+    return f"\n\n---\n\n> **Continues on page {page + 1} of {total}.**"
+
+
+def build_appendix_pointer(file_path: str, has_appendix: bool, is_cli: bool = False) -> str:
+    """
+    Returns the one-line footer appended to body pages telling the agent that
+    structural metadata (defined terms, cross-references, bookmarks, diagnostics)
+    is available via mode='appendix'. Empty string when the document has no
+    appendix content.
+    """
+    if not has_appendix:
+        return ""
+    if is_cli:
+        cmd = f"adeu extract {file_path} --mode appendix --page N"
+        return (
+            "\n\n---\n\n"
+            "> **Appendix available.** This document has structural metadata "
+            "(defined terms, cross-references, bookmarks, diagnostics) that may "
+            "be relevant when editing. Run `{cmd}` "
+            "to load it before submitting edits."
+        )
+    return (
+        "\n\n---\n\n"
+        "> **Appendix available.** This document has structural metadata "
+        "(defined terms, cross-references, bookmarks, diagnostics) that may "
+        "be relevant when editing. Call `read_docx` with `mode='appendix'` "
+        "to load it before submitting edits."
+    )

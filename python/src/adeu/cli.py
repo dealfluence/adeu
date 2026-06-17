@@ -184,8 +184,10 @@ def handle_extract(args):
         with open(args.input, "rb") as f:
             stream = BytesIO(f.read())
         from adeu.utils.docx import strip_bom_from_docx_bytes
+
         sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
         from docx import Document as load_document
+
         doc = load_document(BytesIO(sanitized_bytes))
 
         # Perform extraction
@@ -193,6 +195,7 @@ def handle_extract(args):
         needs_offsets = args.mode == "outline"
 
         from adeu.ingest import _extract_text_from_doc
+
         extract_result = _extract_text_from_doc(
             doc,
             clean_view=args.clean_view,
@@ -220,11 +223,22 @@ def handle_extract(args):
                 outline_max_level=args.outline_max_level,
                 outline_verbose=args.outline_verbose,
                 paragraph_offsets=paragraph_offsets,
+                is_cli=True,
             )
         elif args.mode == "appendix":
-            res = build_appendix_response(text, args.page, "Active Document" if args.live else str(args.input))
+            res = build_appendix_response(
+                text,
+                args.page,
+                "Active Document" if args.live else str(args.input),
+                is_cli=True,
+            )
         else:
-            res = build_paginated_response(text, args.page, "Active Document" if args.live else str(args.input))
+            res = build_paginated_response(
+                text,
+                args.page,
+                "Active Document" if args.live else str(args.input),
+                is_cli=True,
+            )
 
         output_text = res.content
     except Exception as e:
@@ -698,11 +712,11 @@ def main():
     args = parser.parse_args()
 
     import logging
+
     import structlog
+
     log_level = logging.DEBUG if args.debug else logging.WARNING
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(log_level)
-    )
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(log_level))
 
     args.func(args)
 
