@@ -240,7 +240,10 @@ def handle_extract(args):
                 is_cli=True,
             )
 
-        output_text = res.content
+        if isinstance(res.content, list):
+            output_text = "\n".join(item.text if hasattr(item, "text") else str(item) for item in res.content)
+        else:
+            output_text = str(res.content)
     except Exception as e:
         print(f"❌ Error: {e}", file=sys.stderr)
         sys.exit(1)

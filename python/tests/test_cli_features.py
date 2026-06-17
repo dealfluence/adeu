@@ -169,3 +169,23 @@ def test_cli_pagination_parity(capsys):
     cli_markdown = cli_paginated.structured_content["markdown"]
     assert "adeu extract" in cli_markdown
     assert "read_docx" not in cli_markdown
+
+
+def test_cli_stdout_unwrapped(capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+    test_args = ["adeu", "extract", str(fixture_path), "--mode", "full", "--page", "1"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    stdout_output = captured.out.strip()
+    assert "TextContent(" not in stdout_output
+    assert not (stdout_output.startswith("[") and stdout_output.endswith("]"))
+    assert "annotations=" not in stdout_output
