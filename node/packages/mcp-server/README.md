@@ -40,3 +40,17 @@ Once connected, your AI agent will have access to the following tools:
 
 ## Documentation & Support
 For full architectural details, prompt recommendations, and the project constitution, please visit the [main Adeu repository](https://github.com/dealfluence/adeu) or our [website](https://adeu.ai).
+
+---
+
+## Development Runbook Note: Workspace Linkage Trap
+
+> [!WARNING]
+> **Node MCP: a committed source fix is NOT a running fix.**
+> `dist/` is gitignored and the server runs the compiled bundle. After ANY change to `node/packages/core` or `mcp-server`:
+> 
+> 1. **Relink dependencies:** `cd node && npm install` (relinks `@adeu/core` in the workspace; a copied — not symlinked — core is the #1 cause of "fix didn't take").
+> 2. **Rebuild the workspace:** `npm run build` (core builds before mcp-server; confirm `core/dist` timestamp is updated).
+> 3. **Verify:** Check that the build verification sentinel check succeeds (automatically runs postbuild, or can be run manually via `npm run build:verify` under `packages/mcp-server`).
+> 4. **Restart the MCP server:** Restart the MCP server AND reconnect in the client to flush any cached process states.
+> 5. **Confirm the build stamp:** Verify that the build stamp in the live server (via `server_info` or startup logs) matches your built git HEAD.

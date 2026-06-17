@@ -2295,7 +2295,7 @@ class RedlineEngine:
                     if ins_elem is not None:
                         p1_el.append(ins_elem)
 
-            for span in virtual_spans:
+            for span in reversed(virtual_spans):
                 if span.paragraph:
                     p1_element = span.paragraph._element
                     p2_element = p1_element.getnext()

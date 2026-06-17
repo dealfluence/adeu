@@ -11,6 +11,8 @@
   "devDependencies": {},
   "scripts": {
     "build": "tsup",
+    "postbuild": "npm run build:verify",
+    "build:verify": "node scripts/verify-bundle.js",
     "test": "vitest run",
     "start": "node ./dist/index.js"
   },

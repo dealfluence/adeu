@@ -18,6 +18,16 @@ function copyAssets(outDir: string) {
   }
 }
 
+import { execSync } from "node:child_process";
+
+let gitSha = "unknown";
+try {
+  gitSha = execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
+} catch (e) {
+  // fallback if not in git repo or git not found
+}
+const buildTimestamp = new Date().toISOString();
+
 export default defineConfig([
   {
     entry: ["src/index.ts"],
@@ -28,6 +38,10 @@ export default defineConfig([
     outDir: "dist",
     banner: {
       js: "#!/usr/bin/env node",
+    },
+    define: {
+      "process.env.GIT_SHA": JSON.stringify(gitSha),
+      "process.env.BUILD_TIMESTAMP": JSON.stringify(buildTimestamp),
     },
     onSuccess: async () => {
       copyAssets("dist");
@@ -43,6 +57,10 @@ export default defineConfig([
     dts: false,
     sourcemap: false,
     clean: false, // Don't clean the whole dir (preserves icon and manifest)
+    define: {
+      "process.env.GIT_SHA": JSON.stringify(gitSha),
+      "process.env.BUILD_TIMESTAMP": JSON.stringify(buildTimestamp),
+    },
     onSuccess: async () => {
       copyAssets("../../../desktop-extension");
     },

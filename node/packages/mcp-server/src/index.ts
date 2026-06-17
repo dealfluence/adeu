@@ -218,21 +218,24 @@ registerAppTool(
           text: string;
           paragraph_offsets: Map<any, [number, number]>;
         };
-        return build_outline_response(
+        const res = build_outline_response(
           doc,
           extract_res.text,
           file_path,
           outline_max_level,
           outline_verbose,
           extract_res.paragraph_offsets,
-        ) as any;
+        );
+        return appendBuildStamp(res) as any;
       }
 
       const text = await extractTextFromBuffer(buf, clean_view);
       if (mode === "appendix") {
-        return build_appendix_response(text, page, file_path) as any;
+        const res = build_appendix_response(text, page, file_path);
+        return appendBuildStamp(res) as any;
       }
-      return build_paginated_response(text, page, file_path) as any;
+      const res = build_paginated_response(text, page, file_path);
+      return appendBuildStamp(res) as any;
     } catch (e: any) {
       return {
         isError: true,
@@ -246,6 +249,45 @@ registerAppTool(
     }
   },
 );
+
+function appendBuildStamp(result: any): any {
+  const gitSha = process.env.GIT_SHA || "unknown";
+  const buildTs = process.env.BUILD_TIMESTAMP || "unknown";
+  const debugFooter = `\n\n[Debug] build=${gitSha}@${buildTs}`;
+  if (result && result.content && Array.isArray(result.content)) {
+    for (const item of result.content) {
+      if (item.type === "text") {
+        item.text += debugFooter;
+      }
+    }
+  }
+  if (result && result.structuredContent && typeof result.structuredContent === "object") {
+    if (typeof result.structuredContent.markdown === "string") {
+      result.structuredContent.markdown += debugFooter;
+    }
+  }
+  return result;
+}
+
+server.registerTool(
+  "server_info",
+  {
+    description: "Get the MCP server build version, git short SHA, and build timestamp.",
+  },
+  async () => {
+    const gitSha = process.env.GIT_SHA || "unknown";
+    const buildTs = process.env.BUILD_TIMESTAMP || "unknown";
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Adeu MCP Server (Node.js Engine)\nBuild: ${gitSha}@${buildTs}`,
+        },
+      ],
+    };
+  },
+);
+
 
 registerAppTool(
   server,
@@ -695,8 +737,10 @@ export function formatBatchResult(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  const gitSha = process.env.GIT_SHA || "unknown";
+  const buildTs = process.env.BUILD_TIMESTAMP || "unknown";
   console.error(
-    `Adeu MCP Server (Node.js Engine: ${identifyEngine()}) running on stdio`,
+    `Adeu MCP Server (Node.js Engine: ${identifyEngine()}) running on stdio build=${gitSha}@${buildTs}`,
   );
 }
 
