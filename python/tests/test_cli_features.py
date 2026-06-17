@@ -321,7 +321,7 @@ def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
             main()
         assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+    assert "is not a valid DOCX file (missing required Word parts)" in captured.err
 
     # 2. apply
     fake_changes = tmp_path / "changes.json"
@@ -332,7 +332,7 @@ def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
             main()
         assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+    assert "is not a valid DOCX file (missing required Word parts)" in captured.err
 
     # 3. diff (fake.docx vs mod.txt)
     mod_txt = tmp_path / "mod.txt"
@@ -343,7 +343,7 @@ def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
             main()
         assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+    assert "is not a valid DOCX file (missing required Word parts)" in captured.err
 
     # 4. sanitize
     test_args = ["adeu", "sanitize", str(fake_docx)]
@@ -352,7 +352,7 @@ def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
             main()
         assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+    assert "is not a valid DOCX file (missing required Word parts)" in captured.err
 
 
 def test_cli_diff_corrupt_docx_regression(tmp_path, capsys):
@@ -374,3 +374,54 @@ def test_cli_diff_corrupt_docx_regression(tmp_path, capsys):
         assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+
+def test_cli_deeply_malformed_docx_errors(tmp_path, capsys):
+    import zipfile
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    # Create a zip containing [Content_Types].xml but invalid word/document.xml
+    fake2_docx = tmp_path / "fake2.docx"
+    with zipfile.ZipFile(fake2_docx, "w") as z:
+        content_types = (
+            '<?xml version="1.0"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Override PartName="/word/document.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>"
+        )
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("word/document.xml", "<<<not valid xml>>>")
+
+    # 1. extract
+    test_args = ["adeu", "extract", str(fake2_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (corrupted or invalid OOXML structure)" in captured.err
+
+    # 2. apply
+    fake_changes = tmp_path / "changes.json"
+    fake_changes.write_text("[]", encoding="utf-8")
+    test_args = ["adeu", "apply", str(fake2_docx), str(fake_changes), "--dry-run"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (corrupted or invalid OOXML structure)" in captured.err
+
+    # 3. diff (fake2.docx vs mod.txt)
+    mod_txt = tmp_path / "mod.txt"
+    mod_txt.write_text("some modification text", encoding="utf-8")
+    test_args = ["adeu", "diff", str(fake2_docx), str(mod_txt)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (corrupted or invalid OOXML structure)" in captured.err

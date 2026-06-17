@@ -874,7 +874,7 @@ def strip_bom_from_docx_bytes(data: bytes) -> bytes:
     try:
         with zipfile.ZipFile(in_stream, "r") as z_in:
             if "[Content_Types].xml" not in z_in.namelist():
-                raise ValueError("not a valid DOCX file (got bad zip signature)")
+                raise ValueError("not a valid DOCX file (missing required Word parts)")
             with zipfile.ZipFile(out_stream, "w", zipfile.ZIP_DEFLATED) as z_out:
                 for item in z_in.infolist():
                     content = z_in.read(item.filename)
@@ -882,10 +882,21 @@ def strip_bom_from_docx_bytes(data: bytes) -> bytes:
                         if content.startswith(b"\xef\xbb\xbf"):
                             content = content[3:]
                     z_out.writestr(item, content)
-        return out_stream.getvalue()
+        sanitized_bytes = out_stream.getvalue()
     except Exception as e:
-        if isinstance(e, ValueError) and "bad zip signature" in str(e):
+        if isinstance(e, ValueError) and "not a valid DOCX file" in str(e):
             raise
         if isinstance(e, zipfile.BadZipFile):
             raise ValueError("not a valid DOCX file (got bad zip signature)") from e
         raise
+
+    try:
+        from docx import Document
+
+        Document(io.BytesIO(sanitized_bytes))
+    except Exception as e:
+        if isinstance(e, ValueError) and "not a valid DOCX file" in str(e):
+            raise
+        raise ValueError("not a valid DOCX file (corrupted or invalid OOXML structure)") from e
+
+    return sanitized_bytes

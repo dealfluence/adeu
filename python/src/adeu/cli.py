@@ -125,6 +125,19 @@ def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
     sys.exit(exit_code)
 
 
+def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
+    import re
+
+    err_str = str(exc)
+    reason = "got bad zip signature"
+    if "not a valid DOCX file" in err_str:
+        match = re.search(r"not a valid DOCX file \(([^)]+)\)", err_str)
+        if match:
+            reason = match.group(1)
+    print(f"❌ Error: '{filename}' is not a valid DOCX file ({reason}).", file=sys.stderr)
+    sys.exit(1)
+
+
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
     if not path.exists():
         _print_sandbox_warning_and_exit(path)
@@ -140,9 +153,8 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
             f.seek(0)
             return extract_text_from_stream(BytesIO(f.read()), filename=path.name, clean_view=clean_view)
     except Exception as e:
-        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
-            print(f"❌ Error: '{path.name}' is not a valid DOCX file (got bad zip signature).", file=sys.stderr)
-            sys.exit(1)
+        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or "not a valid DOCX file" in str(e):
+            _handle_docx_error_and_exit(path.name, e)
         print(f"❌ Error reading DOCX file '{path.name}': {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -207,13 +219,14 @@ def handle_extract(args):
             from docx import Document as load_document
 
             doc = load_document(BytesIO(sanitized_bytes))
-        except (ValueError, zipfile.BadZipFile) as e:
-            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
-                print(
-                    f"❌ Error: '{args.input.name}' is not a valid DOCX file (got bad zip signature).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        except Exception as e:
+            if (
+                "bad zip signature" in str(e)
+                or "not a zip file" in str(e).lower()
+                or "not a valid DOCX file" in str(e)
+                or isinstance(e, zipfile.BadZipFile)
+            ):
+                _handle_docx_error_and_exit(args.input.name, e)
             raise
 
         # Perform extraction
@@ -302,13 +315,14 @@ def handle_diff(args):
             from docx import Document as load_document
 
             doc = load_document(BytesIO(sanitized_bytes))
-        except (ValueError, zipfile.BadZipFile) as e:
-            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
-                print(
-                    f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        except Exception as e:
+            if (
+                "bad zip signature" in str(e)
+                or "not a zip file" in str(e).lower()
+                or "not a valid DOCX file" in str(e)
+                or isinstance(e, zipfile.BadZipFile)
+            ):
+                _handle_docx_error_and_exit(args.original.name, e)
             raise
 
         from adeu.ingest import _extract_text_from_doc
@@ -384,17 +398,14 @@ def handle_apply(args):
                 from docx import Document as load_document
 
                 doc = load_document(BytesIO(sanitized_bytes))
-            except (ValueError, zipfile.BadZipFile) as e:
+            except Exception as e:
                 if (
                     "bad zip signature" in str(e)
                     or "not a zip file" in str(e).lower()
+                    or "not a valid DOCX file" in str(e)
                     or isinstance(e, zipfile.BadZipFile)
                 ):
-                    print(
-                        f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+                    _handle_docx_error_and_exit(args.original.name, e)
                 raise
 
             from adeu.ingest import _extract_text_from_doc
@@ -436,13 +447,14 @@ def handle_apply(args):
             stream = BytesIO(f.read())
 
         engine = RedlineEngine(stream, author=args.author)
-    except (ValueError, zipfile.BadZipFile) as e:
-        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
-            print(
-                f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    except Exception as e:
+        if (
+            "bad zip signature" in str(e)
+            or "not a zip file" in str(e).lower()
+            or "not a valid DOCX file" in str(e)
+            or isinstance(e, zipfile.BadZipFile)
+        ):
+            _handle_docx_error_and_exit(args.original.name, e)
         raise
     try:
         stats = engine.process_batch(changes, dry_run=args.dry_run)
@@ -585,12 +597,8 @@ def handle_sanitize(args: argparse.Namespace):
             print(f"❌ {e}", file=sys.stderr)
             sys.exit(2)
         except Exception as e:
-            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
-                print(
-                    f"❌ Error: '{input_path.name}' is not a valid DOCX file (got bad zip signature).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or "not a valid DOCX file" in str(e):
+                _handle_docx_error_and_exit(input_path.name, e)
             print(f"❌ Error: {e}", file=sys.stderr)
             sys.exit(2)
     else:
@@ -644,12 +652,12 @@ def handle_sanitize(args: argparse.Namespace):
 
             except Exception as e:
                 blocked += 1
-                if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
-                    print(
-                        f"❌ Error: '{input_path.name}' is not a valid DOCX file (got bad zip signature).",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+                if (
+                    "bad zip signature" in str(e)
+                    or "not a zip file" in str(e).lower()
+                    or "not a valid DOCX file" in str(e)
+                ):
+                    _handle_docx_error_and_exit(input_path.name, e)
                 print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
 
         # Batch summary
