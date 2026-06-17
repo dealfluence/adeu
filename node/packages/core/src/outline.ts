@@ -40,10 +40,14 @@ export function extract_outline(
   projected_body: string,
   body_pages: string[],
   body_page_offsets: number[],
-  paragraph_offsets: Record<string, [number, number]> | null = null,
+  paragraph_offsets: Record<string, [number, number]> | Map<any, [number, number]> | null = null,
 ): OutlineNode[] {
   if (body_pages.length !== body_page_offsets.length) {
     throw new Error("body_pages and body_page_offsets length mismatch");
+  }
+
+  if (paragraph_offsets) {
+    return _extract_outline_fast(doc, projected_body, body_page_offsets, paragraph_offsets);
   }
 
   const comments_map = extract_comments_data(doc.pkg);
@@ -504,4 +508,184 @@ function _offset_to_page(offset: number, body_page_offsets: number[]): number {
     else break;
   }
   return page;
+}
+
+function _extract_outline_fast(
+  doc: DocumentObject,
+  projected_body: string,
+  body_page_offsets: number[],
+  paragraph_offsets: Map<any, [number, number]> | Record<string, [number, number]>,
+): OutlineNode[] {
+  const paragraphs_and_tables: ["p" | "t", any][] = [];
+  const seen_cells = new Set<any>();
+
+  function walk(container: any) {
+    for (const item of iter_block_items(container)) {
+      const i_type = item.constructor.name;
+      if (i_type === "FootnoteItem") {
+        walk(item);
+      } else if (item instanceof Paragraph) {
+        paragraphs_and_tables.push(["p", item]);
+      } else if (item instanceof Table) {
+        paragraphs_and_tables.push(["t", item]);
+        for (const row of item.rows) {
+          for (const cell of row.cells) {
+            if (seen_cells.has(cell._element)) {
+              continue;
+            }
+            seen_cells.add(cell._element);
+            walk(cell);
+          }
+        }
+      }
+    }
+  }
+
+  walk(doc);
+
+  const heading_indices: number[] = [];
+  for (let idx = 0; idx < paragraphs_and_tables.length; idx++) {
+    const [kind, item] = paragraphs_and_tables[idx];
+    if (kind !== "p") continue;
+
+    let hasOffset = false;
+    if (paragraph_offsets instanceof Map) {
+      hasOffset = paragraph_offsets.has(item._element);
+    } else {
+      hasOffset = item._element in (paragraph_offsets as any);
+    }
+    if (!hasOffset) {
+      continue;
+    }
+
+    if (!_is_heading(item)) continue;
+    if (!_heading_passes_quality_filter_fast(item, projected_body, paragraph_offsets)) continue;
+
+    heading_indices.push(idx);
+  }
+
+  if (heading_indices.length === 0) return [];
+
+  const nodes: OutlineNode[] = [];
+  for (let h_pos = 0; h_pos < heading_indices.length; h_pos++) {
+    const item_idx = heading_indices[h_pos];
+    const paragraph = paragraphs_and_tables[item_idx][1] as Paragraph;
+    const level = _heading_level(paragraph);
+    const text = _heading_text_fast(paragraph, projected_body, paragraph_offsets);
+    const style = _determine_heading_style(paragraph);
+
+    // Owned range: items strictly between this heading and the next equal-or-higher heading.
+    let owned_end = item_idx;
+    for (let next_h_pos = h_pos + 1; next_h_pos < heading_indices.length; next_h_pos++) {
+      const next_idx = heading_indices[next_h_pos];
+      const next_paragraph = paragraphs_and_tables[next_idx][1] as Paragraph;
+      if (_heading_level(next_paragraph) <= level) {
+        owned_end = next_idx;
+        break;
+      }
+    }
+    if (owned_end === item_idx) {
+      owned_end = paragraphs_and_tables.length;
+    }
+
+    const owned = paragraphs_and_tables.slice(item_idx + 1, owned_end);
+
+    // has_table: nearest-claim semantics (no bubbling to ancestors).
+    let has_table = false;
+    for (const [kind2, item2] of owned) {
+      if (kind2 === "p" && _is_heading(item2)) {
+        break;
+      }
+      if (kind2 === "t") {
+        has_table = true;
+        break;
+      }
+    }
+
+    // Footnote IDs in document order, deduped.
+    const footnote_ids = _collect_footnote_ids_fast(owned);
+
+    // Page resolution from the paragraph's known offset.
+    let para_offset: [number, number] | undefined;
+    if (paragraph_offsets instanceof Map) {
+      para_offset = paragraph_offsets.get(paragraph._element);
+    } else {
+      para_offset = paragraph_offsets[paragraph._element as any];
+    }
+
+    let page_num = 1;
+    if (para_offset !== undefined) {
+      const [start_offset] = para_offset;
+      page_num = _offset_to_page(start_offset, body_page_offsets);
+    }
+
+    nodes.push({
+      level,
+      text,
+      page: page_num,
+      style,
+      has_table,
+      footnote_ids,
+    });
+  }
+
+  return nodes;
+}
+
+function _heading_passes_quality_filter_fast(
+  paragraph: Paragraph,
+  projected_body: string,
+  paragraph_offsets: Map<any, [number, number]> | Record<string, [number, number]>,
+): boolean {
+  const style = _determine_heading_style(paragraph);
+  if (style !== "(heuristic)") return true;
+
+  const text = _heading_text_fast(paragraph, projected_body, paragraph_offsets);
+  if (!text) return false;
+  const words = text.match(/\w+/g) || [];
+  return words.length >= _HEURISTIC_MIN_WORDS;
+}
+
+function _heading_text_fast(
+  paragraph: Paragraph,
+  projected_body: string,
+  paragraph_offsets: Map<any, [number, number]> | Record<string, [number, number]>,
+): string {
+  let offset: [number, number] | undefined;
+  if (paragraph_offsets instanceof Map) {
+    offset = paragraph_offsets.get(paragraph._element);
+  } else {
+    offset = paragraph_offsets[paragraph._element as any];
+  }
+
+  if (offset === undefined) {
+    return "";
+  }
+  const [start, length] = offset;
+  const raw = projected_body.substring(start, start + length);
+  let cleaned = _strip_critic_markup(raw);
+  cleaned = _strip_inline_formatting(cleaned);
+  cleaned = cleaned.replace(/^#+\s+/, "");
+  return cleaned.trim();
+}
+
+function _collect_footnote_ids_fast(owned_items: ["p" | "t", any][]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const [kind, item] of owned_items) {
+    if (kind !== "p") continue;
+    for (const event of iter_paragraph_content(item)) {
+      if (!("type" in event)) continue;
+      let fn_id = "";
+      if (event.type === "footnote") fn_id = `fn-${event.id}`;
+      else if (event.type === "endnote") fn_id = `en-${event.id}`;
+      else continue;
+
+      if (!seen.has(fn_id)) {
+        seen.add(fn_id);
+        ordered.push(fn_id);
+      }
+    }
+  }
+  return ordered;
 }

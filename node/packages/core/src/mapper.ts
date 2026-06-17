@@ -95,15 +95,17 @@ export function renumber_snapshot_ids(doc: DocumentObject): [Record<string, stri
 export class DocumentMapper {
   public doc: DocumentObject;
   public clean_view: boolean;
+  public original_view: boolean;
   public comments_map: Record<string, any>;
   public full_text: string = '';
   public spans: TextSpan[] = [];
   public appendix_start_index: number = -1;
   private _text_chunks: string[] = [];
 
-  constructor(doc: DocumentObject, clean_view: boolean = false) {
+  constructor(doc: DocumentObject, clean_view: boolean = false, original_view: boolean = false) {
     this.doc = doc;
     this.clean_view = clean_view;
+    this.original_view = original_view;
     this.comments_map = extract_comments_data(doc.pkg);
     this._build_map();
   }
@@ -200,16 +202,17 @@ export class DocumentMapper {
       const del_node = trPr ? findChild(trPr, 'w:del') : null;
 
       if (this.clean_view && del_node) continue;
+      if (this.original_view && ins) continue;
 
       if (rows_processed > 0) {
         this._add_virtual_text('\n', current, null);
         current += 1;
       }
 
-      if (ins && !this.clean_view) {
+      if (ins && !this.clean_view && !this.original_view) {
         this._add_virtual_text('{++ ', current, null);
         current += 4;
-      } else if (del_node && !this.clean_view) {
+      } else if (del_node && !this.clean_view && !this.original_view) {
         this._add_virtual_text('{-- ', current, null);
         current += 4;
       }
@@ -230,11 +233,11 @@ export class DocumentMapper {
         cells_processed += 1;
       }
 
-      if (ins && !this.clean_view) {
+      if (ins && !this.clean_view && !this.original_view) {
         const suffix = ` |Chg:${ins.getAttribute('w:id')}++}`;
         this._add_virtual_text(suffix, current, null);
         current += suffix.length;
-      } else if (del_node && !this.clean_view) {
+      } else if (del_node && !this.clean_view && !this.original_view) {
         const suffix = ` |Chg:${del_node.getAttribute('w:id')}--}`;
         this._add_virtual_text(suffix, current, null);
         current += suffix.length;
@@ -343,13 +346,16 @@ export class DocumentMapper {
         if (this.clean_view && Object.keys(active_del).length > 0) {
           // pass
         }
+        if (this.original_view && Object.keys(active_ins).length > 0) {
+          // pass
+        }
 
         const full_seg_text = run_parts.map(x => x[1]).join('');
         const curr_ins_id = Object.keys(active_ins).pop() || null;
         const curr_del_id = Object.keys(active_del).pop() || null;
 
-        if (full_seg_text && !(this.clean_view && curr_del_id)) {
-          const new_wrappers = this.clean_view ? ['', ''] as [string, string] : this._get_wrappers(curr_ins_id, curr_del_id, active_ids, active_fmt);
+        if (full_seg_text && !(this.clean_view && curr_del_id) && !(this.original_view && curr_ins_id)) {
+          const new_wrappers = (this.clean_view || this.original_view) ? ['', ''] as [string, string] : this._get_wrappers(curr_ins_id, curr_del_id, active_ids, active_fmt);
           const new_style: [string, string] = [prefix, suffix];
 
           if (pending_runs.length > 0 && new_wrappers[0] === current_wrappers[0] && new_wrappers[1] === current_wrappers[1]) {
@@ -379,7 +385,7 @@ export class DocumentMapper {
           }
         }
 
-        if (!this.clean_view) {
+        if (!this.clean_view && !this.original_view) {
           const has_meta = Object.keys(active_ins).length > 0 || Object.keys(active_del).length > 0 || active_ids.size > 0 || Object.keys(active_fmt).length > 0;
           if (has_meta) {
             deferred_meta_states.push([{...active_ins}, {...active_del}, new Set(active_ids), {...active_fmt}]);

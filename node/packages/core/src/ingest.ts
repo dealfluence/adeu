@@ -11,18 +11,24 @@ import { extract_comments_data } from './comments.js';
 
 export async function extractTextFromBuffer(buffer: Buffer, cleanView = false): Promise<string> {
   const doc = await DocumentObject.load(buffer);
-  return _extractTextFromDoc(doc, cleanView);
+  return _extractTextFromDoc(doc, cleanView) as string;
 }
 
-export function _extractTextFromDoc(doc: DocumentObject, cleanView = false, includeAppendix = true): string {
+export function _extractTextFromDoc(
+  doc: DocumentObject,
+  cleanView = false,
+  includeAppendix = true,
+  return_paragraph_offsets = false,
+): string | { text: string; paragraph_offsets: Map<any, [number, number]> } {
   const comments_map = extract_comments_data(doc.pkg);
 
   const full_text: string[] = [];
+  const paragraph_offsets = new Map<any, [number, number]>();
   let cursor = 0;
 
   for (const part of iter_document_parts(doc)) {
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
-    const part_text = _extract_blocks(part, comments_map, cleanView, part_cursor);
+    const part_text = _extract_blocks(part, comments_map, cleanView, part_cursor, return_paragraph_offsets ? paragraph_offsets : undefined);
     if (part_text) {
       if (full_text.length > 0) cursor += 2;
       full_text.push(part_text);
@@ -37,10 +43,19 @@ export function _extractTextFromDoc(doc: DocumentObject, cleanView = false, incl
     if (appendix) base_text += appendix;
   }
 
+  if (return_paragraph_offsets) {
+    return { text: base_text, paragraph_offsets };
+  }
   return base_text;
 }
 
-function _extract_blocks(container: any, comments_map: any, cleanView: boolean, cursor: number): string {
+function _extract_blocks(
+  container: any,
+  comments_map: any,
+  cleanView: boolean,
+  cursor: number,
+  paragraph_offsets?: Map<any, [number, number]>
+): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
 
@@ -62,7 +77,7 @@ function _extract_blocks(container: any, comments_map: any, cleanView: boolean, 
     const block_start = local_cursor;
 
     if (item.constructor.name === 'FootnoteItem') {
-      const fn_text = _extract_blocks(item, comments_map, cleanView, block_start);
+      const fn_text = _extract_blocks(item, comments_map, cleanView, block_start, paragraph_offsets);
       if (fn_text) {
         blocks.push(fn_text);
         local_cursor = block_start + fn_text.length;
@@ -78,11 +93,14 @@ function _extract_blocks(container: any, comments_map: any, cleanView: boolean, 
       const p_text = build_paragraph_text(item, comments_map, cleanView, style_cache, default_pstyle);
       const full_block = prefix + p_text;
       blocks.push(full_block);
+      if (paragraph_offsets) {
+        paragraph_offsets.set(item._element, [block_start, full_block.length]);
+      }
       local_cursor = block_start + full_block.length;
       is_first_para = false;
       is_first_block = false;
     } else if (item instanceof Table) {
-      const table_text = extract_table(item, comments_map, cleanView, block_start);
+      const table_text = extract_table(item, comments_map, cleanView, block_start, paragraph_offsets);
       if (table_text) {
         blocks.push(table_text);
         local_cursor = block_start + table_text.length;
@@ -97,7 +115,13 @@ function _extract_blocks(container: any, comments_map: any, cleanView: boolean, 
   return blocks.join('\n\n');
 }
 
-export function extract_table(table: Table, comments_map: any, cleanView: boolean, cursor: number): string {
+export function extract_table(
+  table: Table,
+  comments_map: any,
+  cleanView: boolean,
+  cursor: number,
+  paragraph_offsets?: Map<any, [number, number]>
+): string {
   const rows_text: string[] = [];
   let rows_processed = 0;
   let local_cursor = cursor;
@@ -124,7 +148,7 @@ export function extract_table(table: Table, comments_map: any, cleanView: boolea
 
       if (!first_cell) cell_cursor += 3;
       
-      const cell_content = _extract_blocks(cell, comments_map, cleanView, cell_cursor);
+      const cell_content = _extract_blocks(cell, comments_map, cleanView, cell_cursor, paragraph_offsets);
       cell_texts.push(cell_content);
       cell_cursor += cell_content.length;
       first_cell = false;

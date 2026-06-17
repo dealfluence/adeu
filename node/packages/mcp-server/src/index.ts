@@ -13,6 +13,7 @@ import fs from "node:fs";
 import {
   identifyEngine,
   extractTextFromBuffer,
+  _extractTextFromDoc,
   DocumentObject,
   RedlineEngine,
   BatchValidationError,
@@ -210,18 +211,24 @@ registerAppTool(
   }) => {
     try {
       const buf = readFileBytesOrThrow(file_path);
-      const text = await extractTextFromBuffer(buf, clean_view);
 
       if (mode === "outline") {
         const doc = await DocumentObject.load(buf);
+        const extract_res = _extractTextFromDoc(doc, clean_view, true, true) as {
+          text: string;
+          paragraph_offsets: Map<any, [number, number]>;
+        };
         return build_outline_response(
           doc,
-          text,
+          extract_res.text,
           file_path,
           outline_max_level,
           outline_verbose,
+          extract_res.paragraph_offsets,
         ) as any;
       }
+
+      const text = await extractTextFromBuffer(buf, clean_view);
       if (mode === "appendix") {
         return build_appendix_response(text, page, file_path) as any;
       }

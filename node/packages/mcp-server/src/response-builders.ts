@@ -110,6 +110,7 @@ export function build_outline_response(
   file_path: string,
   outline_max_level: number = 2,
   outline_verbose: boolean = false,
+  paragraph_offsets: Map<any, [number, number]> | null = null,
 ): ToolResult {
   const [body] = split_structural_appendix(projected_text);
   const pagination_result = paginate(body, "");
@@ -119,6 +120,7 @@ export function build_outline_response(
     body,
     pagination_result.body_pages,
     pagination_result.body_page_offsets,
+    paragraph_offsets,
   );
 
   const rendered = render_outline_tree(

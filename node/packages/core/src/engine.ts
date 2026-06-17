@@ -221,6 +221,7 @@ export class RedlineEngine {
   public mapper: DocumentMapper;
   public comments_manager: CommentsManager;
   public clean_mapper: DocumentMapper | null = null;
+  public original_mapper: DocumentMapper | null = null;
   public skipped_details: string[] = [];
 
   constructor(doc: DocumentObject, author: string = "Adeu AI (TS)") {
@@ -1195,12 +1196,16 @@ export class RedlineEngine {
 
       let matches = this.mapper.find_all_match_indices(edit.target_text);
       let activeText = this.mapper.full_text;
+      let target_mapper = this.mapper;
 
       if (matches.length === 0) {
         if (!this.clean_mapper)
           this.clean_mapper = new DocumentMapper(this.doc, true);
         matches = this.clean_mapper.find_all_match_indices(edit.target_text);
-        if (matches.length > 0) activeText = this.clean_mapper.full_text;
+        if (matches.length > 0) {
+          activeText = this.clean_mapper.full_text;
+          target_mapper = this.clean_mapper;
+        }
       }
 
       // BUG-23-5: a copy of the target that lives entirely inside a tracked
@@ -1208,7 +1213,7 @@ export class RedlineEngine {
       // count toward ambiguity. Drop matches whose overlapping real text is
       // exclusively deleted. Only applies to the raw mapper (the clean mapper
       // already omits deleted text).
-      if (activeText === this.mapper.full_text && matches.length > 1) {
+      if (activeText === this.mapper.full_text && matches.length > 0) {
         const liveMatches = matches.filter(([start, length]) => {
           const realSpans = this.mapper.spans.filter(
             (s) => s.run !== null && s.end > start && s.start < start + length,
@@ -1218,13 +1223,55 @@ export class RedlineEngine {
           // part of a tracked deletion).
           return realSpans.some((s) => !s.del_id);
         });
-        if (liveMatches.length > 0) matches = liveMatches;
+        matches = liveMatches;
+      }
+
+      let is_deleted_text = false;
+      const deleted_authors = new Set<string>();
+
+      if (matches.length === 0) {
+        if (!this.original_mapper) {
+          this.original_mapper = new DocumentMapper(this.doc, false, true);
+        }
+        const orig_matches = this.original_mapper.find_all_match_indices(edit.target_text);
+        if (orig_matches.length > 0) {
+          is_deleted_text = true;
+          for (const [start, length] of orig_matches) {
+            const spans = this.original_mapper.spans.filter(
+              (s) => s.end > start && s.start < start + length,
+            );
+            for (const s of spans) {
+              if (s.run !== null) {
+                let parent = s.run._element as Node | null;
+                while (parent) {
+                  if (parent.nodeType === 1 && (parent as Element).tagName === "w:del") {
+                    const auth = (parent as Element).getAttribute("w:author");
+                    if (auth) {
+                      deleted_authors.add(auth);
+                    }
+                    break;
+                  }
+                  parent = parent.parentNode;
+                }
+              }
+            }
+          }
+        }
       }
 
       if (matches.length === 0) {
-        errors.push(
-          `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"`,
-        );
+        if (is_deleted_text) {
+          const author_phrase = deleted_authors.size > 0
+            ? `by ${Array.from(deleted_authors).sort().join(", ")}`
+            : "by an existing revision";
+          errors.push(
+            `- Edit ${i + 1} Failed: Target text matches text inside a tracked deletion ${author_phrase}. Reject/accept that change first or target the active replacement text instead.`,
+          );
+        } else {
+          errors.push(
+            `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"`,
+          );
+        }
       } else if (matches.length > 1) {
         const positions: [number, number][] = matches.map(([start, length]) => [
           start,
