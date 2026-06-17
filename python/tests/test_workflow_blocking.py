@@ -93,3 +93,38 @@ def test_repro_workflow_blocking_target_with_markup():
     final_text = extract_text_from_stream(res_stream)
 
     assert "Round2" in final_text
+
+
+def test_repro_p1_and_p2_validation_messages():
+    from adeu.redline.engine import BatchValidationError
+
+    doc = Document()
+    p = doc.add_paragraph("The quick brown fox jumps over the ")
+    run = p.add_run("lazy")
+    run.bold = True
+    p.add_run(" dog.")
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    # 1. Author A deletes "lazy dog" and inserts "sleepy cat"
+    engine_a = RedlineEngine(stream, author="Author A")
+    engine_a.apply_edits([ModifyText(target_text="lazy dog", new_text="sleepy cat")])
+    stream_after_a = engine_a.save_to_stream()
+
+    # 2. Under Author B, try to target the deleted "lazy dog"
+    engine_b = RedlineEngine(stream_after_a, author="Author B")
+    edit_deleted = ModifyText(target_text="lazy dog", new_text="lazy hound")
+    with pytest.raises(BatchValidationError) as excinfo:
+        engine_b.process_batch([edit_deleted])
+    err_str = str(excinfo.value)
+    assert "matches text inside a tracked deletion by Author A" in err_str
+    assert "Reject/accept that change first" in err_str
+
+    # 3. Under Author B, try to target the active insertion "sleepy cat" from Author A
+    edit_inserted = ModifyText(target_text="sleepy cat", new_text="sleepy kitten")
+    with pytest.raises(BatchValidationError) as excinfo_ins:
+        engine_b.process_batch([edit_inserted])
+    err_str_ins = str(excinfo_ins.value)
+    assert "targets an active insertion from another author" in err_str_ins
+    assert "Author A (e.g. Chg:2)" in err_str_ins or "Author A (e.g. Chg:1)" in err_str_ins

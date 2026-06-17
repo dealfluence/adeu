@@ -158,9 +158,10 @@ def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
 
 
 class DocumentMapper:
-    def __init__(self, doc: DocumentObject, clean_view: bool = False):
+    def __init__(self, doc: DocumentObject, clean_view: bool = False, original_view: bool = False):
         self.doc = doc
         self.clean_view = clean_view
+        self.original_view = original_view
         self.comments_mgr = CommentsManager(doc)
         self.comments_map = self.comments_mgr.extract_comments_data()
         self.full_text = ""
@@ -260,16 +261,18 @@ class DocumentMapper:
 
             if self.clean_view and del_node is not None:
                 continue
+            if self.original_view and ins is not None:
+                continue
 
             if rows_processed > 0:
                 # Newline separator BETWEEN rows (matches "\n".join in ingest)
                 self._add_virtual_text("\n", current, None)
                 current += 1
 
-            if ins is not None and not self.clean_view:
+            if ins is not None and not self.clean_view and not self.original_view:
                 self._add_virtual_text("{++ ", current, None)
                 current += 4
-            elif del_node is not None and not self.clean_view:
+            elif del_node is not None and not self.clean_view and not self.original_view:
                 self._add_virtual_text("{-- ", current, None)
                 current += 4
 
@@ -288,11 +291,11 @@ class DocumentMapper:
                 current = self._map_blocks(cell, current)
                 cells_processed += 1
 
-            if ins is not None and not self.clean_view:
+            if ins is not None and not self.clean_view and not self.original_view:
                 suffix = f" |Chg:{ins.get(qn('w:id'))}++}}"
                 self._add_virtual_text(suffix, current, None)
                 current += len(suffix)
-            elif del_node is not None and not self.clean_view:
+            elif del_node is not None and not self.clean_view and not self.original_view:
                 suffix = f" |Chg:{del_node.get(qn('w:id'))}--}}"
                 self._add_virtual_text(suffix, current, None)
                 current += len(suffix)
@@ -417,14 +420,16 @@ class DocumentMapper:
 
                 if self.clean_view and active_del:
                     pass
+                if self.original_view and active_ins:
+                    pass
 
                 full_seg_text = "".join(x[1] for x in run_parts)
 
                 curr_ins_id = list(active_ins.keys())[-1] if active_ins else None
                 curr_del_id = list(active_del.keys())[-1] if active_del else None
 
-                if full_seg_text and not (self.clean_view and curr_del_id):
-                    if self.clean_view:
+                if full_seg_text and not (self.clean_view and curr_del_id) and not (self.original_view and curr_ins_id):
+                    if self.clean_view or self.original_view:
                         new_wrappers = ("", "")
                     else:
                         start_token, end_token = self._get_wrappers(curr_ins_id, curr_del_id, active_ids, active_fmt)
@@ -457,7 +462,7 @@ class DocumentMapper:
                         for kind, txt, r_obj in run_parts:
                             pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
 
-                if not self.clean_view:
+                if not self.clean_view and not self.original_view:
                     has_meta = active_ins or active_del or active_ids or active_fmt
                     if has_meta:
                         state_snapshot = (

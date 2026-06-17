@@ -250,10 +250,13 @@ class RedlineEngine:
         self.mapper = DocumentMapper(self.doc)
         self.comments_manager = CommentsManager(self.doc)
         self.clean_mapper: Optional[DocumentMapper] = None
+        self.original_mapper: Optional[DocumentMapper] = None
         self.skipped_details: List[str] = []
 
     def _check_punctuation_warning(self, target_text: str) -> Optional[str]:
         if not target_text:
+            return None
+        if len(target_text) > 20 or " " in target_text:
             return None
         if "_" in target_text or "-" in target_text:
             return (
@@ -1168,6 +1171,7 @@ class RedlineEngine:
 
             matches = self.mapper.find_all_match_indices(edit.target_text)
             active_text = self.mapper.full_text
+            target_mapper = self.mapper
 
             # Fallback to Clean View if not found in Raw View (matches heuristic logic)
             if len(matches) == 0:
@@ -1176,6 +1180,27 @@ class RedlineEngine:
                 matches = self.clean_mapper.find_all_match_indices(edit.target_text)
                 if len(matches) > 0:
                     active_text = self.clean_mapper.full_text
+                    target_mapper = self.clean_mapper
+
+            is_deleted_text = False
+            deleted_authors = set()
+
+            # Check original view if still not found
+            if len(matches) == 0:
+                if not self.original_mapper:
+                    self.original_mapper = DocumentMapper(self.doc, original_view=True)
+                orig_matches = self.original_mapper.find_all_match_indices(edit.target_text)
+                if len(orig_matches) > 0:
+                    is_deleted_text = True
+                    for start, length in orig_matches:
+                        spans = [s for s in self.original_mapper.spans if s.end > start and s.start < start + length]
+                        for s in spans:
+                            if s.run is not None:
+                                del_nodes = s.run._element.xpath("ancestor-or-self::w:del")
+                                if del_nodes:
+                                    auth = del_nodes[0].get(qn("w:author"))
+                                    if auth:
+                                        deleted_authors.add(auth)
 
             # BUG-23-5: a copy of the target that lives entirely inside a tracked
             # deletion (<w:del>) is not a live, editable occurrence and must not
@@ -1186,23 +1211,9 @@ class RedlineEngine:
                 live_matches = []
                 for start, length in matches:
                     real_spans = [
-                        s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
-                    ]
-                    if not real_spans or any(not s.del_id for s in real_spans):
-                        live_matches.append((start, length))
-                if live_matches:
-                    matches = live_matches
-
-            # BUG-23-5: a copy of the target that lives entirely inside a tracked
-            # deletion (<w:del>) is not a live, editable occurrence and must not
-            # count toward ambiguity. Drop matches whose overlapping real text is
-            # exclusively deleted. Only applies to the raw mapper (the clean mapper
-            # already omits deleted text).
-            if active_text == self.mapper.full_text and len(matches) > 1:
-                live_matches = []
-                for start, length in matches:
-                    real_spans = [
-                        s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
+                        s
+                        for s in target_mapper.spans
+                        if s.run is not None and s.end > start and s.start < start + length
                     ]
                     if not real_spans or any(not s.del_id for s in real_spans):
                         live_matches.append((start, length))
@@ -1214,7 +1225,16 @@ class RedlineEngine:
             valid_matches = matches
 
             if len(valid_matches) == 0:
-                errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
+                if is_deleted_text:
+                    author_phrase = (
+                        f"by {', '.join(sorted(deleted_authors))}" if deleted_authors else "by an existing revision"
+                    )
+                    errors.append(
+                        f"- Edit {i + 1} Failed: Target text matches text inside a tracked deletion {author_phrase}. "
+                        "Reject/accept that change first or target the active replacement text instead."
+                    )
+                else:
+                    errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
             elif len(valid_matches) > 1:
                 # valid_matches is a list of (start, length); the formatter
                 # expects (start, end).
@@ -1261,19 +1281,27 @@ class RedlineEngine:
                             )
 
             for start, length in valid_matches:
-                spans = [s for s in self.mapper.spans if s.end > start and s.start < start + length]
-                nested_authors = set()
+                spans = [s for s in target_mapper.spans if s.end > start and s.start < start + length]
+                nested_authors_to_ids: dict[str, set[str]] = {}
                 for s in spans:
                     if s.ins_id:
                         ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{s.ins_id}']")
                         if ins_nodes:
                             auth = ins_nodes[0].get(qn("w:author"))
                             if auth and auth != self.author:
-                                nested_authors.add(auth)
-                if nested_authors:
+                                nested_authors_to_ids.setdefault(auth, set()).add(s.ins_id)
+                if nested_authors_to_ids:
+                    author_hints = []
+                    for auth in sorted(nested_authors_to_ids.keys()):
+                        sorted_ids = sorted(nested_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
+                        id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids)
+                        if id_hints:
+                            author_hints.append(f"{auth} (e.g. {id_hints})")
+                        else:
+                            author_hints.append(auth)
                     errors.append(
                         f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
-                        f"({', '.join(nested_authors)}). Accept that change first or scope your edit outside of it."
+                        f"({', '.join(author_hints)}). Accept that change first or scope your edit outside of it."
                     )
 
         return errors
@@ -1303,6 +1331,7 @@ class RedlineEngine:
                 raise BatchValidationError(self.skipped_details)
             if edits:
                 self.clean_mapper = None
+                self.original_mapper = None
 
         edits_reports = []
         applied_edits, skipped_edits = 0, 0

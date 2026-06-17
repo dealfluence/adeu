@@ -125,11 +125,23 @@ def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
     sys.exit(exit_code)
 
 
-def _read_docx_text(path: Path) -> str:
+def _read_docx_text(path: Path, clean_view: bool = False) -> str:
     if not path.exists():
         _print_sandbox_warning_and_exit(path)
-    with open(path, "rb") as f:
-        return extract_text_from_stream(BytesIO(f.read()), filename=path.name)
+    if path.suffix.lower() != ".docx":
+        print(f"❌ Error: '{path.name}' must be a DOCX file (got {path.suffix or 'no extension'})", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(path, "rb") as f:
+            header = f.read(4)
+            if header != b"PK\x03\x04":
+                print(f"❌ Error: '{path.name}' is not a valid DOCX file (got bad zip signature).", file=sys.stderr)
+                sys.exit(1)
+            f.seek(0)
+            return extract_text_from_stream(BytesIO(f.read()), filename=path.name, clean_view=clean_view)
+    except Exception as e:
+        print(f"❌ Error reading DOCX file '{path.name}': {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
@@ -257,10 +269,11 @@ def handle_extract(args):
 
 
 def handle_diff(args):
-    text_orig = _read_docx_text(args.original)
+    compare_clean = getattr(args, "compare_clean", True)
+    text_orig = _read_docx_text(args.original, clean_view=compare_clean)
 
     if args.modified.suffix == ".docx":
-        text_mod = _read_docx_text(args.modified)
+        text_mod = _read_docx_text(args.modified, clean_view=compare_clean)
     else:
         with open(args.modified, "r", encoding="utf-8") as f:
             text_mod = f.read()
@@ -628,6 +641,15 @@ def main():
     p_diff.add_argument("original", type=Path, help="Original DOCX")
     p_diff.add_argument("modified", type=Path, help="Modified DOCX or Text file")
     p_diff.add_argument("--json", action="store_true", help="Output raw JSON edits")
+    p_diff.add_argument(
+        "--compare-clean",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Compare clean/accepted views of documents instead of raw views "
+            "including existing track changes/markup (default: True)"
+        ),
+    )
     p_diff.set_defaults(func=handle_diff)
 
     try:
