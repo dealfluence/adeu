@@ -39,7 +39,12 @@ function readFileBytesOrThrow(filePath: string): Buffer {
     return readFileSync(filePath);
   } catch (err: any) {
     if (err.code === "ENOENT") {
-      throw new Error(`File not found: ${filePath}`);
+      throw new Error(
+        `File not found: ${filePath}. Note: If you are running in a sandboxed/containerized environment, ` +
+        `the host application or MCP server may not have access to your local workspace files. ` +
+        `You can resolve this by installing Adeu directly inside your sandboxed environment using ` +
+        `'uv tool install adeu' and executing the commands via the CLI.`
+      );
     }
     throw err;
   }

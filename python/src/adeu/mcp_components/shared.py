@@ -16,7 +16,12 @@ EMAIL_UI_URI = "ui://adeu/email-ui"
 def read_file_bytes(path: str) -> BytesIO:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(
+            f"File not found: {path}. Note: If you are running in a sandboxed/containerized environment, "
+            "the host application or MCP server may not have access to your local workspace files. "
+            "You can resolve this by installing Adeu directly inside your sandboxed environment using "
+            "'uv tool install adeu' and executing the commands via the CLI."
+        )
     with open(p, "rb") as f:
         return BytesIO(f.read())
 

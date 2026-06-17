@@ -157,6 +157,8 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.content[0].text).toContain(
       "Error executing tool read_docx: File not found:",
     );
+    expect(res.result.content[0].text).toContain("sandboxed/containerized environment");
+    expect(res.result.content[0].text).toContain("uv tool install adeu");
     expect(res.result.content[0].text).not.toContain("ENOENT"); // Raw node error must not leak
   });
 });

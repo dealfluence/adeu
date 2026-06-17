@@ -162,19 +162,71 @@ def handle_extract(args):
             sys.exit(1)
         from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
-        text, _, _ = _read_active_word_document_core(clean_view=False)
+        text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
     else:
         if not args.input:
             print("❌ Must provide input file or use --live", file=sys.stderr)
             sys.exit(1)
-        text = _read_docx_text(args.input)
+        if not args.input.exists():
+            print(f"❌ File not found: {args.input}", file=sys.stderr)
+            sys.exit(1)
+
+        with open(args.input, "rb") as f:
+            stream = BytesIO(f.read())
+        from adeu.utils.docx import strip_bom_from_docx_bytes
+        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+        from docx import Document as load_document
+        doc = load_document(BytesIO(sanitized_bytes))
+
+        # Perform extraction
+        needs_appendix = args.mode == "appendix"
+        needs_offsets = args.mode == "outline"
+
+        from adeu.ingest import _extract_text_from_doc
+        extract_result = _extract_text_from_doc(
+            doc,
+            clean_view=args.clean_view,
+            include_appendix=needs_appendix,
+            return_paragraph_offsets=needs_offsets,
+        )
+        if needs_offsets:
+            text, paragraph_offsets = extract_result
+        else:
+            text = extract_result
+            paragraph_offsets = None
+
+    from adeu.mcp_components._response_builders import (
+        build_appendix_response,
+        build_outline_response,
+        build_paginated_response,
+    )
+
+    try:
+        if args.mode == "outline":
+            res = build_outline_response(
+                doc,
+                text,
+                "Active Document" if args.live else str(args.input),
+                outline_max_level=args.outline_max_level,
+                outline_verbose=args.outline_verbose,
+                paragraph_offsets=paragraph_offsets,
+            )
+        elif args.mode == "appendix":
+            res = build_appendix_response(text, args.page, "Active Document" if args.live else str(args.input))
+        else:
+            res = build_paginated_response(text, args.page, "Active Document" if args.live else str(args.input))
+
+        output_text = res.content
+    except Exception as e:
+        print(f"❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
+            f.write(output_text)
         print(f"Extracted text to {args.output}", file=sys.stderr)
     else:
-        print(text)
+        print(output_text)
 
 
 def handle_diff(args):
@@ -208,6 +260,10 @@ def handle_apply(args):
             # Shift positional arguments if only one is provided
             args.changes = args.original
             args.original = None
+
+    if args.live and args.dry_run:
+        print("❌ Dry-run simulation is only supported for disk-based files.", file=sys.stderr)
+        sys.exit(1)
 
     if not args.changes:
         print("❌ Must provide changes file.", file=sys.stderr)
@@ -265,7 +321,7 @@ def handle_apply(args):
 
     engine = RedlineEngine(stream, author=args.author)
     try:
-        stats = engine.process_batch(changes)
+        stats = engine.process_batch(changes, dry_run=args.dry_run)
     except BatchValidationError as e:
         print(
             f"\n❌ Batch rejected. {len(e.errors)} edits failed validation:\n",
@@ -276,22 +332,48 @@ def handle_apply(args):
             print("", file=sys.stderr)
         sys.exit(1)
 
-    output_path = args.output
-    if not output_path:
-        if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
-            output_path = args.original
-        else:
-            output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
+    if not args.dry_run:
+        output_path = args.output
+        if not output_path:
+            if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
+                output_path = args.original
+            else:
+                output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
 
-    with open(output_path, "wb") as f:
-        f.write(engine.save_to_stream().getvalue())
+        with open(output_path, "wb") as f:
+            f.write(engine.save_to_stream().getvalue())
 
-    print(f"✅ Saved to {output_path}", file=sys.stderr)
+        print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+    else:
+        print("Dry-run simulation complete.", file=sys.stderr)
+
     print(
-        f"Stats: Actions ({stats['actions_applied']} applied, {stats['actions_skipped']} skipped). "
-        f"Edits ({stats['edits_applied']} applied, {stats['edits_skipped']} skipped).",
+        f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+        f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.",
         file=sys.stderr,
     )
+
+    if stats.get("edits"):
+        print("\nDetailed Edit Reports:", file=sys.stderr)
+        for i, report in enumerate(stats["edits"]):
+            status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
+            print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
+            print(f"  Target: '{report['target_text']}'", file=sys.stderr)
+            print(f"  New text: '{report['new_text']}'", file=sys.stderr)
+            if report.get("warning"):
+                print(f"  Warning: {report['warning']}", file=sys.stderr)
+            if report.get("error"):
+                print(f"  Error: {report['error']}", file=sys.stderr)
+            if report.get("critic_markup"):
+                print(f"  Preview (CriticMarkup): {report['critic_markup']}", file=sys.stderr)
+            if report.get("clean_text"):
+                print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
+
+    if stats.get("skipped_details"):
+        print("\nSkipped Details:", file=sys.stderr)
+        for detail in stats["skipped_details"]:
+            print(detail, file=sys.stderr)
+
     if stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0:
         sys.exit(1)
 
@@ -475,6 +557,35 @@ def main():
         help="Extract text from live active Word document",
     )
     p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
+    p_extract.add_argument(
+        "--clean-view",
+        action="store_true",
+        help="If specified, returns the 'Accepted' text without track changes and comments.",
+    )
+    p_extract.add_argument(
+        "--mode",
+        type=str,
+        choices=["full", "outline", "appendix"],
+        default="full",
+        help="Extraction mode: 'full' for body text, 'outline' for headings, 'appendix' for defined terms.",
+    )
+    p_extract.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help="Page number (1-indexed) for 'full' and 'appendix' modes.",
+    )
+    p_extract.add_argument(
+        "--outline-max-level",
+        type=int,
+        default=2,
+        help="For mode='outline' only: maximum heading depth to show.",
+    )
+    p_extract.add_argument(
+        "--outline-verbose",
+        action="store_true",
+        help="For mode='outline' only: include heading metadata.",
+    )
     p_extract.set_defaults(func=handle_extract)
 
     p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
@@ -506,6 +617,11 @@ def main():
         type=str,
         default=default_author,
         help=f"Author name for Track Changes (default: '{default_author}')",
+    )
+    p_apply.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate the changes and return a detailed preview report without modifying any files.",
     )
     p_apply.set_defaults(func=handle_apply)
 
