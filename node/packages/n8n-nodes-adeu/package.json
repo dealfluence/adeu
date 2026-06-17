@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-adeu",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "description": "n8n community node for Adeu — apply AI-driven tracked changes, generate diffs, and sanitize Microsoft Word (.docx) documents.",
   "keywords": [
     "n8n-community-node-package",
