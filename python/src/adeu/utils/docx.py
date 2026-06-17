@@ -863,9 +863,12 @@ def strip_bom_from_docx_bytes(data: bytes) -> bytes:
     import io
     import zipfile
 
+    if not data.startswith(b"PK\x03\x04"):
+        raise ValueError("not a valid DOCX file (got bad zip signature)")
+
     in_stream = io.BytesIO(data)
     if not zipfile.is_zipfile(in_stream):
-        return data
+        raise ValueError("not a valid DOCX file (got bad zip signature)")
 
     out_stream = io.BytesIO()
     try:
@@ -878,5 +881,7 @@ def strip_bom_from_docx_bytes(data: bytes) -> bytes:
                             content = content[3:]
                     z_out.writestr(item, content)
         return out_stream.getvalue()
-    except Exception:
+    except Exception as e:
+        if isinstance(e, zipfile.BadZipFile):
+            raise ValueError("not a valid DOCX file (got bad zip signature)") from e
         return data

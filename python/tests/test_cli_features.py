@@ -189,3 +189,114 @@ def test_cli_stdout_unwrapped(capsys):
     assert "TextContent(" not in stdout_output
     assert not (stdout_output.startswith("[") and stdout_output.endswith("]"))
     assert "annotations=" not in stdout_output
+
+
+def test_cli_corrupt_docx_errors(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    # 1. Zero-byte file
+    empty_docx = tmp_path / "empty.docx"
+    empty_docx.write_bytes(b"")
+
+    # 2. Garbage file
+    garbage_docx = tmp_path / "garbage.docx"
+    garbage_docx.write_bytes(b"not a zip at all")
+
+    # Test extract empty.docx
+    test_args = ["adeu", "extract", str(empty_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # Test extract garbage.docx
+    test_args = ["adeu", "extract", str(garbage_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # Test apply empty.docx
+    fake_changes = tmp_path / "changes.json"
+    fake_changes.write_text("[]", encoding="utf-8")
+    test_args = ["adeu", "apply", str(empty_docx), str(fake_changes), "--dry-run"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+    # Test sanitize empty.docx
+    test_args = ["adeu", "sanitize", str(empty_docx)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "is not a valid DOCX file (got bad zip signature)" in captured.err
+
+
+def test_docx_vs_text_diff_precision(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+
+    # 1. Extract the original text in clean-view mode
+    from io import BytesIO
+
+    with open(fixture_path, "rb") as f:
+        sanitized_bytes = f.read()
+    from docx import Document
+
+    doc = Document(BytesIO(sanitized_bytes))
+    from adeu.ingest import _extract_text_from_doc
+
+    clean_text = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
+
+    # 2. Modify one specific word in a paragraph dynamically
+    import re
+
+    orig_paragraphs = clean_text.split("\n\n")
+    target_idx = -1
+    for idx, p in enumerate(orig_paragraphs):
+        if len(p) > 10 and re.search(r"\bthe\b", p, re.IGNORECASE):
+            target_idx = idx
+            break
+    assert target_idx != -1
+
+    p_orig = orig_paragraphs[target_idx]
+    p_mod = re.sub(r"\bthe\b", "the governing and crucial", p_orig, count=1, flags=re.IGNORECASE)
+    orig_paragraphs[target_idx] = p_mod
+    modified_text = "\n\n".join(orig_paragraphs)
+
+    # Save to a text file
+    mod_txt = tmp_path / "mod.txt"
+    mod_txt.write_text(modified_text, encoding="utf-8")
+
+    # Run CLI diff
+    test_args = ["adeu", "diff", str(fixture_path), str(mod_txt), "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    edits = json.loads(captured.out.strip())
+
+    # We should have exactly 1 localized edit rather than a massive whole-document replacement!
+    assert len(edits) == 1
+    edit = edits[0]
+    assert edit["type"] == "modify"
+    # Localized edit size should be small
+    assert len(edit["target_text"]) < 50
+    assert len(edit["new_text"]) < 50

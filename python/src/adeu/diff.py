@@ -352,3 +352,63 @@ def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:
     chars1 = encode_text(text1)
     chars2 = encode_text(text2)
     return chars1, chars2, token_array
+
+
+def generate_edits_via_paragraph_alignment(original_text: str, modified_text: str) -> List[ModifyText]:
+    """
+    Aligns original and modified text by paragraph (using SequenceMatcher),
+    and then performs precise word-level diffing on replaced blocks of text.
+    This prevents localized changes from degrading to a single whole-document block.
+    """
+    import difflib
+
+    orig_paragraphs = original_text.split("\n\n")
+    mod_paragraphs = modified_text.split("\n\n")
+
+    # Compute paragraph offsets
+    orig_offsets = []
+    current_offset = 0
+    for p in orig_paragraphs:
+        orig_offsets.append(current_offset)
+        current_offset += len(p) + 2
+
+    matcher = difflib.SequenceMatcher(None, orig_paragraphs, mod_paragraphs)
+    edits: List[ModifyText] = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        offset = orig_offsets[i1] if i1 < len(orig_offsets) else len(original_text)
+
+        if tag == "delete":
+            deleted_text = "\n\n".join(orig_paragraphs[i1:i2])
+            edit = ModifyText(
+                type="modify",
+                target_text=deleted_text,
+                new_text="",
+                comment="Diff: Text deleted",
+            )
+            edit._match_start_index = offset
+            edits.append(edit)
+
+        elif tag == "insert":
+            inserted_text = "\n\n".join(mod_paragraphs[j1:j2])
+            edit = ModifyText(
+                type="modify",
+                target_text="",
+                new_text=inserted_text,
+                comment="Diff: Text inserted",
+            )
+            edit._match_start_index = offset
+            edits.append(edit)
+
+        elif tag == "replace":
+            orig_chunk = "\n\n".join(orig_paragraphs[i1:i2])
+            mod_chunk = "\n\n".join(mod_paragraphs[j1:j2])
+            chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk)
+            for ce in chunk_edits:
+                ce._match_start_index = (ce._match_start_index or 0) + offset
+                edits.append(ce)
+
+    return edits

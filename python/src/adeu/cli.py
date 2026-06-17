@@ -140,6 +140,9 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
             f.seek(0)
             return extract_text_from_stream(BytesIO(f.read()), filename=path.name, clean_view=clean_view)
     except Exception as e:
+        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
+            print(f"❌ Error: '{path.name}' is not a valid DOCX file (got bad zip signature).", file=sys.stderr)
+            sys.exit(1)
         print(f"❌ Error reading DOCX file '{path.name}': {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -193,14 +196,25 @@ def handle_extract(args):
         if not args.input.exists():
             _print_sandbox_warning_and_exit(args.input)
 
-        with open(args.input, "rb") as f:
-            stream = BytesIO(f.read())
-        from adeu.utils.docx import strip_bom_from_docx_bytes
+        import zipfile
 
-        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-        from docx import Document as load_document
+        try:
+            with open(args.input, "rb") as f:
+                stream = BytesIO(f.read())
+            from adeu.utils.docx import strip_bom_from_docx_bytes
 
-        doc = load_document(BytesIO(sanitized_bytes))
+            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+            from docx import Document as load_document
+
+            doc = load_document(BytesIO(sanitized_bytes))
+        except (ValueError, zipfile.BadZipFile) as e:
+            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
+                print(
+                    f"❌ Error: '{args.input.name}' is not a valid DOCX file (got bad zip signature).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            raise
 
         # Perform extraction
         needs_appendix = args.mode == "appendix"
@@ -269,16 +283,33 @@ def handle_extract(args):
 
 
 def handle_diff(args):
-    compare_clean = getattr(args, "compare_clean", True)
-    text_orig = _read_docx_text(args.original, clean_view=compare_clean)
-
-    if args.modified.suffix == ".docx":
+    if args.modified.suffix.lower() == ".docx":
+        compare_clean = getattr(args, "compare_clean", True)
+        text_orig = _read_docx_text(args.original, clean_view=compare_clean)
         text_mod = _read_docx_text(args.modified, clean_view=compare_clean)
+        edits = generate_edits_from_text(text_orig, text_mod)
     else:
+        if not args.original.exists():
+            _print_sandbox_warning_and_exit(args.original)
+        with open(args.original, "rb") as f:
+            stream = BytesIO(f.read())
+        from adeu.utils.docx import strip_bom_from_docx_bytes
+
+        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+        from docx import Document as load_document
+
+        doc = load_document(BytesIO(sanitized_bytes))
+
+        from adeu.ingest import _extract_text_from_doc
+
+        text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
+
         with open(args.modified, "r", encoding="utf-8") as f:
             text_mod = f.read()
 
-    edits = generate_edits_from_text(text_orig, text_mod)
+        from adeu.diff import generate_edits_via_paragraph_alignment
+
+        edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
 
     if args.json:
         output = [e.model_dump(exclude={"_match_start_index"}) for e in edits]
@@ -329,11 +360,27 @@ def handle_apply(args):
             if not args.original:
                 print("❌ Must provide original file if not using --live", file=sys.stderr)
                 sys.exit(1)
-            text_orig = _read_docx_text(args.original)
+            if not args.original.exists():
+                _print_sandbox_warning_and_exit(args.original)
+            with open(args.original, "rb") as f:
+                stream = BytesIO(f.read())
+            from adeu.utils.docx import strip_bom_from_docx_bytes
 
-        with open(args.changes, "r", encoding="utf-8") as f:
-            text_mod = f.read()
-        changes.extend(generate_edits_from_text(text_orig, text_mod))
+            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+            from docx import Document as load_document
+
+            doc = load_document(BytesIO(sanitized_bytes))
+
+            from adeu.ingest import _extract_text_from_doc
+
+            text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
+
+            with open(args.changes, "r", encoding="utf-8") as f:
+                text_mod = f.read()
+
+            from adeu.diff import generate_edits_via_paragraph_alignment
+
+            changes.extend(generate_edits_via_paragraph_alignment(text_orig, text_mod))
 
     if args.live:
         if sys.platform != "win32":
@@ -355,11 +402,22 @@ def handle_apply(args):
         print("❌ Must provide original file if not using --live", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
-    with open(args.original, "rb") as f:
-        stream = BytesIO(f.read())
+    import zipfile
 
-    engine = RedlineEngine(stream, author=args.author)
+    print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
+    try:
+        with open(args.original, "rb") as f:
+            stream = BytesIO(f.read())
+
+        engine = RedlineEngine(stream, author=args.author)
+    except (ValueError, zipfile.BadZipFile) as e:
+        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or isinstance(e, zipfile.BadZipFile):
+            print(
+                f"❌ Error: '{args.original.name}' is not a valid DOCX file (got bad zip signature).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
     try:
         stats = engine.process_batch(changes, dry_run=args.dry_run)
     except BatchValidationError as e:
@@ -501,6 +559,12 @@ def handle_sanitize(args: argparse.Namespace):
             print(f"❌ {e}", file=sys.stderr)
             sys.exit(2)
         except Exception as e:
+            if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
+                print(
+                    f"❌ Error: '{input_path.name}' is not a valid DOCX file (got bad zip signature).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             print(f"❌ Error: {e}", file=sys.stderr)
             sys.exit(2)
     else:
@@ -554,6 +618,12 @@ def handle_sanitize(args: argparse.Namespace):
 
             except Exception as e:
                 blocked += 1
+                if "bad zip signature" in str(e) or "not a zip file" in str(e).lower():
+                    print(
+                        f"❌ Error: '{input_path.name}' is not a valid DOCX file (got bad zip signature).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
 
         # Batch summary
