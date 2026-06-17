@@ -113,10 +113,21 @@ def handle_init(args: argparse.Namespace):
     print("   Please restart Claude to load the new toolset.", file=sys.stderr)
 
 
+def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
+    print(f"❌ File not found: {path}", file=sys.stderr)
+    print(
+        "Note: If you are running in a sandboxed/containerized environment, "
+        "the host application or MCP server may not have access to your local workspace files. "
+        "You can resolve this by installing Adeu directly inside your sandboxed environment using "
+        "'uv tool install adeu' and executing the commands via the CLI.",
+        file=sys.stderr,
+    )
+    sys.exit(exit_code)
+
+
 def _read_docx_text(path: Path) -> str:
     if not path.exists():
-        print(f"Error: File not found: {path}", file=sys.stderr)
-        sys.exit(1)
+        _print_sandbox_warning_and_exit(path)
     with open(path, "rb") as f:
         return extract_text_from_stream(BytesIO(f.read()), filename=path.name)
 
@@ -168,8 +179,7 @@ def handle_extract(args):
             print("❌ Must provide input file or use --live", file=sys.stderr)
             sys.exit(1)
         if not args.input.exists():
-            print(f"❌ File not found: {args.input}", file=sys.stderr)
-            sys.exit(1)
+            _print_sandbox_warning_and_exit(args.input)
 
         with open(args.input, "rb") as f:
             stream = BytesIO(f.read())
@@ -547,6 +557,7 @@ def handle_sanitize(args: argparse.Namespace):
 def main():
     parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
     p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
@@ -685,6 +696,14 @@ def main():
     p_sanitize.set_defaults(func=handle_sanitize)
 
     args = parser.parse_args()
+
+    import logging
+    import structlog
+    log_level = logging.DEBUG if args.debug else logging.WARNING
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(log_level)
+    )
+
     args.func(args)
 
 
