@@ -85,7 +85,7 @@ def get_build_info() -> tuple[str, str, str]:
                 ["git", "rev-parse", "--short", "HEAD"],
                 cwd=str(Path(__file__).parent),
                 stderr=subprocess.DEVNULL,
-                text=True
+                text=True,
             ).strip()
         except Exception:
             git_sha = "unknown"
@@ -97,7 +97,7 @@ def get_build_info() -> tuple[str, str, str]:
                 ["git", "log", "-1", "--format=%ct"],
                 cwd=str(Path(__file__).parent),
                 stderr=subprocess.DEVNULL,
-                text=True
+                text=True,
             ).strip()
             import datetime
 

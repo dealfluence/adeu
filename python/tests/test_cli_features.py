@@ -444,4 +444,3 @@ def test_cli_version(capsys):
     assert "1.10.1" in output
     assert "+" in output
     assert "unknown" not in output
-
