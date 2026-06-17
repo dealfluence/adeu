@@ -79,7 +79,7 @@ describe("Parity Live Server Integration Verification", () => {
     }, 202);
 
     expect(res.result).toBeDefined();
-    expect(res.result.content[0].text).toContain("[Debug] build=");
+    expect(res.result.content[0].text).not.toContain("[Debug] build=");
   });
 
   it("GAP 2 (Live): process_document_batch modify straddling deleted text returns actionable deletion error", async () => {

@@ -62,6 +62,21 @@ def test_read_docx(sample_docx):
     assert "This is the original text." in result.structured_content["markdown"]
 
 
+def test_read_docx_debug_mode(sample_docx):
+    import os
+    ctx = MockContext()
+
+    # 1. By default (no env var), there should be no [Debug] timing string in the output
+    with patch.dict(os.environ, {"ADEU_ENABLE_TEST_TOOLS": ""}):
+        result = asyncio.run(read_docx(file_path=sample_docx, ctx=ctx, clean_view=False))
+        assert "[Debug]" not in result.structured_content["markdown"]
+
+    # 2. When ADEU_ENABLE_TEST_TOOLS is enabled, [Debug] timing string should be appended
+    with patch.dict(os.environ, {"ADEU_ENABLE_TEST_TOOLS": "true"}):
+        result = asyncio.run(read_docx(file_path=sample_docx, ctx=ctx, clean_view=False))
+        assert "[Debug] Tool execution time" in result.structured_content["markdown"]
+
+
 def test_read_docx_file_not_found():
     ctx = MockContext()
     with pytest.raises(ToolError) as exc_info:
