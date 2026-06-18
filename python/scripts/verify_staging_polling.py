@@ -7,6 +7,7 @@ from pathlib import Path
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root / "python" / "src"))
 
+
 def load_env_file(path: Path) -> dict[str, str]:
     env_vars = {}
     if path.exists():
@@ -20,6 +21,7 @@ def load_env_file(path: Path) -> dict[str, str]:
                     env_vars[key.strip()] = val.strip().strip('"').strip("'")
     return env_vars
 
+
 env_path = repo_root / ".env"
 if not env_path.exists():
     env_path = repo_root / "python" / ".env"
@@ -32,8 +34,9 @@ if "ADEU_BACKEND_URL" not in os.environ:
 if "ADEU_FRONTEND_URL" not in os.environ:
     os.environ["ADEU_FRONTEND_URL"] = "https://app.adeu.ai"
 
-from adeu.mcp_components.desktop_auth import DesktopAuthManager
-from adeu.mcp_components.tools.email import search_and_fetch_emails
+from adeu.mcp_components.desktop_auth import DesktopAuthManager  # noqa: E402
+from adeu.mcp_components.tools.email import search_and_fetch_emails  # noqa: E402
+
 
 class ConsoleContext:
     """Mock FastMCP context to cleanly output trace events to stdout."""
@@ -63,12 +66,12 @@ def save_env_file(path: Path, env_vars: dict[str, str]) -> None:
                         existing_keys.add(key)
                         continue
                 lines.append(line)
-    
+
     # Write back and append newly added values
     for key, val in env_vars.items():
         if key not in existing_keys:
             lines.append(f"{key}={val}\n")
-            
+
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -78,9 +81,9 @@ async def main():
     print("Adeu Python Verification Tool")
     print("====================================================")
     print(f"Target Backend: {os.environ.get('ADEU_BACKEND_URL')}")
-    
+
     api_key = os.environ.get("ADEU_API_KEY")
-    
+
     # 2. Keyring Fallback check
     if not api_key:
         api_key = DesktopAuthManager.get_api_key()
@@ -92,11 +95,11 @@ async def main():
         print("❌ No API key found in .env or platform keyring.")
         print("Starting interactive authentication flow...")
         print(f"Opening web browser. Complete validation inside {os.environ.get('ADEU_FRONTEND_URL')}.")
-        
+
         try:
             api_key = DesktopAuthManager.authenticate_interactive()
             print("✅ Successfully authenticated!")
-            
+
             # Persist variables back to .env
             env_vars["ADEU_API_KEY"] = api_key
             env_vars["ADEU_BACKEND_URL"] = os.environ.get("ADEU_BACKEND_URL")
@@ -110,49 +113,46 @@ async def main():
     # 4. Trigger Email Search Verification
     print(f"\n🚀 Initiating search request on {os.environ.get('ADEU_BACKEND_URL')}...")
     ctx = ConsoleContext()
-    
+
     try:
         # Phase 1: Fire base search without task_id
         result = await search_and_fetch_emails(
             ctx=ctx,
             subject="test",  # Generic filter keywords
             limit=5,
-            api_key=api_key
+            api_key=api_key,
         )
-        
+
         content_text = result.content[0].text if hasattr(result, "content") else str(result)
         structured = getattr(result, "structured_content", {}) or {}
-        
+
         print("\n--- Phase 1 Response ---")
         print(f"Response Text Preview:\n{content_text[:400]}...")
         print(f"Structured Payload keys: {list(structured.keys())}")
-        
+
         status = structured.get("status")
         task_id = structured.get("task_id")
-        
+
         # Phase 2: If task is pending, trigger stateful polling loop
         if status == "pending" and task_id:
             print(f"\n⚡ Stateful Task Created Successfully (task_id: {task_id})")
             print("Beginning Phase 2 (Time-Bounded Polling) loop...")
-            
-            poll_result = await search_and_fetch_emails(
-                ctx=ctx,
-                task_id=task_id,
-                api_key=api_key
-            )
-            
+
+            poll_result = await search_and_fetch_emails(ctx=ctx, task_id=task_id, api_key=api_key)
+
             final_text = poll_result.content[0].text if hasattr(poll_result, "content") else str(poll_result)
             final_struct = getattr(poll_result, "structured_content", {}) or {}
-            
+
             print("\n--- Stateful Polling Finished ---")
             print(f"Final Status: {final_struct.get('status') or 'COMPLETED'}")
             print(f"Result Body Preview:\n{final_text[:600]}...")
         else:
             print("\n✅ Execution completed synchronously on backend.")
-            
+
     except Exception as e:
         print(f"💥 Verification execution failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

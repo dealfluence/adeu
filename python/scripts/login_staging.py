@@ -2,12 +2,12 @@ import asyncio
 import os
 import sys
 import urllib.request
-import json
 from pathlib import Path
 
 # Add python/src to path dynamically
 repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo_root / "python" / "src"))
+
 
 def load_env_file(path: Path) -> dict[str, str]:
     env_vars = {}
@@ -22,6 +22,7 @@ def load_env_file(path: Path) -> dict[str, str]:
                     env_vars[key.strip()] = val.strip().strip('"').strip("'")
     return env_vars
 
+
 env_path = repo_root / ".env"
 if not env_path.exists():
     env_path = repo_root / "python" / ".env"
@@ -34,7 +35,7 @@ if "ADEU_BACKEND_URL" not in os.environ:
 if "ADEU_FRONTEND_URL" not in os.environ:
     os.environ["ADEU_FRONTEND_URL"] = "https://app.adeu.ai"
 
-from adeu.mcp_components.desktop_auth import DesktopAuthManager
+from adeu.mcp_components.desktop_auth import DesktopAuthManager  # noqa: E402
 
 
 def save_env_file(path: Path, env_vars: dict[str, str]) -> None:
@@ -52,11 +53,11 @@ def save_env_file(path: Path, env_vars: dict[str, str]) -> None:
                         existing_keys.add(key)
                         continue
                 lines.append(line)
-    
+
     for key, val in env_vars.items():
         if key not in existing_keys:
             lines.append(f"{key}={val}\n")
-            
+
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -71,7 +72,7 @@ async def test_api_key(api_key: str) -> bool:
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
         },
-        method="GET"
+        method="GET",
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -87,7 +88,7 @@ async def main():
     print("Adeu Log In & Token Retrieval Tool")
     print("====================================================")
     print(f"Target Backend: {os.environ.get('ADEU_BACKEND_URL')}")
-    
+
     # 1. Clear any stale cached keys to guarantee a fresh auth loop
     print("🧹 Cleaning local system keyring of stale keys...")
     try:
@@ -98,7 +99,7 @@ async def main():
     # 2. Fire the login server
     print("\n🌐 Spinning up ephemeral local listener on localhost...")
     print(f"Opening your browser to authenticate with {os.environ.get('ADEU_FRONTEND_URL')}...")
-    
+
     try:
         api_key = DesktopAuthManager.authenticate_interactive()
         print("\n🎉 Token gained successfully!")
@@ -109,7 +110,7 @@ async def main():
     # 3. Test and verify the token immediately
     print("\n🔍 Verifying token validity against active backend APIs...")
     is_valid = await test_api_key(api_key)
-    
+
     if is_valid:
         print("✅ Verification Successful! Token is fully authorized.")
     else:
@@ -120,7 +121,7 @@ async def main():
     env_vars["ADEU_API_KEY"] = api_key
     env_vars["ADEU_BACKEND_URL"] = os.environ.get("ADEU_BACKEND_URL")
     env_vars["ADEU_FRONTEND_URL"] = os.environ.get("ADEU_FRONTEND_URL")
-    
+
     save_env_file(env_path, env_vars)
     print(f"📝 Persisted configurations and API token to: {env_path.relative_to(repo_root)}")
     print("\n🚀 You can now safely execute search verification via:")
