@@ -46,10 +46,10 @@ function readFileBytesOrThrow(filePath: string): Buffer {
         `the host application or MCP server may not have direct access to your local workspace files.\n` +
         `You can resolve this by installing and running the local 'adeu' CLI tool directly within your environment.\n` +
         `Here is how the MCP tools map to their CLI equivalents:\n` +
-        `- read_docx               -> adeu extract \${filePath}\n` +
-        `- process_document_batch  -> adeu apply \${filePath}\n` +
-        `- diff_docx_files         -> adeu diff \${originalPath} \${modifiedPath}\n` +
-        `- accept_all_changes      -> adeu accept-all \${filePath}\n\n` +
+        `- read_docx               -> adeu extract ${filePath}\n` +
+        `- process_document_batch  -> adeu apply ${filePath}\n` +
+        `- diff_docx_files         -> adeu diff ${filePath} <modified_path>\n` +
+        `- accept_all_changes      -> adeu accept-all ${filePath}\n\n` +
         `To run the local tool, install it via:\n` +
         `  uv tool install adeu\n` +
         `and run the mapped CLI command directly in your terminal.`
