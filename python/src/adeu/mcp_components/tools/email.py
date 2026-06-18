@@ -531,7 +531,9 @@ async def search_and_fetch_emails(
             except urllib.error.HTTPError as e:
                 if e.code == 401:
                     DesktopAuthManager.clear_api_key()
-                    raise ToolError("Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate.") from e
+                    raise ToolError(
+                        "Your authentication expired. Please call `login_to_adeu_cloud` to re-authenticate."
+                    ) from e
                 error_body = e.read().decode("utf-8")
                 raise ToolError(f"Failed to check task status (HTTP {e.code}): {error_body}") from e
             except ToolError:
@@ -541,7 +543,10 @@ async def search_and_fetch_emails(
 
             await asyncio.sleep(5)
         else:
-            msg = f"Task {task_id} is still processing. Please call `search_and_fetch_emails` again with task_id={task_id}."
+            msg = (
+                f"Task {task_id} is still processing. "
+                + f"Please call `search_and_fetch_emails` again with task_id={task_id}."
+            )
             return ToolResult(content=msg, structured_content={"status": "pending", "task_id": task_id, "message": msg})
 
     else:
@@ -584,7 +589,9 @@ async def search_and_fetch_emails(
             data = json.loads(response.read().decode("utf-8"))
 
             status_code = getattr(response, "status", response.getcode())
-            if status_code == 202 or (isinstance(data, dict) and (data.get("status") == "pending" or "task_id" in data) and "type" not in data):
+            if status_code == 202 or (
+                isinstance(data, dict) and (data.get("status") == "pending" or "task_id" in data) and "type" not in data
+            ):
                 new_task_id = data.get("task_id")
                 msg = (
                     f"Email processing task started successfully. Task ID: {new_task_id}. "
@@ -592,7 +599,9 @@ async def search_and_fetch_emails(
                     f"task_id={new_task_id} to monitor the progress."
                 )
                 await ctx.info(f"Task started: {new_task_id}")
-                return ToolResult(content=msg, structured_content={"status": "pending", "task_id": str(new_task_id), "message": msg})
+                return ToolResult(
+                    content=msg, structured_content={"status": "pending", "task_id": str(new_task_id), "message": msg}
+                )
 
         except urllib.error.HTTPError as e:
             if e.code == 401:

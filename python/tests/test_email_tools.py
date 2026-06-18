@@ -287,11 +287,9 @@ def test_async_task_initiation_on_search(mock_urlopen):
     ctx = AsyncMock()
 
     mock_resp = MagicMock()
-    mock_resp.read.return_value = json.dumps({
-        "status": "pending",
-        "task_id": "email_task_999",
-        "message": "Task queued"
-    }).encode("utf-8")
+    mock_resp.read.return_value = json.dumps(
+        {"status": "pending", "task_id": "email_task_999", "message": "Task queued"}
+    ).encode("utf-8")
     mock_resp.__enter__.return_value = mock_resp
     mock_urlopen.return_value = mock_resp
 
@@ -315,16 +313,11 @@ def test_polling_task_completed(mock_sleep, mock_urlopen):
     mock_resp_pending.__enter__.return_value.read.return_value = json.dumps({"status": "PENDING"}).encode("utf-8")
 
     mock_resp_completed = MagicMock()
-    mock_resp_completed.__enter__.return_value.read.return_value = json.dumps({
-        "status": "COMPLETED",
-        "type": "previews",
-        "previews": []
-    }).encode("utf-8")
+    mock_resp_completed.__enter__.return_value.read.return_value = json.dumps(
+        {"status": "COMPLETED", "type": "previews", "previews": []}
+    ).encode("utf-8")
 
-    mock_urlopen.side_effect = [
-        mock_resp_pending.__enter__.return_value,
-        mock_resp_completed.__enter__.return_value
-    ]
+    mock_urlopen.side_effect = [mock_resp_pending.__enter__.return_value, mock_resp_completed.__enter__.return_value]
 
     res = asyncio.run(search_and_fetch_emails(ctx=ctx, task_id="email_task_999", api_key="test_api_key"))
 
@@ -341,10 +334,9 @@ def test_polling_task_failed(mock_sleep, mock_urlopen):
     ctx = AsyncMock()
 
     mock_resp = MagicMock()
-    mock_resp.__enter__.return_value.read.return_value = json.dumps({
-        "status": "FAILED",
-        "error": "Outlook API rate limit reached."
-    }).encode("utf-8")
+    mock_resp.__enter__.return_value.read.return_value = json.dumps(
+        {"status": "FAILED", "error": "Outlook API rate limit reached."}
+    ).encode("utf-8")
     mock_urlopen.return_value = mock_resp.__enter__.return_value
 
     with pytest.raises(ToolError) as exc_info:
