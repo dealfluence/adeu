@@ -38,14 +38,16 @@ def update_json_version(filepath, version):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    data = json.loads(content)
-    old_version = data.get("version", "unknown")
-
-    if old_version == version:
-        return False
-
     # Regex replace to preserve exact file formatting (indents/newlines)
     new_content = re.sub(r'("version"\s*:\s*)"[^"]+"', f'\\g<1>"{version}"', content)
+    # Also update any @adeu/core dependency range to the target version
+    new_content = re.sub(r'("@adeu/core"\s*:\s*)"[^"]+"', f'\\g<1>"^{version}"', new_content)
+
+    if new_content == content:
+        return False
+
+    data = json.loads(content)
+    old_version = data.get("version", "unknown")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
