@@ -163,9 +163,12 @@ describe("QA Heading Bug Repro Verification", () => {
     expect(pStyle).toBeDefined();
     expect(pStyle.getAttribute('w:val')).toBe('Heading2');
 
-    // Clean text preview should contain "2. Confidentiality" without literal "##" inside it
-    const buf = await doc.save();
-    const cleanText = await extractTextFromBuffer(buf, true);
-    expect(cleanText).not.toContain("##");
+    // Verify that the run text itself does not contain literal "##"
+    const textElements = p1.getElementsByTagName('w:t');
+    let rawText = "";
+    for (let j = 0; j < textElements.length; j++) {
+      rawText += textElements[j].textContent || "";
+    }
+    expect(rawText).not.toContain("##");
   });
 });

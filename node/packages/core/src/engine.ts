@@ -1945,6 +1945,30 @@ export class RedlineEngine {
       start_idx + match_len,
     );
 
+    const [edit_target_clean, edit_target_style] = this._parse_markdown_style(edit.target_text);
+    const [edit_new_clean, edit_new_style] = this._parse_markdown_style(effective_new_text);
+
+    if (edit_target_style !== edit_new_style) {
+      const [actual_clean] = this._parse_markdown_style(actual_doc_text);
+      const final_target = actual_clean;
+      const final_new = edit_new_clean;
+      const style_op = final_target === final_new ? "STYLE_ONLY" : "STYLE_AND_TEXT";
+      const prefix_offset = actual_doc_text.indexOf(actual_clean);
+      const effective_start_idx = start_idx + (prefix_offset !== -1 ? prefix_offset : 0);
+      const resolved_style = edit_new_style !== null ? edit_new_style : "Normal";
+
+      return {
+        type: "modify",
+        target_text: final_target,
+        new_text: final_new,
+        comment: edit.comment,
+        _match_start_index: effective_start_idx,
+        _internal_op: style_op,
+        _new_style: resolved_style,
+        _active_mapper_ref: active_mapper,
+      };
+    }
+
     if (
       actual_doc_text === effective_new_text ||
       edit.target_text === effective_new_text
@@ -2011,6 +2035,80 @@ export class RedlineEngine {
         ? edit._resolved_start_idx
         : edit._match_start_index || 0;
     const length = edit.target_text ? edit.target_text.length : 0;
+
+    if (op === "STYLE_ONLY" || op === "STYLE_AND_TEXT") {
+      const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
+        start_idx,
+        rebuild_map,
+      );
+      let target_para_el: Element | null = null;
+      if (anchor_para) {
+        target_para_el = anchor_para._element;
+      } else if (anchor_run) {
+        let walker: Element | null = anchor_run._element;
+        while (walker && walker.tagName !== "w:p") {
+          walker = walker.parentNode as Element | null;
+        }
+        target_para_el = walker;
+      }
+
+      if (target_para_el && edit._new_style) {
+        this._set_paragraph_style(target_para_el, edit._new_style);
+      }
+
+      if (op === "STYLE_ONLY") {
+        if (edit.comment) {
+          const target_runs = active_mapper.find_target_runs_by_index(
+            start_idx,
+            length,
+            rebuild_map,
+          );
+          if (target_runs.length > 0) {
+            const first_el = target_runs[0]._element;
+            const last_el = target_runs[target_runs.length - 1]._element;
+            let start_p: Element | null = first_el;
+            while (start_p && start_p.tagName !== "w:p")
+              start_p = start_p.parentNode as Element;
+            let end_p: Element | null = last_el;
+            while (end_p && end_p.tagName !== "w:p")
+              end_p = end_p.parentNode as Element;
+            if (start_p && end_p) {
+              const ascend_to_paragraph_child = (el: Element, p: Element): Element => {
+                let cur: Element = el;
+                while (cur.parentNode && cur.parentNode !== p) {
+                  cur = cur.parentNode as Element;
+                }
+                return cur;
+              };
+              const first_anchor = ascend_to_paragraph_child(first_el, start_p);
+              const last_anchor = ascend_to_paragraph_child(last_el, end_p);
+              if (start_p === end_p) {
+                this._attach_comment(start_p, first_anchor, last_anchor, edit.comment);
+              } else {
+                this._attach_comment_spanning(
+                  start_p,
+                  first_anchor,
+                  end_p,
+                  last_anchor,
+                  edit.comment,
+                );
+              }
+            }
+          }
+        }
+        return true;
+      }
+
+      if (edit.target_text && edit.new_text) {
+        op = "MODIFICATION";
+      } else if (!edit.target_text && edit.new_text) {
+        op = "INSERTION";
+      } else if (edit.target_text && !edit.new_text) {
+        op = "DELETION";
+      } else {
+        op = "COMMENT_ONLY";
+      }
+    }
 
     const del_id = ["DELETION", "MODIFICATION"].includes(op)
       ? this._getNextId()
