@@ -161,4 +161,32 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.content[0].text).toContain("uv tool install adeu");
     expect(res.result.content[0].text).not.toContain("ENOENT"); // Raw node error must not leak
   });
+
+  it("Double-Serialization: process_document_batch fails with TypeError when changes array contains double-serialized JSON strings", async () => {
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "process_document_batch",
+        arguments: {
+          original_docx_path: cleanDocPath,
+          author_name: "Agent",
+          changes: [
+            JSON.stringify({
+              type: "modify",
+              target_text: "document",
+              new_text: "clean document",
+            }),
+          ],
+          dry_run: true,
+        },
+      },
+      105,
+    );
+
+    // On unpatched code, the tool catches the TypeError and returns it inside a standard MCP error response, causing this test to fail.
+    // On patched code, the tool successfully parses and applies the double-serialized JSON strings, returning a successful response.
+    expect(res.result.isError).toBeUndefined();
+    expect(res.result.content[0].text).toContain("Dry-run simulation complete.");
+  });
 });
+

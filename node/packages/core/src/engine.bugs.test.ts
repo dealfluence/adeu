@@ -531,4 +531,24 @@ describe("Resolved Bugs Core Engine Verification", () => {
     const final_comment_parts = doc.pkg.parts.filter(p => p.contentType.includes("comments"));
     expect(final_comment_parts.length).toBe(0);
   });
+
+  it("Double-Serialization Core: process_batch successfully processes double-serialized JSON strings", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "original text");
+    const engine = new RedlineEngine(doc);
+
+    // On unpatched code, this will throw a raw TypeError: Cannot create property '_applied_status' on string
+    // On patched code, it will successfully parse and apply the modify change
+    engine.process_batch([
+      JSON.stringify({
+        type: "modify",
+        target_text: "original text",
+        new_text: "updated text",
+      }),
+    ] as any);
+
+    const buf = await doc.save();
+    const text = await extractTextFromBuffer(buf);
+    expect(text).toContain("updated text");
+  });
 });

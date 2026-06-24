@@ -166,6 +166,31 @@ def test_process_document_batch_validation_failure(sample_docx, tmp_path):
     assert "Failed: Target text not found" in result
 
 
+def test_process_document_batch_double_serialization(sample_docx, tmp_path):
+    ctx = MockContext()
+    output_path = tmp_path / "output.docx"
+
+    # Pass a double-serialized JSON string instead of pre-parsed models
+    edits = [
+        '{"type": "modify", "target_text": "original text", "new_text": "new text"}'
+    ]
+
+    result = asyncio.run(
+        process_document_batch(
+            original_docx_path=sample_docx,
+            author_name="AI Agent",
+            ctx=ctx,
+            changes=edits,
+            output_path=str(output_path),
+            dry_run=True,
+        )
+    )
+
+    # On unpatched code, this will fail because the stringified changes are not parsed and thus not applied.
+    # On patched code, this will pass as stringified changes are defensively parsed and processed successfully.
+    assert "Edits: 1 applied" in result
+
+
 def test_accept_all_changes(sample_docx, tmp_path):
     ctx = MockContext()
 
