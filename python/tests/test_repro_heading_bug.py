@@ -1,4 +1,5 @@
 import io
+
 import pytest
 from docx import Document
 
@@ -17,24 +18,21 @@ class TestReproHeadingBug:
         p = doc.add_paragraph("2. Confidentiality")
         p.style = "Heading 1"
         doc.add_paragraph("As defined in Section 1, the Recipient shall...")
-        
+
         stream = io.BytesIO()
         doc.save(stream)
         stream.seek(0)
-        
+
         engine = RedlineEngine(stream)
-        edit = ModifyText(
-            target_text="# 2. Confidentiality",
-            new_text="## 2. Confidentiality"
-        )
-        
+        edit = ModifyText(target_text="# 2. Confidentiality", new_text="## 2. Confidentiality")
+
         # Python should apply this without error
         engine.process_batch([edit])
         engine.accept_all_revisions()
-        
+
         # Save and verify
         res = Document(engine.save_to_stream())
-        
+
         # Check that paragraph 0 is now styled as Heading 2
         assert res.paragraphs[0].style.name == "Heading 2"
         # The text of the paragraph should contain 2. Confidentiality
@@ -50,21 +48,18 @@ class TestReproHeadingBug:
         p1 = doc.add_paragraph("2. Confidentiality")
         p1.style = "Heading 1"
         doc.add_paragraph("As defined in Section 1, the Recipient shall...")
-        
+
         # Add a body paragraph containing the heading text
         doc.add_paragraph("Page footer notice: subject to NDA dated 2026-01-15.")
         doc.add_paragraph("For further detail see section 2. Confidentiality above.")
-        
+
         stream = io.BytesIO()
         doc.save(stream)
         stream.seek(0)
-        
+
         engine = RedlineEngine(stream)
-        edit = ModifyText(
-            target_text="2. Confidentiality",
-            new_text="2. CONFIDENTIALITY"
-        )
-        
+        edit = ModifyText(target_text="2. Confidentiality", new_text="2. CONFIDENTIALITY")
+
         with pytest.raises(BatchValidationError, match="[Aa]mbiguous"):
             engine.process_batch([edit])
 
@@ -78,29 +73,26 @@ class TestReproHeadingBug:
         p1 = doc.add_paragraph("2. Confidentiality")
         p1.style = "Heading 1"
         doc.add_paragraph("As defined in Section 1, the Recipient shall...")
-        
+
         # Add a body paragraph containing the heading text
         doc.add_paragraph("Page footer notice: subject to NDA dated 2026-01-15.")
         doc.add_paragraph("For further detail see section 2. Confidentiality above.")
-        
+
         stream = io.BytesIO()
         doc.save(stream)
         stream.seek(0)
-        
+
         engine = RedlineEngine(stream)
-        edit = ModifyText(
-            target_text="# 2. Confidentiality",
-            new_text="## 2. Confidentiality"
-        )
-        
+        edit = ModifyText(target_text="# 2. Confidentiality", new_text="## 2. Confidentiality")
+
         # Python should successfully disambiguate and apply
         engine.process_batch([edit])
         engine.accept_all_revisions()
-        
+
         res = Document(engine.save_to_stream())
         # Paragraph 0 style is Heading 2
         assert res.paragraphs[0].style.name == "Heading 2"
         assert "2. Confidentiality" in res.paragraphs[0].text
-        
+
         # Paragraph 3 text remains untouched (not demoted, nor modified)
         assert "section 2. Confidentiality above." in res.paragraphs[3].text
