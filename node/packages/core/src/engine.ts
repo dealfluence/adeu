@@ -1399,6 +1399,34 @@ export class RedlineEngine {
     changes: DocumentChange[],
     dry_run: boolean = false,
   ): any {
+    // Defensive sanitization: some LLM clients "double-serialize" nested
+    // arrays, delivering each element of `changes` as a JSON string instead of
+    // a parsed object. Downstream code mutates state trackers (e.g.
+    // `edit._applied_status`) and reads `change.type` on these elements, which
+    // throws a TypeError on string primitives. Parse stringified elements back
+    // into objects here, leaving genuine objects (and unparseable strings)
+    // untouched so validation can surface a clear error rather than crashing.
+    if (Array.isArray(changes)) {
+      changes = changes.map((item: any) => {
+        if (typeof item === "string") {
+          try {
+            const parsed = JSON.parse(item);
+            // Only swap in the parsed value if it is an object; a string that
+            // parses to a scalar (e.g. "42") is not a valid change.
+            if (parsed !== null && typeof parsed === "object") {
+              return parsed;
+            }
+            return item;
+          } catch {
+            // Leave malformed strings as-is; the validation pass downstream
+            // will report them rather than crashing on a raw TypeError.
+            return item;
+          }
+        }
+        return item;
+      }) as DocumentChange[];
+    }
+
     if (dry_run) {
       const baselines = new Map<any, Element>();
       for (const part of this.doc.pkg.parts) {

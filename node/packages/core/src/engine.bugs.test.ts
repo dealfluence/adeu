@@ -548,7 +548,7 @@ describe("Resolved Bugs Core Engine Verification", () => {
     ] as any);
 
     const buf = await doc.save();
-    const text = await extractTextFromBuffer(buf);
+    const text = await extractTextFromBuffer(buf, true);
     expect(text).toContain("updated text");
   });
 });

@@ -334,6 +334,28 @@ server.registerTool(
           content: [{ type: "text", text: "Error: No changes provided." }],
         };
 
+      // Defensive sanitization at the MCP boundary: some LLM clients
+      // "double-serialize" nested arrays, delivering each element of `changes`
+      // as a JSON string instead of an object. The core engine also guards
+      // against this, but we normalize here too so the tool layer never hands
+      // raw string primitives downstream regardless of the engine version
+      // bundled. Genuine objects and unparseable strings pass through
+      // untouched so validation surfaces a clear error rather than crashing.
+      const sanitizedChanges = changes.map((item: any) => {
+        if (typeof item === "string") {
+          try {
+            const parsed = JSON.parse(item);
+            if (parsed !== null && typeof parsed === "object") {
+              return parsed;
+            }
+            return item;
+          } catch {
+            return item;
+          }
+        }
+        return item;
+      });
+
       let outPath = output_path;
       if (!outPath) {
         const ext = extname(original_docx_path);
@@ -348,7 +370,7 @@ server.registerTool(
 
       let stats;
       try {
-        stats = engine.process_batch(changes, dry_run);
+        stats = engine.process_batch(sanitizedChanges, dry_run);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
           return {

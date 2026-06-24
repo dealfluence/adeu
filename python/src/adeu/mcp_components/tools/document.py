@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -26,9 +27,53 @@ from adeu.mcp_components.shared import (
     read_file_bytes,
     save_stream,
 )
+from pydantic import TypeAdapter, ValidationError
+
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
+
+# Validates a single change dict against the DocumentChange discriminated union,
+# selecting the correct model (ModifyText, AcceptChange, etc.) by its 'type'.
+_DOCUMENT_CHANGE_ADAPTER: TypeAdapter = TypeAdapter(DocumentChange)
+
+
+def _coerce_changes(changes: List[Any]) -> List[Any]:
+    """Defensively normalize a `changes` list at the tool boundary.
+
+    Some LLM clients "double-serialize" nested arrays, delivering each element
+    as a JSON string (e.g. '{"type": "modify", ...}') instead of a parsed
+    object/model. The engine dispatches edits by isinstance() against the
+    DocumentChange models, so a raw string is silently dropped from both the
+    actions and edits lists, yielding a confusing zero-op result rather than a
+    crash. Parse stringified elements into the proper model here.
+
+    Elements that are already models/dicts pass through untouched. A string
+    that fails to parse or validate is left as-is so downstream handling can
+    surface a clear error rather than masking the malformed input.
+    """
+    if not changes:
+        return changes
+
+    coerced: List[Any] = []
+    for item in changes:
+        if isinstance(item, str):
+            try:
+                parsed = json.loads(item)
+            except (ValueError, TypeError):
+                coerced.append(item)
+                continue
+            if isinstance(parsed, dict):
+                try:
+                    coerced.append(_DOCUMENT_CHANGE_ADAPTER.validate_python(parsed))
+                    continue
+                except ValidationError:
+                    coerced.append(parsed)
+                    continue
+            coerced.append(parsed)
+        else:
+            coerced.append(item)
+    return coerced
 
 
 async def _read_docx_disk(
@@ -134,6 +179,10 @@ async def _process_document_batch_disk(
     if not changes:
         await ctx.warning("Batch processing rejected: No actions or edits provided.")
         return "Error: No changes provided."
+
+    # Defensive normalization for double-serialized change elements (JSON
+    # strings instead of parsed models). See _coerce_changes for rationale.
+    changes = _coerce_changes(changes)
 
     def _run_batch_sync() -> tuple[bool, Any, str]:
         stream = read_file_bytes(original_docx_path)
