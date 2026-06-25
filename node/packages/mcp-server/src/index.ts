@@ -225,11 +225,11 @@ registerAppTool(
           "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms.",
         ),
       page: z
-        .union([z.number(), z.literal("all")])
+        .union([z.number(), z.string()])
         .default(1)
         .describe("Page number (1-indexed) for mode='full', or 'all' to return unpaginated."),
       outline_max_level: z
-        .number()
+        .coerce.number()
         .default(2)
         .describe("For mode='outline' only: cap on heading depth."),
       outline_verbose: z
@@ -618,10 +618,10 @@ registerAppTool(
       has_attachments: z.boolean().optional(),
       attachment_name: z.string().optional(),
       is_unread: z.boolean().optional(),
-      days_ago: z.number().optional(),
+      days_ago: z.coerce.number().optional(),
       folder: z.enum(["inbox", "sent", "all"]).optional(),
-      limit: z.number().default(10),
-      offset: z.number().default(0),
+      limit: z.coerce.number().default(10),
+      offset: z.coerce.number().default(0),
       email_id: z.string().optional(),
       working_directory: z.string().optional(),
       mailbox_address: z
@@ -633,7 +633,7 @@ registerAppTool(
         .optional()
         .describe("If resuming a pending check, provide the task ID here."),
       max_attachment_size_mb: z
-        .number()
+        .coerce.number()
         .optional()
         .describe(
           "Maximum attachment size in MB to download (default 10). Attachments larger than this are listed in the response but not downloaded. Raise this to fetch large files.",

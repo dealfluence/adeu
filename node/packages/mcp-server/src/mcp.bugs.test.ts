@@ -188,5 +188,26 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.isError).toBeUndefined();
     expect(res.result.content[0].text).toContain("Dry-run simulation complete.");
   });
-});
 
+  it("BUG-12: Accepts stringified numbers for numeric arguments without Zod validation errors", async () => {
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "read_docx",
+        arguments: {
+          file_path: cleanDocPath,
+          page: "1",
+          outline_max_level: "3",
+        },
+      },
+      106,
+    );
+
+    // If Zod validation failed, we would get an error payload back or `res.error` 
+    // from the MCP protocol (error code -32602).
+    expect(res.error).toBeUndefined();
+    expect(res.result).toBeDefined();
+    expect(res.result.isError).toBeUndefined();
+    expect(res.result.content[0].text).toContain("golden");
+  });
+});
