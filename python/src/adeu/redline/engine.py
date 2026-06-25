@@ -1302,7 +1302,9 @@ class RedlineEngine:
                     author_hints = []
                     for auth in sorted(nested_authors_to_ids.keys()):
                         sorted_ids = sorted(nested_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
-                        id_hints = ", ".join(str(cid) if str(cid).startswith("Com:") else f"Chg:{cid}" for cid in sorted_ids)
+                        id_hints = ", ".join(
+                            str(cid) if str(cid).startswith("Com:") else f"Chg:{cid}" for cid in sorted_ids
+                        )
                         if id_hints:
                             author_hints.append(f"{auth} (e.g. {id_hints})")
                         else:
