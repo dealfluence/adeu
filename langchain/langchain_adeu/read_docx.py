@@ -94,8 +94,7 @@ class AdeuReadDocxInput(BaseModel):
     search_query: str | None = Field(
         default=None,
         description=(
-            "The substring or regex pattern to search for. When provided, "
-            "filters results to matching paragraphs."
+            "The substring or regex pattern to search for. When provided, filters results to matching paragraphs."
         ),
     )
     search_regex: bool = Field(
