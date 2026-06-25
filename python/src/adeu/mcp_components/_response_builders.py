@@ -49,7 +49,6 @@ The appendix is paginated using the same paginator as the body, with the
 appendix text passed AS the body input.
 """
 
-import math
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List
@@ -243,12 +242,24 @@ def build_search_response(
     search_query: str,
     search_regex: bool,
     search_case_sensitive: bool,
-    page: int | str,
+    page: int | str | None,
     file_path: str,
 ) -> ToolResult:
     """
     Filters projected Markdown to exact substring or regex matches.
-    Returns a paginated view of matching paragraphs and their immediate context.
+
+    `page` semantics:
+      - None or "all" (case-insensitive): return ALL matches across the whole
+        document. When matches span >1 document page, include a one-line
+        distribution summary.
+      - positive int N: return only matches whose offset falls within document
+        page N. If N has zero hits but the query exists on other pages, emit a
+        helpful empty-result pointer (not an error). If N exceeds the document's
+        total pages, raise ToolError.
+      - anything else (0, negative, non-"all" string): raise ToolError.
+
+    Occurrence counts (the "appears X times" line under each match) are always
+    computed from the FULL match set, never filtered.
     """
     body, _ = split_structural_appendix(text)
     flags = 0 if search_case_sensitive else re.IGNORECASE
@@ -259,6 +270,56 @@ def build_search_response(
     except re.error as e:
         raise ToolError(f"Invalid regex pattern: {e}") from e
 
+    # Pagination needed for both filter mode and distribution summary, even
+    # when there are no matches (to validate `page` is in range).
+    pag_res = paginate(body, "")
+    page_offsets = pag_res.body_page_offsets
+    total_doc_pages = pag_res.total_pages
+
+    # ---- Resolve `page` into either None (= all) or a 1-indexed int. ----
+    page_filter: int | None
+    if page is None:
+        page_filter = None
+    elif isinstance(page, str):
+        if page.lower() == "all":
+            page_filter = None
+        else:
+            # Allow numeric strings ("3"); reject anything else.
+            try:
+                page_filter = int(page)
+            except (TypeError, ValueError):
+                raise ToolError(
+                    f"Invalid page value: {page!r}. In search mode, `page` must be "
+                    f"omitted (search all pages), `'all'`, or a positive integer "
+                    f"document page number."
+                ) from None
+            if page_filter < 1:
+                raise ToolError(
+                    f"Invalid page value: {page!r}. In search mode, `page` must be "
+                    f"omitted, `'all'`, or a positive integer document page number."
+                )
+    elif isinstance(page, int):
+        if page < 1:
+            raise ToolError(
+                f"Invalid page value: {page!r}. In search mode, `page` must be "
+                f"omitted, `'all'`, or a positive integer document page number."
+            )
+        page_filter = page
+    else:
+        raise ToolError(
+            f"Invalid page value: {page!r}. In search mode, `page` must be "
+            f"omitted, `'all'`, or a positive integer document page number."
+        )
+
+    if page_filter is not None and page_filter > total_doc_pages:
+        raise ToolError(
+            f"Document page {page_filter} is out of range — the document has "
+            f"{total_doc_pages} page(s). In search mode, `page` filters matches "
+            f"by document page; omit `page` (or pass `page='all'`) to search "
+            f"across the whole document."
+        )
+
+    # ---- No matches anywhere. ----
     if not matches:
         ui_markdown = (
             f"> **Search Results** — No matches found for query `{search_query}` in `{Path(file_path).name}`.\n\n"
@@ -274,60 +335,85 @@ def build_search_response(
             },
         )
 
-    pag_res = paginate(body, "")
-    page_offsets = pag_res.body_page_offsets
-    total_matches = len(matches)
-    total_pages = math.ceil(total_matches / 10)
+    # ---- Assign each match to its document page. ----
+    def _page_for_offset(offset: int) -> int:
+        p_num = 1
+        for j, off in enumerate(page_offsets):
+            if offset >= off:
+                p_num = j + 1
+            else:
+                break
+        return p_num
 
-    out_of_range_warning = ""
-    if str(page).lower() == "all":
-        start_idx, end_idx = 0, total_matches
-        page_text = "all"
-    else:
-        requested_page = int(page)
-        if requested_page < 1 or requested_page > total_pages:
-            # Soft clamp: LLMs commonly confuse search-result pagination with
-            # document-body pagination and pass a body page number here. Crashing
-            # the tool wastes a turn; instead, fall back to page 1 and tell the
-            # agent what happened so it can correct course.
-            out_of_range_warning = (
-                f"> ⚠️ **Note:** You requested search page {requested_page}, but search "
-                f"results for `{search_query}` only span {total_pages} page"
-                f"{'s' if total_pages != 1 else ''}. Showing page 1 instead. "
-                f"Reminder: the `page` parameter paginates **search results**, not "
-                f"the document body. To filter matches by document page, narrow "
-                f"your `search_query`.\n\n"
-            )
-            page_num = 1
-        else:
-            page_num = requested_page
-        start_idx = (page_num - 1) * 10
-        end_idx = min(start_idx + 10, total_matches)
-        page_text = f"{page_num} of {total_pages}"
+    matches_with_pages = [(m, _page_for_offset(m.start())) for m in matches]
+    total_matches = len(matches_with_pages)
 
-    page_matches = matches[start_idx:end_idx]
-
-    # When we clamped an out-of-range page back to 1, the "next page" hint must
-    # reference 2, not requested_page+1 (which would point off the end again).
-    next_page_hint = 2 if out_of_range_warning else (int(page) + 1 if str(page).lower() != "all" else 2)
-    ui_parts = [
-        out_of_range_warning.rstrip() if out_of_range_warning else "",
-        f"> **Search Results** — Found {total_matches} matches for query `{search_query}` in `{Path(file_path).name}`.",
-        (
-            (
-                f"> Showing page {page_text} (matches {start_idx + 1}-{end_idx}). To see more matches, "
-                f"call `read_docx` with `search_query='{search_query}'`, "
-                f"`search_regex={'true' if search_regex else 'false'}`, "
-                f"and `page={next_page_hint}`."
-            )
-            if total_pages > 1 and str(page).lower() != "all"
-            else ""
-        ),
-    ]
-
+    # Global occurrence map — never filtered.
     occurrences_map: dict[str, int] = {}
-    for m in matches:
+    for m, _p in matches_with_pages:
         occurrences_map[m.group(0)] = occurrences_map.get(m.group(0), 0) + 1
+
+    # Distribution of matches across doc pages — also computed from the full set.
+    page_distribution: dict[int, int] = {}
+    for _m, p in matches_with_pages:
+        page_distribution[p] = page_distribution.get(p, 0) + 1
+    pages_with_hits = sorted(page_distribution.keys())
+
+    # ---- Apply filter. ----
+    if page_filter is None:
+        filtered = matches_with_pages
+    else:
+        filtered = [(m, p) for (m, p) in matches_with_pages if p == page_filter]
+
+        # `page=N` valid but has no hits, query exists elsewhere.
+        if not filtered:
+            other_pages_str = ", ".join(str(p) for p in pages_with_hits)
+            ui_markdown = (
+                f"> **Search Results** — No matches on document page {page_filter} "
+                f"for query `{search_query}` in `{Path(file_path).name}`.\n\n"
+                f"The query DOES appear elsewhere ({total_matches} match"
+                f"{'es' if total_matches != 1 else ''} on page"
+                f"{'s' if len(pages_with_hits) != 1 else ''} {other_pages_str}). "
+                f"Omit `page` or pass `page='all'` to see them."
+            )
+            return ToolResult(
+                content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+                structured_content={
+                    "markdown": ui_markdown,
+                    "title": f"Search: {Path(file_path).name}",
+                    "file_path": str(Path(file_path).resolve()),
+                },
+            )
+
+    # ---- Render. ----
+    ui_parts: list[str] = []
+
+    if page_filter is None:
+        ui_parts.append(
+            f"> **Search Results** — Found {total_matches} match"
+            f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+            f"in `{Path(file_path).name}`."
+        )
+        # Distribution summary only when matches span >1 document page.
+        if len(pages_with_hits) > 1:
+            dist_str = ", ".join(f"p{p}: {page_distribution[p]}" for p in pages_with_hits)
+            ui_parts.append(f"> Distribution across {len(pages_with_hits)} document pages — {dist_str}")
+    else:
+        shown = len(filtered)
+        ui_parts.append(
+            f"> **Search Results** — Found {shown} match"
+            f"{'es' if shown != 1 else ''} on document page {page_filter} "
+            f"for query `{search_query}` in `{Path(file_path).name}` "
+            f"({total_matches} total in document)."
+        )
+        other_pages = [p for p in pages_with_hits if p != page_filter]
+        if other_pages:
+            other_pages_str = ", ".join(str(p) for p in other_pages)
+            ui_parts.append(
+                f"> Additional matches exist on page"
+                f"{'s' if len(other_pages) != 1 else ''} {other_pages_str} — "
+                f"omit `page` or pass `page='all'` to see them."
+            )
 
     def get_heading(idx, txt):
         path: list[str] = []
@@ -347,22 +433,21 @@ def build_search_response(
                         break
         return " > ".join(path) if path else ""
 
-    for i, m in enumerate(page_matches, start=start_idx + 1):
+    # Match index is preserved from the FULL match list so an LLM that sees
+    # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
+    full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
+
+    for m, p_num in filtered:
         m_start, m_end = m.span()
         matched_str = m.group(0)
-        p_num = 1
-        for j, off in enumerate(page_offsets):
-            if m_start >= off:
-                p_num = j + 1
-            else:
-                break
 
         snippet = (
             body[max(0, m_start - 100) : m_start] + f"**{matched_str}**" + body[m_end : min(len(body), m_end + 100)]
         )
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 
-        ui_parts.extend(["---", f"### Match {i} (p{p_num})"])
+        idx = full_index_map[id(m)]
+        ui_parts.extend(["---", f"### Match {idx} (p{p_num})"])
         if h_path := get_heading(m_start, body):
             ui_parts.append(f"**Path:** `{h_path}`")
         ui_parts.extend(

@@ -283,7 +283,7 @@ if sys.platform == "win32":
         clean_view: bool = False,
         file_path: Optional[str] = None,
         mode: str = "full",
-        page: int | str = 1,
+        page: Optional[int | str] = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: Optional[str] = None,
@@ -324,12 +324,21 @@ if sys.platform == "win32":
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
-                page_num = int(page) if str(page).isdigit() else 1
+                # In search mode, `page` is a doc-page filter (None == search all).
+                # Outside search mode, `page` means document page and defaults to 1.
+                page_num = int(page) if (page is not None and str(page).isdigit()) else 1
                 if search_query is not None:
-                    from adeu.mcp_components._response_builders import build_search_response
+                    from adeu.mcp_components._response_builders import (
+                        build_search_response,
+                    )
 
                     res = build_search_response(
-                        final_text, search_query, search_regex, search_case_sensitive, page, actual_path
+                        final_text,
+                        search_query,
+                        search_regex,
+                        search_case_sensitive,
+                        page,
+                        actual_path,
                     )
                 elif mode == "outline":
                     res = build_outline_response(
@@ -604,7 +613,11 @@ if sys.platform == "win32":
                                     actual_doc_text = m.group(0)
                                     all_actual_texts.append(actual_doc_text)
                                     try:
-                                        eff_new = re.sub(change.target_text, change.new_text or "", actual_doc_text)
+                                        eff_new = re.sub(
+                                            change.target_text,
+                                            change.new_text or "",
+                                            actual_doc_text,
+                                        )
                                     except re.error:
                                         eff_new = change.new_text or ""
                                     all_new_texts.append(eff_new)
@@ -1156,9 +1169,12 @@ else:
         clean_view: bool = False,
         file_path: Optional[str] = None,
         mode: str = "full",
-        page: int = 1,
+        page: Optional[int | str] = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
+        search_query: Optional[str] = None,
+        search_regex: bool = False,
+        search_case_sensitive: bool = True,
     ) -> ToolResult:
         raise NotImplementedError("Live Word is only supported on Windows.")
 

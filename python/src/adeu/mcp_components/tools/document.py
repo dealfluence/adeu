@@ -93,7 +93,7 @@ async def _read_docx_disk(
     ctx: Context,
     clean_view: bool,
     mode: str = "full",
-    page: Union[int, str] = 1,
+    page: Optional[Union[int, str]] = None,
     outline_max_level: int = 2,
     outline_verbose: bool = False,
     search_query: Optional[str] = None,
@@ -146,9 +146,11 @@ async def _read_docx_disk(
         await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
 
         if search_query is not None:
+            # `page` is a doc-page filter (None == search all pages).
             return build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
 
-        page_num = int(page) if str(page).isdigit() else 1
+        # Non-search modes: `page` means document page; default to 1.
+        page_num = int(page) if (page is not None and str(page).isdigit()) else 1
         if mode == "outline":
             return build_outline_response(
                 doc,
@@ -544,9 +546,14 @@ if sys.platform == "win32":
             "consult before editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
-            Union[int, Literal["all"]],
-            "Page number (1-indexed) for mode='full'. Defaults to 1. Use 'all' in CLI.",
-        ] = 1,
+            Optional[Union[int, Literal["all"]]],
+            (
+                "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                "for mode='full' and mode='appendix'. With `search_query`: restricts matches "
+                "to that document page (defaults to searching all pages; pass `page='all'` "
+                "to be explicit). 'all' is also valid in CLI."
+            ),
+        ] = None,
         outline_max_level: Annotated[
             int,
             "For mode='outline' only: only show headings at this level or shallower (1-6). "
@@ -564,6 +571,12 @@ if sys.platform == "win32":
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
     ) -> ToolResult:
         start_time = time.perf_counter()
+        # Outside of search mode, `page` semantically means "document page" and
+        # defaults to 1. In search mode, `page` is a document-page filter and
+        # `None` means "search all pages" — we leave it as None to let the
+        # response builder distinguish "omitted" from "explicit 1".
+        if search_query is None and page is None:
+            page = 1
         if not file_path:
             # Read active document directly. No disk fallback available if this fails.
             res = await read_active_word_document(
@@ -796,9 +809,13 @@ else:
             "a structural heading map with page numbers; body content is omitted.",
         ] = "full",
         page: Annotated[
-            Union[int, Literal["all"]],
-            "Page number (1-indexed) for mode='full'. Defaults to 1.",
-        ] = 1,
+            Optional[Union[int, Literal["all"]]],
+            (
+                "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                "for mode='full'. With `search_query`: restricts matches to that document "
+                "page (defaults to searching all pages; pass `page='all'` to be explicit)."
+            ),
+        ] = None,
         outline_max_level: Annotated[
             int,
             "For mode='outline' only: only show headings at this level or shallower (1-6). "
@@ -816,6 +833,8 @@ else:
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
     ) -> ToolResult:
         start_time = time.perf_counter()
+        if search_query is None and page is None:
+            page = 1
         res = await _read_docx_disk(
             file_path,
             ctx,
