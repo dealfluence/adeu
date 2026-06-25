@@ -551,4 +551,23 @@ describe("Resolved Bugs Core Engine Verification", () => {
     const text = await extractTextFromBuffer(buf, true);
     expect(text).toContain("updated text");
   });
+
+  it("Unparseable String Core: process_batch throws validation error instead of TypeError for raw strings", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "original text");
+    const engine = new RedlineEngine(doc);
+
+    let caught: any = null;
+    try {
+      engine.process_batch([
+        "modify original text to updated text"
+      ] as any);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught.name).toBe("BatchValidationError");
+    expect(caught.message).toContain("Invalid change format");
+  });
 });

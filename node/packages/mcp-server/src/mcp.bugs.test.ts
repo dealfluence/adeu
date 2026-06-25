@@ -189,6 +189,29 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.content[0].text).toContain("Dry-run simulation complete.");
   });
 
+  it("Unparseable String: process_document_batch gracefully rejects raw strings instead of crashing", async () => {
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "process_document_batch",
+        arguments: {
+          original_docx_path: cleanDocPath,
+          author_name: "Agent",
+          changes: [
+            "modify document to be clean document" // Raw unparseable string
+          ],
+          dry_run: false,
+        },
+      },
+      110,
+    );
+
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("Batch rejected. Some edits failed validation");
+    expect(res.result.content[0].text).toContain("Invalid change format");
+    expect(res.result.content[0].text).toContain("received a primitive string");
+  });
+
   it("BUG-12: Accepts stringified numbers for numeric arguments without Zod validation errors", async () => {
     const res = await sendRpc(
       "tools/call",
