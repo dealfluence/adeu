@@ -1228,6 +1228,12 @@ export class RedlineEngine {
 
     for (let i = 0; i < edits.length; i++) {
       const edit = edits[i];
+      if (typeof edit !== "object" || edit === null) {
+        errors.push(
+          `- Edit ${i + 1} Failed: Invalid change format. Expected a JSON object, but received a primitive ${typeof edit}. Do not pass raw strings.`
+        );
+        continue;
+      }
       if (!edit.target_text) continue;
       
       const is_regex = (edit as any).regex || false;
@@ -1506,10 +1512,10 @@ export class RedlineEngine {
   ): any {
     this.skipped_details = [];
     const actions = changes.filter((c) =>
-      ["accept", "reject", "reply"].includes(c.type),
+      c !== null && typeof c === "object" && ["accept", "reject", "reply"].includes(c.type),
     );
     const edits = changes.filter(
-      (c) => !["accept", "reject", "reply"].includes(c.type),
+      (c) => c === null || typeof c !== "object" || !["accept", "reject", "reply"].includes(c.type),
     );
 
     // BUG-7: Unified single-pass validation in wet-run / standard mode
@@ -1673,11 +1679,17 @@ export class RedlineEngine {
     const resolved_edits: [any, string | null][] = [];
 
     for (const edit of edits) {
+      if (typeof edit !== "object" || edit === null) {
+        skipped++;
+        continue;
+      }
       edit._applied_status = false;
       edit._error_msg = null;
     }
 
     for (const edit of edits) {
+      if (typeof edit !== "object" || edit === null) continue;
+
       if (
         edit._resolved_start_idx !== undefined &&
         edit._resolved_start_idx !== null
