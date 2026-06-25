@@ -1,5 +1,4 @@
 import io
-import re
 
 from docx import Document
 from docx.oxml import OxmlElement
@@ -113,18 +112,22 @@ def test_ingest_critic_markup_overlapping():
 
     print(f"Overlap Result: {text}")
 
-    # Segment A
-    assert "{==**A **==}{>>" in text
+    # Three highlight wrappers remain separate because each run has different
+    # formatting (bold / italic / bold) — wrapper coalescing requires identical
+    # style markers. But the meta block is correctly deferred and emitted ONCE
+    # at the end, listing both comment IDs in document order.
+    assert "{==**A **==}" in text
+    assert "{==_B _==}" in text
+    assert "{==**C**==}" in text
 
-    # Segment B (Both)
-    match_b = re.search(r"\{==_B _==\}\{>>(.*?)<<\}", text, re.DOTALL)
-    assert match_b
-    content_b = match_b.group(1)
-    assert "U1" in content_b
-    assert "U2" in content_b
-
-    # Segment C
-    assert "{==**C**==}{>>" in text
+    # Exactly one meta block, containing both comments.
+    assert text.count("{>>") == 1
+    assert text.count("<<}") == 1
+    assert "[Com:1]" in text
+    assert "[Com:2]" in text
+    # And the meta block appears AFTER all three highlights.
+    meta_start = text.index("{>>")
+    assert meta_start > text.index("{==**C**==}")
 
 
 def test_ingest_legal_brackets_collision():

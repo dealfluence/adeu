@@ -40,10 +40,14 @@ def test_pure_comment_with_formatting_mismatch():
     assert "{--" not in text
     assert "{++" not in text
 
-    # The formatting should survive, the comment should be attached, and ingest
-    # will wrap the differently-styled runs in separate highlight blocks.
-    assert "{==**Important **==}" in text
-    assert "{==Text==}" in text
+    # The bold formatting on "Important " survives. With meta deferral, the
+    # two runs (bold "Important " + plain "Text") coalesce into a single
+    # {==...==} highlight rather than splitting per-run, and one meta block
+    # closes the range.
+    assert "{==**Important **Text==}" in text
+    assert text.count("{==") == 1
+    assert text.count("{>>") == 1
+    assert text.count("[Com:1]") == 1
     assert "This is a pure comment." in text
 
 

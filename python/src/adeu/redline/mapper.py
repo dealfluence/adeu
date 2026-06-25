@@ -474,14 +474,15 @@ class DocumentMapper:
                         deferred_meta_states.append(state_snapshot)
 
                     should_defer = False
-                    is_redline = bool(curr_ins_id) or bool(curr_del_id) or bool(active_fmt)
+                    has_any_meta = bool(curr_ins_id) or bool(curr_del_id) or bool(active_fmt) or bool(active_ids)
 
-                    if is_redline:
+                    if has_any_meta:
                         j = i + 1
-                        next_is_redline = False
+                        next_has_meta = False
                         temp_ins_count = len(active_ins)
                         temp_del_count = len(active_del)
                         temp_fmt_count = len(active_fmt)
+                        temp_comment_ids = set(active_ids)
 
                         while j < len(items):
                             next_item = items[j]
@@ -489,8 +490,13 @@ class DocumentMapper:
                                 if not get_run_text(next_item):
                                     j += 1
                                     continue
-                                if temp_ins_count > 0 or temp_del_count > 0 or temp_fmt_count > 0:
-                                    next_is_redline = True
+                                if (
+                                    temp_ins_count > 0
+                                    or temp_del_count > 0
+                                    or temp_fmt_count > 0
+                                    or len(temp_comment_ids) > 0
+                                ):
+                                    next_has_meta = True
                                 break
                             elif isinstance(next_item, DocxEvent):
                                 if next_item.type == "ins_start":
@@ -505,9 +511,13 @@ class DocumentMapper:
                                     temp_fmt_count += 1
                                 elif next_item.type == "fmt_end":
                                     temp_fmt_count = max(0, temp_fmt_count - 1)
+                                elif next_item.type == "start":
+                                    temp_comment_ids.add(next_item.id)
+                                elif next_item.type == "end":
+                                    temp_comment_ids.discard(next_item.id)
                             j += 1
 
-                        if next_is_redline:
+                        if next_has_meta:
                             should_defer = True
 
                     if not should_defer and deferred_meta_states:
