@@ -215,6 +215,88 @@ def extract_anchors(doc) -> Dict[str, Dict[str, Any]]:
     return anchors
 
 
+# FILE: src/adeu/domain.py
+def extract_document_settings_warnings(doc) -> List[str]:
+    """
+    Inspects word/settings.xml for privacy flags that cause Microsoft Word to
+    silently strip attribution from tracked changes and comments the next time
+    the document is opened and saved.
+
+    The engine itself preserves the attribution it writes — but Word will
+    destroy `w:author`, `w:initials`, and/or `w:date` on next save when these
+    flags are enabled. We surface this to the agent at read time so it can
+    decide how to handle the situation before making edits.
+
+    Returns a list of warning strings (one per enabled flag), without leading
+    bullets. Empty list if settings.xml is absent or neither flag is enabled.
+
+    OOXML boolean truthiness:
+      - element absent           → disabled
+      - element present, no w:val → enabled (OOXML default)
+      - element with w:val in {"0","false","off"} (case-insensitive) → disabled
+      - element with any other w:val → enabled
+    """
+    warnings: List[str] = []
+
+    settings_part = None
+    for part in doc.part.package.parts:
+        if str(part.partname) == "/word/settings.xml":
+            settings_part = part
+            break
+    if settings_part is None:
+        return warnings
+
+    # The settings part may be a generic Part or an XmlPart depending on how
+    # python-docx loaded it. Parse the blob directly so this is robust either way.
+    from docx.oxml import parse_xml
+
+    try:
+        root = parse_xml(settings_part.blob)
+    except Exception:
+        return warnings
+
+    def _is_truthy(el) -> bool:
+        # OOXML boolean rule: element present with no w:val attribute defaults to true.
+        # w:val of "0", "false", or "off" (case-insensitive) means disabled.
+        val = el.get(qn("w:val"))
+        if val is None:
+            return True
+        return val.lower() not in ("0", "false", "off")
+
+    # Use iter() + local name matching for namespace-agnostic lookup, mirroring
+    # the TS findDescendantsByLocalName helper. This is robust to settings.xml
+    # variants from different Word versions even though w:settings is the
+    # canonical namespace.
+    def _find_first_by_local_name(local_name: str):
+        suffix = "}" + local_name
+        for el in root.iter():
+            tag = el.tag
+            if isinstance(tag, str) and (tag == local_name or tag.endswith(suffix)):
+                return el
+        return None
+
+    remove_personal = _find_first_by_local_name("removePersonalInformation")
+    if remove_personal is not None and _is_truthy(remove_personal):
+        warnings.append(
+            "[Warning] Privacy flag `removePersonalInformation` is enabled in word/settings.xml. "
+            "Microsoft Word will strip the `w:author`, `w:initials`, and `w:date` attributes "
+            "from every tracked change and comment the next time this document is opened and saved. "
+            "Edits made by this agent will lose attribution, breaking audit trails and any "
+            "multi-turn workflow that relies on identifying prior edits."
+        )
+
+    remove_date_time = _find_first_by_local_name("removeDateAndTime")
+    if remove_date_time is not None and _is_truthy(remove_date_time):
+        warnings.append(
+            "[Warning] Privacy flag `removeDateAndTime` is enabled in word/settings.xml. "
+            "Microsoft Word will strip the `w:date` attribute from every tracked change and "
+            "comment the next time this document is opened and saved. Timestamps on this "
+            "agent's edits will be lost on the next Word save."
+        )
+
+    return warnings
+
+
 def extract_all_domain_metadata(
     doc, base_text: str
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str], Dict[str, Dict[str, Any]]]:
@@ -409,7 +491,7 @@ def build_structural_appendix(doc, base_text: str) -> str:
     Returns an empty string if no relevant domain metadata is found.
     """
     defs, diagnostics, anchors = extract_all_domain_metadata(doc, base_text)
-
+    settings_warnings = extract_document_settings_warnings(doc)
     lines: List[str] = [
         "\n\n---",
         "",
@@ -423,6 +505,12 @@ def build_structural_appendix(doc, base_text: str) -> str:
     ]
 
     has_content = False
+
+    if settings_warnings:
+        has_content = True
+        lines.append("\n## Document Settings")
+        for warning in settings_warnings:
+            lines.append(f"- {warning}")
 
     if defs:
         has_content = True
