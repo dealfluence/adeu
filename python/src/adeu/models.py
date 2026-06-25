@@ -46,9 +46,9 @@ class ModifyText(BaseModel):
     )
 
     match_mode: Literal["strict", "first", "all"] = Field(
-        "strict", description="Resolution strategy for multiple occurrences."
+        default="strict", description="Resolution strategy for multiple occurrences."
     )
-    regex: bool = Field(False, description="Treat target_text as a regular expression.")
+    regex: bool = Field(default=False, description="Treat target_text as a regular expression.")
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
@@ -107,6 +107,9 @@ class InsertTableRow(BaseModel):
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
+    _pages: list[int] = PrivateAttr(default_factory=list)
+    _heading_path: Optional[str] = PrivateAttr(default=None)
+    _occurrences_modified: int = PrivateAttr(default=0)
 
 
 class DeleteTableRow(BaseModel):
@@ -124,6 +127,9 @@ class DeleteTableRow(BaseModel):
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
+    _pages: list[int] = PrivateAttr(default_factory=list)
+    _heading_path: Optional[str] = PrivateAttr(default=None)
+    _occurrences_modified: int = PrivateAttr(default=0)
 
 
 DocumentChange = Annotated[

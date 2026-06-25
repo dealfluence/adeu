@@ -304,12 +304,12 @@ def build_search_response(
         else "",
     ]
 
-    occurrences_map = {}
+    occurrences_map: dict[str, int] = {}
     for m in matches:
         occurrences_map[m.group(0)] = occurrences_map.get(m.group(0), 0) + 1
 
     def get_heading(idx, txt):
-        path = []
+        path: list[str] = []
         current_level = 999
         for line in reversed(txt[:idx].split("\n")):
             m = re.match(r"^(#{1,6})\s+(.*)", line)

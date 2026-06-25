@@ -92,6 +92,7 @@ async def _read_docx_disk(
         if search_query is not None:
             return build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
 
+        page_num = int(page) if str(page).isdigit() else 1
         if mode == "outline":
             return build_outline_response(
                 doc,
@@ -102,9 +103,9 @@ async def _read_docx_disk(
                 paragraph_offsets=paragraph_offsets,
             )
         if mode == "appendix":
-            return build_appendix_response(text, page, file_path)
+            return build_appendix_response(text, page_num, file_path)
         # mode == "full"
-        return build_paginated_response(text, page, file_path)
+        return build_paginated_response(text, page_num, file_path)
 
     except ToolError:
         raise

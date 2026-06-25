@@ -1335,7 +1335,7 @@ class RedlineEngine:
                 break
 
         lines = text[:start_idx].split("\n")
-        path = []
+        path: List[str] = []
         current_level = 999
         for line in reversed(lines):
             m = re.match(r"^(#{1,6})\s+(.*)", line)

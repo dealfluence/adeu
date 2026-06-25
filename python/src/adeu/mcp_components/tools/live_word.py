@@ -324,6 +324,7 @@ if sys.platform == "win32":
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
+                page_num = int(page) if str(page).isdigit() else 1
                 if search_query is not None:
                     from adeu.mcp_components._response_builders import build_search_response
 
@@ -340,9 +341,9 @@ if sys.platform == "win32":
                         paragraph_offsets=paragraph_offsets,
                     )
                 elif mode == "appendix":
-                    res = build_appendix_response(final_text, page, actual_path)
+                    res = build_appendix_response(final_text, page_num, actual_path)
                 else:
-                    res = build_paginated_response(final_text, page, actual_path)
+                    res = build_paginated_response(final_text, page_num, actual_path)
             except ToolError:
                 # Post-extraction errors (e.g. page out of range) propagate as-is —
                 # the document was read successfully; the user's request was bad.
