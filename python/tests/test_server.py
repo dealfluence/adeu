@@ -81,6 +81,24 @@ def test_read_docx_debug_mode(sample_docx):
         assert "[Debug] build=" not in result.structured_content["markdown"]
 
 
+@patch("fastmcp.server.context.Context.info")
+@patch("fastmcp.server.context.Context.debug")
+@patch("fastmcp.server.context.Context.warning")
+@patch("fastmcp.server.context.Context.error")
+def test_read_docx_string_page_hallucination(mock_error, mock_warning, mock_debug, mock_info, sample_docx):
+    """
+    Verifies that if an LLM hallucinates the 'page' parameter as a string (e.g., "1")
+    instead of an integer, the tool safely processes it without throwing a validation error.
+    Testing via the FastMCP server object simulates the JSON-RPC payload boundary.
+    """
+    from adeu.server import mcp
+
+    arguments = {"file_path": sample_docx, "page": "1"}
+    result = asyncio.run(mcp.call_tool("read_docx", arguments))
+    text = "".join(item.text for item in result.content if item.type == "text")
+    assert "This is the original text." in text
+
+
 def test_python_server_version_and_descriptions():
     import asyncio
 
