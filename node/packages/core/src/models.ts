@@ -3,6 +3,8 @@ export interface ModifyText {
   target_text: string;
   new_text: string;
   comment?: string | null;
+  match_mode?: 'strict' | 'first' | 'all';
+  regex?: boolean;
   _match_start_index?: number | null;
   _internal_op?: string | null;
   _active_mapper_ref?: any | null; // Typed as DocumentMapper later

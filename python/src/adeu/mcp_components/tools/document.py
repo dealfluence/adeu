@@ -5,7 +5,7 @@ import sys
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated, Any, List, Literal, Optional
+from typing import Annotated, Any, List, Literal, Optional, Union
 
 from docx import Document as load_document
 from fastmcp import Context
@@ -19,6 +19,7 @@ from adeu.mcp_components._response_builders import (
     build_appendix_response,
     build_outline_response,
     build_paginated_response,
+    build_search_response,
 )
 from adeu.mcp_components.shared import (
     MARKDOWN_UI_URI,
@@ -36,9 +37,12 @@ async def _read_docx_disk(
     ctx: Context,
     clean_view: bool,
     mode: str = "full",
-    page: int = 1,
+    page: Union[int, str] = 1,
     outline_max_level: int = 2,
     outline_verbose: bool = False,
+    search_query: Optional[str] = None,
+    search_regex: bool = False,
+    search_case_sensitive: bool = True,
 ) -> ToolResult:
     """Core logic for reading a DOCX from disk. Dispatches on `mode`."""
     await ctx.info(
@@ -84,6 +88,9 @@ async def _read_docx_disk(
             paragraph_offsets = None
 
         await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+
+        if search_query is not None:
+            return build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
 
         if mode == "outline":
             return build_outline_response(
@@ -175,26 +182,38 @@ async def _process_document_batch_disk(
         else:
             res = f"Batch complete. Saved to: {final_output_path}\n"
 
+        total_occurrences = sum(
+            e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
+        )
+        occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
         res += (
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
-            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.\n"
+            f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
         )
 
         if stats.get("edits"):
             res += "\nDetailed Edit Reports:\n"
             for i, report in enumerate(stats["edits"]):
                 status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
-                res += f"Edit {i + 1} {status_indicator}:\n"
-                res += f"  Target: '{report['target_text']}'\n"
-                res += f"  New text: '{report['new_text']}'\n"
+                pages_str = ", ".join(f"p{p}" for p in report.get("pages", []))
+                page_suffix = f" ({pages_str})" if pages_str else ""
+                res += f"### Edit {i + 1} {status_indicator}{page_suffix}\n"
+                if report.get("heading_path"):
+                    res += f"**Path:** `{report['heading_path']}`\n"
+
+                occ = report.get("occurrences_modified", 0)
+                occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
+                res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
+
                 if report.get("warning"):
-                    res += f"  Warning: {report['warning']}\n"
+                    res += f"*Warning:* {report['warning']}\n"
                 if report.get("error"):
-                    res += f"  Error: {report['error']}\n"
+                    res += f"*Error:* {report['error']}\n"
                 if report.get("critic_markup"):
-                    res += f"  Preview (CriticMarkup): {report['critic_markup']}\n"
+                    res += f"*Preview (CriticMarkup):*\n> {report['critic_markup']}\n"
                 if report.get("clean_text"):
-                    res += f"  Clean text preview: {report['clean_text']}\n"
+                    res += f"*Preview (Clean):*\n> {report['clean_text']}\n"
+                res += "\n"
 
         if stats.get("skipped_details"):
             res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
@@ -468,8 +487,8 @@ if sys.platform == "win32":
             "consult before editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
-            int,
-            "Page number (1-indexed) for mode='full'. Defaults to 1. Ignored when mode='outline'.",
+            Union[int, Literal["all"]],
+            "Page number (1-indexed) for mode='full'. Defaults to 1. Use 'all' in CLI.",
         ] = 1,
         outline_max_level: Annotated[
             int,
@@ -483,6 +502,9 @@ if sys.platform == "win32":
             "presence, and footnote IDs. Off by default to minimize payload size. "
             "Ignored when mode='full'.",
         ] = False,
+        search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
+        search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
+        search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
     ) -> ToolResult:
         start_time = time.perf_counter()
         if not file_path:
@@ -495,6 +517,9 @@ if sys.platform == "win32":
                 page=page,
                 outline_max_level=outline_max_level,
                 outline_verbose=outline_verbose,
+                search_query=search_query,
+                search_regex=search_regex,
+                search_case_sensitive=search_case_sensitive,
             )
         else:
             # Try Live Word first. Fallback to Disk if Word is closed or document isn't open.
@@ -507,6 +532,9 @@ if sys.platform == "win32":
                     page=page,
                     outline_max_level=outline_max_level,
                     outline_verbose=outline_verbose,
+                    search_query=search_query,
+                    search_regex=search_regex,
+                    search_case_sensitive=search_case_sensitive,
                 )
                 await ctx.debug("Read document via Live Word COM.")
             except ToolError:
@@ -526,6 +554,9 @@ if sys.platform == "win32":
                     page,
                     outline_max_level=outline_max_level,
                     outline_verbose=outline_verbose,
+                    search_query=search_query,
+                    search_regex=search_regex,
+                    search_case_sensitive=search_case_sensitive,
                 )
         return add_timing_if_debug(start_time, res)
 
@@ -697,8 +728,8 @@ else:
             "a structural heading map with page numbers; body content is omitted.",
         ] = "full",
         page: Annotated[
-            int,
-            "Page number (1-indexed) for mode='full'. Defaults to 1. Ignored when mode='outline'.",
+            Union[int, Literal["all"]],
+            "Page number (1-indexed) for mode='full'. Defaults to 1.",
         ] = 1,
         outline_max_level: Annotated[
             int,
@@ -712,6 +743,9 @@ else:
             "presence, and footnote IDs. Off by default to minimize payload size. "
             "Ignored when mode='full'.",
         ] = False,
+        search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
+        search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
+        search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
     ) -> ToolResult:
         start_time = time.perf_counter()
         res = await _read_docx_disk(
@@ -722,6 +756,9 @@ else:
             page,
             outline_max_level=outline_max_level,
             outline_verbose=outline_verbose,
+            search_query=search_query,
+            search_regex=search_regex,
+            search_case_sensitive=search_case_sensitive,
         )
         return add_timing_if_debug(start_time, res)
 

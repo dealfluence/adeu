@@ -1,4 +1,3 @@
-# FILE: src/adeu/redline/engine.py
 import datetime
 import re
 from collections import defaultdict
@@ -25,6 +24,7 @@ from adeu.models import (
     RejectChange,
     ReplyComment,
 )
+from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
@@ -283,7 +283,8 @@ class RedlineEngine:
             return None, None
         context_before = full_text[max(0, start_idx - 30) : start_idx]
         context_after = full_text[start_idx + length : start_idx + length + 30]
-        critic_markup = f"{context_before}{{--{target_text}--}}{{++{new_text}++}}{context_after}"
+        insertion = f"{{++{new_text}++}}" if new_text else ""
+        critic_markup = f"{context_before}{{--{target_text}--}}{insertion}{context_after}"
 
         import re
 
@@ -294,10 +295,10 @@ class RedlineEngine:
 
         return critic_markup, clean_text
 
-    def _first_live_match(self, target_text: str) -> Tuple[int, int]:
-        all_matches = self.mapper.find_all_match_indices(target_text)
+    def _first_live_match(self, target_text: str, is_regex: bool = False) -> Tuple[int, int]:
+        all_matches = self.mapper.find_all_match_indices(target_text, is_regex=is_regex)
         if len(all_matches) <= 1:
-            return self.mapper.find_match_index(target_text)
+            return self.mapper.find_match_index(target_text, is_regex=is_regex)
         for start, length in all_matches:
             real_spans = [
                 s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
@@ -306,7 +307,7 @@ class RedlineEngine:
                 return start, length
             if any(not s.del_id for s in real_spans):
                 return start, length
-        return self.mapper.find_match_index(target_text)
+        return self.mapper.find_match_index(target_text, is_regex=is_regex)
 
     def _get_paired_nodes(self, node):
         """
@@ -1168,8 +1169,10 @@ class RedlineEngine:
         for i, edit in enumerate(edits):
             if not edit.target_text:
                 continue  # Skip validation for pure index-based insertions
+            is_regex = getattr(edit, "regex", False)
+            match_mode = getattr(edit, "match_mode", "strict")
 
-            matches = self.mapper.find_all_match_indices(edit.target_text)
+            matches = self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
             active_text = self.mapper.full_text
             target_mapper = self.mapper
 
@@ -1177,7 +1180,7 @@ class RedlineEngine:
             if len(matches) == 0:
                 if not self.clean_mapper:
                     self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-                matches = self.clean_mapper.find_all_match_indices(edit.target_text)
+                matches = self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
                 if len(matches) > 0:
                     active_text = self.clean_mapper.full_text
                     target_mapper = self.clean_mapper
@@ -1189,7 +1192,7 @@ class RedlineEngine:
             if len(matches) == 0:
                 if not self.original_mapper:
                     self.original_mapper = DocumentMapper(self.doc, original_view=True)
-                orig_matches = self.original_mapper.find_all_match_indices(edit.target_text)
+                orig_matches = self.original_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
                 if len(orig_matches) > 0:
                     is_deleted_text = True
                     for start, length in orig_matches:
@@ -1235,7 +1238,7 @@ class RedlineEngine:
                     )
                 else:
                     errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
-            elif len(valid_matches) > 1:
+            elif len(valid_matches) > 1 and match_mode == "strict":
                 # valid_matches is a list of (start, length); the formatter
                 # expects (start, end).
                 positions = [(start, start + length) for start, length in valid_matches]
@@ -1290,11 +1293,16 @@ class RedlineEngine:
                             auth = ins_nodes[0].get(qn("w:author"))
                             if auth and auth != self.author:
                                 nested_authors_to_ids.setdefault(auth, set()).add(s.ins_id)
+                if s.comment_ids:
+                    for cid in s.comment_ids:
+                        c_data = self.mapper.comments_map.get(cid)
+                        if c_data and c_data.get("author") and c_data.get("author") != self.author:
+                            nested_authors_to_ids.setdefault(c_data["author"], set()).add(f"Com:{cid}")
                 if nested_authors_to_ids:
                     author_hints = []
                     for auth in sorted(nested_authors_to_ids.keys()):
                         sorted_ids = sorted(nested_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
-                        id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids)
+                        id_hints = ", ".join(str(cid) if str(cid).startswith("Com:") else f"Chg:{cid}" for cid in sorted_ids)
                         if id_hints:
                             author_hints.append(f"{auth} (e.g. {id_hints})")
                         else:
@@ -1316,6 +1324,32 @@ class RedlineEngine:
         else:
             return self._process_batch_internal(changes, dry_run_mode=False)
 
+    def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
+        page = 1
+        for i, off in enumerate(page_offsets):
+            if start_idx >= off:
+                page = i + 1
+            else:
+                break
+
+        lines = text[:start_idx].split("\n")
+        path = []
+        current_level = 999
+        for line in reversed(lines):
+            m = re.match(r"^(#{1,6})\s+(.*)", line)
+            if m:
+                level = len(m.group(1))
+                if level < current_level:
+                    clean_heading = re.sub(r"\*\*|__|[*_]", "", m.group(2))
+                    clean_heading = re.sub(r"\{#[^}]+\}", "", clean_heading).strip()
+                    if len(clean_heading) > 80:
+                        clean_heading = clean_heading[:80] + "..."
+                    path.insert(0, clean_heading)
+                    current_level = level
+                    if level == 1:
+                        break
+        return " > ".join(path) if path else "", page
+
     def _process_batch_internal(self, changes: List[DocumentChange], dry_run_mode: bool = False) -> dict:
         """
         Internal execution engine for batches of edits and actions.
@@ -1332,6 +1366,10 @@ class RedlineEngine:
             if edits:
                 self.clean_mapper = None
                 self.original_mapper = None
+
+        body_text, _ = split_structural_appendix(self.mapper.full_text)
+        pag_res = paginate(body_text, "")
+        page_offsets = pag_res.body_page_offsets
 
         edits_reports = []
         applied_edits, skipped_edits = 0, 0
@@ -1355,7 +1393,7 @@ class RedlineEngine:
                             }
                         )
                         continue
-                    applied, skipped = self.apply_edits([edit])
+                    applied, skipped = self.apply_edits([edit], page_offsets=page_offsets)
                     if applied > 0:
                         applied_edits += 1
                         critic_markup, clean_text = self._build_edit_context_previews(edit)
@@ -1368,6 +1406,10 @@ class RedlineEngine:
                                 "error": None,
                                 "critic_markup": critic_markup,
                                 "clean_text": clean_text,
+                                "pages": getattr(edit, "_pages", []),
+                                "heading_path": getattr(edit, "_heading_path", ""),
+                                "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
+                                "match_mode": getattr(edit, "match_mode", "strict"),
                             }
                         )
                     else:
@@ -1389,7 +1431,7 @@ class RedlineEngine:
                 if errors:
                     raise BatchValidationError(errors)
                 cloned_edits = [deepcopy(e) for e in edits]
-                applied_edits, skipped_edits = self.apply_edits(cloned_edits)
+                applied_edits, skipped_edits = self.apply_edits(cloned_edits, page_offsets=page_offsets)
                 for edit in cloned_edits:
                     success = getattr(edit, "_applied_status", False)
                     edit_error_msg = getattr(edit, "_error_msg", None)
@@ -1407,6 +1449,10 @@ class RedlineEngine:
                             "error": edit_error_msg,
                             "critic_markup": critic_markup,
                             "clean_text": clean_text,
+                            "pages": getattr(edit, "_pages", []),
+                            "heading_path": getattr(edit, "_heading_path", ""),
+                            "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
+                            "match_mode": getattr(edit, "match_mode", "strict"),
                         }
                     )
 
@@ -1423,7 +1469,15 @@ class RedlineEngine:
             "version": __version__,
         }
 
-    def apply_edits(self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]]) -> tuple[int, int]:
+    def apply_edits(
+        self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]], page_offsets: Optional[List[int]] = None
+    ) -> tuple[int, int]:
+        if page_offsets is None:
+            from adeu.pagination import paginate, split_structural_appendix
+
+            body_text, _ = split_structural_appendix(self.mapper.full_text)
+            page_offsets = paginate(body_text, "").body_page_offsets
+
         applied = 0
         skipped = 0
 
@@ -1466,7 +1520,7 @@ class RedlineEngine:
                             r._parent_edit_ref = edit
                             if edit._resolved_start_idx is None:
                                 edit._resolved_start_idx = r._resolved_start_idx
-                            if not hasattr(edit, "_resolved_proxy_edit"):
+                            if getattr(edit, "_resolved_proxy_edit", None) is None:
                                 edit._resolved_proxy_edit = r
                             resolved_edits.append((r, r.new_text))
                     else:
@@ -1541,6 +1595,21 @@ class RedlineEngine:
                 parent = getattr(edit, "_parent_edit_ref", None)
                 if parent is not None:
                     parent._applied_status = True
+                    parent._occurrences_modified = getattr(parent, "_occurrences_modified", 0) + 1
+                    path, page = self._get_heading_path_and_page(start, self.mapper.full_text, page_offsets)
+                    pages = getattr(parent, "_pages", [])
+                    if page not in pages:
+                        pages.insert(0, page)
+                    parent._pages = pages
+                    parent._heading_path = path
+                else:
+                    edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
+                    path, page = self._get_heading_path_and_page(start, self.mapper.full_text, page_offsets)
+                    pages = getattr(edit, "_pages", [])
+                    if page not in pages:
+                        pages.insert(0, page)
+                    edit._pages = pages
+                    edit._heading_path = path
             else:
                 skipped += 1
 
@@ -1747,37 +1816,72 @@ class RedlineEngine:
         if not edit.target_text:
             return None
 
-        start_idx, match_len = self._first_live_match(edit.target_text)
+        is_regex = getattr(edit, "regex", False)
+        match_mode = getattr(edit, "match_mode", "strict")
 
-        # FALLBACK: If Raw View match failed, try matching against Clean View
-        use_clean_map = False
-        if start_idx == -1:
+        matches = self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+        active_mapper = self.mapper
+
+        if not matches:
             if not self.clean_mapper:
                 self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-
-            start_idx, match_len = self.clean_mapper.find_match_index(edit.target_text)
-            if start_idx != -1:
-                use_clean_map = True
+            matches = self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+            if matches:
+                active_mapper = self.clean_mapper
             else:
                 return None
 
-        active_mapper = self.clean_mapper if use_clean_map else self.mapper
-        assert active_mapper is not None
-        # --- Whole-paragraph replacement fast path ---
-        # Detects: an edit whose target_text exactly matches one full
-        # projected paragraph (heading prefix + content), where new_text is
-        # a single new paragraph (no '\n\n') and where at least one side is
-        # a heading. In that case we route to the PARAGRAPH_REPLACE op,
-        # which track-deletes the entire <w:p> (paragraph break included)
-        # and inserts a fresh styled <w:p>. This avoids the
-        # context-trimming + block-element-insertion path that produces
-        # garbled output for heading-level changes (e.g., '## X' -> '# Y').
-        para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
-        if para_replace is not None:
-            return para_replace
+        live_matches = []
+        for s, match_len in matches:
+            real_spans = [
+                span
+                for span in active_mapper.spans
+                if span.run is not None and span.end > s and span.start < s + match_len
+            ]
+            if not real_spans or any(not span.del_id for span in real_spans):
+                live_matches.append((s, match_len))
 
-        effective_new_text = edit.new_text or ""
-        actual_doc_text = self.mapper.full_text[start_idx : start_idx + match_len]
+        if not live_matches:
+            return None
+
+        if match_mode in ("strict", "first"):
+            live_matches = live_matches[:1]
+
+        all_sub_edits = []
+
+        for start_idx, match_len in live_matches:
+            actual_doc_text = active_mapper.full_text[start_idx : start_idx + match_len]
+            current_effective_new_text = edit.new_text or ""
+
+            if is_regex and current_effective_new_text:
+                try:
+                    current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
+                except re.error:
+                    pass
+
+            para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
+            if para_replace is not None:
+                if is_regex:
+                    para_replace.new_text = current_effective_new_text
+                all_sub_edits.append(para_replace)
+                continue
+
+            res = self._resolve_single_match(
+                edit, start_idx, match_len, active_mapper, actual_doc_text, current_effective_new_text
+            )
+            if isinstance(res, list):
+                all_sub_edits.extend(res)
+            elif res:
+                all_sub_edits.append(res)
+
+        if not all_sub_edits:
+            return None
+
+        if match_mode == "all" or len(all_sub_edits) > 1:
+            return all_sub_edits
+        return all_sub_edits[0]
+
+    def _resolve_single_match(self, edit, start_idx, match_len, active_mapper, actual_doc_text, effective_new_text):
 
         if "](" in actual_doc_text:
             t_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", actual_doc_text))

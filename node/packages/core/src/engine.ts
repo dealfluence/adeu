@@ -13,6 +13,7 @@ import {
 } from "./models.js";
 import { trim_common_context } from "./diff.js";
 import { findChild, findAllDescendants, serializeXml } from "./docx/dom.js";
+import { split_structural_appendix, paginate } from "./pagination.js";
 import {
   is_heading_paragraph,
   is_native_heading,
@@ -279,7 +280,8 @@ export class RedlineEngine {
       start_idx + length + 30,
     );
 
-    const critic_markup = `${context_before}{--${target_text}--}{++${new_text}++}${context_after}`;
+    const insertion = new_text ? `{++${new_text}++}` : "";
+    const critic_markup = `${context_before}{--${target_text}--}${insertion}${context_after}`;
 
     let clean_text = critic_markup;
     clean_text = clean_text.replace(/\{>>.*?<<\}/gs, "");
@@ -299,6 +301,40 @@ export class RedlineEngine {
       }
     }
     return maxId;
+  }
+
+  private _get_heading_path_and_page(start_idx: number, text: string, page_offsets: number[]): [string, number] {
+    let page = 1;
+    for (let i = 0; i < page_offsets.length; i++) {
+      if (start_idx >= page_offsets[i]) {
+        page = i + 1;
+      } else {
+        break;
+      }
+    }
+
+    const textBefore = text.substring(0, start_idx);
+    const lines = textBefore.split("\n");
+    const path: string[] = [];
+    let current_level = 999;
+    
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      const m = line.match(/^(#{1,6})\s+(.*)/);
+      if (m) {
+        const level = m[1].length;
+        if (level < current_level) {
+          let cleanHeading = m[2].replace(/\*\*|__|[*_]/g, "").replace(/\{#[^}]+\}/g, "").trim();
+          if (cleanHeading.length > 80) {
+            cleanHeading = cleanHeading.substring(0, 80) + "...";
+          }
+          path.unshift(cleanHeading);
+          current_level = level;
+          if (level === 1) break;
+        }
+      }
+    }
+    return [path.join(" > "), page];
   }
 
   public accept_all_revisions() {
@@ -1193,15 +1229,18 @@ export class RedlineEngine {
     for (let i = 0; i < edits.length; i++) {
       const edit = edits[i];
       if (!edit.target_text) continue;
+      
+      const is_regex = (edit as any).regex || false;
+      const match_mode = (edit as any).match_mode || "strict";
 
-      let matches = this.mapper.find_all_match_indices(edit.target_text);
+      let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
       let activeText = this.mapper.full_text;
       let target_mapper = this.mapper;
 
       if (matches.length === 0) {
         if (!this.clean_mapper)
           this.clean_mapper = new DocumentMapper(this.doc, true);
-        matches = this.clean_mapper.find_all_match_indices(edit.target_text);
+        matches = this.clean_mapper.find_all_match_indices(edit.target_text, is_regex);
         if (matches.length > 0) {
           activeText = this.clean_mapper.full_text;
           target_mapper = this.clean_mapper;
@@ -1233,7 +1272,7 @@ export class RedlineEngine {
         if (!this.original_mapper) {
           this.original_mapper = new DocumentMapper(this.doc, false, true);
         }
-        const orig_matches = this.original_mapper.find_all_match_indices(edit.target_text);
+        const orig_matches = this.original_mapper.find_all_match_indices(edit.target_text, is_regex);
         if (orig_matches.length > 0) {
           is_deleted_text = true;
           for (const [start, length] of orig_matches) {
@@ -1272,7 +1311,7 @@ export class RedlineEngine {
             `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"`,
           );
         }
-      } else if (matches.length > 1) {
+      } else if (matches.length > 1 && match_mode === "strict") {
         const positions: [number, number][] = matches.map(([start, length]) => [
           start,
           start + length,
@@ -1341,6 +1380,14 @@ export class RedlineEngine {
             if (insNodes.length > 0) {
               const auth = insNodes[0].getAttribute("w:author");
               if (auth && auth !== this.author) nestedAuthors.add(auth);
+            }
+          }
+          if (s.comment_ids) {
+            for (const cid of s.comment_ids) {
+              const c_data = this.mapper.comments_map[cid];
+              if (c_data && c_data.author && c_data.author !== this.author) {
+                nestedAuthors.add(c_data.author);
+              }
             }
           }
         }
@@ -1501,6 +1548,10 @@ export class RedlineEngine {
       }
     }
 
+    const [body_text] = split_structural_appendix(this.mapper.full_text);
+    const pag_res = paginate(body_text, "");
+    const page_offsets = pag_res.body_page_offsets;
+
     const edits_reports: any[] = [];
     let applied_edits = 0;
     let skipped_edits = 0;
@@ -1525,9 +1576,8 @@ export class RedlineEngine {
             });
             continue;
           }
-          const res = this.apply_edits([edit]);
-          const applied = res[0];
-          if (applied > 0) {
+          const res = this.apply_edits([edit], page_offsets);
+          if ((edit as any)._applied_status) {
             applied_edits++;
             const previews = this._build_edit_context_previews(edit);
             edits_reports.push({
@@ -1538,6 +1588,10 @@ export class RedlineEngine {
               error: null,
               critic_markup: previews[0],
               clean_text: previews[1],
+              pages: (edit as any)._pages || [],
+              heading_path: (edit as any)._heading_path || "",
+              occurrences_modified: (edit as any)._occurrences_modified || 0,
+              match_mode: (edit as any).match_mode || "strict",
             });
           } else {
             skipped_edits++;
@@ -1562,9 +1616,9 @@ export class RedlineEngine {
           throw new BatchValidationError(errors);
         }
         const cloned_edits = edits.map((e) => JSON.parse(JSON.stringify(e)));
-        const res = this.apply_edits(cloned_edits);
-        applied_edits = res[0];
-        skipped_edits = res[1];
+        const res = this.apply_edits(cloned_edits, page_offsets);
+        applied_edits = cloned_edits.filter((e) => (e as any)._applied_status).length;
+        skipped_edits = cloned_edits.length - applied_edits;
 
         for (const edit of cloned_edits) {
           const success = (edit as any)._applied_status || false;
@@ -1587,6 +1641,10 @@ export class RedlineEngine {
             error: error_msg,
             critic_markup: critic_markup,
             clean_text: clean_text,
+            pages: (edit as any)._pages || [],
+            heading_path: (edit as any)._heading_path || "",
+            occurrences_modified: (edit as any)._occurrences_modified || 0,
+            match_mode: (edit as any).match_mode || "strict",
           });
         }
       }
@@ -1604,9 +1662,14 @@ export class RedlineEngine {
     };
   }
 
-  public apply_edits(edits: any[]): [number, number] {
+  public apply_edits(edits: any[], page_offsets: number[] = []): [number, number] {
     let applied = 0;
     let skipped = 0;
+
+    if (!page_offsets || page_offsets.length === 0) {
+      const [body_text] = split_structural_appendix(this.mapper.full_text);
+      page_offsets = paginate(body_text, "").body_page_offsets;
+    }
     const resolved_edits: [any, string | null][] = [];
 
     for (const edit of edits) {
@@ -1728,6 +1791,19 @@ export class RedlineEngine {
         const parent = edit._parent_edit_ref;
         if (parent) {
           parent._applied_status = true;
+          parent._occurrences_modified = (parent._occurrences_modified || 0) + 1;
+          const [path, page] = this._get_heading_path_and_page(start, this.mapper.full_text, page_offsets);
+          const pages: number[] = parent._pages || [];
+          if (!pages.includes(page)) pages.unshift(page);
+          parent._pages = pages;
+          parent._heading_path = path;
+        } else {
+          edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
+          const [path, page] = this._get_heading_path_and_page(start, this.mapper.full_text, page_offsets);
+          const pages: number[] = edit._pages || [];
+          if (!pages.includes(page)) pages.unshift(page);
+          edit._pages = pages;
+          edit._heading_path = path;
         }
       } else {
         skipped++;
@@ -1899,127 +1975,138 @@ export class RedlineEngine {
     return false;
   }
 
-  /**
-   * Returns the first match of `target_text` in the raw mapper that is NOT
-   * entirely contained within a tracked deletion (<w:del>). Tracked-deleted
-   * copies are not live, editable text, so an edit must resolve to a live
-   * occurrence even when a dead copy appears earlier in the document
-   * (BUG-23-5). Falls back to the plain first match when no live copy is
-   * found (e.g. fuzzy/normalized matches the span filter cannot align).
-   */
-  private _first_live_match(target_text: string): [number, number] {
-    const all = this.mapper.find_all_match_indices(target_text);
-    if (all.length <= 1) {
-      return this.mapper.find_match_index(target_text);
-    }
-    for (const [start, length] of all) {
-      const realSpans = this.mapper.spans.filter(
-        (s) => s.run !== null && s.end > start && s.start < start + length,
-      );
-      if (realSpans.length === 0) return [start, length];
-      if (realSpans.some((s) => !s.del_id)) return [start, length];
-    }
-    return this.mapper.find_match_index(target_text);
-  }
-
   private _pre_resolve_heuristic_edit(edit: any): any {
     if (!edit.target_text) return null;
 
-    let [start_idx, match_len] = this._first_live_match(edit.target_text);
+    const is_regex = edit.regex || false;
+    const match_mode = edit.match_mode || "strict";
+
+    let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
     let use_clean_map = false;
 
-    if (start_idx === -1) {
+    if (matches.length === 0) {
       if (!this.clean_mapper)
         this.clean_mapper = new DocumentMapper(this.doc, true);
-      [start_idx, match_len] = this.clean_mapper.find_match_index(
-        edit.target_text,
-      );
-      if (start_idx !== -1) use_clean_map = true;
+      matches = this.clean_mapper.find_all_match_indices(edit.target_text, is_regex);
+      if (matches.length > 0) use_clean_map = true;
       else return null;
     }
 
     const active_mapper = use_clean_map ? this.clean_mapper! : this.mapper;
-    const effective_new_text = edit.new_text || "";
-    const actual_doc_text = this.mapper.full_text.substring(
-      start_idx,
-      start_idx + match_len,
-    );
 
-    const [edit_target_clean, edit_target_style] = this._parse_markdown_style(edit.target_text);
-    const [edit_new_clean, edit_new_style] = this._parse_markdown_style(effective_new_text);
+    let live_matches: [number, number][] = [];
+    for (const [s, match_len] of matches) {
+      const realSpans = active_mapper.spans.filter(
+        (span) => span.run !== null && span.end > s && span.start < s + match_len
+      );
+      if (realSpans.length === 0 || realSpans.some((span) => !span.del_id)) {
+        live_matches.push([s, match_len]);
+      }
+    }
 
-    if (edit_target_style !== edit_new_style) {
-      const [actual_clean] = this._parse_markdown_style(actual_doc_text);
-      const final_target = actual_clean;
-      const final_new = edit_new_clean;
-      const style_op = final_target === final_new ? "STYLE_ONLY" : "STYLE_AND_TEXT";
-      const prefix_offset = actual_doc_text.indexOf(actual_clean);
-      const effective_start_idx = start_idx + (prefix_offset !== -1 ? prefix_offset : 0);
-      const resolved_style = edit_new_style !== null ? edit_new_style : "Normal";
+    if (live_matches.length === 0) return null;
 
-      return {
+    if (match_mode === "strict" || match_mode === "first") {
+      live_matches = live_matches.slice(0, 1);
+    }
+
+    const all_sub_edits: any[] = [];
+
+    for (const [start_idx, match_len] of live_matches) {
+      const actual_doc_text = active_mapper.full_text.substring(
+        start_idx,
+        start_idx + match_len,
+      );
+      let current_effective_new_text = edit.new_text || "";
+
+      if (is_regex && current_effective_new_text) {
+        try {
+          current_effective_new_text = actual_doc_text.replace(new RegExp(edit.target_text), current_effective_new_text);
+        } catch (e) {}
+      }
+
+      const [edit_target_clean, edit_target_style] = this._parse_markdown_style(edit.target_text);
+      const [edit_new_clean, edit_new_style] = this._parse_markdown_style(current_effective_new_text);
+
+      if (edit_target_style !== edit_new_style) {
+        const [actual_clean] = this._parse_markdown_style(actual_doc_text);
+        const final_target = actual_clean;
+        const final_new = edit_new_clean;
+        const style_op = final_target === final_new ? "STYLE_ONLY" : "STYLE_AND_TEXT";
+        const prefix_offset = actual_doc_text.indexOf(actual_clean);
+        const effective_start_idx = start_idx + (prefix_offset !== -1 ? prefix_offset : 0);
+        const resolved_style = edit_new_style !== null ? edit_new_style : "Normal";
+
+        all_sub_edits.push({
+          type: "modify",
+          target_text: final_target,
+          new_text: final_new,
+          comment: edit.comment,
+          _match_start_index: effective_start_idx,
+          _internal_op: style_op,
+          _new_style: resolved_style,
+          _active_mapper_ref: active_mapper,
+        });
+        continue;
+      }
+
+      if (
+        actual_doc_text === current_effective_new_text ||
+        edit.target_text === current_effective_new_text
+      ) {
+        all_sub_edits.push({
+          type: "modify",
+          target_text: actual_doc_text,
+          new_text: actual_doc_text,
+          comment: edit.comment,
+          _match_start_index: start_idx,
+          _internal_op: "COMMENT_ONLY",
+          _active_mapper_ref: active_mapper,
+        });
+        continue;
+      }
+
+      let effective_op = "";
+      let final_target = "";
+      let final_new = "";
+      let effective_start_idx = start_idx;
+
+      if (current_effective_new_text.startsWith(actual_doc_text)) {
+        effective_op = "INSERTION";
+        final_new = current_effective_new_text.substring(actual_doc_text.length);
+        effective_start_idx = start_idx + match_len;
+      } else {
+        const [prefix_len, suffix_len] = trim_common_context(
+          actual_doc_text,
+          current_effective_new_text,
+        );
+        const t_end = actual_doc_text.length - suffix_len;
+        const n_end = current_effective_new_text.length - suffix_len;
+
+        final_target = actual_doc_text.substring(prefix_len, t_end);
+        final_new = current_effective_new_text.substring(prefix_len, n_end);
+        effective_start_idx = start_idx + prefix_len;
+
+        if (!final_target && final_new) effective_op = "INSERTION";
+        else if (final_target && !final_new) effective_op = "DELETION";
+        else if (final_target && final_new) effective_op = "MODIFICATION";
+        else effective_op = "COMMENT_ONLY";
+      }
+
+      all_sub_edits.push({
         type: "modify",
         target_text: final_target,
         new_text: final_new,
         comment: edit.comment,
         _match_start_index: effective_start_idx,
-        _internal_op: style_op,
-        _new_style: resolved_style,
+        _internal_op: effective_op,
         _active_mapper_ref: active_mapper,
-      };
+      });
     }
 
-    if (
-      actual_doc_text === effective_new_text ||
-      edit.target_text === effective_new_text
-    ) {
-      return {
-        type: "modify",
-        target_text: actual_doc_text,
-        new_text: actual_doc_text,
-        comment: edit.comment,
-        _match_start_index: start_idx,
-        _internal_op: "COMMENT_ONLY",
-        _active_mapper_ref: active_mapper,
-      };
-    }
-
-    let effective_op = "";
-    let final_target = "";
-    let final_new = "";
-    let effective_start_idx = start_idx;
-
-    if (effective_new_text.startsWith(actual_doc_text)) {
-      effective_op = "INSERTION";
-      final_new = effective_new_text.substring(actual_doc_text.length);
-      effective_start_idx = start_idx + match_len;
-    } else {
-      const [prefix_len, suffix_len] = trim_common_context(
-        actual_doc_text,
-        effective_new_text,
-      );
-      const t_end = actual_doc_text.length - suffix_len;
-      const n_end = effective_new_text.length - suffix_len;
-
-      final_target = actual_doc_text.substring(prefix_len, t_end);
-      final_new = effective_new_text.substring(prefix_len, n_end);
-      effective_start_idx = start_idx + prefix_len;
-
-      if (!final_target && final_new) effective_op = "INSERTION";
-      else if (final_target && !final_new) effective_op = "DELETION";
-      else if (final_target && final_new) effective_op = "MODIFICATION";
-      else effective_op = "COMMENT_ONLY";
-    }
-
-    return {
-      type: "modify",
-      target_text: final_target,
-      new_text: final_new,
-      comment: edit.comment,
-      _match_start_index: effective_start_idx,
-      _internal_op: effective_op,
-      _active_mapper_ref: active_mapper,
-    };
+    if (all_sub_edits.length === 0) return null;
+    if (match_mode === "all" || all_sub_edits.length > 1) return all_sub_edits;
+    return all_sub_edits[0];
   }
 
   private _apply_single_edit_indexed(

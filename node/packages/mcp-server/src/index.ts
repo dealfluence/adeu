@@ -24,6 +24,7 @@ import {
   build_paginated_response,
   build_outline_response,
   build_appendix_response,
+  build_search_response,
 } from "./response-builders.js";
 
 import { login_to_adeu_cloud, logout_of_adeu_cloud } from "./tools/auth.js";
@@ -224,9 +225,9 @@ registerAppTool(
           "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms.",
         ),
       page: z
-        .number()
+        .union([z.number(), z.literal("all")])
         .default(1)
-        .describe("Page number (1-indexed) for mode='full'. Defaults to 1."),
+        .describe("Page number (1-indexed) for mode='full', or 'all' to return unpaginated."),
       outline_max_level: z
         .number()
         .default(2)
@@ -235,6 +236,18 @@ registerAppTool(
         .boolean()
         .default(false)
         .describe("For mode='outline' only: includes metadata."),
+      search_query: z
+        .string()
+        .optional()
+        .describe("The substring or regex pattern to search for. When provided, filters results to matching paragraphs."),
+      search_regex: z
+        .boolean()
+        .default(false)
+        .describe("Set to true to interpret search_query as a regular expression."),
+      search_case_sensitive: z
+        .boolean()
+        .default(true)
+        .describe("Set to false to perform case-insensitive matching."),
     }),
     _meta: { ui: { resourceUri: MARKDOWN_UI_URI } },
   },
@@ -245,6 +258,9 @@ registerAppTool(
     page,
     outline_max_level,
     outline_verbose,
+    search_query,
+    search_regex,
+    search_case_sensitive,
   }) => {
     try {
       const buf = readFileBytesOrThrow(file_path);
@@ -267,11 +283,15 @@ registerAppTool(
       }
 
       const text = await extractTextFromBuffer(buf, clean_view);
-      if (mode === "appendix") {
-        const res = build_appendix_response(text, page, file_path);
+      if (search_query !== undefined && search_query !== null) {
+        const res = build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path);
         return res as any;
       }
-      const res = build_paginated_response(text, page, file_path);
+      if (mode === "appendix") {
+        const res = build_appendix_response(text, typeof page === "number" ? page : parseInt(page, 10) || 1, file_path);
+        return res as any;
+      }
+      const res = build_paginated_response(text, typeof page === "number" ? page : parseInt(page, 10) || 1, file_path);
       return res as any;
     } catch (e: any) {
       return {
@@ -728,8 +748,11 @@ export function formatBatchResult(
   } else {
     res = `Batch complete. Saved to: ${outPath}\n`;
   }
+  const total_occurrences = stats.edits ? stats.edits.reduce((acc: number, e: any) => acc + (e.status === "applied" ? (e.occurrences_modified || 1) : 0), 0) : 0;
+  const occ_text = total_occurrences > stats.edits_applied ? ` (${total_occurrences} occurrences)` : "";
+
   res += `Actions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped.\n`;
-  res += `Edits: ${stats.edits_applied} applied, ${stats.edits_skipped} skipped.\n`;
+  res += `Edits: ${stats.edits_applied} applied${occ_text}, ${stats.edits_skipped} skipped.\n`;
 
   if (stats.edits && stats.edits.length > 0) {
     res += "\nDetailed Edit Reports:\n";
@@ -737,28 +760,43 @@ export function formatBatchResult(
       const report = stats.edits[i];
       const status_indicator =
         report.status === "applied" ? "✅ [applied]" : "❌ [failed]";
-      res += `Edit ${i + 1} ${status_indicator}:\n`;
-      res += `  Target: '${report.target_text}'\n`;
-      res += `  New text: '${report.new_text}'\n`;
-      if (report.warning) {
-        res += `  Warning: ${report.warning}\n`;
+        
+      const pagesStr = report.pages && report.pages.length > 0 
+        ? ` (p${report.pages.join(", p")})` 
+        : "";
+        
+      res += `### Edit ${i + 1} ${status_indicator}${pagesStr}\n`;
+      
+      if (report.heading_path) {
+        res += `**Path:** \`${report.heading_path}\`\n`;
       }
+      
+      if (report.match_mode) {
+         const occ = report.occurrences_modified || (report.status === "applied" ? 1 : 0);
+         res += `**Mode:** \`${report.match_mode}\` (${occ} occurrence${occ !== 1 ? 's' : ''} modified)\n`;
+      }
+
       if (report.error) {
-        res += `  Error: ${report.error}\n`;
+        res += `*Error:* ${report.error}\n`;
       }
+      if (report.warning) {
+        res += `*Warning:* ${report.warning}\n`;
+      }
+      
       if (report.critic_markup) {
-        res += `  Preview (CriticMarkup): ${report.critic_markup}\n`;
+        res += `*Preview (CriticMarkup):*\n> ${report.critic_markup.split('\\n').join('\\n> ')}\n`;
       }
       if (report.clean_text) {
-        res += `  Clean text preview: ${report.clean_text}\n`;
+        res += `*Preview (Clean):*\n> ${report.clean_text.split('\\n').join('\\n> ')}\n`;
       }
+      res += "\n";
     }
   }
 
   if (stats.skipped_details && stats.skipped_details.length > 0) {
-    res += `\n\nSkipped Details:\n${stats.skipped_details.join("\n")}`;
+    res += `Skipped Details:\n${stats.skipped_details.join("\n")}`;
   }
-  return res;
+  return res.trim();
 }
 
 // --- Startup ---

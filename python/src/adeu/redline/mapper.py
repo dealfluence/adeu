@@ -38,6 +38,7 @@ class TextSpan:
     ins_id: Optional[str] = None
     del_id: Optional[str] = None
     hyperlink_id: Optional[str] = None
+    comment_ids: Optional[List[str]] = None
 
 
 def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
@@ -349,7 +350,7 @@ class DocumentMapper:
         current_wrappers = ("", "")
         current_style = ("", "")
         active_hyperlink_id = None
-        pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str]]] = []
+        pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str], List[str]]] = []
 
         def flush_pending_runs():
             nonlocal current, pending_runs
@@ -359,7 +360,7 @@ class DocumentMapper:
             if s_tok:
                 self._add_virtual_text(s_tok, current, paragraph)
                 current += len(s_tok)
-            for kind, txt, r_obj, i_id, d_id in pending_runs:
+            for kind, txt, r_obj, i_id, d_id, c_ids in pending_runs:
                 if kind == "virtual":
                     self._add_virtual_text(txt, current, paragraph, hyperlink_id=active_hyperlink_id)
                 else:
@@ -372,6 +373,7 @@ class DocumentMapper:
                         ins_id=i_id,
                         del_id=d_id,
                         hyperlink_id=active_hyperlink_id,
+                        comment_ids=c_ids if c_ids else None,
                     )
                     self.spans.append(span)
                     self._text_chunks.append(txt)
@@ -448,19 +450,21 @@ class DocumentMapper:
                             pending_runs.pop()
                             skip_leading_prefix = True
 
+                        curr_comment_ids = list(active_ids)
                         for kind, txt, r_obj in run_parts:
                             if skip_leading_prefix and kind == "virtual" and txt == new_style[0]:
                                 skip_leading_prefix = False
                                 continue
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id, curr_comment_ids))
 
                         current_style = new_style
                     else:
                         flush_pending_runs()
                         current_wrappers = new_wrappers
                         current_style = new_style
+                        curr_comment_ids = list(active_ids)
                         for kind, txt, r_obj in run_parts:
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id))
+                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id, curr_comment_ids))
 
                 if not self.clean_view and not self.original_view:
                     has_meta = active_ins or active_del or active_ids or active_fmt
@@ -752,11 +756,23 @@ class DocumentMapper:
             idx = haystack.find(needle, idx + 1)
         return -1
 
-    def find_match_index(self, target_text: str) -> Tuple[int, int]:
+    def find_match_index(
+        self, target_text: str, is_regex: bool = False, case_sensitive: bool = True
+    ) -> Tuple[int, int]:
         """
         Returns (start_index, match_length).
         Returns (-1, 0) if not found.
         """
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if is_regex:
+            try:
+                match = re.search(target_text, self.full_text, flags=flags)
+                if match and not self._range_in_deletion(match.start(), match.end() - match.start()):
+                    return match.start(), match.end() - match.start()
+            except re.error:
+                pass
+            return -1, 0
+
         # 1. Exact Match (skipping any occurrence buried inside a w:del)
         start_idx = self._first_live_index(self.full_text, target_text)
         if start_idx != -1:
@@ -775,7 +791,7 @@ class DocumentMapper:
         # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
-            match = re.search(pattern, self.full_text)
+            match = re.search(pattern, self.full_text, flags=flags)
             if match:
                 return match.start(), match.end() - match.start()
         except re.error:
@@ -783,7 +799,9 @@ class DocumentMapper:
 
         return -1, 0
 
-    def find_all_match_indices(self, target_text: str) -> List[Tuple[int, int]]:
+    def find_all_match_indices(
+        self, target_text: str, is_regex: bool = False, case_sensitive: bool = True
+    ) -> List[Tuple[int, int]]:
         """
         Returns a list of all non-overlapping matches as (start_index, match_length).
         Returns an empty list if not found.
@@ -791,28 +809,36 @@ class DocumentMapper:
         if not target_text:
             return []
 
+        flags = 0 if case_sensitive else re.IGNORECASE
+
+        if is_regex:
+            try:
+                return [(m.start(), m.end() - m.start()) for m in re.finditer(target_text, self.full_text, flags=flags)]
+            except re.error:
+                return []
+
         # 1. Exact Match
-        matches = [m.span() for m in re.finditer(re.escape(target_text), self.full_text)]
+        matches = [m.span() for m in re.finditer(re.escape(target_text), self.full_text, flags=flags)]
         if matches:
             return [(s, e - s) for s, e in matches]
 
         # 2. Smart Quote Normalization
         norm_full = self._replace_smart_quotes(self.full_text)
         norm_target = self._replace_smart_quotes(target_text)
-        matches = [m.span() for m in re.finditer(re.escape(norm_target), norm_full)]
+        matches = [m.span() for m in re.finditer(re.escape(norm_target), norm_full, flags=flags)]
         if matches:
             return [(s, e - s) for s, e in matches]
 
         # 3. Strip markdown from target
         stripped_target = self._strip_markdown_formatting(target_text)
-        matches = [m.span() for m in re.finditer(re.escape(stripped_target), self.full_text)]
+        matches = [m.span() for m in re.finditer(re.escape(stripped_target), self.full_text, flags=flags)]
         if matches:
             return [(s, e - s) for s, e in matches]
 
         # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
-            matches = [m.span() for m in re.finditer(pattern, self.full_text)]
+            matches = [m.span() for m in re.finditer(pattern, self.full_text, flags=flags)]
             if matches:
                 return [(s, e - s) for s, e in matches]
         except re.error:

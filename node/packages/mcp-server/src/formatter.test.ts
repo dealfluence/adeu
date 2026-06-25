@@ -16,7 +16,11 @@ describe("MCP Server Tool Output Formatter", () => {
           warning: "Warning: target_text contains punctuation.",
           error: null,
           critic_markup: "The {--quick brown fox--}{++fast red fox++} jumps over",
-          clean_text: "The fast red fox jumps over"
+          clean_text: "The fast red fox jumps over",
+          match_mode: "strict",
+          occurrences_modified: 1,
+          pages: [1],
+          heading_path: "1. Intro"
         }
       ],
       skipped_details: []
@@ -29,9 +33,11 @@ describe("MCP Server Tool Output Formatter", () => {
     expect(res).toContain("Actions: 0 applied");
     expect(res).toContain("Edits: 1 applied");
     expect(res).toContain("Detailed Edit Reports:");
-    expect(res).toContain("✅ [applied]");
-    expect(res).toContain("Warning: Warning: target_text contains punctuation.");
-    expect(res).toContain("Preview (CriticMarkup): The {--quick brown fox--}{++fast red fox++} jumps over");
+    expect(res).toContain("### Edit 1 ✅ [applied] (p1)");
+    expect(res).toContain("**Path:** `1. Intro`");
+    expect(res).toContain("**Mode:** `strict` (1 occurrence modified)");
+    expect(res).toContain("*Warning:* Warning: target_text contains punctuation.");
+    expect(res).toContain("*Preview (CriticMarkup):*\n> The {--quick brown fox--}{++fast red fox++} jumps over");
   });
 
   it("formats a failed batch result correctly", () => {
@@ -57,8 +63,8 @@ describe("MCP Server Tool Output Formatter", () => {
     const res = formatBatchResult(stats, "dummy_processed.docx", false);
 
     expect(res).toContain("Batch complete. Saved to: dummy_processed.docx");
-    expect(res).toContain("❌ [failed]");
-    expect(res).toContain("Error: Target text not found in document");
+    expect(res).toContain("### Edit 1 ❌ [failed]");
+    expect(res).toContain("*Error:* Target text not found in document");
     expect(res).toContain("Skipped Details:\n- Failed to apply edit targeting: 'NON_EXISTENT...'");
   });
 });

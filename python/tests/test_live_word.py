@@ -138,7 +138,9 @@ def test_live_word_cross_boundary_edits_rescue_comments(active_word_app):
 
     async def run_test():
         changes = [ModifyText(target_text="manuscript", new_text="typescript")]
-        await process_active_word_batch(ctx, changes=changes, author_name="Agent")
+        # To bypass foreign author protection, the batch author must match Word's native comment author
+        current_user = app.UserName
+        await process_active_word_batch(ctx, changes=changes, author_name=current_user)
         content = extract_content(await read_active_word_document(ctx))
         assert "Editorial comment" in content
         assert "{++typescript++}" in content
@@ -545,11 +547,11 @@ def test_live_word_batch_fixes_ambiguity_and_comment_duplication(active_word_app
         ]
 
         # 4. Execute Batches
-        ambig_res = await process_active_word_batch(ctx=ctx, changes=ambiguous_batch, author_name="Adeu AI")
+        ambig_res = await process_active_word_batch(ctx=ctx, changes=ambiguous_batch, author_name="Test Reviewer")
         assert "Failed: 1" in ambig_res
         assert "Ambiguous match" in ambig_res
 
-        result = await process_active_word_batch(ctx=ctx, changes=valid_batch, author_name="Adeu AI")
+        result = await process_active_word_batch(ctx=ctx, changes=valid_batch, author_name="Test Reviewer")
 
         # 5. Assertions
         assert "Applied: 2" in result, f"Expected 2 applied edits. Result: {result}"

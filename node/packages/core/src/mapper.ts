@@ -23,6 +23,7 @@ export interface TextSpan {
   ins_id?: string | null;
   del_id?: string | null;
   hyperlink_id?: string | null;
+  comment_ids?: string[];
 }
 
 export function renumber_snapshot_ids(
@@ -321,6 +322,7 @@ export class DocumentMapper {
       Run | null,
       string | null,
       string | null,
+      string[],
     ][] = [];
 
     const flush_pending_runs = () => {
@@ -330,7 +332,7 @@ export class DocumentMapper {
         this._add_virtual_text(s_tok, current, paragraph);
         current += s_tok.length;
       }
-      for (const [kind, txt, r_obj, i_id, d_id] of pending_runs) {
+      for (const [kind, txt, r_obj, i_id, d_id, c_ids] of pending_runs) {
         if (kind === "virtual") {
           this._add_virtual_text(txt, current, paragraph, active_hyperlink_id);
         } else {
@@ -343,6 +345,7 @@ export class DocumentMapper {
             ins_id: i_id || undefined,
             del_id: d_id || undefined,
             hyperlink_id: active_hyperlink_id || undefined,
+            comment_ids: c_ids.length > 0 ? c_ids : undefined,
           };
           this.spans.push(s);
           this._text_chunks.push(txt);
@@ -442,6 +445,7 @@ export class DocumentMapper {
               skip_leading_prefix = true;
             }
 
+            const curr_comment_ids = Array.from(active_ids);
             for (const [kind, txt, r_obj] of run_parts) {
               if (
                 skip_leading_prefix &&
@@ -451,15 +455,30 @@ export class DocumentMapper {
                 skip_leading_prefix = false;
                 continue;
               }
-              pending_runs.push([kind, txt, r_obj, curr_ins_id, curr_del_id]);
+              pending_runs.push([
+                kind,
+                txt,
+                r_obj,
+                curr_ins_id,
+                curr_del_id,
+                curr_comment_ids,
+              ]);
             }
             current_style = new_style;
           } else {
             flush_pending_runs();
             current_wrappers = new_wrappers;
             current_style = new_style;
+            const curr_comment_ids = Array.from(active_ids);
             for (const [kind, txt, r_obj] of run_parts) {
-              pending_runs.push([kind, txt, r_obj, curr_ins_id, curr_del_id]);
+              pending_runs.push([
+                kind,
+                txt,
+                r_obj,
+                curr_ins_id,
+                curr_del_id,
+                curr_comment_ids,
+              ]);
             }
           }
         }
@@ -759,7 +778,19 @@ export class DocumentMapper {
     return parts.join("");
   }
 
-  public find_match_index(target_text: string): [number, number] {
+  public find_match_index(
+    target_text: string,
+    is_regex: boolean = false,
+  ): [number, number] {
+    if (is_regex) {
+      try {
+        const pattern = new RegExp(target_text);
+        const match = pattern.exec(this.full_text);
+        if (match) return [match.index, match[0].length];
+      } catch (e) {}
+      return [-1, 0];
+    }
+
     let start_idx = this.full_text.indexOf(target_text);
     if (start_idx !== -1) return [start_idx, target_text.length];
 
@@ -783,8 +814,21 @@ export class DocumentMapper {
     return [-1, 0];
   }
 
-  public find_all_match_indices(target_text: string): [number, number][] {
+  public find_all_match_indices(
+    target_text: string,
+    is_regex: boolean = false,
+  ): [number, number][] {
     if (!target_text) return [];
+
+    if (is_regex) {
+      try {
+        const pattern = new RegExp(target_text, "g");
+        const matches = [...this.full_text.matchAll(pattern)];
+        if (matches.length > 0)
+          return matches.map((m) => [m.index!, m[0].length]);
+      } catch (e) {}
+      return [];
+    }
     const escapeRegExp = (str: string) =>
       str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

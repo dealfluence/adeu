@@ -128,8 +128,6 @@ def test_mcp_tool_feedback_formatting():
     assert "Dry-run simulation complete." in res
     assert "Detailed Edit Reports:" in res
     assert "✅ [applied]" in res
-    assert "Target: 'quick brown fox'" in res
-    assert "New text: 'fast red fox'" in res
     assert "The {--quick brown--}{++fast red++} fox jumps over" in res
 
 

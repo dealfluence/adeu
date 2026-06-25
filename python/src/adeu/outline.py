@@ -42,6 +42,7 @@ class OutlineNode:
     style: str  # "Heading 1" / "Title" / "(heuristic)" / "(outline_level)"
     has_table: bool  # True if owned range contains a Table
     footnote_ids: List[str] = field(default_factory=list)  # e.g. ["fn-3", "en-1"]
+    end_page: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,18 @@ def extract_outline(
             )
         )
 
+    total_pages = len(body_pages)
+    for i, node in enumerate(nodes):
+        end_page = total_pages
+        for j in range(i + 1, len(nodes)):
+            if nodes[j].level <= node.level:
+                if nodes[j].page > node.page:
+                    end_page = nodes[j].page - 1
+                else:
+                    end_page = node.page
+                break
+        node.end_page = end_page
+
     return nodes
 
 
@@ -291,6 +304,18 @@ def _extract_outline_fast(
                 footnote_ids=footnote_ids,
             )
         )
+
+    total_pages = len(body_page_offsets)
+    for i, node in enumerate(nodes):
+        end_page = total_pages
+        for j in range(i + 1, len(nodes)):
+            if nodes[j].level <= node.level:
+                if nodes[j].page > node.page:
+                    end_page = nodes[j].page - 1
+                else:
+                    end_page = node.page
+                break
+        node.end_page = end_page
 
     return nodes
 

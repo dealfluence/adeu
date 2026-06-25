@@ -49,6 +49,8 @@ The appendix is paginated using the same paginator as the body, with the
 appendix text passed AS the body input.
 """
 
+import math
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List
 
@@ -116,7 +118,10 @@ def render_outline_tree(
             meta = ", ".join(meta_parts)
             lines.append(f"{prefix} {node.text} ({meta})")
         else:
-            lines.append(f"{prefix} {node.text} (p{node.page})")
+            page_str = f"p{node.page}"
+            if node.end_page and node.end_page > node.page:
+                page_str = f"p{node.page}-p{node.end_page}"
+            lines.append(f"{prefix} {node.text} ({page_str})")
     return "\n".join(lines)
 
 
@@ -228,6 +233,131 @@ def build_outline_response(
         structured_content={
             "markdown": ui_markdown,
             "title": Path(file_path).name,
+            "file_path": str(Path(file_path).resolve()),
+        },
+    )
+
+
+def build_search_response(
+    text: str,
+    search_query: str,
+    search_regex: bool,
+    search_case_sensitive: bool,
+    page: int | str,
+    file_path: str,
+) -> ToolResult:
+    """
+    Filters projected Markdown to exact substring or regex matches.
+    Returns a paginated view of matching paragraphs and their immediate context.
+    """
+    body, _ = split_structural_appendix(text)
+    flags = 0 if search_case_sensitive else re.IGNORECASE
+    pattern = search_query if search_regex else re.escape(search_query)
+
+    try:
+        matches = list(re.finditer(pattern, body, flags=flags))
+    except re.error as e:
+        raise ToolError(f"Invalid regex pattern: {e}") from e
+
+    if not matches:
+        ui_markdown = (
+            f"> **Search Results** — No matches found for query `{search_query}` in `{Path(file_path).name}`.\n\n"
+            "Verify your search spelling, or try setting `search_case_sensitive` to false "
+            "or enabling `search_regex` if you used pattern wildcards."
+        )
+        return ToolResult(
+            content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+            structured_content={
+                "markdown": ui_markdown,
+                "title": f"Search: {Path(file_path).name}",
+                "file_path": str(Path(file_path).resolve()),
+            },
+        )
+
+    pag_res = paginate(body, "")
+    page_offsets = pag_res.body_page_offsets
+    total_matches = len(matches)
+    total_pages = math.ceil(total_matches / 10)
+
+    if str(page).lower() == "all":
+        start_idx, end_idx = 0, total_matches
+        page_text = "all"
+    else:
+        page_num = int(page)
+        if page_num < 1 or page_num > total_pages:
+            raise ToolError(f"Page {page_num} out of range (search has {total_pages} pages).")
+        start_idx = (page_num - 1) * 10
+        end_idx = min(start_idx + 10, total_matches)
+        page_text = f"{page_num} of {total_pages}"
+
+    page_matches = matches[start_idx:end_idx]
+
+    ui_parts = [
+        f"> **Search Results** — Found {total_matches} matches for query `{search_query}` in `{Path(file_path).name}`.",
+        (
+            f"> Showing page {page_text} (matches {start_idx + 1}-{end_idx}). To see more matches, "
+            f"call `read_docx` with `search_query='{search_query}'`, "
+            f"`search_regex={'true' if search_regex else 'false'}`, "
+            f"and `page={int(page) + 1 if str(page).lower() != 'all' else 2}`."
+        )
+        if total_pages > 1 and str(page).lower() != "all"
+        else "",
+    ]
+
+    occurrences_map = {}
+    for m in matches:
+        occurrences_map[m.group(0)] = occurrences_map.get(m.group(0), 0) + 1
+
+    def get_heading(idx, txt):
+        path = []
+        current_level = 999
+        for line in reversed(txt[:idx].split("\n")):
+            m = re.match(r"^(#{1,6})\s+(.*)", line)
+            if m:
+                level = len(m.group(1))
+                if level < current_level:
+                    clean_heading = re.sub(r"\*\*|__|[*_]", "", m.group(2))
+                    clean_heading = re.sub(r"\{#[^}]+\}", "", clean_heading).strip()
+                    if len(clean_heading) > 80:
+                        clean_heading = clean_heading[:80] + "..."
+                    path.insert(0, clean_heading)
+                    current_level = level
+                    if level == 1:
+                        break
+        return " > ".join(path) if path else ""
+
+    for i, m in enumerate(page_matches, start=start_idx + 1):
+        m_start, m_end = m.span()
+        matched_str = m.group(0)
+        p_num = 1
+        for j, off in enumerate(page_offsets):
+            if m_start >= off:
+                p_num = j + 1
+            else:
+                break
+
+        snippet = (
+            body[max(0, m_start - 100) : m_start] + f"**{matched_str}**" + body[m_end : min(len(body), m_end + 100)]
+        )
+        snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
+
+        ui_parts.extend(["---", f"### Match {i} (p{p_num})"])
+        if h_path := get_heading(m_start, body):
+            ui_parts.append(f"**Path:** `{h_path}`")
+        ui_parts.extend(
+            [
+                snippet_lines,
+                f"*Occurrences:* This exact phrasing appears {occurrences_map[matched_str]} "
+                f"time{'s' if occurrences_map[matched_str] != 1 else ''} in the document.",
+            ]
+        )
+
+    ui_markdown = "\n\n".join(part for part in ui_parts if part)
+    return ToolResult(
+        content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+        structured_content={
+            "markdown": ui_markdown,
+            "title": f"Search: {Path(file_path).name}",
             "file_path": str(Path(file_path).resolve()),
         },
     )

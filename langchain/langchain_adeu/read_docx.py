@@ -21,6 +21,7 @@ from adeu.mcp_components._response_builders import (
     build_appendix_response,
     build_outline_response,
     build_paginated_response,
+    build_search_response,
 )
 from docx import Document as load_document
 from langchain_core.tools import BaseTool
@@ -90,6 +91,18 @@ class AdeuReadDocxInput(BaseModel):
             "minimize payload size."
         ),
     )
+    search_query: Optional[str] = Field(
+        default=None,
+        description="The substring or regex pattern to search for. When provided, filters results to matching paragraphs.",
+    )
+    search_regex: bool = Field(
+        default=False,
+        description="Set to True to interpret search_query as a regular expression.",
+    )
+    search_case_sensitive: bool = Field(
+        default=True,
+        description="Set to False to perform case-insensitive matching.",
+    )
 
 
 _DESCRIPTION = (
@@ -132,6 +145,9 @@ class AdeuReadDocx(BaseTool):
         page: int = 1,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
+        search_query: Optional[str] = None,
+        search_regex: bool = False,
+        search_case_sensitive: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
 
@@ -152,7 +168,11 @@ class AdeuReadDocx(BaseTool):
             text = extract_result
             paragraph_offsets = None
 
-        if mode == "outline":
+        if search_query is not None:
+            result = build_search_response(
+                text, search_query, search_regex, search_case_sensitive, page, str(path)
+            )
+        elif mode == "outline":
             result = build_outline_response(
                 doc,
                 text,
@@ -185,6 +205,9 @@ class AdeuReadDocx(BaseTool):
         page: int = 1,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
+        search_query: Optional[str] = None,
+        search_regex: bool = False,
+        search_case_sensitive: bool = True,
     ) -> tuple[str, dict[str, Any]]:
 
         return await asyncio.to_thread(
@@ -195,6 +218,9 @@ class AdeuReadDocx(BaseTool):
             page,
             outline_max_level,
             outline_verbose,
+            search_query,
+            search_regex,
+            search_case_sensitive,
         )
 
 

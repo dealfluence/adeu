@@ -45,6 +45,11 @@ class ModifyText(BaseModel):
         description="Text to appear in a comment bubble (Review Pane) linked to this edit.",
     )
 
+    match_mode: Literal["strict", "first", "all"] = Field(
+        "strict", description="Resolution strategy for multiple occurrences."
+    )
+    regex: bool = Field(False, description="Treat target_text as a regular expression.")
+
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
@@ -54,6 +59,9 @@ class ModifyText(BaseModel):
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _parent_edit_ref: Optional["ModifyText"] = PrivateAttr(default=None)
     _resolved_proxy_edit: Optional["ModifyText"] = PrivateAttr(default=None)
+    _pages: list[int] = PrivateAttr(default_factory=list)
+    _heading_path: Optional[str] = PrivateAttr(default=None)
+    _occurrences_modified: int = PrivateAttr(default=0)
 
 
 class AcceptChange(BaseModel):

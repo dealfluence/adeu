@@ -1,4 +1,3 @@
-# FILE: src/adeu/mcp_components/tools/live_word.py
 import io
 import re
 import sys
@@ -284,9 +283,12 @@ if sys.platform == "win32":
         clean_view: bool = False,
         file_path: Optional[str] = None,
         mode: str = "full",
-        page: int = 1,
+        page: int | str = 1,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
+        search_query: Optional[str] = None,
+        search_regex: bool = False,
+        search_case_sensitive: bool = True,
     ) -> ToolResult:
         await ctx.info(
             f"Extracting live Word document via WordOpenXML "
@@ -322,7 +324,13 @@ if sys.platform == "win32":
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
-                if mode == "outline":
+                if search_query is not None:
+                    from adeu.mcp_components._response_builders import build_search_response
+
+                    res = build_search_response(
+                        final_text, search_query, search_regex, search_case_sensitive, page, actual_path
+                    )
+                elif mode == "outline":
                     res = build_outline_response(
                         py_doc,
                         final_text,
@@ -493,6 +501,7 @@ if sys.platform == "win32":
         # not in Structural Appendix). Build a snapshot of the live document
         # via the same Flat OPC -> python-docx pipeline used by the read path,
         # then run RedlineEngine.validate_edits against it.
+        snapshot_engine = None
         if edits:
             try:
                 xml_str = doc.WordOpenXML
@@ -575,51 +584,90 @@ if sys.platform == "win32":
                         continue
 
                     if isinstance(change, ModifyText):
-                        clean_target = strip_markdown_formatting(strip_critic_markup(change.target_text))
+                        is_regex = getattr(change, "regex", False)
+                        match_mode = getattr(change, "match_mode", "strict")
+
                         raw_text, current_text, mapping = _get_haystack()
-                        start_idx, end_idx = _find_match_in_text(current_text, clean_target)
+                        all_positions = []
+                        all_actual_texts = []
+                        all_new_texts = []
 
-                        if start_idx != -1:
-                            # --- AMBIGUITY CHECK (uses shared formatter for parity with disk path) ---
-                            from adeu.markup import format_ambiguity_error
+                        if is_regex:
+                            import re
 
-                            # Enumerate ALL matches, not just the second one,
-                            # so we can produce the same multi-example message
-                            # the disk path produces.
-                            all_positions: list[tuple[int, int]] = [(start_idx, end_idx)]
-                            search_offset = end_idx
+                            try:
+                                matches = list(re.finditer(change.target_text, current_text))
+                                for m in matches:
+                                    s_idx, e_idx = m.span()
+                                    all_positions.append((s_idx, e_idx))
+                                    actual_doc_text = m.group(0)
+                                    all_actual_texts.append(actual_doc_text)
+                                    try:
+                                        eff_new = re.sub(change.target_text, change.new_text or "", actual_doc_text)
+                                    except re.error:
+                                        eff_new = change.new_text or ""
+                                    all_new_texts.append(eff_new)
+                            except re.error:
+                                pass
+                        else:
+                            clean_target = strip_markdown_formatting(strip_critic_markup(change.target_text))
+                            s_off = 0
                             while True:
-                                rel_start, rel_end = _find_match_in_text(current_text[search_offset:], clean_target)
+                                rel_start, rel_end = _find_match_in_text(current_text[s_off:], clean_target)
                                 if rel_start == -1:
                                     break
-                                abs_start = search_offset + rel_start
-                                abs_end = search_offset + rel_end
+                                abs_start = s_off + rel_start
+                                abs_end = s_off + rel_end
                                 all_positions.append((abs_start, abs_end))
-                                search_offset = abs_end
+                                all_actual_texts.append(change.target_text)
+                                all_new_texts.append(change.new_text or "")
+                                s_off = abs_end
 
-                            if len(all_positions) > 1:
-                                stats["failed"] += 1
-                                # The Live Word edit loop tracks the index of
-                                # the current change in `change`. We mirror the
-                                # disk path's 1-based numbering using the
-                                # position of `change` in the edits list.
-                                edit_index = edits.index(change) + 1
-                                stats["skipped_details"].append(
-                                    format_ambiguity_error(
-                                        edit_index=edit_index,
-                                        target_text=change.target_text,
-                                        haystack=current_text,
-                                        match_positions=all_positions,
-                                    )
+                        if not all_positions:
+                            stats["failed"] += 1
+                            stats["skipped_details"].append(
+                                f"- Failed to find target text: '{change.target_text[:40]}...'"
+                            )
+                            continue
+
+                        if len(all_positions) > 1 and match_mode == "strict":
+                            from adeu.markup import format_ambiguity_error
+
+                            stats["failed"] += 1
+                            edit_index = edits.index(change) + 1
+                            stats["skipped_details"].append(
+                                format_ambiguity_error(
+                                    edit_index=edit_index,
+                                    target_text=change.target_text,
+                                    haystack=current_text,
+                                    match_positions=all_positions,
                                 )
-                                continue
+                            )
+                            continue
 
-                            is_table_edit = "|" in clean_target
+                        positions_to_apply = all_positions
+                        actuals_to_apply = all_actual_texts
+                        news_to_apply = all_new_texts
+
+                        if match_mode in ("strict", "first"):
+                            positions_to_apply = [all_positions[0]]
+                            actuals_to_apply = [all_actual_texts[0]]
+                            news_to_apply = [all_new_texts[0]]
+
+                        any_success = False
+
+                        for (start_idx, end_idx), eval_target, eval_new in zip(
+                            reversed(positions_to_apply),
+                            reversed(actuals_to_apply),
+                            reversed(news_to_apply),
+                            strict=True,
+                        ):
+                            is_table_edit = "|" in eval_target
                             table_edit_success = False
 
                             if is_table_edit:
-                                t_cells = [c.strip() for c in change.target_text.split("|")]
-                                n_cells = [c.strip() for c in (change.new_text or "").split("|")]
+                                t_cells = [c.strip() for c in eval_target.split("|")]
+                                n_cells = [c.strip() for c in eval_new.split("|")]
 
                                 if len(t_cells) == len(n_cells):
                                     anchor_idx = -1
@@ -715,17 +763,22 @@ if sys.platform == "win32":
                                                         cells_updated += 1
                                                         continue
 
-                                                    (
-                                                        final_start,
-                                                        final_end,
-                                                        final_new_text,
-                                                    ) = _shrink_replacement_range(
-                                                        exact_substring,
-                                                        n_c,
-                                                        actual_start,
-                                                        actual_end,
-                                                        t_c,
-                                                    )
+                                                    try:
+                                                        (
+                                                            final_start,
+                                                            final_end,
+                                                            final_new_text,
+                                                        ) = _shrink_replacement_range(
+                                                            exact_substring,
+                                                            n_c,
+                                                            actual_start,
+                                                            actual_end,
+                                                            t_c,
+                                                        )
+                                                    except Exception:
+                                                        final_start = actual_start
+                                                        final_end = actual_end
+                                                        final_new_text = n_c
 
                                                     replace_rng = doc.Range(Start=final_start, End=final_end)
                                                     apply_com_replacement(
@@ -738,8 +791,7 @@ if sys.platform == "win32":
                                                     cells_updated += 1
 
                                             if cells_updated > 0:
-                                                stats["applied"] += 1
-                                                _invalidate_haystack()
+                                                any_success = True
 
                             if not table_edit_success:
                                 actual_start = mapping[start_idx]
@@ -761,26 +813,28 @@ if sys.platform == "win32":
                                     actual_start = rng.Start
                                     actual_end = actual_start + len(exact_substring)
 
-                                    effective_new = change.new_text or ""
+                                    effective_new = eval_new
 
-                                    if change.target_text == effective_new:
+                                    if eval_target == effective_new:
                                         if change.comment:
                                             replace_rng = doc.Range(Start=actual_start, End=actual_end)
                                             try:
                                                 doc.Comments.Add(replace_rng, change.comment)
                                             except Exception as e:
                                                 logger.warning(f"Failed to attach comment for same->same edit: {e}")
-                                        stats["applied"] += 1
-                                        _invalidate_haystack()
+                                        any_success = True
                                         continue
 
-                                    actual_start, actual_end, final_new_text = _shrink_replacement_range(
-                                        exact_substring,
-                                        effective_new,
-                                        actual_start,
-                                        actual_end,
-                                        change.target_text,
-                                    )
+                                    try:
+                                        actual_start, actual_end, final_new_text = _shrink_replacement_range(
+                                            exact_substring,
+                                            effective_new,
+                                            actual_start,
+                                            actual_end,
+                                            eval_target,
+                                        )
+                                    except Exception:
+                                        final_new_text = effective_new
 
                                     replace_rng = doc.Range(Start=actual_start, End=actual_end)
                                     apply_com_replacement(
@@ -790,8 +844,7 @@ if sys.platform == "win32":
                                         final_new_text,
                                         change.comment,
                                     )
-                                    stats["applied"] += 1
-                                    _invalidate_haystack()
+                                    any_success = True
                                 else:
                                     doc_rng = doc.Content
                                     doc_rng.Find.ClearFormatting()
@@ -802,8 +855,8 @@ if sys.platform == "win32":
                                             End=doc_rng.Start + len(exact_substring),
                                         )
 
-                                        effective_new = change.new_text or ""
-                                        if change.target_text == effective_new:
+                                        effective_new = eval_new
+                                        if eval_target == effective_new:
                                             if change.comment:
                                                 try:
                                                     doc.Comments.Add(replace_rng, change.comment)
@@ -811,17 +864,19 @@ if sys.platform == "win32":
                                                     logger.warning(
                                                         f"Failed to attach comment for same->same fallback edit: {e}"
                                                     )
-                                            stats["applied"] += 1
-                                            _invalidate_haystack()
+                                            any_success = True
                                             continue
 
-                                        actual_start, actual_end, final_new_text = _shrink_replacement_range(
-                                            exact_substring,
-                                            effective_new,
-                                            doc_rng.Start,
-                                            doc_rng.Start + len(exact_substring),
-                                            change.target_text,
-                                        )
+                                        try:
+                                            actual_start, actual_end, final_new_text = _shrink_replacement_range(
+                                                exact_substring,
+                                                effective_new,
+                                                doc_rng.Start,
+                                                doc_rng.Start + len(exact_substring),
+                                                eval_target,
+                                            )
+                                        except Exception:
+                                            final_new_text = effective_new
 
                                         replace_rng = doc.Range(Start=actual_start, End=actual_end)
                                         apply_com_replacement(
@@ -831,19 +886,16 @@ if sys.platform == "win32":
                                             final_new_text,
                                             change.comment,
                                         )
-                                        stats["applied"] += 1
-                                        _invalidate_haystack()
+                                        any_success = True
                                     else:
                                         stats["failed"] += 1
                                         stats["skipped_details"].append(
                                             f"- Failed to find match in document for: '{change.target_text[:40]}...'"
                                         )
-                        else:
-                            stats["failed"] += 1
-                            stats["skipped_details"].append(
-                                f"- Failed to find target text: '{change.target_text[:40]}...'"
-                            )
-                            logger.warning(f"Could not find target text: '{change.target_text[:30]}...'")
+
+                        if any_success:
+                            stats["applied"] += 1
+                            _invalidate_haystack()
 
                 except Exception as e:
                     stats["failed"] += 1
