@@ -12,7 +12,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
 from fastmcp.tools.tool import ToolResult
-from pydantic import TypeAdapter
+from pydantic import Field, TypeAdapter
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
@@ -38,6 +38,7 @@ from adeu.models import (
     RejectChange,
     ReplyComment,
     coerce_stringified_changes,
+    const_to_enum,
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
@@ -547,11 +548,15 @@ if sys.platform == "win32":
         ] = "full",
         page: Annotated[
             Optional[Union[int, Literal["all"]]],
-            (
-                "Without `search_query`: 1-indexed document page to display (defaults to 1) "
-                "for mode='full' and mode='appendix'. With `search_query`: restricts matches "
-                "to that document page (defaults to searching all pages; pass `page='all'` "
-                "to be explicit). 'all' is also valid in CLI."
+            Field(
+                description=(
+                    "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                    "for mode='full' and mode='appendix'. With `search_query`: restricts matches "
+                    "to that document page (defaults to searching all pages; pass `page='all'` "
+                    "to be explicit). 'all' is also valid in CLI."
+                ),
+                # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
+                json_schema_extra=const_to_enum,
             ),
         ] = None,
         outline_max_level: Annotated[
@@ -810,10 +815,14 @@ else:
         ] = "full",
         page: Annotated[
             Optional[Union[int, Literal["all"]]],
-            (
-                "Without `search_query`: 1-indexed document page to display (defaults to 1) "
-                "for mode='full'. With `search_query`: restricts matches to that document "
-                "page (defaults to searching all pages; pass `page='all'` to be explicit)."
+            Field(
+                description=(
+                    "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                    "for mode='full'. With `search_query`: restricts matches to that document "
+                    "page (defaults to searching all pages; pass `page='all'` to be explicit)."
+                ),
+                # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
+                json_schema_extra=const_to_enum,
             ),
         ] = None,
         outline_max_level: Annotated[

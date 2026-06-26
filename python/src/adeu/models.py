@@ -6,6 +6,33 @@ from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr
 from adeu.redline.mapper import DocumentMapper
 
 
+def const_to_enum(schema: Any) -> None:
+    """Recursively rewrite JSON-Schema ``const`` to a one-member ``enum``.
+
+    Pydantic v2 serializes a single-value ``Literal["x"]`` to ``{"const": "x"}``.
+    Gemini's function-calling API rejects ``const`` outright, so any Gemini-based
+    client hitting this server fails — most visibly on the
+    ``process_document_batch.changes`` discriminator (a ``Literal`` per variant),
+    but also on plain literals nested in unions such as ``read_docx``'s
+    ``page`` (``Literal["all"]``). ``{"enum": ["x"]}`` is semantically identical
+    (a one-member enum) and is accepted everywhere, matching how the Node server
+    declares these. See issue #37.
+
+    Designed to be passed as a Pydantic ``json_schema_extra`` callable: it mutates
+    the field's schema dict in place and recurses into nested ``anyOf``/``oneOf``
+    branches. Validation behaviour is unchanged — Pydantic still enforces the
+    underlying ``Literal``.
+    """
+    if isinstance(schema, dict):
+        if "const" in schema:
+            schema["enum"] = [schema.pop("const")]
+        for value in schema.values():
+            const_to_enum(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            const_to_enum(item)
+
+
 class EditOperationType:
     """Internal enum for low-level XML manipulation"""
 
@@ -21,7 +48,11 @@ class ModifyText(BaseModel):
     The engine treats this as a "Search and Replace" operation.
     """
 
-    type: Literal["modify"] = Field("modify", description="Must be 'modify' for text replacements.")
+    type: Literal["modify"] = Field(
+        "modify",
+        description="Must be 'modify' for text replacements.",
+        json_schema_extra=const_to_enum,
+    )
 
     target_text: str = Field(
         ...,
@@ -66,25 +97,37 @@ class ModifyText(BaseModel):
 
 
 class AcceptChange(BaseModel):
-    type: Literal["accept"] = Field("accept", description="Must be 'accept' to finalize a tracked change.")
+    type: Literal["accept"] = Field(
+        "accept",
+        description="Must be 'accept' to finalize a tracked change.",
+        json_schema_extra=const_to_enum,
+    )
     target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
     comment: Optional[str] = Field(None, description="Optional rationale.")
 
 
 class RejectChange(BaseModel):
-    type: Literal["reject"] = Field("reject", description="Must be 'reject' to revert a tracked change.")
+    type: Literal["reject"] = Field(
+        "reject",
+        description="Must be 'reject' to revert a tracked change.",
+        json_schema_extra=const_to_enum,
+    )
     target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
     comment: Optional[str] = Field(None, description="Optional rationale.")
 
 
 class ReplyComment(BaseModel):
-    type: Literal["reply"] = Field("reply", description="Must be 'reply' to respond to a comment.")
+    type: Literal["reply"] = Field(
+        "reply",
+        description="Must be 'reply' to respond to a comment.",
+        json_schema_extra=const_to_enum,
+    )
     target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Com:5').")
     text: str = Field(..., description="The content of the reply body.")
 
 
 class InsertTableRow(BaseModel):
-    type: Literal["insert_row"] = Field("insert_row")
+    type: Literal["insert_row"] = Field("insert_row", json_schema_extra=const_to_enum)
 
     target_text: str = Field(
         ...,
@@ -114,7 +157,7 @@ class InsertTableRow(BaseModel):
 
 
 class DeleteTableRow(BaseModel):
-    type: Literal["delete_row"] = Field("delete_row")
+    type: Literal["delete_row"] = Field("delete_row", json_schema_extra=const_to_enum)
 
     target_text: str = Field(
         ...,
