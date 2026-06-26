@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "adeu"
-version = "1.16.0"
+version = "1.17.0"
 source = { editable = "../python" }
 dependencies = [
     { name = "diff-match-patch" },
@@ -42,7 +42,6 @@ requires-dist = [
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
-    { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "ruff" },
@@ -761,7 +760,7 @@ wheels = [
 
 [[package]]
 name = "langchain-adeu"
-version = "1.16.0"
+version = "1.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "adeu" },

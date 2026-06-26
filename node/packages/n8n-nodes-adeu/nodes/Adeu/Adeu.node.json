@@ -1,6 +1,6 @@
 {
   "node": "n8n-nodes-adeu.adeu",
-  "nodeVersion": "1.16",
+  "nodeVersion": "1.17",
   "codexVersion": "1.0",
   "categories": ["Productivity", "Utility"],
   "resources": {
