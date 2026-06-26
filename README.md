@@ -27,7 +27,26 @@ Built and maintained by the team at [Adeu](https://adeu.ai).
 
 ## Installation
 
-Adeu can be installed directly into AI assistants as an MCP server, or used locally as a developer toolchain.
+Adeu can be installed directly into AI assistants as an MCP server, used as a Claude Code plugin or Agent Skill, or used locally as a developer toolchain.
+
+### Claude Code (Plugin)
+Adeu ships as a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code/plugins) with a built-in agent skill that teaches Claude how to use the engine effectively. Inside Claude Code:
+
+```
+/plugin marketplace add dealfluence/adeu
+/plugin install adeu-redlining@adeu-skills
+```
+
+For best results, also connect either the Node MCP server (`npx -y @adeu/mcp-server`) or the Python MCP server (`uvx --from adeu adeu-server`). The plugin works without an MCP server too — it falls back to driving the `uvx adeu` CLI via Bash.
+
+### Other Skills-Compatible Agents (Cursor, Windsurf, VS Code Copilot, etc.)
+Adeu's redlining skill follows the open [Agent Skills specification](https://agentskills.io) and works with any compatible agent:
+
+```bash
+npx skills add dealfluence/adeu
+```
+
+The skill installs to your agent's skills directory and activates automatically when you ask Claude to redline, edit, or review a `.docx` file.
 
 ### Claude Desktop
 You can install Adeu directly into Claude Desktop using the official extension package:
