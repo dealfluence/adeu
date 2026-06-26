@@ -1,3 +1,4 @@
+// FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/Adeu.node.ts
 import type {
   IExecuteFunctions,
   INodeExecutionData,
@@ -8,6 +9,7 @@ import { NodeConnectionTypes } from "n8n-workflow";
 import { executeHydrateToolOutput } from "./descriptions/hydrateToolOutput.operation";
 import { documentDescription } from "./descriptions";
 import { executeExtractMarkdown } from "./descriptions/extractMarkdown.operation";
+import { executeExtractOutline } from "./descriptions/extractOutline.operation";
 import { executeApplyEdits } from "./descriptions/applyEdits.operation";
 import { executeGenerateDiff } from "./descriptions/generateDiff.operation";
 import { executeFinalizeDocument } from "./descriptions/finalizeDocument.operation";
@@ -22,14 +24,15 @@ export class Adeu implements INodeType {
     version: 1,
     subtitle: '={{$parameter["operation"]}}',
     description:
-      "Operate on Microsoft Word (.docx) files: extract LLM-friendly Markdown with CriticMarkup, apply tracked changes and comments, generate sub-word diffs, and sanitize/finalize documents. " +
-      "Four operations on the Document resource: " +
-      "(1) Extract Markdown — project a .docx into Markdown plus a Semantic Appendix (defined terms, cross-references, typos); toggle Clean View to simulate Accept All. " +
-      "(2) Apply Edits — apply a JSON array of DocumentChange objects as native Word tracked changes; the entire batch is pre-validated atomically and rejected if any single edit is invalid. Supports a Dry Run flag that previews edits without committing them, returning a per-edit report with CriticMarkup context snippets so an AI Agent can self-correct anchor mistakes before issuing a real call. " +
-      "(3) Generate Diff — produce a @@ Word Patch @@ sub-word level diff between two .docx files. " +
-      "(4) Finalize Document — strip metadata, optionally accept all pending markup, and optionally lock the file read-only. " +
+      "Operate on Microsoft Word (.docx) files: extract LLM-friendly Markdown with CriticMarkup, navigate large documents via a structural outline, apply tracked changes and comments, generate sub-word diffs, and sanitize/finalize documents. " +
+      "Five operations on the Document resource: " +
+      "(1) Extract Markdown — project a .docx into Markdown plus a Semantic Appendix; toggle Clean View to simulate Accept All; pass an optional Page number to fetch only one page of a large document. " +
+      "(2) Extract Outline — return a token-cheap structural map (headings with level, page number, paragraph style, has_table, footnote IDs) plus total_pages. Pair with Extract Markdown to navigate large documents. " +
+      "(3) Apply Edits — apply a JSON array of DocumentChange objects as native Word tracked changes; modify edits support match_mode ('strict'|'first'|'all') and regex (boolean); the entire batch is pre-validated atomically and rejected if any single edit is invalid. Supports a Dry Run flag that previews edits without committing them. " +
+      "(4) Generate Diff — produce a @@ Word Patch @@ sub-word level diff between two .docx files. " +
+      "(5) Finalize Document — strip metadata, optionally accept all pending markup, and optionally lock the file read-only. " +
       "DocumentChange schema (used by Apply Edits): each object has a 'type' field discriminator. " +
-      "type='modify' requires target_text (string, copied EXACTLY from the source including punctuation, spacing, and case) and new_text (string); optional 'comment' attaches a comment bubble. " +
+      "type='modify' requires target_text (string, copied EXACTLY from the source including punctuation, spacing, and case) and new_text (string); optional comment (string); optional match_mode ('strict'|'first'|'all', default 'strict'); optional regex (boolean, default false — when true, target_text is an ES2022 RegExp pattern and new_text may reference $1, $2 capture groups). " +
       "type='accept' or type='reject' requires target_id (string like 'Chg:12' from the Markdown projection); optional 'comment'. " +
       "type='reply' requires target_id (string like 'Com:45') and text (string). " +
       "type='insert_row' requires target_text (string), position ('above' or 'below'), and cells (array of strings). " +
@@ -77,6 +80,9 @@ export class Adeu implements INodeType {
           switch (operation) {
             case "extractMarkdown":
               result = await executeExtractMarkdown.call(this, i);
+              break;
+            case "extractOutline":
+              result = await executeExtractOutline.call(this, i);
               break;
             case "applyEdits":
               result = await executeApplyEdits.call(this, i);

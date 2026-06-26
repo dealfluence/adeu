@@ -7,8 +7,8 @@
       },
       "type": "@n8n/n8n-nodes-langchain.chatTrigger",
       "typeVersion": 1.1,
-      "position": [-1008, 48],
-      "id": "ff93c2fc-eb0d-4fb0-bba6-e49597533a1c",
+      "position": [1248, 640],
+      "id": "f697df7a-aaf1-4bdf-8739-030ee7c2c58a",
       "name": "When chat message received",
       "webhookId": "YOUR_WEBHOOK_ID"
     },
@@ -35,35 +35,41 @@
       },
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [-704, 48],
-      "id": "316bb0d0-0bf0-42e7-9d59-fa43acceb85c",
+      "position": [1552, 640],
+      "id": "7cf0612e-e239-4cb7-8b49-175d7185db83",
       "name": "Restore Chat Context",
       "notes": "Re-injects chatInput and sessionId (dropped by Read Binary File) so the AI Agent can find the user's prompt. The binary on 'data' passes through automatically because 'includeOtherFields' is true."
     },
     {
       "parameters": {
         "options": {
-          "systemMessage": "=You are the Adeu Contract Assistant, a specialized AI for analyzing and redlining Microsoft Word contracts using the Adeu engine.\n\n## How This Workflow Is Wired\n- A node named 'Read Binary File' has loaded the baseline contract .docx into the workflow's binary context before you were invoked.\n- You have access to tools that can read and write this file. To load or modify the file, you must specify the context source.\n\n## How to Manage Document State & Cumulative Edits (CRITICAL)\n- **First Tool Call**: When you read or edit the document for the very first time, you must load the baseline file. Set `Source_Node_Name` to exactly `'Read Binary File'` and leave `Source_Binary_Id` completely blank.\n- **Subsequent Cumulative Calls**: Whenever you make follow-up edits or need to re-extract markdown from a file you have already modified during this conversation, you must build on your previous output instead of the baseline. Locate the `redlinedBinaryId` value in the JSON response of your last successful tool execution. For all subsequent calls, pass that exact string value into `Source_Binary_Id` (and you can leave `Source_Node_Name` blank or set to 'Read Binary File' — `Source_Binary_Id` always takes priority in the backend).\n\n## How to Work With the User\n1. When the user asks you to read or review the document, call `extract_markdown` (using `Source_Node_Name` for the baseline, or `Source_Binary_Id` if you've already made edits). Examine the returned Markdown carefully — pay attention to defined terms, cross-references, and pre-existing tracked changes (marked with Chg:N and Com:N identifiers in CriticMarkup syntax).\n2. When the user requests changes, formulate a JSON array of DocumentChange objects and call `apply_edits`. Ensure you follow the baseline vs. sequential loading rules above so you do not discard previous modifications. The tool will return the updated `redlinedBinaryId` and the post-edit Markdown so you can verify changes.\n3. When To Use Dry_Run (Optional Self-Correction): `apply_edits` accepts an optional `Dry_Run` boolean argument (default false). When true, the tool validates and simulates every edit and returns a per-edit report (`status`, `critic_markup` preview showing exactly where the change would land, `clean_text` post-accept preview, `warning`, `error`) WITHOUT modifying the document, producing a redlined binary, or stashing a new `redlinedBinaryId`. Use a dry run sparingly — only when you are uncertain that a `target_text` anchor is unique or matches the source verbatim (long quotes, unfamiliar legal terminology, possible duplicate phrases across clauses), or when you want to preview a complex multi-edit batch before committing. After inspecting the report, re-call with `Dry_Run=false` (or omitted) to commit. Never dry-run by default — every dry run is an extra round trip that costs the user time and tokens. Note: invalid edits in a dry run return as failed entries in the report array rather than throwing an error, so dry-run is also how you probe whether an edit will succeed without aborting the batch.\n4. After every tool call, summarize what you did or found in plain English. If `apply_edits` ran successfully (and was NOT a dry run), tell the user the redlined .docx will be written with a timestamp suffix. If it WAS a dry run, summarize the per-edit report and ask the user whether to commit.\n\n## DocumentChange Schema (for apply_edits)\nThe Changes_JSON parameter must be a JSON-encoded string containing an array. Each element is one of:\n- {\"type\":\"modify\",\"target_text\":\"<copied VERBATIM from the source document>\",\"new_text\":\"<your replacement>\",\"comment\":\"<optional reviewer note>\"}\n- {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<your reply>\"}\n- {\"type\":\"insert_row\",\"target_text\":\"<text anchoring the target row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]}\n- {\"type\":\"delete_row\",\"target_text\":\"<text anchoring the row to remove>\"}\n\n## Critical Rules\n- target_text must be copied VERBATIM from the document — same punctuation, same whitespace, same capitalization. The engine's anchor is a fuzzy match but it errors out on ambiguous or missing targets.\n- target_text must be unique enough to anchor exactly one location. If a phrase appears multiple times, include surrounding context to disambiguate.\n- NEVER include CriticMarkup tags ({++, ++}, {--, --}, {>>, <<}) in new_text. The engine applies tracking automatically.\n- Use Chg:N and Com:N identifiers exactly as they appear in the Markdown output of extract_markdown. Do not invent IDs.\n- The whole changes array must be a single JSON-encoded string. Escape inner quotes properly.\n- If any single edit in a batch is invalid, the engine atomically rejects the WHOLE batch and returns an error. Read the error message carefully; it tells you exactly which edit failed and why. Use that to self-correct on the next call."
+          "systemMessage": "=You are the Adeu Contract Assistant, a specialized AI for analyzing and redlining Microsoft Word contracts using the Adeu engine.\n\n## How This Workflow Is Wired\n- A node named 'Read Binary File' has loaded the baseline contract .docx into the workflow's binary context before you were invoked.\n- You have access to three Adeu tools: `extract_outline` (cheap structural map for navigation), `extract_markdown` (full or page-scoped CriticMarkup projection), and `apply_edits` (apply tracked changes). To load or modify the file, you must specify the context source.\n\n## How to Manage Document State & Cumulative Edits (CRITICAL)\n- **First Tool Call**: When you read or edit the document for the very first time, you must load the baseline file. Set `Source_Node_Name` to exactly `'Read Binary File'` and leave `Source_Binary_Id` completely blank.\n- **Subsequent Cumulative Calls**: Whenever you make follow-up edits or need to re-extract markdown from a file you have already modified during this conversation, you must build on your previous output instead of the baseline. Locate the `redlinedBinaryId` value in the JSON response of your last successful tool execution. For all subsequent calls, pass that exact string value into `Source_Binary_Id` (and you can leave `Source_Node_Name` blank or set to 'Read Binary File' — `Source_Binary_Id` always takes priority in the backend).\n\n## How to Work With the User\n1. When the user asks you to read or review the document, decide whether the document is short or long. For short documents, call `extract_markdown` directly (using `Source_Node_Name` for the baseline, or `Source_Binary_Id` if you've already made edits) and examine the returned Markdown carefully — pay attention to defined terms, cross-references, and pre-existing tracked changes (marked with Chg:N and Com:N identifiers in CriticMarkup syntax). For long documents (when `extract_markdown` would return more than ~15,000 characters, or when the user's request only concerns one section), call `extract_outline` FIRST to retrieve a token-cheap structural map of headings, page numbers, and which sections directly contain tables or footnotes. Then call `extract_markdown` with the `Page` parameter set to the page containing the section you need — this avoids burning context on irrelevant body text. If the outline indicates the relevant content spans multiple pages, call `extract_markdown` once per page.\n2. When the user requests changes, formulate a JSON array of DocumentChange objects and call `apply_edits`. Ensure you follow the baseline vs. sequential loading rules above so you do not discard previous modifications. The tool will return the updated `redlinedBinaryId` and the post-edit Markdown so you can verify changes.\n3. When To Use Dry_Run (Optional Self-Correction): `apply_edits` accepts an optional `Dry_Run` boolean argument (default false). When true, the tool validates and simulates every edit and returns a per-edit report (`status`, `critic_markup` preview showing exactly where the change would land, `clean_text` post-accept preview, `warning`, `error`) WITHOUT modifying the document, producing a redlined binary, or stashing a new `redlinedBinaryId`. Use a dry run sparingly — only when you are uncertain that a `target_text` anchor is unique or matches the source verbatim (long quotes, unfamiliar legal terminology, possible duplicate phrases across clauses), or when you want to preview a complex multi-edit batch before committing. After inspecting the report, re-call with `Dry_Run=false` (or omitted) to commit. Never dry-run by default — every dry run is an extra round trip that costs the user time and tokens. Note: invalid edits in a dry run return as failed entries in the report array rather than throwing an error, so dry-run is also how you probe whether an edit will succeed without aborting the batch.\n4. After every tool call, summarize what you did or found in plain English. If `apply_edits` ran successfully (and was NOT a dry run), tell the user the redlined .docx will be written with a timestamp suffix. If it WAS a dry run, summarize the per-edit report and ask the user whether to commit.\n\n## DocumentChange Schema (for apply_edits)\nThe Changes_JSON parameter must be a JSON-encoded string containing an array. Each element is one of:\n- {\"type\":\"modify\",\"target_text\":\"<copied VERBATIM from the source document>\",\"new_text\":\"<your replacement>\",\"comment\":\"<optional reviewer note>\"}\n- {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"}\n- {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<your reply>\"}\n- {\"type\":\"insert_row\",\"target_text\":\"<text anchoring the target row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]}\n- {\"type\":\"delete_row\",\"target_text\":\"<text anchoring the row to remove>\"}\n\n## Critical Rules\n- target_text must be copied VERBATIM from the document — same punctuation, same whitespace, same capitalization. The engine's anchor is a fuzzy match but it errors out on ambiguous or missing targets.\n- For modify edits, prefer `match_mode: \"all\"` when harmonizing a term across the whole document (e.g. renaming \"the Contractor\" to \"the Service Provider\" everywhere) — this is one edit object that hits every occurrence, rather than many separate edits. Use `match_mode: \"first\"` only when you are certain the first occurrence in document order is the correct anchor. Use the default (omit `match_mode`, equivalent to `\"strict\"`) when you want the engine to fail loudly on ambiguity so you can self-correct with more context. Set `regex: true` to interpret `target_text` as an ES2022 RegExp pattern (capture groups via $1, $2 in new_text); combine with `match_mode: \"all\"` for global pattern replacements (e.g. converting all `$X.YZ` dollar amounts to `EUR X.YZ`).\n- target_text must be unique enough to anchor exactly one location. If a phrase appears multiple times, include surrounding context to disambiguate.\n- NEVER include CriticMarkup tags ({++, ++}, {--, --}, {>>, <<}) in new_text. The engine applies tracking automatically.\n- Use Chg:N and Com:N identifiers exactly as they appear in the Markdown output of extract_markdown. Do not invent IDs.\n- The whole changes array must be a single JSON-encoded string. Escape inner quotes properly.\n- If any single edit in a batch is invalid, the engine atomically rejects the WHOLE batch and returns an error. Read the error message carefully; it tells you exactly which edit failed and why. Use that to self-correct on the next call."
         }
       },
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 2.2,
-      "position": [-640, 240],
-      "id": "3ccdbbba-a953-48e0-8360-be989e23bf55",
+      "position": [1616, 832],
+      "id": "9794e1eb-656f-4d42-aaa4-197d90851d96",
       "name": "AI Agent"
     },
     {
       "parameters": {
-        "modelName": "models/gemini-3.1-pro-preview-customtools",
+        "modelName": "models/gemini-3.5-flash",
         "options": {
           "temperature": 0
         }
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
       "typeVersion": 1,
-      "position": [-800, 448],
-      "id": "ece28072-f631-4c96-91de-c1c56ee3c7e1",
-      "name": "Connect Gemini"
+      "position": [1456, 1040],
+      "id": "aedd376b-5445-4348-bc5e-788bf1523dc0",
+      "name": "Connect Gemini",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "<YOUR_GOOGLE_GEMINI_CREDENTIAL_ID>",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
     },
     {
       "parameters": {
@@ -71,64 +77,21 @@
       },
       "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
       "typeVersion": 1.3,
-      "position": [-640, 448],
-      "id": "f3dfc91e-7ed5-4171-ad17-29bd388fb873",
+      "position": [1616, 1040],
+      "id": "300daaa7-d73a-4c0f-a596-78c9dc08c386",
       "name": "Conversation Memory"
     },
     {
       "parameters": {
-        "documentSource": "fromNode",
-        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
-        "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional. If you are doing consecutive edits on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}",
-        "cleanView": "={{ $fromAI('Clean_View', `Whether to project the document with all tracked changes accepted (Clean View, true) or with all pending tracked changes surfaced as CriticMarkup tags like {++ins++}, {--del--}, {>>comment<<} (Raw View, false). Use false (default) when reviewing counterparty edits or any document with pending tracked changes. Use true only when generating new redlines against a clean baseline.`, 'boolean', false) }}"
-      },
-      "type": "n8n-nodes-adeu.adeuTool",
-      "typeVersion": 1,
-      "position": [-480, 496],
-      "id": "7ba7aaa7-1e05-45c4-aecc-704397c8661e",
-      "name": "extract_markdown"
-    },
-
-    {
-      "parameters": {
-        "operation": "applyEdits",
-        "documentSource": "fromNode",
-        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
-        "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional. If you are doing consecutive edits on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}",
-        "author": "Adeu AI Reviewer",
-        "editsSource": "defineBelow",
-        "editsJson": "={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Each object is one of: {\"type\":\"modify\",\"target_text\":\"<verbatim from source>\",\"new_text\":\"<replacement>\",\"comment\":\"<optional>\"} | {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<reply>\"} | {\"type\":\"insert_row\",\"target_text\":\"<cell text anchoring row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]} | {\"type\":\"delete_row\",\"target_text\":\"<cell text anchoring row>\"}. RULES: target_text must be copied VERBATIM from the source including punctuation/whitespace/case and must uniquely anchor one location; never include CriticMarkup tags like {++ or {-- in new_text — the engine applies tracking automatically; use Chg:N and Com:N IDs exactly as surfaced by extract_markdown; the entire array must be a single JSON-encoded string. Atomic batch: if any single edit is invalid the whole array is rejected with an error telling you which edit failed — use that to self-correct on the next call.`, 'string') }}",
-        "dryRun": "={{ $fromAI('Dry_Run', `Boolean. Default false (commit edits to the document). Set true ONLY as a self-correction primitive when you are uncertain that a target_text anchor is unique or matches the source verbatim, OR when you want to preview a complex multi-edit batch before committing. A dry run validates and simulates every edit and returns a per-edit report containing 'status' (applied/failed), 'critic_markup' (a ~30-char CriticMarkup preview showing exactly where the change would land), 'clean_text' (the post-accept preview), 'warning' (punctuation/tokenization hints), and 'error' (if the edit failed) — but the document is NOT modified, no redlined binary is produced, and no static-data stash is written. Invalid edits in a dry run come back as failed entries in the array rather than throwing a BatchValidationError, so dry-run is also how you probe whether an edit will succeed without aborting the batch. After inspecting the preview, re-call with Dry_Run=false to commit. Do NOT default to true — every dry run is an extra round trip that costs the user time and tokens.`, 'boolean', false) }}"
-      },
-      "type": "n8n-nodes-adeu.adeuTool",
-      "typeVersion": 1,
-      "position": [-288, 512],
-      "id": "2b2fdef4-9b9e-4abd-96c8-72ebf3059e11",
-      "name": "apply_edits"
-    },
-    {
-      "parameters": {
-        "fileSelector": "YOUR_PATH_TO_FOLDER\\NDA_Acme_Vertex_clean.docx",
+        "fileSelector": "<YOUR_INPUT_FILE_PATH_HERE>",
         "options": {}
       },
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1,
-      "position": [-864, 48],
-      "id": "2aebb514-f017-401d-9d7d-2a3d153a2338",
+      "position": [1392, 640],
+      "id": "dc81ece4-1554-464f-8a41-44481fe34c86",
       "name": "Read Binary File",
       "notes": "EDIT 'fileSelector' to the absolute path of your local .docx file before running the demo. The file is read once per chat turn into the 'data' binary property. The AI Agent NEVER sees this path — it only references this node by name ('Read Binary File') when calling Adeu tools."
-    },
-    {
-      "parameters": {
-        "operation": "hydrateToolOutput",
-        "outputPathTemplate": "YOUR_PATH_TO_FOLDER\\{baseName}_{timestamp}.docx"
-      },
-      "type": "n8n-nodes-adeu.adeu",
-      "typeVersion": 1,
-      "position": [-368, 240],
-      "id": "e9b6205c-b4de-4f82-99f2-cb866d57195c",
-      "name": "Hydrate Redlined Binary",
-      "notes": "Reads the redlined .docx binary id from workflow static data (where apply_edits stashes it when running as a tool, because n8n's tool wrapper strips binaries from tool outputs). Fetches the buffer via getBinaryStream, prepares a fresh IBinaryData, attaches it on 'data', and clears the static data entry. On turns where apply_edits was not called, emits json.hydrated=false with no binary so the downstream If can skip the write."
     },
     {
       "parameters": {
@@ -157,8 +120,8 @@
       },
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [-208, 304],
-      "id": "7ab06705-8070-45c5-af71-f8c8f892622f",
+      "position": [2048, 896],
+      "id": "ec8f5f1d-8760-46bb-8f3b-4747e1f9ebf0",
       "name": "Has Redlined Binary?",
       "notes": "Gates the Write step on json.hydrated, which Hydrate Redlined Binary sets to true only when apply_edits actually produced a binary this turn."
     },
@@ -170,10 +133,66 @@
       },
       "type": "n8n-nodes-base.readWriteFile",
       "typeVersion": 1,
-      "position": [0, 224],
-      "id": "5279e797-0664-44b1-a993-7d81d99d614f",
+      "position": [2256, 816],
+      "id": "99e6391a-4ec1-4655-ba3c-514ae363ca1b",
       "name": "Write Redlined File",
       "notes": "Writes the hydrated redlined file to disk using the calculated output path constructed in TypeScript."
+    },
+    {
+      "parameters": {
+        "operation": "extractOutline",
+        "documentSource": "fromNode",
+        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
+        "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional. If you are inspecting a document that you have already modified during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to view the updated draft outline. Leave blank on your first tool call to load the baseline document.`, 'string', '') }}"
+      },
+      "type": "CUSTOM.adeuTool",
+      "typeVersion": 1,
+      "position": [1728, 1120],
+      "id": "7ba8f2d7-daed-4363-9968-6cf1405df0c9",
+      "name": "extract_outline"
+    },
+    {
+      "parameters": {
+        "documentSource": "fromNode",
+        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File'. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
+        "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional. If you are inspecting a document that you have already modified during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to view the updated draft. Leave blank on your first tool call to load the baseline document.`, 'string', '') }}",
+        "cleanView": "={{ $fromAI('Clean_View', `Boolean. Set false (default) to surface all pending tracked changes as CriticMarkup tags {++ins++}, {--del--}, {>>comment<<} — use when reviewing counterparty edits or any document with pending markup. Set true to project the document as if all tracked changes were accepted (simulates Accept All) — use only when generating net-new redlines against a clean baseline.`, 'boolean', false) }}",
+        "page": "={{ $fromAI('Page', `Optional 1-based integer page number to retrieve only one page of the projected document. Set to 0 (default) for the full document body — use 0 for short documents (under ~10 pages). For long documents, call extract_outline FIRST to discover total_pages and which headings live on which page, then call this tool again with Page set to the page you need. Pages are ~19,000-character chunks; the Structural Appendix is appended to every page. If you request a page beyond total_pages the tool will error.`, 'number', 0) }}"
+      },
+      "type": "CUSTOM.adeuTool",
+      "typeVersion": 1,
+      "position": [1888, 1072],
+      "id": "3c7c823a-fdda-413c-b0b3-828ec96017fa",
+      "name": "extract_markdown"
+    },
+    {
+      "parameters": {
+        "operation": "applyEdits",
+        "documentSource": "fromNode",
+        "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File' on the first edit. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
+        "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional string. If you are doing consecutive edits on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}",
+        "author": "={{ $fromAI('Author', `Author name attached to every tracked change and comment produced by this batch (string, e.g. 'AI Reviewer' or 'Acme Legal AI'). Appears in Word's review pane as the author of every redline.`, 'string', 'Adeu AI') }}",
+        "editsSource": "defineBelow",
+        "editsJson": "={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Each object is one of: {\"type\":\"modify\",\"target_text\":\"<verbatim from source>\",\"new_text\":\"<replacement>\",\"comment\":\"<optional>\",\"match_mode\":\"<optional 'strict' (default) | 'first' | 'all'>\",\"regex\":<optional boolean default false>} | {\"type\":\"accept\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reject\",\"target_id\":\"Chg:12\",\"comment\":\"<optional>\"} | {\"type\":\"reply\",\"target_id\":\"Com:45\",\"text\":\"<reply>\"} | {\"type\":\"insert_row\",\"target_text\":\"<cell text anchoring row>\",\"position\":\"above\" or \"below\",\"cells\":[\"col1\",\"col2\"]} | {\"type\":\"delete_row\",\"target_text\":\"<cell text anchoring row>\"}. MODIFY EXTENDED: set match_mode='all' to replace every occurrence of target_text in linear document order (returns occurrences_modified in the per-edit report); set match_mode='first' to silently anchor to the first hit; omit or use 'strict' (default) to fail on ambiguous matches so you can self-correct with more context. Set regex=true to interpret target_text as an ES2022 RegExp pattern; new_text may reference capture groups via $1, $2 etc. Combine match_mode='all' with regex=true for global pattern-based replacements. RULES: target_text must be copied VERBATIM from the source including punctuation/whitespace/case (unless regex=true) and must uniquely anchor one location under match_mode='strict'; never include CriticMarkup tags like {++ or {-- in new_text — the engine applies tracking automatically; use Chg:N and Com:N IDs exactly as surfaced by extract_markdown; the entire array must be a single JSON-encoded string. Atomic batch: if any single edit is invalid the whole array is rejected with an error telling you which edit failed — use that to self-correct on the next call.`, 'string') }}",
+        "returnMarkdown": "={{ $fromAI('Return_Markdown', `Boolean. When true (default), the tool returns the post-edit document as Markdown with CriticMarkup so you can verify what changed and reason about follow-up edits. Set false only to skip extraction when you are confident no follow-up review is needed.`, 'boolean', true) }}",
+        "dryRun": "={{ $fromAI('Dry_Run', `Boolean. Default false (commit edits to the document). Set true ONLY as a self-correction primitive when you are uncertain that a target_text anchor is unique or matches the source verbatim, OR when you want to preview a complex multi-edit batch before committing. A dry run validates and simulates every edit and returns a per-edit report containing 'status' (applied/failed), 'critic_markup' (a ~30-char CriticMarkup preview showing exactly where the change would land), 'clean_text' (the post-accept preview), 'warning' (punctuation/tokenization hints), and 'error' (if the edit failed) — but the document is NOT modified, no redlined binary is produced, and no static-data stash is written. Invalid edits in a dry run come back as failed entries in the array rather than throwing a BatchValidationError, so dry-run is also how you probe whether an edit will succeed without aborting the batch. After inspecting the preview, re-call with Dry_Run=false to commit. Do NOT default to true — every dry run is an extra round trip that costs the user time and tokens.`, 'boolean', false) }}"
+      },
+      "type": "CUSTOM.adeuTool",
+      "typeVersion": 1,
+      "position": [2032, 1136],
+      "id": "bc1a5367-6428-42ae-8e5c-fa8f8734e53c",
+      "name": "apply_edits1"
+    },
+    {
+      "parameters": {
+        "operation": "hydrateToolOutput",
+        "outputPathTemplate": "<YOUR_OUTPUT_DIRECTORY_HERE>\\{baseName}_{timestamp}.docx"
+      },
+      "type": "CUSTOM.adeu",
+      "typeVersion": 1,
+      "position": [1904, 848],
+      "id": "b180e922-52a1-466e-9884-18a8f9346097",
+      "name": "Hydrate Redlined Binary"
     }
   ],
   "pinData": {},
@@ -205,17 +224,6 @@
         [
           {
             "node": "Hydrate Redlined Binary",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Hydrate Redlined Binary": {
-      "main": [
-        [
-          {
-            "node": "Has Redlined Binary?",
             "type": "main",
             "index": 0
           }
@@ -255,6 +263,28 @@
         ]
       ]
     },
+    "Read Binary File": {
+      "main": [
+        [
+          {
+            "node": "Restore Chat Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract_outline": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "extract_markdown": {
       "ai_tool": [
         [
@@ -266,7 +296,7 @@
         ]
       ]
     },
-    "apply_edits": {
+    "apply_edits1": {
       "ai_tool": [
         [
           {
@@ -277,11 +307,11 @@
         ]
       ]
     },
-    "Read Binary File": {
+    "Hydrate Redlined Binary": {
       "main": [
         [
           {
-            "node": "Restore Chat Context",
+            "node": "Has Redlined Binary?",
             "type": "main",
             "index": 0
           }
@@ -294,10 +324,11 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "017c27d4-d4ba-411e-8cb3-fc0780d1909e",
+  "versionId": "75d56ead-5a21-4259-8d97-aa1fb279e08a",
   "meta": {
+    "templateCredsSetupCompleted": true,
     "instanceId": "0790c7342a70c8218ce40b4281412a6086cdd0958c17162b5051376c87698fb2"
   },
-  "id": "NAvkG2ATa2jQQPUy",
+  "id": "jhUPm2y5kG9vnSGn",
   "tags": []
 }

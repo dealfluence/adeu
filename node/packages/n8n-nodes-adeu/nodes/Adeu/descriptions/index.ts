@@ -1,6 +1,8 @@
+// FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/descriptions/index.ts
 import type { INodeProperties } from "n8n-workflow";
 
 import { extractMarkdownDescription } from "./extractMarkdown.operation";
+import { extractOutlineDescription } from "./extractOutline.operation";
 import { applyEditsDescription } from "./applyEdits.operation";
 import { generateDiffDescription } from "./generateDiff.operation";
 import { finalizeDocumentDescription } from "./finalizeDocument.operation";
@@ -21,19 +23,27 @@ export const documentDescription: INodeProperties[] = [
       {
         name: "Apply Edits",
         value: "applyEdits",
-        action: "Apply a batch of tracked changes to the document",
+        action: "Apply tracked changes to document",
         description:
-          "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected and the document is left untouched. Supports a Dry Run mode for previewing edits — when enabled, the engine returns a per-edit report (status, CriticMarkup preview, errors, warnings) without modifying the document or producing a redlined binary.",
+          "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. modify edits support match_mode ('strict'|'first'|'all') and regex (boolean) for targeted multi-occurrence writes. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected and the document is left untouched. Supports a Dry Run mode for previewing edits — when enabled, the engine returns a per-edit report (status, CriticMarkup preview, errors, warnings) without modifying the document or producing a redlined binary.",
       },
       {
         name: "Extract Markdown",
         value: "extractMarkdown",
-        action: "Extract a Markdown representation of the document",
+        action: "Extract markdown from document",
         description:
-          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix listing defined terms, cross-references, and potential typos. Each tracked change is tagged with a stable id (Chg:N, Com:N) for use in Apply Edits.",
+          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix listing defined terms, cross-references, and potential typos. Each tracked change is tagged with a stable id (Chg:N, Com:N) for use in Apply Edits. Supports an optional Page parameter to fetch only one page of a large document (paired with Extract Outline for navigation).",
       },
       {
-        name: "Finalize Document",
+        name: "Extract Outline",
+        value: "extractOutline",
+        action:
+          "Extract a structural outline (table of contents) of the document",
+        description:
+          "Return a token-cheap structural map of the .docx: a JSON array of headings with their level (1-6), text, page number, paragraph style, whether the section directly contains a table, and any footnote/endnote IDs scoped to that section. Also returns total_pages. Use this as a navigation primitive for large documents — call it first to discover structure, then call Extract Markdown with a specific Page to drill into the relevant section.",
+      },
+      {
+        name: "Finalize",
         value: "finalizeDocument",
         action: "Sanitize metadata and lock the document for distribution",
         description:
@@ -42,7 +52,7 @@ export const documentDescription: INodeProperties[] = [
       {
         name: "Generate Diff",
         value: "generateDiff",
-        action: "Generate a Word Patch diff between two documents",
+        action: "Generate diff between documents",
         description:
           "Produce a sub-word level @@ Word Patch @@ diff between two .docx files. Reads the document text via the same Markdown projection used by Extract Markdown, so the diff respects CriticMarkup and Clean View settings.",
       },
@@ -82,7 +92,12 @@ export const documentDescription: INodeProperties[] = [
     displayOptions: {
       show: {
         resource: ["document"],
-        operation: ["applyEdits", "extractMarkdown", "finalizeDocument"],
+        operation: [
+          "applyEdits",
+          "extractMarkdown",
+          "extractOutline",
+          "finalizeDocument",
+        ],
       },
     },
   },
@@ -98,7 +113,12 @@ export const documentDescription: INodeProperties[] = [
     displayOptions: {
       show: {
         resource: ["document"],
-        operation: ["applyEdits", "extractMarkdown", "finalizeDocument"],
+        operation: [
+          "applyEdits",
+          "extractMarkdown",
+          "extractOutline",
+          "finalizeDocument",
+        ],
         documentSource: ["fromNode"],
       },
     },
@@ -114,12 +134,18 @@ export const documentDescription: INodeProperties[] = [
     displayOptions: {
       show: {
         resource: ["document"],
-        operation: ["applyEdits", "extractMarkdown", "finalizeDocument"],
+        operation: [
+          "applyEdits",
+          "extractMarkdown",
+          "extractOutline",
+          "finalizeDocument",
+        ],
         documentSource: ["fromNode"],
       },
     },
   },
   ...extractMarkdownDescription,
+  ...extractOutlineDescription,
   ...applyEditsDescription,
   ...generateDiffDescription,
   ...finalizeDocumentDescription,

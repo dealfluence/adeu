@@ -131,8 +131,98 @@ describe("Test Adeu n8n Node", () => {
       expect(typeof item.json.markdown).toBe("string");
       expect(item.json.markdown).toContain("golden");
     });
-  });
 
+    it("should return paginated output with pagination metadata when Page >= 1", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractMarkdown";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "cleanView") return false;
+        if (paramName === "page") return 1;
+        return fallback;
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("markdown");
+      expect(item.json).toHaveProperty("page", 1);
+      expect(item.json).toHaveProperty("total_pages");
+      expect(item.json).toHaveProperty("has_next");
+      expect(item.json).toHaveProperty("has_prev", false);
+      expect(item.json).toHaveProperty("tracked_change_count");
+      expect(typeof item.json.total_pages).toBe("number");
+      expect((item.json.total_pages as number) >= 1).toBe(true);
+    });
+    it("should throw when Page exceeds total_pages", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractMarkdown";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "cleanView") return false;
+        if (paramName === "page") return 999;
+        return fallback;
+      });
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
+        /exceeds total_pages/i,
+      );
+    });
+  });
+  describe("Operation: Extract Outline", () => {
+    beforeEach(() => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        { json: {}, binary: { data: { fileName: "input.docx" } } },
+      ]);
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<
+          typeof vi.fn
+        >
+      ).mockResolvedValue(goldenBuffer);
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractOutline";
+        if (paramName === "binaryPropertyName") return "data";
+        return fallback;
+      });
+    });
+
+    it("should return an outline array and total_pages", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toHaveLength(1);
+
+      const item = result[0][0];
+      expect(item.json).toHaveProperty("fileName", "input.docx");
+      expect(item.json).toHaveProperty("total_pages");
+      expect(item.json).toHaveProperty("outline");
+      expect(Array.isArray(item.json.outline)).toBe(true);
+
+      // Every entry conforms to the OutlineNode shape (golden.docx may or may
+      // not have headings, but the shape contract holds regardless).
+      for (const node of item.json.outline as Array<Record<string, unknown>>) {
+        expect(node).toHaveProperty("level");
+        expect(node).toHaveProperty("text");
+        expect(node).toHaveProperty("page");
+        expect(node).toHaveProperty("style");
+        expect(node).toHaveProperty("has_table");
+        expect(node).toHaveProperty("footnote_ids");
+        expect(typeof node.level).toBe("number");
+        expect(typeof node.text).toBe("string");
+        expect(typeof node.page).toBe("number");
+        expect(typeof node.has_table).toBe("boolean");
+        expect(Array.isArray(node.footnote_ids)).toBe(true);
+      }
+    });
+  });
   describe("Operation: Apply Edits", () => {
     let uniqueTarget: string;
 
@@ -142,9 +232,11 @@ describe("Test Adeu n8n Node", () => {
       // length that appears exactly once, and has no pending tracked changes/comments on it.
       const rawMarkdown = await extractTextFromBuffer(goldenBuffer, false);
       const cleanMarkdown = await extractTextFromBuffer(goldenBuffer, true);
-      
+
       const cleanChunks = rawMarkdown
-        .split(/\{--[\s\S]*?--\}|\{\+\+[\s\S]*?\+\+\}|\{>>[\s\S]*?<<\}|\{==[\s\S]*?==\}/g)
+        .split(
+          /\{--[\s\S]*?--\}|\{\+\+[\s\S]*?\+\+\}|\{>>[\s\S]*?<<\}|\{==[\s\S]*?==\}/g,
+        )
         .map((chunk) => chunk.trim())
         .filter((chunk) => chunk.length >= 3 && /[a-zA-Z]/.test(chunk));
 
@@ -220,6 +312,45 @@ describe("Test Adeu n8n Node", () => {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       );
       expect(item.binary).toHaveProperty("data");
+    });
+    it("should pass match_mode='all' and regex=true through to the engine and return enriched edit report", async () => {
+      // Build a changes array exercising match_mode + regex. We use a regex
+      // matching any single word followed by 'document' (the golden fixture's
+      // body contains 'golden document' after change acceptance, so this is
+      // safe and verifies the JSON pass-through reaches the engine.)
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              {
+                type: "modify",
+                target_text: "\\bdocument\\b",
+                new_text: "doc",
+                match_mode: "all",
+                regex: true,
+              },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("stats");
+      const stats = item.json.stats as Record<string, unknown>;
+      expect(stats).toHaveProperty("edits");
+      const edits = stats.edits as Array<Record<string, unknown>>;
+      expect(edits.length).toBe(1);
+      // Enriched report must include occurrences_modified and match_mode
+      // surfaced from the engine.
+      expect(edits[0]).toHaveProperty("status", "applied");
+      expect(edits[0]).toHaveProperty("match_mode", "all");
+      expect(edits[0]).toHaveProperty("occurrences_modified");
+      expect((edits[0].occurrences_modified as number) >= 1).toBe(true);
     });
 
     it("should run in dry-run mode without producing a redlined binary or stashing static data", async () => {

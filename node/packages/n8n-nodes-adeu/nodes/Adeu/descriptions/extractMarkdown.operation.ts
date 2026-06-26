@@ -1,14 +1,21 @@
+// FILE: node/packages/n8n-nodes-adeu/nodes/Adeu/descriptions/extractMarkdown.operation.ts
 import type {
   IExecuteFunctions,
   INodeExecutionData,
   INodeProperties,
 } from "n8n-workflow";
-import { extractTextFromBuffer } from "@adeu/core";
+import { NodeOperationError } from "n8n-workflow";
+import {
+  extractTextFromBuffer,
+  paginate,
+  split_structural_appendix,
+} from "@adeu/core";
 
 import {
   type BinarySource,
   getDocxBufferFromSource,
 } from "../GenericFunctions";
+
 export const extractMarkdownDescription: INodeProperties[] = [
   {
     displayName: "Input Binary Property",
@@ -40,6 +47,27 @@ export const extractMarkdownDescription: INodeProperties[] = [
       },
     },
   },
+  {
+    displayName: "Page",
+    name: "page",
+    type: "number",
+    default: 0,
+    typeOptions: {
+      minValue: 0,
+    },
+    description:
+      "Optional 1-based page number to return only one page of the projected document (integer, default 0). " +
+      "When 0 (default), the full Markdown body plus the Structural Appendix is returned in the 'markdown' field and pagination metadata is omitted. " +
+      "When >= 1, only that page is returned in the 'markdown' field and the JSON output includes pagination metadata: page, total_pages, has_next, has_prev, tracked_change_count. " +
+      "Pages are ~19,000-character chunks of the projected body with the Structural Appendix appended to each page. Use the extractOutline operation first to discover how many pages exist and what each page contains. " +
+      "If the requested page exceeds total_pages, an error is thrown.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["extractMarkdown"],
+      },
+    },
+  },
 ];
 
 export async function executeExtractMarkdown(
@@ -51,6 +79,7 @@ export async function executeExtractMarkdown(
     itemIndex,
   ) as string;
   const cleanView = this.getNodeParameter("cleanView", itemIndex) as boolean;
+  const page = this.getNodeParameter("page", itemIndex, 0) as number;
 
   const documentSource = this.getNodeParameter(
     "documentSource",
@@ -81,14 +110,47 @@ export async function executeExtractMarkdown(
     itemIndex,
     source,
   );
-  const markdown = await extractTextFromBuffer(buffer, cleanView);
+  const fullMarkdown = await extractTextFromBuffer(buffer, cleanView);
+
+  // Page 0 / omitted => full document, no pagination metadata (preserves backward compatibility).
+  if (!page || page === 0) {
+    return [
+      {
+        json: {
+          fileName,
+          cleanView,
+          markdown: fullMarkdown,
+        },
+        pairedItem: { item: itemIndex },
+      },
+    ];
+  }
+
+  // Paginate. Split body from structural appendix so paginate() can append the appendix to each page.
+  const [body, appendix] = split_structural_appendix(fullMarkdown);
+  const pagination = paginate(body, appendix);
+
+  if (page > pagination.total_pages) {
+    throw new NodeOperationError(
+      this.getNode(),
+      `Requested page ${page} exceeds total_pages (${pagination.total_pages}). Call extractOutline to discover the page count first.`,
+      { itemIndex },
+    );
+  }
+
+  const pageInfo = pagination.pages[page - 1];
 
   return [
     {
       json: {
         fileName,
         cleanView,
-        markdown,
+        markdown: pageInfo.page_content,
+        page: pageInfo.page,
+        total_pages: pageInfo.total_pages,
+        has_next: pageInfo.has_next,
+        has_prev: pageInfo.has_prev,
+        tracked_change_count: pageInfo.tracked_change_count,
       },
       pairedItem: { item: itemIndex },
     },
