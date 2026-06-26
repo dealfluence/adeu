@@ -83,10 +83,10 @@ const READ_DOCX_TAIL =
 const PROCESS_BATCH_COMMON_DESC =
   "Applies a batch of edits and review actions to a DOCX.\n\nAll changes evaluate against the ORIGINAL document state — do not chain dependent edits within one batch (e.g. rename X to Y, then modify Y). Apply the rename first, then send a second batch.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. `target_text` must uniquely match — include surrounding context if the phrase is ambiguous. `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
+  "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. By default `target_text` must match uniquely (`match_mode`:'strict') — add surrounding context to disambiguate, or set `match_mode`:'first'/'all' to edit the first or every occurrence. Set `regex`:true to treat `target_text` as a regular expression (capture groups available in `new_text` as $1, $2…). `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
 
 const DIFF_DOCX_DESC =
-  "Compares two DOCX files and returns a unified diff of their text content. Useful for analyzing differences between versions before editing.";
+  "Compares two DOCX files and returns a compact `@@ Word Patch @@` diff — Adeu's token-level, sub-word patch format — of their text content. Useful for analyzing differences between versions before editing.";
 
 const gitSha = process.env.GIT_SHA || "unknown";
 const packageVersion = process.env.PACKAGE_VERSION || "unknown";
@@ -110,7 +110,9 @@ const server = new McpServer({
 const originalRegisterTool = server.registerTool.bind(server);
 server.registerTool = (name: string, schema: any, handler?: any) => {
   if (schema && typeof schema === "object") {
-    if (schema.description) {
+    // Idempotent: UI tools route through BOTH this wrapper and the
+    // registerAppTool wrapper, so guard against stamping the tag twice.
+    if (schema.description && !schema.description.includes(buildTag.trim())) {
       schema.description = schema.description.trim() + buildTag;
     }
   }
@@ -344,6 +346,69 @@ registerAppTool(
 // 3. HEADLESS TOOLS (No UI)
 // ==========================================
 
+// Typed shape for a single `process_document_batch` change. This makes the six
+// DocumentChange variants — and the modify-only `match_mode`/`regex` options —
+// discoverable from the tool schema itself, instead of prose alone. A bare
+// string is still accepted (and normalized in-handler) so double-serialized
+// payloads from some LLM clients keep working; only `type` is required, all
+// other fields are optional, and unknown keys pass through untouched.
+const CHANGE_ITEM_SCHEMA = z
+  .object({
+    type: z
+      .enum(["modify", "accept", "reject", "reply", "insert_row", "delete_row"])
+      .describe(
+        "Change kind: 'modify' (search-and-replace), 'accept'/'reject' (resolve a tracked change by id), 'reply' (reply to a comment by id), 'insert_row'/'delete_row' (table edits; disk mode only).",
+      ),
+    target_text: z
+      .string()
+      .optional()
+      .describe(
+        "modify / insert_row / delete_row: the existing text to locate (interpreted as a regex when regex=true).",
+      ),
+    new_text: z
+      .string()
+      .optional()
+      .describe(
+        "modify: replacement text. Supports Markdown (headings, **bold**, _italic_, '\\n\\n' paragraph splits); empty string deletes. Regex capture groups are available as $1, $2…",
+      ),
+    target_id: z
+      .string()
+      .optional()
+      .describe(
+        "accept / reject / reply: the 'Chg:N' or 'Com:N' id taken from a fresh read_docx.",
+      ),
+    text: z.string().optional().describe("reply: the reply body."),
+    comment: z
+      .string()
+      .optional()
+      .describe(
+        "modify / accept / reject: attach a margin comment to the change (no manual CriticMarkup).",
+      ),
+    match_mode: z
+      .enum(["strict", "first", "all"])
+      .optional()
+      .describe(
+        "modify only: 'strict' (default — target must match uniquely), 'first' (first occurrence), or 'all' (every occurrence).",
+      ),
+    regex: z
+      .boolean()
+      .optional()
+      .describe(
+        "modify only: treat target_text as a regular expression (default false).",
+      ),
+    position: z
+      .enum(["above", "below"])
+      .optional()
+      .describe(
+        "insert_row: place the new row above or below the matched row.",
+      ),
+    cells: z
+      .array(z.string())
+      .optional()
+      .describe("insert_row: the cell values for the new row, left to right."),
+  })
+  .passthrough();
+
 server.registerTool(
   "process_document_batch",
   {
@@ -356,8 +421,10 @@ server.registerTool(
         .string()
         .describe("Name to appear in Track Changes (e.g., 'Reviewer AI')."),
       changes: z
-        .array(z.any())
-        .describe("List of changes to apply. Each change must specify 'type'."),
+        .array(z.union([z.string(), CHANGE_ITEM_SCHEMA]))
+        .describe(
+          "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). All items evaluate against the ORIGINAL document state.",
+        ),
       output_path: z.string().optional().describe("Optional output path."),
       dry_run: z
         .boolean()
@@ -549,7 +616,7 @@ server.registerTool(
   "finalize_document",
   {
     description:
-      "Prepares a document for external distribution or e-signature.",
+      "Prepares a document for external distribution or e-signature. Note: in this zero-dependency environment, protection_mode='encrypt' is unsupported and falls back to a native read-only lock; export_pdf and password are ignored.",
     inputSchema: {
       file_path: z.string().describe("Absolute path to the DOCX file."),
       output_path: z.string().optional().describe("Optional output path."),
@@ -566,7 +633,9 @@ server.registerTool(
       protection_mode: z
         .enum(["read_only", "encrypt"])
         .optional()
-        .describe("Native OOXML document locking."),
+        .describe(
+          "Native OOXML document locking. Note: 'encrypt' is unsupported in this zero-dependency build and falls back to 'read_only'.",
+        ),
       password: z.string().optional().describe("Ignored in this environment."),
       author: z
         .string()
