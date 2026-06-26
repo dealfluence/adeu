@@ -1,0 +1,83 @@
+#!/bin/sh
+# Adeu monorepo pre-push hook.
+#
+# Runs each area's test suite, but only for areas changed by the commits being
+# pushed. The heavier checks live here (not in pre-commit) so day-to-day commits
+# stay fast. Bypass in a pinch with `git push --no-verify`.
+#
+#   python/      uv run pytest
+#   langchain/   uv run pytest
+#   node/        npm run build && npm test
+#
+# Cross-platform: runs under Git Bash on Windows and /bin/sh on macOS/Linux.
+
+set -u
+
+PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+ZERO=0000000000000000000000000000000000000000
+# Well-known hash of the empty tree, used as a base when none can be determined.
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# git feeds "<local_ref> <local_sha> <remote_ref> <remote_sha>" lines on stdin.
+# Accumulate the files changed across every ref being pushed.
+CHANGED=""
+while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+	[ "$_local_sha" = "$ZERO" ] && continue # branch deletion — nothing to test
+	if [ "$_remote_sha" = "$ZERO" ]; then
+		# New branch on the remote: compare against its fork point from main.
+		_base=$(git merge-base origin/main "$_local_sha" 2>/dev/null || true)
+		[ -n "$_base" ] || _base=$EMPTY_TREE
+	else
+		_base=$_remote_sha
+	fi
+	CHANGED="$CHANGED
+$(git diff --name-only "$_base" "$_local_sha" 2>/dev/null)"
+done
+
+[ -n "$(printf '%s' "$CHANGED" | tr -d '[:space:]')" ] || exit 0
+
+touched() { printf '%s\n' "$CHANGED" | grep -Eq "$1"; }
+FAIL=0
+
+if touched '^python/'; then
+	if have uv; then
+		echo "→ python: pytest"
+		uv run --directory python pytest || FAIL=1
+	else
+		echo "  ! uv not found — skipping python tests (CI still enforces them)"
+	fi
+fi
+
+if touched '^langchain/'; then
+	if have uv; then
+		echo "→ langchain: pytest"
+		uv run --directory langchain pytest || FAIL=1
+	else
+		echo "  ! uv not found — skipping langchain tests (CI still enforces them)"
+	fi
+fi
+
+if touched '^node/'; then
+	if have npm; then
+		echo "→ node: build + test"
+		(cd node && npm run build && npm test) || FAIL=1
+	else
+		echo "  ! npm not found — skipping node tests (CI still enforces them)"
+	fi
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+	echo
+	echo "✖ pre-push tests failed — push aborted. Fix the failures and re-push,"
+	echo "  or bypass with 'git push --no-verify' if you must."
+	exit 1
+fi
+
+exit 0

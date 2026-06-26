@@ -50,11 +50,15 @@ The hook only touches the directories your commit changes:
   (fixes are applied in place and re-staged into the commit), then `mypy`.
 - **`node/` (n8n-nodes-adeu)** — runs `eslint --fix` on touched `.ts` files.
 
-It needs `uv` on your `PATH` (and `node` + `npm install` in `node/` if you touch
-the n8n package); areas whose tools are missing are skipped with a warning, so
-CI remains the source of truth. Tests are not run on commit — run `uv run pytest`
-yourself or rely on CI. The hook is POSIX `sh` and works on macOS, Linux, and
-Windows (Git Bash).
+A companion `pre-push` hook runs each changed area's test suite before a push
+(`pytest` for `python/` and `langchain/`, `npm run build && npm test` for
+`node/`) — kept off the commit path so commits stay fast. Bypass in a pinch
+with `git push --no-verify`.
+
+Both hooks need `uv` on your `PATH` (and `node` + `npm install` in `node/` if you
+touch the n8n package); areas whose tools are missing are skipped with a
+warning, so CI remains the source of truth. The hooks are POSIX `sh` and work on
+macOS, Linux, and Windows (Git Bash).
 
 ### 3. Testing
 
