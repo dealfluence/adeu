@@ -1518,15 +1518,29 @@ export class RedlineEngine {
       (c) => c === null || typeof c !== "object" || !["accept", "reject", "reply"].includes(c.type),
     );
 
-    // BUG-7: Unified single-pass validation in wet-run / standard mode
+    // BUG-7: Unified single-pass validation in wet-run / standard mode.
+    //
+    // Edits are validated up-front EXCEPT when valid review actions are present.
+    // Valid accepts/rejects mutate the document before edits run, so an edit
+    // targeting text that a same-batch accept turns from a foreign <w:ins> into
+    // plain body text would be wrongly rejected ("active insertion from another
+    // author") if validated against the pre-accept state. In that case edit
+    // validation is deferred to the post-accept `validate_edits` call below
+    // (matching the Python engine).
+    //
+    // When the actions are themselves invalid (or there are none), nothing will
+    // be applied, so the current document IS the state edits run against — we
+    // validate edits now and accumulate every error in one pass (preserves
+    // BUG-7's unified error reporting).
     if (!dry_run_mode) {
-      const all_errors: string[] = [];
-      if (actions.length > 0) {
-        all_errors.push(...this.validate_review_actions(actions));
-      }
-      if (edits.length > 0) {
-        all_errors.push(...this.validate_edits(edits));
-      }
+      const action_errors =
+        actions.length > 0 ? this.validate_review_actions(actions) : [];
+      const validate_edits_now =
+        edits.length > 0 && (actions.length === 0 || action_errors.length > 0);
+      const all_errors = [
+        ...action_errors,
+        ...(validate_edits_now ? this.validate_edits(edits) : []),
+      ];
       if (all_errors.length > 0) {
         throw new BatchValidationError(all_errors);
       }

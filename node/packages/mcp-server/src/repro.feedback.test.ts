@@ -155,4 +155,55 @@ describe("Field feedback repro — Issue 3 file-path ambiguity (real MCP server)
     expect(savedFile(msg)).toBe("contract_processed.docx");
     expect(existsSync(join(workDir, "contract_processed_processed.docx"))).toBe(false);
   });
+
+  it("Issue 1 (end-to-end via shipped server): accept + modify the same foreign insertion in one batch succeeds", async () => {
+    // Proves the engine fix is present in the COMPILED bundle, not just src.
+    // Build a doc where "Supplier's Counsel" has tracked-inserted "24 months".
+    const foreign = join(workDir, "lease.docx");
+    {
+      const doc = await DocumentObject.load(
+        readFileSync(resolve(__dirname, "../../../../shared/fixtures/initial.docx")),
+      );
+      const body = doc.element;
+      while (body.firstChild) body.removeChild(body.firstChild);
+      const x = body.ownerDocument!;
+      const p = x.createElement("w:p");
+      const r0 = x.createElement("w:r");
+      const t0 = x.createElement("w:t");
+      t0.textContent = "The term is ";
+      t0.setAttribute("xml:space", "preserve");
+      r0.appendChild(t0);
+      p.appendChild(r0);
+      const ins = x.createElement("w:ins");
+      ins.setAttribute("w:id", "5");
+      ins.setAttribute("w:author", "Supplier's Counsel");
+      ins.setAttribute("w:date", "2024-01-01T00:00:00Z");
+      const r = x.createElement("w:r");
+      const t = x.createElement("w:t");
+      t.textContent = "24 months";
+      r.appendChild(t);
+      ins.appendChild(r);
+      p.appendChild(ins);
+      body.appendChild(p);
+      writeFileSync(foreign, await doc.save());
+    }
+
+    const res = await callTool(
+      "process_document_batch",
+      {
+        original_docx_path: foreign,
+        author_name: "Acme's Counsel",
+        output_path: join(workDir, "lease_out.docx"),
+        changes: [
+          { type: "accept", target_id: "Chg:5" },
+          { type: "modify", target_text: "24 months", new_text: "36 months" },
+        ],
+      },
+      204,
+    );
+    const msg = res.result.content[0].text as string;
+    expect(msg).not.toContain("active insertion from another author");
+    expect(msg).toContain("Batch complete");
+    expect(msg).toContain("Edits: 1 applied, 0 skipped");
+  });
 });

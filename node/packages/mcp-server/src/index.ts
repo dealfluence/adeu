@@ -481,7 +481,15 @@ server.registerTool(
         const ext = extname(original_docx_path);
         const base = basename(original_docx_path, ext);
         const dir = dirname(original_docx_path);
-        outPath = resolve(dir, `${base}_processed${ext}`);
+        // Idempotency guard (parity with Python document.py): if the input is
+        // already a processed artifact, write back to it instead of compounding
+        // the suffix into contract_processed_processed.docx, which fragments the
+        // agent's document state across files.
+        if (base.endsWith("_processed") || base.endsWith("_redlined")) {
+          outPath = resolve(dir, `${base}${ext}`);
+        } else {
+          outPath = resolve(dir, `${base}_processed${ext}`);
+        }
       }
 
       const buf = readFileBytesOrThrow(original_docx_path);
