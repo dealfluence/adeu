@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.2",
   "name": "Adeu",
-  "version": "1.17.0",
+  "version": "1.17.1",
   "description": "Native Node.js DOCX <-> LLM Context Engine (No Python Required).",
   "author": {
     "name": "mikko@adeu.ai",
