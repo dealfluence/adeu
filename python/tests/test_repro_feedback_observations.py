@@ -29,7 +29,6 @@ Summary of findings (see each test for the proof):
 
 import asyncio
 import io
-import os
 import re
 import zipfile
 
@@ -143,9 +142,7 @@ def test_issue2_self_replacement_comment_over_fragmented_runs_is_single_comment(
 
     eng = RedlineEngine(s, author="Reviewer")
     sentence = "".join(words).strip()
-    eng.apply_edits(
-        [ModifyText(target_text=sentence, new_text=sentence, comment="Missing value")]
-    )
+    eng.apply_edits([ModifyText(target_text=sentence, new_text=sentence, comment="Missing value")])
     starts, ends, refs = _count_comment_markers(eng.save_to_stream())
     assert (starts, ends, refs) == (1, 1, 1)
 
@@ -185,9 +182,7 @@ def test_issue2_no_dedicated_comment_only_change_type_exists():
     ModifyText.
     """
     members = DocumentChange.__args__[0].__args__  # Annotated[Union[...], ...]
-    type_literals = {
-        m.model_fields["type"].default for m in members if "type" in m.model_fields
-    }
+    type_literals = {m.model_fields["type"].default for m in members if "type" in m.model_fields}
     assert "comment" not in type_literals
     assert "modify" in type_literals
     # The comment payload lives on ModifyText, not on a first-class comment type.
