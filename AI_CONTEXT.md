@@ -157,6 +157,9 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 ### Deployment
 *   **Versioning**: Semantic versioning in `pyproject.toml`. `src/adeu/__init__.py` dynamically loads this via `importlib.metadata`.
 *   **Dependencies**: Uses `uv` (PEP 621 standard) with `hatchling` as the build backend. `python-docx` is patched at runtime in `comments.py` to support Modern Comments namespaces (`w16cid`, `w15`).
+*   **Release pipeline** (`.github/workflows/release.yml`): Two-phase. Run `scripts/bump.py X.Y.Z` (syncs manifests + lockfiles), commit, then push a `vX.Y.Z` tag — the tag triggers `draft-release` (build + draft GitHub Release). A human then clicks **Publish**, which fires the `npm` / `pypi` / `langchain-pypi` / `smithery` jobs.
+    *   *Consistency gate*: `scripts/check_release_consistency.mjs` is the single source of truth for codex integrity (n8n `nodeVersion`/`codexVersion`/`node`/categories) + monorepo version lockstep. It runs in CI/pre-push (via a vitest test in `n8n-nodes-adeu`), inside `bump.py`, and as the first step of `draft-release` — a bad tag fails before any asset ships.
+    *   *Manual gates*: the only human gate is the draft → **Publish** click. The `pypi`/`langchain-pypi` GitHub Environments are name-only OIDC pins (Trusted Publishing), NOT approval gates — keep the `environment:` blocks; add a "Required reviewers" rule in repo Settings → Environments to re-gate. Smithery publishes on the **publish** event (not at tag/draft time) so all registries ship together.
 
 ### Agent Integration Testing
 *   To test changes to the MCP server without publishing to PyPI, use `uv run adeu init --local`.
