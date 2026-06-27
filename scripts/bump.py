@@ -137,18 +137,40 @@ def main():
     print("   Running 'npm install --package-lock-only' in node/...")
     run_cmd(["npm", "install", "--package-lock-only"], cwd="node", check=False)
 
+    print("\n🔎 Verifying release consistency...")
+    try:
+        check = run_cmd(
+            ["node", "scripts/check_release_consistency.mjs"], check=False
+        )
+        print(check.stdout.strip() or check.stderr.strip())
+        if check.returncode != 0:
+            print(
+                "\n⚠️  Consistency check FAILED — resolve the issues above before tagging."
+            )
+    except FileNotFoundError:
+        print(
+            "  ! node not found — skipping consistency check"
+            " (CI re-runs it before the release builds)."
+        )
+
+    tag = f"v{target_version}"
     print("\n🎉 Files and lockfiles updated successfully!")
     print("\nNext steps:")
     print("  1. Review changes: git diff")
     print(f'  2. git commit -am "chore(release): bump version to {target_version}"')
     print("  3. git push origin main")
+    print("  4. Tag the release — THIS push is what triggers the pipeline:")
+    print(f'       git tag -a {tag} -m "Release {tag}"')
+    print(f"       git push origin {tag}")
     print(
-        "  ⚠️  Do NOT sync nodeVersion/codexVersion in nodes/Adeu/Adeu.node.json"
-        " to this package version. nodeVersion mirrors Adeu.node.ts's `version`"
-        " (now \"1.0\"); codexVersion is the schema version (\"1.0\")."
+        "  5. CI builds the draft release + assets. Add notes, then click 'Publish'"
+        " to ship to npm / PyPI / Smithery."
     )
     print(
-        "  4. Wait for CI to create the Draft Release, then go to GitHub to add notes and click 'Publish'"
+        "\n  ⚠️  Do NOT sync nodeVersion/codexVersion in nodes/Adeu/Adeu.node.json"
+        " to this package version. nodeVersion mirrors Adeu.node.ts's `version`"
+        ' (now "1.0"); codexVersion is the schema version ("1.0"). The'
+        " consistency check above enforces this."
     )
 
 

@@ -23,6 +23,12 @@ jobs:
         with:
           node-version: "24.x"
 
+      # Gate the whole release on codex integrity + monorepo version lockstep
+      # BEFORE any asset is built or published. Mirrors the check enforced in
+      # CI / pre-push, so a bad tag fails here instead of shipping.
+      - name: Validate release consistency
+        run: node scripts/check_release_consistency.mjs
+
       - name: Install Dependencies
         working-directory: ./node
         run: npm install
@@ -34,16 +40,6 @@ jobs:
       - name: Pack MCPB Bundle
         working-directory: ./desktop-extension
         run: zip -r Adeu.mcpb manifest.json icon.png package.json *.js assets/ templates/
-
-      - name: Build Smithery Bundle
-        run: python scripts/patch_smithery_mcpb.py
-
-      - name: Publish to Smithery
-        env:
-          SMITHERY_API_KEY: ${{ secrets.SMITHERY_TOKEN }}
-        # Using --yes to suppress any interactive CLI prompts
-        run: |
-          npx --yes smithery@latest mcp publish adeu-smithery.mcpb -n adeu/adeu
 
       - name: Generate Draft Release and Upload Asset
         env:
@@ -85,10 +81,50 @@ jobs:
             ./linux.adeu.zip \
             ./win32.adeu.zip
 
+  smithery-publish:
+    # Smithery ships on the SAME trigger as npm/PyPI (release published), not at
+    # the draft/tag stage — otherwise tagging a release you never publish would
+    # still push to Smithery, skewing it ahead of the other registries.
+    if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
+    name: Publish to Smithery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.x"
+
+      - name: Install Dependencies
+        working-directory: ./node
+        run: npm install
+
+      - name: Build Packages
+        working-directory: ./node
+        run: npm run build
+
+      - name: Build Smithery Bundle
+        run: python scripts/patch_smithery_mcpb.py
+
+      - name: Publish to Smithery
+        env:
+          SMITHERY_API_KEY: ${{ secrets.SMITHERY_TOKEN }}
+        # Using --yes to suppress any interactive CLI prompts
+        run: |
+          npx --yes smithery@latest mcp publish adeu-smithery.mcpb -n adeu/adeu
+
   pypi-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
     name: Upload release to PyPI
     runs-on: ubuntu-latest
+    # The `pypi` environment is intentionally a NAME-ONLY reference, not a
+    # second approval gate. PyPI's OIDC Trusted Publisher is pinned to this
+    # exact environment name, so the `environment:` block must stay for auth to
+    # succeed — do NOT delete it. The single human gate is the GitHub Release
+    # draft -> Publish click. If you want to pause this job again, add a
+    # "Required reviewers" protection rule under Settings -> Environments ->
+    # pypi (repo settings), NOT here.
     environment:
       name: pypi
       url: https://pypi.org/p/adeu
@@ -165,6 +201,10 @@ jobs:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
     name: Upload langchain-adeu to PyPI
     runs-on: ubuntu-latest
+    # Same as the `pypi` job: name-only environment pinned by langchain-adeu's
+    # OIDC Trusted Publisher. Keep the `environment:` block (required for auth);
+    # it is not an approval gate. Re-add a gate via Settings -> Environments ->
+    # langchain-pypi if ever needed, not in this file.
     environment:
       name: langchain-pypi
       url: https://pypi.org/project/langchain-adeu
