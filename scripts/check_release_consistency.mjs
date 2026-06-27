@@ -1,5 +1,11 @@
-#!/usr/bin/env node
 // Release consistency checker (zero-dependency, single source of truth).
+//
+// NOTE: intentionally NO `#!/usr/bin/env node` shebang. This module is imported
+// by node/packages/n8n-nodes-adeu/test/codex-consistency.test.ts, and Vite/
+// vitest's transform of an imported .mjs does not strip a leading shebang,
+// which makes V8 throw "SyntaxError: Invalid or unexpected token" at load time
+// (0 tests collected). The script is always run as `node scripts/<file>.mjs`
+// (see release.yml / bump.py), so the shebang was never needed.
 //
 // Two independent guarantees, both of which have bitten us before:
 //
