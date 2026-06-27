@@ -145,6 +145,103 @@ def test_multiple_errors_accumulated():
     assert "Edit 2 Failed: Target text not found" in errors[1]
 
 
+def test_ambiguity_error_surfaces_match_mode_escape_hatch():
+    """
+    Regression for the "Turn Loop Trap": when process_document_batch returns an
+    ambiguous-match failure, the message MUST tell the agent how to re-call using
+    match_mode="all" / match_mode="first". Without this, agents burn dozens of
+    turns refining target_text and regexes instead of using the built-in escape
+    hatch — exactly the failure that blew through the 80-turn / 6.78M-token ceiling.
+    """
+    doc = Document()
+    # Mirror the DPA scenario: the same placeholder appears in multiple clauses.
+    doc.add_paragraph("PROVIDER: [official company name] shall process the data.")
+    doc.add_paragraph("PROVIDER: [official company name] is the data processor.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream)
+    edit = ModifyText(target_text="PROVIDER: [official company name]", new_text="PROVIDER: Acme Corp")
+
+    errors = engine.validate_edits([edit])
+
+    assert len(errors) == 1
+    error_msg = errors[0]
+
+    assert "Edit 1 Failed: Ambiguous match" in error_msg
+    assert "appears 2 times" in error_msg
+
+    # The actionable remediation: the message names BOTH match_mode options
+    # explicitly so the agent can immediately re-call instead of looping.
+    assert 'match_mode": "all"' in error_msg
+    assert 'match_mode": "first"' in error_msg
+    assert "ALL 2 occurrences" in error_msg
+    assert "FIRST occurrence" in error_msg
+
+    # The original "add more context" guidance is preserved as a third option.
+    assert "Please provide more surrounding context" in error_msg
+
+
+def test_ambiguity_resolved_by_match_mode_all():
+    """
+    Goal state: re-sending the SAME target_text with match_mode="all" clears the
+    ambiguity (zero validation errors) and modifies every occurrence.
+    """
+    doc = Document()
+    doc.add_paragraph("PROVIDER: [official company name] shall process the data.")
+    doc.add_paragraph("PROVIDER: [official company name] is the data processor.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream)
+    edit = ModifyText(
+        target_text="PROVIDER: [official company name]",
+        new_text="PROVIDER: Acme Corp",
+        match_mode="all",
+    )
+
+    # Validation no longer trips on the ambiguity.
+    assert engine.validate_edits([edit]) == []
+
+    # And a dry run confirms every occurrence is targeted.
+    stats = engine.process_batch([edit], dry_run=True)
+    report = stats["edits"][0]
+    assert report.get("match_mode") == "all"
+    assert report.get("occurrences_modified", 0) == 2
+
+
+def test_ambiguity_resolved_by_match_mode_first():
+    """
+    Goal state: re-sending the SAME target_text with match_mode="first" clears the
+    ambiguity and modifies only the first occurrence.
+    """
+    doc = Document()
+    doc.add_paragraph("PROVIDER: [official company name] shall process the data.")
+    doc.add_paragraph("PROVIDER: [official company name] is the data processor.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    engine = RedlineEngine(stream)
+    edit = ModifyText(
+        target_text="PROVIDER: [official company name]",
+        new_text="PROVIDER: Acme Corp",
+        match_mode="first",
+    )
+
+    assert engine.validate_edits([edit]) == []
+
+    stats = engine.process_batch([edit], dry_run=True)
+    report = stats["edits"][0]
+    assert report.get("match_mode") == "first"
+    assert report.get("occurrences_modified", 0) == 1
+
+
 def test_validation_rejects_hallucinated_criticmarkup():
     """
     Scenario: LLM hallucinates CriticMarkup tags inside the new_text instead of using the comment parameter.

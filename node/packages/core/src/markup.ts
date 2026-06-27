@@ -422,8 +422,19 @@ export function format_ambiguity_error(
     lines.push(`    ... and ${remaining} more occurrence(s) not shown.`);
   }
 
+  // Tell the agent EXACTLY how to re-call. Without this, agents loop forever
+  // refining target_text/regex because they never learn that match_mode is the
+  // built-in escape hatch for genuine ambiguity.
+  lines.push("  To resolve, re-send this edit using ONE of these strategies:");
   lines.push(
-    "  Please provide more surrounding context in your target_text to uniquely identify the location.",
+    `    1. Set "match_mode": "all" to modify ALL ${total} occurrences (same target_text).`,
+  );
+  lines.push(
+    '    2. Set "match_mode": "first" to modify only the FIRST occurrence (same target_text).',
+  );
+  lines.push(
+    '    3. Please provide more surrounding context in your target_text to uniquely ' +
+      'identify a single location (keep the default "match_mode": "strict").',
   );
 
   return lines.join("\n");

@@ -103,3 +103,108 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     # The third paragraph should have the new tracked change anchored perfectly
     assert "{--Third--}" in final_text
     assert "{++3rd++}" in final_text
+
+
+def _make_dpa(tmp_path):
+    """Build the DPA scenario: an identical placeholder in two clauses."""
+    doc = Document()
+    doc.add_paragraph("PROVIDER: [official company name] shall process the data.")
+    doc.add_paragraph("PROVIDER: [official company name] is the data processor.")
+    path = tmp_path / "dpa.docx"
+    doc.save(path)
+    return path
+
+
+def test_ambiguous_batch_rejection_then_match_mode_all_through_real_tool(tmp_path):
+    """
+    End-to-end through the ACTUAL process_document_batch tool (not just the
+    engine): an ambiguous strict edit is rejected with guidance naming the
+    match_mode escape hatch, and re-running with the suggested match_mode="all"
+    actually mutates the document on disk. This is the full "Turn Loop Trap"
+    fix verified along the real agent-facing path.
+    """
+    dpa_path = _make_dpa(tmp_path)
+
+    # 1. The flawed strict edit — exactly what trapped the agent originally.
+    strict_edit = ModifyText(
+        target_text="PROVIDER: [official company name]",
+        new_text="PROVIDER: Acme Corp",
+    )
+    rejection = asyncio.run(
+        process_document_batch(
+            original_docx_path=str(dpa_path),
+            author_name="Reviewer",
+            ctx=MockContext(),
+            changes=[strict_edit],
+        )
+    )
+
+    # The agent-facing message must reject AND show how to re-call.
+    assert "Batch rejected" in rejection
+    assert "Ambiguous match" in rejection
+    assert 'match_mode": "all"' in rejection
+    assert 'match_mode": "first"' in rejection
+
+    # 2. Follow the guidance verbatim: re-send with match_mode="all".
+    all_edit = ModifyText(
+        target_text="PROVIDER: [official company name]",
+        new_text="PROVIDER: Acme Corp",
+        match_mode="all",
+    )
+    out_path = tmp_path / "dpa_all.docx"
+    result = asyncio.run(
+        process_document_batch(
+            original_docx_path=str(dpa_path),
+            author_name="Reviewer",
+            ctx=MockContext(),
+            changes=[all_edit],
+            output_path=str(out_path),
+        )
+    )
+
+    assert "Batch complete" in result
+    # match_mode="all" fans the single edit out into one applied edit per occurrence.
+    assert "Edits: 2 applied" in result
+
+    # 3. The document on disk is genuinely modified in BOTH clauses. (The engine
+    # trims the shared "PROVIDER: " prefix, so only the differing tail is redlined.)
+    with open(out_path, "rb") as f:
+        final_text = extract_text_from_stream(io.BytesIO(f.read()))
+
+    assert final_text.count("{++Acme Corp++}") == 2
+    assert final_text.count("{--[official company name]--}") == 2
+
+
+def test_ambiguous_batch_resolved_by_match_mode_first_through_real_tool(tmp_path):
+    """
+    Same agent-facing path, but following the match_mode="first" branch of the
+    guidance: only the first occurrence is mutated on disk.
+    """
+    dpa_path = _make_dpa(tmp_path)
+
+    first_edit = ModifyText(
+        target_text="PROVIDER: [official company name]",
+        new_text="PROVIDER: Acme Corp",
+        match_mode="first",
+    )
+    out_path = tmp_path / "dpa_first.docx"
+    result = asyncio.run(
+        process_document_batch(
+            original_docx_path=str(dpa_path),
+            author_name="Reviewer",
+            ctx=MockContext(),
+            changes=[first_edit],
+            output_path=str(out_path),
+        )
+    )
+
+    assert "Batch complete" in result
+    assert "Edits: 1 applied" in result
+
+    with open(out_path, "rb") as f:
+        final_text = extract_text_from_stream(io.BytesIO(f.read()))
+
+    # Exactly one clause is changed; the other placeholder is untouched.
+    assert final_text.count("{++Acme Corp++}") == 1
+    assert final_text.count("{--[official company name]--}") == 1
+    assert "PROVIDER: [official company name] is the data processor." in final_text

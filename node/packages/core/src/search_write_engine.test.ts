@@ -25,6 +25,47 @@ describe('Search and Targeted Write Engine', () => {
     expect(() => engine.process_batch(edits)).toThrowError(BatchValidationError);
   });
 
+  it('strict rejection carries match_mode guidance, and the suggested re-call applies (Turn Loop Trap)', async () => {
+    // The DPA scenario: one placeholder repeated across clauses.
+    const doc = await createTestDocument();
+    addParagraph(doc, "PROVIDER: [official company name] shall process the data.");
+    addParagraph(doc, "PROVIDER: [official company name] is the data processor.");
+
+    const engine = new RedlineEngine(doc);
+    const strictEdit: any = {
+      type: 'modify',
+      target_text: "PROVIDER: [official company name]",
+      new_text: "PROVIDER: Acme Corp",
+    };
+
+    // 1. The strict edit is rejected — and the error MUST name the escape hatch
+    // so the agent re-calls instead of looping on context/regex refinement.
+    let caught: BatchValidationError | null = null;
+    try {
+      engine.process_batch([strictEdit]);
+    } catch (e) {
+      caught = e as BatchValidationError;
+    }
+    expect(caught).toBeInstanceOf(BatchValidationError);
+    const msg = caught!.errors.join("\n");
+    expect(msg).toContain("Ambiguous match");
+    expect(msg).toContain('"match_mode": "all"');
+    expect(msg).toContain('"match_mode": "first"');
+
+    // 2. Follow the guidance verbatim — the same target_text with match_mode="all"
+    // applies cleanly and mutates BOTH clauses on the saved document.
+    const doc2 = await createTestDocument();
+    addParagraph(doc2, "PROVIDER: [official company name] shall process the data.");
+    addParagraph(doc2, "PROVIDER: [official company name] is the data processor.");
+    const engine2 = new RedlineEngine(doc2);
+    const stats = engine2.process_batch([{ ...strictEdit, match_mode: 'all' }]);
+    expect(stats.edits[0].occurrences_modified).toBe(2);
+
+    const text = await extractTextFromBuffer(await doc2.save(), true);
+    expect(text.match(/Acme Corp/g)?.length).toBe(2);
+    expect(text).not.toContain("PROVIDER: [official company name]");
+  });
+
   it('match_mode="first" modifies only the first occurrence', async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "This is a repetitive clause.");

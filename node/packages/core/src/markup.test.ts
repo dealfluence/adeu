@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { 
-  _replace_smart_quotes, 
-  _make_fuzzy_regex, 
-  _find_match_in_text, 
-  _build_critic_markup, 
-  apply_edits_to_markdown 
+import {
+  _replace_smart_quotes,
+  _make_fuzzy_regex,
+  _find_match_in_text,
+  _build_critic_markup,
+  apply_edits_to_markdown,
+  format_ambiguity_error
 } from './markup.js';
 import { ModifyText } from './models.js';
 
@@ -146,5 +147,39 @@ describe('apply_edits_to_markdown', () => {
   ])('formatting noise and preservation: %s', (text, target, newText, expectedSubstring) => {
     const result = apply_edits_to_markdown(text, [{ type: 'modify', target_text: target, new_text: newText }]);
     expect(result).toContain(expectedSubstring);
+  });
+});
+
+describe('format_ambiguity_error (Turn Loop Trap mitigation)', () => {
+  // Mirror the DPA scenario: the same placeholder appears in multiple clauses.
+  const haystack =
+    'PROVIDER: [official company name] shall process the data. ' +
+    'PROVIDER: [official company name] is the data processor.';
+  const target = 'PROVIDER: [official company name]';
+  const positions: [number, number][] = [
+    [0, target.length],
+    [58, 58 + target.length],
+  ];
+
+  it('names BOTH match_mode escape hatches so the agent can re-call instead of looping', () => {
+    const msg = format_ambiguity_error(1, target, haystack, positions);
+
+    expect(msg).toContain('Edit 1 Failed: Ambiguous match');
+    expect(msg).toContain('appears 2 times');
+
+    // The actionable remediation that breaks the loop.
+    expect(msg).toContain('"match_mode": "all"');
+    expect(msg).toContain('"match_mode": "first"');
+    expect(msg).toContain('ALL 2 occurrences');
+    expect(msg).toContain('FIRST occurrence');
+
+    // The original "add more context" guidance is preserved as a third option.
+    expect(msg).toContain('Please provide more surrounding context');
+  });
+
+  it('still throws for fewer than two matches', () => {
+    expect(() => format_ambiguity_error(1, target, haystack, [[0, 5]])).toThrow(
+      /requires at least 2 matches/,
+    );
   });
 });

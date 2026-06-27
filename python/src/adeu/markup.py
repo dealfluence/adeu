@@ -376,7 +376,16 @@ def format_ambiguity_error(
     if remaining > 0:
         lines.append(f"    ... and {remaining} more occurrence(s) not shown.")
 
-    lines.append("  Please provide more surrounding context in your target_text to uniquely identify the location.")
+    # Tell the agent EXACTLY how to re-call. Without this, agents loop forever
+    # refining target_text/regex because they never learn that match_mode is the
+    # built-in escape hatch for genuine ambiguity.
+    lines.append("  To resolve, re-send this edit using ONE of these strategies:")
+    lines.append(f'    1. Set "match_mode": "all" to modify ALL {total} occurrences (same target_text).')
+    lines.append('    2. Set "match_mode": "first" to modify only the FIRST occurrence (same target_text).')
+    lines.append(
+        "    3. Please provide more surrounding context in your target_text to uniquely "
+        'identify a single location (keep the default "match_mode": "strict").'
+    )
 
     return "\n".join(lines)
 

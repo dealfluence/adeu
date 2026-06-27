@@ -78,7 +78,14 @@ class ModifyText(BaseModel):
     )
 
     match_mode: Literal["strict", "first", "all"] = Field(
-        default="strict", description="Resolution strategy for multiple occurrences."
+        default="strict",
+        description=(
+            "Resolution strategy when target_text appears more than once. "
+            "'strict' (default): fail with an ambiguity error if there are multiple matches. "
+            "'first': modify only the first occurrence. "
+            "'all': modify every occurrence. Use 'first'/'all' to resolve an ambiguity error "
+            "without having to add more surrounding context to target_text."
+        ),
     )
     regex: bool = Field(default=False, description="Treat target_text as a regular expression.")
 
