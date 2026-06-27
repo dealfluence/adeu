@@ -15,6 +15,13 @@ FILES_TO_BUMP = [
     "node/packages/n8n-nodes-adeu/package.json",
 ]
 
+# NOTE: nodes/Adeu/Adeu.node.json is intentionally NOT bumped here. Its codex
+# fields do NOT track the npm package version:
+#   - "nodeVersion"  mirrors the `version` property in Adeu.node.ts (currently
+#                    `version: 1` -> "1.0"). Only change it if that bumps.
+#   - "codexVersion" is the codex schema version and stays "1.0".
+# Ref: https://docs.n8n.io/integrations/creating-nodes/build/reference/node-codex-files/
+
 
 def run_cmd(cmd, cwd=None, check=True):
     """Helper to run shell commands."""
@@ -135,6 +142,11 @@ def main():
     print("  1. Review changes: git diff")
     print(f'  2. git commit -am "chore(release): bump version to {target_version}"')
     print("  3. git push origin main")
+    print(
+        "  ⚠️  Do NOT sync nodeVersion/codexVersion in nodes/Adeu/Adeu.node.json"
+        " to this package version. nodeVersion mirrors Adeu.node.ts's `version`"
+        " (now \"1.0\"); codexVersion is the schema version (\"1.0\")."
+    )
     print(
         "  4. Wait for CI to create the Draft Release, then go to GitHub to add notes and click 'Publish'"
     )
