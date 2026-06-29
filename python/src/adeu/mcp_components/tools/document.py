@@ -45,28 +45,38 @@ from adeu.utils.docx import strip_bom_from_docx_bytes
 
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
 
+_SINGLE_CHANGE_ADAPTER: TypeAdapter[DocumentChange] = TypeAdapter(DocumentChange)
 
-def _normalize_changes(changes: Any) -> List[DocumentChange]:
+
+def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
     """
     Normalize the `changes` argument into a list of validated DocumentChange
-    instances. Tolerates three shapes the tool may legitimately receive:
+    instances, validating each element INDEPENDENTLY so that one malformed
+    sub-edit cannot forfeit the whole batch.
 
-      1. List of already-validated DocumentChange / Pydantic instances
-         (the common path when callers construct the objects themselves).
-      2. List of plain dicts (the common path when an LLM passes a JSON object).
-      3. List of JSON-encoded strings (Gemini quirk — see coerce_stringified_changes).
+    Returns (valid_changes, rejected_notes):
+      - valid_changes: every element that validated, in original order.
+      - rejected_notes: human-readable "changes[i]: <reason>" strings for every
+        element that failed, for surfacing back to the model.
 
-    Mixed lists are also handled. We coerce strings -> dicts first, then run
-    the discriminated-union validator. Any item Pydantic can't classify will
-    raise a ValidationError with a clear path like `changes.2: ...`.
+    Tolerates the same three input shapes as before:
+      1. List of already-validated DocumentChange instances (fast path; skips
+         re-validation to preserve engine PrivateAttrs set during a dry-run).
+      2. List of plain dicts.
+      3. List of JSON-encoded strings (Gemini quirk).
 
-    Pre-validated DocumentChange instances bypass re-validation because Pydantic
-    dump+reload would strip the engine's PrivateAttrs (e.g. _resolved_start_idx)
-    that may have been set during a dry-run.
+    Mixed lists are handled. Strings are coerced to dicts first (and missing
+    `type` / malformed `match_mode` are repaired) via coerce_stringified_changes.
     """
     if not isinstance(changes, list):
-        # Let the adapter produce the canonical "expected list" error.
-        return _DOCUMENT_CHANGE_LIST_ADAPTER.validate_python(changes)
+        # A non-list input can't be salvaged per-element. Let the list adapter
+        # produce its canonical "expected a list" error and report it as a
+        # whole-batch rejection.
+        try:
+            validated = _DOCUMENT_CHANGE_LIST_ADAPTER.validate_python(changes)
+            return validated, []
+        except Exception as e:
+            return [], [f"changes: {_summarize_validation_error(e)}"]
 
     # If every element is already a DocumentChange instance, skip revalidation.
     if changes and all(
@@ -83,10 +93,36 @@ def _normalize_changes(changes: Any) -> List[DocumentChange]:
         )
         for c in changes
     ):
-        return changes  # type: ignore[return-value]
+        return changes, []  # type: ignore[return-value]
 
     coerced = coerce_stringified_changes(changes)
-    return _DOCUMENT_CHANGE_LIST_ADAPTER.validate_python(coerced)
+
+    valid: List[DocumentChange] = []
+    rejected: List[str] = []
+    for i, item in enumerate(coerced):
+        try:
+            valid.append(_SINGLE_CHANGE_ADAPTER.validate_python(item))
+        except Exception as e:
+            rejected.append(f"changes[{i}]: {_summarize_validation_error(e)}")
+
+    return valid, rejected
+
+
+def _summarize_validation_error(exc: Exception) -> str:
+    """
+    Condense a Pydantic ValidationError into a short, model-actionable line.
+    Falls back to str(exc) for non-Pydantic errors.
+    """
+    from pydantic import ValidationError
+
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    parts: List[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        msg = err.get("msg", "invalid")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) if parts else str(exc)
 
 
 async def _read_docx_disk(
@@ -183,6 +219,7 @@ async def _process_document_batch_disk(
     changes: List[DocumentChange],
     output_path: Optional[str],
     dry_run: bool = False,
+    rejected_notes: Optional[List[str]] = None,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     await ctx.info(
@@ -200,7 +237,20 @@ async def _process_document_batch_disk(
 
     if not changes:
         await ctx.warning("Batch processing rejected: No actions or edits provided.")
+        if rejected_notes:
+            return "Error: No valid changes to apply. All submitted changes failed validation:\n" + "\n".join(
+                f"- {n}" for n in rejected_notes
+            )
         return "Error: No changes provided."
+
+    rejection_prefix = ""
+    if rejected_notes:
+        rejection_prefix = (
+            "Note: some submitted changes were skipped because they failed validation. "
+            "The valid changes below were still applied. Resubmit the skipped ones corrected:\n"
+            + "\n".join(f"- {n}" for n in rejected_notes)
+            + "\n\n"
+        )
 
     def _run_batch_sync() -> tuple[bool, Any, str]:
         stream = read_file_bytes(original_docx_path)
@@ -238,9 +288,9 @@ async def _process_document_batch_disk(
 
         stats = result_data
         if dry_run:
-            res = "Dry-run simulation complete.\n"
+            res = rejection_prefix + "Dry-run simulation complete.\n"
         else:
-            res = f"Batch complete. Saved to: {final_output_path}\n"
+            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}\n"
 
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
@@ -666,14 +716,26 @@ if sys.platform == "win32":
         # against the bare list type), so coerce here as a defensive second pass.
         # This is also what catches stringified-object lists emitted by some LLM
         # clients (notably Gemini under load).
-        changes = _normalize_changes(changes)
+        changes, rejected_notes = _normalize_changes(changes)
+        if not changes and rejected_notes:
+            return add_timing_if_debug(
+                start_time,
+                "Error: No valid changes to apply. All submitted changes failed validation:\n"
+                + "\n".join(f"- {n}" for n in rejected_notes),
+            )
         if dry_run:
             if not original_docx_path:
                 return (
                     "Dry-run simulation is only supported for disk-based files (original_docx_path must be specified)."
                 )
             res = await _process_document_batch_disk(
-                original_docx_path, author_name, ctx, changes, output_path, dry_run=True
+                original_docx_path,
+                author_name,
+                ctx,
+                changes,
+                output_path,
+                dry_run=True,
+                rejected_notes=rejected_notes,
             )
         elif not original_docx_path:
             # Edit active document directly. No disk fallback available.
@@ -691,6 +753,7 @@ if sys.platform == "win32":
                     changes,
                     output_path,
                     dry_run=False,
+                    rejected_notes=rejected_notes,
                 )
         return add_timing_if_debug(start_time, res)
 
@@ -879,8 +942,20 @@ else:
     ) -> str:
         start_time = time.perf_counter()
         # See win32 branch above for why we re-coerce here.
-        changes = _normalize_changes(changes)
+        changes, rejected_notes = _normalize_changes(changes)
+        if not changes and rejected_notes:
+            return add_timing_if_debug(
+                start_time,
+                "Error: No valid changes to apply. All submitted changes failed validation:\n"
+                + "\n".join(f"- {n}" for n in rejected_notes),
+            )
         res = await _process_document_batch_disk(
-            original_docx_path, author_name, ctx, changes, output_path, dry_run=dry_run
+            original_docx_path,
+            author_name,
+            ctx,
+            changes,
+            output_path,
+            dry_run=dry_run,
+            rejected_notes=rejected_notes,
         )
         return add_timing_if_debug(start_time, res)

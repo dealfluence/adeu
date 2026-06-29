@@ -110,26 +110,35 @@ def test_process_document_batch_accepts_mixed_string_and_dict(sample_docx, tmp_p
 
 def test_process_document_batch_rejects_unparseable_string(sample_docx, tmp_path):
     """
-    A string that is not valid JSON should leave the original string in place
-    so Pydantic raises a clear validation error, not an opaque internal one.
+    A string that is not valid JSON cannot be salvaged into a change. Under the
+    per-change validation contract this is no longer raised as an exception;
+    instead the element is reported back as a validation rejection in the tool's
+    text response, no edits are applied, and the error must be a clear
+    validation message (not an opaque internal `_applied_status`-style error).
     """
     ctx = MockContext()
 
     bad_changes = ["this is not json at all"]
 
-    with pytest.raises(Exception) as exc_info:
-        asyncio.run(
-            process_document_batch(
-                original_docx_path=sample_docx,
-                author_name="AI Agent",
-                ctx=ctx,  # type: ignore[arg-type]
-                changes=bad_changes,  # type: ignore[arg-type]
-                output_path=str(tmp_path / "fail.docx"),
-            )
+    result = asyncio.run(
+        process_document_batch(
+            original_docx_path=sample_docx,
+            author_name="AI Agent",
+            ctx=ctx,  # type: ignore[arg-type]
+            changes=bad_changes,  # type: ignore[arg-type]
+            output_path=str(tmp_path / "fail.docx"),
         )
+    )
 
-    msg = str(exc_info.value).lower()
+    # The single unsalvageable element means there are no valid changes, so the
+    # tool returns the all-failed message rather than raising.
+    msg = result.lower()
+    assert "failed validation" in msg
+    # The rejection must reference the offending index, not leak engine internals.
+    assert "changes[0]" in result
     assert "_applied_status" not in msg
+    # And nothing should have been written.
+    assert not (tmp_path / "fail.docx").exists()
 
 
 # ---------------------------------------------------------------------------
