@@ -1,11 +1,13 @@
 import io
+
+import pytest
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import pytest
 
 from adeu.models import ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
+
 
 def test_tc1_sequential_batch_evaluation():
     """
@@ -15,19 +17,19 @@ def test_tc1_sequential_batch_evaluation():
     """
     doc = Document()
     doc.add_paragraph("As defined in Section 1, the Recipient shall maintain confidentiality of all materials.")
-    
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     engine = RedlineEngine(stream)
-    
+
     # TC1 is specified as run with dry_run:True in report.md
     res = engine.process_batch([
         ModifyText(target_text="the Recipient", new_text="Receiving Party"),
         ModifyText(target_text="Receiving Party", new_text="Disclosee")
     ], dry_run=True)
-    
+
     # Python correctly applies both edits in dry-run mode since it runs sequentially.
     assert res["edits_applied"] == 2
     assert res["edits_skipped"] == 0
@@ -42,42 +44,42 @@ def test_tc2_dry_run_write_parity_active_insertion_guard():
     """
     doc = Document()
     p = doc.add_paragraph("The party shall provide ")
-    
+
     # In python-docx, inject an active insertion from "Original Drafter"
     p_el = p._element
     ins = OxmlElement("w:ins")
     ins.set(qn("w:id"), "101")
     ins.set(qn("w:author"), "Original Drafter")
     ins.set(qn("w:date"), "2026-06-29T12:00:00Z")
-    
+
     r = OxmlElement("w:r")
     t = OxmlElement("w:t")
     t.text = "five (5)"
     r.append(t)
     ins.append(r)
     p_el.append(ins)
-    
+
     r2 = OxmlElement("w:r")
     t2 = OxmlElement("w:t")
     t2.text = " years."
     r2.append(t2)
     p_el.append(r2)
-    
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     # Create engine with author "QA Tester" to trigger lock-out / active insertion guard
     engine = RedlineEngine(stream, author="QA Tester")
     edit = ModifyText(target_text="five (5)", new_text="seven (7)")
-    
+
     # Run A: dry_run = True (should return a failed edit status with active insertion message)
     res_dry = engine.process_batch([edit], dry_run=True)
     assert res_dry["edits_applied"] == 0
     assert res_dry["edits_skipped"] == 1
     assert res_dry["edits"][0]["status"] == "failed"
     assert "active insertion" in res_dry["edits"][0]["error"]
-    
+
     # Run B: dry_run = False (should raise BatchValidationError)
     with pytest.raises(BatchValidationError) as exc_info_wet:
         engine.process_batch([edit], dry_run=False)
@@ -92,19 +94,19 @@ def test_tc3_heading_targeted_by_markdown_hash():
     """
     doc = Document()
     doc.add_heading("3. Pending Review", level=1)
-    
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     engine = RedlineEngine(stream)
-    
+
     res = engine.process_batch([
         ModifyText(target_text="# 3. Pending Review", new_text="# 3. Final Review")
     ])
-    
+
     assert res["edits_applied"] == 1
-    
+
     # The buggy engine produces a preview that contains hashes inside deletion/insertion markup
     critic_markup = res["edits"][0]["critic_markup"]
     assert "{--#" not in critic_markup
@@ -117,23 +119,23 @@ def test_tc5_w16du_namespace_untouched_parts():
     """
     doc = Document()
     doc.add_paragraph("This is untouched body text.")
-    
+
     section = doc.sections[0]
     header = section.header
     header.paragraphs[0].text = "Header Text"
-    
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     engine = RedlineEngine(stream)
     engine.process_batch([
         ModifyText(target_text="untouched body", new_text="changed body")
     ], dry_run=False)
-    
+
     stream_edited = engine.save_to_stream()
     doc_edited = Document(stream_edited)
-    
+
     saved_header_xml = doc_edited.sections[0].header._element.xml
     # The untouched header should not contain word16du namespace
     assert "word16du" not in saved_header_xml
@@ -146,22 +148,22 @@ def test_tc8_error_message_mislabeled_index():
     """
     doc = Document()
     doc.add_paragraph("First paragraph text.")
-    
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     engine = RedlineEngine(stream)
-    
+
     res = engine.process_batch([
         ModifyText(target_text="First paragraph", new_text="Updated first paragraph"),
         ModifyText(target_text="Non-existent text", new_text="Failed update")
     ], dry_run=True)
-    
+
     assert res["edits_applied"] == 1
     assert res["edits_skipped"] == 1
     assert res["edits"][1]["status"] == "failed"
-    
+
     error_msg = res["edits"][1]["error"]
     # Under correct behavior, the inner error should label it as Edit 2.
     # The buggy unpatched codebase says "Edit 1 Failed:" inside the error message for Edit 2.

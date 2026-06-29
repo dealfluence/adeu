@@ -87,7 +87,7 @@ describe("Field feedback repro — Node engine", () => {
     const batch = [
       { type: "accept", target_id: "Chg:5" },
       { type: "modify", target_text: "24 months", new_text: "36 months" },
-    ];
+    ] as any[];
 
     // DESIRED behaviour — RED on current Node (throws "active insertion from
     // another author"), GREEN after the fix.

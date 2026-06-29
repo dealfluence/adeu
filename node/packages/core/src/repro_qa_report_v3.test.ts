@@ -61,21 +61,23 @@ describe("QA Report V3 Defects Reproductions", () => {
     } as any;
 
     // Run A: dry_run = true
+    const resDry = engine.process_batch([edit], true);
+    expect(resDry.edits_applied).toBe(0);
+    expect(resDry.edits_skipped).toBe(1);
+    expect(resDry.edits[0].status).toBe("failed");
+    expect(resDry.edits[0].error).toContain("active insertion");
+
     // Run B: dry_run = false
-    //
-    // Under correct behavior, BOTH runs must reject (throwing BatchValidationError due to active insertion).
-    // On the unpatched Node engine, Run A (dry_run: true) incorrectly succeeds while Run B (dry_run: false) rejects.
-    // Therefore, asserting that dry_run throws a BatchValidationError will reproduce the bug (by failing).
-    let dryRunError: any = null;
+    let wetRunError: any = null;
     try {
-      engine.process_batch([edit], true);
+      engine.process_batch([edit], false);
     } catch (e) {
-      dryRunError = e;
+      wetRunError = e;
     }
 
-    expect(dryRunError).not.toBeNull();
-    expect(dryRunError.name).toBe("BatchValidationError");
-    expect(dryRunError.message).toContain("active insertion");
+    expect(wetRunError).not.toBeNull();
+    expect(wetRunError.name).toBe("BatchValidationError");
+    expect(wetRunError.message).toContain("active insertion");
   });
 
   it("TC3: Heading targeted by markdown '#' corrupts instead of failing [report F4, F5]", async () => {

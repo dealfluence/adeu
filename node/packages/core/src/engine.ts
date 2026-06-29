@@ -65,6 +65,81 @@ function insertAtIndex(parent: Element, index: number, child: Node) {
   }
 }
 
+
+function safeCloneEdit(val: any, seen: WeakMap<any, any> = new WeakMap()): any {
+  if (val === null || typeof val !== "object") {
+    return val;
+  }
+  if (seen.has(val)) {
+    return seen.get(val);
+  }
+  if (val.nodeType !== undefined || typeof val.cloneNode === "function") {
+    return val;
+  }
+  if (Array.isArray(val)) {
+    const copy: any[] = [];
+    seen.set(val, copy);
+    for (let i = 0; i < val.length; i++) {
+      copy.push(safeCloneEdit(val[i], seen));
+    }
+    return copy;
+  }
+  const copy: any = {};
+  seen.set(val, copy);
+  for (const key of Object.keys(val)) {
+    copy[key] = safeCloneEdit(val[key], seen);
+  }
+  return copy;
+}
+
+function takeSnapshot(doc: any): any {
+  const parts = [...doc.pkg.parts];
+  const unzipped = { ...doc.pkg.unzipped };
+  const rels = new Map<any, Map<string, any>>();
+  const elements = new Map<any, Element>();
+  for (const part of parts) {
+    rels.set(part, new Map(part.rels));
+    if (part._element) {
+      elements.set(part, part._element.cloneNode(true) as Element);
+    }
+  }
+  return { parts, unzipped, rels, elements };
+}
+
+function restoreSnapshot(doc: any, snapshot: any): void {
+  doc.pkg.parts = [...snapshot.parts];
+  for (const key of Object.keys(doc.pkg.unzipped)) {
+    delete doc.pkg.unzipped[key];
+  }
+  for (const [key, val] of Object.entries(snapshot.unzipped)) {
+    doc.pkg.unzipped[key] = val;
+  }
+  for (const part of snapshot.parts) {
+    part.rels = new Map(snapshot.rels.get(part)!);
+    const originalEl = snapshot.elements.get(part);
+    if (originalEl && part._element) {
+      const xmlDoc = part._element.ownerDocument;
+      if (xmlDoc && xmlDoc.documentElement) {
+        xmlDoc.replaceChild(originalEl, xmlDoc.documentElement);
+      }
+      part._element = originalEl;
+    }
+  }
+}
+
+function stripMatchingHeadingHashes(target: string, newText: string): [string, string] {
+  if (!target || !newText) return [target, newText];
+  const targetMatch = target.match(/^(#+)\s+/);
+  const newMatch = newText.match(/^(#+)\s+/);
+  if (targetMatch && newMatch && targetMatch[1] === newMatch[1]) {
+    const hashes = targetMatch[1];
+    const targetClean = target.substring(hashes.length).trimStart();
+    const newClean = newText.substring(hashes.length).trimStart();
+    return [targetClean, newClean];
+  }
+  return [target, newText];
+}
+
 // --- Validation ---
 export class BatchValidationError extends Error {
   public errors: string[];
@@ -75,7 +150,7 @@ export class BatchValidationError extends Error {
   }
 }
 
-export function validate_edit_strings(edits: any[]): string[] {
+export function validate_edit_strings(edits: any[], index_offset: number = 0): string[] {
   const errors: string[] = [];
 
   for (let i = 0; i < edits.length; i++) {
@@ -90,7 +165,7 @@ export function validate_edit_strings(edits: any[]): string[] {
       n_text.includes("{==")
     ) {
       errors.push(
-        `- Edit ${i + 1} Failed: Do not manually write CriticMarkup tags ({++, {--, {>>, {==) in \`new_text\`. The engine handles redlining automatically. To add a comment, use the \`comment\` parameter.`,
+        `- Edit ${i + 1 + index_offset} Failed: Do not manually write CriticMarkup tags ({++, {--, {>>, {==) in \`new_text\`. The engine handles redlining automatically. To add a comment, use the \`comment\` parameter.`,
       );
     }
 
@@ -107,11 +182,11 @@ export function validate_edit_strings(edits: any[]): string[] {
           )
         ) {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot insert footnote/endnote markers via text replace. Markers like \`[^fn-N]\` are read-only projections. Use Word's References menu.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot insert footnote/endnote markers via text replace. Markers like \`[^fn-N]\` are read-only projections. Use Word's References menu.`,
           );
         } else {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot delete footnote/endnote references via text replace. The marker corresponds to a structural XML element.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot delete footnote/endnote references via text replace. The marker corresponds to a structural XML element.`,
           );
         }
       }
@@ -123,11 +198,11 @@ export function validate_edit_strings(edits: any[]): string[] {
       if (t_links.length !== n_links.length) {
         if (n_links.length > t_links.length) {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot insert hyperlinks via text replace. Use a dedicated structural operation.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot insert hyperlinks via text replace. Use a dedicated structural operation.`,
           );
         } else {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot delete hyperlinks via text replace. The marker corresponds to a structural XML element.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot delete hyperlinks via text replace. The marker corresponds to a structural XML element.`,
           );
         }
       } else if (
@@ -135,7 +210,7 @@ export function validate_edit_strings(edits: any[]): string[] {
         JSON.stringify(t_links) !== JSON.stringify(n_links)
       ) {
         errors.push(
-          `- Edit ${i + 1} Failed: Can only edit or retarget one hyperlink per text replacement. Please split into multiple edits.`,
+          `- Edit ${i + 1 + index_offset} Failed: Can only edit or retarget one hyperlink per text replacement. Please split into multiple edits.`,
         );
       }
     }
@@ -146,18 +221,18 @@ export function validate_edit_strings(edits: any[]): string[] {
       if (t_xrefs.length !== n_xrefs.length) {
         if (n_xrefs.length > t_xrefs.length) {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot insert cross-references via text replace. Markers are read-only projections.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot insert cross-references via text replace. Markers are read-only projections.`,
           );
         } else {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot delete cross-references via text replace. The marker corresponds to a structural XML element.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot delete cross-references via text replace. The marker corresponds to a structural XML element.`,
           );
         }
       } else {
         // Advanced XREF validation simplified for port scope
         if (JSON.stringify(t_xrefs) !== JSON.stringify(n_xrefs)) {
           errors.push(
-            `- Edit ${i + 1} Failed: Modifying or retargeting cross-reference markers is disallowed to prevent dependency corruption.`,
+            `- Edit ${i + 1 + index_offset} Failed: Modifying or retargeting cross-reference markers is disallowed to prevent dependency corruption.`,
           );
         }
       }
@@ -172,7 +247,7 @@ export function validate_edit_strings(edits: any[]): string[] {
           t_anchors.filter((x: string) => x === a).length
         ) {
           errors.push(
-            `- Edit ${i + 1} Failed: Cannot modify or insert internal anchor markers (\`{#...}\`). These represent structural XML bookmarks.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot modify or insert internal anchor markers (\`{#...}\`). These represent structural XML bookmarks.`,
           );
           break;
         }
@@ -190,7 +265,7 @@ export function validate_edit_strings(edits: any[]): string[] {
             stripped.substring(level) === ""
           ) {
             errors.push(
-              `- Edit ${i + 1} Failed: Heading level ${level} is not supported (maximum is 6).`,
+              `- Edit ${i + 1 + index_offset} Failed: Heading level ${level} is not supported (maximum is 6).`,
             );
             break;
           }
@@ -202,10 +277,12 @@ export function validate_edit_strings(edits: any[]): string[] {
       t_text.includes("READONLY_BOUNDARY_START") ||
       n_text.includes("READONLY_BOUNDARY_START") ||
       t_text.includes("# Document Structure (Read-Only)") ||
-      n_text.includes("# Document Structure (Read-Only)")
+      n_text.includes("# Document Structure (Read-Only)") ||
+      t_text.includes("Document Structure (Read-Only)") ||
+      n_text.includes("Document Structure (Read-Only)")
     ) {
       errors.push(
-        `- Edit ${i + 1} Failed: Modification targets the read-only boundary (Structural Appendix). This section cannot be edited.`,
+        `- Edit ${i + 1 + index_offset} Failed: Modification targets the read-only boundary (Structural Appendix). This section cannot be edited.`,
       );
     }
   }
@@ -233,11 +310,7 @@ export class RedlineEngine {
     const w16du_ns =
       "http://schemas.microsoft.com/office/word/2023/wordml/word16du";
     for (const part of this.doc.pkg.parts) {
-      if (
-        part === this.doc.part ||
-        (part.contentType.includes("wordprocessingml") &&
-          part.contentType.endsWith("+xml"))
-      ) {
+      if (part === this.doc.part) {
         if (!part._element.hasAttribute("xmlns:w16du")) {
           part._element.setAttribute("xmlns:w16du", w16du_ns);
         }
@@ -308,10 +381,23 @@ export class RedlineEngine {
     if (edit._resolved_proxy_edit) {
       edit = edit._resolved_proxy_edit;
     }
-    const start_idx = edit._resolved_start_idx;
+    let start_idx = edit._resolved_start_idx;
     if (start_idx === undefined || start_idx === null) return [null, null];
-    const target_text = edit.target_text || "";
-    const new_text = edit.new_text || "";
+    let target_text = edit.target_text || "";
+    let new_text = edit.new_text || "";
+
+    const [clean_target, target_style] = this._parse_markdown_style(target_text);
+    if (target_style && target_style.startsWith("Heading")) {
+      const prefix_len = target_text.length - clean_target.length;
+      start_idx += prefix_len;
+      target_text = clean_target;
+    }
+
+    const [clean_new, new_style] = this._parse_markdown_style(new_text);
+    if (new_style && new_style.startsWith("Heading")) {
+      new_text = clean_new;
+    }
+
     const length = target_text.length;
     const active_mapper = edit._active_mapper_ref || this.mapper;
     const full_text = active_mapper.full_text;
@@ -1271,17 +1357,17 @@ export class RedlineEngine {
     }
   }
 
-  public validate_edits(edits: any[]): string[] {
+  public validate_edits(edits: any[], index_offset: number = 0): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
 
-    errors.push(...validate_edit_strings(edits));
+    errors.push(...validate_edit_strings(edits, index_offset));
 
     for (let i = 0; i < edits.length; i++) {
       const edit = edits[i];
       if (typeof edit !== "object" || edit === null) {
         errors.push(
-          `- Edit ${i + 1} Failed: Invalid change format. Expected a JSON object, but received a primitive ${typeof edit}. Do not pass raw strings.`,
+          `- Edit ${i + 1 + index_offset} Failed: Invalid change format. Expected a JSON object, but received a primitive ${typeof edit}. Do not pass raw strings.`,
         );
         continue;
       }
@@ -1374,12 +1460,12 @@ export class RedlineEngine {
               ? `by ${Array.from(deleted_authors).sort().join(", ")}`
               : "by an existing revision";
           errors.push(
-            `- Edit ${i + 1} Failed: Target text matches text inside a tracked deletion ${author_phrase}. Reject/accept that change first or target the active replacement text instead.`,
+            `- Edit ${i + 1 + index_offset} Failed: Target text matches text inside a tracked deletion ${author_phrase}. Reject/accept that change first or target the active replacement text instead.`,
           );
         } else {
           const hint = this._nearest_match_hint(edit.target_text, is_regex);
           errors.push(
-            `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"${hint}`,
+            `- Edit ${i + 1 + index_offset} Failed: Target text not found in document:\n  "${edit.target_text}"${hint}`,
           );
         }
       } else if (matches.length > 1 && match_mode === "strict") {
@@ -1392,7 +1478,7 @@ export class RedlineEngine {
           ]);
           errors.push(
             format_ambiguity_error(
-              i + 1,
+              i + 1 + index_offset,
               edit.target_text,
               activeText,
               positions,
@@ -1423,7 +1509,7 @@ export class RedlineEngine {
               parts[parts.length - 1].trim() !== ""
             ) {
               errors.push(
-                `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+                `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
               );
             }
           } else {
@@ -1434,7 +1520,7 @@ export class RedlineEngine {
               parts[parts.length - 1].trim() !== ""
             ) {
               errors.push(
-                `- Edit ${i + 1} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+                `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
               );
             }
           }
@@ -1454,7 +1540,13 @@ export class RedlineEngine {
             ).filter((n) => n.getAttribute("w:id") === s.ins_id);
             if (insNodes.length > 0) {
               const auth = insNodes[0].getAttribute("w:author");
-              if (auth && auth !== this.author) nestedAuthors.add(auth);
+              if (auth && auth !== this.author) {
+                const is_fully_contained_in_ins = start >= s.start && (start + length) <= s.end;
+                const is_lockout = is_fully_contained_in_ins || match_mode === "all";
+                if (is_lockout) {
+                  nestedAuthors.add(auth);
+                }
+              }
             }
           }
           if (s.comment_ids) {
@@ -1468,7 +1560,7 @@ export class RedlineEngine {
         }
         if (nestedAuthors.size > 0) {
           errors.push(
-            `- Edit ${i + 1} Failed: Modification targets an active insertion from another author (${Array.from(nestedAuthors).join(", ")}). Accept that change first or scope your edit outside of it.`,
+            `- Edit ${i + 1 + index_offset} Failed: Modification targets an active insertion from another author (${Array.from(nestedAuthors).join(", ")}). Accept that change first or scope your edit outside of it.`,
           );
         }
       }
@@ -1550,22 +1642,13 @@ export class RedlineEngine {
     }
 
     if (dry_run) {
-      const baselines = new Map<any, Element>();
-      for (const part of this.doc.pkg.parts) {
-        if (part._element) {
-          baselines.set(part, part._element.cloneNode(true) as Element);
-        }
-      }
+      const snapshot = takeSnapshot(this.doc);
+      const originalCurrentId = this.current_id;
       try {
         return this._process_batch_internal(changes, true);
       } finally {
-        for (const [part, originalEl] of baselines.entries()) {
-          const doc = part._element.ownerDocument;
-          if (doc && doc.documentElement) {
-            doc.replaceChild(originalEl, doc.documentElement);
-          }
-          part._element = originalEl;
-        }
+        restoreSnapshot(this.doc, snapshot);
+        this.current_id = originalCurrentId;
         this.mapper = new DocumentMapper(this.doc);
         this.comments_manager = new CommentsManager(this.doc);
         this.clean_mapper = null;
@@ -1579,15 +1662,33 @@ export class RedlineEngine {
     changes: DocumentChange[],
     dry_run_mode: boolean = false,
   ): any {
+    // Pre-process edits: strip identical leading heading hashes from target_text and new_text
+    for (const c of changes) {
+      if (c && typeof c === "object" && (c as any).type === "modify" && (c as any).target_text && (c as any).new_text) {
+        const [strippedTarget, strippedNew] = stripMatchingHeadingHashes((c as any).target_text, (c as any).new_text);
+        (c as any).target_text = strippedTarget;
+        (c as any).new_text = strippedNew;
+      }
+    }
+
     this.skipped_details = [];
-    const edits_for_merge = dry_run_mode ? changes.filter(
+
+    const actions = changes.filter(
+      (c) =>
+        c !== null &&
+        typeof c === "object" &&
+        ["accept", "reject", "reply"].includes(c.type),
+    );
+    const edits = changes.filter(
       (c) =>
         c === null ||
         typeof c !== "object" ||
         !["accept", "reject", "reply"].includes(c.type),
-    ) : [];
+    );
+
+    // Run edits_for_merge logic to unwrap collaborative active insertions
     let mapper_dirty = false;
-    for (const edit of edits_for_merge as any[]) {
+    for (const edit of edits as any[]) {
       if (typeof edit !== "object" || edit === null || !edit.target_text) continue;
       const is_regex = edit.regex || false;
       let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
@@ -1611,20 +1712,24 @@ export class RedlineEngine {
             if (insNodes.length > 0) {
               const auth = insNodes[0].getAttribute("w:author");
               if (auth && auth !== this.author) {
-                const node = insNodes[0];
-                this._clean_wrapping_comments(node);
-                const parent = node.parentNode as Element | null;
-                if (parent) {
-                  if (parent.tagName === "w:trPr") {
-                    parent.removeChild(node);
-                  } else {
-                    while (node.firstChild) {
-                      parent.insertBefore(node.firstChild, node);
+                const is_fully_contained_in_ins = start >= s.start && (start + length) <= s.end;
+                const match_mode = edit.match_mode || "strict";
+                if (!is_fully_contained_in_ins && match_mode !== "all") {
+                  const node = insNodes[0];
+                  this._clean_wrapping_comments(node);
+                  const parent = node.parentNode as Element | null;
+                  if (parent) {
+                    if (parent.tagName === "w:trPr") {
+                      parent.removeChild(node);
+                    } else {
+                      while (node.firstChild) {
+                        parent.insertBefore(node.firstChild, node);
+                      }
+                      parent.removeChild(node);
                     }
-                    parent.removeChild(node);
                   }
+                  mapper_dirty = true;
                 }
-                mapper_dirty = true;
               }
             }
           }
@@ -1636,41 +1741,15 @@ export class RedlineEngine {
       this.clean_mapper = null;
     }
 
-    const actions = changes.filter(
-      (c) =>
-        c !== null &&
-        typeof c === "object" &&
-        ["accept", "reject", "reply"].includes(c.type),
-    );
-    const edits = changes.filter(
-      (c) =>
-        c === null ||
-        typeof c !== "object" ||
-        !["accept", "reject", "reply"].includes(c.type),
-    );
-
     // BUG-7: Unified single-pass validation in wet-run / standard mode.
-    //
-    // Edits are validated up-front EXCEPT when valid review actions are present.
-    // Valid accepts/rejects mutate the document before edits run, so an edit
-    // targeting text that a same-batch accept turns from a foreign <w:ins> into
-    // plain body text would be wrongly rejected ("active insertion from another
-    // author") if validated against the pre-accept state. In that case edit
-    // validation is deferred to the post-accept `validate_edits` call below
-    // (matching the Python engine).
-    //
-    // When the actions are themselves invalid (or there are none), nothing will
-    // be applied, so the current document IS the state edits run against — we
-    // validate edits now and accumulate every error in one pass (preserves
-    // BUG-7's unified error reporting).
     if (!dry_run_mode) {
       const action_errors =
         actions.length > 0 ? this.validate_review_actions(actions) : [];
-      const validate_edits_now =
-        edits.length > 0 && (actions.length === 0 || action_errors.length > 0);
+      const validate_edits_now = edits.length > 0 && action_errors.length > 0;
+      const edit_errors = validate_edits_now ? this.validate_edits(edits) : [];
       const all_errors = [
         ...action_errors,
-        ...(validate_edits_now ? this.validate_edits(edits) : []),
+        ...edit_errors,
       ];
       if (all_errors.length > 0) {
         throw new BatchValidationError(all_errors);
@@ -1709,8 +1788,9 @@ export class RedlineEngine {
 
     if (edits.length > 0) {
       if (dry_run_mode) {
-        for (const edit of edits) {
-          const single_errors = this.validate_edits([edit]);
+        for (let i = 0; i < edits.length; i++) {
+          const edit = edits[i];
+          const single_errors = this.validate_edits([edit], i);
           const warning = this._check_punctuation_warning(
             (edit as any).target_text || "",
           );
@@ -1744,6 +1824,8 @@ export class RedlineEngine {
               occurrences_modified: (edit as any)._occurrences_modified || 0,
               match_mode: (edit as any).match_mode || "strict",
             });
+            this.mapper = new DocumentMapper(this.doc);
+            this.clean_mapper = null;
           } else {
             skipped_edits++;
             const error_msg =
@@ -1762,18 +1844,40 @@ export class RedlineEngine {
           }
         }
       } else {
-        const errors = this.validate_edits(edits);
-        if (errors.length > 0) {
-          throw new BatchValidationError(errors);
+        // Simulated dry-run sequentially for wet-run validation parity
+        const snapshot = takeSnapshot(this.doc);
+        const originalCurrentId = this.current_id;
+        try {
+          const sequential_errors: string[] = [];
+          for (let i = 0; i < edits.length; i++) {
+            const edit = edits[i];
+            const single_errors = this.validate_edits([edit], i);
+            if (single_errors.length > 0) {
+              sequential_errors.push(...single_errors);
+            } else {
+              this.apply_edits([edit], page_offsets);
+              this.mapper = new DocumentMapper(this.doc);
+              this.clean_mapper = null;
+            }
+          }
+          if (sequential_errors.length > 0) {
+            throw new BatchValidationError(sequential_errors);
+          }
+        } catch (err) {
+          restoreSnapshot(this.doc, snapshot);
+          this.current_id = originalCurrentId;
+          this.mapper = new DocumentMapper(this.doc);
+          this.comments_manager = new CommentsManager(this.doc);
+          this.clean_mapper = null;
+          throw err;
         }
-        const cloned_edits = edits.map((e) => JSON.parse(JSON.stringify(e)));
-        const res = this.apply_edits(cloned_edits, page_offsets);
-        applied_edits = cloned_edits.filter(
+
+        applied_edits = edits.filter(
           (e) => (e as any)._applied_status,
         ).length;
-        skipped_edits = cloned_edits.length - applied_edits;
+        skipped_edits = edits.length - applied_edits;
 
-        for (const edit of cloned_edits) {
+        for (const edit of edits) {
           const success = (edit as any)._applied_status || false;
           const error_msg = (edit as any)._error_msg || null;
           const warning = this._check_punctuation_warning(
@@ -1802,7 +1906,6 @@ export class RedlineEngine {
         }
       }
     }
-
     return {
       actions_applied: applied_actions,
       actions_skipped: skipped_actions,

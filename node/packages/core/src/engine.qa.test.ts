@@ -83,7 +83,7 @@ describe("QA Report V2: Engine Logic", () => {
       target_text: "Occurrence",
       new_text: "Match",
       match_mode: "all"
-    };
+    } as any;
     const stats = engine.process_batch([edit], false);
     
     const report = stats.edits[0];
@@ -116,7 +116,7 @@ describe("QA Report V2: Engine Logic", () => {
       target_text: "Target word",
       new_text: "Replaced",
       match_mode: "all"
-    };
+    } as any;
 
     expect(() => engine.process_batch([edit], false)).toThrow(/targets an active insertion from another author/);
   });
@@ -132,7 +132,7 @@ describe("QA Report V2: Engine Logic", () => {
       target_text: "part.\\n\\nSecond",
       new_text: "merged",
       regex: true
-    };
+    } as any;
 
     expect(() => engine.process_batch([edit], false)).toThrow(/spans a paragraph boundary with body text on both sides/);
   });
@@ -155,7 +155,7 @@ describe("QA Report V2: Engine Logic", () => {
       target_text: "the Board of Directors",
       new_text: "the Supervisory Board",
       match_mode: "all"
-    };
+    } as any;
 
     expect(() => engineBob.process_batch([editBob], false)).toThrow(/another author/i);
   });
