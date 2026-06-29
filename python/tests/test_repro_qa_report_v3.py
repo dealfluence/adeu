@@ -25,16 +25,20 @@ def test_tc1_sequential_batch_evaluation():
     engine = RedlineEngine(stream)
 
     # TC1 is specified as run with dry_run:True in report.md
-    res = engine.process_batch([
-        ModifyText(target_text="the Recipient", new_text="Receiving Party"),
-        ModifyText(target_text="Receiving Party", new_text="Disclosee")
-    ], dry_run=True)
+    res = engine.process_batch(
+        [
+            ModifyText(target_text="the Recipient", new_text="Receiving Party"),
+            ModifyText(target_text="Receiving Party", new_text="Disclosee"),
+        ],
+        dry_run=True,
+    )
 
     # Python correctly applies both edits in dry-run mode since it runs sequentially.
     assert res["edits_applied"] == 2
     assert res["edits_skipped"] == 0
     assert res["edits"][0]["status"] == "applied"
     assert res["edits"][1]["status"] == "applied"
+
 
 def test_tc2_dry_run_write_parity_active_insertion_guard():
     """
@@ -85,6 +89,7 @@ def test_tc2_dry_run_write_parity_active_insertion_guard():
         engine.process_batch([edit], dry_run=False)
     assert "active insertion" in str(exc_info_wet.value)
 
+
 def test_tc3_heading_targeted_by_markdown_hash():
     """
     TC3: Heading targeted by markdown '#' corrupts instead of failing [report F4, F5]
@@ -101,9 +106,7 @@ def test_tc3_heading_targeted_by_markdown_hash():
 
     engine = RedlineEngine(stream)
 
-    res = engine.process_batch([
-        ModifyText(target_text="# 3. Pending Review", new_text="# 3. Final Review")
-    ])
+    res = engine.process_batch([ModifyText(target_text="# 3. Pending Review", new_text="# 3. Final Review")])
 
     assert res["edits_applied"] == 1
 
@@ -111,6 +114,7 @@ def test_tc3_heading_targeted_by_markdown_hash():
     critic_markup = res["edits"][0]["critic_markup"]
     assert "{--#" not in critic_markup
     assert "{++#" not in critic_markup
+
 
 def test_tc5_w16du_namespace_untouched_parts():
     """
@@ -129,9 +133,7 @@ def test_tc5_w16du_namespace_untouched_parts():
     stream.seek(0)
 
     engine = RedlineEngine(stream)
-    engine.process_batch([
-        ModifyText(target_text="untouched body", new_text="changed body")
-    ], dry_run=False)
+    engine.process_batch([ModifyText(target_text="untouched body", new_text="changed body")], dry_run=False)
 
     stream_edited = engine.save_to_stream()
     doc_edited = Document(stream_edited)
@@ -139,6 +141,7 @@ def test_tc5_w16du_namespace_untouched_parts():
     saved_header_xml = doc_edited.sections[0].header._element.xml
     # The untouched header should not contain word16du namespace
     assert "word16du" not in saved_header_xml
+
 
 def test_tc8_error_message_mislabeled_index():
     """
@@ -155,10 +158,13 @@ def test_tc8_error_message_mislabeled_index():
 
     engine = RedlineEngine(stream)
 
-    res = engine.process_batch([
-        ModifyText(target_text="First paragraph", new_text="Updated first paragraph"),
-        ModifyText(target_text="Non-existent text", new_text="Failed update")
-    ], dry_run=True)
+    res = engine.process_batch(
+        [
+            ModifyText(target_text="First paragraph", new_text="Updated first paragraph"),
+            ModifyText(target_text="Non-existent text", new_text="Failed update"),
+        ],
+        dry_run=True,
+    )
 
     assert res["edits_applied"] == 1
     assert res["edits_skipped"] == 1
