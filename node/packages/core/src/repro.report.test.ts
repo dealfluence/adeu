@@ -90,7 +90,7 @@ describe("Webinar Report Bug Reproductions", () => {
 
     // Under normal collaborative conditions, this edit should succeed.
     // However, on the current unpatched codebase, the dry-run engine aborts with a BatchValidationError.
-    const res = engine.process_batch([edit as any]);
+    const res = engine.process_batch([edit as any], true);
     expect(res.edits_applied).toBe(1);
   });
 

@@ -760,7 +760,7 @@ export class DocumentMapper {
     target_text = this._replace_smart_quotes(target_text);
 
     const parts: string[] = [];
-    const token_pattern = /(\[_+\])|(\s+)|(['"])|([.,;:\/])/g;
+    const token_pattern = /(\[_+\])|(\s+)|(['"])|([.,;:\/\-\[\](){}+=$?*!|#^<>\\%&@~`_])/g;
 
     let last_idx = 0;
     let match;

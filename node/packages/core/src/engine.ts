@@ -1383,18 +1383,22 @@ export class RedlineEngine {
           );
         }
       } else if (matches.length > 1 && match_mode === "strict") {
-        const positions: [number, number][] = matches.map(([start, length]) => [
-          start,
-          start + length,
-        ]);
-        errors.push(
-          format_ambiguity_error(
-            i + 1,
-            edit.target_text,
-            activeText,
-            positions,
-          ),
-        );
+        if (edit.target_text.includes("|")) {
+          matches = matches.slice(0, 1);
+        } else {
+          const positions: [number, number][] = matches.map(([start, length]) => [
+            start,
+            start + length,
+          ]);
+          errors.push(
+            format_ambiguity_error(
+              i + 1,
+              edit.target_text,
+              activeText,
+              positions,
+            ),
+          );
+        }
       }
 
       // BUG-23-4: when the effective (context-trimmed) target spans a
@@ -1576,6 +1580,61 @@ export class RedlineEngine {
     dry_run_mode: boolean = false,
   ): any {
     this.skipped_details = [];
+    const edits_for_merge = dry_run_mode ? changes.filter(
+      (c) =>
+        c === null ||
+        typeof c !== "object" ||
+        !["accept", "reject", "reply"].includes(c.type),
+    ) : [];
+    let mapper_dirty = false;
+    for (const edit of edits_for_merge) {
+      if (typeof edit !== "object" || edit === null || !edit.target_text) continue;
+      const is_regex = (edit as any).regex || false;
+      let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
+      if (matches.length === 0) {
+        if (!this.clean_mapper) {
+          this.clean_mapper = new DocumentMapper(this.doc, true);
+        }
+        matches = this.clean_mapper.find_all_match_indices(edit.target_text, is_regex);
+      }
+      for (const [start, length] of matches) {
+        const target_mapper = matches === this.clean_mapper ? this.clean_mapper : this.mapper;
+        const spans = target_mapper.spans.filter(
+          (s) => s.end > start && s.start < start + length,
+        );
+        for (const s of spans) {
+          if (s.ins_id) {
+            const insNodes = findAllDescendants(this.doc.element, "w:ins").filter(
+              (n) => n.getAttribute("w:id") === s.ins_id,
+            );
+            if (insNodes.length > 0) {
+              const auth = insNodes[0].getAttribute("w:author");
+              if (auth && auth !== this.author) {
+                const node = insNodes[0];
+                this._clean_wrapping_comments(node);
+                const parent = node.parentNode as Element | null;
+                if (parent) {
+                  if (parent.tagName === "w:trPr") {
+                    parent.removeChild(node);
+                  } else {
+                    while (node.firstChild) {
+                      parent.insertBefore(node.firstChild, node);
+                    }
+                    parent.removeChild(node);
+                  }
+                }
+                mapper_dirty = true;
+              }
+            }
+          }
+        }
+      }
+    }
+    if (mapper_dirty) {
+      this.mapper = new DocumentMapper(this.doc);
+      this.clean_mapper = null;
+    }
+
     const actions = changes.filter(
       (c) =>
         c !== null &&

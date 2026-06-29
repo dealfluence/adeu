@@ -138,7 +138,7 @@ export function _make_fuzzy_regex(target_text: string): string {
   target_text = _replace_smart_quotes(target_text);
 
   const parts: string[] = [];
-  const token_pattern = /(_+)|(\s+)|(['"])|([.,;:\/])/g;
+  const token_pattern = /(_+)|(\s+)|(['"])|([.,;:\/\-\[\](){}+=$?*!|#^<>\\%&@~`])/g;
 
   // Note: JS does not support atomic groups (?>...).
   // However, because we only match markdown characters * and _,
