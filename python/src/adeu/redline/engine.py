@@ -5,6 +5,7 @@ from copy import deepcopy
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import lxml.etree as etree
 import structlog
 from docx import Document
 from docx.oxml import parse_xml
@@ -213,11 +214,6 @@ class RedlineEngine:
         sanitized_bytes = strip_bom_from_docx_bytes(doc_stream.read())
         self.doc = Document(BytesIO(sanitized_bytes))
 
-        # M8: Ensure w16du namespace is declared at the document root to prevent ns0 aliasing
-        import re
-
-        import lxml.etree as etree
-
         w16du_ns_str = 'xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du"'
 
         parts_to_inject = [self.doc.part]
@@ -283,10 +279,20 @@ class RedlineEngine:
             return None, None
         context_before = full_text[max(0, start_idx - 30) : start_idx]
         context_after = full_text[start_idx + length : start_idx + length + 30]
-        insertion = f"{{++{new_text}++}}" if new_text else ""
-        critic_markup = f"{context_before}{{--{target_text}--}}{insertion}{context_after}"
 
-        import re
+        # F4/F5: when the resolved edit is a whole-paragraph heading replacement
+        # (PARAGRAPH_REPLACE), target_text/new_text still carry the markdown '#'
+        # heading prefix from the projection. That prefix is not literal document
+        # text, so surfacing it inside {--...--}/{++...++} markup misrepresents
+        # the change as touching '#' characters. Strip a leading run of '#' (plus
+        # the following whitespace) from both sides of the rendered preview.
+        display_target = target_text
+        display_new = new_text
+        if getattr(edit, "_internal_op", None) == EditOperationType.PARAGRAPH_REPLACE:
+            display_target = re.sub(r"^#+\s*", "", target_text)
+            display_new = re.sub(r"^#+\s*", "", new_text)
+        insertion = f"{{++{display_new}++}}" if display_new else ""
+        critic_markup = f"{context_before}{{--{display_target}--}}{insertion}{context_after}"
 
         clean_text = critic_markup
         clean_text = re.sub(r"\{>>.*?<<\}", "", clean_text, flags=re.DOTALL)
@@ -1378,18 +1384,22 @@ class RedlineEngine:
 
         if edits:
             if dry_run_mode:
-                for edit in edits:
+                for edit_idx, edit in enumerate(edits):
                     single_errors = self.validate_edits([edit])
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     if single_errors:
                         skipped_edits += 1
+                        # validate_edits is called with a single-element list, so it
+                        # always labels failures as "Edit 1". Renumber to the edit's
+                        # true 1-based position in the batch.
+                        relabeled_error = re.sub(r"Edit 1 Failed:", f"Edit {edit_idx + 1} Failed:", single_errors[0])
                         edits_reports.append(
                             {
                                 "status": "failed",
                                 "target_text": getattr(edit, "target_text", ""),
                                 "new_text": getattr(edit, "new_text", ""),
                                 "warning": warning,
-                                "error": single_errors[0],
+                                "error": relabeled_error,
                                 "critic_markup": None,
                                 "clean_text": None,
                             }
