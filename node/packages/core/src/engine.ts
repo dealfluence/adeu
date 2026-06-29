@@ -256,7 +256,51 @@ export class RedlineEngine {
     }
     return null;
   }
-
+  /**
+   * Best-effort "did you mean" hint for a failed target. The common loop trap
+   * (observed in the field) is an anchored regex like `^\( x \)$` against a
+   * mid-document string: ^/$ bind to the whole full_text, so it never matches
+   * even though the literal `( x )` is present. We strip regex anchoring/escapes
+   * and probe full_text for a literal occurrence; if found, we tell the model
+   * the exact literal that WOULD match so it drops the anchors instead of
+   * escalating the regex further.
+   */
+  private _nearest_match_hint(
+    target_text: string | undefined,
+    is_regex: boolean,
+  ): string {
+    if (!target_text) return "";
+    let probe = target_text;
+    if (is_regex) {
+      // Strip leading/trailing anchors and surrounding \s* the model tends to add.
+      probe = probe.replace(/^\^/, "").replace(/\$$/, "");
+      probe = probe.replace(/^\\s\*/, "").replace(/\\s\*$/, "");
+      // Unescape the common literal escapes so "\( x \)" -> "( x )".
+      probe = probe.replace(/\\([.^$*+?()[\]{}|\\/])/g, "$1");
+    }
+    probe = probe.trim();
+    if (!probe || probe === target_text) {
+      // No anchors to strip, or nothing changed: nothing useful to suggest.
+      if (!is_regex) return "";
+    }
+    const idx = this.mapper.full_text.indexOf(probe);
+    if (idx !== -1) {
+      const ctx_start = Math.max(0, idx - 15);
+      const ctx_end = Math.min(
+        this.mapper.full_text.length,
+        idx + probe.length + 15,
+      );
+      const ctx = this.mapper.full_text
+        .substring(ctx_start, ctx_end)
+        .replace(/\n/g, " ");
+      return (
+        `\n  Did you mean the literal "${probe}"? It appears in the document` +
+        ` (…${ctx}…). If you used a regex, drop the ^/$ anchors — they match` +
+        ` the start/end of the entire document, not a line.`
+      );
+    }
+    return "";
+  }
   private _build_edit_context_previews(
     edit: any,
   ): [string | null, string | null] {
@@ -303,7 +347,11 @@ export class RedlineEngine {
     return maxId;
   }
 
-  private _get_heading_path_and_page(start_idx: number, text: string, page_offsets: number[]): [string, number] {
+  private _get_heading_path_and_page(
+    start_idx: number,
+    text: string,
+    page_offsets: number[],
+  ): [string, number] {
     let page = 1;
     for (let i = 0; i < page_offsets.length; i++) {
       if (start_idx >= page_offsets[i]) {
@@ -317,14 +365,17 @@ export class RedlineEngine {
     const lines = textBefore.split("\n");
     const path: string[] = [];
     let current_level = 999;
-    
+
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i];
       const m = line.match(/^(#{1,6})\s+(.*)/);
       if (m) {
         const level = m[1].length;
         if (level < current_level) {
-          let cleanHeading = m[2].replace(/\*\*|__|[*_]/g, "").replace(/\{#[^}]+\}/g, "").trim();
+          let cleanHeading = m[2]
+            .replace(/\*\*|__|[*_]/g, "")
+            .replace(/\{#[^}]+\}/g, "")
+            .trim();
           if (cleanHeading.length > 80) {
             cleanHeading = cleanHeading.substring(0, 80) + "...";
           }
@@ -1230,23 +1281,29 @@ export class RedlineEngine {
       const edit = edits[i];
       if (typeof edit !== "object" || edit === null) {
         errors.push(
-          `- Edit ${i + 1} Failed: Invalid change format. Expected a JSON object, but received a primitive ${typeof edit}. Do not pass raw strings.`
+          `- Edit ${i + 1} Failed: Invalid change format. Expected a JSON object, but received a primitive ${typeof edit}. Do not pass raw strings.`,
         );
         continue;
       }
       if (!edit.target_text) continue;
-      
+
       const is_regex = (edit as any).regex || false;
       const match_mode = (edit as any).match_mode || "strict";
 
-      let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
+      let matches = this.mapper.find_all_match_indices(
+        edit.target_text,
+        is_regex,
+      );
       let activeText = this.mapper.full_text;
       let target_mapper = this.mapper;
 
       if (matches.length === 0) {
         if (!this.clean_mapper)
           this.clean_mapper = new DocumentMapper(this.doc, true);
-        matches = this.clean_mapper.find_all_match_indices(edit.target_text, is_regex);
+        matches = this.clean_mapper.find_all_match_indices(
+          edit.target_text,
+          is_regex,
+        );
         if (matches.length > 0) {
           activeText = this.clean_mapper.full_text;
           target_mapper = this.clean_mapper;
@@ -1278,7 +1335,10 @@ export class RedlineEngine {
         if (!this.original_mapper) {
           this.original_mapper = new DocumentMapper(this.doc, false, true);
         }
-        const orig_matches = this.original_mapper.find_all_match_indices(edit.target_text, is_regex);
+        const orig_matches = this.original_mapper.find_all_match_indices(
+          edit.target_text,
+          is_regex,
+        );
         if (orig_matches.length > 0) {
           is_deleted_text = true;
           for (const [start, length] of orig_matches) {
@@ -1289,7 +1349,10 @@ export class RedlineEngine {
               if (s.run !== null) {
                 let parent = s.run._element as Node | null;
                 while (parent) {
-                  if (parent.nodeType === 1 && (parent as Element).tagName === "w:del") {
+                  if (
+                    parent.nodeType === 1 &&
+                    (parent as Element).tagName === "w:del"
+                  ) {
                     const auth = (parent as Element).getAttribute("w:author");
                     if (auth) {
                       deleted_authors.add(auth);
@@ -1306,15 +1369,17 @@ export class RedlineEngine {
 
       if (matches.length === 0) {
         if (is_deleted_text) {
-          const author_phrase = deleted_authors.size > 0
-            ? `by ${Array.from(deleted_authors).sort().join(", ")}`
-            : "by an existing revision";
+          const author_phrase =
+            deleted_authors.size > 0
+              ? `by ${Array.from(deleted_authors).sort().join(", ")}`
+              : "by an existing revision";
           errors.push(
             `- Edit ${i + 1} Failed: Target text matches text inside a tracked deletion ${author_phrase}. Reject/accept that change first or target the active replacement text instead.`,
           );
         } else {
+          const hint = this._nearest_match_hint(edit.target_text, is_regex);
           errors.push(
-            `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"`,
+            `- Edit ${i + 1} Failed: Target text not found in document:\n  "${edit.target_text}"${hint}`,
           );
         }
       } else if (matches.length > 1 && match_mode === "strict") {
@@ -1511,11 +1576,17 @@ export class RedlineEngine {
     dry_run_mode: boolean = false,
   ): any {
     this.skipped_details = [];
-    const actions = changes.filter((c) =>
-      c !== null && typeof c === "object" && ["accept", "reject", "reply"].includes(c.type),
+    const actions = changes.filter(
+      (c) =>
+        c !== null &&
+        typeof c === "object" &&
+        ["accept", "reject", "reply"].includes(c.type),
     );
     const edits = changes.filter(
-      (c) => c === null || typeof c !== "object" || !["accept", "reject", "reply"].includes(c.type),
+      (c) =>
+        c === null ||
+        typeof c !== "object" ||
+        !["accept", "reject", "reply"].includes(c.type),
     );
 
     // BUG-7: Unified single-pass validation in wet-run / standard mode.
@@ -1637,7 +1708,9 @@ export class RedlineEngine {
         }
         const cloned_edits = edits.map((e) => JSON.parse(JSON.stringify(e)));
         const res = this.apply_edits(cloned_edits, page_offsets);
-        applied_edits = cloned_edits.filter((e) => (e as any)._applied_status).length;
+        applied_edits = cloned_edits.filter(
+          (e) => (e as any)._applied_status,
+        ).length;
         skipped_edits = cloned_edits.length - applied_edits;
 
         for (const edit of cloned_edits) {
@@ -1682,7 +1755,10 @@ export class RedlineEngine {
     };
   }
 
-  public apply_edits(edits: any[], page_offsets: number[] = []): [number, number] {
+  public apply_edits(
+    edits: any[],
+    page_offsets: number[] = [],
+  ): [number, number] {
     let applied = 0;
     let skipped = 0;
 
@@ -1817,15 +1893,24 @@ export class RedlineEngine {
         const parent = edit._parent_edit_ref;
         if (parent) {
           parent._applied_status = true;
-          parent._occurrences_modified = (parent._occurrences_modified || 0) + 1;
-          const [path, page] = this._get_heading_path_and_page(start, this.mapper.full_text, page_offsets);
+          parent._occurrences_modified =
+            (parent._occurrences_modified || 0) + 1;
+          const [path, page] = this._get_heading_path_and_page(
+            start,
+            this.mapper.full_text,
+            page_offsets,
+          );
           const pages: number[] = parent._pages || [];
           if (!pages.includes(page)) pages.unshift(page);
           parent._pages = pages;
           parent._heading_path = path;
         } else {
           edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
-          const [path, page] = this._get_heading_path_and_page(start, this.mapper.full_text, page_offsets);
+          const [path, page] = this._get_heading_path_and_page(
+            start,
+            this.mapper.full_text,
+            page_offsets,
+          );
           const pages: number[] = edit._pages || [];
           if (!pages.includes(page)) pages.unshift(page);
           edit._pages = pages;
@@ -2007,13 +2092,19 @@ export class RedlineEngine {
     const is_regex = edit.regex || false;
     const match_mode = edit.match_mode || "strict";
 
-    let matches = this.mapper.find_all_match_indices(edit.target_text, is_regex);
+    let matches = this.mapper.find_all_match_indices(
+      edit.target_text,
+      is_regex,
+    );
     let use_clean_map = false;
 
     if (matches.length === 0) {
       if (!this.clean_mapper)
         this.clean_mapper = new DocumentMapper(this.doc, true);
-      matches = this.clean_mapper.find_all_match_indices(edit.target_text, is_regex);
+      matches = this.clean_mapper.find_all_match_indices(
+        edit.target_text,
+        is_regex,
+      );
       if (matches.length > 0) use_clean_map = true;
       else return null;
     }
@@ -2023,7 +2114,8 @@ export class RedlineEngine {
     let live_matches: [number, number][] = [];
     for (const [s, match_len] of matches) {
       const realSpans = active_mapper.spans.filter(
-        (span) => span.run !== null && span.end > s && span.start < s + match_len
+        (span) =>
+          span.run !== null && span.end > s && span.start < s + match_len,
       );
       if (realSpans.length === 0 || realSpans.some((span) => !span.del_id)) {
         live_matches.push([s, match_len]);
@@ -2045,23 +2137,72 @@ export class RedlineEngine {
       );
       let current_effective_new_text = edit.new_text || "";
 
+      // Cell anchors ({#cell:<paraId>}) are pure position markers with no real
+      // content — they let the model address an empty (or any) table cell that
+      // has no run to diff against. Treat such a target as a clean INSERTION at
+      // the anchor's paragraph: never delete the marker, never run trim_common_context
+      // (which refuses to split inside {#...} markup and yields a no-op MODIFICATION).
+      // Strip any echoed anchor from new_text so the model can send either
+      // "June 22, 2026" or "June 22, 2026{#cell:...}" and get the same result.
+      if (/^\{#cell:[^}]+\}$/.test(actual_doc_text.trim())) {
+        let ins_text = current_effective_new_text;
+        // Drop a leading/trailing copy of the same anchor token if echoed.
+        ins_text = ins_text.split(actual_doc_text.trim()).join("");
+        if (ins_text) {
+          all_sub_edits.push({
+            type: "modify",
+            target_text: "",
+            new_text: ins_text,
+            comment: edit.comment,
+            // Insert at the anchor token's start so the new run lands inside
+            // the cell paragraph that get_insertion_anchor resolves there.
+            _match_start_index: start_idx,
+            _internal_op: "INSERTION",
+            _active_mapper_ref: active_mapper,
+          });
+        } else if (edit.comment) {
+          // Anchor target with empty effective new_text but a comment: attach
+          // the comment to the cell paragraph.
+          all_sub_edits.push({
+            type: "modify",
+            target_text: "",
+            new_text: "",
+            comment: edit.comment,
+            _match_start_index: start_idx,
+            _internal_op: "COMMENT_ONLY",
+            _active_mapper_ref: active_mapper,
+          });
+        }
+        continue;
+      }
+
       if (is_regex && current_effective_new_text) {
         try {
-          current_effective_new_text = actual_doc_text.replace(new RegExp(edit.target_text), current_effective_new_text);
+          current_effective_new_text = actual_doc_text.replace(
+            new RegExp(edit.target_text),
+            current_effective_new_text,
+          );
         } catch (e) {}
       }
 
-      const [edit_target_clean, edit_target_style] = this._parse_markdown_style(edit.target_text);
-      const [edit_new_clean, edit_new_style] = this._parse_markdown_style(current_effective_new_text);
+      const [edit_target_clean, edit_target_style] = this._parse_markdown_style(
+        edit.target_text,
+      );
+      const [edit_new_clean, edit_new_style] = this._parse_markdown_style(
+        current_effective_new_text,
+      );
 
       if (edit_target_style !== edit_new_style) {
         const [actual_clean] = this._parse_markdown_style(actual_doc_text);
         const final_target = actual_clean;
         const final_new = edit_new_clean;
-        const style_op = final_target === final_new ? "STYLE_ONLY" : "STYLE_AND_TEXT";
+        const style_op =
+          final_target === final_new ? "STYLE_ONLY" : "STYLE_AND_TEXT";
         const prefix_offset = actual_doc_text.indexOf(actual_clean);
-        const effective_start_idx = start_idx + (prefix_offset !== -1 ? prefix_offset : 0);
-        const resolved_style = edit_new_style !== null ? edit_new_style : "Normal";
+        const effective_start_idx =
+          start_idx + (prefix_offset !== -1 ? prefix_offset : 0);
+        const resolved_style =
+          edit_new_style !== null ? edit_new_style : "Normal";
 
         all_sub_edits.push({
           type: "modify",
@@ -2099,7 +2240,9 @@ export class RedlineEngine {
 
       if (current_effective_new_text.startsWith(actual_doc_text)) {
         effective_op = "INSERTION";
-        final_new = current_effective_new_text.substring(actual_doc_text.length);
+        final_new = current_effective_new_text.substring(
+          actual_doc_text.length,
+        );
         effective_start_idx = start_idx + match_len;
       } else {
         const [prefix_len, suffix_len] = trim_common_context(
@@ -2186,7 +2329,10 @@ export class RedlineEngine {
             while (end_p && end_p.tagName !== "w:p")
               end_p = end_p.parentNode as Element;
             if (start_p && end_p) {
-              const ascend_to_paragraph_child = (el: Element, p: Element): Element => {
+              const ascend_to_paragraph_child = (
+                el: Element,
+                p: Element,
+              ): Element => {
                 let cur: Element = el;
                 while (cur.parentNode && cur.parentNode !== p) {
                   cur = cur.parentNode as Element;
@@ -2196,7 +2342,12 @@ export class RedlineEngine {
               const first_anchor = ascend_to_paragraph_child(first_el, start_p);
               const last_anchor = ascend_to_paragraph_child(last_el, end_p);
               if (start_p === end_p) {
-                this._attach_comment(start_p, first_anchor, last_anchor, edit.comment);
+                this._attach_comment(
+                  start_p,
+                  first_anchor,
+                  last_anchor,
+                  edit.comment,
+                );
               } else {
                 this._attach_comment_spanning(
                   start_p,

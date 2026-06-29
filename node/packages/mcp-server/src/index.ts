@@ -40,20 +40,23 @@ function readFileBytesOrThrow(filePath: string): Buffer {
     return readFileSync(filePath);
   } catch (err: any) {
     if (err.code === "ENOENT") {
-      throw new Error(
-        `File not found: ${filePath}.\n` +
-          `If you are running in a sandboxed/containerized environment (such as Claude Desktop or another containerized client), ` +
-          `the host application or MCP server may not have direct access to your local workspace files.\n` +
-          `You can resolve this by installing and running the local 'adeu' CLI tool directly within your environment.\n` +
-          `Here is how the MCP tools map to their CLI equivalents:\n` +
-          `- read_docx               -> adeu extract ${filePath}\n` +
-          `- process_document_batch  -> adeu apply ${filePath}\n` +
-          `- diff_docx_files         -> adeu diff ${filePath} <modified_path>\n` +
-          `- accept_all_changes      -> adeu accept-all ${filePath}\n\n` +
-          `To run the local tool, install it via:\n` +
-          `  uv tool install adeu\n` +
-          `and run the mapped CLI command directly in your terminal.`,
-      );
+      // Lean, agent-appropriate error: list sibling .docx files so the model
+      // can self-correct a wrong filename (e.g. a guessed `-processed` suffix)
+      // in one turn, instead of being handed CLI install instructions that are
+      // irrelevant inside an agent loop and pure token waste.
+      let available = "";
+      try {
+        const dir = dirname(filePath);
+        const docs = fs
+          .readdirSync(dir)
+          .filter((f) => f.toLowerCase().endsWith(".docx"));
+        available = docs.length
+          ? ` available files: [${docs.join(", ")}]`
+          : ` (no .docx files found in ${dir})`;
+      } catch {
+        // Directory unreadable — omit the listing rather than fail.
+      }
+      throw new Error(`file not found: ${basename(filePath)};${available}`);
     }
     throw err;
   }
@@ -83,7 +86,7 @@ const READ_DOCX_TAIL =
 const PROCESS_BATCH_COMMON_DESC =
   "Applies a batch of edits and review actions to a DOCX.\n\nAll changes evaluate against the ORIGINAL document state — do not chain dependent edits within one batch (e.g. rename X to Y, then modify Y). Apply the rename first, then send a second batch.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. By default `target_text` must match uniquely (`match_mode`:'strict') — add surrounding context to disambiguate, or set `match_mode`:'first'/'all' to edit the first or every occurrence. Set `regex`:true to treat `target_text` as a regular expression (capture groups available in `new_text` as $1, $2…). `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
+  "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. By default `target_text` must match uniquely (`match_mode`:'strict') — add surrounding context to disambiguate, or set `match_mode`:'first'/'all' to edit the first or every occurrence. Set `regex`:true to treat `target_text` as a regular expression (capture groups available in `new_text` as $1, $2…). `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n   • EMPTY/FORM TABLE CELLS: a blank cell has no text to match. `read_docx` renders each cell with a trailing `{#cell:<id>}` anchor — to fill a blank cell, set `target_text` to that exact anchor (e.g. '{#cell:0000005E}') and put the value in `new_text`. Do NOT try to match the pipe layout ('Date |  |  |'); the pipes are display separators, not editable text.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation. The `{#cell:<id>}` anchors are stable (Word-assigned) and safe to reuse across reads.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
 
 const DIFF_DOCX_DESC =
   "Compares two DOCX files and returns a compact `@@ Word Patch @@` diff — Adeu's token-level, sub-word patch format — of their text content. Useful for analyzing differences between versions before editing.";

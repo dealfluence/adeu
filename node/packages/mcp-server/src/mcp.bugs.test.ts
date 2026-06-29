@@ -154,12 +154,17 @@ describe("Resolved Bugs MCP Server Verification", () => {
     );
 
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toContain(
-      "Error executing tool read_docx: File not found:",
+    expect(res.result.content[0].text).toContain("file not found:");
+    // Lean agent error: no CLI install blurb, no raw node error.
+    expect(res.result.content[0].text).not.toContain("uv tool install adeu");
+    expect(res.result.content[0].text).not.toContain(
+      "sandboxed/containerized environment",
     );
-    expect(res.result.content[0].text).toContain("sandboxed/containerized environment");
-    expect(res.result.content[0].text).toContain("uv tool install adeu");
-    expect(res.result.content[0].text).not.toContain("ENOENT"); // Raw node error must not leak
+    expect(res.result.content[0].text).not.toContain("ENOENT");
+    // Should surface an available-files listing to enable one-turn self-correction.
+    expect(res.result.content[0].text).toMatch(
+      /available files:|no \.docx files found/,
+    );
   });
 
   it("Double-Serialization: process_document_batch fails with TypeError when changes array contains double-serialized JSON strings", async () => {
@@ -186,7 +191,9 @@ describe("Resolved Bugs MCP Server Verification", () => {
     // On unpatched code, the tool catches the TypeError and returns it inside a standard MCP error response, causing this test to fail.
     // On patched code, the tool successfully parses and applies the double-serialized JSON strings, returning a successful response.
     expect(res.result.isError).toBeUndefined();
-    expect(res.result.content[0].text).toContain("Dry-run simulation complete.");
+    expect(res.result.content[0].text).toContain(
+      "Dry-run simulation complete.",
+    );
   });
 
   it("Unparseable String: process_document_batch gracefully rejects raw strings instead of crashing", async () => {
@@ -198,7 +205,7 @@ describe("Resolved Bugs MCP Server Verification", () => {
           original_docx_path: cleanDocPath,
           author_name: "Agent",
           changes: [
-            "modify document to be clean document" // Raw unparseable string
+            "modify document to be clean document", // Raw unparseable string
           ],
           dry_run: false,
         },
@@ -207,7 +214,9 @@ describe("Resolved Bugs MCP Server Verification", () => {
     );
 
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toContain("Batch rejected. Some edits failed validation");
+    expect(res.result.content[0].text).toContain(
+      "Batch rejected. Some edits failed validation",
+    );
     expect(res.result.content[0].text).toContain("Invalid change format");
     expect(res.result.content[0].text).toContain("received a primitive string");
   });
@@ -226,7 +235,7 @@ describe("Resolved Bugs MCP Server Verification", () => {
       106,
     );
 
-    // If Zod validation failed, we would get an error payload back or `res.error` 
+    // If Zod validation failed, we would get an error payload back or `res.error`
     // from the MCP protocol (error code -32602).
     expect(res.error).toBeUndefined();
     expect(res.result).toBeDefined();

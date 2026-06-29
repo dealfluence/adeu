@@ -260,7 +260,29 @@ export class DocumentMapper {
           current += 3;
         }
 
+        const cell_start = current;
         current = this._map_blocks(cell, current);
+
+        // Parity with ingest.extract_table: emit a {#cell:<paraId>} anchor and
+        // bind a zero-width span to the cell's first paragraph so the engine
+        // can resolve "write into this cell" even when the cell is empty
+        // (pPr-only paragraph with no run).
+        if (!this.clean_view && !this.original_view) {
+          const firstP = cell._element.getElementsByTagName("w:p")[0] as
+            | Element
+            | undefined;
+          const paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+          if (paraId && firstP) {
+            // Zero-width span bound to the empty cell paragraph: gives
+            // get_insertion_anchor a paragraph to land on. Placed at the anchor
+            // token offset so resolution targets THIS cell, not a neighbour.
+            const cellPara = new Paragraph(firstP, cell);
+            this._add_virtual_text("", current, cellPara);
+            const anchor = `{#cell:${paraId}}`;
+            this._add_virtual_text(anchor, current, cellPara);
+            current += anchor.length;
+          }
+        }
         cells_processed += 1;
       }
 

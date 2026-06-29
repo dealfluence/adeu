@@ -184,13 +184,28 @@ export function extract_table(
 
       if (!first_cell) cell_cursor += 3;
 
-      const cell_content = _extract_blocks(
+      let cell_content = _extract_blocks(
         cell,
         comments_map,
         cleanView,
         cell_cursor,
         paragraph_offsets,
       );
+      // Emit a stable, document-native anchor for this cell so empty/short
+      // value cells are addressable by the engine. Reuses the {#...} bookmark
+      // projection (already protected by validate_edit_strings and resolvable
+      // via the mapper). We key on the cell's first paragraph w14:paraId, which
+      // Word assigns and keeps stable across reads.
+      if (!cleanView) {
+        const firstP = cell._element.getElementsByTagName("w:p")[0] as
+          | Element
+          | undefined;
+        const paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+        if (paraId) {
+          const anchor = `{#cell:${paraId}}`;
+          cell_content = cell_content + anchor;
+        }
+      }
       cell_texts.push(cell_content);
       cell_cursor += cell_content.length;
       first_cell = false;
