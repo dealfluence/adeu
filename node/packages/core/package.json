@@ -1,6 +1,6 @@
 {
   "name": "@adeu/core",
-  "version": "1.17.2",
+  "version": "1.18.0",
   "description": "",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
