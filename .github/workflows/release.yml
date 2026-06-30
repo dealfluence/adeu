@@ -104,6 +104,10 @@ jobs:
         working-directory: ./node
         run: npm run build
 
+      - name: Pack MCPB Bundle
+        working-directory: ./desktop-extension
+        run: zip -r Adeu.mcpb manifest.json icon.png package.json *.js assets/ templates/
+
       - name: Build Smithery Bundle
         run: python scripts/patch_smithery_mcpb.py
 
