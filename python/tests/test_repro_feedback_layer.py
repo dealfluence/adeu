@@ -46,10 +46,12 @@ def test_process_batch_returns_detailed_edit_reports():
     assert "version" in stats
 
 
-def test_punctuation_anchor_triggers_warning():
+def test_punctuation_anchor_no_warning_on_clean_apply():
     """
-    Verifies that target_text containing tokenization-splitting punctuation
-    like underscores or hyphens generates a warning.
+    A punctuated anchor (underscores/hyphens) that matches and applies cleanly
+    must NOT raise the tokenization-splitting warning. The redline preview
+    (critic_markup/clean_text) already reports the change; a warning here is a
+    false positive that pushes agents into needless "cleaner anchor" retries.
     """
     stream = _build_simple_doc("Refer to sample_term_name in Section 4.")
     engine = RedlineEngine(stream, author="Reviewer AI")
@@ -57,9 +59,40 @@ def test_punctuation_anchor_triggers_warning():
     stats = engine.process_batch([ModifyText(target_text="sample_term_name", new_text="validated_term_name")])
 
     edit_report = stats["edits"][0]
+    assert edit_report["status"] == "applied"
+    assert edit_report["warning"] is None
+
+    # Same expectation under dry_run (validation + simulation path).
+    stream2 = _build_simple_doc("Refer to sample_term_name in Section 4.")
+    engine2 = RedlineEngine(stream2, author="Reviewer AI")
+    dry_stats = engine2.process_batch(
+        [ModifyText(target_text="sample_term_name", new_text="validated_term_name")],
+        dry_run=True,
+    )
+    dry_report = dry_stats["edits"][0]
+    assert dry_report["status"] == "applied"
+    assert dry_report["warning"] is None
+
+
+def test_punctuation_anchor_warns_only_when_match_fails():
+    """
+    When a punctuated anchor fails to match, the warning IS surfaced as
+    recovery context (the punctuation may be why the match missed).
+    """
+    stream = _build_simple_doc("Refer to sample_term_name in Section 4.")
+    engine = RedlineEngine(stream, author="Reviewer AI")
+
+    # 'phantom_term-x' is short, space-free, punctuated, and absent from the doc.
+    stats = engine.process_batch(
+        [ModifyText(target_text="phantom_term-x", new_text="anything")],
+        dry_run=True,
+    )
+
+    edit_report = stats["edits"][0]
+    assert edit_report["status"] == "failed"
     assert edit_report["warning"] is not None
     assert "punctuation" in edit_report["warning"].lower()
-    assert "sample_term_name" in edit_report["warning"]
+    assert "phantom_term-x" in edit_report["warning"]
 
 
 def test_dry_run_does_not_mutate_and_reports_safely():

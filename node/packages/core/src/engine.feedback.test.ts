@@ -31,7 +31,11 @@ describe("Feedback Layer & Dry Run Verification", () => {
     expect(stats.version).toBeDefined();
   });
 
-  it("punctuation anchor triggers warning", async () => {
+  it("punctuation anchor: no warning on clean apply", async () => {
+    // A punctuated anchor that matches and applies cleanly must NOT raise the
+    // tokenization-splitting warning. The redline preview already reports the
+    // change; a warning here is a false positive that pushes agents into
+    // needless "cleaner anchor" retries.
     const doc = await createTestDocument();
     addParagraph(doc, "Refer to sample_term_name in Section 4.");
     const engine = new RedlineEngine(doc, "Reviewer TS");
@@ -41,9 +45,37 @@ describe("Feedback Layer & Dry Run Verification", () => {
     ]);
 
     const report = stats.edits[0];
+    expect(report.status).toBe("applied");
+    expect(report.warning).toBeNull();
+
+    // Same expectation under dry_run.
+    const doc2 = await createTestDocument();
+    addParagraph(doc2, "Refer to sample_term_name in Section 4.");
+    const engine2 = new RedlineEngine(doc2, "Reviewer TS");
+    const dryStats = (engine2 as any).process_batch([
+      { type: "modify", target_text: "sample_term_name", new_text: "validated_term_name" }
+    ], true);
+    const dryReport = dryStats.edits[0];
+    expect(dryReport.status).toBe("applied");
+    expect(dryReport.warning).toBeNull();
+  });
+
+  it("punctuation anchor: warns only when match fails", async () => {
+    // When a punctuated anchor fails to match, the warning IS surfaced as
+    // recovery context (the punctuation may be why the match missed).
+    const doc = await createTestDocument();
+    addParagraph(doc, "Refer to sample_term_name in Section 4.");
+    const engine = new RedlineEngine(doc, "Reviewer TS");
+
+    const stats = (engine as any).process_batch([
+      { type: "modify", target_text: "phantom_term-x", new_text: "anything" }
+    ], true);
+
+    const report = stats.edits[0];
+    expect(report.status).toBe("failed");
     expect(report.warning).not.toBeNull();
     expect(report.warning.toLowerCase()).toContain("punctuation");
-    expect(report.warning).toContain("sample_term_name");
+    expect(report.warning).toContain("phantom_term-x");
   });
 
   it("dry_run does not mutate and reports safely", async () => {

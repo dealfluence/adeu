@@ -322,8 +322,19 @@ export class RedlineEngine {
     this.comments_manager = new CommentsManager(this.doc);
   }
 
+  /**
+   * Return a hint when a short, single-token anchor contains punctuation that
+   * can split awkwardly, else null.
+   *
+   * Surface this ONLY for edits that actually failed to match/apply. On a
+   * successful edit the batch report already carries the redline preview, so
+   * emitting this would be a false positive: the punctuation (dates,
+   * `[_name_]` placeholders, `____` blanks) is frequently the literal target
+   * and the edit succeeds despite it. Mirrors the Python engine.
+   */
   private _check_punctuation_warning(target_text: string): string | null {
     if (!target_text) return null;
+    if (target_text.length > 20 || target_text.includes(" ")) return null;
     if (target_text.includes("_") || target_text.includes("-")) {
       return `Warning: target_text '${target_text}' contains tokenization-splitting punctuation ('_' or '-'). This can trigger mid-word splits in the diff engine. Consider using a longer plain-prose anchor.`;
     }
@@ -1894,11 +1905,16 @@ export class RedlineEngine {
         for (let i = 0; i < edits.length; i++) {
           const edit = edits[i];
           const single_errors = this.validate_edits([edit], i);
-          const warning = this._check_punctuation_warning(
-            (edit as any).target_text || "",
-          );
           if (single_errors.length > 0) {
             skipped_edits++;
+            // Only surface the punctuation-anchor warning when the edit actually
+            // failed. A clean apply already returns the redline preview, so the
+            // warning is pure noise on success — and it misleads agents into
+            // hunting for a "cleaner" anchor that was never needed (e.g. on
+            // placeholders/dates where the punctuation IS the literal target).
+            const warning = this._check_punctuation_warning(
+              (edit as any).target_text || "",
+            );
             edits_reports.push({
               status: "failed",
               target_text: (edit as any).target_text || "",
@@ -1918,7 +1934,7 @@ export class RedlineEngine {
               status: "applied",
               target_text: (edit as any).target_text || "",
               new_text: (edit as any).new_text || "",
-              warning: warning,
+              warning: null,
               error: null,
               critic_markup: previews[0],
               clean_text: previews[1],
@@ -1935,6 +1951,9 @@ export class RedlineEngine {
               this.skipped_details.length > 0
                 ? this.skipped_details[this.skipped_details.length - 1]
                 : "Failed to apply edit";
+            const warning = this._check_punctuation_warning(
+              (edit as any).target_text || "",
+            );
             edits_reports.push({
               status: "failed",
               target_text: (edit as any).target_text || "",
@@ -1983,15 +2002,19 @@ export class RedlineEngine {
         for (const edit of edits) {
           const success = (edit as any)._applied_status || false;
           const error_msg = (edit as any)._error_msg || null;
-          const warning = this._check_punctuation_warning(
-            (edit as any).target_text || "",
-          );
           let critic_markup = null;
           let clean_text = null;
+          // Punctuation-anchor warning is failure-context only: on success the
+          // redline preview below already reports the change cleanly.
+          let warning: string | null = null;
           if (success) {
             const previews = this._build_edit_context_previews(edit);
             critic_markup = previews[0];
             clean_text = previews[1];
+          } else {
+            warning = this._check_punctuation_warning(
+              (edit as any).target_text || "",
+            );
           }
           edits_reports.push({
             status: success ? "applied" : "failed",

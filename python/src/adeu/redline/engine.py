@@ -255,6 +255,15 @@ class RedlineEngine:
         self.skipped_details: List[str] = []
 
     def _check_punctuation_warning(self, target_text: str) -> Optional[str]:
+        """Return a hint when a short, single-token anchor contains punctuation
+        that can split awkwardly, else None.
+
+        Surface this ONLY for edits that actually failed to match/apply. On a
+        successful edit the batch report already carries the redline preview, so
+        emitting this would be a false positive: the punctuation (dates,
+        ``[_name_]`` placeholders, ``____`` blanks) is frequently the literal
+        target and the edit succeeds despite it.
+        """
         if not target_text:
             return None
         if len(target_text) > 20 or " " in target_text:
@@ -1423,9 +1432,16 @@ class RedlineEngine:
             if dry_run_mode:
                 for edit_idx, edit in enumerate(edits):
                     single_errors = self.validate_edits([edit])
-                    warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     if single_errors:
                         skipped_edits += 1
+                        # Only surface the punctuation-anchor warning when the edit
+                        # actually failed. A clean apply already returns the redline
+                        # preview (critic_markup/clean_text) showing exactly what
+                        # changed, so the warning is pure noise on success — and it
+                        # misleads agents into hunting for a "cleaner" anchor that was
+                        # never needed (e.g. on placeholders/dates where the
+                        # punctuation IS the literal target).
+                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                         # validate_edits is called with a single-element list, so it
                         # always labels failures as "Edit 1". Renumber to the edit's
                         # true 1-based position in the batch.
@@ -1451,7 +1467,7 @@ class RedlineEngine:
                                 "status": "applied",
                                 "target_text": getattr(edit, "target_text", ""),
                                 "new_text": getattr(edit, "new_text", ""),
-                                "warning": warning,
+                                "warning": None,
                                 "error": None,
                                 "critic_markup": critic_markup,
                                 "clean_text": clean_text,
@@ -1464,6 +1480,7 @@ class RedlineEngine:
                     else:
                         skipped_edits += 1
                         error_msg = self.skipped_details[-1] if self.skipped_details else "Failed to apply edit"
+                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                         edits_reports.append(
                             {
                                 "status": "failed",
@@ -1484,11 +1501,15 @@ class RedlineEngine:
                 for edit in cloned_edits:
                     success = getattr(edit, "_applied_status", False)
                     edit_error_msg = getattr(edit, "_error_msg", None)
-                    warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     critic_markup = None
                     clean_text = None
+                    # Punctuation-anchor warning is failure-context only: on success
+                    # the redline preview below already reports the change cleanly.
+                    warning = None
                     if success:
                         critic_markup, clean_text = self._build_edit_context_previews(edit)
+                    else:
+                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     edits_reports.append(
                         {
                             "status": "applied" if success else "failed",
