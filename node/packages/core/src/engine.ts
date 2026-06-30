@@ -1501,27 +1501,39 @@ export class RedlineEngine {
           (edit.new_text || "").length - sfx,
         );
         if (final_target.includes("\n\n")) {
-          if (final_new.includes("\n\n")) {
-            const parts = matched.split("\n\n");
-            if (
-              parts.length >= 2 &&
-              parts[0].trim() !== "" &&
-              parts[parts.length - 1].trim() !== ""
-            ) {
-              errors.push(
-                `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
-              );
-            }
-          } else {
-            const parts = final_target.split("\n\n");
-            if (
-              parts.length >= 2 &&
-              parts[0].trim() !== "" &&
-              parts[parts.length - 1].trim() !== ""
-            ) {
-              errors.push(
-                `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
-              );
+          // A *balanced* multi-paragraph modification (target and replacement
+          // carry the same number of paragraph breaks) is safe: it is split
+          // into one sub-edit per paragraph segment and applied, leaving the
+          // structural \n\n breaks untouched. Only reject when the paragraph
+          // structure would actually change (a merge or split), which cannot be
+          // expressed as a per-paragraph text replacement. See
+          // _pre_resolve_heuristic_edit.
+          const balanced =
+            matched.split("\n\n").length ===
+            (edit.new_text || "").split("\n\n").length;
+          if (!balanced) {
+            if (final_new.includes("\n\n")) {
+              const parts = matched.split("\n\n");
+              if (
+                parts.length >= 2 &&
+                parts[0].trim() !== "" &&
+                parts[parts.length - 1].trim() !== ""
+              ) {
+                errors.push(
+                  `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+                );
+              }
+            } else {
+              const parts = final_target.split("\n\n");
+              if (
+                parts.length >= 2 &&
+                parts[0].trim() !== "" &&
+                parts[parts.length - 1].trim() !== ""
+              ) {
+                errors.push(
+                  `- Edit ${i + 1 + index_offset} Failed: target_text spans a paragraph boundary with body text on both sides. The paragraph break is a structural element, not literal text, so it cannot be replaced as a single span without corrupting the document. Split this into one edit per paragraph.`,
+                );
+              }
             }
           }
         }
@@ -1531,8 +1543,16 @@ export class RedlineEngine {
         const spans = this.mapper.spans.filter(
           (s) => s.end > start && s.start < start + length,
         );
-        const nestedAuthors = new Set<string>();
+        const insAuthors = new Set<string>();
+        const commentAuthors = new Set<string>();
+        // Does any real (run-backed) text in the target lie OUTSIDE a foreign
+        // insertion? If so the target only partially overlaps the insertion and
+        // replacing it as one span would straddle the <w:ins> boundary — that
+        // case must still be refused.
+        let hasNonForeignRealText = false;
         for (const s of spans) {
+          if (s.run === null) continue;
+          let isForeignIns = false;
           if (s.ins_id) {
             const insNodes = findAllDescendants(
               this.doc.element,
@@ -1541,24 +1561,45 @@ export class RedlineEngine {
             if (insNodes.length > 0) {
               const auth = insNodes[0].getAttribute("w:author");
               if (auth && auth !== this.author) {
-                const is_fully_contained_in_ins = start >= s.start && (start + length) <= s.end;
-                const is_lockout = is_fully_contained_in_ins || match_mode === "all";
-                if (is_lockout) {
-                  nestedAuthors.add(auth);
-                }
+                insAuthors.add(auth);
+                isForeignIns = true;
               }
             }
           }
+          if (!isForeignIns) hasNonForeignRealText = true;
+        }
+        for (const s of spans) {
           if (s.comment_ids) {
             for (const cid of s.comment_ids) {
               const c_data = this.mapper.comments_map[cid];
               if (c_data && c_data.author && c_data.author !== this.author) {
-                nestedAuthors.add(c_data.author);
+                commentAuthors.add(c_data.author);
               }
             }
           }
         }
-        if (nestedAuthors.size > 0) {
+        if (insAuthors.size > 0 || commentAuthors.size > 0) {
+          // A single (strict/first) modification whose target lies ENTIRELY
+          // inside foreign-authored insertion(s), with no foreign comment
+          // overlap, is allowed: track_delete_run splits the enclosing <w:ins>
+          // and nests the change, producing valid tracked-change XML. Refuse the
+          // remaining cases — match_mode "all" fan-outs, partial overlaps that
+          // straddle the insertion boundary, and edits touching another author's
+          // comment range.
+          const fullyWithinForeignIns =
+            insAuthors.size > 0 &&
+            !hasNonForeignRealText &&
+            commentAuthors.size === 0;
+          if (
+            (match_mode === "strict" || match_mode === "first") &&
+            fullyWithinForeignIns
+          ) {
+            continue;
+          }
+          const nestedAuthors = new Set<string>([
+            ...insAuthors,
+            ...commentAuthors,
+          ]);
           errors.push(
             `- Edit ${i + 1 + index_offset} Failed: Modification targets an active insertion from another author (${Array.from(nestedAuthors).join(", ")}). Accept that change first or scope your edit outside of it.`,
           );
@@ -2018,6 +2059,10 @@ export class RedlineEngine {
         (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
     );
     const occupied_ranges: [number, number][] = [];
+    // Sub-edits split from one balanced multi-paragraph modification share a
+    // _split_group_id; count the group as a single applied edit (and a single
+    // occurrence), even though it touches several paragraphs.
+    const counted_split_groups = new Set<number>();
 
     for (const [edit, orig_new] of resolved_edits) {
       const start = edit._resolved_start_idx || 0;
@@ -2050,14 +2095,27 @@ export class RedlineEngine {
       }
 
       if (success) {
-        applied++;
+        // A balanced multi-paragraph split fans one logical edit into several
+        // paragraph sub-edits sharing a _split_group_id; count it once. Edits
+        // with no group id (the common case) always count.
+        const group_id = edit._split_group_id;
+        const first_in_group =
+          group_id === undefined ||
+          group_id === null ||
+          !counted_split_groups.has(group_id);
+        if (first_in_group && group_id !== undefined && group_id !== null) {
+          counted_split_groups.add(group_id);
+        }
+        if (first_in_group) applied++;
         occupied_ranges.push([start, end]);
         edit._applied_status = true;
         const parent = edit._parent_edit_ref;
         if (parent) {
           parent._applied_status = true;
-          parent._occurrences_modified =
-            (parent._occurrences_modified || 0) + 1;
+          if (first_in_group) {
+            parent._occurrences_modified =
+              (parent._occurrences_modified || 0) + 1;
+          }
           const [path, page] = this._get_heading_path_and_page(
             start,
             this.mapper.full_text,
@@ -2068,7 +2126,9 @@ export class RedlineEngine {
           parent._pages = pages;
           parent._heading_path = path;
         } else {
-          edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
+          if (first_in_group) {
+            edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
+          }
           const [path, page] = this._get_heading_path_and_page(
             start,
             this.mapper.full_text,
@@ -2418,6 +2478,65 @@ export class RedlineEngine {
         final_target = actual_doc_text.substring(prefix_len, t_end);
         final_new = current_effective_new_text.substring(prefix_len, n_end);
         effective_start_idx = start_idx + prefix_len;
+
+        // Balanced multi-paragraph modification: the matched span crosses one or
+        // more paragraph breaks and the replacement preserves the same number of
+        // breaks. Apply it as one independent sub-edit per paragraph segment so
+        // the structural \n\n breaks are left intact. Each sub-edit shares a
+        // _split_group_id (the occurrence's start index) so the batch report
+        // counts it as a single applied edit. Unbalanced cases (a genuine
+        // paragraph merge or split) fall through to the single-span path and are
+        // rejected by validate_edits.
+        const target_segs = actual_doc_text.split("\n\n");
+        const new_segs = current_effective_new_text.split("\n\n");
+        if (
+          actual_doc_text.includes("\n\n") &&
+          target_segs.length === new_segs.length
+        ) {
+          const split_sub_edits: any[] = [];
+          let seg_offset = start_idx;
+          let comment_assigned = false;
+          for (let k = 0; k < target_segs.length; k++) {
+            const t_seg = target_segs[k];
+            const n_seg = new_segs[k];
+            if (t_seg !== n_seg) {
+              const [seg_prefix, seg_suffix] = trim_common_context(t_seg, n_seg);
+              const seg_target = t_seg.substring(
+                seg_prefix,
+                t_seg.length - seg_suffix,
+              );
+              const seg_new = n_seg.substring(
+                seg_prefix,
+                n_seg.length - seg_suffix,
+              );
+              const seg_start = seg_offset + seg_prefix;
+              let seg_op: string;
+              if (!seg_target && seg_new) seg_op = "INSERTION";
+              else if (seg_target && !seg_new) seg_op = "DELETION";
+              else if (seg_target && seg_new) seg_op = "MODIFICATION";
+              else seg_op = "COMMENT_ONLY";
+              const seg_comment =
+                edit.comment && !comment_assigned ? edit.comment : null;
+              if (seg_comment) comment_assigned = true;
+              split_sub_edits.push({
+                type: "modify",
+                target_text: seg_target,
+                new_text: seg_new,
+                comment: seg_comment,
+                _match_start_index: seg_start,
+                _internal_op: seg_op,
+                _active_mapper_ref: active_mapper,
+                _split_group_id: start_idx,
+              });
+            }
+            // Advance past this segment plus its "\n\n" separator span.
+            seg_offset += t_seg.length + 2;
+          }
+          if (split_sub_edits.length > 0) {
+            for (const sub of split_sub_edits) all_sub_edits.push(sub);
+            continue;
+          }
+        }
 
         if (!final_target && final_new) effective_op = "INSERTION";
         else if (final_target && !final_new) effective_op = "DELETION";

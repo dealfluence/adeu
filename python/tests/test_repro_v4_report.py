@@ -1,12 +1,11 @@
 import io
 
-import pytest
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.models import ModifyText
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import get_visible_runs
 
 
@@ -95,11 +94,12 @@ def test_val_obs_8_bullet_markdown_leak():
     assert visible_text == "Second Item", f"Markdown bullet leaked into OOXML text: {visible_text}"
 
 
-def test_val_obs_13_nested_redline_fragmentation():
+def test_val_obs_13_nested_redline_edit_applies():
     """
     VAL-OBS-13:
-    A Modification targeting text strictly inside an active <w:ins> by a DIFFERENT author
-    should trigger a Strict Refusal via BatchValidationError to prevent nested tag fragmentation.
+    A single (strict) Modification targeting text strictly inside an active
+    <w:ins> by a DIFFERENT author is applied: track_delete_run splits the
+    enclosing <w:ins> and nests the change, producing valid tracked-change XML.
     """
     doc = Document()
     doc.add_paragraph("Original baseline.")
@@ -112,15 +112,13 @@ def test_val_obs_13_nested_redline_fragmentation():
     engine_a.apply_edits([ModifyText(target_text="Original baseline.", new_text="Original baseline. Inserted by A.")])
     stream_a = engine_a.save_to_stream()
 
-    # 2. Author B tries to modify Author A's pending insertion
+    # 2. Author B modifies Author A's pending insertion — this now applies.
     engine_b = RedlineEngine(stream_a, author="Author B")
     edit = ModifyText(target_text="Inserted by A", new_text="Modified by B")
 
-    # We expect the validator to catch this and raise
-    with pytest.raises(BatchValidationError) as excinfo:
-        engine_b.process_batch([edit])
-
-    assert "targets an active insertion from another author" in str(excinfo.value)
+    res = engine_b.process_batch([edit])
+    assert res["edits_applied"] == 1
+    assert res["edits_skipped"] == 0
 
 
 def test_val_obs_4_appendix_over_rejection():

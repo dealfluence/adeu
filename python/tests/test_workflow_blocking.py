@@ -121,10 +121,11 @@ def test_repro_p1_and_p2_validation_messages():
     assert "matches text inside a tracked deletion by Author A" in err_str
     assert "Reject/accept that change first" in err_str
 
-    # 3. Under Author B, try to target the active insertion "sleepy cat" from Author A
+    # 3. Under Author B, modify the active insertion "sleepy cat" from Author A.
+    #    A strict edit fully contained inside a foreign insertion now applies
+    #    (the enclosing <w:ins> is split and the change nested); only the deleted
+    #    text in step 2 stays blocked.
     edit_inserted = ModifyText(target_text="sleepy cat", new_text="sleepy kitten")
-    with pytest.raises(BatchValidationError) as excinfo_ins:
-        engine_b.process_batch([edit_inserted])
-    err_str_ins = str(excinfo_ins.value)
-    assert "targets an active insertion from another author" in err_str_ins
-    assert "Author A (e.g. Chg:2)" in err_str_ins or "Author A (e.g. Chg:1)" in err_str_ins
+    res_ins = engine_b.process_batch([edit_inserted])
+    assert res_ins["edits_applied"] == 1
+    assert res_ins["edits_skipped"] == 0

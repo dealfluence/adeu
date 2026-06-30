@@ -444,29 +444,40 @@ class TestMultiParagraphTarget:
                 f"Error: {raised!r}"
             )
 
-    def test_multi_paragraph_nn_modification_rejected(self):
+    def test_multi_paragraph_nn_modification_applies_per_paragraph(self):
         """
         target_text="ends here.\\n\\nClause 2 begins"
         new_text="ends here. MERGED\\n\\nClause 2 begins CHANGED"
 
-        On the current implementation, this slips past the N->1 / N->0 boundary checks
-        because both target and replacement contain '\\n\\n'. It must be caught
-        and rejected with an actionable boundary error.
+        Both target and replacement carry the same number of '\\n\\n' breaks, so
+        the paragraph structure is preserved. The engine splits this into one
+        sub-edit per paragraph and applies it as a single logical edit, leaving
+        the \\n\\n boundary intact. (Unbalanced merges/splits are still rejected
+        — see the regex case in test_repro_qa_report_v2 and the N->1 case above.)
         """
         buf = _make_clean_docx("Clause 1 ends here.", "Clause 2 begins here.")
         engine = RedlineEngine(buf, author="Test Author")
 
-        with pytest.raises(Exception) as excinfo:
-            engine.process_batch(
-                [
-                    ModifyText(
-                        target_text="ends here.\n\nClause 2 begins",
-                        new_text="ends here. MERGED\n\nClause 2 begins CHANGED",
-                    )
-                ]
-            )
+        res = engine.process_batch(
+            [
+                ModifyText(
+                    target_text="ends here.\n\nClause 2 begins",
+                    new_text="ends here. MERGED\n\nClause 2 begins CHANGED",
+                )
+            ]
+        )
+        assert res["edits_applied"] == 1
+        assert res["edits_skipped"] == 0
 
-        assert "paragraph" in str(excinfo.value).lower()
+        saved = engine.save_to_stream()
+        saved.seek(0)
+        text = extract_text_from_stream(saved)
+        # The paragraph boundary must survive — the two clauses are NOT merged.
+        assert "ends here.Clause 2 begins" not in text
+        assert "ends here. Clause 2 begins" not in text
+        # Both per-paragraph insertions land.
+        assert "MERGED" in text
+        assert "CHANGED" in text
 
 
 # ===========================================================================

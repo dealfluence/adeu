@@ -1272,47 +1272,94 @@ class RedlineEngine:
                 final_new = effective_new_text[prefix_len : len(effective_new_text) - suffix_len]
 
                 if "\n\n" in final_target:
-                    if "\n\n" in final_new:
-                        parts = actual_doc_text.split("\n\n")
-                        if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
-                            errors.append(
-                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
-                                "with body text on both sides. The paragraph break is a structural "
-                                "element, not literal text, so it cannot be replaced as "
-                                "a single span without corrupting the document. "
-                                "Split this into one edit per paragraph."
-                            )
-                    else:
-                        parts = final_target.split("\n\n")
-                        if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
-                            errors.append(
-                                f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
-                                "with body text on both sides. "
-                                "The paragraph break is a structural element, not literal text, "
-                                "so it cannot be replaced as "
-                                "a single span without corrupting the document. Split this into "
-                                "one edit per paragraph."
-                            )
+                    # A *balanced* multi-paragraph modification (the target and the
+                    # replacement contain the same number of paragraph breaks) is
+                    # safe: apply_edits splits it into one sub-edit per paragraph
+                    # segment, leaving the structural \n\n breaks untouched. Only
+                    # reject when the paragraph structure would actually change
+                    # (a merge or split), which cannot be expressed as a
+                    # per-paragraph text replacement. See _resolve_single_match.
+                    balanced = actual_doc_text.count("\n\n") == effective_new_text.count("\n\n")
+                    if not balanced:
+                        if "\n\n" in final_new:
+                            parts = actual_doc_text.split("\n\n")
+                            if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
+                                errors.append(
+                                    f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
+                                    "with body text on both sides. The paragraph break is a structural "
+                                    "element, not literal text, so it cannot be replaced as "
+                                    "a single span without corrupting the document. "
+                                    "Split this into one edit per paragraph."
+                                )
+                        else:
+                            parts = final_target.split("\n\n")
+                            if len(parts) >= 2 and parts[0].strip() and parts[-1].strip():
+                                errors.append(
+                                    f"- Edit {i + 1} Failed: target_text spans a paragraph boundary "
+                                    "with body text on both sides. "
+                                    "The paragraph break is a structural element, not literal text, "
+                                    "so it cannot be replaced as "
+                                    "a single span without corrupting the document. Split this into "
+                                    "one edit per paragraph."
+                                )
 
             for start, length in valid_matches:
                 spans = [s for s in target_mapper.spans if s.end > start and s.start < start + length]
-                nested_authors_to_ids: dict[str, set[str]] = {}
+                # Foreign insertions overlapping the target, keyed by author.
+                ins_authors_to_ids: dict[str, set[str]] = {}
+                # Foreign comments overlapping the target, keyed by author.
+                comment_authors_to_ids: dict[str, set[str]] = {}
+                # Does any real (run-backed) text in the target lie OUTSIDE a
+                # foreign insertion? If so the target only partially overlaps the
+                # insertion and replacing it as one span would split the <w:ins>
+                # boundary — that case must still be refused.
+                has_non_foreign_real_text = False
                 for s in spans:
+                    if s.run is None:
+                        continue
+                    is_foreign_ins = False
                     if s.ins_id:
                         ins_nodes = self.doc.element.xpath(f"//w:ins[@w:id='{s.ins_id}']")
                         if ins_nodes:
                             auth = ins_nodes[0].get(qn("w:author"))
                             if auth and auth != self.author:
-                                nested_authors_to_ids.setdefault(auth, set()).add(s.ins_id)
-                if s.comment_ids:
-                    for cid in s.comment_ids:
-                        c_data = self.mapper.comments_map.get(cid)
-                        if c_data and c_data.get("author") and c_data.get("author") != self.author:
-                            nested_authors_to_ids.setdefault(c_data["author"], set()).add(f"Com:{cid}")
-                if nested_authors_to_ids:
+                                ins_authors_to_ids.setdefault(auth, set()).add(s.ins_id)
+                                is_foreign_ins = True
+                    if not is_foreign_ins:
+                        has_non_foreign_real_text = True
+                # Foreign comments anywhere in the target range (check every span,
+                # not just the last one).
+                for s in spans:
+                    if s.comment_ids:
+                        for cid in s.comment_ids:
+                            c_data = self.mapper.comments_map.get(cid)
+                            if c_data and c_data.get("author") and c_data.get("author") != self.author:
+                                comment_authors_to_ids.setdefault(c_data["author"], set()).add(f"Com:{cid}")
+
+                if ins_authors_to_ids or comment_authors_to_ids:
+                    # A single-occurrence (strict/first) modification whose target
+                    # lies ENTIRELY inside foreign-authored insertion(s), with no
+                    # foreign comment overlap, is allowed: track_delete_run splits
+                    # the enclosing <w:ins> and nests the change, producing valid
+                    # tracked-change XML. Refuse the remaining cases — match_mode
+                    # "all" fan-outs, partial overlaps that straddle the insertion
+                    # boundary, and edits touching another author's comment range.
+                    fully_within_foreign_ins = (
+                        bool(ins_authors_to_ids)
+                        and not has_non_foreign_real_text
+                        and not comment_authors_to_ids
+                    )
+                    if match_mode in ("strict", "first") and fully_within_foreign_ins:
+                        continue
+
+                    combined: dict[str, set[str]] = {}
+                    for auth, ids in ins_authors_to_ids.items():
+                        combined.setdefault(auth, set()).update(ids)
+                    for auth, ids in comment_authors_to_ids.items():
+                        combined.setdefault(auth, set()).update(ids)
                     author_hints = []
-                    for auth in sorted(nested_authors_to_ids.keys()):
-                        sorted_ids = sorted(nested_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
+                    for auth in sorted(combined.keys()):
+                        sorted_ids = sorted(combined[auth], key=lambda x: int(x) if x.isdigit() else 0)
                         id_hints = ", ".join(
                             str(cid) if str(cid).startswith("Com:") else f"Chg:{cid}" for cid in sorted_ids
                         )
@@ -1571,6 +1618,10 @@ class RedlineEngine:
         # Process all edits backwards in a single O(N) sweep to avoid index drift and map rebuilds
         resolved_edits.sort(key=lambda x: x[0]._resolved_start_idx or 0, reverse=True)
         occupied_ranges: List[Tuple[int, int]] = []
+        # Sub-edits split from one balanced multi-paragraph modification share a
+        # _split_group_id; count the group as a single applied edit (and a single
+        # occurrence), even though it touches several paragraphs.
+        counted_split_groups: set = set()
 
         for edit, orig_new in resolved_edits:
             start = edit._resolved_start_idx or 0
@@ -1606,13 +1657,22 @@ class RedlineEngine:
                 success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
 
             if success:
-                applied += 1
+                # A balanced multi-paragraph split fans one logical edit into
+                # several paragraph sub-edits sharing a _split_group_id; count it
+                # once. Edits with no group id (the common case) always count.
+                group_id = getattr(edit, "_split_group_id", None)
+                first_in_group = group_id is None or group_id not in counted_split_groups
+                if first_in_group and group_id is not None:
+                    counted_split_groups.add(group_id)
+                if first_in_group:
+                    applied += 1
                 occupied_ranges.append((start, end))
                 edit._applied_status = True
                 parent = getattr(edit, "_parent_edit_ref", None)
                 if parent is not None:
                     parent._applied_status = True
-                    parent._occurrences_modified = getattr(parent, "_occurrences_modified", 0) + 1
+                    if first_in_group:
+                        parent._occurrences_modified = getattr(parent, "_occurrences_modified", 0) + 1
                     path, page = self._get_heading_path_and_page(start, self.mapper.full_text, page_offsets)
                     pages = getattr(parent, "_pages", [])
                     if page not in pages:
@@ -1620,7 +1680,8 @@ class RedlineEngine:
                     parent._pages = pages
                     parent._heading_path = path
                 else:
-                    edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
+                    if first_in_group:
+                        edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
                     path, page = self._get_heading_path_and_page(start, self.mapper.full_text, page_offsets)
                     pages = getattr(edit, "_pages", [])
                     if page not in pages:
@@ -2071,6 +2132,53 @@ class RedlineEngine:
             final_new = effective_new_text[prefix_len:n_end]
             effective_start_idx = start_idx + prefix_len
 
+            # Balanced multi-paragraph modification: the matched span crosses one
+            # or more paragraph breaks and the replacement preserves the same
+            # number of breaks. Apply it as one independent sub-edit per paragraph
+            # segment so the structural \n\n breaks are left intact. Each sub-edit
+            # shares a _split_group_id (the occurrence's start index) so the batch
+            # report still counts it as a single applied edit. Unbalanced cases
+            # (a genuine paragraph merge or split) fall through to the guard below.
+            if "\n\n" in actual_doc_text and actual_doc_text.count("\n\n") == effective_new_text.count("\n\n"):
+                target_segs = actual_doc_text.split("\n\n")
+                new_segs = effective_new_text.split("\n\n")
+                split_sub_edits: List[ModifyText] = []
+                seg_offset = start_idx
+                comment_assigned = False
+                for t_seg, n_seg in zip(target_segs, new_segs, strict=True):
+                    if t_seg != n_seg:
+                        seg_prefix, seg_suffix = trim_common_context(t_seg, n_seg)
+                        seg_target = t_seg[seg_prefix : len(t_seg) - seg_suffix]
+                        seg_new = n_seg[seg_prefix : len(n_seg) - seg_suffix]
+                        seg_start = seg_offset + seg_prefix
+                        if not seg_target and seg_new:
+                            seg_op = EditOperationType.INSERTION
+                        elif seg_target and not seg_new:
+                            seg_op = EditOperationType.DELETION
+                        elif seg_target and seg_new:
+                            seg_op = EditOperationType.MODIFICATION
+                        else:
+                            seg_op = "COMMENT_ONLY"
+                        seg_comment = edit.comment if (edit.comment and not comment_assigned) else None
+                        if seg_comment:
+                            comment_assigned = True
+                        sub_edit = ModifyText(
+                            type="modify",
+                            target_text=seg_target,
+                            new_text=seg_new,
+                            comment=seg_comment,
+                        )
+                        sub_edit._resolved_start_idx = seg_start
+                        sub_edit._match_start_index = seg_start
+                        sub_edit._internal_op = seg_op
+                        sub_edit._active_mapper_ref = active_mapper
+                        sub_edit._split_group_id = start_idx
+                        split_sub_edits.append(sub_edit)
+                    # Advance past this segment plus its "\n\n" separator span.
+                    seg_offset += len(t_seg) + 2
+                if split_sub_edits:
+                    return split_sub_edits
+
             # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
             # to prevent structural paragraph-break corruption.
             if "\n\n" in final_target:
@@ -2200,11 +2308,24 @@ class RedlineEngine:
                 while end_p is not None and end_p.tag != qn("w:p"):
                     end_p = end_p.getparent()
 
+                # first_el / last_el may live inside a <w:ins> or <w:del> (e.g. a
+                # comment-only edit anchored on another author's tracked
+                # insertion). _attach_comment needs an element that is a DIRECT
+                # child of the paragraph, so ascend to the child-of-paragraph
+                # ancestor; the comment markers then wrap the whole ins/del.
+                def _ascend_to_paragraph_child(el, p):
+                    cur = el
+                    while cur.getparent() is not None and cur.getparent() is not p:
+                        cur = cur.getparent()
+                    return cur
+
                 if start_p is not None and end_p is not None:
+                    first_anchor = _ascend_to_paragraph_child(first_el, start_p)
+                    last_anchor = _ascend_to_paragraph_child(last_el, end_p)
                     if start_p == end_p:
-                        self._attach_comment(start_p, first_el, last_el, edit.comment)
+                        self._attach_comment(start_p, first_anchor, last_anchor, edit.comment)
                     else:
-                        self._attach_comment_spanning(start_p, first_el, end_p, last_el, edit.comment)
+                        self._attach_comment_spanning(start_p, first_anchor, end_p, last_anchor, edit.comment)
             return True
 
         if op == EditOperationType.INSERTION:

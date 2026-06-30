@@ -111,6 +111,9 @@ class ModifyText(BaseModel):
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _parent_edit_ref: Optional["ModifyText"] = PrivateAttr(default=None)
     _resolved_proxy_edit: Optional["ModifyText"] = PrivateAttr(default=None)
+    # Sub-edits produced by splitting one balanced multi-paragraph modification
+    # share this id so the batch report counts them as a single applied edit.
+    _split_group_id: Optional[int] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)

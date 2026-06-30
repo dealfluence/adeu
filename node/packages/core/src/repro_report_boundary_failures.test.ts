@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createTestDocument, addParagraph } from "./test-utils.js";
 import { RedlineEngine } from "./engine.js";
+import { serializeXml } from "./docx/dom.js";
 
 describe("Report Bug Reproductions: Boundaries and Active Insertions", () => {
   it("TC_BOUNDARY: target_text spans a paragraph boundary with body text on both sides", async () => {
@@ -64,5 +65,44 @@ describe("Report Bug Reproductions: Boundaries and Active Insertions", () => {
     const result = engine.process_batch([edit], false);
     expect(result.edits_applied).toBe(1);
     expect(result.edits_skipped).toBe(0);
+  });
+
+  it("comment-only edit on a foreign author's insertion attaches the comment without crashing", async () => {
+    // Regression guard (cross-engine parity): a COMMENT_ONLY edit (new_text ==
+    // target_text + comment) whose target lies entirely inside another author's
+    // pending <w:ins> must attach the comment around that insertion, not crash.
+    const doc = await createTestDocument();
+    const xmlDoc = doc.element.ownerDocument!;
+
+    const p = addParagraph(doc, "Prefix ");
+    const ins = xmlDoc.createElement("w:ins");
+    ins.setAttribute("w:id", "9");
+    ins.setAttribute("w:author", "Author A");
+    const r = xmlDoc.createElement("w:r");
+    const t = xmlDoc.createElement("w:t");
+    t.textContent = "beta";
+    r.appendChild(t);
+    ins.appendChild(r);
+    p.appendChild(ins);
+
+    const engine = new RedlineEngine(doc, "Editor");
+    const edit = {
+      type: "modify",
+      target_text: "beta",
+      new_text: "beta",
+      comment: "flag this clause",
+    } as any;
+
+    const result = engine.process_batch([edit], false);
+    expect(result.edits_applied).toBe(1);
+    expect(result.edits_skipped).toBe(0);
+
+    const xml = serializeXml(p);
+    // The foreign insertion survives and the comment range wraps it.
+    expect(xml).toContain('w:author="Author A"');
+    expect(xml.indexOf("commentRangeStart")).toBeLessThan(
+      xml.indexOf('w:ins w:id="9"'),
+    );
+    expect(xml).toContain("commentRangeEnd");
   });
 });

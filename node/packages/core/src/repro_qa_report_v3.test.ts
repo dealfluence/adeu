@@ -27,7 +27,7 @@ describe("QA Report V3 Defects Reproductions", () => {
     expect(res.edits_skipped).toBe(0);
   });
 
-  it("TC2: NODE dry-run ≠ real write (active-insertion guard) [report F2, F3]", async () => {
+  it("TC2: NODE dry-run == real write for an edit inside a foreign insertion [report F2, F3]", async () => {
     const doc = await createTestDocument();
     const xmlDoc = doc.element.ownerDocument!;
 
@@ -37,7 +37,7 @@ describe("QA Report V3 Defects Reproductions", () => {
     ins.setAttribute("w:id", "101");
     ins.setAttribute("w:author", "Original Drafter");
     ins.setAttribute("w:date", "2026-06-29T12:00:00Z");
-    
+
     const r = xmlDoc.createElement("w:r");
     const t = xmlDoc.createElement("w:t");
     t.textContent = "five (5)";
@@ -51,33 +51,25 @@ describe("QA Report V3 Defects Reproductions", () => {
     suffixRun.appendChild(suffixText);
     p.appendChild(suffixRun);
 
-    // Create an engine with a different user name ("QA Tester") to trigger lockout
     const engine = new RedlineEngine(doc, "QA Tester");
 
-    const edit = {
-      type: "modify",
-      target_text: "five (5)",
-      new_text: "seven (7)",
-    } as any;
+    // A strict edit fully contained inside a foreign insertion now applies: the
+    // enclosing <w:ins> is split and the change nested. Dry-run and write agree.
+    // (Fresh edit object per call: a dry-run mutates the edit's resolution state.)
+    const resDry = engine.process_batch(
+      [{ type: "modify", target_text: "five (5)", new_text: "seven (7)" } as any],
+      true,
+    );
+    expect(resDry.edits_applied).toBe(1);
+    expect(resDry.edits_skipped).toBe(0);
+    expect(resDry.edits[0].status).toBe("applied");
 
-    // Run A: dry_run = true
-    const resDry = engine.process_batch([edit], true);
-    expect(resDry.edits_applied).toBe(0);
-    expect(resDry.edits_skipped).toBe(1);
-    expect(resDry.edits[0].status).toBe("failed");
-    expect(resDry.edits[0].error).toContain("active insertion");
-
-    // Run B: dry_run = false
-    let wetRunError: any = null;
-    try {
-      engine.process_batch([edit], false);
-    } catch (e) {
-      wetRunError = e;
-    }
-
-    expect(wetRunError).not.toBeNull();
-    expect(wetRunError.name).toBe("BatchValidationError");
-    expect(wetRunError.message).toContain("active insertion");
+    const resWet = engine.process_batch(
+      [{ type: "modify", target_text: "five (5)", new_text: "seven (7)" } as any],
+      false,
+    );
+    expect(resWet.edits_applied).toBe(1);
+    expect(resWet.edits_skipped).toBe(0);
   });
 
   it("TC3: Heading targeted by markdown '#' corrupts instead of failing [report F4, F5]", async () => {

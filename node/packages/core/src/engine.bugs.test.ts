@@ -418,7 +418,7 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(pTarget.parentNode).toBeNull();
   });
 
-  it("BUG-EXPLORE-2: Nested redline validation error includes actionable hint", async () => {
+  it("BUG-EXPLORE-2: a strict edit inside a foreign author's insertion applies (nested change)", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Original baseline.");
 
@@ -432,20 +432,18 @@ describe("Resolved Bugs Core Engine Verification", () => {
       },
     ]);
 
-    // Author B tries to modify Author A's pending insertion
+    // Author B modifies Author A's pending insertion — this now applies: the
+    // enclosing <w:ins> is split and Author B's change nested inside it.
     const engineB = new RedlineEngine(doc, "Author B");
-
-    expect(() => {
-      engineB.process_batch([
-        {
-          type: "modify",
-          target_text: "Inserted by A.",
-          new_text: "Modified by B.",
-        },
-      ]);
-    }).toThrowError(
-      /Accept that change first or scope your edit outside of it/,
-    );
+    const result = engineB.process_batch([
+      {
+        type: "modify",
+        target_text: "Inserted by A.",
+        new_text: "Modified by B.",
+      },
+    ]);
+    expect(result.edits_applied).toBe(1);
+    expect(result.edits_skipped).toBe(0);
   });
 
   it("BUG-CROSS-PARA-1: Cross-paragraph modify coalesces paragraphs and tracks para-mark deletion", async () => {

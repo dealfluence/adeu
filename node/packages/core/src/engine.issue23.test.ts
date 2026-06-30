@@ -422,31 +422,36 @@ describe("BUG-23-4: multi-paragraph target_text must produce actionable feedback
     }
   });
 
-  it("BUG-23-4-NN: rejects plain-paragraph N->N modifications spanning a paragraph boundary to prevent silent corruption", async () => {
+  it("BUG-23-4-NN: applies balanced plain-paragraph N->N modifications per paragraph, preserving the boundary", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Clause 1 ends here.");
     addParagraph(doc, "Clause 2 begins here.");
 
     const engine = new RedlineEngine(doc, "Test Author");
 
-    let raised: any = null;
-    try {
-      engine.process_batch([
-        {
-          type: "modify",
-          target_text: "ends here.\n\nClause 2 begins",
-          new_text: "ends here. MERGED\n\nClause 2 begins CHANGED",
-        },
-      ]);
-    } catch (e: any) {
-      raised = e;
-    }
+    // Both target and replacement carry the same number of \n\n breaks, so the
+    // paragraph structure is preserved. The engine splits this into one sub-edit
+    // per paragraph and applies it as a single logical edit. (Unbalanced
+    // merges/splits are still rejected — see the regex case in engine.qa.test.)
+    const result = engine.process_batch([
+      {
+        type: "modify",
+        target_text: "ends here.\n\nClause 2 begins",
+        new_text: "ends here. MERGED\n\nClause 2 begins CHANGED",
+      },
+    ]);
 
-    expect(raised).not.toBeNull();
-    if (raised) {
-      expect(raised.name).toBe("BatchValidationError");
-      expect(raised.message.toLowerCase()).toContain("paragraph boundary");
-    }
+    expect(result.edits_applied).toBe(1);
+    expect(result.edits_skipped).toBe(0);
+
+    const buf = await doc.save();
+    const text = await extractTextFromBuffer(buf);
+    // The paragraph boundary must survive — the two clauses are NOT merged.
+    expect(text).not.toContain("ends here.Clause 2 begins");
+    expect(text).not.toContain("ends here. Clause 2 begins");
+    // Both per-paragraph insertions land.
+    expect(text).toContain("MERGED");
+    expect(text).toContain("CHANGED");
   });
 });
 

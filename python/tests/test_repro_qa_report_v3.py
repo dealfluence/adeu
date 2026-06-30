@@ -1,12 +1,11 @@
 import io
 
-import pytest
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.models import ModifyText
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.engine import RedlineEngine
 
 
 def test_tc1_sequential_batch_evaluation():
@@ -40,11 +39,15 @@ def test_tc1_sequential_batch_evaluation():
     assert res["edits"][1]["status"] == "applied"
 
 
-def test_tc2_dry_run_write_parity_active_insertion_guard():
+def test_tc2_dry_run_write_parity_active_insertion_edit():
     """
-    TC2: dry-run outcome must equal write outcome (active-insertion guard) [report F2, F3]
-    Intended behavior: both runs must reject because the edit targets an active insertion from another author.
-    (Already correct on Python side, keeping as guard/sentinel).
+    TC2: dry-run outcome must equal write outcome.
+
+    A single (strict) modification whose target lies entirely inside another
+    author's pending insertion is now applied: track_delete_run splits the
+    enclosing <w:ins> and nests the change. Dry-run and write must agree that
+    the edit applies. (Partial overlaps and match_mode="all" fan-outs are still
+    refused — see TestQaReportV2EngineSafety.)
     """
     doc = Document()
     p = doc.add_paragraph("The party shall provide ")
@@ -73,21 +76,19 @@ def test_tc2_dry_run_write_parity_active_insertion_guard():
     doc.save(stream)
     stream.seek(0)
 
-    # Create engine with author "QA Tester" to trigger lock-out / active insertion guard
     engine = RedlineEngine(stream, author="QA Tester")
-    edit = ModifyText(target_text="five (5)", new_text="seven (7)")
 
-    # Run A: dry_run = True (should return a failed edit status with active insertion message)
-    res_dry = engine.process_batch([edit], dry_run=True)
-    assert res_dry["edits_applied"] == 0
-    assert res_dry["edits_skipped"] == 1
-    assert res_dry["edits"][0]["status"] == "failed"
-    assert "active insertion" in res_dry["edits"][0]["error"]
+    # Run A: dry_run = True — the edit applies. (Fresh edit object per call: a
+    # dry-run mutates the input edit's internal resolution state.)
+    res_dry = engine.process_batch([ModifyText(target_text="five (5)", new_text="seven (7)")], dry_run=True)
+    assert res_dry["edits_applied"] == 1
+    assert res_dry["edits_skipped"] == 0
+    assert res_dry["edits"][0]["status"] == "applied"
 
-    # Run B: dry_run = False (should raise BatchValidationError)
-    with pytest.raises(BatchValidationError) as exc_info_wet:
-        engine.process_batch([edit], dry_run=False)
-    assert "active insertion" in str(exc_info_wet.value)
+    # Run B: dry_run = False — same outcome, no rejection.
+    res_wet = engine.process_batch([ModifyText(target_text="five (5)", new_text="seven (7)")], dry_run=False)
+    assert res_wet["edits_applied"] == 1
+    assert res_wet["edits_skipped"] == 0
 
 
 def test_tc3_heading_targeted_by_markdown_hash():
