@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import sys
 from pathlib import Path
@@ -46,7 +47,6 @@ def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
     Set ADEU_DEBUG_FLATOPC=1 to dump the generated zip to a temp file for inspection.
     """
     import base64
-    import os
     import posixpath
     import xml.etree.ElementTree as ET
     import zipfile
@@ -183,6 +183,19 @@ if sys.platform == "win32":
 
         pass
 
+    class LiveWordUnavailableError(Exception):
+        """
+        Raised when Word itself cannot be reached over COM (no running instance,
+        a dead/zombie instance, or COM in a bad state — e.g. HRESULT
+        -2147221021). Distinct from LiveDocumentNotOpenError: that means "Word is
+        up but doesn't have this file"; this means "Word/COM is not usable at
+        all". Callers that hold a file_path can safely fall back to reading the
+        disk copy when they see THIS error, without masking genuine post-read
+        request errors (page-out-of-range etc., which are ToolError).
+        """
+
+        pass
+
     from adeu.diff import trim_common_context
     from adeu.markup import _find_match_in_text
     from adeu.mcp_components.tools.live_word_ops import (
@@ -281,7 +294,7 @@ if sys.platform == "win32":
         try:
             app = win32com.client.GetActiveObject("Word.Application")
         except Exception as e:  # Catch pywintypes.com_error
-            raise RuntimeError(f"Could not connect to active Word document. {e}") from e
+            raise LiveWordUnavailableError(f"Could not connect to active Word document. {e}") from e
 
         word_doc = _get_word_doc(app, file_path)
         xml_str = word_doc.WordOpenXML
@@ -464,7 +477,7 @@ if sys.platform == "win32":
         try:
             app = win32com.client.GetActiveObject("Word.Application")
         except Exception as e:
-            raise RuntimeError(f"Could not connect to active Word document. {e}") from e
+            raise LiveWordUnavailableError(f"Could not connect to active Word document. {e}") from e
 
         doc = _get_word_doc(app, file_path)
 
@@ -1129,6 +1142,10 @@ if sys.platform == "win32":
             if stats.get("skipped_details"):
                 res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
             return res
+        except LiveWordUnavailableError:
+            # Let the dispatcher decide whether to fall back to disk (it will,
+            # when a file_path is present). Do not wrap as ToolError.
+            raise
         except Exception as e:
             raise ToolError(str(e)) from e
 

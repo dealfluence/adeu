@@ -568,6 +568,7 @@ PROCESS_BATCH_OPERATIONS_DESC = (
 
 if sys.platform == "win32":
     from adeu.mcp_components.tools.live_word import (
+        LiveWordUnavailableError,
         is_document_open_in_word,
         open_word_document_impl,
         process_active_word_batch,
@@ -657,18 +658,41 @@ if sys.platform == "win32":
             # or leaks a COM connection error to the model.
             if is_document_open_in_word(file_path):
                 await ctx.debug("Document is open in live Word; reading from the canvas.")
-                res = await read_active_word_document(
-                    ctx,
-                    clean_view,
-                    file_path,
-                    mode=mode,
-                    page=page,
-                    outline_max_level=outline_max_level,
-                    outline_verbose=outline_verbose,
-                    search_query=search_query,
-                    search_regex=search_regex,
-                    search_case_sensitive=search_case_sensitive,
-                )
+                try:
+                    res = await read_active_word_document(
+                        ctx,
+                        clean_view,
+                        file_path,
+                        mode=mode,
+                        page=page,
+                        outline_max_level=outline_max_level,
+                        outline_verbose=outline_verbose,
+                        search_query=search_query,
+                        search_regex=search_regex,
+                        search_case_sensitive=search_case_sensitive,
+                    )
+                except LiveWordUnavailableError:
+                    # The probe reported the file open, but Word/COM turned out to
+                    # be unusable (dead or zombie instance). Since we hold an
+                    # explicit file_path, the disk copy is authoritative — fall
+                    # back to it silently rather than surfacing -2147221021 to the
+                    # model. Scoped to THIS error so genuine post-read failures
+                    # (page out of range, etc. — raised as ToolError) still
+                    # propagate. Only reachable when a file_path exists; the
+                    # active-document mode above has no disk fallback by design.
+                    await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk read.")
+                    res = await _read_docx_disk(
+                        file_path,
+                        ctx,
+                        clean_view,
+                        mode,
+                        page,
+                        outline_max_level=outline_max_level,
+                        outline_verbose=outline_verbose,
+                        search_query=search_query,
+                        search_regex=search_regex,
+                        search_case_sensitive=search_case_sensitive,
+                    )
             else:
                 res = await _read_docx_disk(
                     file_path,
@@ -741,10 +765,23 @@ if sys.platform == "win32":
             res = await process_active_word_batch(ctx, changes, author_name, None)
         elif is_document_open_in_word(original_docx_path):
             # The file is open in Word: apply edits to the live canvas so the
-            # agent's changes land where the user is looking. (Probe does no
-            # extraction and returns False when Word isn't running.)
+            # agent's changes land where the user is looking. If the probe matched
+            # but COM is actually unusable, fall back to editing the disk copy
+            # (which the explicit path makes authoritative) instead of erroring.
             await ctx.debug("Document is open in live Word; editing the canvas.")
-            res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
+            try:
+                res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
+            except LiveWordUnavailableError:
+                await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk edit.")
+                res = await _process_document_batch_disk(
+                    original_docx_path,
+                    author_name,
+                    ctx,
+                    changes,
+                    output_path,
+                    dry_run=False,
+                    rejected_notes=rejected_notes,
+                )
         else:
             # Not open in Word (or Word not running): the file on disk is
             # authoritative — edit it directly. This is also the headless path.
@@ -859,6 +896,10 @@ if sys.platform == "win32":
             return add_timing_if_debug(start_time, res)
 
 else:
+    from adeu.models import DocumentChange
+
+    class LiveWordUnavailableError(Exception):
+        pass
 
     @tool(
         description=READ_DOCX_COMMON_DESC + READ_DOCX_TAIL,
