@@ -14,6 +14,23 @@ import {
 
 export const finalizeDocumentDescription: INodeProperties[] = [
   {
+    displayName: "Reasoning",
+    name: "reasoning",
+    type: "string",
+    default: "",
+    typeOptions: {
+      rows: 2,
+    },
+    description:
+      "Why the document is being finalized now — e.g. what state it's in and why it's ready for distribution. State your reasoning BEFORE choosing the sanitize mode and options. This field is captured for auditability and is NOT forwarded into the finalize engine; its only purpose is to make the AI reason first. Safe to leave empty in deterministic (non-AI) pipelines.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["finalizeDocument"],
+      },
+    },
+  },
+  {
     displayName: "Input Binary Property",
     name: "binaryPropertyName",
     type: "string",
@@ -165,6 +182,8 @@ export async function executeFinalizeDocument(
   const protectionMode: "read_only" | null =
     protectionParam === "read_only" ? "read_only" : null;
 
+  const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
+
   const documentSource = this.getNodeParameter(
     "documentSource",
     itemIndex,
@@ -224,6 +243,7 @@ export async function executeFinalizeDocument(
         fileName: outName,
         sanitizeMode,
         report: reportText,
+        ...(reasoning !== "" ? { reasoning } : {}),
       },
       binary: {
         ...incomingBinary,

@@ -311,6 +311,11 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 
 ### Apply Edits
 
+**Reasoning** (fill this FIRST):
+```
+={{ $fromAI('Reasoning', `State your reasoning for this batch of edits BEFORE you produce the Changes_JSON array: briefly explain what you intend to change and why (e.g. which clauses, which counterparty positions you are countering, which playbook rule applies). Always write this field first — reasoning through the change before emitting the JSON produces more accurate, better-anchored edits. This text is captured for audit only and does not alter engine behavior. One to three sentences is enough.`, 'string', '') }}
+```
+
 **Source Node Name** (when `Document Source` is `From Another Node`):
 ```
 ={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label in the canvas exactly. If your system prompt specifies which node holds the document, always use that name.`, 'string', 'Read Binary File') }}
@@ -363,6 +368,11 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 ---
 
 ### Finalize Document
+
+**Reasoning** (fill this FIRST):
+```
+={{ $fromAI('Reasoning', `State your reasoning for finalizing the document now BEFORE choosing the sanitize mode and options: what state the document is in, why it is ready for distribution, and who it is going to (signer, counterparty, internal). Always write this field first. This text is captured for audit only and does not alter engine behavior. One to three sentences is enough.`, 'string', '') }}
+```
 
 **Source Node Name** (when `Document Source` is `From Another Node`):
 ```

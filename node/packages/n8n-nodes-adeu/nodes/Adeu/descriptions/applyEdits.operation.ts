@@ -22,6 +22,23 @@ import {
 
 export const applyEditsDescription: INodeProperties[] = [
   {
+    displayName: "Reasoning",
+    name: "reasoning",
+    type: "string",
+    default: "",
+    typeOptions: {
+      rows: 2,
+    },
+    description:
+      "Why these edits are being made. State your reasoning BEFORE the changes — what you intend to change and why — then produce the Changes (JSON) array. This field is captured for auditability and is NOT forwarded into the redline engine; its only purpose is to make the AI reason first, which improves edit quality. Safe to leave empty in deterministic (non-AI) pipelines.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
+      },
+    },
+  },
+  {
     displayName: "Input Binary Property",
     name: "binaryPropertyName",
     type: "string",
@@ -194,6 +211,7 @@ export async function executeApplyEdits(
     itemIndex,
   ) as boolean;
   const dryRun = this.getNodeParameter("dryRun", itemIndex, false) as boolean;
+  const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
 
   // Resolve the changes array
   let changes: unknown;
@@ -271,6 +289,7 @@ export async function executeApplyEdits(
           author,
           dryRun: true,
           stats,
+          ...(reasoning !== "" ? { reasoning } : {}),
         },
         binary: incomingBinary,
         pairedItem: { item: itemIndex },
@@ -325,6 +344,7 @@ export async function executeApplyEdits(
         author,
         dryRun: false,
         stats,
+        ...(reasoning !== "" ? { reasoning } : {}),
         ...(markdown !== undefined ? { markdown } : {}),
         ...(redlinedBinaryId !== undefined ? { redlinedBinaryId } : {}),
       },

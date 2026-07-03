@@ -281,7 +281,7 @@ describe("Test Adeu n8n Node", () => {
       ).mockResolvedValue(goldenBuffer);
       (
         mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string) => {
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
         if (paramName === "resource") return "document";
         if (paramName === "operation") return "applyEdits";
         if (paramName === "binaryPropertyName") return "data";
@@ -289,8 +289,43 @@ describe("Test Adeu n8n Node", () => {
         if (paramName === "author") return "n8n AI";
         if (paramName === "editsSource") return "fromInputJson";
         if (paramName === "editsJsonPath") return "changes";
-        return undefined;
+        return fallback;
       });
+    });
+
+    it("should echo reasoning into the output JSON when supplied", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "applyEdits";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "author") return "n8n AI";
+        if (paramName === "editsSource") return "fromInputJson";
+        if (paramName === "editsJsonPath") return "changes";
+        if (paramName === "reasoning")
+          return "Standardizing governing law per playbook.";
+        return fallback;
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty(
+        "reasoning",
+        "Standardizing governing law per playbook.",
+      );
+    });
+
+    it("should omit reasoning from output JSON when left empty", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      // The block's default getNodeParameter mock returns undefined for
+      // "reasoning"; the operation coerces that to "" via its fallback and
+      // omits the key.
+      expect(item.json).not.toHaveProperty("reasoning");
     });
 
     it("should successfully apply edits and output binary data", async () => {

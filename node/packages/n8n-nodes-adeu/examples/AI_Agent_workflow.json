@@ -168,6 +168,7 @@
     {
       "parameters": {
         "operation": "applyEdits",
+        "reasoning": "={{ $fromAI('Reasoning', `State your reasoning for this batch of edits BEFORE producing Changes_JSON: briefly explain what you intend to change and why (which clauses, which counterparty positions you are countering, which playbook rule applies). Always fill this field first — reasoning through the change before emitting the JSON produces more accurate, better-anchored edits. Captured for audit only; does not alter engine behavior. One to three sentences.`, 'string', '') }}",
         "documentSource": "fromNode",
         "sourceNodeName": "={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary. For this workflow, always pass 'Read Binary File' on the first edit. Case-sensitive, must match the node label exactly.`, 'string', 'Read Binary File') }}",
         "sourceBinaryId": "={{ $fromAI('Source_Binary_Id', `Optional string. If you are doing consecutive edits on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}",
