@@ -6,12 +6,12 @@
     "url": "https://github.com/dealfluence/adeu",
     "source": "github"
   },
-  "version": "1.18.1",
+  "version": "1.18.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@adeu/mcp-server",
-      "version": "1.18.1",
+      "version": "1.18.2",
       "transport": {
         "type": "stdio"
       }

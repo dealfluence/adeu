@@ -2085,7 +2085,7 @@ export class RedlineEngine {
       skipped_details: this.skipped_details,
       edits: edits_reports,
       engine: "node",
-      version: "1.10.0",
+      version: "1.18.2",
     };
   }
 
