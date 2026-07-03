@@ -36,6 +36,7 @@ class TestAdeuSanitizeDocxStandard(ToolsIntegrationTests):
         fixture = str(repo_root / "shared" / "fixtures" / "golden.docx")
         assert self._tmp_output is not None
         return {
+            "reasoning": "Sanitizing the golden fixture for the suite.",
             "file_path": fixture,
             "output_path": str(self._tmp_output),
             "accept_all": True,
@@ -48,6 +49,7 @@ class TestAdeuSanitizeDocxBehavior:
         tool_call = {
             "name": "adeu_sanitize_docx",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "output_path": str(output_path),
                 "accept_all": True,
@@ -69,6 +71,7 @@ class TestAdeuSanitizeDocxBehavior:
         with pytest.raises(ToolException, match="SanitizeError"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(working_docx),
                     "output_path": str(output_path),
                 }
@@ -84,6 +87,7 @@ class TestAdeuSanitizeDocxBehavior:
         tool_call = {
             "name": "adeu_sanitize_docx",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "output_path": str(output_path),
                 "keep_markup": True,

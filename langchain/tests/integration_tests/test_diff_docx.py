@@ -42,6 +42,7 @@ class TestAdeuDiffDocxStandard(ToolsIntegrationTests):
         repo_root = Path(__file__).resolve().parents[3]
         fixture = str(repo_root / "shared" / "fixtures" / "golden.docx")
         return {
+            "reasoning": "Diffing the golden fixture against itself for the suite.",
             "original_path": fixture,
             "modified_path": fixture,
             "compare_clean": True,
@@ -54,6 +55,7 @@ class TestAdeuDiffDocxBehavior:
         tool = AdeuDiffDocx()
         result = tool.invoke(
             {
+                "reasoning": "test",
                 "original_path": str(golden_docx_path),
                 "modified_path": str(working_docx),
             }
@@ -65,6 +67,7 @@ class TestAdeuDiffDocxBehavior:
         tool = AdeuDiffDocx()
         result = tool.invoke(
             {
+                "reasoning": "test",
                 "original_path": str(golden_docx_path),
                 "modified_path": str(golden_docx_path),
             }
@@ -83,6 +86,7 @@ class TestAdeuDiffDocxBehavior:
 
         apply_result = apply_tool.invoke(
             {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "Integration Test",
                 "changes": [
@@ -105,6 +109,7 @@ class TestAdeuDiffDocxBehavior:
         diff_tool = AdeuDiffDocx()
         diff_result = diff_tool.invoke(
             {
+                "reasoning": "test",
                 "original_path": str(golden_docx_path),
                 "modified_path": str(modified),
             }
@@ -124,6 +129,7 @@ class TestAdeuDiffDocxBehavior:
     async def test_ainvoke_matches_invoke(self, working_docx: Path, golden_docx_path: Path) -> None:
         tool = AdeuDiffDocx()
         args = {
+            "reasoning": "test",
             "original_path": str(golden_docx_path),
             "modified_path": str(working_docx),
         }

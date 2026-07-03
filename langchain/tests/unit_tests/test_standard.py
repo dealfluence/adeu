@@ -38,6 +38,7 @@ class TestAdeuReadDocxStandard(ToolsUnitTests):
     def tool_invoke_params_example(self) -> dict[str, Any]:
 
         return {
+            "reasoning": "Reading the document to inspect its contents.",
             "file_path": "/tmp/example.docx",
             "clean_view": False,
             "mode": "full",
@@ -57,6 +58,7 @@ class TestAdeuDiffDocxStandard(ToolsUnitTests):
     @property
     def tool_invoke_params_example(self) -> dict[str, Any]:
         return {
+            "reasoning": "Comparing the two document versions.",
             "original_path": "/tmp/original.docx",
             "modified_path": "/tmp/modified.docx",
             "compare_clean": True,
@@ -76,6 +78,7 @@ class TestAdeuAcceptAllChangesStandard(ToolsUnitTests):
     def tool_invoke_params_example(self) -> dict[str, Any]:
 
         return {
+            "reasoning": "Finalizing the document by accepting all changes.",
             "file_path": "/tmp/draft.docx",
             "output_path": "/tmp/draft_clean.docx",
         }
@@ -94,6 +97,7 @@ class TestAdeuSanitizeDocxStandard(ToolsUnitTests):
     def tool_invoke_params_example(self) -> dict[str, Any]:
 
         return {
+            "reasoning": "Stripping metadata before external distribution.",
             "file_path": "/tmp/draft.docx",
             "output_path": "/tmp/draft_sanitized.docx",
         }
@@ -112,6 +116,7 @@ class TestAdeuApplyChangesStandard(ToolsUnitTests):
     def tool_invoke_params_example(self) -> dict[str, Any]:
 
         return {
+            "reasoning": "Applying tracked-change edits to align terminology.",
             "file_path": "/tmp/draft.docx",
             "author_name": "AI Reviewer",
             "changes": [

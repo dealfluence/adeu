@@ -46,6 +46,9 @@ class AdeuApplyChangesInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reasoning: str = Field(
+        description="Why am I applying these changes to the document? State this reason before any other parameter.",
+    )
     file_path: str = Field(
         description="Absolute path to the source .docx file to edit.",
     )
@@ -154,6 +157,7 @@ class AdeuApplyChanges(BaseTool):
     @wrap_tool_errors
     def _run(
         self,
+        reasoning: str,
         file_path: str,
         author_name: str,
         changes: list[dict[str, Any]],
@@ -230,13 +234,14 @@ class AdeuApplyChanges(BaseTool):
 
     async def _arun(
         self,
+        reasoning: str,
         file_path: str,
         author_name: str,
         changes: list[dict[str, Any]],
         output_path: str | None = None,
         dry_run: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(self._run, file_path, author_name, changes, output_path, dry_run)
+        return await asyncio.to_thread(self._run, reasoning, file_path, author_name, changes, output_path, dry_run)
 
 
 def _resolve_output_path(source: Path, requested: str | None) -> Path:

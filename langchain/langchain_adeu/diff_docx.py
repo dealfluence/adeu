@@ -34,6 +34,9 @@ class AdeuDiffDocxInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reasoning: str = Field(
+        description="Why am I comparing these two documents? State this reason before any other parameter.",
+    )
     original_path: str = Field(
         description=("Absolute path to the baseline .docx file (the 'before' document)."),
     )
@@ -82,6 +85,7 @@ class AdeuDiffDocx(BaseTool):
     @wrap_tool_errors
     def _run(
         self,
+        reasoning: str,
         original_path: str,
         modified_path: str,
         compare_clean: bool = True,
@@ -104,12 +108,14 @@ class AdeuDiffDocx(BaseTool):
 
     async def _arun(
         self,
+        reasoning: str,
         original_path: str,
         modified_path: str,
         compare_clean: bool = True,
     ) -> str:
         return await asyncio.to_thread(
             self._run,
+            reasoning,
             original_path,
             modified_path,
             compare_clean,

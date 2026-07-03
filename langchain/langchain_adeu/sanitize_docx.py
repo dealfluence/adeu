@@ -38,6 +38,9 @@ class AdeuSanitizeDocxInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reasoning: str = Field(
+        description="Why am I sanitizing this document? State this reason before any other parameter.",
+    )
     file_path: str = Field(
         description="Absolute path to the .docx file to sanitize.",
     )
@@ -120,6 +123,7 @@ class AdeuSanitizeDocx(BaseTool):
     @wrap_tool_errors
     def _run(
         self,
+        reasoning: str,
         file_path: str,
         output_path: str | None = None,
         keep_markup: bool = False,
@@ -156,6 +160,7 @@ class AdeuSanitizeDocx(BaseTool):
 
     async def _arun(
         self,
+        reasoning: str,
         file_path: str,
         output_path: str | None = None,
         keep_markup: bool = False,
@@ -165,6 +170,7 @@ class AdeuSanitizeDocx(BaseTool):
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
             self._run,
+            reasoning,
             file_path,
             output_path,
             keep_markup,

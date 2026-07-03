@@ -54,6 +54,7 @@ class TestAdeuAcceptAllChangesStandard(ToolsIntegrationTests):
             "Output path tmp dir not initialized — _setup_tmp_output fixture did not run."
         )
         return {
+            "reasoning": "Accepting all changes in the golden fixture.",
             "file_path": fixture,
             "output_path": str(self._tmp_output),
         }
@@ -63,7 +64,7 @@ class TestAdeuAcceptAllChangesBehavior:
     def test_default_output_path(self, working_docx: Path) -> None:
         # Default output_path is `<stem>_clean.docx` in the same directory.
         tool = AdeuAcceptAllChanges()
-        result = tool.invoke({"file_path": str(working_docx)})
+        result = tool.invoke({"reasoning": "test", "file_path": str(working_docx)})
         expected = working_docx.with_name(f"{working_docx.stem}_clean.docx")
         assert expected.exists(), f"Expected default output at {expected}, but it was not created."
         assert str(expected) in result
@@ -73,6 +74,7 @@ class TestAdeuAcceptAllChangesBehavior:
         tool_call = {
             "name": "adeu_accept_all_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "output_path": str(output_path),
             },
@@ -89,7 +91,13 @@ class TestAdeuAcceptAllChangesBehavior:
         # "produce a clean copy", not "modify in place".
         original_bytes = working_docx.read_bytes()
         tool = AdeuAcceptAllChanges()
-        tool.invoke({"file_path": str(working_docx), "output_path": str(output_path)})
+        tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "output_path": str(output_path),
+            }
+        )
         assert working_docx.read_bytes() == original_bytes, (
             "Source file was modified by accept_all_changes — should be read-only."
         )
@@ -98,10 +106,16 @@ class TestAdeuAcceptAllChangesBehavior:
         # The whole point of accept_all_changes: the output should have
         # no remaining CriticMarkup when read in raw mode.
         accept_tool = AdeuAcceptAllChanges()
-        accept_tool.invoke({"file_path": str(working_docx), "output_path": str(output_path)})
+        accept_tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "output_path": str(output_path),
+            }
+        )
 
         read_tool = AdeuReadDocx()
-        raw_after = read_tool.invoke({"file_path": str(output_path), "clean_view": False})
+        raw_after = read_tool.invoke({"reasoning": "test", "file_path": str(output_path), "clean_view": False})
 
         # No insertion/deletion markup should remain. Comments may or may
         # not survive depending on the engine's final-pass logic, so we
@@ -114,6 +128,12 @@ class TestAdeuAcceptAllChangesBehavior:
     @pytest.mark.asyncio
     async def test_ainvoke_writes_file(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuAcceptAllChanges()
-        result = await tool.ainvoke({"file_path": str(working_docx), "output_path": str(output_path)})
+        result = await tool.ainvoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "output_path": str(output_path),
+            }
+        )
         assert output_path.exists()
         assert str(output_path) in result

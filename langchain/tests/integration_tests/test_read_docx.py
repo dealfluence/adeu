@@ -48,6 +48,7 @@ class TestAdeuReadDocxStandard(ToolsIntegrationTests):
 
         repo_root = Path(__file__).resolve().parents[3]
         return {
+            "reasoning": "Reading the golden fixture for the integration suite.",
             "file_path": str(repo_root / "shared" / "fixtures" / "golden.docx"),
             "clean_view": False,
             "mode": "full",
@@ -63,7 +64,7 @@ class TestAdeuReadDocxBehavior:
         # content blocks. This is the same bug we caught manually in
         # Step 2 — having a test guarantees it can't regress.
         tool = AdeuReadDocx()
-        result = tool.invoke({"file_path": str(golden_docx_path)})
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path)})
         assert isinstance(result, str)
         assert "TextContent(" not in result, (
             "Output contains FastMCP block repr — content extraction regressed. Expected plain Markdown string."
@@ -76,7 +77,7 @@ class TestAdeuReadDocxBehavior:
         tool = AdeuReadDocx()
         tool_call = {
             "name": "adeu_read_docx",
-            "args": {"file_path": str(golden_docx_path)},
+            "args": {"reasoning": "test", "file_path": str(golden_docx_path)},
             "id": "test-call-1",
             "type": "tool_call",
         }
@@ -88,7 +89,13 @@ class TestAdeuReadDocxBehavior:
         # clean_view=True simulates "Accept All Changes". The output
         # should not contain CriticMarkup tokens.
         tool = AdeuReadDocx()
-        clean = tool.invoke({"file_path": str(golden_docx_path), "clean_view": True})
+        clean = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "clean_view": True,
+            }
+        )
         # Strip the file-path prefix line which doesn't count as content.
         body = clean.split("\n\n", 1)[1] if "\n\n" in clean else clean
         for token in ("{++", "++}", "{--", "--}", "{>>", "<<}"):
@@ -100,7 +107,13 @@ class TestAdeuReadDocxBehavior:
     def test_raw_view_includes_critic_markup_when_present(self, golden_docx_path: Path) -> None:
 
         tool = AdeuReadDocx()
-        raw = tool.invoke({"file_path": str(golden_docx_path), "clean_view": False})
+        raw = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "clean_view": False,
+            }
+        )
 
         has_any_markup = any(token in raw for token in ("{++", "{--", "{==", "{>>"))
         assert has_any_markup, (
@@ -110,7 +123,7 @@ class TestAdeuReadDocxBehavior:
 
     def test_outline_mode_returns_outline_view_banner(self, golden_docx_path: Path) -> None:
         tool = AdeuReadDocx()
-        result = tool.invoke({"file_path": str(golden_docx_path), "mode": "outline"})
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "outline"})
         assert "Outline view" in result, "Expected the outline banner to appear in mode='outline' output."
 
     @pytest.mark.asyncio
@@ -118,6 +131,6 @@ class TestAdeuReadDocxBehavior:
         # The async path must produce the same content as sync (it just
         # offloads to a thread). Drift between the two is a leak risk.
         tool = AdeuReadDocx()
-        sync_result = tool.invoke({"file_path": str(golden_docx_path)})
-        async_result = await tool.ainvoke({"file_path": str(golden_docx_path)})
+        sync_result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path)})
+        async_result = await tool.ainvoke({"reasoning": "test", "file_path": str(golden_docx_path)})
         assert sync_result == async_result

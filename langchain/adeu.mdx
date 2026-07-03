@@ -11,16 +11,16 @@ Adeu acts as a Virtual DOM for Microsoft Word (.docx) documents, translating com
 
 ### Details
 
-| Class | Package | Serializable | JS Support | Downloads | Version |
-| :--- | :--- | :---: | :---: | :---: | :---: |
-| [AdeuToolkit](https://reference.langchain.com/python/langchain-core/tools/base/BaseTool) | [langchain-adeu](https://pypi.org/project/langchain-adeu/) | ❌ | ❌ | ![PyPI - Downloads](https://img.shields.io/pypi/dm/langchain-adeu?style=flat-square&label=%20) | ![PyPI - Version](https://img.shields.io/pypi/v/langchain-adeu?style=flat-square&label=%20) |
+| Class                                                                                    | Package                                                    | Serializable | JS Support |                                           Downloads                                            |                                           Version                                           |
+| :--------------------------------------------------------------------------------------- | :--------------------------------------------------------- | :----------: | :--------: | :--------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------: |
+| [AdeuToolkit](https://reference.langchain.com/python/langchain-core/tools/base/BaseTool) | [langchain-adeu](https://pypi.org/project/langchain-adeu/) |      ❌      |     ❌     | ![PyPI - Downloads](https://img.shields.io/pypi/dm/langchain-adeu?style=flat-square&label=%20) | ![PyPI - Version](https://img.shields.io/pypi/v/langchain-adeu?style=flat-square&label=%20) |
 
 ### Features
 
-* **Lossless Translation**: Converts `.docx` documents into clean Markdown on read, and back into native OpenXML on write.
-* **Granular Redlining**: Commits edits as standard tracked changes and comment bubbles using native Microsoft Word nodes (`w:ins`/`w:del`).
-* **Metadata Sanitization**: Strips dangerous hidden tracking fields, rsids, DMS metadata, and template paths before distributing documents.
-* **Fuzzy Anchor Protection**: Automatically protects document boundaries by catching and rejecting ambiguous search-and-replace matches.
+- **Lossless Translation**: Converts `.docx` documents into clean Markdown on read, and back into native OpenXML on write.
+- **Granular Redlining**: Commits edits as standard tracked changes and comment bubbles using native Microsoft Word nodes (`w:ins`/`w:del`).
+- **Metadata Sanitization**: Strips dangerous hidden tracking fields, rsids, DMS metadata, and template paths before distributing documents.
+- **Fuzzy Anchor Protection**: Automatically protects document boundaries by catching and rejecting ambiguous search-and-replace matches.
 
 ---
 
@@ -33,12 +33,8 @@ To use the Adeu LangChain tools, you will need to install the `langchain-adeu` i
 The Adeu integration package resides in `langchain-adeu`:
 
 <CodeGroup>
-    ```python pip
-    pip install -U langchain-adeu
-    ```
-    ```python uv
-    uv add langchain-adeu
-    ```
+  ```python pip pip install -U langchain-adeu ``` ```python uv uv add
+  langchain-adeu ```
 </CodeGroup>
 
 ---
@@ -67,6 +63,7 @@ read_tool = [t for t in tools if t.name == "adeu_read_docx"][0]
 
 # Read document body with active tracked changes visible
 markdown_content = read_tool.invoke({
+    "reasoning": "Reading the agreement body with tracked changes visible.",
     "file_path": "path/to/agreement.docx",
     "clean_view": False,
     "mode": "full",
@@ -83,6 +80,7 @@ apply_tool = [t for t in tools if t.name == "adeu_apply_changes"][0]
 
 model_generated_tool_call = {
     "args": {
+        "reasoning": "Standardizing the governing-law jurisdiction to Delaware.",
         "file_path": "path/to/agreement.docx",
         "author_name": "Legal Agent",
         "changes": [

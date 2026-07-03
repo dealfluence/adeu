@@ -30,12 +30,12 @@ class TestAdeuAcceptAllChangesSchema:
     def test_args_schema_required_fields(self) -> None:
         # Only file_path is required; output_path has a default of None.
         schema = AdeuAcceptAllChangesInput.model_json_schema()
-        assert schema["required"] == ["file_path"]
+        assert schema["required"] == ["reasoning", "file_path"]
 
     def test_args_schema_rejects_extra_fields(self) -> None:
 
         with pytest.raises(ValueError):
-            AdeuAcceptAllChangesInput.model_validate({"file_path": "/a.docx", "policy": "auto"})
+            AdeuAcceptAllChangesInput.model_validate({"reasoning": "test", "file_path": "/a.docx", "policy": "auto"})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         tool = AdeuAcceptAllChanges()
@@ -46,14 +46,14 @@ class TestAdeuAcceptAllChangesValidation:
     def test_rejects_nonexistent_input(self) -> None:
         tool = AdeuAcceptAllChanges()
         with pytest.raises(ToolException, match="does not exist"):
-            tool.invoke({"file_path": "/nonexistent/file.docx"})
+            tool.invoke({"reasoning": "test", "file_path": "/nonexistent/file.docx"})
 
     def test_rejects_non_docx_input(self, tmp_path: Path) -> None:
         bad = tmp_path / "doc.txt"
         bad.write_text("nope")
         tool = AdeuAcceptAllChanges()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"file_path": str(bad)})
+            tool.invoke({"reasoning": "test", "file_path": str(bad)})
 
     def test_rejects_overwrite_of_input(self, tmp_path: Path) -> None:
         # Same physical path for input and output is rejected even if the
@@ -63,7 +63,7 @@ class TestAdeuAcceptAllChangesValidation:
         src.write_bytes(b"PK")
         tool = AdeuAcceptAllChanges()
         with pytest.raises(ToolException, match="must differ from input path"):
-            tool.invoke({"file_path": str(src), "output_path": str(src)})
+            tool.invoke({"reasoning": "test", "file_path": str(src), "output_path": str(src)})
 
     def test_rejects_non_docx_output_path(self, tmp_path: Path) -> None:
         src = tmp_path / "doc.docx"
@@ -71,7 +71,7 @@ class TestAdeuAcceptAllChangesValidation:
         target = tmp_path / "out.txt"
         tool = AdeuAcceptAllChanges()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"file_path": str(src), "output_path": str(target)})
+            tool.invoke({"reasoning": "test", "file_path": str(src), "output_path": str(target)})
 
     def test_resolves_relative_input_path(self, tmp_path: Path, monkeypatch) -> None:
         # validate_docx_path expands and resolves, so a relative path
@@ -85,7 +85,7 @@ class TestAdeuAcceptAllChangesValidation:
         # but we expect it to fail INSIDE the engine, not at the path
         # validator. Use the wrap to assert that.
         with pytest.raises(ToolException) as excinfo:
-            tool.invoke({"file_path": "doc.docx"})
+            tool.invoke({"reasoning": "test", "file_path": "doc.docx"})
         # Failure should NOT be about path resolution.
         assert "does not exist" not in str(excinfo.value)
         assert "must be a .docx file" not in str(excinfo.value)

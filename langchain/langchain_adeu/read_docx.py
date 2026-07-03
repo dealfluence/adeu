@@ -35,6 +35,9 @@ class AdeuReadDocxInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reasoning: str = Field(
+        description="Why do I need to read this docx document? State this reason before any other parameter.",
+    )
     file_path: str = Field(
         description=(
             "Absolute filesystem path to the .docx file to read. "
@@ -141,6 +144,7 @@ class AdeuReadDocx(BaseTool):
     @wrap_tool_errors
     def _run(
         self,
+        reasoning: str,
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
@@ -199,6 +203,7 @@ class AdeuReadDocx(BaseTool):
 
     async def _arun(
         self,
+        reasoning: str,
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
@@ -212,6 +217,7 @@ class AdeuReadDocx(BaseTool):
 
         return await asyncio.to_thread(
             self._run,
+            reasoning,
             file_path,
             clean_view,
             mode,

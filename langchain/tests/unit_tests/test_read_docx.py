@@ -37,12 +37,12 @@ class TestAdeuReadDocxSchema:
     def test_args_schema_required_fields(self) -> None:
         # file_path is the only required field; the rest have defaults.
         schema = AdeuReadDocxInput.model_json_schema()
-        assert schema["required"] == ["file_path"]
+        assert schema["required"] == ["reasoning", "file_path"]
 
     def test_args_schema_rejects_extra_fields(self) -> None:
 
         with pytest.raises(ValueError):
-            AdeuReadDocxInput.model_validate({"file_path": "/tmp/x.docx", "bogus_param": True})
+            AdeuReadDocxInput.model_validate({"reasoning": "test", "file_path": "/tmp/x.docx", "bogus_param": True})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         # If this assertion breaks, our _run signature also needs to change
@@ -56,34 +56,52 @@ class TestAdeuReadDocxValidation:
     def test_rejects_nonexistent_file(self) -> None:
         tool = AdeuReadDocx()
         with pytest.raises(ToolException, match="does not exist"):
-            tool.invoke({"file_path": "/nonexistent/path/file.docx"})
+            tool.invoke({"reasoning": "test", "file_path": "/nonexistent/path/file.docx"})
 
     def test_rejects_non_docx_file(self, tmp_path: Path) -> None:
         bad = tmp_path / "doc.txt"
         bad.write_text("not a docx")
         tool = AdeuReadDocx()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"file_path": str(bad)})
+            tool.invoke({"reasoning": "test", "file_path": str(bad)})
 
     def test_rejects_empty_file_path(self) -> None:
         tool = AdeuReadDocx()
         with pytest.raises(ToolException, match="cannot be empty"):
-            tool.invoke({"file_path": ""})
+            tool.invoke({"reasoning": "test", "file_path": ""})
 
     def test_page_must_be_positive(self) -> None:
         # ge=1 on the field schema; Pydantic raises ValidationError on invoke.
         tool = AdeuReadDocx()
         with pytest.raises(ValidationError):
-            tool.invoke({"file_path": "/tmp/x.docx", "page": 0})
+            tool.invoke({"reasoning": "test", "file_path": "/tmp/x.docx", "page": 0})
 
     def test_outline_max_level_bounds(self) -> None:
         tool = AdeuReadDocx()
         with pytest.raises(ValidationError):
-            tool.invoke({"file_path": "/tmp/x.docx", "outline_max_level": 0})
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": "/tmp/x.docx",
+                    "outline_max_level": 0,
+                }
+            )
         with pytest.raises(ValidationError):
-            tool.invoke({"file_path": "/tmp/x.docx", "outline_max_level": 7})
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": "/tmp/x.docx",
+                    "outline_max_level": 7,
+                }
+            )
 
     def test_mode_must_be_valid_literal(self) -> None:
         tool = AdeuReadDocx()
         with pytest.raises(ValidationError):
-            tool.invoke({"file_path": "/tmp/x.docx", "mode": "unsupported_mode"})
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": "/tmp/x.docx",
+                    "mode": "unsupported_mode",
+                }
+            )

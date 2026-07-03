@@ -59,12 +59,13 @@ class TestAdeuApplyChangesSchema:
         # has a default of None.
         schema = AdeuApplyChangesInput.model_json_schema()
         required = set(schema["required"])
-        assert required == {"file_path", "author_name", "changes"}
+        assert required == {"reasoning", "file_path", "author_name", "changes"}
 
     def test_args_schema_rejects_extra_fields(self) -> None:
         with pytest.raises(ValueError):
             AdeuApplyChangesInput.model_validate(
                 {
+                    "reasoning": "test",
                     "file_path": "/a.docx",
                     "author_name": "AI",
                     "changes": [],
@@ -92,6 +93,7 @@ class TestAdeuApplyChangesSchema:
         with pytest.raises(ValueError):
             AdeuApplyChangesInput.model_validate(
                 {
+                    "reasoning": "test",
                     "file_path": "/a.docx",
                     "author_name": "AI",
                     "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
@@ -106,6 +108,7 @@ class TestAdeuApplyChangesValidation:
         with pytest.raises(ToolException, match="does not exist"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": "/nonexistent/file.docx",
                     "author_name": "AI",
                     "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
@@ -119,6 +122,7 @@ class TestAdeuApplyChangesValidation:
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(bad),
                     "author_name": "AI",
                     "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
@@ -132,6 +136,7 @@ class TestAdeuApplyChangesValidation:
         with pytest.raises(ToolException, match="author_name cannot be empty"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(src),
                     "author_name": "   ",
                     "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
@@ -145,6 +150,7 @@ class TestAdeuApplyChangesValidation:
         with pytest.raises(ToolException, match="changes list cannot be empty"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(src),
                     "author_name": "AI",
                     "changes": [],
@@ -160,6 +166,7 @@ class TestAdeuApplyChangesValidation:
         with pytest.raises(ToolException, match="must differ from input path"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(src),
                     "author_name": "AI",
                     "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
@@ -179,6 +186,7 @@ class TestAdeuApplyChangesValidation:
         tool_call = {
             "name": "adeu_apply_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(src),
                 "author_name": "AI",
                 "changes": [{"type": "this_is_not_a_real_type", "garbage": "ignored"}],

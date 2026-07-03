@@ -39,6 +39,7 @@ class TestAdeuApplyChangesStandard(ToolsIntegrationTests):
         fixture = str(repo_root / "shared" / "fixtures" / "golden.docx")
         assert self._tmp_output is not None
         return {
+            "reasoning": "Applying an integration-test edit to the golden fixture.",
             "file_path": fixture,
             "author_name": "Integration Test",
             "changes": [
@@ -61,6 +62,7 @@ class TestAdeuApplyChangesBehavior:
         tool_call = {
             "name": "adeu_apply_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -94,6 +96,7 @@ class TestAdeuApplyChangesBehavior:
         apply_tool = AdeuApplyChanges()
         apply_msg_content = apply_tool.invoke(
             {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -114,7 +117,7 @@ class TestAdeuApplyChangesBehavior:
         )
 
         read_tool = AdeuReadDocx()
-        raw = read_tool.invoke({"file_path": str(output_path), "clean_view": False})
+        raw = read_tool.invoke({"reasoning": "test", "file_path": str(output_path), "clean_view": False})
         assert _REPLACEMENT in raw, f"New text {_REPLACEMENT!r} not found in read-back of edited file."
 
     def test_input_file_is_not_modified(self, working_docx: Path, output_path: Path) -> None:
@@ -122,6 +125,7 @@ class TestAdeuApplyChangesBehavior:
         tool = AdeuApplyChanges()
         tool.invoke(
             {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -141,6 +145,7 @@ class TestAdeuApplyChangesBehavior:
         tool_call = {
             "name": "adeu_apply_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -167,6 +172,7 @@ class TestAdeuApplyChangesBehavior:
         tool_call = {
             "name": "adeu_apply_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [{"type": "invalid_change_type_xyz"}],
@@ -186,6 +192,7 @@ class TestAdeuApplyChangesBehavior:
         tool = AdeuApplyChanges()
         result = await tool.ainvoke(
             {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -208,6 +215,7 @@ class TestAdeuApplyChangesBehavior:
         tool_call = {
             "name": "adeu_apply_changes",
             "args": {
+                "reasoning": "test",
                 "file_path": str(working_docx),
                 "author_name": "AI Reviewer",
                 "changes": [
@@ -272,6 +280,7 @@ class TestAdeuApplyChangesBehavior:
             {
                 "name": "adeu_apply_changes",
                 "args": {
+                    "reasoning": "test",
                     "file_path": str(working_docx),
                     "author_name": "AI Reviewer",
                     "changes": [

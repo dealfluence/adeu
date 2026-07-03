@@ -32,12 +32,17 @@ class TestAdeuDiffDocxSchema:
     def test_args_schema_required_fields(self) -> None:
         # Both paths are required; compare_clean has a default.
         schema = AdeuDiffDocxInput.model_json_schema()
-        assert set(schema["required"]) == {"original_path", "modified_path"}
+        assert set(schema["required"]) == {
+            "reasoning",
+            "original_path",
+            "modified_path",
+        }
 
     def test_args_schema_rejects_extra_fields(self) -> None:
         with pytest.raises(ValueError):
             AdeuDiffDocxInput.model_validate(
                 {
+                    "reasoning": "test",
                     "original_path": "/a.docx",
                     "modified_path": "/b.docx",
                     "language": "en",
@@ -59,6 +64,7 @@ class TestAdeuDiffDocxValidation:
         with pytest.raises(ToolException, match="original document"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "original_path": "/nonexistent/orig.docx",
                     "modified_path": str(mod),
                 }
@@ -71,6 +77,7 @@ class TestAdeuDiffDocxValidation:
         with pytest.raises(ToolException, match="modified document"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "original_path": str(orig),
                     "modified_path": "/nonexistent/mod.docx",
                 }
@@ -83,12 +90,24 @@ class TestAdeuDiffDocxValidation:
         mod.write_bytes(b"PK")
         tool = AdeuDiffDocx()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"original_path": str(orig), "modified_path": str(mod)})
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "original_path": str(orig),
+                    "modified_path": str(mod),
+                }
+            )
 
     def test_identical_paths_short_circuit(self, tmp_path: Path) -> None:
 
         same = tmp_path / "same.docx"
         same.write_bytes(b"PK")
         tool = AdeuDiffDocx()
-        result = tool.invoke({"original_path": str(same), "modified_path": str(same)})
+        result = tool.invoke(
+            {
+                "reasoning": "test",
+                "original_path": str(same),
+                "modified_path": str(same),
+            }
+        )
         assert "No text differences found" in result

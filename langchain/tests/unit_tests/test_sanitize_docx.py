@@ -34,11 +34,11 @@ class TestAdeuSanitizeDocxSchema:
     def test_args_schema_required_fields(self) -> None:
         # Only file_path is required; everything else has a default.
         schema = AdeuSanitizeDocxInput.model_json_schema()
-        assert schema["required"] == ["file_path"]
+        assert schema["required"] == ["reasoning", "file_path"]
 
     def test_args_schema_rejects_extra_fields(self) -> None:
         with pytest.raises(ValueError):
-            AdeuSanitizeDocxInput.model_validate({"file_path": "/a.docx", "preset": "loose"})
+            AdeuSanitizeDocxInput.model_validate({"reasoning": "test", "file_path": "/a.docx", "preset": "loose"})
 
     def test_response_format_is_content_and_artifact(self) -> None:
         tool = AdeuSanitizeDocx()
@@ -49,21 +49,21 @@ class TestAdeuSanitizeDocxValidation:
     def test_rejects_nonexistent_input(self) -> None:
         tool = AdeuSanitizeDocx()
         with pytest.raises(ToolException, match="does not exist"):
-            tool.invoke({"file_path": "/nonexistent/file.docx"})
+            tool.invoke({"reasoning": "test", "file_path": "/nonexistent/file.docx"})
 
     def test_rejects_non_docx_input(self, tmp_path: Path) -> None:
         bad = tmp_path / "doc.txt"
         bad.write_text("nope")
         tool = AdeuSanitizeDocx()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"file_path": str(bad)})
+            tool.invoke({"reasoning": "test", "file_path": str(bad)})
 
     def test_rejects_overwrite_of_input(self, tmp_path: Path) -> None:
         src = tmp_path / "doc.docx"
         src.write_bytes(b"PK")
         tool = AdeuSanitizeDocx()
         with pytest.raises(ToolException, match="must differ from input path"):
-            tool.invoke({"file_path": str(src), "output_path": str(src)})
+            tool.invoke({"reasoning": "test", "file_path": str(src), "output_path": str(src)})
 
     def test_rejects_nonexistent_baseline(self, tmp_path: Path) -> None:
 
@@ -73,6 +73,7 @@ class TestAdeuSanitizeDocxValidation:
         with pytest.raises(ToolException, match="baseline document"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(src),
                     "baseline_path": "/nonexistent/baseline.docx",
                 }
@@ -87,6 +88,7 @@ class TestAdeuSanitizeDocxValidation:
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
             tool.invoke(
                 {
+                    "reasoning": "test",
                     "file_path": str(src),
                     "baseline_path": str(bad_baseline),
                 }
@@ -98,4 +100,10 @@ class TestAdeuSanitizeDocxValidation:
         bad_output = tmp_path / "out.pdf"
         tool = AdeuSanitizeDocx()
         with pytest.raises(ToolException, match=r"must be a \.docx file"):
-            tool.invoke({"file_path": str(src), "output_path": str(bad_output)})
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": str(src),
+                    "output_path": str(bad_output),
+                }
+            )
