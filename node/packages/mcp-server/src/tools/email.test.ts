@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { search_and_fetch_emails, list_available_mailboxes } from "./email.js";
+import {
+  search_and_fetch_emails,
+  list_available_mailboxes,
+  create_email_draft,
+} from "./email.js";
 
 // Mock the Auth module so tests bypass active browser logins
 vi.mock("../desktop-auth.js", () => {
@@ -656,5 +660,38 @@ describe("Mailbox-aware short ID cache", () => {
     ).rejects.toThrowError(
       /re-run search_and_fetch_emails with filters[\s\S]*mailbox_address/,
     );
+  });
+
+  it("re-applies the cached mailbox when replying to a short ID without one", async () => {
+    // Seed a new-format entry directly into the cache file (merge, don't clobber).
+    const cachePath = join(homedir(), ".adeu", "mcp_id_cache.json");
+    mkdirSync(join(homedir(), ".adeu"), { recursive: true });
+    let existing: Record<string, unknown> = {};
+    try {
+      existing = JSON.parse(readFileSync(cachePath, "utf-8"));
+    } catch {
+      /* no cache yet */
+    }
+    existing["msg_rep01"] = {
+      id: "AAMkAD_reply_item_1",
+      mailbox: "sales@ahti.io",
+    };
+    writeFileSync(cachePath, JSON.stringify(existing));
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "draft_1" }),
+    } as Response);
+    global.fetch = fetchMock;
+
+    await create_email_draft({
+      reply_to_email_id: "msg_rep01",
+      body_markdown: "Thanks, will do!",
+    });
+
+    const formData = fetchMock.mock.calls[0][1].body as FormData;
+    expect(formData.get("reply_to_email_id")).toBe("AAMkAD_reply_item_1");
+    expect(formData.get("mailbox_address")).toBe("sales@ahti.io");
   });
 });

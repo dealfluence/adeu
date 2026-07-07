@@ -5,6 +5,7 @@ import json
 import re
 import urllib.error
 from email.message import Message
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from fastmcp.exceptions import ToolError
 from adeu.mcp_components.tools.email import (
     StaleShortIdError,
     _format_backend_error,
+    create_email_draft,
     list_available_mailboxes,
     resolve_email_id,
     search_and_fetch_emails,
@@ -673,3 +675,54 @@ def test_failed_task_error_carries_recovery_hint(mock_sleep, mock_urlopen):
     assert "Validation task failed on the server:" in msg
     assert "re-run search_and_fetch_emails with filters" in msg
     assert "mailbox_address" in msg
+
+
+@patch("urllib.request.urlopen")
+def test_reply_draft_reuses_cached_mailbox(mock_urlopen, tmp_path):
+    """Reply drafts inherit the mailbox the original email's short ID was harvested from."""
+    ctx = AsyncMock()
+
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text(
+        json.dumps({"msg_rep01": {"id": "AAMkAD_reply_item_1", "mailbox": "sales@ahti.io"}}),
+        encoding="utf-8",
+    )
+
+    with patch("adeu.mcp_components.tools.email.CACHE_FILE", cache_file):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"id": "draft_1"}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        asyncio.run(
+            create_email_draft(
+                reasoning="test",
+                ctx=ctx,
+                body_markdown="Thanks, will do!",
+                reply_to_email_id="msg_rep01",
+                api_key="test_api_key",
+            )
+        )
+
+    draft_request = mock_urlopen.call_args_list[-1].args[0]
+    body_bytes = draft_request.data
+    assert b"AAMkAD_reply_item_1" in body_bytes
+    assert b"sales@ahti.io" in body_bytes
+
+
+def test_ui_templates_are_in_sync():
+    """The Node package ships byte-identical copies of the canonical UI templates.
+
+    There is no build step keeping them aligned — sync is manual — so this guard
+    fails loudly when one copy is edited without the other.
+    """
+    python_templates = Path(__file__).resolve().parents[1] / "src" / "adeu" / "templates"
+    node_templates = Path(__file__).resolve().parents[2] / "node" / "packages" / "mcp-server" / "src" / "templates"
+    if not node_templates.exists():
+        pytest.skip("node package not present in this checkout")
+
+    for name in ("email_ui.html", "markdown_ui.html"):
+        assert (python_templates / name).read_bytes() == (node_templates / name).read_bytes(), (
+            f"{name} differs between python/src/adeu/templates and "
+            f"node/packages/mcp-server/src/templates — copy the canonical version over."
+        )
