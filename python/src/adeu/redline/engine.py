@@ -1623,7 +1623,7 @@ class RedlineEngine:
                     # N2 Fix: Safe display text fallback for heuristic failures
                     display_text = edit.target_text or "insertion"
                     if not display_text.strip() and hasattr(edit, "_original_target_text"):
-                        display_text = edit._original_target_text
+                        display_text = edit._original_target_text or "insertion"
 
                     target_snippet = display_text.strip()[:40]
                     if not target_snippet:
@@ -1656,7 +1656,7 @@ class RedlineEngine:
 
                 display_text = edit.target_text or "insertion"
                 if not display_text.strip() and hasattr(edit, "_original_target_text"):
-                    display_text = edit._original_target_text
+                    display_text = edit._original_target_text or "insertion"
                 target_snippet = display_text.strip()[:40]
 
                 msg = f"- Skipped overlapping edit targeting: '{target_snippet}...'"
@@ -1717,7 +1717,7 @@ class RedlineEngine:
 
                 display_text = edit.target_text or "insertion"
                 if not display_text.strip() and hasattr(edit, "_original_target_text"):
-                    display_text = edit._original_target_text
+                    display_text = edit._original_target_text or "insertion"
                 target_snippet = display_text.strip()[:40]
                 if not target_snippet:
                     target_snippet = "insertion"

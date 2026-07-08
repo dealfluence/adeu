@@ -117,6 +117,8 @@ class ModifyText(BaseModel):
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
+    _is_table_edit: bool = PrivateAttr(default=False)
+    _original_target_text: Optional[str] = PrivateAttr(default=None)
 
 
 class AcceptChange(BaseModel):
