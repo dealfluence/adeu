@@ -2141,7 +2141,7 @@ class RedlineEngine:
                             base_offset=actual_start,
                             parent_comment=edit.comment if should_attach_comment else None,
                             is_table=True,
-                            active_mapper=active_mapper
+                            active_mapper=active_mapper,
                         )
                         for se in cell_sub_edits:
                             se._original_target_text = edit.target_text
@@ -2241,7 +2241,7 @@ class RedlineEngine:
                         base_offset=seg_offset,
                         parent_comment=seg_comment,
                         is_table=False,
-                        active_mapper=active_mapper
+                        active_mapper=active_mapper,
                     )
                     if any(se.comment is not None for se in seg_sub_edits):
                         comment_assigned = True
@@ -2326,7 +2326,7 @@ class RedlineEngine:
             base_offset=start_idx,
             parent_comment=edit.comment,
             is_table=False,
-            active_mapper=active_mapper
+            active_mapper=active_mapper,
         )
         for se in sub_edits:
             se._split_group_id = start_idx

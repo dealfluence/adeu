@@ -15,13 +15,9 @@ def test_surgical_interior_word_diff():
     stream.seek(0)
 
     engine = RedlineEngine(stream, author="Test AI")
-    engine.process_batch([
-        ModifyText(
-            type="modify",
-            target_text="The quick brown fox jumped.",
-            new_text="The slow brown fox leapt."
-        )
-    ])
+    engine.process_batch(
+        [ModifyText(type="modify", target_text="The quick brown fox jumped.", new_text="The slow brown fox leapt.")]
+    )
 
     result_text = extract_text_from_stream(engine.save_to_stream(), clean_view=False)
 
