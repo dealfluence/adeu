@@ -1983,7 +1983,15 @@ class RedlineEngine:
             return all_sub_edits
         return all_sub_edits[0]
 
-    def _word_diff_sub_edits(self, target_str: str, new_str: str, base_offset: int, parent_comment: Optional[str] = None, is_table: bool = False, active_mapper = None) -> List[ModifyText]:
+    def _word_diff_sub_edits(
+        self,
+        target_str: str,
+        new_str: str,
+        base_offset: int,
+        parent_comment: Optional[str] = None,
+        is_table: bool = False,
+        active_mapper=None,
+    ) -> List[ModifyText]:
         try:
             raw_sub_edits = generate_edits_from_text(target_str, new_str)
         except Exception as e:
@@ -2021,7 +2029,7 @@ class RedlineEngine:
             should_attach_comment = (parent_comment is not None) and (not comment_assigned)
             if should_attach_comment:
                 comment_assigned = True
-            
+
             sub_edit = ModifyText(
                 type="modify",
                 target_text=raw_edit.target_text,
@@ -2044,9 +2052,9 @@ class RedlineEngine:
                 sub_edit._internal_op = EditOperationType.MODIFICATION
             else:
                 sub_edit._internal_op = "COMMENT_ONLY"
-                
+
             sub_edits.append(sub_edit)
-            
+
         return sub_edits
 
     def _resolve_single_match(self, edit, start_idx, match_len, active_mapper, actual_doc_text, effective_new_text):

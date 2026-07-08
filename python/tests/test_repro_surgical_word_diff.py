@@ -1,8 +1,11 @@
 import io
+
 from docx import Document
-from adeu.redline.engine import RedlineEngine
-from adeu.models import ModifyText
+
 from adeu.ingest import extract_text_from_stream
+from adeu.models import ModifyText
+from adeu.redline.engine import RedlineEngine
+
 
 def test_surgical_interior_word_diff():
     doc = Document()
@@ -10,7 +13,7 @@ def test_surgical_interior_word_diff():
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
-    
+
     engine = RedlineEngine(stream, author="Test AI")
     engine.process_batch([
         ModifyText(
@@ -19,9 +22,9 @@ def test_surgical_interior_word_diff():
             new_text="The slow brown fox leapt."
         )
     ])
-    
+
     result_text = extract_text_from_stream(engine.save_to_stream(), clean_view=False)
-    
+
     # Assertions:
     # 1. "brown fox" should NOT be inside a deletion or insertion tag.
     assert "{--The quick brown fox jumped.--}" not in result_text
