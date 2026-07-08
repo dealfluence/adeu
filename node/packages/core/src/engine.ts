@@ -11,7 +11,7 @@ import {
   ReplyComment,
   DocumentChange,
 } from "./models.js";
-import { trim_common_context } from "./diff.js";
+import { trim_common_context, generate_edits_from_text } from "./diff.js";
 import { findChild, findAllDescendants, serializeXml } from "./docx/dom.js";
 import { split_structural_appendix, paginate } from "./pagination.js";
 import {
@@ -344,6 +344,90 @@ export class RedlineEngine {
       return `Warning: target_text '${target_text}' contains tokenization-splitting punctuation ('_' or '-'). This can trigger mid-word splits in the diff engine. Consider using a longer plain-prose anchor.`;
     }
     return null;
+  }
+
+  private _word_diff_sub_edits(
+    target_str: string,
+    new_str: string,
+    base_offset: number,
+    parent_comment: string | null = null,
+    is_table: boolean = false,
+    active_mapper: any = null,
+  ): any[] {
+    let raw_sub_edits: any[] = [];
+    try {
+      raw_sub_edits = generate_edits_from_text(target_str, new_str);
+      console.log("_word_diff_sub_edits RAW_SUB_EDITS:", JSON.stringify(raw_sub_edits, null, 2));
+    } catch (e) {
+      console.warn("generate_edits_from_text failed, falling back to wholesale edit", e);
+      raw_sub_edits = [];
+    }
+
+    if (!raw_sub_edits || raw_sub_edits.length === 0) {
+      const fallback_edit: any = {
+        type: "modify",
+        target_text: target_str,
+        new_text: new_str,
+        comment: parent_comment,
+      };
+      fallback_edit._resolved_start_idx = base_offset;
+      fallback_edit._match_start_index = base_offset;
+      fallback_edit._active_mapper_ref = active_mapper;
+      if (is_table) {
+        fallback_edit._is_table_edit = true;
+      }
+      if (target_str === new_str) {
+        fallback_edit._internal_op = "COMMENT_ONLY";
+      } else if (!target_str && new_str) {
+        fallback_edit._internal_op = "INSERTION";
+      } else if (target_str && !new_str) {
+        fallback_edit._internal_op = "DELETION";
+      } else if (target_str && new_str) {
+        fallback_edit._internal_op = "MODIFICATION";
+      } else {
+        fallback_edit._internal_op = "COMMENT_ONLY";
+      }
+      return [fallback_edit];
+    }
+
+    const sub_edits: any[] = [];
+    let comment_assigned = false;
+    for (const raw_edit of raw_sub_edits) {
+      const sub_start = base_offset + (raw_edit._match_start_index || 0);
+      const should_attach_comment = (parent_comment !== null) && !comment_assigned;
+      if (should_attach_comment) {
+        comment_assigned = true;
+      }
+
+      const sub_edit: any = {
+        type: "modify",
+        target_text: raw_edit.target_text,
+        new_text: raw_edit.new_text,
+        comment: should_attach_comment ? parent_comment : null,
+      };
+      sub_edit._resolved_start_idx = sub_start;
+      sub_edit._match_start_index = sub_start;
+      sub_edit._active_mapper_ref = active_mapper;
+      if (is_table) {
+        sub_edit._is_table_edit = true;
+      }
+
+      const t_val = raw_edit.target_text;
+      const n_val = raw_edit.new_text;
+      if (!t_val && n_val) {
+        sub_edit._internal_op = "INSERTION";
+      } else if (t_val && !n_val) {
+        sub_edit._internal_op = "DELETION";
+      } else if (t_val && n_val) {
+        sub_edit._internal_op = "MODIFICATION";
+      } else {
+        sub_edit._internal_op = "COMMENT_ONLY";
+      }
+
+      sub_edits.push(sub_edit);
+    }
+
+    return sub_edits;
   }
   /**
    * Best-effort "did you mean" hint for a failed target. The common loop trap
@@ -2268,7 +2352,8 @@ export class RedlineEngine {
 
       let success = false;
       if (edit.type === "modify") {
-        success = this._apply_single_edit_indexed(edit, orig_new, false);
+        const rebuild = edit._split_group_id !== undefined && edit._split_group_id !== null;
+        success = this._apply_single_edit_indexed(edit, orig_new, rebuild);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         success = this._apply_table_edit(edit, false);
       }
@@ -2635,6 +2720,97 @@ export class RedlineEngine {
         continue;
       }
 
+      let overlaps_virtual_pipe = false;
+      if (active_mapper) {
+        overlaps_virtual_pipe = active_mapper.spans.some(
+          (s: any) =>
+            s.text === " | " &&
+            (s.run === null || s.run === undefined) &&
+            s.start < start_idx + match_len &&
+            s.end > start_idx,
+        );
+      }
+
+      if (overlaps_virtual_pipe) {
+        const actual_cells = actual_doc_text.split("|");
+        const new_cells = current_effective_new_text.split("|");
+
+        if (actual_cells.length === new_cells.length && actual_cells.length > 1) {
+          const sub_edits: any[] = [];
+          let search_offset = start_idx;
+
+          // Determine which cell receives the comment
+          let target_comment_idx = 0;
+          for (let idx = 0; idx < actual_cells.length; idx++) {
+            if (actual_cells[idx].trim() !== new_cells[idx].trim()) {
+              target_comment_idx = idx;
+              break;
+            }
+          }
+
+          for (let cell_idx = 0; cell_idx < actual_cells.length; cell_idx++) {
+            const a_cell = actual_cells[cell_idx];
+            const n_cell = new_cells[cell_idx];
+            const a_clean = a_cell.trim();
+            const n_clean = n_cell.trim();
+
+            let actual_start = search_offset;
+            if (a_clean) {
+              actual_start = this.mapper.full_text.indexOf(a_clean, search_offset);
+              if (actual_start === -1 || actual_start > search_offset + 10) {
+                actual_start = search_offset;
+              }
+            }
+
+            const should_attach_comment = (edit.comment !== null && edit.comment !== undefined) && (cell_idx === target_comment_idx);
+
+            if (a_clean !== n_clean || should_attach_comment) {
+              const cell_sub_edits = this._word_diff_sub_edits(
+                a_clean,
+                n_clean,
+                actual_start,
+                should_attach_comment ? edit.comment : null,
+                true,
+                active_mapper,
+              );
+              for (const se of cell_sub_edits) {
+                se._original_target_text = edit.target_text;
+                se._split_group_id = start_idx;
+                sub_edits.push(se);
+              }
+            }
+
+            if (a_clean) {
+              search_offset = actual_start + a_clean.length;
+            }
+
+            const next_pipe = this.mapper.full_text.indexOf(" | ", search_offset);
+            if (next_pipe !== -1 && next_pipe <= search_offset + 10) {
+              search_offset = next_pipe + 3;
+            } else {
+              search_offset += a_cell.length + 1;
+            }
+          }
+
+          for (const sub of sub_edits) {
+            all_sub_edits.push(sub);
+          }
+          continue;
+        } else {
+          throw new BatchValidationError([
+            `Target text spans ${actual_cells.length} table cells, but replacement provides ${new_cells.length}. To modify text without altering table structure (rows or columns), ensure the replacement contains the exact same number of '|' separators (e.g., replace with 'CellC | ' to empty the second cell).`
+          ]);
+        }
+      }
+
+      let has_markdown = false;
+      if (edit.target_text && (edit.target_text.includes("**") || edit.target_text.includes("_"))) {
+        has_markdown = true;
+      }
+      if (current_effective_new_text && (current_effective_new_text.includes("**") || current_effective_new_text.includes("_"))) {
+        has_markdown = true;
+      }
+
       let effective_op = "";
       let final_target = "";
       let final_new = "";
@@ -2642,9 +2818,7 @@ export class RedlineEngine {
 
       if (current_effective_new_text.startsWith(actual_doc_text)) {
         effective_op = "INSERTION";
-        final_new = current_effective_new_text.substring(
-          actual_doc_text.length,
-        );
+        final_new = current_effective_new_text.substring(actual_doc_text.length);
         effective_start_idx = start_idx + match_len;
       } else {
         const [prefix_len, suffix_len] = trim_common_context(
@@ -2657,84 +2831,101 @@ export class RedlineEngine {
         final_target = actual_doc_text.substring(prefix_len, t_end);
         final_new = current_effective_new_text.substring(prefix_len, n_end);
         effective_start_idx = start_idx + prefix_len;
-
-        // Balanced multi-paragraph modification: the matched span crosses one or
-        // more paragraph breaks and the replacement preserves the same number of
-        // breaks. Apply it as one independent sub-edit per paragraph segment so
-        // the structural \n\n breaks are left intact. Each sub-edit shares a
-        // _split_group_id (the occurrence's start index) so the batch report
-        // counts it as a single applied edit. Unbalanced cases (a genuine
-        // paragraph merge or split) fall through to the single-span path and are
-        // rejected by validate_edits.
-        const target_segs = actual_doc_text.split("\n\n");
-        const new_segs = current_effective_new_text.split("\n\n");
-        if (
-          actual_doc_text.includes("\n\n") &&
-          target_segs.length === new_segs.length
-        ) {
-          const split_sub_edits: any[] = [];
-          let seg_offset = start_idx;
-          let comment_assigned = false;
-          for (let k = 0; k < target_segs.length; k++) {
-            const t_seg = target_segs[k];
-            const n_seg = new_segs[k];
-            if (t_seg !== n_seg) {
-              const [seg_prefix, seg_suffix] = trim_common_context(
-                t_seg,
-                n_seg,
-              );
-              const seg_target = t_seg.substring(
-                seg_prefix,
-                t_seg.length - seg_suffix,
-              );
-              const seg_new = n_seg.substring(
-                seg_prefix,
-                n_seg.length - seg_suffix,
-              );
-              const seg_start = seg_offset + seg_prefix;
-              let seg_op: string;
-              if (!seg_target && seg_new) seg_op = "INSERTION";
-              else if (seg_target && !seg_new) seg_op = "DELETION";
-              else if (seg_target && seg_new) seg_op = "MODIFICATION";
-              else seg_op = "COMMENT_ONLY";
-              const seg_comment =
-                edit.comment && !comment_assigned ? edit.comment : null;
-              if (seg_comment) comment_assigned = true;
-              split_sub_edits.push({
-                type: "modify",
-                target_text: seg_target,
-                new_text: seg_new,
-                comment: seg_comment,
-                _match_start_index: seg_start,
-                _internal_op: seg_op,
-                _active_mapper_ref: active_mapper,
-                _split_group_id: start_idx,
-              });
-            }
-            // Advance past this segment plus its "\n\n" separator span.
-            seg_offset += t_seg.length + 2;
-          }
-          if (split_sub_edits.length > 0) {
-            for (const sub of split_sub_edits) all_sub_edits.push(sub);
-            continue;
-          }
-        }
-
-        if (!final_target && final_new) effective_op = "INSERTION";
-        else if (final_target && !final_new) effective_op = "DELETION";
-        else if (final_target && final_new) effective_op = "MODIFICATION";
-        else effective_op = "COMMENT_ONLY";
       }
 
-      all_sub_edits.push({
-        type: "modify",
-        target_text: final_target,
-        new_text: final_new,
-        comment: edit.comment,
-        _match_start_index: effective_start_idx,
-        _internal_op: effective_op,
-        _active_mapper_ref: active_mapper,
-      });
+      if (has_markdown) {
+        if (!final_target && final_new) {
+          effective_op = "INSERTION";
+        } else if (final_target && !final_new) {
+          effective_op = "DELETION";
+        } else if (final_target && final_new) {
+          effective_op = "MODIFICATION";
+        } else {
+          all_sub_edits.push({
+            type: "modify",
+            target_text: final_target,
+            new_text: final_new,
+            comment: edit.comment,
+            _match_start_index: effective_start_idx,
+            _internal_op: "COMMENT_ONLY",
+            _active_mapper_ref: active_mapper,
+          });
+          continue;
+        }
+
+        all_sub_edits.push({
+          type: "modify",
+          target_text: final_target,
+          new_text: final_new,
+          comment: edit.comment,
+          _resolved_start_idx: effective_start_idx,
+          _match_start_index: effective_start_idx,
+          _internal_op: effective_op,
+          _active_mapper_ref: active_mapper,
+        });
+        continue;
+      }
+
+      // Balanced multi-paragraph modification: the matched span crosses one or
+      // more paragraph breaks and the replacement preserves the same number of
+      // breaks. Apply it as one independent sub-edit per paragraph segment so
+      // the structural \n\n breaks are left intact. Each sub-edit shares a
+      // _split_group_id (the occurrence's start index) so the batch report
+      // counts it as a single applied edit. Unbalanced cases (a genuine
+      // paragraph merge or split) fall through to the single-span path and are
+      // rejected by validate_edits.
+      const target_segs = actual_doc_text.split("\n\n");
+      const new_segs = current_effective_new_text.split("\n\n");
+      if (
+        actual_doc_text.includes("\n\n") &&
+        target_segs.length === new_segs.length
+      ) {
+        const split_sub_edits: any[] = [];
+        let seg_offset = start_idx;
+        let comment_assigned = false;
+        for (let k = 0; k < target_segs.length; k++) {
+          const t_seg = target_segs[k];
+          const n_seg = new_segs[k];
+          if (t_seg !== n_seg) {
+            const seg_comment =
+              edit.comment && !comment_assigned ? edit.comment : null;
+            const seg_sub_edits = this._word_diff_sub_edits(
+              t_seg,
+              n_seg,
+              seg_offset,
+              seg_comment,
+              false,
+              active_mapper,
+            );
+            if (seg_sub_edits.some((se) => se.comment !== null && se.comment !== undefined)) {
+              comment_assigned = true;
+            }
+            for (const se of seg_sub_edits) {
+              se._split_group_id = start_idx;
+              split_sub_edits.push(se);
+            }
+          }
+          // Advance past this segment plus its "\n\n" separator span.
+          seg_offset += t_seg.length + 2;
+        }
+        if (split_sub_edits.length > 0) {
+          for (const sub of split_sub_edits) all_sub_edits.push(sub);
+          continue;
+        }
+      }
+
+      const sub_edits = this._word_diff_sub_edits(
+        actual_doc_text,
+        current_effective_new_text,
+        start_idx,
+        edit.comment,
+        false,
+        active_mapper,
+      );
+      for (const se of sub_edits) {
+        se._split_group_id = start_idx;
+        all_sub_edits.push(se);
+      }
     }
 
     if (all_sub_edits.length === 0) return null;

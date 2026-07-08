@@ -69,11 +69,8 @@ def test_whitespace_fuzzy_match():
     # Suffix: "End" (len 3). Matches.
     # Result: Replace "   " with " Middle ".
 
-    # Corrected expectation based on actual trimming logic (Prefix 'Start ' and Suffix ' End' consumed)
-    # Remaining target is one space. Remaining new is 'Middle'.
-    # Resulting text should read "Start Middle End" when accepted.
-    # Markup: Start {-- --}{++Middle++} End
-    assert "{-- --}{++Middle++}" in text
+    # Corrected expectation based on surgical word-diffing
+    assert "{--   --}{++ Middle ++}" in text
 
 
 def test_smart_quote_match():

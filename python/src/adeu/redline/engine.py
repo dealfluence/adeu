@@ -13,7 +13,7 @@ from docx.oxml.ns import nsmap, qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.diff import trim_common_context
+from adeu.diff import generate_edits_from_text, trim_common_context
 from adeu.markup import format_ambiguity_error
 from adeu.models import (
     AcceptChange,
@@ -1677,7 +1677,8 @@ class RedlineEngine:
             elif isinstance(edit, DeleteTableRow):
                 success = self._apply_delete_row(edit)
             else:
-                success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
+                rebuild = getattr(edit, "_split_group_id", None) is not None
+                success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=rebuild)
 
             if success:
                 # A balanced multi-paragraph split fans one logical edit into
@@ -1982,6 +1983,72 @@ class RedlineEngine:
             return all_sub_edits
         return all_sub_edits[0]
 
+    def _word_diff_sub_edits(self, target_str: str, new_str: str, base_offset: int, parent_comment: Optional[str] = None, is_table: bool = False, active_mapper = None) -> List[ModifyText]:
+        try:
+            raw_sub_edits = generate_edits_from_text(target_str, new_str)
+        except Exception as e:
+            logger.warning("generate_edits_from_text failed, falling back to wholesale edit", error=str(e))
+            raw_sub_edits = []
+
+        if not raw_sub_edits:
+            fallback_edit = ModifyText(
+                type="modify",
+                target_text=target_str,
+                new_text=new_str,
+                comment=parent_comment,
+            )
+            fallback_edit._resolved_start_idx = base_offset
+            fallback_edit._match_start_index = base_offset
+            fallback_edit._active_mapper_ref = active_mapper
+            if is_table:
+                fallback_edit._is_table_edit = True
+            if target_str == new_str:
+                fallback_edit._internal_op = "COMMENT_ONLY"
+            elif not target_str and new_str:
+                fallback_edit._internal_op = EditOperationType.INSERTION
+            elif target_str and not new_str:
+                fallback_edit._internal_op = EditOperationType.DELETION
+            elif target_str and new_str:
+                fallback_edit._internal_op = EditOperationType.MODIFICATION
+            else:
+                fallback_edit._internal_op = "COMMENT_ONLY"
+            return [fallback_edit]
+
+        sub_edits = []
+        comment_assigned = False
+        for raw_edit in raw_sub_edits:
+            sub_start = base_offset + (raw_edit._match_start_index or 0)
+            should_attach_comment = (parent_comment is not None) and (not comment_assigned)
+            if should_attach_comment:
+                comment_assigned = True
+            
+            sub_edit = ModifyText(
+                type="modify",
+                target_text=raw_edit.target_text,
+                new_text=raw_edit.new_text,
+                comment=parent_comment if should_attach_comment else None,
+            )
+            sub_edit._resolved_start_idx = sub_start
+            sub_edit._match_start_index = sub_start
+            sub_edit._active_mapper_ref = active_mapper
+            if is_table:
+                sub_edit._is_table_edit = True
+
+            t_val = raw_edit.target_text
+            n_val = raw_edit.new_text
+            if not t_val and n_val:
+                sub_edit._internal_op = EditOperationType.INSERTION
+            elif t_val and not n_val:
+                sub_edit._internal_op = EditOperationType.DELETION
+            elif t_val and n_val:
+                sub_edit._internal_op = EditOperationType.MODIFICATION
+            else:
+                sub_edit._internal_op = "COMMENT_ONLY"
+                
+            sub_edits.append(sub_edit)
+            
+        return sub_edits
+
     def _resolve_single_match(self, edit, start_idx, match_len, active_mapper, actual_doc_text, effective_new_text):
 
         if "](" in actual_doc_text:
@@ -2060,42 +2127,18 @@ class RedlineEngine:
                     should_attach_comment = (edit.comment is not None) and (cell_idx == target_comment_idx)
 
                     if a_clean != n_clean or should_attach_comment:
-                        sub_edit = ModifyText(
-                            type="modify",
-                            target_text=a_clean,
-                            new_text=n_clean,
-                            comment=edit.comment if should_attach_comment else None,
+                        cell_sub_edits = self._word_diff_sub_edits(
+                            target_str=a_clean,
+                            new_str=n_clean,
+                            base_offset=actual_start,
+                            parent_comment=edit.comment if should_attach_comment else None,
+                            is_table=True,
+                            active_mapper=active_mapper
                         )
-                        sub_edit._active_mapper_ref = active_mapper
-                        sub_edit._original_target_text = edit.target_text  # type: ignore[attr-defined]
-                        sub_edit._is_table_edit = True  # type: ignore[attr-defined]
-
-                        if a_clean == n_clean:
-                            sub_edit._resolved_start_idx = actual_start
-                            sub_edit._match_start_index = actual_start
-                            sub_edit._internal_op = "COMMENT_ONLY"
-                        else:
-                            prefix_len, suffix_len = trim_common_context(a_clean, n_clean)
-                            t_end = len(a_clean) - suffix_len
-                            n_end = len(n_clean) - suffix_len
-
-                            final_target = a_clean[prefix_len:t_end]
-                            final_new = n_clean[prefix_len:n_end]
-                            sub_edit.target_text = final_target
-                            sub_edit.new_text = final_new
-                            sub_edit._resolved_start_idx = actual_start + prefix_len
-                            sub_edit._match_start_index = actual_start + prefix_len
-
-                            if not final_target and final_new:
-                                sub_edit._internal_op = EditOperationType.INSERTION
-                            elif final_target and not final_new:
-                                sub_edit._internal_op = EditOperationType.DELETION
-                            elif final_target and final_new:
-                                sub_edit._internal_op = EditOperationType.MODIFICATION
-                            else:
-                                sub_edit._internal_op = "COMMENT_ONLY"
-
-                        sub_edits.append(sub_edit)
+                        for se in cell_sub_edits:
+                            se._original_target_text = edit.target_text
+                            se._split_group_id = start_idx
+                        sub_edits.extend(cell_sub_edits)
 
                     # Advance search_offset to the start of the next cell safely
                     if a_clean:
@@ -2135,103 +2178,110 @@ class RedlineEngine:
             return proxy_edit
 
         if effective_new_text.startswith(actual_doc_text):
-            effective_op = EditOperationType.INSERTION
-            final_target = ""
-            final_new = effective_new_text[len(actual_doc_text) :]
-            effective_start_idx = start_idx + match_len
-        elif effective_new_text.startswith(actual_doc_text.rstrip()):
+            proxy_edit = ModifyText(
+                type="modify",
+                target_text="",
+                new_text=effective_new_text[len(actual_doc_text) :],
+                comment=edit.comment,
+            )
+            proxy_edit._resolved_start_idx = start_idx + match_len
+            proxy_edit._match_start_index = start_idx + match_len
+            proxy_edit._internal_op = EditOperationType.INSERTION
+            proxy_edit._active_mapper_ref = active_mapper
+            return proxy_edit
+
+        if effective_new_text.startswith(actual_doc_text.rstrip()):
             # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space)
-            effective_op = EditOperationType.INSERTION
-            final_target = ""
-            final_new = effective_new_text[len(actual_doc_text.rstrip()) :]
-            effective_start_idx = start_idx + len(actual_doc_text.rstrip())
-        else:
-            prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
+            proxy_edit = ModifyText(
+                type="modify",
+                target_text="",
+                new_text=effective_new_text[len(actual_doc_text.rstrip()) :],
+                comment=edit.comment,
+            )
+            proxy_edit._resolved_start_idx = start_idx + len(actual_doc_text.rstrip())
+            proxy_edit._match_start_index = start_idx + len(actual_doc_text.rstrip())
+            proxy_edit._internal_op = EditOperationType.INSERTION
+            proxy_edit._active_mapper_ref = active_mapper
+            return proxy_edit
 
-            t_end = len(actual_doc_text) - suffix_len
-            n_end = len(effective_new_text) - suffix_len
+        prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
 
-            final_target = actual_doc_text[prefix_len:t_end]
-            final_new = effective_new_text[prefix_len:n_end]
-            effective_start_idx = start_idx + prefix_len
+        t_end = len(actual_doc_text) - suffix_len
+        n_end = len(effective_new_text) - suffix_len
 
-            # Balanced multi-paragraph modification: the matched span crosses one
-            # or more paragraph breaks and the replacement preserves the same
-            # number of breaks. Apply it as one independent sub-edit per paragraph
-            # segment so the structural \n\n breaks are left intact. Each sub-edit
-            # shares a _split_group_id (the occurrence's start index) so the batch
-            # report still counts it as a single applied edit. Unbalanced cases
-            # (a genuine paragraph merge or split) fall through to the guard below.
-            if "\n\n" in actual_doc_text and actual_doc_text.count("\n\n") == effective_new_text.count("\n\n"):
-                target_segs = actual_doc_text.split("\n\n")
-                new_segs = effective_new_text.split("\n\n")
-                split_sub_edits: List[ModifyText] = []
-                seg_offset = start_idx
-                comment_assigned = False
-                for t_seg, n_seg in zip(target_segs, new_segs, strict=True):
-                    if t_seg != n_seg:
-                        seg_prefix, seg_suffix = trim_common_context(t_seg, n_seg)
-                        seg_target = t_seg[seg_prefix : len(t_seg) - seg_suffix]
-                        seg_new = n_seg[seg_prefix : len(n_seg) - seg_suffix]
-                        seg_start = seg_offset + seg_prefix
-                        if not seg_target and seg_new:
-                            seg_op = EditOperationType.INSERTION
-                        elif seg_target and not seg_new:
-                            seg_op = EditOperationType.DELETION
-                        elif seg_target and seg_new:
-                            seg_op = EditOperationType.MODIFICATION
-                        else:
-                            seg_op = "COMMENT_ONLY"
-                        seg_comment = edit.comment if (edit.comment and not comment_assigned) else None
-                        if seg_comment:
-                            comment_assigned = True
-                        sub_edit = ModifyText(
-                            type="modify",
-                            target_text=seg_target,
-                            new_text=seg_new,
-                            comment=seg_comment,
-                        )
-                        sub_edit._resolved_start_idx = seg_start
-                        sub_edit._match_start_index = seg_start
-                        sub_edit._internal_op = seg_op
-                        sub_edit._active_mapper_ref = active_mapper
-                        sub_edit._split_group_id = start_idx
-                        split_sub_edits.append(sub_edit)
-                    # Advance past this segment plus its "\n\n" separator span.
-                    seg_offset += len(t_seg) + 2
-                if split_sub_edits:
-                    return split_sub_edits
+        final_target = actual_doc_text[prefix_len:t_end]
+        final_new = effective_new_text[prefix_len:n_end]
+        effective_start_idx = start_idx + prefix_len
+        # or more paragraph breaks and the replacement preserves the same
+        # number of breaks. Apply it as one independent sub-edit per paragraph
+        # segment so the structural \n\n breaks are left intact. Each sub-edit
+        # shares a _split_group_id (the occurrence's start index) so the batch
+        # report still counts it as a single applied edit. Unbalanced cases
+        # (a genuine paragraph merge or split) fall through to the guard below.
+        if "\n\n" in actual_doc_text and actual_doc_text.count("\n\n") == effective_new_text.count("\n\n"):
+            target_segs = actual_doc_text.split("\n\n")
+            new_segs = effective_new_text.split("\n\n")
+            split_sub_edits: List[ModifyText] = []
+            seg_offset = start_idx
+            comment_assigned = False
+            for t_seg, n_seg in zip(target_segs, new_segs, strict=True):
+                if t_seg != n_seg:
+                    seg_comment = edit.comment if (edit.comment and not comment_assigned) else None
+                    seg_sub_edits = self._word_diff_sub_edits(
+                        target_str=t_seg,
+                        new_str=n_seg,
+                        base_offset=seg_offset,
+                        parent_comment=seg_comment,
+                        is_table=False,
+                        active_mapper=active_mapper
+                    )
+                    if any(se.comment is not None for se in seg_sub_edits):
+                        comment_assigned = True
+                    for se in seg_sub_edits:
+                        se._split_group_id = start_idx
+                        split_sub_edits.append(se)
+                # Advance past this segment plus its "\n\n" separator span.
+                seg_offset += len(t_seg) + 2
+            if split_sub_edits:
+                return split_sub_edits
 
-            # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
-            # to prevent structural paragraph-break corruption.
-            if "\n\n" in final_target:
-                if "\n\n" in final_new:
-                    before, _, after = actual_doc_text.partition("\n\n")
-                    if before.strip() and after.strip():
-                        raise BatchValidationError(
-                            [
-                                "- Edit Failed: target_text spans a paragraph "
-                                "boundary with body text on both sides. "
-                                "The paragraph break is a structural element, "
-                                "not literal text, so it cannot be replaced as "
-                                "a single span "
-                                "without corrupting the document. "
-                                "Split this into one edit per paragraph."
-                            ]
-                        )
-                else:
-                    before, _, after = final_target.partition("\n\n")
-                    if before.strip() and after.strip():
-                        raise BatchValidationError(
-                            [
-                                "- Edit Failed: target_text spans a paragraph "
-                                "boundary with body text on both sides. "
-                                "The paragraph break is a structural element, "
-                                "not literal text, so it cannot be replaced as a single span "
-                                "without corrupting the document. Split this into one edit per paragraph."
-                            ]
-                        )
+        # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
+        # to prevent structural paragraph-break corruption.
+        if "\n\n" in final_target:
+            if "\n\n" in final_new:
+                before, _, after = actual_doc_text.partition("\n\n")
+                if before.strip() and after.strip():
+                    raise BatchValidationError(
+                        [
+                            "- Edit Failed: target_text spans a paragraph "
+                            "boundary with body text on both sides. "
+                            "The paragraph break is a structural element, "
+                            "not literal text, so it cannot be replaced as "
+                            "a single span "
+                            "without corrupting the document. "
+                            "Split this into one edit per paragraph."
+                        ]
+                    )
+            else:
+                before, _, after = final_target.partition("\n\n")
+                if before.strip() and after.strip():
+                    raise BatchValidationError(
+                        [
+                            "- Edit Failed: target_text spans a paragraph "
+                            "boundary with body text on both sides. "
+                            "The paragraph break is a structural element, "
+                            "not literal text, so it cannot be replaced as a single span "
+                            "without corrupting the document. Split this into one edit per paragraph."
+                        ]
+                    )
 
+        has_markdown = False
+        if edit.target_text and ("**" in edit.target_text or "_" in edit.target_text):
+            has_markdown = True
+        if effective_new_text and ("**" in effective_new_text or "_" in effective_new_text):
+            has_markdown = True
+
+        if has_markdown:
             if not final_target and final_new:
                 effective_op = EditOperationType.INSERTION
             elif final_target and not final_new:
@@ -2250,17 +2300,29 @@ class RedlineEngine:
                 proxy_edit._active_mapper_ref = active_mapper
                 return proxy_edit
 
-        proxy_edit = ModifyText(
-            type="modify",
-            target_text=final_target,
-            new_text=final_new,
-            comment=edit.comment,
+            proxy_edit = ModifyText(
+                type="modify",
+                target_text=final_target,
+                new_text=final_new,
+                comment=edit.comment,
+            )
+            proxy_edit._resolved_start_idx = effective_start_idx
+            proxy_edit._match_start_index = effective_start_idx
+            proxy_edit._internal_op = effective_op
+            proxy_edit._active_mapper_ref = active_mapper
+            return proxy_edit
+
+        sub_edits = self._word_diff_sub_edits(
+            target_str=actual_doc_text,
+            new_str=effective_new_text,
+            base_offset=start_idx,
+            parent_comment=edit.comment,
+            is_table=False,
+            active_mapper=active_mapper
         )
-        proxy_edit._resolved_start_idx = effective_start_idx
-        proxy_edit._match_start_index = effective_start_idx
-        proxy_edit._internal_op = effective_op
-        proxy_edit._active_mapper_ref = active_mapper
-        return proxy_edit
+        for se in sub_edits:
+            se._split_group_id = start_idx
+        return sub_edits
 
     def _apply_single_edit_indexed(
         self,

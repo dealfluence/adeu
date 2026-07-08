@@ -127,6 +127,7 @@ describe("Webinar Report Bug Reproductions", () => {
     // Ideally, the system should allow distinct targeting of cells (e.g. preserving grid coordinates).
     // But due to the coordinate-flattening design flaw, it throws "Ambiguous match".
     const res = engine.process_batch([edit as any]);
+    console.log("BUG 3 PROCESS_BATCH RESULT:", JSON.stringify(res, null, 2));
     expect(res.edits_applied).toBe(1);
   });
 });
