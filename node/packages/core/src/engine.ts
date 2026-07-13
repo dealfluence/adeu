@@ -357,9 +357,8 @@ export class RedlineEngine {
     let raw_sub_edits: any[] = [];
     try {
       raw_sub_edits = generate_edits_from_text(target_str, new_str);
-      console.log("_word_diff_sub_edits RAW_SUB_EDITS:", JSON.stringify(raw_sub_edits, null, 2));
     } catch (e) {
-      console.warn("generate_edits_from_text failed, falling back to wholesale edit", e);
+      console.error("generate_edits_from_text failed, falling back to wholesale edit", e);
       raw_sub_edits = [];
     }
 
