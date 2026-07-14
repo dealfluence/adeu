@@ -1,8 +1,20 @@
 version: 2
 updates:
-  # Maintain Python dependencies (Native support for pyproject.toml & uv.lock)
+  # Maintain Python dependencies in /python
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/python"
+    schedule:
+      interval: "weekly"
+
+  # Maintain Python dependencies in /langchain
+  - package-ecosystem: "pip"
+    directory: "/langchain"
+    schedule:
+      interval: "weekly"
+
+  # Maintain Node.js dependencies in /node
+  - package-ecosystem: "npm"
+    directory: "/node"
     schedule:
       interval: "weekly"
 
