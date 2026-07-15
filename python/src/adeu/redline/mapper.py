@@ -922,6 +922,19 @@ class DocumentMapper:
                     return s.run, s.paragraph
             for s in reversed(preceding):
                 if s.paragraph:
+                    # Every span ending exactly here is virtual (CriticMarkup
+                    # wrappers, {>>...<<} meta blocks, prefixes). If real text
+                    # precedes this index in the SAME paragraph, anchor after
+                    # its last run: falling back to the bare paragraph would
+                    # drop the insertion at paragraph start, ahead of the very
+                    # redlines/comment ranges that fence off the true position.
+                    real_before = [
+                        prev
+                        for prev in self.spans
+                        if prev.end <= index and prev.run is not None and prev.paragraph is s.paragraph
+                    ]
+                    if real_before:
+                        return real_before[-1].run, real_before[-1].paragraph
                     return None, s.paragraph
 
         containing = [s for s in self.spans if s.start < index < s.end]

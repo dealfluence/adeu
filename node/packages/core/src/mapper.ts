@@ -989,7 +989,27 @@ export class DocumentMapper {
         if (preceding[i].run) return [preceding[i].run, preceding[i].paragraph];
       }
       for (let i = preceding.length - 1; i >= 0; i--) {
-        if (preceding[i].paragraph) return [null, preceding[i].paragraph];
+        const para = preceding[i].paragraph;
+        if (para) {
+          // Every span ending exactly here is virtual (CriticMarkup
+          // wrappers, {>>...<<} meta blocks, prefixes). If real text
+          // precedes this index in the SAME paragraph, anchor after its
+          // last run: falling back to the bare paragraph would drop the
+          // insertion at paragraph start, ahead of the very redlines and
+          // comment ranges that fence off the true position (mirrors the
+          // Python mapper).
+          for (let j = this.spans.length - 1; j >= 0; j--) {
+            const prev = this.spans[j];
+            if (
+              prev.end <= index &&
+              prev.run !== null &&
+              prev.paragraph === para
+            ) {
+              return [prev.run, prev.paragraph];
+            }
+          }
+          return [null, para];
+        }
       }
     }
 

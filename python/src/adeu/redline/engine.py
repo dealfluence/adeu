@@ -2437,6 +2437,15 @@ class RedlineEngine:
             if anchor_run:
                 parent = anchor_run._element.getparent()
                 index = parent.index(anchor_run._element)
+                # A tracked-deleted anchor (run inside <w:del>) cannot host
+                # the new <w:ins> as a child — an insertion nested inside a
+                # deletion is invalid revision XML. Lift the anchor to the
+                # <w:del> wrapper so the insert lands beside the whole block.
+                if parent.tag == qn("w:del"):
+                    del_wrapper = parent
+                    parent = del_wrapper.getparent()
+                    if parent is not None:
+                        index = parent.index(del_wrapper)
             elif anchor_paragraph:
                 parent = anchor_paragraph._element
                 for i, child in enumerate(parent):

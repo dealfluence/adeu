@@ -3245,8 +3245,17 @@ export class RedlineEngine {
       const is_inline_first = result.first_node.tagName === "w:ins";
       if (is_inline_first) {
         if (anchor_run) {
-          const anchor_parent = anchor_run._element
-            .parentNode as Element | null;
+          let anchor_el: Element = anchor_run._element;
+          let anchor_parent = anchor_el.parentNode as Element | null;
+          // A tracked-deleted anchor (run inside <w:del>) cannot host the
+          // new <w:ins> as a child — an insertion nested inside a deletion
+          // is invalid revision XML. Lift the anchor to the <w:del> wrapper
+          // so the insert lands beside the whole block (mirrors the Python
+          // engine).
+          if (anchor_parent && anchor_parent.tagName === "w:del") {
+            anchor_el = anchor_parent;
+            anchor_parent = anchor_el.parentNode as Element | null;
+          }
           // get_insertion_anchor(0) resolves to the document's FIRST run: the
           // insertion point precedes it, so the new <w:ins> must land before
           // the anchor, not after (mirrors the Python engine's insert_before
@@ -3259,14 +3268,14 @@ export class RedlineEngine {
             // Python engine).
             this._insert_and_split_ins(
               anchor_parent,
-              anchor_run._element,
+              anchor_el,
               result.first_node,
               before_anchor,
             );
           } else if (before_anchor && anchor_parent) {
-            anchor_parent.insertBefore(result.first_node, anchor_run._element);
+            anchor_parent.insertBefore(result.first_node, anchor_el);
           } else {
-            insertAfter(result.first_node, anchor_run._element);
+            insertAfter(result.first_node, anchor_el);
           }
         } else if (anchor_para) {
           // Paragraph-anchored insertion: the anchor resolves to a paragraph
