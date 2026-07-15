@@ -306,10 +306,16 @@ def handle_extract(args):
         print(f"❌ Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    json_output = json.dumps(res.structured_content or {}) if args.json else None
+
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output_text)
         print(f"Extracted text to {args.output}", file=sys.stderr)
+        if json_output is not None:
+            print(json_output)
+    elif json_output is not None:
+        print(json_output)
     else:
         print(output_text)
 
@@ -390,10 +396,12 @@ def handle_apply(args):
     changes: List[DocumentChange] = []
 
     if args.changes.suffix.lower() == ".json":
-        print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
+        if not args.json:
+            print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
         changes = _load_batch_from_json(args.changes)
     else:
-        print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
+        if not args.json:
+            print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         if args.live:
             if sys.platform != "win32":
                 print("❌ --live is only supported on Windows.", file=sys.stderr)
@@ -447,12 +455,16 @@ def handle_apply(args):
             sys.exit(1)
         from adeu.mcp_components.tools.live_word import _process_active_word_batch_core
 
-        print(f"Applying {len(changes)} changes to live Word document...", file=sys.stderr)
+        if not args.json:
+            print(f"Applying {len(changes)} changes to live Word document...", file=sys.stderr)
         stats = _process_active_word_batch_core(changes, args.author)
-        print(
-            f"✅ Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}",
-            file=sys.stderr,
-        )
+        if args.json:
+            print(json.dumps(stats))
+        else:
+            print(
+                f"✅ Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}",
+                file=sys.stderr,
+            )
         if stats["failed"] > 0:
             sys.exit(1)
         return
@@ -463,7 +475,8 @@ def handle_apply(args):
 
     import zipfile
 
-    print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
+    if not args.json:
+        print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
     try:
         with open(args.original, "rb") as f:
             stream = BytesIO(f.read())
@@ -481,15 +494,19 @@ def handle_apply(args):
     try:
         stats = engine.process_batch(changes, dry_run=args.dry_run)
     except BatchValidationError as e:
-        print(
-            f"\n❌ Batch rejected. {len(e.errors)} edits failed validation:\n",
-            file=sys.stderr,
-        )
-        for err in e.errors:
-            print(err, file=sys.stderr)
-            print("", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"error": "batch_validation_failed", "errors": e.errors}))
+        else:
+            print(
+                f"\n❌ Batch rejected. {len(e.errors)} edits failed validation:\n",
+                file=sys.stderr,
+            )
+            for err in e.errors:
+                print(err, file=sys.stderr)
+                print("", file=sys.stderr)
         sys.exit(1)
 
+    output_path = None
     if not args.dry_run:
         output_path = args.output
         if not output_path:
@@ -501,42 +518,88 @@ def handle_apply(args):
         with open(output_path, "wb") as f:
             f.write(engine.save_to_stream().getvalue())
 
-        print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+    stats["dry_run"] = args.dry_run
+    stats["output_path"] = str(output_path) if output_path else None
+
+    if args.json:
+        print(json.dumps(stats))
     else:
-        print("Dry-run simulation complete.", file=sys.stderr)
+        if not args.dry_run:
+            print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+        else:
+            print("Dry-run simulation complete.", file=sys.stderr)
 
-    print(
-        f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
-        f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.",
-        file=sys.stderr,
-    )
+        print(
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.",
+            file=sys.stderr,
+        )
 
-    if stats.get("edits"):
-        print("\nDetailed Edit Reports:", file=sys.stderr)
-        for i, report in enumerate(stats["edits"]):
-            status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
-            print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
-            print(f"  Target: '{report['target_text']}'", file=sys.stderr)
-            print(f"  New text: '{report['new_text']}'", file=sys.stderr)
-            if report.get("warning"):
-                print(f"  Warning: {report['warning']}", file=sys.stderr)
-            if report.get("error"):
-                print(f"  Error: {report['error']}", file=sys.stderr)
-            if report.get("critic_markup"):
-                print(
-                    f"  Preview (CriticMarkup): {report['critic_markup']}",
-                    file=sys.stderr,
-                )
-            if report.get("clean_text"):
-                print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
+        if stats.get("edits"):
+            print("\nDetailed Edit Reports:", file=sys.stderr)
+            for i, report in enumerate(stats["edits"]):
+                status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
+                print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
+                print(f"  Target: '{report['target_text']}'", file=sys.stderr)
+                print(f"  New text: '{report['new_text']}'", file=sys.stderr)
+                if report.get("warning"):
+                    print(f"  Warning: {report['warning']}", file=sys.stderr)
+                if report.get("error"):
+                    print(f"  Error: {report['error']}", file=sys.stderr)
+                if report.get("critic_markup"):
+                    print(
+                        f"  Preview (CriticMarkup): {report['critic_markup']}",
+                        file=sys.stderr,
+                    )
+                if report.get("clean_text"):
+                    print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
 
-    if stats.get("skipped_details"):
-        print("\nSkipped Details:", file=sys.stderr)
-        for detail in stats["skipped_details"]:
-            print(detail, file=sys.stderr)
+        if stats.get("skipped_details"):
+            print("\nSkipped Details:", file=sys.stderr)
+            for detail in stats["skipped_details"]:
+                print(detail, file=sys.stderr)
 
     if stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0:
         sys.exit(1)
+
+
+def handle_accept_all(args: argparse.Namespace):
+    """
+    Accepts all tracked changes and removes all comments, producing a
+    finalized clean document. Mirrors the `accept_all_changes` MCP tool.
+    """
+    if not args.input.exists():
+        _print_sandbox_warning_and_exit(args.input)
+
+    import zipfile
+
+    try:
+        with open(args.input, "rb") as f:
+            stream = BytesIO(f.read())
+        engine = RedlineEngine(stream)
+    except Exception as e:
+        if (
+            "bad zip signature" in str(e)
+            or "not a zip file" in str(e).lower()
+            or "not a valid DOCX file" in str(e)
+            or isinstance(e, zipfile.BadZipFile)
+        ):
+            _handle_docx_error_and_exit(args.input.name, e)
+        raise
+
+    engine.accept_all_revisions(remove_comments=True)
+
+    output_path = args.output
+    if not output_path:
+        output_path = args.input.with_name(f"{args.input.stem}_clean{args.input.suffix}")
+
+    with open(output_path, "wb") as f:
+        f.write(engine.save_to_stream().getvalue())
+
+    if args.json:
+        print(json.dumps({"status": "ok", "output_path": str(output_path)}))
+    else:
+        print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
 
 
 def handle_markup(args):
@@ -772,6 +835,11 @@ def main():
         action="store_true",
         help="For mode='outline' only: include heading metadata.",
     )
+    p_extract.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the extraction result as a machine-readable JSON object on stdout.",
+    )
     p_extract.set_defaults(func=handle_extract)
 
     p_init = subparsers.add_parser("init", help="Auto-configure Adeu for Claude Desktop")
@@ -824,7 +892,30 @@ def main():
         action="store_true",
         help="Simulate the changes and return a detailed preview report without modifying any files.",
     )
+    p_apply.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the batch result stats as machine-readable JSON on stdout, suppressing human-readable logs.",
+    )
     p_apply.set_defaults(func=handle_apply)
+
+    p_accept = subparsers.add_parser(
+        "accept-all",
+        help="Accept all tracked changes and remove all comments (finalize a document)",
+    )
+    p_accept.add_argument("input", type=Path, help="Input DOCX file")
+    p_accept.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output DOCX path (default: <input>_clean.docx)",
+    )
+    p_accept.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON result on stdout.",
+    )
+    p_accept.set_defaults(func=handle_accept_all)
 
     p_markup = subparsers.add_parser(
         "markup",
@@ -892,7 +983,12 @@ def main():
     import structlog
 
     log_level = logging.DEBUG if args.debug else logging.WARNING
-    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(log_level))
+    # stdout is reserved for document data / JSON results; all logging must
+    # stay on stderr so `adeu extract doc.docx > out.md` stays clean.
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
 
     args.func(args)
 

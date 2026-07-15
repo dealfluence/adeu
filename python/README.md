@@ -55,8 +55,21 @@ uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
 # Simulate the changes without modifying the file to get a preview report
 uvx adeu apply original.docx edits.json --dry-run
 
+# Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
+uvx adeu apply original.docx edits.json --json
+
 # Windows Only: Apply edits directly to the live, open Word canvas
 uvx adeu apply edits.json --live
+```
+
+### Accepting All Changes
+Accept every tracked change and remove all comments in one operation, producing a finalized clean document. Mirrors the `accept_all_changes` MCP tool.
+```bash
+# Writes contract_clean.docx next to the input
+uvx adeu accept-all contract.docx
+
+# Explicit output path, machine-readable result on stdout
+uvx adeu accept-all contract.docx -o final.docx --json
 ```
 
 ### Sanitization
@@ -68,6 +81,24 @@ uvx adeu sanitize contract.docx --accept-all -o clean.docx
 # Keep your redlines/comments, but anonymize the author and strip metadata
 uvx adeu sanitize redline.docx --keep-markup --author "My Firm"
 ```
+
+### Agentic / Headless Usage (the CLI as an API)
+When an agent operates in a closed sandbox (a CI pipeline, a containerized coding agent) it cannot reach an MCP server. The CLI is the fallback: a strictly local, air-gapped command-line API that accepts the same JSON change schema as the MCP tools. The mapping is 1:1:
+
+| MCP tool                 | CLI equivalent                          |
+| ------------------------ | --------------------------------------- |
+| `read_docx`              | `adeu extract <doc> [--json]`           |
+| `diff_docx_files`        | `adeu diff <orig> <mod> [--json]`       |
+| `process_document_batch` | `adeu apply <doc> <changes.json> [--json]` |
+| `accept_all_changes`     | `adeu accept-all <doc> [--json]`        |
+
+The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
+
+* **stdout** carries only document data (Markdown/CriticMarkup) or, with `--json`, a machine-readable JSON result. `uvx adeu extract doc.docx > out.md` always produces a clean file, even with `--debug`.
+* **stderr** carries all logs, progress messages, warnings, and errors.
+* **Exit codes**: `0` = full success; `1` = failure or a partially applied batch (check `edits_skipped` in the JSON stats).
+
+`adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` and `dry_run` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
 
 ## The Python SDK
 

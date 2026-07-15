@@ -13,10 +13,16 @@ If `uvx` is not available, install it once: `pip install uv` (or see https://doc
 ```bash
 uvx adeu extract contract.docx -o contract.md
 # Clean view (accepted state):
-uvx adeu extract contract.docx --clean -o accepted.md
+uvx adeu extract contract.docx --clean-view -o accepted.md
+# Outline / appendix / search modes, mirroring read_docx:
+uvx adeu extract contract.docx --mode outline
+uvx adeu extract contract.docx --mode appendix
+uvx adeu extract contract.docx --search-query "Governing Law"
+# Machine-readable JSON envelope ({"markdown", "title", "file_path"}) on stdout:
+uvx adeu extract contract.docx --json
 ```
 
-Output is Markdown with CriticMarkup for tracked changes and comments. The same semantic appendix (defined terms, cross-refs, bookmarks) appears at the bottom.
+Output is Markdown with CriticMarkup for tracked changes and comments. The same semantic appendix (defined terms, cross-refs, bookmarks) appears at the bottom. Long documents are paginated — pass `--page N` to continue reading.
 
 ### `adeu diff` — compare two versions
 
@@ -30,7 +36,13 @@ Returns Adeu's `@@ Word Patch @@` sub-word diff. Not a unified diff.
 
 ```bash
 uvx adeu apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
+# Preview without touching any file:
+uvx adeu apply contract.docx edits.json --dry-run
+# Machine-readable stats on stdout (recommended — parse it to verify your batch):
+uvx adeu apply contract.docx edits.json --json
 ```
+
+With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`, `dry_run`) and human logs are suppressed. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1. Exit code 1 also signals a partially applied batch — check `edits_skipped`.
 
 The `edits.json` file is a JSON array. Each entry has a `type` discriminator matching `process_document_batch` (see `references/mcp-tools.md` for the full shape):
 
@@ -73,20 +85,28 @@ Use `--report` to print a sanitization report — useful for verifying what was 
 
 ```bash
 uvx adeu accept-all redline.docx -o final.docx
+# Default output is <input>_clean.docx; --json prints {"status": "ok", "output_path": ...}
+uvx adeu accept-all redline.docx --json
 ```
 
 ## Workflow on the CLI path
 
 1. `uvx adeu extract <doc> -o doc.md` — read it.
 2. Construct `edits.json` based on what the user asked for.
-3. `uvx adeu apply <doc> edits.json --author "<name>" -o <out>.docx`
-4. `uvx adeu extract <out>.docx --clean -o verify.md` — verify by reading the clean view.
+3. `uvx adeu apply <doc> edits.json --author "<name>" -o <out>.docx --json` — parse the stats to confirm `edits_skipped == 0`.
+4. `uvx adeu extract <out>.docx --clean-view -o verify.md` — verify by reading the clean view.
 
 For ID-based operations (`accept`, `reject`, `reply`), step 1 and step 2 must be back-to-back. Do not reuse IDs across multiple `apply` runs.
+
+## I/O contract
+
+- **stdout** carries only document data or, with `--json`, one machine-readable JSON result. Redirecting stdout always yields a clean file.
+- **stderr** carries all logs, warnings, and errors.
+- **Exit codes**: `0` = full success; `1` = failure or partially applied batch.
 
 ## CLI vs MCP differences worth knowing
 
 - **The CLI is Python-only.** Node users don't have a CLI equivalent — they should run the Node MCP server (`@adeu/mcp-server`) instead.
-- The CLI does not expose Live MS Word (Windows COM) integration. That is MCP-only on the Python server.
-- The CLI does not support a `dry_run` flag. To preview, apply to a throwaway output path and inspect with `adeu extract --clean`.
-- Outline mode (`mode="outline"` on MCP) is not directly exposed as a CLI flag; use `adeu extract` and read the heading structure from the Markdown.
+- The CLI does not expose Live MS Word (Windows COM) integration for reading; `adeu extract --live` / `adeu apply --live` exist on Windows only and require a running Word instance — do not rely on them in sandboxes.
+- `dry_run` maps to `adeu apply --dry-run` (combine with `--json` for a parseable preview report).
+- `mode="outline"` / `mode="appendix"` / search map to `adeu extract --mode outline`, `--mode appendix`, and `--search-query`.

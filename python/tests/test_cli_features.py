@@ -519,6 +519,230 @@ def test_cli_extract_search_regex_and_case(capsys):
     assert "golden" in captured.out.lower()
 
 
+def test_cli_extract_json(capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+
+    test_args = ["adeu", "extract", str(fixture_path), "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip())
+    assert payload["title"] == "golden.docx"
+    assert Path(payload["file_path"]).name == "golden.docx"
+    assert len(payload["markdown"]) > 0
+
+
+def test_cli_apply_json(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+    changes_file = tmp_path / "changes.json"
+    changes_file.write_text(
+        json.dumps([{"type": "modify", "target_text": "document", "new_text": "modified document"}]),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "out.docx"
+
+    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "-o", str(out_path), "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    stats = json.loads(captured.out.strip())
+    assert stats["edits_applied"] == 1
+    assert stats["edits_skipped"] == 0
+    assert stats["dry_run"] is False
+    assert stats["output_path"] == str(out_path)
+    assert stats["edits"][0]["status"] == "applied"
+    assert out_path.exists()
+
+    # --json suppresses the human-readable progress logs
+    assert "Loading structured batch" not in captured.err
+    assert "Applying" not in captured.err
+    assert "Batch complete" not in captured.err
+    assert "Detailed Edit Reports" not in captured.err
+
+
+def test_cli_apply_json_dry_run(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+    changes_file = tmp_path / "changes.json"
+    changes_file.write_text(
+        json.dumps([{"type": "modify", "target_text": "document", "new_text": "modified document"}]),
+        encoding="utf-8",
+    )
+
+    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "--dry-run", "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    stats = json.loads(captured.out.strip())
+    assert stats["dry_run"] is True
+    assert stats["output_path"] is None
+    assert stats["edits_applied"] == 1
+    assert not (fixture_path.parent / "golden_redlined.docx").exists()
+
+
+def test_cli_apply_json_validation_error(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+    changes_file = tmp_path / "changes.json"
+    changes_file.write_text(
+        json.dumps([{"type": "modify", "target_text": "THIS TEXT EXISTS NOWHERE 987654321", "new_text": "x"}]),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "out.docx"
+
+    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "-o", str(out_path), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip())
+    assert payload["error"] == "batch_validation_failed"
+    assert len(payload["errors"]) == 1
+    assert not out_path.exists()
+
+
+def test_cli_accept_all_workflow(tmp_path, capsys):
+    from io import BytesIO
+    from unittest.mock import patch
+
+    from adeu.cli import main
+    from adeu.ingest import extract_text_from_stream
+
+    fixture_path = get_fixture_path("golden.docx")
+    changes_file = tmp_path / "changes.json"
+    changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "modify",
+                    "target_text": "document",
+                    "new_text": "dossier",
+                    "comment": "Review note to be stripped",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    redlined_path = tmp_path / "redlined.docx"
+
+    # 1. Apply an edit to create tracked changes + a comment
+    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "-o", str(redlined_path), "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+    capsys.readouterr()
+    assert redlined_path.exists()
+
+    # 2. Accept all — default output mirrors the MCP tool (<stem>_clean.docx)
+    test_args = ["adeu", "accept-all", str(redlined_path), "--json"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out.strip())
+    clean_path = tmp_path / "redlined_clean.docx"
+    assert result == {"status": "ok", "output_path": str(clean_path)}
+    assert clean_path.exists()
+
+    # 3. The finalized document has no redlines or comments left
+    with open(clean_path, "rb") as f:
+        raw_text = extract_text_from_stream(BytesIO(f.read()), clean_view=False)
+    assert "dossier" in raw_text
+    assert "{++" not in raw_text
+    assert "{--" not in raw_text
+    assert "Review note to be stripped" not in raw_text
+
+
+def test_cli_accept_all_human_output(tmp_path, capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+    out_path = tmp_path / "final.docx"
+
+    test_args = ["adeu", "accept-all", str(fixture_path), "-o", str(out_path)]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    assert out_path.exists()
+    assert captured.out == ""
+    assert "Accepted all changes" in captured.err
+
+
+def test_cli_accept_all_missing_file(capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    test_args = ["adeu", "accept-all", "definitely_non_existent_file_path_123456.docx"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "sandboxed" in captured.err
+
+
+def test_cli_debug_logs_go_to_stderr_only(capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    fixture_path = get_fixture_path("golden.docx")
+
+    test_args = ["adeu", "--debug", "extract", str(fixture_path), "--mode", "full"]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    # Debug logs must never pollute stdout: `adeu extract doc.docx > out.md`
+    # has to produce a clean file even with --debug.
+    assert "Initializing CommentsManager" in captured.err
+    assert "Initializing CommentsManager" not in captured.out
+
+
 def test_cli_extract_search_page_filter(capsys):
     from unittest.mock import patch
 
