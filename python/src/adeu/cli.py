@@ -1,4 +1,5 @@
 import argparse
+import codecs
 import datetime
 import getpass
 import json
@@ -19,6 +20,7 @@ from adeu.mcp_components.shared import get_build_info
 from adeu.models import DocumentChange, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
+from adeu.utils.console import configure_cli_streams, dynamic_stderr
 
 
 def _get_claude_config_path() -> Path:
@@ -165,14 +167,76 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
         sys.exit(1)
 
 
+def _read_text_file(path: Path) -> str:
+    """Read a user-supplied text file with encoding tolerance.
+
+    UTF-8 (with or without BOM) and BOM-marked UTF-16/32 decode silently;
+    other content falls back to Windows-1252 with a loud warning — such files
+    are typically produced by redirecting console output on a legacy Windows
+    code page. Content with NUL bytes (BOM-less UTF-16, binaries) gets a
+    guided error instead of flowing into edits as mojibake. Newlines are
+    normalized to \\n, matching text-mode open().
+    """
+    if not path.exists():
+        _print_sandbox_warning_and_exit(path)
+    raw = path.read_bytes()
+
+    bom_encoding = None
+    if raw.startswith(codecs.BOM_UTF8):
+        bom_encoding = "utf-8-sig"
+    elif raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        bom_encoding = "utf-32"
+    elif raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        bom_encoding = "utf-16"
+
+    if bom_encoding is not None:
+        try:
+            text = raw.decode(bom_encoding)
+        except UnicodeDecodeError as e:
+            print(
+                f"❌ '{path.name}' has a {bom_encoding} byte-order mark but its content "
+                f"did not decode as {bom_encoding} ({e}). Re-save the file as UTF-8.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif b"\x00" in raw:
+        # NUL bytes never occur in text: this is BOM-less UTF-16/32 or a binary.
+        print(
+            f"❌ '{path.name}' does not look like a text file (contains NUL bytes). "
+            "If it is UTF-16 text (e.g. from a PowerShell '>' redirect), re-save it as UTF-8.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            try:
+                text = raw.decode("cp1252")
+            except UnicodeDecodeError:
+                print(
+                    f"❌ Could not decode '{path.name}': not valid UTF-8 "
+                    f"(byte 0x{raw[e.start]:02x} at offset {e.start}) and not Windows-1252 either. "
+                    "Re-save the file as UTF-8.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                f"⚠️ '{path.name}' is not valid UTF-8 (byte 0x{raw[e.start]:02x} at offset {e.start}); "
+                "decoded as Windows-1252. Re-save the file as UTF-8 to avoid ambiguity.",
+                file=sys.stderr,
+            )
+
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     """
     Loads a batch of actions and edits from a JSON file.
     Supports the unified List[DocumentChange] format or the legacy dict format.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(_read_text_file(path))
 
         # Legacy dict format support
         if isinstance(data, dict):
@@ -354,8 +418,7 @@ def handle_diff(args):
 
         text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
 
-        with open(args.modified, "r", encoding="utf-8") as f:
-            text_mod = f.read()
+        text_mod = _read_text_file(args.modified)
 
         from adeu.diff import generate_edits_via_paragraph_alignment
 
@@ -442,8 +505,7 @@ def handle_apply(args):
 
             text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
 
-            with open(args.changes, "r", encoding="utf-8") as f:
-                text_mod = f.read()
+            text_mod = _read_text_file(args.changes)
 
             from adeu.diff import generate_edits_via_paragraph_alignment
 
@@ -607,8 +669,7 @@ def handle_markup(args):
     if args.input.suffix.lower() == ".docx":
         text = _read_docx_text(args.input)
     else:
-        with open(args.input, "r", encoding="utf-8") as f:
-            text = f.read()
+        text = _read_text_file(args.input)
 
     if not args.edits.exists():
         print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
@@ -777,6 +838,10 @@ def handle_sanitize(args: argparse.Namespace):
 
 
 def main():
+    # Must run before anything prints and before structlog captures stderr:
+    # forces deterministic UTF-8 output and picks emoji-vs-ASCII glyphs.
+    configure_cli_streams()
+
     parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
     _version, _sha, _ = get_build_info()
     _ver_str = f"{_version}+{_sha}" if _sha and _sha != "unknown" else _version
@@ -984,10 +1049,12 @@ def main():
 
     log_level = logging.DEBUG if args.debug else logging.WARNING
     # stdout is reserved for document data / JSON results; all logging must
-    # stay on stderr so `adeu extract doc.docx > out.md` stays clean.
+    # stay on stderr so `adeu extract doc.docx > out.md` stays clean. The
+    # dynamic proxy (not sys.stderr itself) keeps this global config valid
+    # even if the stderr object is replaced or closed after configure time.
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),
     )
 
     args.func(args)
