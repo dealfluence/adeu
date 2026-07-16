@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 from io import BytesIO
@@ -167,6 +168,11 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
         sys.exit(1)
 
 
+# The decorative header every extract response starts with (see
+# _response_builders.py). It is presentation, not document content.
+_EXTRACT_HEADER_RE = re.compile(r"^> \*\*File Path:\*\*[^\n]*\n+")
+
+
 def _read_text_file(path: Path) -> str:
     """Read a user-supplied text file with encoding tolerance.
 
@@ -175,7 +181,8 @@ def _read_text_file(path: Path) -> str:
     are typically produced by redirecting console output on a legacy Windows
     code page. Content with NUL bytes (BOM-less UTF-16, binaries) gets a
     guided error instead of flowing into edits as mojibake. Newlines are
-    normalized to \\n, matching text-mode open().
+    normalized to \\n, matching text-mode open(), and a leading extract
+    file-path header is dropped so extract output round-trips cleanly.
     """
     if not path.exists():
         _print_sandbox_warning_and_exit(path)
@@ -227,7 +234,11 @@ def _read_text_file(path: Path) -> str:
                 file=sys.stderr,
             )
 
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Adeu's own extract output prepends a file-path header; strip it on
+    # ingestion so the natural extract → edit → diff/apply round trip never
+    # reports the header as a document change (QA 2026-07-16 run 2, F1).
+    return _EXTRACT_HEADER_RE.sub("", text, count=1)
 
 
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
@@ -842,9 +853,18 @@ def main():
     # forces deterministic UTF-8 output and picks emoji-vs-ASCII glyphs.
     configure_cli_streams()
 
-    parser = argparse.ArgumentParser(prog="adeu", description="Adeu: Agentic DOCX Redlining Engine")
     _version, _sha, _ = get_build_info()
     _ver_str = f"{_version}+{_sha}" if _sha and _sha != "unknown" else _version
+    parser = argparse.ArgumentParser(
+        prog="adeu",
+        description=f"Adeu: Agentic DOCX Redlining Engine (version {_ver_str})",
+        epilog=(
+            "Track Changes for the LLM era -- LLMs speak Markdown; reviewers speak Track Changes.\n"
+            "Built and maintained by the team at Adeu (https://adeu.ai).\n"
+            "Docs, MCP server & agent skills: https://github.com/dealfluence/adeu"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {_ver_str}")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
@@ -1041,7 +1061,13 @@ def main():
     )
     p_sanitize.set_defaults(func=handle_sanitize)
 
-    args = parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
+    if unknown_args:
+        # Route the error through the invoked subcommand's parser so the
+        # usage hint matches the command actually run — argparse's default
+        # reports these against the top-level parser (QA 2026-07-16 run 2, F2).
+        invoked = subparsers.choices.get(getattr(args, "command", None) or "")
+        (invoked or parser).error(f"unrecognized arguments: {' '.join(unknown_args)}")
 
     import logging
 

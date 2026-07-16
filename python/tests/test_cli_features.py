@@ -471,6 +471,31 @@ def test_cli_version(capsys):
     assert "unknown" not in output
 
 
+def test_cli_help_shows_version_and_attribution(capsys):
+    from unittest.mock import patch
+
+    from adeu.cli import main
+    from adeu.mcp_components.shared import get_build_info
+
+    test_args = ["adeu", "--help"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+
+    out = capsys.readouterr().out
+
+    # The purpose statement stays up front, now carrying the build version.
+    assert "Agentic DOCX Redlining Engine" in out
+    version, _, _ = get_build_info()
+    assert version in out
+    assert "unknown" not in out
+
+    # Team/product attribution, mirroring the README.
+    assert "https://adeu.ai" in out
+    assert "https://github.com/dealfluence/adeu" in out
+
+
 def test_cli_extract_search_query(capsys):
     from unittest.mock import patch
 
