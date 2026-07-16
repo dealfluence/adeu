@@ -1054,7 +1054,7 @@ def main():
     # even if the stderr object is replaced or closed after configure time.
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),  # type: ignore[arg-type]
     )
 
     args.func(args)
