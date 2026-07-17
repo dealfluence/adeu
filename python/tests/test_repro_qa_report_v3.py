@@ -8,11 +8,13 @@ from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
 
-def test_tc1_sequential_batch_evaluation():
+def test_tc1_sequential_chaining_works_in_both_modes():
     """
-    TC1: Sequential batch evaluation (modify->modify chaining) [report F1]
-    Intended behavior: sequential evaluation in dry-run mode (already correct on Python side).
-    A second modify must see the first modify's output.
+    TC1 [report F1], extended 2026-07-17: sequential chaining is a first-class
+    batch semantic in BOTH modes. Each edit is validated and applied against
+    the document state produced by the edits before it, so a second modify may
+    target the first modify's output — and the real run behaves exactly like
+    the dry-run (QA M1 parity).
     """
     doc = Document()
     doc.add_paragraph("As defined in Section 1, the Recipient shall maintain confidentiality of all materials.")
@@ -21,22 +23,29 @@ def test_tc1_sequential_batch_evaluation():
     doc.save(stream)
     stream.seek(0)
 
-    engine = RedlineEngine(stream)
-
-    # TC1 is specified as run with dry_run:True in report.md
-    res = engine.process_batch(
-        [
+    def batch():
+        return [
             ModifyText(target_text="the Recipient", new_text="Receiving Party"),
             ModifyText(target_text="Receiving Party", new_text="Disclosee"),
-        ],
-        dry_run=True,
-    )
+        ]
 
-    # Python correctly applies both edits in dry-run mode since it runs sequentially.
-    assert res["edits_applied"] == 2
-    assert res["edits_skipped"] == 0
-    assert res["edits"][0]["status"] == "applied"
-    assert res["edits"][1]["status"] == "applied"
+    engine = RedlineEngine(stream)
+    res_dry = engine.process_batch(batch(), dry_run=True)
+    assert res_dry["edits_applied"] == 2
+    assert res_dry["edits_skipped"] == 0
+    assert all(r["status"] == "applied" for r in res_dry["edits"])
+
+    # Real run chains identically and the final accepted text reflects both edits.
+    res_wet = engine.process_batch(batch(), dry_run=False)
+    assert res_wet["edits_applied"] == 2
+    assert res_wet["edits_skipped"] == 0
+
+    engine.accept_all_revisions(remove_comments=True)
+    from adeu.ingest import extract_text_from_stream
+
+    final_text = extract_text_from_stream(engine.save_to_stream(), filename="x.docx", clean_view=True)
+    assert "Disclosee" in final_text
+    assert "Receiving Party" not in final_text
 
 
 def test_tc2_dry_run_write_parity_active_insertion_edit():
@@ -167,8 +176,13 @@ def test_tc8_error_message_mislabeled_index():
         dry_run=True,
     )
 
-    assert res["edits_applied"] == 1
-    assert res["edits_skipped"] == 1
+    # Since QA 2026-07-17 M1, dry-run mirrors the real run's transactional
+    # semantics: a batch with any invalid edit applies nothing. The valid edit
+    # is reported as blocked by the batch, the invalid one keeps its own error.
+    assert res["edits_applied"] == 0
+    assert res["edits_skipped"] == 2
+    assert res["edits"][0]["status"] == "failed"
+    assert "transactional" in res["edits"][0]["error"]
     assert res["edits"][1]["status"] == "failed"
 
     error_msg = res["edits"][1]["error"]

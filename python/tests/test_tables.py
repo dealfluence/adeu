@@ -270,8 +270,10 @@ def test_ingest_structural_row_changes():
 
     raw_text = extract_text_from_stream(engine.save_to_stream(), clean_view=False)
     assert "{++ A1 | A2 |" in raw_text or "{++ New | Row |" in raw_text
-    assert "{++ New | Row |Chg:2++}" in raw_text
-    assert "{-- B1 | B2 |Chg:1--}" in raw_text
+    # Batches apply sequentially in batch order, so the insert (edit 1) takes
+    # Chg:1 and the delete (edit 2) takes Chg:2.
+    assert "{++ New | Row |Chg:1++}" in raw_text
+    assert "{-- B1 | B2 |Chg:2--}" in raw_text
 
 
 def test_clean_view_omits_deleted_row():

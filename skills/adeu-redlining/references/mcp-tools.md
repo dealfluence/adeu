@@ -24,7 +24,7 @@ Read a `.docx` and return text with inline CriticMarkup.
 
 ## `process_document_batch`
 
-Apply a list of edits to a `.docx`. All edits evaluate against the original document state — do not chain dependent edits within one batch.
+Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates against the document state produced by the edits before it, so you may chain dependent edits within one batch (a later edit targets the text as it reads after the earlier edits). If any edit fails validation, the whole batch is rejected transactionally.
 
 **Parameters:**
 - `original_docx_path` (str, required).

@@ -22,6 +22,14 @@ import {
   apply_formatting_to_segments,
 } from "./utils/docx.js";
 import { format_ambiguity_error } from "./markup.js";
+import {
+  PREVIEW_TEXT_CAP,
+  REPORT_ECHO_CAP,
+  truncate_middle,
+} from "./utils/text.js";
+
+// Width of the surrounding-document window shown in redline previews.
+const PREVIEW_CONTEXT_CHARS = 30;
 
 // --- DOM Mutation Helpers for xmldom ---
 function getNextElement(el: Element): Element | null {
@@ -151,6 +159,24 @@ export class BatchValidationError extends Error {
     this.errors = errors;
   }
 }
+
+// Appended to a validation error when earlier edits in the same batch have
+// already applied: the failing target may simply be stale under the
+// sequential batch contract. Wording mirrors the Python engine exactly.
+function sequential_context_hint(applied_so_far: number): string {
+  return (
+    `\n  Note: ${applied_so_far} earlier edit(s) in this batch were already ` +
+    "applied. Batches apply sequentially — each edit must target the document " +
+    "text as it reads AFTER the preceding edits (e.g. target the replacement " +
+    "text an earlier edit introduced, not the original wording)."
+  );
+}
+
+// Report placeholder for edits blocked only by OTHER edits' validation
+// failures under the transactional batch contract. Mirrors Python.
+const TRANSACTIONAL_NOT_APPLIED_ERROR =
+  "Not applied: the batch is transactional and other edits failed " +
+  "validation (see their errors). Fix or remove those edits and re-run.";
 
 export function validate_edit_strings(
   edits: any[],
@@ -473,10 +499,214 @@ export class RedlineEngine {
     }
     return "";
   }
+  // CriticMarkup wrapper pairs used when tidying preview context windows.
+  private static readonly _PREVIEW_WRAPPER_PAIRS: [string, string][] = [
+    ["{--", "--}"],
+    ["{++", "++}"],
+    ["{==", "==}"],
+    ["{>>", "<<}"],
+  ];
+
+  /**
+   * Makes a fixed-width slice of the raw-view projection presentable: drops
+   * complete {>>...<<} meta blocks (annotations of pre-existing changes, not
+   * part of this edit) and any wrapper fragments the window boundary chopped
+   * in half. Without this, previews leak internal scaffolding like
+   * "[Chg:5 delete]" (QA H1). Mirrors the Python engine.
+   */
+  private static _tidy_preview_context(
+    snippet: string,
+    side: "before" | "after",
+  ): string {
+    snippet = snippet.replace(/\{>>[\s\S]*?<<\}/g, "");
+
+    for (const [open_tok, close_tok] of RedlineEngine._PREVIEW_WRAPPER_PAIRS) {
+      if (side === "before") {
+        // Cut through the last closer whose opener lies left of the window.
+        let depth = 0;
+        let cut = 0;
+        let i = 0;
+        while (i < snippet.length) {
+          if (snippet.startsWith(open_tok, i)) {
+            depth += 1;
+            i += open_tok.length;
+          } else if (snippet.startsWith(close_tok, i)) {
+            if (depth === 0) cut = i + close_tok.length;
+            else depth -= 1;
+            i += close_tok.length;
+          } else {
+            i += 1;
+          }
+        }
+        snippet = snippet.substring(cut);
+      } else {
+        // Cut from the first opener whose closer lies right of the window.
+        const opens: number[] = [];
+        let i = 0;
+        while (i < snippet.length) {
+          if (snippet.startsWith(open_tok, i)) {
+            opens.push(i);
+            i += open_tok.length;
+          } else if (snippet.startsWith(close_tok, i)) {
+            if (opens.length > 0) opens.pop();
+            i += close_tok.length;
+          } else {
+            i += 1;
+          }
+        }
+        if (opens.length > 0) snippet = snippet.substring(0, opens[0]);
+      }
+    }
+
+    // 1-2 char remnants of a 3-char wrapper token chopped by the window edge.
+    if (side === "before") {
+      snippet = snippet.replace(/^[-+=<>]{0,2}\}/, "");
+    } else {
+      snippet = snippet.replace(/\{[-+=<>]{0,2}$/, "");
+    }
+    return snippet;
+  }
+
+  /**
+   * Snapshots the document text around a resolved edit BEFORE anything is
+   * applied. Previews rendered after the batch mutates the DOM cannot slice
+   * full_text at the stored offsets: applied edits shift offsets and inject
+   * tracked-change markup, which produced garbled previews mixing unrelated
+   * edits and internal scaffolding (QA H1).
+   */
+  private _capture_preview_context(edit: any): void {
+    if (edit.type !== "modify") return;
+    const start_idx = edit._resolved_start_idx;
+    if (start_idx === undefined || start_idx === null) return;
+    const active_mapper = edit._active_mapper_ref || this.mapper;
+    const full_text = active_mapper.full_text;
+    if (!full_text) return;
+    const length = (edit.target_text || "").length;
+    const before = full_text.substring(
+      Math.max(0, start_idx - PREVIEW_CONTEXT_CHARS),
+      start_idx,
+    );
+    const after = full_text.substring(
+      start_idx + length,
+      start_idx + length + PREVIEW_CONTEXT_CHARS,
+    );
+    edit._preview_context = [
+      RedlineEngine._tidy_preview_context(before, "before"),
+      RedlineEngine._tidy_preview_context(after, "after"),
+    ];
+  }
+
+  /**
+   * Like _capture_preview_context, but snapshots the context around the
+   * ORIGINAL edit's full matched span (stashed by _pre_resolve_heuristic_edit),
+   * so the report preview can present the complete logical change of a
+   * compound modification instead of its first sub-edit.
+   */
+  private _capture_parent_preview_context(parent: any): void {
+    if (!parent || parent.type !== "modify") return;
+    if (parent._preview_context || !parent._preview_span) return;
+    const [start_idx, match_len] = parent._preview_span;
+    const active_mapper = parent._preview_mapper_ref || this.mapper;
+    const full_text = active_mapper.full_text;
+    if (!full_text) return;
+    const before = full_text.substring(
+      Math.max(0, start_idx - PREVIEW_CONTEXT_CHARS),
+      start_idx,
+    );
+    const after = full_text.substring(
+      start_idx + match_len,
+      start_idx + match_len + PREVIEW_CONTEXT_CHARS,
+    );
+    parent._preview_context = [
+      RedlineEngine._tidy_preview_context(before, "before"),
+      RedlineEngine._tidy_preview_context(after, "after"),
+    ];
+  }
+
+  /**
+   * Renders the preview from the edit's full matched span. The common
+   * prefix/suffix between matched and replacement text is moved into the
+   * surrounding context so the {--...--}{++...++} block shows the minimal
+   * complete change.
+   */
+  private _build_full_match_preview(edit: any): [string | null, string | null] {
+    let [context_before, context_after] = edit._preview_context as [
+      string,
+      string,
+    ];
+    let matched: string = edit._preview_matched_text || "";
+    let new_text: string =
+      edit._preview_new_text !== undefined && edit._preview_new_text !== null
+        ? edit._preview_new_text
+        : edit.new_text || "";
+
+    // Heading markdown prefixes are projection artifacts, not literal
+    // document text — keep them out of the {--...--}/{++...++} body.
+    const [matched_clean, matched_style] = this._parse_markdown_style(matched);
+    const [new_clean, new_style] = this._parse_markdown_style(new_text);
+    if (matched_style && matched_style.startsWith("Heading")) {
+      context_before = context_before + matched.substring(0, matched.length - matched_clean.length);
+      matched = matched_clean;
+    }
+    if (new_style && new_style.startsWith("Heading")) {
+      new_text = new_clean;
+    }
+
+    const [prefix_len, suffix_len] = trim_common_context(matched, new_text);
+    let display_target = matched.substring(
+      prefix_len,
+      matched.length - suffix_len,
+    );
+    let display_new = new_text.substring(
+      prefix_len,
+      new_text.length - suffix_len,
+    );
+    context_before = context_before + matched.substring(0, prefix_len);
+    if (suffix_len) {
+      context_after = matched.substring(matched.length - suffix_len) + context_after;
+    }
+
+    display_target = truncate_middle(display_target, PREVIEW_TEXT_CAP);
+    display_new = truncate_middle(display_new, PREVIEW_TEXT_CAP);
+    let critic_markup: string;
+    if (!display_target && !display_new) {
+      // Comment-only edit (text unchanged): highlight the anchor instead of
+      // rendering an empty change.
+      const anchor = truncate_middle(matched, PREVIEW_TEXT_CAP);
+      const body = anchor ? `{==${anchor}==}` : "";
+      critic_markup = `${context_before.substring(0, context_before.length - matched.length)}${body}${context_after}`;
+    } else {
+      const deletion = display_target ? `{--${display_target}--}` : "";
+      const insertion = display_new ? `{++${display_new}++}` : "";
+      critic_markup = `${context_before}${deletion}${insertion}${context_after}`;
+    }
+
+    let clean_text = critic_markup;
+    clean_text = clean_text.replace(/\{>>[\s\S]*?<<\}/g, "");
+    clean_text = clean_text.replace(/\{--[\s\S]*?--\}/g, "");
+    clean_text = clean_text.replace(/\{\+\+([\s\S]*?)\+\+\}/g, "$1");
+    return [critic_markup, clean_text];
+  }
+
+  /**
+   * The "new text" a batch report should show for an edit. InsertTableRow has
+   * no new_text field — surface its cell contents instead of the misleading
+   * empty string the report used to print (QA M4).
+   */
+  private static _report_new_text(edit: any): string {
+    if (edit && edit.type === "insert_row" && Array.isArray(edit.cells)) {
+      return edit.cells.join(" | ");
+    }
+    return (edit && edit.new_text) || "";
+  }
+
   private _build_edit_context_previews(
     edit: any,
   ): [string | null, string | null] {
     if (edit.type !== "modify") return [null, null];
+    if (edit._preview_span && edit._preview_context) {
+      return this._build_full_match_preview(edit);
+    }
     if (edit._resolved_proxy_edit) {
       edit = edit._resolved_proxy_edit;
     }
@@ -499,19 +729,38 @@ export class RedlineEngine {
     }
 
     const length = target_text.length;
-    const active_mapper = edit._active_mapper_ref || this.mapper;
-    const full_text = active_mapper.full_text;
-    if (!full_text) return [null, null];
+    let context_before: string;
+    let context_after: string;
+    if (edit._preview_context) {
+      [context_before, context_after] = edit._preview_context;
+    } else {
+      // Fallback for callers that never went through apply_edits. Only safe
+      // while the mapper still reflects the pre-apply document.
+      const active_mapper = edit._active_mapper_ref || this.mapper;
+      const full_text = active_mapper.full_text;
+      if (!full_text) return [null, null];
+      context_before = RedlineEngine._tidy_preview_context(
+        full_text.substring(
+          Math.max(0, start_idx - PREVIEW_CONTEXT_CHARS),
+          start_idx,
+        ),
+        "before",
+      );
+      context_after = RedlineEngine._tidy_preview_context(
+        full_text.substring(
+          start_idx + length,
+          start_idx + length + PREVIEW_CONTEXT_CHARS,
+        ),
+        "after",
+      );
+    }
 
-    const before_start = Math.max(0, start_idx - 30);
-    const context_before = full_text.substring(before_start, start_idx);
-    const context_after = full_text.substring(
-      start_idx + length,
-      start_idx + length + 30,
-    );
-
-    const insertion = new_text ? `{++${new_text}++}` : "";
-    const critic_markup = `${context_before}{--${target_text}--}${insertion}${context_after}`;
+    // Bound the echoed edit values: previews flow into LLM context windows
+    // and must not multiply an oversized new_text/target_text (QA C2).
+    const display_target = truncate_middle(target_text, PREVIEW_TEXT_CAP);
+    const display_new = truncate_middle(new_text, PREVIEW_TEXT_CAP);
+    const insertion = display_new ? `{++${display_new}++}` : "";
+    const critic_markup = `${context_before}{--${display_target}--}${insertion}${context_after}`;
 
     let clean_text = critic_markup;
     clean_text = clean_text.replace(/\{>>.*?<<\}/gs, "");
@@ -1713,7 +1962,7 @@ export class RedlineEngine {
         } else {
           const hint = this._nearest_match_hint(edit.target_text, is_regex);
           errors.push(
-            `- Edit ${i + 1 + index_offset} Failed: Target text not found in document:\n  "${edit.target_text}"${hint}`,
+            `- Edit ${i + 1 + index_offset} Failed: Target text not found in document:\n  "${truncate_middle(edit.target_text, REPORT_ECHO_CAP)}"${hint}`,
           );
         }
       } else if (matches.length > 1 && match_mode === "strict") {
@@ -1862,8 +2111,63 @@ export class RedlineEngine {
           );
         }
       }
+
+      // Structural table edits: verify the anchor really is a table row, and
+      // that insert_row does not provide more cells than the row has columns —
+      // extra cells used to produce a structurally inconsistent row (QA M3).
+      if (
+        (edit.type === "insert_row" || edit.type === "delete_row") &&
+        matches.length > 0
+      ) {
+        const [start, length] = matches[0];
+        const n_cols = RedlineEngine._column_count_at(
+          target_mapper,
+          start,
+          length,
+        );
+        if (n_cols === null) {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: ${edit.type} target text was found, but it is not inside a table row. Anchor the operation on text that appears within the table.`,
+          );
+        } else if (
+          edit.type === "insert_row" &&
+          Array.isArray(edit.cells) &&
+          edit.cells.length > n_cols
+        ) {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: insert_row provides ${edit.cells.length} cells but the target table has ${n_cols} column(s). The extra cell(s) would be dropped. Provide at most ${n_cols} cells — rows given fewer cells are padded with empty ones.`,
+          );
+        }
+      }
     }
     return errors;
+  }
+
+  /**
+   * Number of columns (w:tc elements) in the table row containing the text at
+   * [start, start+length) in `mapper`, or null if that text is not inside a
+   * table row.
+   */
+  private static _column_count_at(
+    mapper: DocumentMapper,
+    start: number,
+    length: number,
+  ): number | null {
+    for (const s of mapper.spans) {
+      if (s.run === null || s.end <= start || s.start >= start + length) {
+        continue;
+      }
+      let curr: Node | null = s.run._element;
+      while (curr) {
+        if (curr.nodeType === 1 && (curr as Element).tagName === "w:tr") {
+          return findAllDescendants(curr as Element, "w:tc").filter(
+            (tc) => tc.parentNode === curr,
+          ).length;
+        }
+        curr = curr.parentNode;
+      }
+    }
+    return null;
   }
 
   public validate_review_actions(actions: any[]): string[] {
@@ -2082,9 +2386,18 @@ export class RedlineEngine {
 
       if (dry_run_mode) {
         const reports_by_input: any[] = new Array(edits.length);
+        // Indexes that failed VALIDATION (not runtime skips): if any exist,
+        // the real run rejects the whole batch, so the dry-run report must
+        // not claim any edit "applied" (transactional parity with Python).
+        const validation_failed_idx = new Set<number>();
         for (const { edit, i } of ordered_edits) {
-          const single_errors = this.validate_edits([edit], i);
+          let single_errors = this.validate_edits([edit], i);
           if (single_errors.length > 0) {
+            if (applied_edits > 0) {
+              const hint = sequential_context_hint(applied_edits);
+              single_errors = single_errors.map((err) => err + hint);
+            }
+            validation_failed_idx.add(i);
             skipped_edits++;
             // Only surface the punctuation-anchor warning when the edit actually
             // failed. A clean apply already returns the redline preview, so the
@@ -2096,10 +2409,10 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
-              target_text: (edit as any).target_text || "",
-              new_text: (edit as any).new_text || "",
+              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
+              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
-              error: single_errors[0],
+              error: single_errors.join("\n"),
               critic_markup: null,
               clean_text: null,
             };
@@ -2111,8 +2424,8 @@ export class RedlineEngine {
             const previews = this._build_edit_context_previews(edit);
             reports_by_input[i] = {
               status: "applied",
-              target_text: (edit as any).target_text || "",
-              new_text: (edit as any).new_text || "",
+              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
+              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: null,
               error: null,
               critic_markup: previews[0],
@@ -2135,13 +2448,36 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
-              target_text: (edit as any).target_text || "",
-              new_text: (edit as any).new_text || "",
+              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
+              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
               error: error_msg,
               critic_markup: null,
               clean_text: null,
             };
+          }
+        }
+        if (validation_failed_idx.size > 0) {
+          // Dry-run mirrors the real run's transactional rejection: no edit
+          // will be applied by the real run, so none may be reported as
+          // applied here. Edits that only failed at runtime keep their own
+          // error; edits that would have applied get the transactional note.
+          applied_edits = 0;
+          skipped_edits = edits.length;
+          for (let i = 0; i < reports_by_input.length; i++) {
+            const report = reports_by_input[i];
+            if (!report || validation_failed_idx.has(i)) continue;
+            if (report.status === "applied") {
+              reports_by_input[i] = {
+                status: "failed",
+                target_text: report.target_text,
+                new_text: report.new_text,
+                warning: null,
+                error: TRANSACTIONAL_NOT_APPLIED_ERROR,
+                critic_markup: null,
+                clean_text: null,
+              };
+            }
           }
         }
         edits_reports.push(...reports_by_input);
@@ -2151,12 +2487,20 @@ export class RedlineEngine {
         const originalCurrentId = this.current_id;
         try {
           const sequential_errors: string[] = [];
+          let applied_so_far = 0;
           for (const { edit, i } of ordered_edits) {
-            const single_errors = this.validate_edits([edit], i);
+            let single_errors = this.validate_edits([edit], i);
             if (single_errors.length > 0) {
+              if (applied_so_far > 0) {
+                const hint = sequential_context_hint(applied_so_far);
+                single_errors = single_errors.map((err) => err + hint);
+              }
               sequential_errors.push(...single_errors);
             } else {
               this.apply_edits([edit], page_offsets);
+              if ((edit as any)._applied_status) {
+                applied_so_far++;
+              }
               this.mapper = new DocumentMapper(this.doc);
               this.clean_mapper = null;
             }
@@ -2195,8 +2539,8 @@ export class RedlineEngine {
           }
           edits_reports.push({
             status: success ? "applied" : "failed",
-            target_text: (edit as any).target_text || "",
-            new_text: (edit as any).new_text || "",
+            target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
+            new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
             warning: warning,
             error: error_msg,
             critic_markup: critic_markup,
@@ -2320,6 +2664,18 @@ export class RedlineEngine {
       (a, b) =>
         (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
     );
+
+    // Snapshot preview context now, while every resolved offset still refers
+    // to the untouched document. The sweep below mutates the DOM and rebuilds
+    // the map, which shifts offsets and injects tracked-change markup —
+    // slicing full_text at report time garbled previews (QA H1).
+    for (const [res_edit] of resolved_edits) {
+      this._capture_preview_context(res_edit);
+      if (res_edit._parent_edit_ref) {
+        this._capture_parent_preview_context(res_edit._parent_edit_ref);
+      }
+    }
+
     const occupied_ranges: [number, number][] = [];
     // Sub-edits split from one balanced multi-paragraph modification share a
     // _split_group_id; count the group as a single applied edit (and a single
@@ -2552,7 +2908,22 @@ export class RedlineEngine {
       const trPr = tr.ownerDocument!.createElement("w:trPr");
       new_tr.appendChild(trPr);
       trPr.appendChild(this._create_track_change_tag("w:ins"));
-      for (const cellText of edit.cells) {
+      // The new row must carry exactly as many cells as the anchor row has
+      // columns: pad missing cells with empty strings and drop extras
+      // (validation already rejects overfilled batches upfront, QA M3) so a
+      // mismatched `cells` list can never produce a structurally
+      // inconsistent table row.
+      const anchor_cols = findAllDescendants(tr, "w:tc").filter(
+        (tc) => tc.parentNode === tr,
+      ).length;
+      let cell_values: string[] = Array.isArray(edit.cells)
+        ? [...edit.cells]
+        : [];
+      if (anchor_cols > 0) {
+        while (cell_values.length < anchor_cols) cell_values.push("");
+        cell_values = cell_values.slice(0, anchor_cols);
+      }
+      for (const cellText of cell_values) {
         const tc = tr.ownerDocument!.createElement("w:tc");
         const p = tr.ownerDocument!.createElement("w:p");
         const r = tr.ownerDocument!.createElement("w:r");
@@ -2669,6 +3040,17 @@ export class RedlineEngine {
             current_effective_new_text,
           );
         } catch (e) {}
+      }
+
+      // Stash the first occurrence's full match for the report preview, so it
+      // can show the complete logical change rather than only the first
+      // word-diff sub-edit (e.g. "{--two--}{++five++} (2) years" for a
+      // "two (2) years" -> "five (5) years" edit). Mirrors Python (QA H1).
+      if (!edit._preview_span) {
+        edit._preview_span = [start_idx, match_len];
+        edit._preview_matched_text = actual_doc_text;
+        edit._preview_new_text = current_effective_new_text;
+        edit._preview_mapper_ref = active_mapper;
       }
 
       const [edit_target_clean, edit_target_style] = this._parse_markdown_style(

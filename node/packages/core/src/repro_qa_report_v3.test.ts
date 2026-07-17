@@ -172,10 +172,16 @@ describe("QA Report V3 Defects Reproductions", () => {
       } as any,
     ], true);
 
-    expect(res.edits_applied).toBe(1);
-    expect(res.edits_skipped).toBe(1);
+    // Dry-run mirrors the real run's transactional semantics (QA 2026-07-17
+    // M1 parity): a batch with any invalid edit applies nothing. The valid
+    // edit is reported as blocked by the batch, the invalid one keeps its own
+    // error.
+    expect(res.edits_applied).toBe(0);
+    expect(res.edits_skipped).toBe(2);
+    expect(res.edits[0].status).toBe("failed");
+    expect(res.edits[0].error).toContain("transactional");
     expect(res.edits[1].status).toBe("failed");
-    
+
     // Assert that the error message correctly labels it as Edit 2.
     // The buggy unpatched codebase says "Edit 1 Failed:" inside the error message for Edit 2.
     const errorMsg = res.edits[1].error;

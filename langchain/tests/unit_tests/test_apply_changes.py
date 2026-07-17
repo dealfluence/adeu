@@ -41,11 +41,11 @@ class TestAdeuApplyChangesSchema:
             assert change_type in desc, f"description missing change type '{change_type}'"
 
     def test_description_warns_about_batch_semantics(self) -> None:
-        # The "do not chain dependent edits in one batch" rule is one of
-        # the most common pitfalls. If the warning is missing, LLMs will
-        # write rename-then-modify batches and get confused by failures.
+        # Batches apply sequentially (chaining supported); if the contract is
+        # missing from the description, LLMs won't know a later edit must
+        # target the text as it reads AFTER the preceding edits.
         tool = AdeuApplyChanges()
-        assert "ORIGINAL" in tool.description or "original" in tool.description
+        assert "SEQUENTIALLY" in tool.description or "sequential" in tool.description.lower()
 
     def test_description_warns_about_id_volatility(self) -> None:
         # IDs shift between document states. If the warning is missing,

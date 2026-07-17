@@ -127,7 +127,7 @@ const READ_DOCX_TAIL =
   "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.";
 
 const PROCESS_BATCH_COMMON_DESC =
-  "Applies a batch of edits and review actions to a DOCX.\n\nAll changes evaluate against the ORIGINAL document state — do not chain dependent edits within one batch (e.g. rename X to Y, then modify Y). Apply the rename first, then send a second batch.\n\n";
+  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated and applied against the document state produced by the changes before it, so you may chain dependent edits within one batch (e.g. rename X to Y, then modify Y — the second edit must target Y, the text as it reads after the rename). Validation failures reject the whole batch transactionally: nothing is applied until every change resolves.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
   "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. By default `target_text` must match uniquely (`match_mode`:'strict') — add surrounding context to disambiguate, or set `match_mode`:'first'/'all' to edit the first or every occurrence. Set `regex`:true to treat `target_text` as a regular expression (capture groups available in `new_text` as $1, $2…). `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n   • EMPTY/FORM TABLE CELLS: a blank cell has no text to match. `read_docx` renders each cell with a trailing `{#cell:<id>}` anchor — to fill a blank cell, set `target_text` to that exact anchor (e.g. '{#cell:0000005E}') and put the value in `new_text`. Do NOT try to match the pipe layout ('Date |  |  |'); the pipes are display separators, not editable text.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation. The `{#cell:<id>}` anchors are stable (Word-assigned) and safe to reuse across reads.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
 
@@ -252,7 +252,7 @@ registerAppTool(
         .union([z.number(), z.string()])
         .optional()
         .describe(
-          "Without `search_query`: 1-indexed document page to display (defaults to 1). With `search_query`: restricts matches to that document page (defaults to searching all pages; pass `page='all'` to be explicit).",
+          "Without `search_query`: 1-indexed document page to display (defaults to 1). With `search_query`: restricts matches to that document page (defaults to searching all pages; pass `page='all'` to be explicit). Note: pages are synthetic, length-based content chunks sized for LLM consumption — they do NOT correspond to printed Word pages or explicit page breaks.",
         ),
       outline_max_level: z.coerce
         .number()
@@ -333,12 +333,27 @@ registerAppTool(
         return res as any;
       }
       // In non-search mode, `page` defaults to 1 (show document page 1).
-      const resolvedPage =
-        page === undefined || page === null
-          ? 1
-          : typeof page === "number"
-            ? page
-            : parseInt(String(page), 10) || 1;
+      // Non-numeric values must error, not silently fall back to page 1
+      // (QA L1 parity with the Python CLI).
+      let resolvedPage = 1;
+      if (page !== undefined && page !== null) {
+        const parsed =
+          typeof page === "number" ? page : parseInt(String(page).trim(), 10);
+        if (!Number.isFinite(parsed)) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  `Invalid page value: '${page}'. Provide a positive integer ` +
+                  `(pages are 1-indexed; 'all' is only valid together with search_query).`,
+              },
+            ],
+          };
+        }
+        resolvedPage = parsed;
+      }
       if (mode === "appendix") {
         const res = build_appendix_response(text, resolvedPage, file_path);
         return res as any;
@@ -446,7 +461,7 @@ server.registerTool(
       changes: z
         .array(z.union([z.string(), CHANGE_ITEM_SCHEMA]))
         .describe(
-          "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). All items evaluate against the ORIGINAL document state.",
+          "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). Items apply SEQUENTIALLY: each one evaluates against the document state produced by the items before it, so later items may target text an earlier item introduced.",
         ),
       output_path: z.string().optional().describe("Optional output path."),
       dry_run: z
@@ -585,10 +600,29 @@ server.registerTool(
 
       if (!dry_run) {
         const outBuf = await doc.save();
-        fs.writeFileSync(outPath, outBuf);
+        try {
+          fs.writeFileSync(outPath, outBuf);
+        } catch (e: any) {
+          // Filesystem failures (name too long, missing directory, perms)
+          // must surface as a clear, actionable error (QA H3 parity).
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Could not write output file '${outPath}': ${e.message}`,
+              },
+            ],
+          };
+        }
       }
 
-      const res = formatBatchResult(stats, outPath, !!dry_run);
+      let res = formatBatchResult(stats, outPath, !!dry_run);
+      if (sanitizedChanges.length === 0) {
+        res =
+          `⚠️ 0 changes provided — nothing to do. The output is an unmodified copy of the original.\n\n` +
+          res;
+      }
       return { content: [{ type: "text", text: res }] };
     } catch (e: any) {
       return {

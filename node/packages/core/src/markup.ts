@@ -424,17 +424,23 @@ export function format_ambiguity_error(
 
   // Tell the agent EXACTLY how to re-call. Without this, agents loop forever
   // refining target_text/regex because they never learn that match_mode is the
-  // built-in escape hatch for genuine ambiguity.
+  // built-in escape hatch for genuine ambiguity. The safe strategy (more
+  // context) comes first: blindly switching to "first"/"all" has silently
+  // modified unrelated occurrences — dates, section numbers — in real use
+  // (QA C1), so those options carry an explicit verification warning.
+  // Wording mirrors the Python engine's format_ambiguity_error.
   lines.push("  To resolve, re-send this edit using ONE of these strategies:");
   lines.push(
-    `    1. Set "match_mode": "all" to modify ALL ${total} occurrences (same target_text).`,
-  );
-  lines.push(
-    '    2. Set "match_mode": "first" to modify only the FIRST occurrence (same target_text).',
-  );
-  lines.push(
-    '    3. Please provide more surrounding context in your target_text to uniquely ' +
+    "    1. RECOMMENDED: Provide more surrounding context in your target_text to uniquely " +
       'identify a single location (keep the default "match_mode": "strict").',
+  );
+  lines.push(
+    `    2. Set "match_mode": "all" to modify ALL ${total} occurrences — only after verifying ` +
+      "from the occurrence list above that EVERY occurrence should change.",
+  );
+  lines.push(
+    '    3. Set "match_mode": "first" to modify only the FIRST occurrence — only after verifying ' +
+      "the first occurrence above is the one you intend to change.",
   );
 
   return lines.join("\n");

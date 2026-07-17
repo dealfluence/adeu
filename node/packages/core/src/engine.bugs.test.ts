@@ -57,7 +57,7 @@ describe("Resolved Bugs Core Engine Verification", () => {
       "Ambiguous match. Target text appears 4 times",
     );
     expect(caught.message).toContain("[the]"); // Ensure the matched text is bracketed
-    expect(caught.message).toContain("Please provide more surrounding context");
+    expect(caught.message).toContain("Provide more surrounding context");
   });
 
   it("BUG-7: Unifies review-action and text-edit validation errors in a single pass", async () => {

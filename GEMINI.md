@@ -18,7 +18,7 @@ Reads a DOCX file and returns its content as CriticMarkup-annotated text:
 - `page=N`: navigate paginated full-text output
 
 ### `process_document_batch`
-Applies a list of edits atomically to a DOCX. All edits evaluate against the **original** document state — do not chain dependent edits in one batch.
+Applies a list of edits to a DOCX. Edits apply **sequentially** — each one evaluates against the document state produced by the edits before it, so dependent edits may be chained in one batch (a later edit must target the text as it reads after the earlier edits). If any edit fails validation, the whole batch is rejected transactionally.
 
 **Change types:**
 - `modify`: search-and-replace. `target_text` must uniquely identify the passage. `new_text` supports Markdown headings, bold, italic, and `\n\n` for paragraph breaks. Empty `new_text` deletes the passage.

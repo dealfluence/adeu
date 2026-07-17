@@ -158,6 +158,13 @@ def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
     return chg_remap, com_remap
 
 
+# Markdown style delimiters the projection emits as VIRTUAL spans around
+# formatted runs (see get_run_style_markers). Literal asterisks/underscores
+# typed in the document live inside real (run-backed) spans and are never
+# confused with these.
+_STYLE_MARKER_TEXTS = frozenset({"**", "__", "*", "_"})
+
+
 class DocumentMapper:
     def __init__(self, doc: DocumentObject, clean_view: bool = False, original_view: bool = False):
         self.doc = doc
@@ -168,6 +175,7 @@ class DocumentMapper:
         self.full_text = ""
         self.spans: List[TextSpan] = []
         self.appendix_start_index: int = -1
+        self._plain_projection: Optional[Tuple[str, List[int]]] = None
         self._build_map()
 
     def _build_map(self):
@@ -175,6 +183,7 @@ class DocumentMapper:
         self.spans = []
         self._text_chunks: List[str] = []
         self.full_text = ""
+        self._plain_projection = None
 
         for part in iter_document_parts(self.doc):
             current_offset = self._map_blocks(part, current_offset)
@@ -730,6 +739,54 @@ class DocumentMapper:
 
         return "".join(parts)
 
+    def _get_plain_projection(self) -> Tuple[str, List[int]]:
+        """
+        Returns (plain_text, offset_map) where plain_text is full_text with the
+        VIRTUAL markdown style delimiters (bold/italic markers emitted around
+        formatted runs) removed, and offset_map[i] is the full_text index of
+        plain_text[i].
+
+        Formatting run boundaries can fall mid-word (e.g. a paragraph projected
+        as "**Al**pha"), where neither exact matching nor the whitespace-anchored
+        fuzzy regex can find the plain target "Alpha". Matching against this
+        projection and mapping the span back to full_text closes that gap.
+
+        Built lazily and invalidated by _build_map(): most batches never need it.
+        """
+        if self._plain_projection is None:
+            chunks: List[str] = []
+            offsets: List[int] = []
+            for s in self.spans:
+                if s.run is None and s.paragraph is not None and s.text in _STYLE_MARKER_TEXTS:
+                    continue
+                chunks.append(s.text)
+                offsets.extend(range(s.start, s.end))
+            self._plain_projection = ("".join(chunks), offsets)
+        return self._plain_projection
+
+    def _find_plain_projection_matches(self, target_text: str, flags: int = 0) -> List[Tuple[int, int]]:
+        """
+        Matches a markdown-stripped target against the plain projection and maps
+        each hit back to a (start, length) span in full_text. Interior style
+        markers end up inside the returned span (so "Alpha" over "**Al**pha"
+        resolves to the "Al**pha" range); markers just outside the matched
+        characters are excluded.
+        """
+        plain_text, offsets = self._get_plain_projection()
+        if len(plain_text) == len(self.full_text):
+            return []  # No virtual style markers anywhere; nothing new to find.
+        norm_target = self._replace_smart_quotes(self._strip_markdown_formatting(target_text))
+        if not norm_target:
+            return []
+        norm_plain = self._replace_smart_quotes(plain_text)
+        results: List[Tuple[int, int]] = []
+        for m in re.finditer(re.escape(norm_target), norm_plain, flags=flags):
+            p_start, p_end = m.span()
+            raw_start = offsets[p_start]
+            raw_end = offsets[p_end - 1] + 1
+            results.append((raw_start, raw_end - raw_start))
+        return results
+
     def _range_in_deletion(self, start: int, length: int) -> bool:
         """
         BUG-23-5: Returns True if the [start, start+length) range falls entirely
@@ -788,6 +845,13 @@ class DocumentMapper:
             start_idx = self.full_text.find(stripped_target)
             return start_idx, len(stripped_target)
 
+        # 3.5 Plain-projection match: the target crosses a formatting run
+        # boundary (possibly mid-word), so the projection carries style markers
+        # the plain target doesn't have.
+        for start, length in self._find_plain_projection_matches(target_text, flags=flags):
+            if not self._range_in_deletion(start, length):
+                return start, length
+
         # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
@@ -834,6 +898,12 @@ class DocumentMapper:
         matches = [m.span() for m in re.finditer(re.escape(stripped_target), self.full_text, flags=flags)]
         if matches:
             return [(s, e - s) for s, e in matches]
+
+        # 3.5 Plain-projection match (target spans a bold/italic run boundary,
+        # possibly mid-word). See _find_plain_projection_matches.
+        plain_matches = self._find_plain_projection_matches(target_text, flags=flags)
+        if plain_matches:
+            return plain_matches
 
         # 4. Fuzzy Regex Match
         try:

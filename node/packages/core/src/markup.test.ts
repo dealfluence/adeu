@@ -174,7 +174,7 @@ describe('format_ambiguity_error (Turn Loop Trap mitigation)', () => {
     expect(msg).toContain('FIRST occurrence');
 
     // The original "add more context" guidance is preserved as a third option.
-    expect(msg).toContain('Please provide more surrounding context');
+    expect(msg).toContain('Provide more surrounding context');
   });
 
   it('still throws for fewer than two matches', () => {

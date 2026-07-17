@@ -551,9 +551,12 @@ READ_DOCX_TAIL = (
 
 PROCESS_BATCH_COMMON_DESC = (
     "Applies a batch of edits and review actions to a DOCX.\n\n"
-    "All changes evaluate against the ORIGINAL document state — do not chain "
-    "dependent edits within one batch (e.g. rename X to Y, then modify Y). "
-    "Apply the rename first, then send a second batch.\n\n"
+    "Batches apply SEQUENTIALLY: each change is validated and applied against "
+    "the document state produced by the changes before it, so you may chain "
+    "dependent edits within one batch (e.g. rename X to Y, then modify Y — "
+    "the second edit must target Y, the text as it reads after the rename). "
+    "Validation failures reject the whole batch transactionally: nothing is "
+    "applied until every change resolves.\n\n"
 )
 PROCESS_BATCH_WIN32_EXTRA = (
     "If the file is open in Word, edits run live on the canvas. "

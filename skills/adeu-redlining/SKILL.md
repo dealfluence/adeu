@@ -45,7 +45,7 @@ Every redlining task follows the same shape. Follow it in order:
 
 1. **Read first.** Always read the document before editing. Use `read_docx` (MCP) or `uvx adeu extract` (CLI). For long contracts, start with `mode="outline"` to see the heading structure, then read specific pages.
 2. **Plan the edits.** Each edit is either a search-and-replace (most common), an accept/reject of an existing tracked change by ID, a reply to a comment by ID, or a structural table edit. Write the plan down explicitly before applying.
-3. **Apply as one batch.** Send all edits in a single `process_document_batch` call (MCP) or one `adeu apply` invocation (CLI). All edits evaluate against the _original_ document state — never chain dependent edits across the same batch.
+3. **Apply as one batch.** Send all edits in a single `process_document_batch` call (MCP) or one `adeu apply` invocation (CLI). Edits apply _sequentially_: each edit evaluates against the document state produced by the edits before it, so dependent edits may be chained — a later edit must target the text as it reads _after_ the earlier edits.
 4. **Verify.** If the user asked for a specific outcome, re-read the modified file with `clean_view=true` (MCP) or `--clean` (CLI) and confirm.
 
 For destructive or finalization operations, run a dry-run first when the tool supports it (`dry_run: true` on `process_document_batch`).
@@ -56,7 +56,7 @@ These are environment-specific facts that will trip you up if you assume Word/`.
 
 - **IDs are session-bound.** Change IDs (`Chg:12`) and comment IDs (`Com:5`) shift every time the document state changes. Before any `accept`, `reject`, or `reply` action, call `read_docx` _immediately_ before the batch. Never reuse IDs from earlier in the conversation. Never reuse IDs across a save/reload boundary.
 
-- **Batches evaluate against the original state.** You cannot rename `X → Y` and then in the same batch modify `Y`. The second edit will search the _original_ document where `Y` doesn't exist. Apply the rename, then send a second batch.
+- **Batches apply sequentially and reject transactionally.** You can rename `X → Y` and then in the same batch modify `Y` — but the second edit must target `Y` (the text as it reads after the rename), not the original `X` wording. Stale targets fail validation, and any validation failure rejects the whole batch (nothing is applied) with per-edit errors explaining what to fix.
 
 - **`target_text` must be unique by default.** `match_mode: "strict"` (the default) requires a single match. Either add surrounding context to disambiguate, or explicitly set `match_mode: "first"` or `"all"`. Set `regex: true` to use a regular expression; capture groups are available as `$1`, `$2` in `new_text`.
 
