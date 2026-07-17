@@ -252,7 +252,7 @@ registerAppTool(
         .union([z.number(), z.string()])
         .optional()
         .describe(
-          "Without `search_query`: 1-indexed document page to display (defaults to 1). With `search_query`: restricts matches to that document page (defaults to searching all pages; pass `page='all'` to be explicit).",
+          "Without `search_query`: 1-indexed document page to display (defaults to 1). With `search_query`: restricts matches to that document page (defaults to searching all pages; pass `page='all'` to be explicit). Note: pages are synthetic, length-based content chunks sized for LLM consumption — they do NOT correspond to printed Word pages or explicit page breaks.",
         ),
       outline_max_level: z.coerce
         .number()
@@ -333,12 +333,27 @@ registerAppTool(
         return res as any;
       }
       // In non-search mode, `page` defaults to 1 (show document page 1).
-      const resolvedPage =
-        page === undefined || page === null
-          ? 1
-          : typeof page === "number"
-            ? page
-            : parseInt(String(page), 10) || 1;
+      // Non-numeric values must error, not silently fall back to page 1
+      // (QA L1 parity with the Python CLI).
+      let resolvedPage = 1;
+      if (page !== undefined && page !== null) {
+        const parsed =
+          typeof page === "number" ? page : parseInt(String(page).trim(), 10);
+        if (!Number.isFinite(parsed)) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  `Invalid page value: '${page}'. Provide a positive integer ` +
+                  `(pages are 1-indexed; 'all' is only valid together with search_query).`,
+              },
+            ],
+          };
+        }
+        resolvedPage = parsed;
+      }
       if (mode === "appendix") {
         const res = build_appendix_response(text, resolvedPage, file_path);
         return res as any;
@@ -585,10 +600,29 @@ server.registerTool(
 
       if (!dry_run) {
         const outBuf = await doc.save();
-        fs.writeFileSync(outPath, outBuf);
+        try {
+          fs.writeFileSync(outPath, outBuf);
+        } catch (e: any) {
+          // Filesystem failures (name too long, missing directory, perms)
+          // must surface as a clear, actionable error (QA H3 parity).
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Could not write output file '${outPath}': ${e.message}`,
+              },
+            ],
+          };
+        }
       }
 
-      const res = formatBatchResult(stats, outPath, !!dry_run);
+      let res = formatBatchResult(stats, outPath, !!dry_run);
+      if (sanitizedChanges.length === 0) {
+        res =
+          `⚠️ 0 changes provided — nothing to do. The output is an unmodified copy of the original.\n\n` +
+          res;
+      }
       return { content: [{ type: "text", text: res }] };
     } catch (e: any) {
       return {

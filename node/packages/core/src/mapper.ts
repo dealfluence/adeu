@@ -105,6 +105,12 @@ export function renumber_snapshot_ids(
   return [chg_remap, com_remap];
 }
 
+// Markdown style delimiters the projection emits as VIRTUAL spans around
+// formatted runs (see get_run_style_markers). Literal asterisks/underscores
+// typed in the document live inside real (run-backed) spans and are never
+// confused with these.
+const STYLE_MARKER_TEXTS = new Set(["**", "__", "*", "_"]);
+
 export class DocumentMapper {
   public doc: DocumentObject;
   public clean_view: boolean;
@@ -114,6 +120,7 @@ export class DocumentMapper {
   public spans: TextSpan[] = [];
   public appendix_start_index: number = -1;
   private _text_chunks: string[] = [];
+  private _plain_projection: [string, number[]] | null = null;
 
   constructor(
     doc: DocumentObject,
@@ -132,6 +139,7 @@ export class DocumentMapper {
     this.spans = [];
     this._text_chunks = [];
     this.full_text = "";
+    this._plain_projection = null;
 
     for (const part of iter_document_parts(this.doc)) {
       current_offset = this._map_blocks(part, current_offset);
@@ -800,6 +808,72 @@ export class DocumentMapper {
     return parts.join("");
   }
 
+  /**
+   * Returns [plain_text, offset_map] where plain_text is full_text with the
+   * VIRTUAL markdown style delimiters (bold/italic markers emitted around
+   * formatted runs) removed, and offset_map[i] is the full_text index of
+   * plain_text[i].
+   *
+   * Formatting run boundaries can fall mid-word (e.g. a paragraph projected
+   * as "**Al**pha"), where neither exact matching nor the whitespace-anchored
+   * fuzzy regex can find the plain target "Alpha". Matching against this
+   * projection and mapping the span back to full_text closes that gap (QA H2).
+   *
+   * Built lazily and invalidated by _build_map(): most batches never need it.
+   */
+  private _get_plain_projection(): [string, number[]] {
+    if (this._plain_projection === null) {
+      const chunks: string[] = [];
+      const offsets: number[] = [];
+      for (const s of this.spans) {
+        if (
+          s.run === null &&
+          s.paragraph !== null &&
+          STYLE_MARKER_TEXTS.has(s.text)
+        ) {
+          continue;
+        }
+        chunks.push(s.text);
+        for (let k = s.start; k < s.end; k++) offsets.push(k);
+      }
+      this._plain_projection = [chunks.join(""), offsets];
+    }
+    return this._plain_projection;
+  }
+
+  /**
+   * Matches a markdown-stripped target against the plain projection and maps
+   * each hit back to a [start, length] span in full_text. Interior style
+   * markers end up inside the returned span (so "Alpha" over "**Al**pha"
+   * resolves to the "Al**pha" range); markers just outside the matched
+   * characters are excluded.
+   */
+  private _find_plain_projection_matches(
+    target_text: string,
+  ): [number, number][] {
+    const [plain_text, offsets] = this._get_plain_projection();
+    if (plain_text.length === this.full_text.length) {
+      return []; // No virtual style markers anywhere; nothing new to find.
+    }
+    const norm_target = this._replace_smart_quotes(
+      this._strip_markdown_formatting(target_text),
+    );
+    if (!norm_target) return [];
+    const norm_plain = this._replace_smart_quotes(plain_text);
+    const results: [number, number][] = [];
+    let from = 0;
+    while (true) {
+      const p_start = norm_plain.indexOf(norm_target, from);
+      if (p_start === -1) break;
+      const p_end = p_start + norm_target.length;
+      const raw_start = offsets[p_start];
+      const raw_end = offsets[p_end - 1] + 1;
+      results.push([raw_start, raw_end - raw_start]);
+      from = p_end;
+    }
+    return results;
+  }
+
   public find_match_index(
     target_text: string,
     is_regex: boolean = false,
@@ -827,6 +901,12 @@ export class DocumentMapper {
       return [start_idx, stripped_target.length];
     }
 
+    // 3.5 Plain-projection match: the target crosses a formatting run
+    // boundary (possibly mid-word), so the projection carries style markers
+    // the plain target doesn't have (QA H2).
+    const plain_first = this._find_plain_projection_matches(target_text);
+    if (plain_first.length > 0) return plain_first[0];
+
     try {
       const pattern = new RegExp(this._make_fuzzy_regex(target_text));
       const match = pattern.exec(this.full_text);
@@ -851,34 +931,47 @@ export class DocumentMapper {
       } catch (e) {}
       return [];
     }
-    const escapeRegExp = (str: string) =>
-      str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Exact tiers use plain indexOf scans, NOT RegExp: building a RegExp from
+    // an arbitrarily long escaped target throws "regular expression too
+    // large" for oversized inputs, crashing validation instead of returning
+    // a clean not-found (QA C2 hardening).
+    const findAllLiteral = (
+      haystack: string,
+      needle: string,
+    ): [number, number][] => {
+      const out: [number, number][] = [];
+      if (!needle) return out;
+      let from = 0;
+      while (true) {
+        const idx = haystack.indexOf(needle, from);
+        if (idx === -1) break;
+        out.push([idx, needle.length]);
+        from = idx + needle.length;
+      }
+      return out;
+    };
 
-    let matches = [
-      ...this.full_text.matchAll(new RegExp(escapeRegExp(target_text), "g")),
-    ];
-    if (matches.length > 0) return matches.map((m) => [m.index!, m[0].length]);
+    let matches = findAllLiteral(this.full_text, target_text);
+    if (matches.length > 0) return matches;
 
     const norm_full = this._replace_smart_quotes(this.full_text);
     const norm_target = this._replace_smart_quotes(target_text);
-    matches = [
-      ...norm_full.matchAll(new RegExp(escapeRegExp(norm_target), "g")),
-    ];
-    if (matches.length > 0) return matches.map((m) => [m.index!, m[0].length]);
+    matches = findAllLiteral(norm_full, norm_target);
+    if (matches.length > 0) return matches;
 
     const stripped_target = this._strip_markdown_formatting(target_text);
-    matches = [
-      ...this.full_text.matchAll(
-        new RegExp(escapeRegExp(stripped_target), "g"),
-      ),
-    ];
-    if (matches.length > 0) return matches.map((m) => [m.index!, m[0].length]);
+    matches = findAllLiteral(this.full_text, stripped_target);
+    if (matches.length > 0) return matches;
+
+    // 3.5 Plain-projection match (target spans a bold/italic run boundary,
+    // possibly mid-word). See _find_plain_projection_matches (QA H2).
+    const plain_matches = this._find_plain_projection_matches(target_text);
+    if (plain_matches.length > 0) return plain_matches;
 
     try {
       const pattern = new RegExp(this._make_fuzzy_regex(target_text), "g");
-      matches = [...this.full_text.matchAll(pattern)];
-      if (matches.length > 0)
-        return matches.map((m) => [m.index!, m[0].length]);
+      const fuzzy = [...this.full_text.matchAll(pattern)];
+      if (fuzzy.length > 0) return fuzzy.map((m) => [m.index!, m[0].length]);
     } catch (e) {}
 
     return [];
