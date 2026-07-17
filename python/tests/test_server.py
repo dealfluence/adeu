@@ -1,21 +1,18 @@
 # FILE: tests/test_server.py
 import asyncio
-import json
 from io import BytesIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from docx import Document
 from fastmcp.exceptions import ToolError
 
-from adeu.mcp_components.tools.auth import login_to_adeu_cloud, logout_of_adeu_cloud
 from adeu.mcp_components.tools.document import (
     accept_all_changes,
     diff_docx_files,
     process_document_batch,
     read_docx,
 )
-from adeu.mcp_components.tools.validation import validate_documents
 from adeu.models import ModifyText
 from adeu.redline.engine import RedlineEngine
 
@@ -226,102 +223,3 @@ def test_accept_all_changes(sample_docx, tmp_path):
     assert "w:del" not in xml
     assert "accepted" in xml
     assert "original" not in xml
-
-
-# --- Cloud Auth & Validation Tool Mocks ---
-
-
-@patch("adeu.mcp_components.desktop_auth.DesktopAuthManager.ensure_authenticated")
-@patch("urllib.request.urlopen")
-def test_login_to_adeu_cloud_success(mock_urlopen, mock_ensure_auth):
-    ctx = MockContext()
-    mock_ensure_auth.return_value = "mock_api_key"
-
-    mock_response = MagicMock()
-    mock_response.read.return_value = json.dumps({"email": "test@adeu.ai"}).encode("utf-8")
-    mock_response.__enter__.return_value = mock_response
-    mock_urlopen.return_value = mock_response
-
-    result = asyncio.run(login_to_adeu_cloud(reasoning="test", ctx=ctx))
-    assert "Login successful" in result
-    assert "test@adeu.ai" in result
-
-
-@patch("adeu.mcp_components.desktop_auth.DesktopAuthManager.clear_api_key")
-def test_logout_of_adeu_cloud(mock_clear_key):
-    ctx = MockContext()
-    result = asyncio.run(logout_of_adeu_cloud(reasoning="test", ctx=ctx))
-    assert "Successfully logged out" in result
-    mock_clear_key.assert_called_once()
-
-
-@patch("urllib.request.urlopen")
-def test_validate_documents_init(mock_urlopen, sample_docx):
-    """Tests Phase 1: Uploading the document returns a pending status and Task ID."""
-    ctx = MockContext()
-
-    mock_response = MagicMock()
-    # Mock the backend returning a new task ID
-    mock_response.read.return_value = json.dumps({"task_id": 99}).encode("utf-8")
-    mock_response.__enter__.return_value = mock_response
-    mock_urlopen.return_value = mock_response
-
-    # Convert the list to a JSON string before passing it to the tool
-    file_paths_json = json.dumps([sample_docx])
-
-    result = asyncio.run(validate_documents(reasoning="test", file_paths=file_paths_json, ctx=ctx, api_key="fake_key"))
-
-    text_result = str(result.content)
-    assert "Validation task started successfully" in text_result
-    assert "Task ID: 99" in text_result
-    assert result.structured_content["status"] == "pending"
-
-
-@patch("asyncio.sleep")
-@patch("urllib.request.urlopen")
-def test_validate_documents_poll_success(mock_urlopen, mock_sleep):
-    """Tests Phase 2: Polling successfully retrieves the completed report."""
-    ctx = MockContext()
-
-    # We mock asyncio.sleep so the test doesn't actually wait during polling
-    mock_sleep.return_value = None
-
-    mock_response_data = {
-        "status": "COMPLETED",
-        "report_markdown": ("# Validation Report\n\n## Consistency Issues\n- **Date mismatch**: Conflict in dates.\n"),
-    }
-
-    mock_response = MagicMock()
-    mock_response.read.return_value = json.dumps(mock_response_data).encode("utf-8")
-    mock_response.__enter__.return_value = mock_response
-    mock_urlopen.return_value = mock_response
-
-    # Call with task_id to trigger polling mode
-    result = asyncio.run(validate_documents(reasoning="test", task_id=99, ctx=ctx, api_key="fake_key"))
-
-    text_result = str(result.content)
-    assert "Validation Report" in text_result
-    assert "Date mismatch" in text_result
-    assert result.structured_content["status"] == "completed"
-
-
-@patch("asyncio.sleep")
-@patch("urllib.request.urlopen")
-def test_validate_documents_poll_timeout(mock_urlopen, mock_sleep):
-    """Tests Phase 2: Polling times out after 10 attempts and returns a pending continuation message."""
-    ctx = MockContext()
-    mock_sleep.return_value = None
-
-    # Mock the backend continuously returning PENDING
-    mock_response = MagicMock()
-    mock_response.read.return_value = json.dumps({"status": "PROCESSING"}).encode("utf-8")
-    mock_response.__enter__.return_value = mock_response
-    mock_urlopen.return_value = mock_response
-
-    result = asyncio.run(validate_documents(reasoning="test", task_id=99, ctx=ctx, api_key="fake_key"))
-
-    text_result = str(result.content)
-    # Ensure it tells the LLM to call again with the same task ID
-    assert "still processing" in text_result
-    assert "task_id=99" in text_result
-    assert result.structured_content["status"] == "pending"

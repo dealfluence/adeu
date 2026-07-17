@@ -27,13 +27,7 @@ import {
   build_search_response,
 } from "./response-builders.js";
 
-import { login_to_adeu_cloud, logout_of_adeu_cloud } from "./tools/auth.js";
-import {
-  search_and_fetch_emails,
-  create_email_draft,
-  list_available_mailboxes,
-} from "./tools/email.js";
-import { MARKDOWN_UI_URI, EMAIL_UI_URI } from "./shared.js";
+import { MARKDOWN_UI_URI } from "./shared.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
 // (a missing `type` that's unambiguous from the key signature, or a non-canonical
@@ -144,14 +138,6 @@ const gitSha = process.env.GIT_SHA || "unknown";
 const packageVersion = process.env.PACKAGE_VERSION || "unknown";
 const buildTag = ` [Adeu v${packageVersion}+${gitSha}]`;
 
-// --- Scope Configuration ---
-const args = process.argv.slice(2);
-const scopeIdx = args.indexOf("--scope");
-const requestedScope = (
-  scopeIdx !== -1 ? args[scopeIdx + 1] : "all"
-).toLowerCase();
-const isDocxOnly = requestedScope === "docx";
-
 // --- Server Setup ---
 const server = new McpServer({
   name: "adeu-redlining-service",
@@ -225,34 +211,6 @@ registerAppResource(
       contents: [
         {
           uri: MARKDOWN_UI_URI,
-          mimeType: RESOURCE_MIME_TYPE,
-          text: html,
-          _meta: { ui: { csp: UI_CSP } },
-        },
-      ],
-    };
-  },
-);
-
-registerAppResource(
-  server,
-  EMAIL_UI_URI,
-  EMAIL_UI_URI,
-  { mimeType: RESOURCE_MIME_TYPE, description: "Adeu Email Viewer UI" },
-  async () => {
-    let html = getAssetContent(
-      "templates",
-      "email_ui.html",
-      "<html><body>UI Template Not Found</body></html>",
-    );
-    const svg = getAssetContent("assets", "adeu.svg", "");
-
-    html = html.replace("[[ adeu_svg_code ]]", svg);
-
-    return {
-      contents: [
-        {
-          uri: EMAIL_UI_URI,
           mimeType: RESOURCE_MIME_TYPE,
           text: html,
           _meta: { ui: { csp: UI_CSP } },
@@ -833,188 +791,6 @@ server.registerTool(
     }
   },
 );
-
-if (!isDocxOnly) {
-  registerAppTool(
-    server,
-    "search_and_fetch_emails",
-    {
-      title: "Search & Fetch Emails",
-      description:
-        "Searches the user's live email inbox via the Adeu cloud backend.\n\n" +
-        "TWO MODES:\n" +
-        "1. Search mode (no `email_id`): returns up to `limit` lightweight previews. Use filters (`sender`, `subject`, `is_unread`, `days_ago`, `folder`, `has_attachments`, `attachment_name`) to narrow down.\n" +
-        "2. Fetch mode (with `email_id`): returns the full email body, thread history, and downloads attachments under `max_attachment_size_mb` to the local disk.\n\n" +
-        "AUTO-ESCALATION: If a search returns exactly one preview, the backend automatically fetches the full email in the same call. Plan around the response shape — check the `type` field (`previews` vs `full_email`) before assuming.\n\n" +
-        "EMAIL ID FORMATS (`email_id` parameter accepts any of):\n" +
-        "- `msg_<6 chars>` — short ID returned by previews on THIS machine. NOT portable across machines or sessions; the local cache holds the most recent 1000. If you reference one that's been evicted, the tool returns a StaleShortIdError telling you to re-search. The mailbox used in the original search is remembered with the short ID and re-applied automatically when you fetch or reply without specifying `mailbox_address`.\n" +
-        "- `adeu_<numeric>` — server-side reference for emails Adeu has previously processed. Portable across machines and sessions for the same authenticated user.\n" +
-        "- Raw provider ID (Gmail/Outlook native ID) — works if you have it, but you usually won't.\n\n" +
-        "FOLDER DEFAULT: omitting `folder` searches the Inbox only (matching what the user sees in their mail client). Use `folder='sent'` for sent items, `folder='all'` to include Deleted Items, Drafts, and other folders.\n\n" +
-        "ATTACHMENTS: attachments larger than `max_attachment_size_mb` (default 10) are listed in the response but NOT downloaded — raise the cap if you need them. Always set `working_directory` when calling from a project so attachments land alongside the user's other files; the directory is created automatically if it does not exist. This directory path refers to the user's native operating system, not the LLM's sandbox environment.",
-      inputSchema: z.object({
-        reasoning: z
-          .string()
-          .describe(
-            "Why do I need to search or fetch these emails? State this reason before any other parameter.",
-          ),
-        sender: z.string().optional(),
-        subject: z.string().optional(),
-        has_attachments: z.boolean().optional(),
-        attachment_name: z.string().optional(),
-        is_unread: z.boolean().optional(),
-        days_ago: z.coerce.number().optional(),
-        folder: z.enum(["inbox", "sent", "all"]).optional(),
-        limit: z.coerce.number().default(10),
-        offset: z.coerce.number().default(0),
-        email_id: z.string().optional(),
-        working_directory: z
-          .string()
-          .optional()
-          .describe(
-            "Optional. The current working directory of the project or task. " +
-              "If provided, attachments will be saved here under an 'adeu_attachments' subfolder; " +
-              "the directory is created automatically if it does not exist. " +
-              "If omitted, attachments are saved to the system temp directory.",
-          ),
-        mailbox_address: z
-          .string()
-          .optional()
-          .describe("Optional target mailbox email address to search within."),
-        task_id: z
-          .string()
-          .optional()
-          .describe("If resuming a pending check, provide the task ID here."),
-        max_attachment_size_mb: z.coerce
-          .number()
-          .optional()
-          .describe(
-            "Maximum attachment size in MB to download (default 10). Attachments larger than this are listed in the response but not downloaded. Raise this to fetch large files.",
-          ),
-      }),
-      _meta: { ui: { resourceUri: EMAIL_UI_URI } },
-    },
-    async (args) => {
-      try {
-        return (await search_and_fetch_emails(args)) as any;
-      } catch (e: any) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: e.message }],
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "login_to_adeu_cloud",
-    {
-      description:
-        "Logs the user into Adeu Cloud. Opens a browser window for SSO authentication.\n\n" +
-        "IMPORTANT — login is user-level, not account-level:\n" +
-        "- An Adeu user can have multiple linked provider accounts (Microsoft, Google) and multiple mailboxes (personal + shared/delegated). One linked account is marked primary.\n" +
-        "- Signing in through ANY of the user's linked accounts authenticates the same Adeu user. Once logged in, the session can read from and draft in ALL of that user's linked accounts and ALL of their mailboxes — not just the one used to sign in.\n" +
-        "- The choice of which provider account to sign in through is purely an SSO mechanism; it does not select a 'current account' for the session.\n\n" +
-        "When the user asks which accounts or mailboxes are available, call `list_available_mailboxes` rather than naming a single account from the login response.",
-      inputSchema: {
-        reasoning: z
-          .string()
-          .describe(
-            "Why do I need to log in to Adeu Cloud? State this reason before any other parameter.",
-          ),
-      },
-    },
-    async () => {
-      try {
-        return (await login_to_adeu_cloud()) as any;
-      } catch (e: any) {
-        return { isError: true, content: [{ type: "text", text: e.message }] };
-      }
-    },
-  );
-
-  server.registerTool(
-    "logout_of_adeu_cloud",
-    {
-      description: "Logs out of the Adeu Cloud backend.",
-      inputSchema: {
-        reasoning: z
-          .string()
-          .describe(
-            "Why do I need to log out of Adeu Cloud? State this reason before any other parameter.",
-          ),
-      },
-    },
-    async () => {
-      try {
-        return (await logout_of_adeu_cloud()) as any;
-      } catch (e: any) {
-        return { isError: true, content: [{ type: "text", text: e.message }] };
-      }
-    },
-  );
-  server.registerTool(
-    "create_email_draft",
-    {
-      description:
-        "Creates an email draft in the user's native draft box (Outlook Drafts or Gmail Drafts).\n\n" +
-        "TWO MODES:\n" +
-        "1. Reply mode: pass `reply_to_email_id` to create a threaded reply. The draft inherits subject, recipients, and threading headers from the original — do NOT pass `subject` or `to_recipients`.\n" +
-        "2. New email mode: omit `reply_to_email_id` and pass BOTH `subject` and `to_recipients`.\n\n" +
-        "`reply_to_email_id` accepts the same ID formats as search_and_fetch_emails (`msg_*` short IDs, `adeu_*` references, or raw provider IDs). Short IDs are validated against the local cache before the call; stale ones fail fast with a clear error telling you to re-search.\n\n" +
-        "`body_markdown` is converted server-side to styled HTML with inlined CSS for email-client compatibility. Write the body in plain Markdown — do not pre-render HTML.\n\n" +
-        "`attachment_paths` takes absolute file paths on the user's local disk and uploads them with the draft. Useful right after search_and_fetch_emails downloaded attachments — those local paths can be passed directly here.",
-      inputSchema: {
-        reasoning: z
-          .string()
-          .describe(
-            "Why do I need to create this email draft? State this reason before any other parameter.",
-          ),
-        body_markdown: z.string(),
-        reply_to_email_id: z.string().optional(),
-        subject: z.string().optional(),
-        to_recipients: z.array(z.string()).optional(),
-        attachment_paths: z.array(z.string()).optional(),
-        mailbox_address: z
-          .string()
-          .optional()
-          .describe(
-            "Optional target mailbox email address to create the draft in.",
-          ),
-      },
-    },
-    async (args) => {
-      try {
-        return (await create_email_draft(args)) as any;
-      } catch (e: any) {
-        return { isError: true, content: [{ type: "text", text: e.message }] };
-      }
-    },
-  );
-  server.registerTool(
-    "list_available_mailboxes",
-    {
-      description:
-        "Lists all personal and shared/delegated mailboxes the authenticated Adeu user has access to, across ALL of their linked provider accounts. Returns each mailbox's `email_address`, `display_name`, auto-processing settings, and write-back preference.\n\n" +
-        "This is the right tool to answer 'which accounts/mailboxes am I logged into?' — Adeu login is user-level, so a single MCP session can see every mailbox listed here regardless of which provider account was used for SSO.\n\n" +
-        "Call this FIRST when the user names a specific mailbox or shared inbox, to resolve the canonical `email_address`. Then pass that address as `mailbox_address` to `search_and_fetch_emails` or `create_email_draft` to scope the operation. Omitting `mailbox_address` on those tools targets the user's primary personal mailbox.",
-      inputSchema: {
-        reasoning: z
-          .string()
-          .describe(
-            "Why do I need to list available mailboxes? State this reason before any other parameter.",
-          ),
-      },
-    },
-    async () => {
-      try {
-        return (await list_available_mailboxes()) as any;
-      } catch (e: any) {
-        return { isError: true, content: [{ type: "text", text: e.message }] };
-      }
-    },
-  );
-}
 
 // --- Formatter for process_document_batch ---
 export function formatBatchResult(
