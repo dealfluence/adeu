@@ -185,6 +185,11 @@ def build_outline_response(
             _extract_text_from_doc(return_paragraph_offsets=True).
     """
 
+    # Levels outside 1-6 are meaningless (0/negative used to render a
+    # nonsensical "L1-L0" range label, QA L2). The CLI rejects them at parse
+    # time; clamp here so MCP callers get the nearest sensible depth.
+    outline_max_level = max(1, min(outline_max_level, 6))
+
     # Pagination is used here only to compute body page boundaries for
     # heading->page mapping. We deliberately pass empty string instead of the
     # appendix because per-page appendix injection is gone (Step 2).

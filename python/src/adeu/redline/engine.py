@@ -29,8 +29,12 @@ from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
+from adeu.utils.text import PREVIEW_TEXT_CAP, REPORT_ECHO_CAP, truncate_middle
 
 logger = structlog.get_logger(__name__)
+
+# Width of the surrounding-document window shown in redline previews.
+PREVIEW_CONTEXT_CHARS = 30
 
 # Register w16du namespace for dateUtc
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
@@ -276,9 +280,163 @@ class RedlineEngine:
             )
         return None
 
+    # CriticMarkup wrapper pairs used when tidying preview context windows.
+    _PREVIEW_WRAPPER_PAIRS = (("{--", "--}"), ("{++", "++}"), ("{==", "==}"), ("{>>", "<<}"))
+    _PREVIEW_META_BLOCK_RE = re.compile(r"\{>>.*?<<\}", re.DOTALL)
+    # 1-2 char remnants of a 3-char wrapper token chopped by the window edge.
+    _PREVIEW_LEAD_ORPHAN_RE = re.compile(r"^[-+=<>]{0,2}\}")
+    _PREVIEW_TAIL_ORPHAN_RE = re.compile(r"\{[-+=<>]{0,2}$")
+
+    @classmethod
+    def _tidy_preview_context(cls, snippet: str, side: str) -> str:
+        """
+        Makes a fixed-width slice of the raw-view projection presentable:
+        drops complete {>>...<<} meta blocks (annotations of pre-existing
+        changes, not part of this edit) and any wrapper fragments the window
+        boundary chopped in half. Without this, previews leak internal
+        scaffolding like "[Chg:5 delete]" (QA H1).
+        """
+        snippet = cls._PREVIEW_META_BLOCK_RE.sub("", snippet)
+
+        for open_tok, close_tok in cls._PREVIEW_WRAPPER_PAIRS:
+            if side == "before":
+                # Cut through the last closer whose opener lies left of the window.
+                depth = 0
+                cut = 0
+                i = 0
+                while i < len(snippet):
+                    if snippet.startswith(open_tok, i):
+                        depth += 1
+                        i += len(open_tok)
+                    elif snippet.startswith(close_tok, i):
+                        if depth == 0:
+                            cut = i + len(close_tok)
+                        else:
+                            depth -= 1
+                        i += len(close_tok)
+                    else:
+                        i += 1
+                snippet = snippet[cut:]
+            else:
+                # Cut from the first opener whose closer lies right of the window.
+                opens: List[int] = []
+                i = 0
+                while i < len(snippet):
+                    if snippet.startswith(open_tok, i):
+                        opens.append(i)
+                        i += len(open_tok)
+                    elif snippet.startswith(close_tok, i):
+                        if opens:
+                            opens.pop()
+                        i += len(close_tok)
+                    else:
+                        i += 1
+                if opens:
+                    snippet = snippet[: opens[0]]
+
+        if side == "before":
+            snippet = cls._PREVIEW_LEAD_ORPHAN_RE.sub("", snippet)
+        else:
+            snippet = cls._PREVIEW_TAIL_ORPHAN_RE.sub("", snippet)
+        return snippet
+
+    def _capture_preview_context(self, edit: Any) -> None:
+        """
+        Snapshots the document text around a resolved edit BEFORE anything is
+        applied. Previews rendered after the batch mutates the DOM cannot slice
+        full_text at the stored offsets: applied edits shift offsets and inject
+        tracked-change markup, which produced garbled previews mixing unrelated
+        edits and internal scaffolding (QA H1).
+        """
+        if not isinstance(edit, ModifyText):
+            return
+        start_idx = edit._resolved_start_idx
+        if start_idx is None:
+            return
+        active_mapper = edit._active_mapper_ref or self.mapper
+        full_text = active_mapper.full_text
+        if not full_text:
+            return
+        length = len(edit.target_text or "")
+        before = full_text[max(0, start_idx - PREVIEW_CONTEXT_CHARS) : start_idx]
+        after = full_text[start_idx + length : start_idx + length + PREVIEW_CONTEXT_CHARS]
+        edit._preview_context = (
+            self._tidy_preview_context(before, "before"),
+            self._tidy_preview_context(after, "after"),
+        )
+
+    def _capture_parent_preview_context(self, parent: Any) -> None:
+        """
+        Like _capture_preview_context, but snapshots the context around the
+        ORIGINAL edit's full matched span (stashed by _pre_resolve_heuristic_edit),
+        so the report preview can present the complete logical change of a
+        compound modification instead of its first sub-edit.
+        """
+        if not isinstance(parent, ModifyText):
+            return
+        if parent._preview_context is not None or parent._preview_span is None:
+            return
+        start_idx, match_len = parent._preview_span
+        active_mapper = parent._preview_mapper_ref or self.mapper
+        full_text = active_mapper.full_text
+        if not full_text:
+            return
+        before = full_text[max(0, start_idx - PREVIEW_CONTEXT_CHARS) : start_idx]
+        after = full_text[start_idx + match_len : start_idx + match_len + PREVIEW_CONTEXT_CHARS]
+        parent._preview_context = (
+            self._tidy_preview_context(before, "before"),
+            self._tidy_preview_context(after, "after"),
+        )
+
+    def _build_full_match_preview(self, edit: ModifyText) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Renders the preview from the edit's full matched span. The common
+        prefix/suffix between matched and replacement text is moved into the
+        surrounding context so the {--...--}{++...++} block shows the minimal
+        complete change.
+        """
+        context_before, context_after = edit._preview_context  # type: ignore[misc]
+        matched = edit._preview_matched_text or ""
+        new_text = edit._preview_new_text if edit._preview_new_text is not None else (edit.new_text or "")
+
+        proxy = getattr(edit, "_resolved_proxy_edit", None)
+        if proxy is not None and getattr(proxy, "_internal_op", None) == EditOperationType.PARAGRAPH_REPLACE:
+            # Heading markdown prefixes are projection artifacts, not literal
+            # document text (see the F4/F5 note in _build_edit_context_previews).
+            matched = re.sub(r"^#+\s*", "", matched)
+            new_text = re.sub(r"^#+\s*", "", new_text)
+
+        prefix_len, suffix_len = trim_common_context(matched, new_text)
+        display_target = matched[prefix_len : len(matched) - suffix_len]
+        display_new = new_text[prefix_len : len(new_text) - suffix_len]
+        context_before = context_before + matched[:prefix_len]
+        if suffix_len:
+            context_after = matched[len(matched) - suffix_len :] + context_after
+
+        display_target = truncate_middle(display_target, PREVIEW_TEXT_CAP)
+        display_new = truncate_middle(display_new, PREVIEW_TEXT_CAP)
+        if not display_target and not display_new:
+            # Comment-only edit (text unchanged): highlight the anchor instead
+            # of rendering an empty change.
+            anchor = truncate_middle(matched, PREVIEW_TEXT_CAP)
+            body = f"{{=={anchor}==}}" if anchor else ""
+            critic_markup = f"{context_before[: len(context_before) - len(matched)]}{body}{context_after}"
+        else:
+            deletion = f"{{--{display_target}--}}" if display_target else ""
+            insertion = f"{{++{display_new}++}}" if display_new else ""
+            critic_markup = f"{context_before}{deletion}{insertion}{context_after}"
+
+        clean_text = critic_markup
+        clean_text = re.sub(r"\{>>.*?<<\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{--.*?--\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", clean_text, flags=re.DOTALL)
+        return critic_markup, clean_text
+
     def _build_edit_context_previews(self, edit: Any) -> Tuple[Optional[str], Optional[str]]:
         if not isinstance(edit, ModifyText):
             return None, None
+        if edit._preview_span is not None and edit._preview_context is not None:
+            return self._build_full_match_preview(edit)
         if hasattr(edit, "_resolved_proxy_edit") and edit._resolved_proxy_edit is not None:
             edit = edit._resolved_proxy_edit
         start_idx = edit._resolved_start_idx
@@ -286,13 +444,24 @@ class RedlineEngine:
             return None, None
         target_text = edit.target_text or ""
         new_text = edit.new_text or ""
-        length = len(target_text)
-        active_mapper = edit._active_mapper_ref or self.mapper
-        full_text = active_mapper.full_text
-        if not full_text:
-            return None, None
-        context_before = full_text[max(0, start_idx - 30) : start_idx]
-        context_after = full_text[start_idx + length : start_idx + length + 30]
+
+        context = getattr(edit, "_preview_context", None)
+        if context is not None:
+            context_before, context_after = context
+        else:
+            # Fallback for callers that never went through apply_edits. Only
+            # safe while the mapper still reflects the pre-apply document.
+            length = len(target_text)
+            active_mapper = edit._active_mapper_ref or self.mapper
+            full_text = active_mapper.full_text
+            if not full_text:
+                return None, None
+            context_before = self._tidy_preview_context(
+                full_text[max(0, start_idx - PREVIEW_CONTEXT_CHARS) : start_idx], "before"
+            )
+            context_after = self._tidy_preview_context(
+                full_text[start_idx + length : start_idx + length + PREVIEW_CONTEXT_CHARS], "after"
+            )
 
         # F4/F5: when the resolved edit is a whole-paragraph heading replacement
         # (PARAGRAPH_REPLACE), target_text/new_text still carry the markdown '#'
@@ -305,6 +474,10 @@ class RedlineEngine:
         if getattr(edit, "_internal_op", None) == EditOperationType.PARAGRAPH_REPLACE:
             display_target = re.sub(r"^#+\s*", "", target_text)
             display_new = re.sub(r"^#+\s*", "", new_text)
+        # Bound the echoed edit values: previews flow into LLM context windows
+        # and must not multiply an oversized new_text/target_text (QA C2).
+        display_target = truncate_middle(display_target, PREVIEW_TEXT_CAP)
+        display_new = truncate_middle(display_new, PREVIEW_TEXT_CAP)
         insertion = f"{{++{display_new}++}}" if display_new else ""
         critic_markup = f"{context_before}{{--{display_target}--}}{insertion}{context_after}"
 
@@ -1173,6 +1346,11 @@ class RedlineEngine:
         # Delegated to module-level helper so the Live Word path can call the
         # same checks. See validate_edit_strings docstring for what is checked.
         errors.extend(validate_edit_strings(edits))
+
+        # Effective (edit_idx, start, end, mapper_key) spans of every edit that
+        # validates cleanly, for the batch-level overlap check below (QA M2).
+        effective_spans: List[Tuple[int, int, int, int]] = []
+
         for i, edit in enumerate(edits):
             if not edit.target_text:
                 continue  # Skip validation for pure index-based insertions
@@ -1254,7 +1432,10 @@ class RedlineEngine:
                         "Reject/accept that change first or target the active replacement text instead."
                     )
                 else:
-                    errors.append(f'- Edit {i + 1} Failed: Target text not found in document:\n  "{edit.target_text}"')
+                    errors.append(
+                        f"- Edit {i + 1} Failed: Target text not found in document:\n"
+                        f'  "{truncate_middle(edit.target_text, REPORT_ECHO_CAP)}"'
+                    )
             elif len(valid_matches) > 1 and match_mode == "strict":
                 # valid_matches is a list of (start, length); the formatter
                 # expects (start, end).
@@ -1383,7 +1564,177 @@ class RedlineEngine:
                         f'with match_mode "strict" or "first", or scope your edit outside of it.'
                     )
 
+            # Structural table edits: verify the anchor really is a table row,
+            # and that insert_row does not provide more cells than the row has
+            # columns — extra cells used to be silently discarded (QA M3).
+            if isinstance(edit, (InsertTableRow, DeleteTableRow)) and valid_matches:
+                start, length = valid_matches[0]
+                n_cols = self._column_count_at(target_mapper, start, length)
+                if n_cols is None:
+                    op_name = "insert_row" if isinstance(edit, InsertTableRow) else "delete_row"
+                    errors.append(
+                        f"- Edit {i + 1} Failed: {op_name} target text was found, but it is not inside "
+                        "a table row. Anchor the operation on text that appears within the table."
+                    )
+                elif isinstance(edit, InsertTableRow) and len(edit.cells) > n_cols:
+                    errors.append(
+                        f"- Edit {i + 1} Failed: insert_row provides {len(edit.cells)} cells but the "
+                        f"target table has {n_cols} column(s). The extra cell(s) would be dropped. "
+                        f"Provide at most {n_cols} cells — rows given fewer cells are padded with "
+                        "empty ones."
+                    )
+
+            # Record the spans this edit will actually modify (for the batch
+            # overlap check below), but only if the edit validated cleanly.
+            edit_prefix = f"- Edit {i + 1} Failed"
+            if not any(e.startswith(edit_prefix) for e in errors):
+                scoped_matches = valid_matches[:1] if match_mode in ("strict", "first") else valid_matches
+                for start, length in scoped_matches:
+                    actual_doc_text = active_text[start : start + length]
+                    for span_start, span_end in self._effective_edit_spans(edit, start, actual_doc_text):
+                        effective_spans.append((i, span_start, span_end, id(target_mapper)))
+
+        # QA M2: overlapping effective spans within one batch are order-dependent
+        # and cannot apply atomically — reject them upfront, exactly like the
+        # ambiguity check. Effective spans come from the same word-level diff the
+        # apply step uses, so edits that merely share unchanged context words
+        # (e.g. widened diff output) do NOT collide. Sort-and-sweep keeps this
+        # O(n log n) even for match_mode="all" fan-outs with many matches.
+        effective_spans.sort(key=lambda t: (t[3], t[1], t[2]))
+        reported_pairs: set = set()
+        running_map: Optional[int] = None
+        running_end = 0
+        running_start = 0
+        running_idx = -1
+        for b_idx, b_start, b_end, b_map in effective_spans:
+            if b_map != running_map:
+                running_map, running_start, running_end, running_idx = b_map, b_start, b_end, b_idx
+                continue
+            overlaps = (
+                b_idx != running_idx
+                and b_start < running_end
+                # A zero-length insertion point sitting exactly on the other
+                # span's start does not touch its characters.
+                and not (b_start == b_end == running_start)
+            )
+            if overlaps:
+                pair = tuple(sorted((running_idx, b_idx)))
+                if pair not in reported_pairs:
+                    reported_pairs.add(pair)
+                    first, second = pair
+                    first_target = truncate_middle(edits[first].target_text or "", 60)
+                    second_target = truncate_middle(edits[second].target_text or "", 60)
+                    errors.append(
+                        f"- Edit {second + 1} Failed: Its target overlaps the text modified by "
+                        f'Edit {first + 1} ("{first_target}" vs "{second_target}"). Overlapping '
+                        "edits in one batch are order-dependent and cannot be applied atomically. "
+                        "Merge them into a single edit covering the combined change, or submit "
+                        "them in separate batches."
+                    )
+            if b_end > running_end:
+                running_start, running_end, running_idx = b_start, b_end, b_idx
+
         return errors
+
+    @staticmethod
+    def _column_count_at(mapper: DocumentMapper, start: int, length: int) -> Optional[int]:
+        """
+        Number of columns (w:tc elements) in the table row containing the text
+        at [start, start+length) in `mapper`, or None if that text is not
+        inside a table row.
+        """
+        for s in mapper.spans:
+            if s.run is None or s.end <= start or s.start >= start + length:
+                continue
+            curr = s.run._element
+            while curr is not None:
+                if curr.tag == qn("w:tr"):
+                    return len(curr.findall(qn("w:tc")))
+                curr = curr.getparent()
+        return None
+
+    def _effective_edit_spans(self, edit: Any, start: int, actual_doc_text: str) -> List[Tuple[int, int]]:
+        """
+        The character spans of `actual_doc_text` (matched at `start`) that this
+        edit will actually modify, mirroring the word-level diff the apply step
+        performs. Unchanged context words are excluded, so two edits sharing an
+        anchor phrase only collide when they touch the same characters. Pure
+        insertion points come back as zero-length spans, which the half-open
+        overlap test treats as colliding only when strictly inside another span.
+        """
+        end = start + len(actual_doc_text)
+        if not isinstance(edit, ModifyText) or getattr(edit, "regex", False):
+            return [(start, end)]
+        new_text = edit.new_text or ""
+        if actual_doc_text == new_text:
+            return []  # Comment-only edit: nothing is modified.
+        try:
+            sub_edits = generate_edits_from_text(actual_doc_text, new_text)
+        except Exception:
+            return [(start, end)]
+        if not sub_edits:
+            return [(start, end)]
+        spans = []
+        for se in sub_edits:
+            rel = se._match_start_index or 0
+            spans.append((start + rel, start + rel + len(se.target_text or "")))
+        return spans
+
+    _EDIT_ERROR_INDEX_RE = re.compile(r"^- Edit (\d+) Failed:")
+
+    def _validate_edits_detailed(self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]]) -> dict:
+        """
+        Runs validate_edits on the whole batch and groups the error strings by
+        0-based edit index (parsed from the uniform "- Edit N Failed:" prefix).
+        Used by dry-run mode to attribute batch-level validation results to
+        individual edit reports.
+        """
+        errors_by_edit: Dict[int, List[str]] = {}
+        for err in self.validate_edits(edits):
+            m = self._EDIT_ERROR_INDEX_RE.match(err)
+            idx = int(m.group(1)) - 1 if m else 0
+            errors_by_edit.setdefault(idx, []).append(err)
+        return errors_by_edit
+
+    @staticmethod
+    def _report_new_text(edit: Any) -> str:
+        """
+        The "new text" a batch report should show for an edit. InsertTableRow
+        has no new_text field — surface its cell contents instead of the
+        misleading empty string the report used to print (QA M4).
+        """
+        if isinstance(edit, InsertTableRow):
+            return " | ".join(edit.cells)
+        return getattr(edit, "new_text", "") or ""
+
+    def _build_edit_report(self, edit: Any) -> dict:
+        """Builds the per-edit result dict after apply_edits ran on the edit."""
+        success = getattr(edit, "_applied_status", False)
+        edit_error_msg = getattr(edit, "_error_msg", None)
+        critic_markup = None
+        clean_text = None
+        # Punctuation-anchor warning is failure-context only: on success
+        # the redline preview below already reports the change cleanly.
+        warning = None
+        if success:
+            critic_markup, clean_text = self._build_edit_context_previews(edit)
+        else:
+            warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
+        return {
+            "status": "applied" if success else "failed",
+            # Echoes of caller-supplied values are bounded so an oversized edit
+            # cannot balloon the report/JSON output (QA C2).
+            "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
+            "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
+            "warning": warning,
+            "error": edit_error_msg,
+            "critic_markup": critic_markup,
+            "clean_text": clean_text,
+            "pages": getattr(edit, "_pages", []),
+            "heading_path": getattr(edit, "_heading_path", ""),
+            "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
+            "match_mode": getattr(edit, "match_mode", "strict"),
+        }
 
     def process_batch(self, changes: List[DocumentChange], dry_run: bool = False) -> dict:
         """
@@ -1447,101 +1798,52 @@ class RedlineEngine:
 
         if edits:
             if dry_run_mode:
-                for edit_idx, edit in enumerate(edits):
-                    single_errors = self.validate_edits([edit])
-                    if single_errors:
-                        skipped_edits += 1
-                        # Only surface the punctuation-anchor warning when the edit
-                        # actually failed. A clean apply already returns the redline
-                        # preview (critic_markup/clean_text) showing exactly what
-                        # changed, so the warning is pure noise on success — and it
-                        # misleads agents into hunting for a "cleaner" anchor that was
-                        # never needed (e.g. on placeholders/dates where the
-                        # punctuation IS the literal target).
-                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
-                        # validate_edits is called with a single-element list, so it
-                        # always labels failures as "Edit 1". Renumber to the edit's
-                        # true 1-based position in the batch.
-                        relabeled_error = re.sub(r"Edit 1 Failed:", f"Edit {edit_idx + 1} Failed:", single_errors[0])
+                # Dry-run must preview EXACTLY what the real run will do. The
+                # real run validates the whole batch against the pristine
+                # document and rejects it atomically on any error; the old
+                # dry-run validated and applied edit-by-edit, so later edits
+                # were checked against a document already mutated by earlier
+                # ones — ambiguity occurrence counts (and even outcomes)
+                # disagreed between the two modes (QA M1).
+                errors_by_edit = self._validate_edits_detailed(edits)
+                if errors_by_edit:
+                    skipped_edits = len(edits)
+                    for edit_idx, edit in enumerate(edits):
+                        edit_errors = errors_by_edit.get(edit_idx)
+                        if edit_errors:
+                            # Only surface the punctuation-anchor warning when the
+                            # edit actually failed; on success the redline preview
+                            # already reports the change cleanly.
+                            warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
+                            error_msg = "\n".join(edit_errors)
+                        else:
+                            warning = None
+                            error_msg = (
+                                "Not applied: the batch is transactional and other edits failed "
+                                "validation (see their errors). Fix or remove those edits and re-run."
+                            )
                         edits_reports.append(
                             {
                                 "status": "failed",
-                                "target_text": getattr(edit, "target_text", ""),
-                                "new_text": getattr(edit, "new_text", ""),
-                                "warning": warning,
-                                "error": relabeled_error,
-                                "critic_markup": None,
-                                "clean_text": None,
-                            }
-                        )
-                        continue
-                    applied, skipped = self.apply_edits([edit], page_offsets=page_offsets)
-                    if applied > 0:
-                        applied_edits += 1
-                        critic_markup, clean_text = self._build_edit_context_previews(edit)
-                        edits_reports.append(
-                            {
-                                "status": "applied",
-                                "target_text": getattr(edit, "target_text", ""),
-                                "new_text": getattr(edit, "new_text", ""),
-                                "warning": None,
-                                "error": None,
-                                "critic_markup": critic_markup,
-                                "clean_text": clean_text,
-                                "pages": getattr(edit, "_pages", []),
-                                "heading_path": getattr(edit, "_heading_path", ""),
-                                "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
-                                "match_mode": getattr(edit, "match_mode", "strict"),
-                            }
-                        )
-                    else:
-                        skipped_edits += 1
-                        error_msg = self.skipped_details[-1] if self.skipped_details else "Failed to apply edit"
-                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
-                        edits_reports.append(
-                            {
-                                "status": "failed",
-                                "target_text": getattr(edit, "target_text", ""),
-                                "new_text": getattr(edit, "new_text", ""),
+                                "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
+                                "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
                                 "warning": warning,
                                 "error": error_msg,
                                 "critic_markup": None,
                                 "clean_text": None,
                             }
                         )
+                else:
+                    cloned_edits = [deepcopy(e) for e in edits]
+                    applied_edits, skipped_edits = self.apply_edits(cloned_edits, page_offsets=page_offsets)
+                    edits_reports.extend(self._build_edit_report(e) for e in cloned_edits)
             else:
                 errors = self.validate_edits(edits)
                 if errors:
                     raise BatchValidationError(errors)
                 cloned_edits = [deepcopy(e) for e in edits]
                 applied_edits, skipped_edits = self.apply_edits(cloned_edits, page_offsets=page_offsets)
-                for edit in cloned_edits:
-                    success = getattr(edit, "_applied_status", False)
-                    edit_error_msg = getattr(edit, "_error_msg", None)
-                    critic_markup = None
-                    clean_text = None
-                    # Punctuation-anchor warning is failure-context only: on success
-                    # the redline preview below already reports the change cleanly.
-                    warning = None
-                    if success:
-                        critic_markup, clean_text = self._build_edit_context_previews(edit)
-                    else:
-                        warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
-                    edits_reports.append(
-                        {
-                            "status": "applied" if success else "failed",
-                            "target_text": getattr(edit, "target_text", ""),
-                            "new_text": getattr(edit, "new_text", ""),
-                            "warning": warning,
-                            "error": edit_error_msg,
-                            "critic_markup": critic_markup,
-                            "clean_text": clean_text,
-                            "pages": getattr(edit, "_pages", []),
-                            "heading_path": getattr(edit, "_heading_path", ""),
-                            "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
-                            "match_mode": getattr(edit, "match_mode", "strict"),
-                        }
-                    )
+                edits_reports.extend(self._build_edit_report(e) for e in cloned_edits)
 
         from adeu import __version__
 
@@ -1640,6 +1942,17 @@ class RedlineEngine:
 
         # Process all edits backwards in a single O(N) sweep to avoid index drift and map rebuilds
         resolved_edits.sort(key=lambda x: x[0]._resolved_start_idx or 0, reverse=True)
+
+        # Snapshot preview context now, while every resolved offset still refers
+        # to the untouched document. The sweep below mutates the DOM and rebuilds
+        # the map, which shifts offsets and injects tracked-change markup —
+        # slicing full_text at report time garbled previews (QA H1).
+        for res_edit, _ in resolved_edits:
+            self._capture_preview_context(res_edit)
+            parent = getattr(res_edit, "_parent_edit_ref", None)
+            if parent is not None:
+                self._capture_parent_preview_context(parent)
+
         occupied_ranges: List[Tuple[int, int]] = []
         # Sub-edits split from one balanced multi-paragraph modification share a
         # _split_group_id; count the group as a single applied edit (and a single
@@ -1960,6 +2273,16 @@ class RedlineEngine:
                     current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
                 except re.error:
                     pass
+
+            # Stash the first occurrence's full match for the report preview,
+            # so it can show the complete logical change rather than only the
+            # first word-diff sub-edit (e.g. "{--two--}{++five++} (2) years"
+            # for a "two (2) years" -> "five (5) years" edit).
+            if edit._preview_span is None:
+                edit._preview_span = (start_idx, match_len)
+                edit._preview_matched_text = actual_doc_text
+                edit._preview_new_text = current_effective_new_text
+                edit._preview_mapper_ref = active_mapper
 
             para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
             if para_replace is not None:

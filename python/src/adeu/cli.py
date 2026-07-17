@@ -12,14 +12,14 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
 from adeu.mcp_components.shared import get_build_info
-from adeu.models import DocumentChange, ModifyText
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.models import BatchChanges, DocumentChange, ModifyText
+from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
 
@@ -141,6 +141,25 @@ def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
     sys.exit(1)
 
 
+def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
+    """
+    Writes an output file, converting filesystem failures (name too long,
+    permission denied, missing directory, disk full) into the same clean
+    exit-code-1 errors every other CLI failure path produces, instead of a
+    raw traceback (QA H3).
+    """
+    try:
+        if isinstance(data, bytes):
+            with open(path, "wb") as fb:
+                fb.write(data)
+        else:
+            with open(path, "w", encoding="utf-8") as ft:
+                ft.write(data)
+    except OSError as e:
+        print(f"❌ Could not write output file '{path}': {e.strerror or e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
     if not path.exists():
         _print_sandbox_warning_and_exit(path)
@@ -241,6 +260,55 @@ def _read_text_file(path: Path) -> str:
     return _EXTRACT_HEADER_RE.sub("", text, count=1)
 
 
+# One-line usage reference per change type, shown when a batch fails schema
+# validation. These are otherwise only discoverable via the MCP schema.
+_CHANGE_TYPE_REFERENCE = (
+    "Each change must be a JSON object with a 'type' field. Valid types and their required fields:\n"
+    '  modify     — {"type": "modify", "target_text": "...", "new_text": "..."}'
+    " (optional: comment, match_mode, regex)\n"
+    '  accept     — {"type": "accept", "target_id": "Chg:N"}\n'
+    '  reject     — {"type": "reject", "target_id": "Chg:N"}\n'
+    '  reply      — {"type": "reply", "target_id": "Com:N", "text": "..."}\n'
+    '  insert_row — {"type": "insert_row", "target_text": "...", "cells": ["...", "..."]}'
+    ' (optional: position "above"/"below")\n'
+    '  delete_row — {"type": "delete_row", "target_text": "..."}'
+)
+
+
+def _format_batch_validation_error(exc: "ValidationError") -> str:
+    """
+    Renders a Pydantic ValidationError on the changes batch as a plain-language
+    message. The raw dump leaks discriminated-union internals and a pydantic.dev
+    URL without ever naming the valid 'type' values (QA M5).
+    """
+    lines: List[str] = []
+    seen: set = set()
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        item_no = f"Change #{loc[0] + 1}" if loc and isinstance(loc[0], int) else "The batch"
+        err_type = err.get("type", "")
+        if err_type == "union_tag_not_found":
+            msg = f"{item_no} is missing the required 'type' field."
+        elif err_type == "union_tag_invalid":
+            tag = err.get("ctx", {}).get("tag", "unknown")
+            msg = f"{item_no} has an unknown type: '{tag}'."
+        elif err_type == "missing":
+            # loc is (index, variant_tag, field_name)
+            variant = f" (type '{loc[1]}')" if len(loc) >= 2 else ""
+            field = loc[-1] if len(loc) >= 3 else "a required field"
+            msg = f"{item_no}{variant} is missing required field '{field}'."
+        elif err_type == "list_type" and not loc:
+            msg = "The JSON root must be a list of change objects."
+        else:
+            where = ".".join(str(p) for p in loc[1:]) if len(loc) > 1 else ""
+            detail = err.get("msg", "is invalid")
+            msg = f"{item_no}{f' field {where!r}' if where else ''}: {detail}."
+        if msg not in seen:
+            seen.add(msg)
+            lines.append(f"  - {msg}")
+    return "❌ The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
+
+
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     """
     Loads a batch of actions and edits from a JSON file.
@@ -267,8 +335,14 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
         elif not isinstance(data, list):
             raise ValueError("JSON root must be a list of changes or a legacy dict with 'actions' and 'edits'.")
 
-        adapter = TypeAdapter(List[DocumentChange])
+        # BatchChanges (not the bare list) so the CLI tolerates the same LLM
+        # quirks the MCP server does: stringified items, inferable missing
+        # 'type', malformed match_mode.
+        adapter = TypeAdapter(BatchChanges)
         return adapter.validate_python(data)
+    except ValidationError as e:
+        print(_format_batch_validation_error(e), file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"Error parsing JSON batch: {e}", file=sys.stderr)
         sys.exit(1)
@@ -336,8 +410,28 @@ def handle_extract(args):
     )
 
     try:
-        page_val = args.page
-        page_num = int(page_val) if page_val is not None and str(page_val).isdigit() else 1
+        # In search mode, `page` supports 'all' and is validated (with clear
+        # errors) inside build_search_response. For full/appendix modes it must
+        # be a positive integer — anything else used to fall through silently
+        # to page 1 (QA L1: `--page -1` / `--page abc` returned page 1).
+        page_num = 1
+        if args.page is not None and not getattr(args, "search_query", None):
+            try:
+                page_num = int(str(args.page).strip())
+            except ValueError:
+                print(
+                    f"❌ Invalid --page value: '{args.page}'. Provide a positive integer "
+                    "(pages are 1-indexed; 'all' is only valid together with --search-query).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if page_num < 1:
+                print(
+                    f"❌ Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
+                    "(negative page numbers are not supported).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         if getattr(args, "search_query", None):
             res = build_search_response(
@@ -384,8 +478,7 @@ def handle_extract(args):
     json_output = json.dumps(res.structured_content or {}) if args.json else None
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_text)
+        _write_output_or_exit(args.output, output_text)
         print(f"Extracted text to {args.output}", file=sys.stderr)
         if json_output is not None:
             print(json_output)
@@ -396,6 +489,8 @@ def handle_extract(args):
 
 
 def handle_diff(args):
+    from adeu.diff import make_edits_self_contained
+
     if args.modified.suffix.lower() == ".docx":
         compare_clean = getattr(args, "compare_clean", True)
         text_orig = _read_docx_text(args.original, clean_view=compare_clean)
@@ -435,6 +530,11 @@ def handle_diff(args):
 
         edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
 
+    # diff output must be re-appliable by text matching alone: JSON consumers
+    # never see the private position index, so widen ambiguous/pure-insertion
+    # edits with surrounding context until each target is unique (QA C1).
+    edits = make_edits_self_contained(edits, text_orig)
+
     if args.json:
         output = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
         print(json.dumps(output, indent=2))
@@ -473,6 +573,12 @@ def handle_apply(args):
         if not args.json:
             print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
         changes = _load_batch_from_json(args.changes)
+        if not changes:
+            print(
+                f"⚠️  '{args.changes.name}' contains 0 changes — nothing to do. "
+                "The output will be an unmodified copy of the original.",
+                file=sys.stderr,
+            )
     else:
         if not args.json:
             print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
@@ -588,8 +694,7 @@ def handle_apply(args):
             else:
                 output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
 
-        with open(output_path, "wb") as f:
-            f.write(engine.save_to_stream().getvalue())
+        _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     stats["dry_run"] = args.dry_run
     stats["output_path"] = str(output_path) if output_path else None
@@ -666,8 +771,7 @@ def handle_accept_all(args: argparse.Namespace):
     if not output_path:
         output_path = args.input.with_name(f"{args.input.stem}_clean{args.input.suffix}")
 
-    with open(output_path, "wb") as f:
-        f.write(engine.save_to_stream().getvalue())
+    _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     if args.json:
         print(json.dumps({"status": "ok", "output_path": str(output_path)}))
@@ -692,6 +796,17 @@ def handle_markup(args):
     if not edits:
         print("Warning: No text edits found in JSON file.", file=sys.stderr)
 
+    # Same string-shape validation `apply` enforces. Without it, new_text
+    # containing raw CriticMarkup tags ({++..++}, {>>..<<}) passes straight
+    # into the rendered output, where a downstream CriticMarkup consumer would
+    # parse user data as structural markup (QA L3).
+    shape_errors = validate_edit_strings(list(edits))
+    if shape_errors:
+        print(f"❌ {len(shape_errors)} edit(s) failed validation:\n", file=sys.stderr)
+        for err in shape_errors:
+            print(err, file=sys.stderr)
+        sys.exit(1)
+
     result = apply_edits_to_markdown(
         markdown_text=text,
         edits=edits,
@@ -705,8 +820,7 @@ def handle_markup(args):
         if args.input.suffix.lower() == ".md":
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(result)
+    _write_output_or_exit(output_path, result)
 
     print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
     print(f"Stats: {len(edits)} edits processed.", file=sys.stderr)
@@ -895,7 +1009,9 @@ def main():
         default=None,
         help=(
             "Page number (1-indexed) for 'full' and 'appendix' modes (defaults to 1), "
-            "or 'all' for search (defaults to all)."
+            "or 'all' for search (defaults to all). Note: pages are synthetic, "
+            "length-based content chunks sized for LLM consumption — they do NOT "
+            "correspond to printed Word pages or explicit page breaks."
         ),
     )
     p_extract.add_argument("--search-query", type=str, help="The substring or regex pattern to search for.")
@@ -909,11 +1025,18 @@ def main():
         action="store_true",
         help="Perform case-insensitive matching.",
     )
+
+    def _outline_level(value: str) -> int:
+        level = int(value)
+        if not 1 <= level <= 6:
+            raise argparse.ArgumentTypeError(f"must be between 1 and 6 (got {value})")
+        return level
+
     p_extract.add_argument(
         "--outline-max-level",
-        type=int,
+        type=_outline_level,
         default=2,
-        help="For mode='outline' only: maximum heading depth to show.",
+        help="For mode='outline' only: maximum heading depth to show (1-6).",
     )
     p_extract.add_argument(
         "--outline-verbose",

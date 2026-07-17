@@ -104,9 +104,13 @@ class TestQaReportDefects:
 
         engine = RedlineEngine(stream)
         # Both edits target the same text. Edit 1 applies, Edit 2 is skipped due to overlap.
-        # This passes validation but tests the post-validation skip path.
+        # Pin positions so batch validation (which since QA M2 rejects overlapping
+        # text-matched targets upfront) is bypassed, exercising the
+        # post-validation runtime skip path this test is about.
         edit1 = ModifyText(target_text="Overlapping target.", new_text="First edit.")
         edit2 = ModifyText(target_text="Overlapping target.", new_text="Second edit.")
+        edit1._match_start_index = 0
+        edit2._match_start_index = 0
 
         stats = engine.process_batch([edit1, edit2])
 

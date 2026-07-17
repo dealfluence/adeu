@@ -119,6 +119,18 @@ class ModifyText(BaseModel):
     _occurrences_modified: int = PrivateAttr(default=0)
     _is_table_edit: bool = PrivateAttr(default=False)
     _original_target_text: Optional[str] = PrivateAttr(default=None)
+    # (before, after) document text around the resolved match, snapshotted
+    # before the batch mutates the DOM. Consumed by the preview builder.
+    _preview_context: Optional[tuple] = PrivateAttr(default=None)
+    # Full-match preview data stashed on the ORIGINAL edit at resolve time:
+    # the (start, length) of the first matched occurrence, the exact document
+    # text it matched, and the effective replacement. Lets the report preview
+    # show the complete logical change instead of just the first word-diff
+    # sub-edit of a compound modification.
+    _preview_span: Optional[tuple] = PrivateAttr(default=None)
+    _preview_matched_text: Optional[str] = PrivateAttr(default=None)
+    _preview_new_text: Optional[str] = PrivateAttr(default=None)
+    _preview_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
 
 
 class AcceptChange(BaseModel):

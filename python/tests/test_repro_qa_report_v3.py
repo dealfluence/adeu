@@ -5,14 +5,20 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 from adeu.models import ModifyText
-from adeu.redline.engine import RedlineEngine
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 
 
-def test_tc1_sequential_batch_evaluation():
+def test_tc1_dry_run_matches_real_run_for_chained_batch():
     """
-    TC1: Sequential batch evaluation (modify->modify chaining) [report F1]
-    Intended behavior: sequential evaluation in dry-run mode (already correct on Python side).
-    A second modify must see the first modify's output.
+    TC1 (superseded by QA 2026-07-17 M1): dry-run must preview EXACTLY what the
+    real run will do.
+
+    This test originally asserted the opposite — that dry-run evaluates edits
+    sequentially so a second modify can target the first modify's output. But
+    the real run validates every target against the PRISTINE document and
+    rejects this batch ("Receiving Party" does not exist yet), so the
+    sequential dry-run was lying about the real outcome. Both modes now agree:
+    the chained batch fails with a clear not-found error for Edit 2.
     """
     doc = Document()
     doc.add_paragraph("As defined in Section 1, the Recipient shall maintain confidentiality of all materials.")
@@ -21,22 +27,29 @@ def test_tc1_sequential_batch_evaluation():
     doc.save(stream)
     stream.seek(0)
 
+    batch = [
+        ModifyText(target_text="the Recipient", new_text="Receiving Party"),
+        ModifyText(target_text="Receiving Party", new_text="Disclosee"),
+    ]
+
     engine = RedlineEngine(stream)
+    res = engine.process_batch(batch, dry_run=True)
 
-    # TC1 is specified as run with dry_run:True in report.md
-    res = engine.process_batch(
-        [
-            ModifyText(target_text="the Recipient", new_text="Receiving Party"),
-            ModifyText(target_text="Receiving Party", new_text="Disclosee"),
-        ],
-        dry_run=True,
-    )
+    assert res["edits_applied"] == 0
+    assert res["edits_skipped"] == 2
+    assert res["edits"][0]["status"] == "failed"
+    assert "transactional" in res["edits"][0]["error"]
+    assert res["edits"][1]["status"] == "failed"
+    assert "not found" in res["edits"][1]["error"].lower()
 
-    # Python correctly applies both edits in dry-run mode since it runs sequentially.
-    assert res["edits_applied"] == 2
-    assert res["edits_skipped"] == 0
-    assert res["edits"][0]["status"] == "applied"
-    assert res["edits"][1]["status"] == "applied"
+    # Real run agrees: the batch is rejected for the same reason.
+    stream.seek(0)
+    engine_real = RedlineEngine(stream)
+    try:
+        engine_real.process_batch(batch, dry_run=False)
+        raise AssertionError("Real run should reject the chained batch")
+    except BatchValidationError as e:
+        assert any("Edit 2 Failed" in err and "not found" in err.lower() for err in e.errors)
 
 
 def test_tc2_dry_run_write_parity_active_insertion_edit():
@@ -167,8 +180,13 @@ def test_tc8_error_message_mislabeled_index():
         dry_run=True,
     )
 
-    assert res["edits_applied"] == 1
-    assert res["edits_skipped"] == 1
+    # Since QA 2026-07-17 M1, dry-run mirrors the real run's transactional
+    # semantics: a batch with any invalid edit applies nothing. The valid edit
+    # is reported as blocked by the batch, the invalid one keeps its own error.
+    assert res["edits_applied"] == 0
+    assert res["edits_skipped"] == 2
+    assert res["edits"][0]["status"] == "failed"
+    assert "transactional" in res["edits"][0]["error"]
     assert res["edits"][1]["status"] == "failed"
 
     error_msg = res["edits"][1]["error"]

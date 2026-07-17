@@ -354,6 +354,88 @@ def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:
     return chars1, chars2, token_array
 
 
+def _prev_word_boundary(text: str, pos: int) -> int:
+    """Index of the start of the word preceding `pos` (whitespace included)."""
+    i = pos
+    while i > 0 and text[i - 1].isspace():
+        i -= 1
+    while i > 0 and not text[i - 1].isspace():
+        i -= 1
+    return i
+
+
+def _next_word_boundary(text: str, pos: int) -> int:
+    """Index just past the word following `pos` (whitespace included)."""
+    i = pos
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
+    while i < n and not text[i].isspace():
+        i += 1
+    return i
+
+
+# Backstop against pathological documents (e.g. one token repeated thousands
+# of times): after this many word-by-word expansions we give up and emit the
+# widest candidate found. 60 words of context on each side is far beyond what
+# any real ambiguity requires.
+_MAX_CONTEXT_EXPANSIONS = 60
+
+
+def make_edits_self_contained(edits: List[ModifyText], original_text: str) -> List[ModifyText]:
+    """
+    Rewrites diff-generated edits so each one can be re-applied by TEXT MATCHING
+    alone against `original_text`.
+
+    Diff output resolves positions via the private `_match_start_index`, which
+    does not survive JSON serialization (`adeu diff --json`). Without it, an
+    atomic edit like target_text="2" is ambiguous — and the match_mode
+    fallbacks ('first'/'all') can silently modify unrelated occurrences.
+
+    For every edit whose target_text is empty (pure insertion) or occurs more
+    than once in `original_text`, this widens the edit with surrounding words
+    from the original document until the target is unique, mirroring the added
+    context into new_text so the change itself is untouched. The engine's
+    trim_common_context re-trims that shared context at apply time, so the
+    resulting redline is identical to the positional one.
+
+    Returns the same edit objects, mutated in place (target_text, new_text and
+    _match_start_index updated).
+    """
+    n = len(original_text)
+    for edit in edits:
+        idx = edit._match_start_index
+        if idx is None:
+            continue  # No positional info; nothing safe to do.
+        target = edit.target_text or ""
+        # Guard against a stale/mismatched index: only expand when the target
+        # really lives at idx (always true for our own diff generators).
+        if target and original_text[idx : idx + len(target)] != target:
+            continue
+        if target and original_text.count(target) == 1:
+            continue  # Already unambiguous.
+
+        start, end = idx, idx + len(target)
+        for _ in range(_MAX_CONTEXT_EXPANSIONS):
+            candidate = original_text[start:end]
+            if candidate and original_text.count(candidate) == 1:
+                break
+            if start == 0 and end == n:
+                break
+            start = _prev_word_boundary(original_text, start)
+            end = _next_word_boundary(original_text, end)
+
+        prefix = original_text[start:idx]
+        suffix = original_text[idx + len(target) : end]
+        if not prefix and not suffix:
+            continue
+        edit.target_text = original_text[start:end]
+        edit.new_text = f"{prefix}{edit.new_text or ''}{suffix}"
+        edit._match_start_index = start
+
+    return edits
+
+
 def generate_edits_via_paragraph_alignment(original_text: str, modified_text: str) -> List[ModifyText]:
     """
     Aligns original and modified text by paragraph (using SequenceMatcher),

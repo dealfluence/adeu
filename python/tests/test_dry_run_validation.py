@@ -41,7 +41,7 @@ def test_validation_ambiguous_match_with_context():
     # Verify the context extraction is working so the LLM can see the difference
     assert "Clause 2.4" in error_msg
     assert "Clause 6.1" in error_msg
-    assert "Please provide more surrounding context" in error_msg
+    assert "Provide more surrounding context" in error_msg
 
 
 def test_validation_not_found():
@@ -181,7 +181,7 @@ def test_ambiguity_error_surfaces_match_mode_escape_hatch():
     assert "FIRST occurrence" in error_msg
 
     # The original "add more context" guidance is preserved as a third option.
-    assert "Please provide more surrounding context" in error_msg
+    assert "Provide more surrounding context" in error_msg
 
 
 def test_ambiguity_resolved_by_match_mode_all():
