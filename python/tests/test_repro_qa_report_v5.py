@@ -835,3 +835,102 @@ class TestF11ControlCharacters:
         err = capsys.readouterr().err
         assert "❌" in err
         assert "control character" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# MCP server surface — the same guarantees must hold through the tool layer
+# ---------------------------------------------------------------------------
+
+
+class MockContext:
+    """Absorbs async logging calls from FastMCP tools during tests."""
+
+    async def info(self, msg, **kwargs):
+        pass
+
+    async def debug(self, msg, **kwargs):
+        pass
+
+    async def warning(self, msg, **kwargs):
+        pass
+
+    async def error(self, msg, **kwargs):
+        pass
+
+
+class TestMcpServerSurface:
+    def test_read_docx_page_all_returns_entire_document(self, tmp_path):
+        """MCP parity for F1: page='all' with mode='full' must return the whole
+        document without page chrome (it used to silently render page 1)."""
+        import asyncio
+
+        from adeu.mcp_components.tools.document import read_docx
+
+        docx_path = tmp_path / "large.docx"
+        docx_path.write_bytes(_make_large_doc().getvalue())
+
+        result = asyncio.run(read_docx(reasoning="test", file_path=str(docx_path), ctx=MockContext(), page="all"))
+        markdown = result.structured_content["markdown"]
+        assert "Paragraph 0001" in markdown
+        assert "Paragraph 0130" in markdown
+        assert "Continues on page" not in markdown
+        assert "Page 1 of" not in markdown
+
+    def test_process_document_batch_rejects_control_char_author(self, tmp_path):
+        """MCP parity for F11: author_name with control characters must be a
+        clean tool error, not an lxml traceback."""
+        import asyncio
+
+        from adeu.mcp_components.tools.document import process_document_batch
+
+        docx_path = tmp_path / "doc.docx"
+        doc = Document()
+        doc.add_paragraph("This is a simple contract.")
+        docx_path.write_bytes(_stream(doc).getvalue())
+
+        result = asyncio.run(
+            process_document_batch(
+                reasoning="test",
+                original_docx_path=str(docx_path),
+                author_name="Bad\x01Author",
+                ctx=MockContext(),
+                changes=[ModifyText(target_text="simple", new_text="plain")],
+                output_path=str(tmp_path / "out.docx"),
+            )
+        )
+        assert "control character" in str(result).lower()
+        assert not (tmp_path / "out.docx").exists()
+
+    def test_process_document_batch_redos_regex_is_clean_error(self, tmp_path):
+        """MCP parity for F5: a catastrophic regex edit must come back as a
+        clean batch-validation report through the tool layer."""
+        import asyncio
+
+        from adeu.mcp_components.tools.document import process_document_batch
+
+        docx_path = tmp_path / "r.docx"
+        doc = Document()
+        doc.add_paragraph(REDOS_HAYSTACK)
+        docx_path.write_bytes(_stream(doc).getvalue())
+
+        result = asyncio.run(
+            process_document_batch(
+                reasoning="test",
+                original_docx_path=str(docx_path),
+                author_name="QA",
+                ctx=MockContext(),
+                changes=[
+                    ModifyText(
+                        target_text=REDOS_PATTERN_NEEDS_TIMEOUT,
+                        new_text="X",
+                        regex=True,
+                        match_mode="first",
+                    )
+                ],
+                output_path=str(tmp_path / "out.docx"),
+            )
+        )
+        text = str(result)
+        assert "Edit 1 Failed" in text
+        assert "time" in text.lower()
+        assert not (tmp_path / "out.docx").exists()
