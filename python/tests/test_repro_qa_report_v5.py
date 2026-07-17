@@ -934,3 +934,118 @@ class TestMcpServerSurface:
         assert "Edit 1 Failed" in text
         assert "time" in text.lower()
         assert not (tmp_path / "out.docx").exists()
+
+
+# ---------------------------------------------------------------------------
+# §7 regression property — apply(D, extract(D)) must never silently mutate D
+# ---------------------------------------------------------------------------
+
+
+def _corpus_docs() -> dict[str, io.BytesIO]:
+    """Small corpus spanning the shapes the QA report exercised: plain text,
+    contract structure (headings/terms/table), unicode, >19k chars (paginates),
+    existing tracked changes, and comments."""
+    simple = Document()
+    simple.add_paragraph("This is a simple contract.")
+    simple.add_paragraph("It has exactly two paragraphs.")
+
+    contract = Document()
+    contract.add_heading("Master Services Agreement", 1)
+    contract.add_paragraph('"Services" means the work described in Exhibit A.')
+    contract.add_paragraph("The Services shall commence on the Effective Date.")
+    table = contract.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Item"
+    table.cell(0, 1).text = "Fee"
+    table.cell(1, 0).text = "Consulting"
+    table.cell(1, 1).text = "$10,000"
+
+    unicode_doc = Document()
+    unicode_doc.add_paragraph("Emoji: 🚀🔥 — CJK: 契約書の条項 — RTL: اتفاقية سرية")
+    unicode_doc.add_paragraph("Zero-width​ and NBSP  characters survive.")
+
+    return {
+        "simple": _stream(simple),
+        "contract": _stream(contract),
+        "unicode": _stream(unicode_doc),
+        "large": _make_large_doc(),
+        "tracked": _make_doc_with_tracked_insertion(),
+        "comments": _make_doc_with_comment(),
+    }
+
+
+class TestIdentityRoundTripProperty:
+    """The QA report's central invariant (§2, §7): feeding an unmodified
+    extract straight back into apply must either be a no-op or fail loudly —
+    never a silent mutation. Checked for every corpus doc in both views."""
+
+    @pytest.mark.parametrize("view", ["clean", "markup"])
+    @pytest.mark.parametrize("name", ["simple", "contract", "unicode", "large", "tracked", "comments"])
+    def test_identity_roundtrip_is_a_noop_or_loud(self, tmp_path, capsys, name, view):
+        docx_path = tmp_path / f"{name}.docx"
+        docx_path.write_bytes(_corpus_docs()[name].getvalue())
+        original_clean = _clean_text(docx_path.read_bytes())
+
+        txt_path = tmp_path / f"{name}_{view}.txt"
+        extract_args = ["extract", str(docx_path), "--page", "all", "-o", str(txt_path)]
+        if view == "clean":
+            extract_args.insert(2, "--clean-view")
+        assert _run_cli(extract_args) == 0
+        capsys.readouterr()
+
+        out_path = tmp_path / f"{name}_{view}_out.docx"
+        rc = _run_cli(["apply", str(docx_path), str(txt_path), "-o", str(out_path), "--json"])
+        captured = capsys.readouterr()
+
+        if rc == 0:
+            stats = json.loads(captured.out.strip().splitlines()[-1])
+            assert stats["edits_applied"] == 0, f"{name}/{view}: identity round-trip produced edits: {stats}"
+            assert _clean_text(out_path.read_bytes()) == original_clean, (
+                f"{name}/{view}: document content changed on a no-edit round-trip"
+            )
+        else:
+            # A loud refusal (e.g. markup-view text on a redlined document) is
+            # an acceptable outcome; silent corruption is not.
+            assert not out_path.exists(), f"{name}/{view}: apply failed ({rc}) but still wrote output"
+            assert captured.err.strip(), f"{name}/{view}: apply failed silently with no diagnostic"
+
+
+class TestRemainingGaps:
+    def test_pinned_shape_violation_reported_in_dry_run(self):
+        """Dry-run must mirror the wet run's rejection of invalid pinned edits
+        (transactional parity)."""
+        doc = Document()
+        doc.add_paragraph("This is a simple contract paragraph for testing.")
+        engine = RedlineEngine(_stream(doc))
+
+        edit = ModifyText(target_text="simple", new_text="{++New York++}")
+        edit._match_start_index = engine.mapper.full_text.index("simple")
+
+        stats = engine.process_batch([edit], dry_run=True)
+        assert stats["edits_applied"] == 0
+        assert stats["edits_skipped"] == 1
+        assert stats["edits"][0]["status"] == "failed"
+        assert "CriticMarkup" in (stats["edits"][0]["error"] or "")
+
+    def test_keep_markup_sanitize_verifiably_removes_resolved_comments(self, tmp_path):
+        """The remove_resolved_comments path shares delete_comment with F3;
+        its report is now verified against actual package state."""
+        from docx.oxml.ns import qn as _qn
+
+        from adeu.sanitize.core import sanitize_docx
+
+        doc = Document(_make_doc_with_comment(author="Alice", text="Resolved note to remove."))
+        cm = CommentsManager(doc)
+        # Flip the (only) comment to resolved in commentsExtended.
+        for child in cm.extended_part.element:
+            child.set(_qn("w15:done"), "1")
+
+        input_path = tmp_path / "resolved.docx"
+        input_path.write_bytes(_stream(doc).getvalue())
+        output_path = tmp_path / "clean.docx"
+
+        result = sanitize_docx(str(input_path), str(output_path), keep_markup=True)
+        assert result.comments_removed == 1
+
+        comments_xml = _read_comment_parts(output_path.read_bytes())
+        assert "Resolved note to remove." not in comments_xml
+        assert "Alice" not in comments_xml
