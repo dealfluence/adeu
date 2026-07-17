@@ -64,11 +64,17 @@ def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, 
             if matched_term in definitions:
                 definitions[matched_term]["count"] += 1
 
-        # Drop unused terms (same semantics as before)
+        # Drop unused terms from the SYMBOL TABLE only — that filter is noise
+        # reduction for the Defined Terms listing, and must not gate the
+        # Semantic Diagnostics: a term defined twice and never used is two
+        # drafting errors, not zero (QA 2026-07-17 F6 — the duplicate error
+        # was discarded together with the pruned term). Surface the orphan
+        # definition itself as a diagnostic instead.
         for term in list(definitions.keys()):
             if definitions[term]["count"] == 0:
                 del definitions[term]
-                duplicates.discard(term)
+                if term not in duplicates:
+                    diagnostics.append(f"[Warning] Unused Definition: '{term}' is defined but never used.")
 
     for term in duplicates:
         diagnostics.append(f"[Error] Duplicate Definition: '{term}' is defined multiple times.")
@@ -385,10 +391,13 @@ def extract_all_domain_metadata(
             if matched_term in definitions:
                 definitions[matched_term]["count"] += 1
 
+        # Symbol-table noise reduction must not gate diagnostics — see the
+        # matching comment in extract_definitions_and_diagnostics (QA F6).
         for term in list(definitions.keys()):
             if definitions[term]["count"] == 0:
                 del definitions[term]
-                duplicates.discard(term)
+                if term not in duplicates:
+                    diagnostics.append(f"[Warning] Unused Definition: '{term}' is defined but never used.")
 
     for term in duplicates:
         diagnostics.append(f"[Error] Duplicate Definition: '{term}' is defined multiple times.")

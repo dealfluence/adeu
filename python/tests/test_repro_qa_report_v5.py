@@ -31,7 +31,6 @@ import io
 import json
 import re
 import sys
-
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -168,9 +167,7 @@ def _read_zip_part(data: bytes, name: str) -> str:
 def _read_comment_parts(data: bytes) -> str:
     """Concatenated content of every word/comments*.xml part in the package."""
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        return "".join(
-            zf.read(n).decode("utf-8", "ignore") for n in zf.namelist() if n.startswith("word/comments")
-        )
+        return "".join(zf.read(n).decode("utf-8", "ignore") for n in zf.namelist() if n.startswith("word/comments"))
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +236,33 @@ class TestF1PaginationRoundTrip:
         result_clean = _clean_text(out_path.read_bytes())
         assert result_clean == original_clean
 
-    def test_appendix_pointer_chrome_is_stripped_on_ingest(self, tmp_path, capsys):
-        """Single-page docs with defined terms get an '> **Appendix available.**'
-        footer; round-tripping that text must not insert the footer as prose."""
+    @pytest.mark.parametrize("is_cli", [True, False])
+    def test_page_chrome_stripper_matches_real_chrome_builders(self, is_cli):
+        """The ingest-side chrome stripper must recognize exactly what the
+        pagination chrome builders emit — banner, continuation footer, and
+        appendix pointer, in both CLI and MCP wording."""
+        from adeu.cli import _strip_page_chrome
+        from adeu.pagination import build_appendix_pointer, build_page_banner, build_page_footer
+
+        body = "Paragraph body text.\n\nSecond paragraph."
+        chromed = (
+            build_page_banner(1, 6, "large.docx", is_cli=is_cli)
+            + body
+            + build_page_footer(1, 6, True, "large.docx", is_cli=is_cli)
+            + build_appendix_pointer("large.docx", True, is_cli=is_cli)
+        )
+        stripped, page, total = _strip_page_chrome(chromed)
+        assert stripped == body
+        assert page == 1
+        assert total == 6
+
+        # Single-page output (no banner/footer) with an appendix pointer.
+        chromed_single = body + build_appendix_pointer("doc.docx", True, is_cli=is_cli)
+        stripped, page, total = _strip_page_chrome(chromed_single)
+        assert stripped == body
+        assert page is None and total is None
+
+    def test_single_page_extract_roundtrips_as_noop(self, tmp_path, capsys):
         doc = Document()
         doc.add_paragraph('"Widget" means a mechanical device.')
         doc.add_paragraph("The Widget shall be delivered on time.")
@@ -251,14 +272,12 @@ class TestF1PaginationRoundTrip:
 
         txt_path = tmp_path / "terms.txt"
         assert _run_cli(["extract", str(docx_path), "--clean-view", "-o", str(txt_path)]) == 0
-        assert "Appendix available" in txt_path.read_text(encoding="utf-8")  # sanity
 
         out_path = tmp_path / "out.docx"
         rc = _run_cli(["apply", str(docx_path), str(txt_path), "-o", str(out_path), "--json"])
         stats = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert rc == 0
-        assert stats["edits_applied"] == 0, f"appendix pointer chrome diffed as content: {stats}"
-        assert "Appendix available" not in _clean_text(out_path.read_bytes())
+        assert stats["edits_applied"] == 0, f"identity round-trip produced edits: {stats}"
         assert _clean_text(out_path.read_bytes()) == original_clean
 
     def test_truncated_text_without_chrome_still_guarded(self, tmp_path, capsys):
@@ -319,9 +338,7 @@ class TestF2LegacyActionCoercion:
 
     @pytest.mark.parametrize("bad_action", ["rejcet", "PLEASE_DO_NOT_ACCEPT", ""])
     def test_unrecognized_action_is_a_hard_error(self, tmp_path, capsys, bad_action):
-        rc, err, out_path = self._apply_legacy(
-            tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}]
-        )
+        rc, err, out_path = self._apply_legacy(tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}])
         assert rc != 0, f"unrecognized action {bad_action!r} was silently coerced to accept"
         assert not out_path.exists()
         assert "accept" in err and "reject" in err  # names the valid values
@@ -333,9 +350,7 @@ class TestF2LegacyActionCoercion:
 
     @pytest.mark.parametrize("bad_action", [None, 42])
     def test_non_string_action_produces_clean_error(self, tmp_path, capsys, bad_action):
-        rc, err, out_path = self._apply_legacy(
-            tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}]
-        )
+        rc, err, out_path = self._apply_legacy(tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}])
         assert rc != 0
         assert "AttributeError" not in err
         assert "has no attribute" not in err
@@ -449,16 +464,20 @@ class TestF4CorePropertyScrub:
 # F5 — LLM-controlled regex needs a wall-clock budget
 # ---------------------------------------------------------------------------
 
-REDOS_PATTERN = "(a+)+$"
+# Both pathological patterns come from the QA report. The regex engine's own
+# optimizations defuse `(a+)+$` outright (fast, correct no-match); `(a|a)*$`
+# defeats optimization and must be stopped by the wall-clock budget instead.
+REDOS_PATTERN_OPTIMIZED_AWAY = "(a+)+$"
+REDOS_PATTERN_NEEDS_TIMEOUT = "(a|a)*$"
 REDOS_HAYSTACK = "x" + "a" * 34 + "!"
 WATCHDOG_SECONDS = 12.0
 
 
-def _f5_edit_payload(q):
+def _f5_edit_payload(q, pattern):
     doc = Document()
     doc.add_paragraph(REDOS_HAYSTACK)
     engine = RedlineEngine(_stream(doc))
-    edit = ModifyText(target_text=REDOS_PATTERN, new_text="X", regex=True, match_mode="first")
+    edit = ModifyText(target_text=pattern, new_text="X", regex=True, match_mode="first")
     try:
         engine.process_batch([edit])
         q.put(("returned", None))
@@ -468,24 +487,24 @@ def _f5_edit_payload(q):
         q.put(("raised", f"{type(e).__name__}: {e}"))
 
 
-def _f5_search_payload(q):
+def _f5_search_payload(q, pattern):
     from adeu.mcp_components._response_builders import build_search_response
 
     try:
-        res = build_search_response(REDOS_HAYSTACK, REDOS_PATTERN, True, True, None, "doc.docx")
+        res = build_search_response(REDOS_HAYSTACK, pattern, True, True, None, "doc.docx")
         q.put(("returned", str(res.content)))
     except Exception as e:  # noqa: BLE001 - recorded for assertion
         q.put(("raised", f"{type(e).__name__}: {e}"))
 
 
-def _run_in_subprocess_with_watchdog(payload) -> tuple[str, str | None]:
+def _run_in_subprocess_with_watchdog(payload, pattern) -> tuple[str, str | None]:
     """Catastrophic re backtracking holds the GIL, so an in-process watchdog
     thread would freeze with it — run the payload in a child process instead."""
     import multiprocessing
 
     ctx = multiprocessing.get_context("fork")
     q = ctx.Queue()
-    proc = ctx.Process(target=payload, args=(q,), daemon=True)
+    proc = ctx.Process(target=payload, args=(q, pattern), daemon=True)
     proc.start()
     proc.join(WATCHDOG_SECONDS)
     if proc.is_alive():
@@ -497,13 +516,20 @@ def _run_in_subprocess_with_watchdog(payload) -> tuple[str, str | None]:
 
 class TestF5RegexTimeout:
     def test_redos_edit_is_rejected_within_budget(self):
-        outcome, detail = _run_in_subprocess_with_watchdog(_f5_edit_payload)
+        outcome, detail = _run_in_subprocess_with_watchdog(_f5_edit_payload, REDOS_PATTERN_NEEDS_TIMEOUT)
         assert outcome == "rejected", f"expected clean rejection, got {outcome}: {detail}"
         assert "Edit 1 Failed" in detail
         assert "time" in detail.lower()  # names the timeout, not a generic not-found
 
+    def test_redos_prone_pattern_resolves_fast_and_clean(self):
+        """The report's headline pattern is handled by engine optimization:
+        a fast, correct 'not found' — no hang, no traceback."""
+        outcome, detail = _run_in_subprocess_with_watchdog(_f5_edit_payload, REDOS_PATTERN_OPTIMIZED_AWAY)
+        assert outcome == "rejected", f"expected clean not-found rejection, got {outcome}: {detail}"
+        assert "Edit 1 Failed" in detail
+
     def test_redos_search_downgrades_to_literal_within_budget(self):
-        outcome, detail = _run_in_subprocess_with_watchdog(_f5_search_payload)
+        outcome, detail = _run_in_subprocess_with_watchdog(_f5_search_payload, REDOS_PATTERN_NEEDS_TIMEOUT)
         assert outcome == "returned", f"expected downgraded literal search, got {outcome}: {detail}"
         assert "literal" in detail.lower()  # mirrors the invalid-regex downgrade note
 

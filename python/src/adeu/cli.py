@@ -128,6 +128,19 @@ def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
     sys.exit(exit_code)
 
 
+def _require_input_file(path: Path, exit_code: int = 1) -> None:
+    """
+    Validates that an input path exists AND is a regular file. A directory
+    satisfies `.exists()`, so without the `.is_file()` check `open(dir, 'rb')`
+    escaped as a raw IsADirectoryError traceback (QA 2026-07-17 F7).
+    """
+    if not path.exists():
+        _print_sandbox_warning_and_exit(path, exit_code)
+    if not path.is_file():
+        print(f"❌ Error: '{path}' is a directory, not a file.", file=sys.stderr)
+        sys.exit(exit_code)
+
+
 def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
     import re
 
@@ -161,8 +174,7 @@ def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
 
 
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
-    if not path.exists():
-        _print_sandbox_warning_and_exit(path)
+    _require_input_file(path)
     if path.suffix.lower() != ".docx":
         print(
             f"❌ Error: '{path.name}' must be a DOCX file (got {path.suffix or 'no extension'})",
@@ -191,6 +203,93 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
 # _response_builders.py). It is presentation, not document content.
 _EXTRACT_HEADER_RE = re.compile(r"^> \*\*File Path:\*\*[^\n]*\n+")
 
+# Pagination chrome emitted by extract around each page (see pagination.py's
+# build_page_banner / build_page_footer / build_appendix_pointer). Like the
+# file-path header, it is presentation — but unlike the header, a banner or
+# footer that names "page N of M" (M > 1) proves the text is only PART of the
+# document, which can never round-trip through apply/diff safely
+# (QA 2026-07-17 F1).
+_PAGE_BANNER_RE = re.compile(r"^> \*\*Page (\d+) of (\d+)\*\*[^\n]*\n+(?:---\n+)?")
+_PAGE_FOOTER_RE = re.compile(r"\n+---\n+> \*\*Continues on page (\d+) of (\d+)\.\*\*[^\n]*\s*$")
+_APPENDIX_POINTER_RE = re.compile(r"\n+---\n+> \*\*Appendix available\.\*\*[^\n]*\s*$")
+
+# CriticMarkup open tokens; their presence in a round-trip text file means the
+# text was extracted in the default markup view (apply/diff compare against
+# the CLEAN view, so markup tokens would be diffed INTO the document as prose).
+_CRITICMARKUP_TOKENS = ("{++", "{--", "{>>", "{==")
+
+# Guardrail for the text-diff path: refuse to silently delete the majority of
+# a document. 2000 chars ≈ one page of prose; below that, halving a document
+# in a single edit is a plausible deliberate workflow.
+_MAJOR_DELETION_MIN_ORIGINAL_CHARS = 2000
+_MAJOR_DELETION_RATIO = 0.5
+
+
+def _strip_page_chrome(text: str) -> "tuple[str, int | None, int | None]":
+    """
+    Strips extract's page banner/footer/appendix-pointer chrome from a
+    round-trip text file. Returns (stripped_text, page, total_pages);
+    page/total_pages are None when the text carries no multi-page markers.
+    """
+    page = total = None
+    banner = _PAGE_BANNER_RE.match(text)
+    if banner:
+        page, total = int(banner.group(1)), int(banner.group(2))
+        text = text[banner.end() :]
+    # The appendix pointer trails the footer, so strip it first.
+    text = _APPENDIX_POINTER_RE.sub("", text)
+    footer = _PAGE_FOOTER_RE.search(text)
+    if footer:
+        if page is None:
+            page = int(footer.group(1)) - 1
+        if total is None:
+            total = int(footer.group(2))
+        text = text[: footer.start()]
+    return text, page, total
+
+
+def _load_roundtrip_text(path: Path, original: Path, command: str) -> str:
+    """
+    Loads the modified-text file for the apply/diff text paths, stripping
+    extract chrome and refusing inputs that cannot round-trip safely:
+
+      - a single page of a multi-page extract (everything absent would be
+        diffed as deleted — QA 2026-07-17 F1 destroyed 80% of the document)
+      - markup-view text containing CriticMarkup tokens (apply/diff compare
+        against the CLEAN view, so the tokens — including reviewer names and
+        change IDs — would be written into the document as literal prose,
+        QA 2026-07-17 F8)
+    """
+    text, page, total = _strip_page_chrome(_read_text_file(path))
+
+    if total is not None and total > 1:
+        print(
+            f"❌ '{path.name}' looks like page {page or '?'} of {total} of a paginated extract — "
+            "it contains only part of the document, and applying it would delete every page "
+            "not present.\n"
+            "   Re-extract the ENTIRE document first:\n"
+            f"     adeu extract {original} --page all --clean-view -o {path.name}\n"
+            f"   then edit that file and re-run {command}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if any(tok in text for tok in _CRITICMARKUP_TOKENS):
+        print(
+            f"❌ '{path.name}' contains CriticMarkup tokens ({{++..++}}, {{--..--}}, {{==..==}}, "
+            "{>>..<<}), which means it was extracted in the default markup view. "
+            f"`{command}` compares text against the document's CLEAN view, so markup-view text "
+            "would be diffed into the document as literal prose (including reviewer names and "
+            "change IDs).\n"
+            "   Re-extract with --clean-view (add --page all for multi-page documents):\n"
+            f"     adeu extract {original} --clean-view --page all -o {path.name}\n"
+            "   then edit that file and re-run the command.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return text
+
 
 def _read_text_file(path: Path) -> str:
     """Read a user-supplied text file with encoding tolerance.
@@ -203,8 +302,7 @@ def _read_text_file(path: Path) -> str:
     normalized to \\n, matching text-mode open(), and a leading extract
     file-path header is dropped so extract output round-trips cleanly.
     """
-    if not path.exists():
-        _print_sandbox_warning_and_exit(path)
+    _require_input_file(path)
     raw = path.read_bytes()
 
     bom_encoding = None
@@ -320,9 +418,25 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
         # Legacy dict format support
         if isinstance(data, dict):
             changes_data = []
-            for item in data.get("actions", []):
-                action_val = item.pop("action", "").lower()
-                item["type"] = action_val if action_val in ("accept", "reject", "reply") else "accept"
+            for idx, item in enumerate(data.get("actions", [])):
+                raw_action = item.pop("action", None)
+                # Whitespace/case variants of valid values are normalized;
+                # anything else is a hard error. Never default to a value —
+                # least of all "accept", the destructive opposite of "reject"
+                # (QA 2026-07-17 F2: ' reject ' was silently applied as accept).
+                action_val = raw_action.strip().lower() if isinstance(raw_action, str) else None
+                if action_val not in ("accept", "reject", "reply"):
+                    if raw_action is None:
+                        raise ValueError(
+                            f"actions[{idx}] is missing the required 'action' field. "
+                            "Valid values: 'accept', 'reject', 'reply'."
+                        )
+                    raise ValueError(
+                        f"actions[{idx}] has an unrecognized 'action' value: {raw_action!r}. "
+                        "Valid values: 'accept', 'reject', 'reply'. "
+                        "Refusing to guess — a wrong default could apply the opposite of what you asked."
+                    )
+                item["type"] = action_val
                 changes_data.append(item)
             for item in data.get("edits", []):
                 item["type"] = "modify"
@@ -360,8 +474,7 @@ def handle_extract(args):
         if not args.input:
             print("❌ Must provide input file or use --live", file=sys.stderr)
             sys.exit(1)
-        if not args.input.exists():
-            _print_sandbox_warning_and_exit(args.input)
+        _require_input_file(args.input)
 
         import zipfile
 
@@ -411,27 +524,35 @@ def handle_extract(args):
 
     try:
         # In search mode, `page` supports 'all' and is validated (with clear
-        # errors) inside build_search_response. For full/appendix modes it must
-        # be a positive integer — anything else used to fall through silently
-        # to page 1 (QA L1: `--page -1` / `--page abc` returned page 1).
+        # errors) inside build_search_response. In full mode, 'all' returns
+        # the entire document without page chrome — the round-trip artifact
+        # for text-based apply/diff (QA 2026-07-17 F1). For the remaining
+        # modes it must be a positive integer — anything else used to fall
+        # through silently to page 1 (QA L1: `--page -1` / `--page abc`
+        # returned page 1).
         page_num = 1
+        want_all_pages = False
         if args.page is not None and not getattr(args, "search_query", None):
-            try:
-                page_num = int(str(args.page).strip())
-            except ValueError:
-                print(
-                    f"❌ Invalid --page value: '{args.page}'. Provide a positive integer "
-                    "(pages are 1-indexed; 'all' is only valid together with --search-query).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if page_num < 1:
-                print(
-                    f"❌ Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
-                    "(negative page numbers are not supported).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+            page_str = str(args.page).strip()
+            if page_str.lower() == "all" and args.mode == "full":
+                want_all_pages = True
+            else:
+                try:
+                    page_num = int(page_str)
+                except ValueError:
+                    print(
+                        f"❌ Invalid --page value: '{args.page}'. Provide a positive integer "
+                        "(pages are 1-indexed; 'all' is valid for --mode full and --search-query).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if page_num < 1:
+                    print(
+                        f"❌ Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
+                        "(negative page numbers are not supported).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
         if getattr(args, "search_query", None):
             res = build_search_response(
@@ -458,6 +579,13 @@ def handle_extract(args):
                 page_num,
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
+            )
+        elif want_all_pages:
+            from adeu.mcp_components._response_builders import build_full_document_response
+
+            res = build_full_document_response(
+                text,
+                "Active Document" if args.live else str(args.input),
             )
         else:
             res = build_paginated_response(
@@ -497,8 +625,7 @@ def handle_diff(args):
         text_mod = _read_docx_text(args.modified, clean_view=compare_clean)
         edits = generate_edits_from_text(text_orig, text_mod)
     else:
-        if not args.original.exists():
-            _print_sandbox_warning_and_exit(args.original)
+        _require_input_file(args.original)
         import zipfile
 
         try:
@@ -524,7 +651,7 @@ def handle_diff(args):
 
         text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
 
-        text_mod = _read_text_file(args.modified)
+        text_mod = _load_roundtrip_text(args.modified, args.original, "diff")
 
         from adeu.diff import generate_edits_via_paragraph_alignment
 
@@ -550,6 +677,19 @@ def handle_diff(args):
 
 
 def handle_apply(args):
+    # Author flows into w:author attributes; XML-illegal control characters
+    # would otherwise surface as a raw lxml traceback mid-apply (QA F11).
+    from adeu.redline.engine import describe_illegal_control_chars
+
+    author_ctrl = describe_illegal_control_chars(args.author or "")
+    if author_ctrl:
+        print(
+            f"❌ --author contains control character(s) ({author_ctrl}) that cannot be "
+            "stored in a DOCX. Remove them and re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if args.live:
         if args.changes is None and args.original is not None:
             # Shift positional arguments if only one is provided
@@ -595,8 +735,7 @@ def handle_apply(args):
             if not args.original:
                 print("❌ Must provide original file if not using --live", file=sys.stderr)
                 sys.exit(1)
-            if not args.original.exists():
-                _print_sandbox_warning_and_exit(args.original)
+            _require_input_file(args.original)
             import zipfile
 
             try:
@@ -620,9 +759,29 @@ def handle_apply(args):
 
             from adeu.ingest import _extract_text_from_doc
 
+            # Canonical baseline for text-file input: the CLEAN (accepted)
+            # view. Extract with --clean-view (and --page all on multi-page
+            # documents) to produce a file this path can round-trip.
             text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
 
-            text_mod = _read_text_file(args.changes)
+            text_mod = _load_roundtrip_text(args.changes, args.original, "apply")
+
+            if (
+                not args.allow_major_deletions
+                and len(text_orig) >= _MAJOR_DELETION_MIN_ORIGINAL_CHARS
+                and len(text_mod) < _MAJOR_DELETION_RATIO * len(text_orig)
+            ):
+                pct = 100 - int(100 * len(text_mod) / len(text_orig))
+                print(
+                    f"❌ '{args.changes.name}' is ~{pct}% shorter than the document's clean text "
+                    f"({len(text_mod):,} vs {len(text_orig):,} characters). Applying it would "
+                    "delete the majority of the document as tracked deletions.\n"
+                    "   If the file is a partial extract, re-extract the ENTIRE document with "
+                    "`--page all --clean-view` and edit that.\n"
+                    "   If the mass deletion is intentional, re-run with --allow-major-deletions.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
             from adeu.diff import generate_edits_via_paragraph_alignment
 
@@ -651,6 +810,7 @@ def handle_apply(args):
     if not args.original:
         print("❌ Must provide original file if not using --live", file=sys.stderr)
         sys.exit(1)
+    _require_input_file(args.original)
 
     import zipfile
 
@@ -746,8 +906,7 @@ def handle_accept_all(args: argparse.Namespace):
     Accepts all tracked changes and removes all comments, producing a
     finalized clean document. Mirrors the `accept_all_changes` MCP tool.
     """
-    if not args.input.exists():
-        _print_sandbox_warning_and_exit(args.input)
+    _require_input_file(args.input)
 
     import zipfile
 
@@ -827,6 +986,17 @@ def handle_markup(args):
 
 
 def handle_sanitize(args: argparse.Namespace):
+    from adeu.redline.engine import describe_illegal_control_chars
+
+    author_ctrl = describe_illegal_control_chars(args.author or "")
+    if author_ctrl:
+        print(
+            f"❌ --author contains control character(s) ({author_ctrl}) that cannot be "
+            "stored in a DOCX. Remove them and re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     input_files: List[Path] = args.input
     is_batch = len(input_files) > 1 or args.outdir
 
@@ -1009,9 +1179,11 @@ def main():
         default=None,
         help=(
             "Page number (1-indexed) for 'full' and 'appendix' modes (defaults to 1), "
-            "or 'all' for search (defaults to all). Note: pages are synthetic, "
-            "length-based content chunks sized for LLM consumption — they do NOT "
-            "correspond to printed Word pages or explicit page breaks."
+            "or 'all' to emit the entire document in one output (mode 'full' and search). "
+            "Use '--page all' when producing a text file for `adeu apply`/`adeu diff` — "
+            "a single page of a multi-page document cannot round-trip. Note: pages are "
+            "synthetic, length-based content chunks sized for LLM consumption — they do "
+            "NOT correspond to printed Word pages or explicit page breaks."
         ),
     )
     p_extract.add_argument("--search-query", type=str, help="The substring or regex pattern to search for.")
@@ -1099,6 +1271,16 @@ def main():
         "--dry-run",
         action="store_true",
         help="Simulate the changes and return a detailed preview report without modifying any files.",
+    )
+    p_apply.add_argument(
+        "--allow-major-deletions",
+        action="store_true",
+        help=(
+            "Text-file apply only: allow the supplied text to be less than half the length of the "
+            "document's clean text. Without this flag such an apply is refused, because a truncated "
+            "input (e.g. a single page of a paginated extract) would silently delete everything "
+            "it does not contain."
+        ),
     )
     p_apply.add_argument(
         "--json",

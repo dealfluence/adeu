@@ -40,7 +40,7 @@ from adeu.models import (
     coerce_stringified_changes,
     const_to_enum,
 )
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
 
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
@@ -234,6 +234,14 @@ async def _process_document_batch_disk(
     if not author_name or not author_name.strip():
         await ctx.warning("Batch processing rejected: author_name is empty.")
         return "Error: author_name cannot be empty."
+
+    author_ctrl = describe_illegal_control_chars(author_name)
+    if author_ctrl:
+        await ctx.warning("Batch processing rejected: author_name contains control characters.")
+        return (
+            f"Error: author_name contains control character(s) ({author_ctrl}) that cannot be "
+            "stored in a DOCX. Remove them and retry."
+        )
 
     if not changes:
         await ctx.warning("Batch processing rejected: No actions or edits provided.")

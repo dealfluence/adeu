@@ -330,6 +330,19 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
             if el.getparent() is not None:
                 el.getparent().remove(el)
 
+    # Verify the assertion before reporting it. The report lines above are
+    # built from a PRE-deletion snapshot, so they are structurally incapable
+    # of noticing a failed deletion — which is how a delete_comment no-op
+    # shipped a report reading "Comments removed: N" while word/comments.xml
+    # still carried every comment (QA 2026-07-17 F3). A fresh manager reads
+    # actual package state.
+    remaining = CommentsManager(doc).extract_comments_data()
+    if remaining:
+        raise RuntimeError(
+            f"Sanitize integrity check failed: {len(remaining)} comment(s) still present in the "
+            "package after comment removal. Refusing to report a clean document."
+        )
+
     resolved_count = len([c for c in data.values() if c.get("resolved")])
     open_count = len([c for c in data.values() if not c.get("resolved")])
     header = [f"Comments removed: {len(data)} ({resolved_count} resolved, {open_count} open)"]
@@ -366,6 +379,16 @@ def remove_resolved_comments(doc: DocumentObject) -> list[str]:
         for child in list(cm.extended_part.element):
             if child.get(qn("w15:done")) in ("1", "true", "on"):
                 cm.extended_part.element.remove(child)
+
+    # Verify before reporting (same integrity contract as remove_all_comments).
+    still_resolved = {
+        c_id for c_id, info in CommentsManager(doc).extract_comments_data().items() if info.get("resolved")
+    }
+    if still_resolved:
+        raise RuntimeError(
+            f"Sanitize integrity check failed: {len(still_resolved)} resolved comment(s) still "
+            "present in the package after removal. Refusing to report a clean document."
+        )
 
     return [f"Resolved comments stripped: {len(resolved)}"] + lines
 
@@ -441,8 +464,24 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
         lines.append(f"Last modified by: {core.last_modified_by}")
         core.last_modified_by = ""
     if core.title:
-        # Title is often intentional, but can leak. Report it, don't strip.
-        pass
+        # Title is often intentional, but can leak. Report it, don't strip —
+        # and actually DO report it: the 1.21.0 build had a bare `pass` here,
+        # so codename titles left the building unreported (QA 2026-07-17 F4).
+        lines.append(f'Title kept (review manually): "{core.title}"')
+    # Classification-style properties are textbook leak vectors ("Project
+    # Falcon", "confidential,merger,..."). Unlike title they carry no
+    # legitimate outbound formatting value, so strip them and say so.
+    for attr, label in (
+        ("category", "Category"),
+        ("keywords", "Keywords"),
+        ("subject", "Subject"),
+        ("content_status", "Content status"),
+        ("comments", "Description/comments"),
+    ):
+        value = getattr(core, attr, None)
+        if value:
+            lines.append(f"{label}: {value}")
+            setattr(core, attr, "")
     if core.revision and core.revision > 1:
         lines.append(f"Revision count: {core.revision} → 1")
         core.revision = 1

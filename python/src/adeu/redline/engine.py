@@ -29,6 +29,7 @@ from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
+from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import PREVIEW_TEXT_CAP, REPORT_ECHO_CAP, truncate_middle
 
 logger = structlog.get_logger(__name__)
@@ -52,6 +53,23 @@ class BatchValidationError(Exception):
     def __init__(self, errors: List[str]):
         super().__init__("Batch validation failed:\n" + "\n".join(errors))
         self.errors = errors
+
+
+# Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
+# lxml refuses to serialize them, so without an up-front check they surfaced
+# as a raw "All strings must be XML compatible" traceback from deep inside
+# lxml instead of a clean per-edit error (QA 2026-07-17 F11).
+XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def describe_illegal_control_chars(text: str) -> Optional[str]:
+    """Human-readable listing of XML-illegal control characters in `text`, or None."""
+    if not text:
+        return None
+    found = sorted({f"0x{ord(c):02x}" for c in XML_ILLEGAL_CHARS_RE.findall(text)})
+    if not found:
+        return None
+    return ", ".join(found)
 
 
 def validate_edit_strings(
@@ -94,6 +112,23 @@ def validate_edit_strings(
     for i, edit in enumerate(edits, start=index_offset):
         t_text = edit.target_text or ""
         n_text = getattr(edit, "new_text", "") or ""
+
+        # VAL-CRIT-8: XML-illegal control characters. These can never be
+        # written into a DOCX (lxml refuses), so reject them here with a clean
+        # per-edit error instead of a raw lxml traceback at apply time.
+        checked_fields = [("target_text", t_text), ("new_text", n_text)]
+        comment_text = getattr(edit, "comment", None)
+        if comment_text:
+            checked_fields.append(("comment", comment_text))
+        for cell_idx, cell in enumerate(getattr(edit, "cells", []) or []):
+            checked_fields.append((f"cells[{cell_idx}]", cell or ""))
+        for field_name, field_value in checked_fields:
+            described = describe_illegal_control_chars(field_value)
+            if described:
+                errors.append(
+                    f"- Edit {i + 1} Failed: `{field_name}` contains control character(s) ({described}) "
+                    "that cannot be stored in a DOCX. Remove them and re-submit."
+                )
 
         # VAL-CRIT-6: CriticMarkup Hallucination Prevention
         if "{++" in n_text or "{--" in n_text or "{>>" in n_text or "{==" in n_text:
@@ -1277,6 +1312,21 @@ class RedlineEngine:
     def _attach_comment(self, parent_element, start_element, end_element, text: str):
         if not text:
             return
+        # The anchor context can be gone by the time we get here (e.g. the
+        # enclosing <w:ins> was split and detached from the tree). Resolve the
+        # anchor indexes BEFORE minting the comment so a failed anchor skips
+        # cleanly instead of crashing on parent_element.index(None-parent) and
+        # leaving an orphaned entry in comments.xml (QA 2026-07-17 F8).
+        if parent_element is None or start_element is None or end_element is None:
+            logger.warning("Comment anchor context missing; skipping comment attachment", text=text[:60])
+            return
+        try:
+            start_index = parent_element.index(start_element)
+            end_index = parent_element.index(end_element)
+        except ValueError:
+            logger.warning("Comment anchor elements are not children of the parent; skipping", text=text[:60])
+            return
+
         comment_id = self.comments_manager.add_comment(self.author, text)
         range_start = create_element("w:commentRangeStart")
         create_attribute(range_start, "w:id", comment_id)
@@ -1294,7 +1344,6 @@ class RedlineEngine:
         create_attribute(ref, "w:id", comment_id)
         ref_run.append(ref)
 
-        start_index = parent_element.index(start_element)
         parent_element.insert(start_index, range_start)
         end_index = parent_element.index(end_element)
         parent_element.insert(end_index + 1, range_end)
@@ -1765,17 +1814,47 @@ class RedlineEngine:
             validation_errors: List[str] = []
             failed_validation_indices: set = set()
 
-            if pinned:
-                p_applied, p_skipped = self.apply_edits([e for _, e in pinned], page_offsets=page_offsets)
+            # Caller-pinned edits resolve by position, so the document-context
+            # checks (not-found / ambiguity) don't apply to them — but the
+            # string-shape checks do, exactly as the validate_edits docstring
+            # promises. Without this, the text-diff path wrote raw CriticMarkup
+            # (including reviewer names and change IDs) into document bodies as
+            # prose (QA 2026-07-17 F8).
+            pinned_ok: List[Tuple[int, Any]] = []
+            for i, e in pinned:
+                shape_errors = validate_edit_strings([e], index_offset=i)
+                if shape_errors:
+                    validation_errors.extend(shape_errors)
+                    failed_validation_indices.add(i)
+                    skipped_edits += 1
+                    reports_by_input[i] = {
+                        "status": "failed",
+                        "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
+                        "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
+                        "warning": None,
+                        "error": "\n".join(shape_errors),
+                        "critic_markup": None,
+                        "clean_text": None,
+                    }
+                else:
+                    pinned_ok.append((i, e))
+
+            if pinned_ok:
+                p_applied, p_skipped = self.apply_edits([e for _, e in pinned_ok], page_offsets=page_offsets)
                 applied_edits += p_applied
                 skipped_edits += p_skipped
-                for i, e in pinned:
+                for i, e in pinned_ok:
                     reports_by_input[i] = self._build_edit_report(e)
                 if p_applied > 0:
                     self._refresh_after_sequential_edit()
 
             for i, edit in unpinned:
-                single_errors = self.validate_edits([edit], index_offset=i)
+                try:
+                    single_errors = self.validate_edits([edit], index_offset=i)
+                except RegexTimeoutError as e:
+                    # A pathological user pattern must fail as a clean per-edit
+                    # validation error, never a hang or traceback (QA F5).
+                    single_errors = [f"- Edit {i + 1} Failed: {e}"]
                 if single_errors:
                     if applied_edits > 0:
                         hint = (
@@ -1893,7 +1972,17 @@ class RedlineEngine:
                     target_snippet = edit.target_text.strip()[:40]
                     self.skipped_details.append(f"- Failed to apply structural edit targeting: '{target_snippet}...'")
             else:
-                resolved = self._pre_resolve_heuristic_edit(edit)
+                try:
+                    resolved = self._pre_resolve_heuristic_edit(edit)
+                except RegexTimeoutError as e:
+                    # Direct apply_edits callers bypass validate_edits; the
+                    # time budget must still fail cleanly here (QA F5).
+                    skipped += 1
+                    edit._applied_status = False
+                    msg = f"- Failed to apply edit targeting: '{(edit.target_text or '')[:40]}...' ({e})"
+                    self.skipped_details.append(msg)
+                    edit._error_msg = msg
+                    continue
                 if resolved:
                     if isinstance(resolved, list):
                         for r in resolved:
@@ -3129,6 +3218,34 @@ class RedlineEngine:
         output.seek(0)
         return output
 
+    def _duplicate_revision_id_error(self, target_id: str, action_type: str) -> Optional[str]:
+        """
+        Refuses accept/reject on a w:id shared by revisions from DIFFERENT
+        authors. Chg:N identifiers are the raw w:id values; uniqueness is
+        assumed but not guaranteed for externally produced documents (merges,
+        cross-document copy-paste), where one action would silently resolve
+        several unrelated changes (QA 2026-07-17 F9). Same-author reuse is
+        legitimate — this engine itself mints one id across every element of
+        a single logical edit — so authorship is the discriminator.
+        """
+        nodes = [
+            n
+            for tag in ("w:ins", "w:del")
+            for n in self.doc.element.findall(f".//{qn(tag)}")
+            if n.get(qn("w:id")) == target_id
+        ]
+        authors = sorted({n.get(qn("w:author")) or "Unknown" for n in nodes})
+        if len(authors) <= 1:
+            return None
+        return (
+            f"- Failed to apply action: {action_type} on Chg:{target_id} is ambiguous. The document "
+            f"contains {len(nodes)} tracked-change elements sharing w:id={target_id} from different "
+            f"authors ({', '.join(authors)}) — duplicate revision IDs produced outside this engine "
+            "(e.g. by a document merge or copy-paste). Acting on this ID would resolve all of them "
+            "at once. Resolve these changes individually in Word, or apply the intended outcome as "
+            "an explicit text edit instead."
+        )
+
     def apply_review_actions(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> tuple[int, int]:
         applied = 0
         skipped = 0
@@ -3154,6 +3271,13 @@ class RedlineEngine:
             if is_change and target_id in resolved_history:
                 applied += 1
                 continue
+
+            if is_change and isinstance(act, (AcceptChange, RejectChange)):
+                dup_error = self._duplicate_revision_id_error(target_id, act.type)
+                if dup_error:
+                    self.skipped_details.append(dup_error)
+                    skipped += 1
+                    continue
 
             resolved_now = set()
             success = False
