@@ -574,10 +574,10 @@ class TestF6DuplicateDefinitionDiagnostics:
         return doc, base_text
 
     def test_extract_definitions_reports_unused_duplicate(self):
-        from adeu.domain import extract_definitions_and_diagnostics
+        from adeu.domain import extract_all_domain_metadata
 
         doc, base_text = self._doc_with_unused_duplicate()
-        _defs, diagnostics = extract_definitions_and_diagnostics(doc, base_text)
+        _defs, diagnostics, _anchors = extract_all_domain_metadata(doc, base_text)
         assert any("Duplicate Definition" in d and "Gadget" in d for d in diagnostics), (
             f"duplicate-definition error suppressed for unused term; got {diagnostics}"
         )

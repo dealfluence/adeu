@@ -14,7 +14,6 @@ from typing import Any, Dict, List
 
 from pydantic import TypeAdapter, ValidationError
 
-from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import BatchChanges, DocumentChange, ModifyText
@@ -237,24 +236,15 @@ def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
 
 
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
-    _require_input_file(path)
-    if path.suffix.lower() != ".docx":
-        _cli_error(
-            "invalid_docx",
-            f"'{path.name}' must be a DOCX file (got {path.suffix or 'no extension'}).",
-        )
+    """Projects a DOCX to text through the single shared open path."""
+    doc = _load_docx_or_exit(path)
     try:
-        with open(path, "rb") as f:
-            header = f.read(4)
-            if header != b"PK\x03\x04":
-                _cli_error("invalid_docx", f"'{path.name}' is not a valid DOCX file (got bad zip signature).")
-            f.seek(0)
-            return extract_text_from_stream(BytesIO(f.read()), filename=path.name, clean_view=clean_view)
+        from adeu.ingest import _extract_text_from_doc
+
+        return _extract_text_from_doc(doc, clean_view=clean_view)
     except SystemExit:
         raise
     except Exception as e:
-        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or "not a valid DOCX file" in str(e):
-            _handle_docx_error_and_exit(path.name, e)
         _cli_error("invalid_docx", f"Error reading DOCX file '{path.name}': {e}")
         raise AssertionError("unreachable") from None
 
@@ -706,6 +696,30 @@ def _load_docx_or_exit(path: Path):
         raise
 
 
+def _open_redline_engine_or_exit(path: Path, author: "str | None" = None) -> RedlineEngine:
+    """Opens a RedlineEngine on `path` through the single shared error path."""
+    _require_input_file(path)
+    import zipfile
+
+    try:
+        with open(path, "rb") as f:
+            stream = BytesIO(f.read())
+        if author is not None:
+            return RedlineEngine(stream, author=author)
+        return RedlineEngine(stream)
+    except SystemExit:
+        raise
+    except Exception as e:
+        if (
+            "bad zip signature" in str(e)
+            or "not a zip file" in str(e).lower()
+            or "not a valid DOCX file" in str(e)
+            or isinstance(e, zipfile.BadZipFile)
+        ):
+            _handle_docx_error_and_exit(path.name, e)
+        raise
+
+
 def handle_diff(args):
     _set_json_mode(args.json)
     from adeu.diff import make_edits_self_contained
@@ -829,29 +843,8 @@ def handle_apply(args):
             text_orig, _, _ = _read_active_word_document_core(clean_view=False)
         else:
             if not args.original:
-                print("❌ Must provide original file if not using --live", file=sys.stderr)
-                sys.exit(1)
-            _require_input_file(args.original)
-            import zipfile
-
-            try:
-                with open(args.original, "rb") as f:
-                    stream = BytesIO(f.read())
-                from adeu.utils.docx import strip_bom_from_docx_bytes
-
-                sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-                from docx import Document as load_document
-
-                doc = load_document(BytesIO(sanitized_bytes))
-            except Exception as e:
-                if (
-                    "bad zip signature" in str(e)
-                    or "not a zip file" in str(e).lower()
-                    or "not a valid DOCX file" in str(e)
-                    or isinstance(e, zipfile.BadZipFile)
-                ):
-                    _handle_docx_error_and_exit(args.original.name, e)
-                raise
+                _cli_error("invalid_input", "Must provide original file if not using --live")
+            doc = _load_docx_or_exit(args.original)
 
             from adeu.ingest import _extract_text_from_doc
 
@@ -906,24 +899,9 @@ def handle_apply(args):
         _cli_error("invalid_input", "Must provide original file if not using --live")
     _require_input_file(args.original)
 
-    import zipfile
-
     if not args.json:
         print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
-    try:
-        with open(args.original, "rb") as f:
-            stream = BytesIO(f.read())
-
-        engine = RedlineEngine(stream, author=args.author)
-    except Exception as e:
-        if (
-            "bad zip signature" in str(e)
-            or "not a zip file" in str(e).lower()
-            or "not a valid DOCX file" in str(e)
-            or isinstance(e, zipfile.BadZipFile)
-        ):
-            _handle_docx_error_and_exit(args.original.name, e)
-        raise
+    engine = _open_redline_engine_or_exit(args.original, author=args.author)
     try:
         stats = engine.process_batch(changes, dry_run=args.dry_run)
     except BatchValidationError as e:
@@ -1013,23 +991,7 @@ def handle_accept_all(args: argparse.Namespace):
     finalized clean document. Mirrors the `accept_all_changes` MCP tool.
     """
     _set_json_mode(args.json)
-    _require_input_file(args.input)
-
-    import zipfile
-
-    try:
-        with open(args.input, "rb") as f:
-            stream = BytesIO(f.read())
-        engine = RedlineEngine(stream)
-    except Exception as e:
-        if (
-            "bad zip signature" in str(e)
-            or "not a zip file" in str(e).lower()
-            or "not a valid DOCX file" in str(e)
-            or isinstance(e, zipfile.BadZipFile)
-        ):
-            _handle_docx_error_and_exit(args.input.name, e)
-        raise
+    engine = _open_redline_engine_or_exit(args.input)
 
     engine.accept_all_revisions(remove_comments=True)
 
