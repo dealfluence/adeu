@@ -533,9 +533,8 @@ def apply_edits_to_markdown(
             target_text=isolated_target,
             new_text=isolated_new,
             comment=edit.comment,
-            # 1-based, matching apply's "Edit N" reports and batch validation
-            # errors — a 0-based [Edit:N] here mis-mapped every cross-reference
-            # between a markup preview and an apply report by one (QA F10).
+            # 1-based, matching apply's "Edit N" reports and batch
+            # validation errors (QA 2026-07-17 F10).
             edit_index=orig_idx + 1,
             include_index=include_index,
             highlight_only=highlight_only,

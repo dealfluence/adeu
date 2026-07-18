@@ -385,8 +385,8 @@ class RedlineEngine:
         Snapshots the document text around a resolved edit BEFORE anything is
         applied. Previews rendered after the batch mutates the DOM cannot slice
         full_text at the stored offsets: applied edits shift offsets and inject
-        tracked-change markup, which produced garbled previews mixing unrelated
-        edits and internal scaffolding (QA H1).
+        tracked-change markup, garbling previews with unrelated edits and
+        internal scaffolding (QA H1).
         """
         if not isinstance(edit, ModifyText):
             return
@@ -1477,8 +1477,8 @@ class RedlineEngine:
                 if live_matches:
                     matches = live_matches
 
-            # Since the structural appendix is no longer in the mapper,
-            # all matches are valid document body matches.
+            # The structural appendix is not part of the mapper's
+            # projection, so all matches are valid document body matches.
             valid_matches = matches
 
             if len(valid_matches) == 0:
@@ -1625,7 +1625,7 @@ class RedlineEngine:
 
             # Structural table edits: verify the anchor really is a table row,
             # and that insert_row does not provide more cells than the row has
-            # columns — extra cells used to be silently discarded (QA M3).
+            # columns — extra cells must never be silently discarded (QA M3).
             if isinstance(edit, (InsertTableRow, DeleteTableRow)) and valid_matches:
                 start, length = valid_matches[0]
                 n_cols = self._column_count_at(target_mapper, start, length)
@@ -1688,8 +1688,8 @@ class RedlineEngine:
     def _report_new_text(edit: Any) -> str:
         """
         The "new text" a batch report should show for an edit. InsertTableRow
-        has no new_text field — surface its cell contents instead of the
-        misleading empty string the report used to print (QA M4).
+        has no new_text field — surface its cell contents rather than a
+        misleading empty string (QA M4).
         """
         if isinstance(edit, InsertTableRow):
             return " | ".join(edit.cells)
@@ -1817,7 +1817,7 @@ class RedlineEngine:
             # Caller-pinned edits resolve by position, so the document-context
             # checks (not-found / ambiguity) don't apply to them — but the
             # string-shape checks do, exactly as the validate_edits docstring
-            # promises. Without this, the text-diff path wrote raw CriticMarkup
+            # promises. Without this, the text-diff path writes raw CriticMarkup
             # (including reviewer names and change IDs) into document bodies as
             # prose (QA 2026-07-17 F8).
             pinned_ok: List[Tuple[int, Any]] = []
@@ -2026,8 +2026,8 @@ class RedlineEngine:
 
         # Snapshot preview context now, while every resolved offset still refers
         # to the untouched document. The sweep below mutates the DOM and rebuilds
-        # the map, which shifts offsets and injects tracked-change markup —
-        # slicing full_text at report time garbled previews (QA H1).
+        # the map, shifting offsets and injecting tracked-change markup —
+        # slicing full_text at report time garbles previews (QA H1).
         for res_edit, _ in resolved_edits:
             self._capture_preview_context(res_edit)
             parent = getattr(res_edit, "_parent_edit_ref", None)
@@ -2765,17 +2765,15 @@ class RedlineEngine:
         if op == EditOperationType.PARAGRAPH_REPLACE:
             return self._apply_paragraph_replace(edit)
 
-        # Allocate logical-edit IDs up front. A single ModifyText that spans
-        # multiple XML runs (e.g. a target containing a bold word, which OOXML
-        # stores as a separate <w:r> element) or whose new_text spans multiple
-        # paragraphs used to mint a fresh w:id per <w:ins>/<w:del> element,
-        # surfacing as N [Chg:N] entries in the projected bubble even though
-        # Word renders the change as a single review entry. We now allocate one
-        # id for the delete side and one for the insert side per logical
-        # operation, and reuse them across every <w:ins>/<w:del> element this
-        # edit produces. The mapper's _build_merged_meta_block already
-        # deduplicates repeated IDs via seen_sigs, so this collapses the bubble
-        # automatically without any projection-side change to the engine.
+        # Allocate logical-edit IDs up front: one id for the delete side and
+        # one for the insert side per logical operation, reused across every
+        # <w:ins>/<w:del> element this edit produces. A single ModifyText can
+        # span multiple XML runs (e.g. a target containing a bold word, which
+        # OOXML stores as a separate <w:r> element) or multiple paragraphs;
+        # minting a fresh w:id per element would surface N [Chg:N] entries in
+        # the projected bubble for what Word renders as a single review entry.
+        # The mapper's _build_merged_meta_block deduplicates repeated IDs via
+        # seen_sigs, collapsing the bubble without any projection-side change.
         del_id: Optional[str] = None
         ins_id: Optional[str] = None
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):

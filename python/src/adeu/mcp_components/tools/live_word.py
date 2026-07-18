@@ -345,7 +345,7 @@ if sys.platform == "win32":
             # in the response. Skip building it for the other modes (~8.5s saved on
             # large docs).
             needs_appendix = mode == "appendix"
-            # Step 4 / Option A: outline mode uses paragraph offsets to avoid
+            # Outline mode uses paragraph offsets to avoid
             # re-projecting each paragraph.
             needs_offsets = mode == "outline"
 

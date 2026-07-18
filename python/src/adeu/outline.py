@@ -108,7 +108,7 @@ def extract_outline(
         body_pages: pre-appendix-injection page bodies, in order.
         body_page_offsets: start offset (in projected_body) of each entry in body_pages.
             Must satisfy len(body_pages) == len(body_page_offsets).
-        paragraph_offsets: when provided (Step 4 / Option A), this is the offset
+        paragraph_offsets: when provided, this is the offset
             map produced by _extract_text_from_doc(return_paragraph_offsets=True).
             Used to fast-path heading text extraction by slicing projected_body
             instead of re-projecting each paragraph. When None, falls back to the
@@ -436,11 +436,10 @@ def _walk_doc_body(doc: DocumentObject, comments_map: dict) -> List[_BlockRecord
     # we need length for. For outline purposes, the only thing that matters is
     # heading position; non-heading lengths only matter as cumulative offsets.
     #
-    # Tradeoff: we still call build_paragraph_text per paragraph here. That's
-    # O(N) over body paragraphs, same complexity as before, but the per-call
-    # cost is unchanged. The win comes from removing the recursive table
-    # measuring (which previously called extract_table AND walked cells AND
-    # called build_paragraph_text per inner paragraph).
+    # Tradeoff: build_paragraph_text still runs once per body paragraph —
+    # O(N) — but tables are measured by length arithmetic alone. Recursively
+    # measuring them (extract_table + walking cells + build_paragraph_text
+    # per inner paragraph) is the expensive path this avoids.
     records: List[_BlockRecord] = []
     cursor = body_start_offset
     is_first_block = True

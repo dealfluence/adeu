@@ -134,7 +134,7 @@ export function build_outline_response(
   outline_verbose: boolean = false,
   paragraph_offsets: Map<any, [number, number]> | null = null,
 ): ToolResult {
-  // Levels outside 1-6 are meaningless (0/negative used to render a
+  // Levels outside 1-6 are meaningless (0/negative would render a
   // nonsensical "L1-L0" range label, QA L2). Clamp to the nearest sensible
   // depth, mirroring the Python builder.
   outline_max_level = Math.max(1, Math.min(outline_max_level, 6));

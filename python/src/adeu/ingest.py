@@ -64,23 +64,22 @@ def _extract_text_from_doc(
         clean_view: if True, simulate "Accept All Changes" view.
         include_appendix: if True (default), append the structural appendix
             (defined terms, anchors, diagnostics) to the projected text.
-            Set False when the caller knows it will discard the appendix
-            (e.g. mode='full' / mode='outline' since Step 3 — those modes
-            no longer ship the appendix in the response).
+            Set False when the caller discards the appendix (mode='full' /
+            mode='outline' do not ship it in the response).
         return_paragraph_offsets: if True (default False), returns a tuple
             (text, offset_map) where offset_map is Dict[id(p._element), (start, length)]
-            for every paragraph projected. Used by mode='outline' (Step 4 / Option A)
+            for every paragraph projected. Used by mode='outline'
             to avoid re-projecting paragraphs to extract heading text.
 
     Returns:
         - text: str   (default)
         - (text, offset_map): tuple   (when return_paragraph_offsets=True)
 
-    PERF: We no longer call normalize_docx() here. The ingest pipeline tolerates
-    fragmented runs (build_paragraph_text coalesces marker/wrapper boundaries
-    via FIX C logic). normalize_docx remains called by the RedlineEngine on
-    edit paths via the engine's own initialization, where DOM mutation is
-    already happening anyway. Read-only ingest skipping it is safe.
+    PERF: normalize_docx() is deliberately not called here. The ingest
+    pipeline tolerates fragmented runs (build_paragraph_text coalesces
+    marker/wrapper boundaries), and read-only ingest is safe without it;
+    the RedlineEngine normalizes on edit paths, where DOM mutation is
+    already happening anyway.
     """
     comments_mgr = CommentsManager(doc)
     comments_map = comments_mgr.extract_comments_data()

@@ -33,17 +33,15 @@ each channel is self-sufficient for its audience:
     position in the document without consulting structured_content.
 
   - `structured_content`: contains only fields the markdown UI widget actually
-    reads — `markdown`, `title`, `file_path`. Everything else has been removed
-    because nothing consumes it.
+    reads — `markdown`, `title`, `file_path`. Nothing else is consumed.
 
-APPENDIX SEPARATION (Step 2)
-----------------------------
+APPENDIX SEPARATION
+-------------------
 The Structural Appendix (defined terms, anchors, diagnostics) is NOT included
-in body pages. It is fetched on demand via mode='appendix'. Body pages get a
-small one-line footer pointing the agent at the appendix mode. This was
-necessary because on large legal documents the appendix can exceed 400KB,
-which (a) blew the per-page payload ceiling and (b) was being silently
-chunked by the MCP client.
+in body pages. It is fetched on demand via mode='appendix', and body pages get
+a small one-line footer pointing the agent at the appendix mode. Rationale: on
+large legal documents the appendix can exceed 400KB, which (a) blows the
+per-page payload ceiling and (b) gets silently chunked by the MCP client.
 
 The appendix is paginated using the same paginator as the body, with the
 appendix text passed AS the body input.
@@ -132,9 +130,8 @@ def build_full_document_response(text: str, file_path: str) -> ToolResult:
 
     This is the round-trip artifact for text-based apply/diff: page chrome is
     presentation, and a single page of a multi-page document can never round-
-    trip safely (QA 2026-07-17 F1 — there was previously no supported way to
-    extract a >19k-char document completely). Reached via `--page all` on the
-    CLI and `page='all'` with `mode='full'` over MCP.
+    trip safely (QA 2026-07-17 F1). Reached via `--page all` on the CLI and
+    `page='all'` with `mode='full'` over MCP.
     """
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
@@ -153,9 +150,9 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
     """
     Splits projected Markdown into pages and returns the requested page.
 
-    The structural appendix is NOT included in the page content (since Step 2).
-    Body pages get a one-line footer pointing the agent at mode='appendix'
-    if the document has an appendix.
+    The structural appendix is NOT included in the page content. Body pages
+    get a one-line footer pointing the agent at mode='appendix' if the
+    document has an appendix.
 
     Raises ToolError if `page` is out of range.
     """
@@ -210,14 +207,14 @@ def build_outline_response(
             _extract_text_from_doc(return_paragraph_offsets=True).
     """
 
-    # Levels outside 1-6 are meaningless (0/negative used to render a
+    # Levels outside 1-6 are meaningless (0/negative would render a
     # nonsensical "L1-L0" range label, QA L2). The CLI rejects them at parse
     # time; clamp here so MCP callers get the nearest sensible depth.
     outline_max_level = max(1, min(outline_max_level, 6))
 
     # Pagination is used here only to compute body page boundaries for
     # heading->page mapping. We deliberately pass empty string instead of the
-    # appendix because per-page appendix injection is gone (Step 2).
+    # appendix — the appendix is never injected per page.
     body, _appendix = split_structural_appendix(projected_text)
     pagination_result = paginate(body, structural_appendix="")
 

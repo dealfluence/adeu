@@ -605,8 +605,8 @@ export class RedlineEngine {
    * Snapshots the document text around a resolved edit BEFORE anything is
    * applied. Previews rendered after the batch mutates the DOM cannot slice
    * full_text at the stored offsets: applied edits shift offsets and inject
-   * tracked-change markup, which produced garbled previews mixing unrelated
-   * edits and internal scaffolding (QA H1).
+   * tracked-change markup, garbling previews with unrelated edits and
+   * internal scaffolding (QA H1).
    */
   private _capture_preview_context(edit: any): void {
     if (edit.type !== "modify") return;
@@ -724,8 +724,8 @@ export class RedlineEngine {
 
   /**
    * The "new text" a batch report should show for an edit. InsertTableRow has
-   * no new_text field — surface its cell contents instead of the misleading
-   * empty string the report used to print (QA M4).
+   * no new_text field — surface its cell contents rather than a misleading
+   * empty string (QA M4).
    */
   private static _report_new_text(edit: any): string {
     if (edit && edit.type === "insert_row" && Array.isArray(edit.cells)) {
@@ -2148,7 +2148,7 @@ export class RedlineEngine {
 
       // Structural table edits: verify the anchor really is a table row, and
       // that insert_row does not provide more cells than the row has columns —
-      // extra cells used to produce a structurally inconsistent row (QA M3).
+      // extra cells must never produce a structurally inconsistent row (QA M3).
       if (
         (edit.type === "insert_row" || edit.type === "delete_row") &&
         matches.length > 0
@@ -2331,16 +2331,14 @@ export class RedlineEngine {
         !["accept", "reject", "reply"].includes(c.type),
     );
 
-    // NOTE: a previous "edits_for_merge" pre-pass here silently UNWRAPPED a
-    // foreign author's <w:ins> when a strict/first edit only partially straddled
-    // its boundary — turning that author's tracked-inserted text into untracked
-    // committed body text before the edit applied, destroying their provenance.
-    // That is the same provenance-laundering failure mode the canonical engine
-    // refuses, so it has been removed: a partial straddle now surfaces the
-    // standard validation error ("Modification targets an active insertion from
-    // another author …") via validate_edits, matching the Python engine. An edit
-    // fully CONTAINED inside a foreign <w:ins> stays allowed and is handled by
-    // nesting the <w:del> inside that <w:ins> (see _apply_single_edit_indexed /
+    // Never pre-unwrap a foreign author's <w:ins> to make a partially
+    // straddling edit fit: that turns their tracked-inserted text into
+    // untracked committed body text before the edit applies, destroying
+    // their provenance. A partial straddle surfaces the standard validation
+    // error ("Modification targets an active insertion from another author
+    // …") via validate_edits, matching the Python engine. An edit fully
+    // CONTAINED inside a foreign <w:ins> is allowed and handled by nesting
+    // the <w:del> inside that <w:ins> (see _apply_single_edit_indexed /
     // _insert_and_split_ins).
 
     // BUG-7: Unified single-pass validation in wet-run / standard mode.
@@ -2729,8 +2727,8 @@ export class RedlineEngine {
 
     // Snapshot preview context now, while every resolved offset still refers
     // to the untouched document. The sweep below mutates the DOM and rebuilds
-    // the map, which shifts offsets and injects tracked-change markup —
-    // slicing full_text at report time garbled previews (QA H1).
+    // the map, shifting offsets and injecting tracked-change markup —
+    // slicing full_text at report time garbles previews (QA H1).
     for (const [res_edit] of resolved_edits) {
       this._capture_preview_context(res_edit);
       if (res_edit._parent_edit_ref) {

@@ -330,11 +330,9 @@ def remove_all_comments(doc: DocumentObject) -> list[str]:
             if el.getparent() is not None:
                 el.getparent().remove(el)
 
-    # Verify the assertion before reporting it. The report lines above are
+    # Verify the assertion before reporting it: the report lines above are
     # built from a PRE-deletion snapshot, so they are structurally incapable
-    # of noticing a failed deletion — which is how a delete_comment no-op
-    # shipped a report reading "Comments removed: N" while word/comments.xml
-    # still carried every comment (QA 2026-07-17 F3). A fresh manager reads
+    # of noticing a failed deletion (QA 2026-07-17 F3). A fresh manager reads
     # actual package state.
     remaining = CommentsManager(doc).extract_comments_data()
     if remaining:
@@ -464,9 +462,8 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
         lines.append(f"Last modified by: {core.last_modified_by}")
         core.last_modified_by = ""
     if core.title:
-        # Title is often intentional, but can leak. Report it, don't strip —
-        # and actually DO report it: the 1.21.0 build had a bare `pass` here,
-        # so codename titles left the building unreported (QA 2026-07-17 F4).
+        # Title is often intentional, but can leak. Report it, don't strip
+        # (QA 2026-07-17 F4).
         lines.append(f'Title kept (review manually): "{core.title}"')
     # Classification-style properties are textbook leak vectors ("Project
     # Falcon", "confidential,merger,..."). Unlike title they carry no

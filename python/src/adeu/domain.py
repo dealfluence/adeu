@@ -67,8 +67,7 @@ def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, 
         # Drop unused terms from the SYMBOL TABLE only — that filter is noise
         # reduction for the Defined Terms listing, and must not gate the
         # Semantic Diagnostics: a term defined twice and never used is two
-        # drafting errors, not zero (QA 2026-07-17 F6 — the duplicate error
-        # was discarded together with the pruned term). Surface the orphan
+        # drafting errors, not zero (QA 2026-07-17 F6). Surface the orphan
         # definition itself as a diagnostic instead.
         for term in list(definitions.keys()):
             if definitions[term]["count"] == 0:

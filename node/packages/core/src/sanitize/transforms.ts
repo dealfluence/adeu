@@ -427,8 +427,8 @@ export function scrub_doc_properties(doc: DocumentObject): string[] {
     const modifiers = findDescendantsByLocalName(corePart._element, 'lastModifiedBy');
     modifiers.forEach(c => { if (c.textContent) { lines.push(`Last modified by: ${c.textContent}`); c.textContent = ""; }});
 
-    // Title is often intentional, but can leak. Report it, don't strip —
-    // it previously did neither (QA 2026-07-17 F4; mirrors Python).
+    // Title is often intentional, but can leak. Report it, don't strip
+    // (QA 2026-07-17 F4; mirrors Python).
     const titles = findDescendantsByLocalName(corePart._element, 'title');
     titles.forEach(c => { if (c.textContent) { lines.push(`Title kept (review manually): "${c.textContent}"`); }});
 

@@ -200,8 +200,8 @@ class DocumentMapper:
             self._text_chunks.pop()
 
         self.full_text = "".join(self._text_chunks)
-        # We no longer calculate the appendix for the mapping engine.
-        # It's an unnecessary O(N) calculation that isn't needed for redlining.
+        # The appendix is not part of the mapping engine's projection —
+        # an O(N) calculation redlining never needs.
         self.appendix_start_index = -1
 
     def _map_blocks(self, container, offset: int) -> int:

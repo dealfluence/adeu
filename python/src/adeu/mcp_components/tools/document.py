@@ -166,7 +166,7 @@ async def _read_docx_disk(
         # build_structural_appendix() cost (~8.5s on a 1000-page doc).
         needs_appendix = mode == "appendix"
         # mode='outline' uses paragraph offsets to avoid re-projecting each
-        # paragraph (Step 4 / Option A).
+        # paragraph.
         needs_offsets = mode == "outline"
 
         extract_result = _extract_text_from_doc(
@@ -189,8 +189,8 @@ async def _read_docx_disk(
 
         # In full mode, page='all' returns the entire document without page
         # chrome — the round-trip artifact for text-based apply/diff
-        # (QA 2026-07-17 F1; mirrors the CLI's --page all). It used to fall
-        # through the isdigit() check below and silently render page 1.
+        # (QA 2026-07-17 F1; mirrors the CLI's --page all). Dispatched before
+        # the isdigit() check below, which would silently render page 1.
         if mode == "full" and page is not None and str(page).strip().lower() == "all":
             return build_full_document_response(text, file_path)
 

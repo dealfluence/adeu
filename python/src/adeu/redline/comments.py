@@ -336,9 +336,9 @@ class CommentsManager:
         Read paths must use this guard instead of testing the raw backing field
         `self._comments_part`: on a fresh manager the backing field is None
         until the lazy `comments_part` property populates it, so guarding on
-        the field silently no-ops even though the document HAS comments — that
-        is exactly how `sanitize` shipped reporting comments removed while
-        word/comments.xml survived intact (QA 2026-07-17 F3). Checking the
+        the field silently no-ops even though the document HAS comments, and
+        sanitize then reports comments removed while word/comments.xml
+        survives intact (QA 2026-07-17 F3). Checking the
         package (rather than unconditionally touching the property) keeps the
         other guarantee: a document with no comments part never has one
         created as a side effect of a read/delete.

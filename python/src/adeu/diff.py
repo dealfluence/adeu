@@ -199,18 +199,14 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
             prefix_len += mlen
             suffix_len += mlen
 
-    # NOTE: An earlier version of this function suppressed suffix trimming when
-    # the trimmed new_text contained newlines, on the theory that the engine
-    # needed the full suffix kept in target_text so it could "transplant" it
-    # into the new paragraph structure. That theory was wrong: the engine never
-    # implemented such a transplant, and the suppression made multi-paragraph
-    # structured replacements (where target_text spans a paragraph break)
-    # produce orphan fragments and standalone reinsertions of the surviving
-    # suffix. See debug_bug1.py and the Bug 1 investigation.
-    #
-    # With suffix trimming enabled, the engine sees a clean
-    # (target='', new=insertion) pure-insertion edit at the paragraph boundary,
-    # which it handles correctly via the existing INSERTION path
+    # Suffix trimming stays active even when the trimmed new_text contains
+    # newlines. The engine implements no suffix "transplant" into new
+    # paragraph structure: keeping the full suffix inside target_text makes
+    # multi-paragraph structured replacements (where target_text spans a
+    # paragraph break) produce orphan fragments and standalone reinsertions
+    # of the surviving suffix. With the suffix trimmed, the engine sees a
+    # clean (target='', new=insertion) pure-insertion edit at the paragraph
+    # boundary and handles it via the INSERTION path
     # (get_insertion_anchor + track_insert).
 
     return prefix_len, suffix_len
@@ -282,17 +278,15 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
                 # text. This matches the contract used by every other producer of
                 # _match_start_index in the codebase.
                 #
-                # We no longer use the "anchor baked into target_text" convention,
-                # because it produced contradictory edit objects: target_text would
-                # claim to live at [anchor_start : current_original_index] while
-                # _match_start_index pointed at current_original_index. The engine's
-                # apply_edits trusts _match_start_index when set, leading to silent
-                # document corruption (see debug_bug6_engine_baseline.py Case 1).
+                # Never bake an anchor into target_text instead: that yields a
+                # contradictory edit object — a target_text claiming to live at
+                # [anchor_start : current_original_index] while _match_start_index
+                # points at current_original_index — and apply_edits trusts
+                # _match_start_index when set, silently corrupting the document.
                 #
-                # The start-of-document special case is no longer needed: the engine
-                # handles _match_start_index=0 with target_text="" via
-                # get_insertion_anchor, which correctly anchors to the first run of
-                # the first paragraph.
+                # _match_start_index=0 with target_text="" needs no special case:
+                # get_insertion_anchor anchors it to the first run of the first
+                # paragraph.
                 edit = ModifyText(
                     type="modify",
                     target_text="",
@@ -314,17 +308,12 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
         edit._match_start_index = idx
         edits.append(edit)
 
-    # Post-coalescing pass removed (was Pathology C in Bug 6 investigation).
-    # The pass mutated target_text/new_text by appending "gap + edit.target_text",
-    # which produced semantically meaningless edit objects when one or both of the
-    # adjacent edits was a pure insertion (whose target_text used to contain an
-    # anchor that overlapped with the gap). The result was duplicated text in
-    # both the rendered diff (Bug 6 visible symptom) and in the engine's output
-    # (silent document corruption — see debug_bug6_engine_baseline.py Case 6).
-    #
-    # If grouped/merged-hunk rendering is desired in the future, do it in
-    # _create_diff_output by visually grouping adjacent edits in the output,
-    # without mutating the underlying ModifyText objects.
+    # Adjacent hunks are deliberately NOT coalesced here. Bridging the gap by
+    # appending "gap + edit.target_text" yields semantically meaningless edit
+    # objects whenever an adjacent edit is a pure insertion — duplicated text
+    # in the rendered diff and silent corruption in the engine's output.
+    # Grouped/merged-hunk presentation belongs in the rendering layer, never
+    # in these ModifyText objects.
     return edits
 
 
