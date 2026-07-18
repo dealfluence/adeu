@@ -669,7 +669,17 @@ def handle_extract(args):
 def _load_docx_or_exit(path: Path):
     """Loads a python-docx Document from `path` with the shared error handling."""
     _require_input_file(path)
-    if path.suffix.lower() != ".docx":
+    # Content beats extension: a valid ZIP is loaded whatever the filename
+    # says (temp files, extension-less artifacts). The extension only shapes
+    # the error message when the content is NOT a DOCX package (QA L3: a
+    # .txt input deserves "must be a DOCX file", not a zip-signature error).
+    try:
+        with open(path, "rb") as _fh:
+            _magic = _fh.read(4)
+    except OSError as e:
+        _cli_error("invalid_input", f"Could not read '{path.name}': {e.strerror or e}")
+        raise AssertionError("unreachable") from None
+    if _magic != b"PK\x03\x04" and path.suffix.lower() != ".docx":
         _cli_error(
             "invalid_docx",
             f"'{path.name}' must be a DOCX file (got {path.suffix or 'no extension'}).",
@@ -709,14 +719,22 @@ def handle_diff(args):
         # edits apply can never resolve (QA 2026-07-18 H1). Extraction is
         # structure-aware so the diff can compare part-by-part (QA C1) and
         # emit structured table-row operations (QA C2).
-        doc_orig = _load_docx_or_exit(args.original)
-        text_orig, struct_orig = _extract_text_from_doc(
-            doc_orig, clean_view=compare_clean, include_appendix=False, return_structure=True
-        )
-        doc_mod = _load_docx_or_exit(args.modified)
-        text_mod, struct_mod = _extract_text_from_doc(
-            doc_mod, clean_view=compare_clean, include_appendix=False, return_structure=True
-        )
+        try:
+            doc_orig = _load_docx_or_exit(args.original)
+            text_orig, struct_orig = _extract_text_from_doc(
+                doc_orig, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+            doc_mod = _load_docx_or_exit(args.modified)
+            text_mod, struct_mod = _extract_text_from_doc(
+                doc_mod, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+        except SystemExit:
+            raise
+        except Exception as e:
+            # Projection failures (corrupt comments/notes/numbering parts)
+            # must honor the CLI error contract, not dump a traceback (QA M8).
+            _cli_error("invalid_docx", f"Could not extract text for comparison: {e}")
+            raise AssertionError("unreachable") from None
 
         from adeu.diff import generate_structured_edits
 
@@ -768,12 +786,11 @@ def handle_apply(args):
 
     author_ctrl = describe_illegal_control_chars(args.author or "")
     if author_ctrl:
-        print(
-            f"❌ --author contains control character(s) ({author_ctrl}) that cannot be "
+        _cli_error(
+            "invalid_input",
+            f"--author contains control character(s) ({author_ctrl}) that cannot be "
             "stored in a DOCX. Remove them and re-run.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     if args.live:
         if args.changes is None and args.original is not None:
@@ -782,15 +799,10 @@ def handle_apply(args):
             args.original = None
 
     if args.live and args.dry_run:
-        print(
-            "❌ Dry-run simulation is only supported for disk-based files.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _cli_error("unsupported", "Dry-run simulation is only supported for disk-based files.")
 
     if not args.changes:
-        print("❌ Must provide changes file.", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_input", "Must provide changes file.")
 
     changes: List[DocumentChange] = []
 
@@ -809,8 +821,7 @@ def handle_apply(args):
             print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         if args.live:
             if sys.platform != "win32":
-                print("❌ --live is only supported on Windows.", file=sys.stderr)
-                sys.exit(1)
+                _cli_error("unsupported", "--live is only supported on Windows.")
             from adeu.mcp_components.tools.live_word import (
                 _read_active_word_document_core,
             )
@@ -874,8 +885,7 @@ def handle_apply(args):
 
     if args.live:
         if sys.platform != "win32":
-            print("❌ --live is only supported on Windows.", file=sys.stderr)
-            sys.exit(1)
+            _cli_error("unsupported", "--live is only supported on Windows.")
         from adeu.mcp_components.tools.live_word import _process_active_word_batch_core
 
         if not args.json:
@@ -893,8 +903,7 @@ def handle_apply(args):
         return
 
     if not args.original:
-        print("❌ Must provide original file if not using --live", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_input", "Must provide original file if not using --live")
     _require_input_file(args.original)
 
     import zipfile
@@ -1547,6 +1556,7 @@ def main():
         logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),  # type: ignore[arg-type]
     )
 
+    _set_json_mode(bool(getattr(args, "json", False)))
     args.func(args)
 
 

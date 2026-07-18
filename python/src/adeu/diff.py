@@ -461,6 +461,42 @@ def make_edits_self_contained(
     return edits
 
 
+_IMAGE_MARKER_RE = re.compile(r"!\[[^\]]*\]\(docx-image:[^)]*\)")
+
+
+def _drop_image_marker_hunks(edits: List[ModifyText], warnings: List[str]) -> List[ModifyText]:
+    """
+    Removes generated edits whose image-marker multisets differ between
+    target and new text. The engine (validate_edit_strings) rightly refuses
+    such edits — markers are read-only projections — so emitting them would
+    make the diff pipeline reject its own output. An added/removed image is
+    reported as a warning instead of an unappliable edit.
+    """
+
+    def _normalized(s: str) -> str:
+        return re.sub(r"\s+", " ", _IMAGE_MARKER_RE.sub("", s)).strip()
+
+    kept: List[ModifyText] = []
+    for e in edits:
+        t_imgs = sorted(_IMAGE_MARKER_RE.findall(e.target_text or ""))
+        n_imgs = sorted(_IMAGE_MARKER_RE.findall(e.new_text or ""))
+        if t_imgs == n_imgs:
+            kept.append(e)
+            continue
+        if _normalized(e.target_text or "") == _normalized(e.new_text or ""):
+            warnings.append(
+                "An inline image was added or removed between the documents. Images cannot be "
+                "transferred by text edits — the image-only difference was skipped; apply it "
+                "manually in Word."
+            )
+        else:
+            warnings.append(
+                "A text change overlapping an added/removed inline image was skipped — images "
+                "cannot be transferred by text edits. Apply that section manually in Word."
+            )
+    return kept
+
+
 def _rows_are_plain(text: str, table: "TableGeometry") -> bool:
     """
     True when every projected row reads exactly as its cells joined by " | ".
@@ -509,6 +545,16 @@ def _row_ops_for_table(
     def row_text(r) -> str:
         return " | ".join(r.cells)
 
+    # Duplicate row texts make text-anchored row operations ambiguous. The
+    # engine fails closed with a strict-mode ambiguity error at apply time;
+    # tell the user up front so the rejection is not a surprise.
+    if len(set(keys_o)) != len(keys_o):
+        warnings.append(
+            "A table contains rows with identical text; the generated row operations anchor by "
+            "row text and may be rejected as ambiguous at apply time. If that happens, apply the "
+            "row changes with explicit insert_row/delete_row edits."
+        )
+
     # Rows removed by the transformation (deletes + surplus rows of shrinking
     # replaces) can never anchor an insert.
     removed: set = set()
@@ -537,13 +583,23 @@ def _row_ops_for_table(
             # Insert below the preceding surviving row. Emitting in reverse
             # keeps the final order: below-A(B), then below-A(C) yields A,C,B —
             # so emit C first.
-            anchor = anchor_text(before[-1])
+            anchor_idx = before[-1]
+            anchor = anchor_text(anchor_idx)
             for r in reversed(new_rows):
-                ops.append(InsertTableRow(type="insert_row", target_text=anchor, position="below", cells=list(r.cells)))
+                ins_op = InsertTableRow(type="insert_row", target_text=anchor, position="below", cells=list(r.cells))
+                # Pin to the anchor row's offset: text anchors alone are
+                # ambiguous when tables share identical rows. Pins do not
+                # survive JSON round-trips (the strict text match applies
+                # then, failing closed with the duplicate-row warning above).
+                ins_op._match_start_index = rows_o[anchor_idx].start
+                ops.append(ins_op)
         elif after:
-            anchor = anchor_text(after[0])
+            anchor_idx = after[0]
+            anchor = anchor_text(anchor_idx)
             for r in new_rows:
-                ops.append(InsertTableRow(type="insert_row", target_text=anchor, position="above", cells=list(r.cells)))
+                ins_op = InsertTableRow(type="insert_row", target_text=anchor, position="above", cells=list(r.cells))
+                ins_op._match_start_index = rows_o[anchor_idx].start
+                ops.append(ins_op)
         else:
             warnings.append(
                 "A table gained rows but no original row survives to anchor them; "
@@ -570,13 +626,17 @@ def _row_ops_for_table(
                         )
                     )
             for k in range(i1 + pairs, i2):
-                ops.append(DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k])))
+                del_op = DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k]))
+                del_op._match_start_index = rows_o[k].start
+                ops.append(del_op)
             surplus_new = [rows_m[j] for j in range(j1 + pairs, j2)]
             if surplus_new:
                 ops.extend(insert_ops(surplus_new, i2))
         elif tag == "delete":
             for k in range(i1, i2):
-                ops.append(DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k])))
+                del_op = DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k]))
+                del_op._match_start_index = rows_o[k].start
+                ops.append(del_op)
         elif tag == "insert":
             ops.extend(insert_ops([rows_m[j] for j in range(j1, j2)], i1))
     return ops
@@ -614,7 +674,7 @@ def generate_structured_edits(
             f"{' + '.join(kinds_m) or 'none'}); comparing flattened text instead. Header/footer "
             "additions or removals cannot be expressed as text edits."
         )
-        flat = generate_edits_from_text(text_orig, text_mod)
+        flat = _drop_image_marker_hunks(generate_edits_from_text(text_orig, text_mod), warnings)
         make_edits_self_contained(flat, text_orig, part_ranges=struct_orig.part_ranges)
         return list(flat), warnings
 
@@ -668,6 +728,29 @@ def generate_structured_edits(
                     for e in tbl_edits:
                         e._match_start_index = (e._match_start_index or 0) + t_o.start
                     edits.extend(tbl_edits)
+
+    # Row operations anchor by row text (pins do not survive JSON): if the
+    # anchor text also appears elsewhere in the document — e.g. two tables
+    # sharing a header row — the strict text match at apply time is
+    # ambiguous. In-process consumers ride the pinned offsets; JSON consumers
+    # fail closed, so tell the user why up front.
+    ambiguous_anchor_warned = False
+    for e in edits:
+        if isinstance(e, (InsertTableRow, DeleteTableRow)) and not ambiguous_anchor_warned:
+            if e.target_text and text_orig.count(e.target_text) > 1:
+                warnings.append(
+                    f'The row anchor "{e.target_text[:60]}" appears more than once in the document. '
+                    "Applying this diff from its JSON output may be rejected as ambiguous — "
+                    "make the anchor rows unique, or apply the row changes with explicit "
+                    "insert_row/delete_row edits."
+                )
+                ambiguous_anchor_warned = True
+
+    # Our own output must never trip the engine's read-only image-marker
+    # validation: an added/removed image becomes a warning, not an edit.
+    modify_edits = [e for e in edits if isinstance(e, ModifyText)]
+    kept_modifies = set(map(id, _drop_image_marker_hunks(modify_edits, warnings)))
+    edits = [e for e in edits if not isinstance(e, ModifyText) or id(e) in kept_modifies]
 
     text_edits = [e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None]
     make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)

@@ -1586,9 +1586,31 @@ class RedlineEngine:
 
                 # QA 2026-07-18 C1: the projection flattens headers, body,
                 # footers and notes into one string, but a text edit whose
-                # CHANGED span covers real text from two different OPC parts
-                # cannot be applied without writing content into the wrong
-                # part. Refuse it outright.
+                # matched span covers real text from two different OPC parts
+                # cannot be applied without putting content in the wrong part
+                # — including the insertion shape, whose anchor point at the
+                # part gap is inherently ambiguous. Refuse the RAW match
+                # range outright and ask for a single-part anchor.
+                raw_span_parts = sorted(
+                    {
+                        s.part_index
+                        for s in target_mapper.spans
+                        if s.run is not None and s.end > start and s.start < start + length
+                    }
+                )
+                if len(raw_span_parts) > 1:
+                    kinds = " → ".join(target_mapper.part_kind_of(pi) or "?" for pi in raw_span_parts)
+                    errors.append(
+                        f"- Edit {i + 1} Failed: target_text spans a structural document-part "
+                        f"boundary ({kinds}). Headers, body, footers and footnotes are separate "
+                        "Word parts — an edit cannot cross between them. Anchor the edit on text "
+                        "within a single part (split it into one edit per part if both sides "
+                        "must change)."
+                    )
+
+                # QA 2026-07-18 M5: image markers are read-only projections.
+                # Only the CHANGED span matters — markers sitting untouched in
+                # the shared context are fine.
                 eff_start = start + prefix_len
                 eff_end = start + length - suffix_len
                 if eff_end > eff_start:
@@ -1597,16 +1619,6 @@ class RedlineEngine:
                         for s in target_mapper.spans
                         if s.end > eff_start and s.start < eff_end and (s.run is not None or s.text.strip())
                     ]
-                    part_idxs = sorted({s.part_index for s in overlapping})
-                    if len(part_idxs) > 1:
-                        kinds = " → ".join(target_mapper.part_kind_of(pi) or "?" for pi in part_idxs)
-                        errors.append(
-                            f"- Edit {i + 1} Failed: target_text spans a structural document-part "
-                            f"boundary ({kinds}). Headers, body, footers and footnotes are separate "
-                            "Word parts — an edit cannot cross between them. Split this into one "
-                            "edit per part."
-                        )
-                    # QA 2026-07-18 M5: image markers are read-only projections.
                     if any(getattr(s, "is_image_marker", False) for s in overlapping):
                         errors.append(
                             f"- Edit {i + 1} Failed: the target overlaps a read-only image marker "
@@ -2190,7 +2202,14 @@ class RedlineEngine:
 
         for edit, orig_new in resolved_edits:
             start = edit._resolved_start_idx or 0
-            end = start + (len(edit.target_text) if edit.target_text else 0)
+            # An insert_row does not consume its anchor text — it adds an
+            # adjacent row. Give it a zero-width range so several inserts
+            # sharing one anchor (consecutive new rows) never flag each other
+            # as overlapping.
+            if isinstance(edit, InsertTableRow):
+                end = start
+            else:
+                end = start + (len(edit.target_text) if edit.target_text else 0)
 
             if any(start < occ_end and end > occ_start for occ_start, occ_end in occupied_ranges):
                 logger.warning(f"Skipping overlapping edit at index {start}")
@@ -2987,17 +3006,20 @@ class RedlineEngine:
         if op == EditOperationType.INSERTION:
             final_new_text = edit.new_text or ""
 
-            # QA 2026-07-18 C1: an insertion positioned in the separator gap
-            # between the body and a following part (footer/footnotes) used to
-            # anchor on the NEXT part's first paragraph, writing the new final
-            # body paragraph into word/footer1.xml. Re-anchor it to the end of
-            # the body and force new-paragraph semantics. Insertions whose text
-            # ends with a paragraph break keep the next-part anchor — that
-            # shape comes from edits deliberately anchored on next-part text
-            # (e.g. "insert a line above FOOTER MARKER").
+            # QA 2026-07-18 C1: a MACHINE-PINNED pure insertion (diff/text
+            # round-trip output: authored with an empty target and no parent
+            # edit) positioned in the separator gap between the body and a
+            # following part used to anchor on the NEXT part's first
+            # paragraph, writing the new final body paragraph into
+            # word/footer1.xml. Re-anchor it to the end of the body and force
+            # new-paragraph semantics. Insertions DERIVED from a
+            # target-anchored edit (parent ref set — e.g. prepending "DRAFT "
+            # to "FOOTER MARKER") keep the user's chosen anchor: their
+            # context names the part they meant.
             boundary_anchor: Optional[TextSpan] = None
             boundary = active_mapper.part_boundary_at(start_idx) if hasattr(active_mapper, "part_boundary_at") else None
-            if boundary is not None and not final_new_text.endswith("\n\n"):
+            is_machine_pure_insertion = not edit.target_text and getattr(edit, "_parent_edit_ref", None) is None
+            if boundary is not None and is_machine_pure_insertion:
                 prev_i, next_i = boundary
                 prev_kind = active_mapper.part_kind_of(prev_i)
                 next_kind = active_mapper.part_kind_of(next_i)

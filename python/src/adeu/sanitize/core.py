@@ -293,13 +293,31 @@ def _sanitize_baseline(
 
     if edits:
         try:
-            engine.process_batch(list(edits))
+            stats = engine.process_batch(list(edits))
         except BatchValidationError as e:
             details = "\n".join(e.errors)
             raise SanitizeError(
                 "❌ Baseline recomputation failed — the computed changes could not be applied "
                 f"to the baseline:\n{details}"
             ) from e
+        # Apply-stage skips return in stats instead of raising. A partial
+        # redline silently reverts the skipped working-document changes to
+        # baseline text — the same false-success shape as QA M2, so fail
+        # closed here too.
+        if stats.get("edits_skipped", 0) > 0 or stats.get("actions_skipped", 0) > 0:
+            details = "\n".join(stats.get("skipped_details") or [])
+            raise SanitizeError(
+                "❌ Baseline recomputation failed — "
+                f"{stats.get('edits_skipped', 0)} computed change(s) could not be applied to the "
+                "baseline, so the output would silently miss part of the working document's "
+                f"changes:\n{details}"
+            )
+        # Non-fatal engine notices (e.g. a comment dropped because it landed
+        # in a footer part) must reach the sanitize report, not vanish with
+        # the discarded stats.
+        for detail in stats.get("skipped_details") or []:
+            if detail.startswith("- Warning:"):
+                report.warnings.append(detail[2:])
 
     # Reload from the engine's serialized output so every later transform and
     # the final save operate on a self-consistent package.

@@ -316,7 +316,23 @@ def _find_all_matches_in_text(text: str, target: str, is_regex: bool = False) ->
     if spans:
         return [_find_safe_boundaries(text, s, e) for s, e in spans]
 
-    # 3. Fuzzy regex match (handles markdown noise, list markers, etc.).
+    # 3. Markdown-stripped match, mirroring the mapper's strip-markdown and
+    # plain-projection rungs: a plain target must find text whose projection
+    # carries **bold**/_italic_ markers (even mid-word), and a marked target
+    # must find plain text.
+    stripped_text, pos_map = _strip_markdown_for_matching(norm_text)
+    stripped_target, _ = _strip_markdown_for_matching(norm_target)
+    if stripped_target and (stripped_text != norm_text or stripped_target != norm_target):
+        results = []
+        for m in re.finditer(re.escape(stripped_target), stripped_text):
+            p_start, p_end = m.span()
+            raw_start = pos_map[p_start]
+            raw_end = pos_map[p_end - 1] + 1
+            results.append(_find_safe_boundaries(text, raw_start, raw_end))
+        if results:
+            return results
+
+    # 4. Fuzzy regex match (handles markdown noise, list markers, etc.).
     # Atomic groups in _make_fuzzy_regex prevent catastrophic backtracking.
     try:
         pattern = _make_fuzzy_regex(target)

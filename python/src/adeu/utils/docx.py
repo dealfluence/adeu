@@ -64,6 +64,8 @@ QN_W_DRAWING = qn("w:drawing")
 QN_W_OBJECT = qn("w:object")
 QN_W_PICT = qn("w:pict")
 QN_WP_DOCPR = qn("wp:docPr")
+QN_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
+QN_O_TITLE = "{urn:schemas-microsoft-com:office:office}title"
 
 
 def is_heading_paragraph(
@@ -470,20 +472,25 @@ def get_paragraph_prefix(
     # numPr in styles.xml, QA 2026-07-18 M4).
     list_num_id = None
     list_ilvl = None
+    numbering_disabled = False
     if pPr is not None:
         numPr = pPr.find(QN_W_NUMPR)
         if numPr is not None:
             numId = numPr.find(QN_W_NUMID)
             if numId is not None:
                 val = numId.get(QN_W_VAL)
-                if val and val != "0":
+                if val == "0":
+                    # ECMA-376 §17.9.15: a direct numId of 0 REMOVES the
+                    # numbering a style would otherwise apply.
+                    numbering_disabled = True
+                elif val:
                     list_num_id = val
                     ilvl = numPr.find(QN_W_ILVL)
                     if ilvl is not None:
                         val_attr = ilvl.get(QN_W_VAL)
                         if val_attr is not None and val_attr.isdigit():
                             list_ilvl = int(val_attr)
-    if list_num_id is None and style_info:
+    if list_num_id is None and not numbering_disabled and style_info:
         style_num_id = style_info.get("num_id")
         if style_num_id:
             list_num_id = style_num_id
@@ -628,6 +635,14 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                     alt = doc_pr.get("descr") or doc_pr.get("title") or ""
                     img_id = doc_pr.get("id") or "0"
                 yield DocxEvent("image", img_id, date=alt)
+            elif tag == QN_W_PICT:
+                # Legacy VML picture. Only actual images (v:imagedata) get a
+                # marker; textpath-only shapes (watermarks) are reported by
+                # sanitize's watermark audit instead of polluting the text.
+                imagedata = child.find(f".//{QN_V_IMAGEDATA}")
+                if imagedata is not None:
+                    alt = imagedata.get(QN_O_TITLE) or ""
+                    yield DocxEvent("image", "vml", date=alt)
             elif tag == QN_W_COMMENTREFERENCE:
                 ref_id = child.get(QN_W_ID)
                 if ref_id:

@@ -1143,3 +1143,214 @@ class TestLowSeverity:
         code, out, err = run_cli(["init", "--local"], capsys)
         assert code != 0, "--local from a non-checkout directory must not claim success"
         assert "source" in err.lower() or "checkout" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Post-review regressions (found while reviewing the fixes themselves)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewRegressions:
+    def test_diff_of_added_image_warns_instead_of_self_rejecting(self, tmp_path, capsys):
+        """An added inline image must never produce an edit apply refuses."""
+        orig = tmp_path / "noimg.docx"
+        d = Document()
+        d.add_paragraph("Before image.")
+        d.add_paragraph("After image.")
+        d.save(orig)
+
+        mod = tmp_path / "img.docx"
+        build_image_doc(mod)  # Before image. / [image] / After image.
+
+        code, out, err = run_cli(["diff", orig, mod, "--json"], capsys)
+        assert code == 0
+        edits = json.loads(out)
+        for e in edits:
+            t_imgs = re.findall(r"!\[[^\]]*\]\(docx-image:[^)]*\)", e.get("target_text") or "")
+            n_imgs = re.findall(r"!\[[^\]]*\]\(docx-image:[^)]*\)", e.get("new_text") or "")
+            assert sorted(t_imgs) == sorted(n_imgs), f"diff emitted an unappliable image edit: {e}"
+        assert "image" in err.lower(), "the skipped image difference must be surfaced as a warning"
+
+        # Whatever the diff DID emit must still pass its own dry-run apply.
+        edits_file = tmp_path / "edits.json"
+        edits_file.write_text(out)
+        code, out, err = run_cli(["apply", orig, edits_file, "--dry-run", "--json"], capsys)
+        assert code == 0, f"diff output failed its own dry-run: {err} {out}"
+
+    def test_baseline_fails_closed_on_apply_stage_skips(self, tmp_path, capsys, monkeypatch):
+        """Apply-stage skips (no exception) must not produce a partial baseline output."""
+        from adeu.redline.engine import RedlineEngine
+        from adeu.sanitize.core import SanitizeError, sanitize_docx
+
+        base = tmp_path / "base.docx"
+        work = tmp_path / "work.docx"
+        d = Document()
+        d.add_paragraph("Alpha paragraph.")
+        d.save(base)
+        d = Document()
+        d.add_paragraph("Alpha paragraph revised.")
+        d.save(work)
+
+        real_process_batch = RedlineEngine.process_batch
+
+        def fake_process_batch(self, changes, dry_run=False):
+            stats = real_process_batch(self, changes, dry_run=dry_run)
+            stats["edits_skipped"] = stats.get("edits_skipped", 0) + 1
+            stats.setdefault("skipped_details", []).append("- simulated apply-stage skip")
+            return stats
+
+        monkeypatch.setattr(RedlineEngine, "process_batch", fake_process_batch)
+        out_path = tmp_path / "san.docx"
+        with pytest.raises(SanitizeError, match="could not be applied"):
+            sanitize_docx(str(work), str(out_path), baseline_path=str(base))
+        assert not out_path.exists()
+
+    def test_diff_json_projection_failure_emits_json_error(self, tmp_path, capsys, monkeypatch):
+        """Extraction blowups inside diff must honor the --json error contract (M8)."""
+        import adeu.cli as cli_mod
+
+        a = tmp_path / "a.docx"
+        b = tmp_path / "b.docx"
+        for p in (a, b):
+            d = Document()
+            d.add_paragraph("content")
+            d.save(p)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated projection failure")
+
+        monkeypatch.setattr(cli_mod, "_extract_text_from_doc", boom, raising=False)
+        # handle_diff imports the symbol lazily from adeu.ingest — patch there.
+        import adeu.ingest as ingest_mod
+
+        monkeypatch.setattr(ingest_mod, "_extract_text_from_doc", boom)
+
+        code, out, err = run_cli(["diff", a, b, "--json"], capsys)
+        assert code != 0
+        payload = json.loads(out)
+        assert payload.get("error") == "invalid_docx", payload
+
+    def test_footer_prefix_edit_stays_in_footer(self, tmp_path, capsys):
+        """A target-anchored insertion at the footer's first character must not
+        be hijacked into the body by the C1 boundary re-anchor."""
+        orig = tmp_path / "hf.docx"
+        build_header_footer_doc(orig)
+        edits_file = tmp_path / "edits.json"
+        edits_file.write_text(
+            json.dumps(
+                [
+                    {
+                        "type": "modify",
+                        "target_text": "FOOTER MARKER",
+                        "new_text": "DRAFT FOOTER MARKER",
+                    }
+                ]
+            )
+        )
+        applied = tmp_path / "applied.docx"
+        code, out, err = run_cli(["apply", orig, edits_file, "-o", applied], capsys)
+        assert code == 0, err
+        body_xml = read_part_xml(applied, "word/document.xml")
+        assert "DRAFT" not in body_xml, "footer prefix must not be re-anchored into the body"
+        assert any("DRAFT" in read_part_xml(applied, m) for m in footer_members(applied))
+        clean = extract_text_from_stream(BytesIO(applied.read_bytes()), clean_view=True)
+        assert "DRAFT FOOTER MARKER" in clean
+
+    def test_extensionless_docx_still_extracts(self, tmp_path, capsys):
+        """Content beats extension: a valid DOCX without .docx must load."""
+        src = tmp_path / "sample_noext"
+        d = Document()
+        d.add_paragraph("Extension-less content.")
+        d.save(src)
+        code, out, err = run_cli(["extract", src, "--page", "all"], capsys)
+        assert code == 0, err
+        assert "Extension-less content." in out
+
+    def test_two_consecutive_added_rows_roundtrip_in_process(self, tmp_path, capsys):
+        """Consecutive inserts share one pinned anchor; they must not be
+        flagged as overlapping edits (zero-width insert ranges)."""
+        orig = tmp_path / "t1.docx"
+        mod = tmp_path / "t3.docx"
+        d = Document()
+        t = d.add_table(rows=2, cols=2)
+        for i, row in enumerate([["A", "B"], ["C", "D"]]):
+            for j, v in enumerate(row):
+                t.rows[i].cells[j].text = v
+        d.save(orig)
+        d = Document()
+        t = d.add_table(rows=4, cols=2)
+        for i, row in enumerate([["A", "B"], ["C", "D"], ["X1", "Y1"], ["X2", "Y2"]]):
+            for j, v in enumerate(row):
+                t.rows[i].cells[j].text = v
+        d.save(mod)
+
+        # In-process pinned path (the sanitize --baseline shape).
+        san = tmp_path / "san.docx"
+        code, out, err = run_cli(["sanitize", mod, "--baseline", orig, "-o", san], capsys)
+        assert code == 0, err
+        clean = extract_text_from_stream(BytesIO(san.read_bytes()), clean_view=True)
+        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+
+        # JSON round trip too.
+        code, out, err = run_cli(["diff", orig, mod, "--json"], capsys)
+        edits_file = tmp_path / "edits.json"
+        edits_file.write_text(out)
+        applied = tmp_path / "applied.docx"
+        code, out, err = run_cli(["apply", orig, edits_file, "-o", applied], capsys)
+        assert code == 0, err
+        clean = extract_text_from_stream(BytesIO(applied.read_bytes()), clean_view=True)
+        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+
+    def test_numbering_disabled_override_suppresses_style_list(self, tmp_path):
+        """ECMA-376 §17.9.15: a direct numId=0 removes the style's numbering."""
+        from docx.oxml import parse_xml
+
+        doc = Document()
+        p = doc.add_paragraph("Not a list item", style="List Number")
+        pPr = p._element.get_or_add_pPr()
+        pPr.append(
+            parse_xml(
+                '<w:numPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:numId w:val="0"/></w:numPr>'
+            )
+        )
+        doc.add_paragraph("Real item", style="List Number")
+        stream = BytesIO()
+        doc.save(stream)
+        text = extract_text_from_stream(BytesIO(stream.getvalue()))
+        assert "1. Not a list item" not in text, text
+        assert "Not a list item" in text
+        assert "1. Real item" in text
+
+    def test_duplicate_anchor_rows_across_tables_roundtrip(self, tmp_path, capsys):
+        """Row ops anchored on text duplicated in another table warn, and the
+        in-process baseline path (pinned offsets) still succeeds."""
+        orig = tmp_path / "two_tables.docx"
+        mod = tmp_path / "two_tables_mod.docx"
+        for path, extra in ((orig, False), (mod, True)):
+            d = Document()
+            for _ in range(2):
+                t = d.add_table(rows=2, cols=2)
+                t.rows[0].cells[0].text = "Name"
+                t.rows[0].cells[1].text = "Value"
+                t.rows[1].cells[0].text = "A"
+                t.rows[1].cells[1].text = "1"
+            if extra:
+                r = d.tables[1].add_row()
+                r.cells[0].text = "B"
+                r.cells[1].text = "2"
+            d.save(path)
+
+        code, out, err = run_cli(["diff", orig, mod, "--json"], capsys)
+        assert code == 0
+        assert "identical" in err.lower() or "ambiguous" in err.lower(), (
+            "duplicate-row ambiguity must be surfaced as a warning"
+        )
+
+        # The in-process pipeline (sanitize --baseline) rides pinned offsets
+        # and must succeed despite the duplicated anchor text.
+        san = tmp_path / "san.docx"
+        code, out, err = run_cli(["sanitize", mod, "--baseline", orig, "-o", san], capsys)
+        assert code == 0, err
+        clean = extract_text_from_stream(BytesIO(san.read_bytes()), clean_view=True)
+        assert "B | 2" in clean
