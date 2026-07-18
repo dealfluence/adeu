@@ -234,6 +234,19 @@ export class DocumentObject {
   public async save(): Promise<Buffer> {
     for (const part of this.pkg.parts) {
       let xmlStr = serializeXml(part._element.ownerDocument || part._element);
+      // Lazily declare the w16du namespace on any part that picked up a
+      // tracked change (w16du:dateUtc) without a root declaration — a
+      // tracked edit in a header/footer/footnotes part would otherwise
+      // serialize an undeclared prefix no parser (including ours) accepts.
+      // Unmodified parts never contain "w16du:" and stay untouched.
+      // Mirrors the Python engine's _inject_w16du_if_needed at save time.
+      if (xmlStr.includes("w16du:") && !xmlStr.includes("xmlns:w16du=")) {
+        part._element.setAttribute(
+          "xmlns:w16du",
+          "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
+        );
+        xmlStr = serializeXml(part._element.ownerDocument || part._element);
+      }
       if (!xmlStr.startsWith("<?xml")) {
         xmlStr =
           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xmlStr;

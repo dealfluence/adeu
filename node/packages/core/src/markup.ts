@@ -1,5 +1,14 @@
 import { trim_common_context } from "./diff.js";
 import { ModifyText } from "./models.js";
+import { RegexTimeoutError, userFindAllMatches } from "./utils/safe-regex.js";
+
+/** One entry per input edit in apply_edits_to_markdown's edit_reports. */
+export interface MarkupEditReport {
+  index: number;
+  status: "applied" | "failed";
+  error: string | null;
+  occurrences: number;
+}
 export const AMBIGUITY_EXAMPLES_CAP = 5;
 export const AMBIGUITY_CONTEXT_CHARS = 50;
 function _should_strip_markers(text: string, marker: string): boolean {
@@ -49,6 +58,45 @@ export function _replace_smart_quotes(text: string): string {
     .replace(/”/g, '"')
     .replace(/‘/g, "'")
     .replace(/’/g, "'");
+}
+
+/**
+ * Strips markdown formatting markers and builds a position map.
+ * Returns [stripped_text, position_map] where position_map[i] = original
+ * index. Mirrors Python markup._strip_markdown_for_matching.
+ */
+function _strip_markdown_for_matching(text: string): [string, number[]] {
+  const result: string[] = [];
+  const position_map: number[] = [];
+  let i = 0;
+
+  while (i < text.length) {
+    // Skip ** or __
+    const pair = text.substring(i, i + 2);
+    if (i < text.length - 1 && (pair === "**" || pair === "__")) {
+      i += 2;
+      continue;
+    }
+    // Skip single * or _ that look like markdown (at word boundaries)
+    if (text[i] === "*" || text[i] === "_") {
+      const prev_char = i > 0 ? text[i - 1] : " ";
+      const next_char = i < text.length - 1 ? text[i + 1] : " ";
+      // If at boundary (space or start/end), likely markdown
+      if (
+        [" ", "\n", "\t"].includes(prev_char) ||
+        [" ", "\n", "\t"].includes(next_char)
+      ) {
+        i += 1;
+        continue;
+      }
+    }
+
+    position_map.push(i);
+    result.push(text[i]);
+    i += 1;
+  }
+
+  return [result.join(""), position_map];
 }
 
 function _find_safe_boundaries(
@@ -198,35 +246,107 @@ export function _find_match_in_text(
   text: string,
   target: string,
 ): [number, number] {
-  if (!target) return [-1, -1];
+  const matches = _find_all_matches_in_text(text, target);
+  if (matches.length > 0) return matches[0];
+  return [-1, -1];
+}
 
-  let idx = text.indexOf(target);
-  if (idx !== -1) return _find_safe_boundaries(text, idx, idx + target.length);
+/**
+ * Every non-overlapping match of `target` in `text` as [start, end] pairs,
+ * using the SAME strategy ladder as the apply engine's
+ * DocumentMapper.find_all_match_indices: regex (when requested) or
+ * exact → smart-quote-normalized → fuzzy. Markup previews must resolve
+ * matching identically to apply, or the preview lies (QA 2026-07-18 M1).
+ */
+export function _find_all_matches_in_text(
+  text: string,
+  target: string,
+  is_regex = false,
+): [number, number][] {
+  if (!target) return [];
 
+  if (is_regex) {
+    // Same semantics as the mapper: budgeted user regex; an invalid pattern
+    // simply produces no matches (surfaced as "not found").
+    // RegexTimeoutError propagates for a clean per-edit error.
+    try {
+      return userFindAllMatches(target, text).map((m) => [m.start, m.end]);
+    } catch (e) {
+      if (e instanceof RegexTimeoutError) throw e;
+      return [];
+    }
+  }
+
+  // Literal indexOf scans (no RegExp over an arbitrarily long escaped
+  // target, mirroring the mapper's exact tiers).
+  const findAllLiteral = (
+    haystack: string,
+    needle: string,
+  ): [number, number][] => {
+    const out: [number, number][] = [];
+    let from = 0;
+    while (true) {
+      const idx = haystack.indexOf(needle, from);
+      if (idx === -1) break;
+      out.push([idx, idx + needle.length]);
+      from = idx + needle.length;
+    }
+    return out;
+  };
+
+  // 1. Exact matches
+  let spans = findAllLiteral(text, target);
+  if (spans.length > 0) {
+    return spans.map(([s, e]) => _find_safe_boundaries(text, s, e));
+  }
+
+  // 2. Smart quote normalization
   const norm_text = _replace_smart_quotes(text);
   const norm_target = _replace_smart_quotes(target);
-  idx = norm_text.indexOf(norm_target);
-  if (idx !== -1)
-    return _find_safe_boundaries(text, idx, idx + norm_target.length);
+  spans = findAllLiteral(norm_text, norm_target);
+  if (spans.length > 0) {
+    return spans.map(([s, e]) => _find_safe_boundaries(text, s, e));
+  }
 
+  // 3. Markdown-stripped match, mirroring the mapper's strip-markdown and
+  // plain-projection rungs: a plain target must find text whose projection
+  // carries **bold**/_italic_ markers (even mid-word), and a marked target
+  // must find plain text.
+  const [stripped_text, pos_map] = _strip_markdown_for_matching(norm_text);
+  const [stripped_target] = _strip_markdown_for_matching(norm_target);
+  if (
+    stripped_target &&
+    (stripped_text !== norm_text || stripped_target !== norm_target)
+  ) {
+    const results: [number, number][] = [];
+    for (const [p_start, p_end] of findAllLiteral(stripped_text, stripped_target)) {
+      const raw_start = pos_map[p_start];
+      const raw_end = pos_map[p_end - 1] + 1;
+      results.push(_find_safe_boundaries(text, raw_start, raw_end));
+    }
+    if (results.length > 0) return results;
+  }
+
+  // 4. Fuzzy regex matches (handles markdown noise, list markers, etc.).
+  // The [*_]* character classes in _make_fuzzy_regex prevent catastrophic
+  // backtracking.
   try {
-    const pattern = new RegExp(_make_fuzzy_regex(target));
-    const match = pattern.exec(text);
-    if (match) {
-      const raw_start = match.index;
-      const raw_end = match.index + match[0].length;
+    const pattern = new RegExp(_make_fuzzy_regex(target), "g");
+    const results: [number, number][] = [];
+    for (const match of text.matchAll(pattern)) {
       const [refined_start, refined_end] = _refine_match_boundaries(
         text,
-        raw_start,
-        raw_end,
+        match.index!,
+        match.index! + match[0].length,
       );
-      return _find_safe_boundaries(text, refined_start, refined_end);
+      results.push(_find_safe_boundaries(text, refined_start, refined_end));
     }
+    if (results.length > 0) return results;
   } catch (e) {
     // Ignore regex compilation errors from edge cases
   }
 
-  return [-1, -1];
+  return [];
 }
 
 export function _build_critic_markup(
@@ -283,31 +403,93 @@ export function _build_critic_markup(
   return parts.join("");
 }
 
+/**
+ * Applies edits to Markdown text and returns CriticMarkup-annotated output.
+ *
+ * Edit resolution follows the SAME semantics as `apply` (QA 2026-07-18 M1):
+ *   - `regex: true` targets match as regular expressions
+ *   - `match_mode` is honored: "strict" (default) refuses ambiguous targets,
+ *     "first" marks the first occurrence, "all" marks every occurrence
+ *   - a missing target is a per-edit failure, never a silent skip
+ *
+ * When `edit_reports` is provided, one entry per input edit is appended:
+ * { index: 0-based input position, status: "applied"|"failed",
+ *   error: string|null, occurrences: number }.
+ */
 export function apply_edits_to_markdown(
   markdown_text: string,
   edits: ModifyText[],
   include_index = false,
   highlight_only = false,
+  edit_reports?: MarkupEditReport[],
 ): string {
   if (!edits || edits.length === 0) return markdown_text;
 
+  const _report = (
+    idx: number,
+    status: "applied" | "failed",
+    error: string | null = null,
+    occurrences = 0,
+  ) => {
+    if (edit_reports) edit_reports.push({ index: idx, status, error, occurrences });
+  };
+
+  // Step 1: Find match positions for each edit
   const matched_edits: [number, number, string, ModifyText, number][] = [];
 
   for (let idx = 0; idx < edits.length; idx++) {
     const edit = edits[idx];
     const target = edit.target_text || "";
+    const match_mode = (edit as any).match_mode || "strict";
+    const is_regex = Boolean((edit as any).regex);
 
     if (!target) {
+      _report(
+        idx,
+        "failed",
+        `- Edit ${idx + 1} Failed: target_text is empty. Pure insertions are expressed as a ` +
+          "replacement: put the text immediately around the insertion point in target_text and " +
+          "repeat it (plus the new text) in new_text.",
+      );
       continue;
     }
 
-    const [start, end] = _find_match_in_text(markdown_text, target);
-    if (start === -1) continue;
+    let spans: [number, number][];
+    try {
+      spans = _find_all_matches_in_text(markdown_text, target, is_regex);
+    } catch (e) {
+      if (!(e instanceof RegexTimeoutError)) throw e;
+      _report(idx, "failed", `- Edit ${idx + 1} Failed: ${e.message}`);
+      continue;
+    }
 
-    const actual_matched_text = markdown_text.substring(start, end);
-    matched_edits.push([start, end, actual_matched_text, edit, idx]);
+    if (spans.length === 0) {
+      _report(
+        idx,
+        "failed",
+        `- Edit ${idx + 1} Failed: Target text not found in document:\n  "${target.substring(0, 80)}"`,
+      );
+      continue;
+    }
+
+    if (spans.length > 1 && match_mode === "strict") {
+      _report(
+        idx,
+        "failed",
+        format_ambiguity_error(idx + 1, target, markdown_text, spans),
+      );
+      continue;
+    }
+
+    const selected =
+      match_mode === "strict" || match_mode === "first" ? spans.slice(0, 1) : spans;
+    for (const [start, end] of selected) {
+      matched_edits.push([start, end, markdown_text.substring(start, end), edit, idx]);
+    }
+    _report(idx, "applied", null, selected.length);
   }
 
+  // Step 2: Check for overlapping edits
   const matched_edits_filtered: [number, number, string, ModifyText, number][] =
     [];
   const occupied_ranges: [number, number][] = [];
@@ -319,6 +501,16 @@ export function apply_edits_to_markdown(
     for (const [occ_start, occ_end] of occupied_ranges) {
       if (start < occ_end && end > occ_start) {
         overlaps = true;
+        if (edit_reports) {
+          const msg = `- Edit ${orig_idx + 1} Failed: overlaps with a previously matched edit.`;
+          for (const r of edit_reports) {
+            if (r.index === orig_idx) {
+              r.status = "failed";
+              r.error = msg;
+              r.occurrences = 0;
+            }
+          }
+        }
         break;
       }
     }

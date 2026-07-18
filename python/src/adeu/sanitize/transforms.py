@@ -618,6 +618,48 @@ def audit_hyperlinks(doc: DocumentObject, internal_patterns: Optional[list[str]]
     return warnings
 
 
+def detect_watermarks(doc: DocumentObject) -> list[str]:
+    """
+    Detect watermark-like embedded text objects (VML shapes with a textpath,
+    Word's native watermark mechanism) in headers, footers and the body.
+    Non-destructive: returns warnings so the report never declares a document
+    fully clean while such an object silently remains (QA 2026-07-18 M3).
+    """
+    VML_TEXTPATH = "{urn:schemas-microsoft-com:vml}textpath"
+    warnings = []
+    seen: set = set()
+
+    for part in doc.part.package.parts:
+        name = str(part.partname)
+        if name.startswith("/word/header"):
+            location = "header"
+        elif name.startswith("/word/footer"):
+            location = "footer"
+        elif name == "/word/document.xml":
+            location = "body"
+        else:
+            continue
+        try:
+            root = _parse_part_xml(part)
+        except Exception:
+            continue
+        if root is None:
+            continue
+        for tp in root.iter(VML_TEXTPATH):
+            text = (tp.get("string") or "").strip()
+            key = (location, text)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = f'"{_truncate(text, 60)}"' if text else "(no text)"
+            warnings.append(
+                f"Watermark-like text object in {location}: {label} — NOT removed. "
+                "It remains in the document package and may render in other applications; "
+                "review and remove it in Word if it must not reach the counterparty."
+            )
+    return warnings
+
+
 def strip_image_alt_text(doc: DocumentObject) -> list[str]:
     """Remove auto-generated alt text (descr attributes) from images."""
     WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"

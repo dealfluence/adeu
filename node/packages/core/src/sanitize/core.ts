@@ -71,6 +71,9 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
   
   const warnings = transforms.audit_hyperlinks(doc);
   for (const w of warnings) report.warnings.push(w);
+  // Audit (non-destructive — just warnings): watermark-like VML text objects
+  // must never let the report declare the document clean (QA 2026-07-18 M3).
+  for (const w of transforms.detect_watermarks(doc)) report.warnings.push(w);
 
   report.add_transform_lines(transforms.normalize_change_dates(doc));
 

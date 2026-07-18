@@ -48,8 +48,34 @@ export const QN_W_OUTLINELVL = "w:outlineLvl";
 export const QN_W_NUMPR = "w:numPr";
 export const QN_W_NUMID = "w:numId";
 export const QN_W_ILVL = "w:ilvl";
+export const QN_W_DRAWING = "w:drawing";
+export const QN_W_OBJECT = "w:object";
+export const QN_W_PICT = "w:pict";
+export const QN_WP_DOCPR = "wp:docPr";
+export const QN_V_IMAGEDATA = "v:imagedata";
+export const QN_O_TITLE = "o:title";
 
 const _CUSTOM_HEADING_NAME_RE = /Heading[ ]?([1-6])(?![0-9])/;
+
+/**
+ * Resolves the DocxPackage owning `obj`, whatever wrapper it is (Part,
+ * DocumentObject, Cell/Row/Table/NotesPart chains). Returns null when no
+ * package is reachable.
+ */
+function _resolve_package(obj: any): any {
+  let cur = obj;
+  const seen = new Set<any>();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    if (cur.package) return cur.package;
+    if (cur.pkg) return cur.pkg;
+    if (cur.part && (cur.part.package || cur.part.pkg)) {
+      return cur.part.package || cur.part.pkg;
+    }
+    cur = cur._parent || cur.part || null;
+  }
+  return null;
+}
 
 export function _get_style_cache(
   part: any,
@@ -97,12 +123,32 @@ export function _get_style_cache(
     const based_on = based_on_el ? based_on_el.getAttribute("w:val") : null;
 
     let outline_lvl: number | null = null;
+    let num_id: string | null = null;
+    let num_ilvl: number | null = null;
     const pPr = findChild(s, "w:pPr");
     if (pPr) {
       const oLvl = findChild(pPr, "w:outlineLvl");
       if (oLvl) {
         const val = oLvl.getAttribute("w:val");
         if (val && /^\d+$/.test(val)) outline_lvl = parseInt(val, 10);
+      }
+      // Style-level list binding: Word's built-in "List Bullet" /
+      // "List Number" styles carry <w:numPr> in styles.xml, not on the
+      // paragraph. Without this, style-based lists project as plain
+      // paragraphs and the agent loses ordered-vs-unordered semantics
+      // (QA 2026-07-18 M4).
+      const numPr = findChild(pPr, "w:numPr");
+      if (numPr) {
+        const numId_el = findChild(numPr, "w:numId");
+        if (numId_el) {
+          const n_val = numId_el.getAttribute("w:val");
+          if (n_val && n_val !== "0") num_id = n_val;
+        }
+        const ilvl_el = findChild(numPr, "w:ilvl");
+        if (ilvl_el) {
+          const i_val = ilvl_el.getAttribute("w:val");
+          if (i_val && /^\d+$/.test(i_val)) num_ilvl = parseInt(i_val, 10);
+        }
       }
     }
 
@@ -116,13 +162,26 @@ export function _get_style_cache(
       }
     }
 
-    raw_styles[s_id] = { name, based_on, outline_level: outline_lvl, bold };
+    raw_styles[s_id] = {
+      name,
+      based_on,
+      outline_level: outline_lvl,
+      bold,
+      num_id,
+      num_ilvl,
+    };
   }
 
   const resolve_style = (s_id: string, visited: Set<string>): any => {
     if (cache[s_id]) return cache[s_id];
     if (visited.has(s_id) || !raw_styles[s_id])
-      return { name: s_id, outline_level: null, bold: false };
+      return {
+        name: s_id,
+        outline_level: null,
+        bold: false,
+        num_id: null,
+        num_ilvl: null,
+      };
 
     visited.add(s_id);
     const raw = raw_styles[s_id];
@@ -130,14 +189,24 @@ export function _get_style_cache(
 
     let o_lvl = raw.outline_level;
     let bold_val = raw.bold !== null ? raw.bold : false;
+    let n_id = raw.num_id;
+    let n_ilvl = raw.num_ilvl;
 
     if (based_on_id) {
       const parent = resolve_style(based_on_id, visited);
       if (o_lvl === null) o_lvl = parent.outline_level;
       if (raw.bold === null) bold_val = parent.bold;
+      if (n_id === null) n_id = parent.num_id ?? null;
+      if (n_ilvl === null) n_ilvl = parent.num_ilvl ?? null;
     }
 
-    const resolved = { name: raw.name, outline_level: o_lvl, bold: bold_val };
+    const resolved = {
+      name: raw.name,
+      outline_level: o_lvl,
+      bold: bold_val,
+      num_id: n_id,
+      num_ilvl: n_ilvl,
+    };
     cache[s_id] = resolved;
     return resolved;
   };
@@ -147,6 +216,94 @@ export function _get_style_cache(
   const result: [Record<string, any>, string | null] = [cache, default_pstyle];
   if (pkg) pkg._adeu_style_cache = result;
   return result;
+}
+
+/**
+ * Parses word/numbering.xml once per package into
+ * {numId: {ilvl: numFmt}} (e.g. {"5": {0: "decimal", 1: "lowerLetter"}}).
+ *
+ * Used to distinguish bullet lists from ordered lists in the projection
+ * (QA 2026-07-18 M4). Missing part / malformed XML yields an empty cache,
+ * which projects every list with the bullet marker (the historical default).
+ */
+export function _get_numbering_cache(
+  part: any,
+): Record<string, Record<number, string>> {
+  const pkg = _resolve_package(part);
+  if (!pkg) return {};
+  if (pkg._adeu_numbering_cache) return pkg._adeu_numbering_cache;
+
+  const cache: Record<string, Record<number, string>> = {};
+  let numbering_root: Element | null = null;
+  try {
+    const numberingPart = (pkg.parts || []).find((p: any) =>
+      String(p.partname).endsWith("/numbering.xml"),
+    );
+    if (numberingPart) numbering_root = numberingPart._element;
+  } catch {
+    numbering_root = null;
+  }
+
+  if (numbering_root) {
+    const abstract_fmts: Record<string, Record<number, string>> = {};
+    for (const abstract of findAllDescendants(numbering_root, "w:abstractNum")) {
+      const a_id = abstract.getAttribute("w:abstractNumId");
+      if (a_id === null) continue;
+      const lvl_map: Record<number, string> = {};
+      for (const lvl of findAllDescendants(abstract, "w:lvl")) {
+        const ilvl_val = lvl.getAttribute("w:ilvl");
+        const fmt_el = findChild(lvl, "w:numFmt");
+        if (ilvl_val !== null && /^-?\d+$/.test(ilvl_val) && fmt_el) {
+          const fmt = fmt_el.getAttribute("w:val");
+          if (fmt) lvl_map[parseInt(ilvl_val, 10)] = fmt;
+        }
+      }
+      abstract_fmts[a_id] = lvl_map;
+    }
+
+    for (const num of findAllDescendants(numbering_root, "w:num")) {
+      const n_id = num.getAttribute("w:numId");
+      const a_ref = findChild(num, "w:abstractNumId");
+      if (n_id === null || !a_ref) continue;
+      const a_id = a_ref.getAttribute("w:val");
+      if (a_id !== null && abstract_fmts[a_id] !== undefined) {
+        cache[n_id] = abstract_fmts[a_id];
+      }
+    }
+  }
+
+  pkg._adeu_numbering_cache = cache;
+  return cache;
+}
+
+/**
+ * Markdown marker for a list paragraph: '* ' for bullets, '1. ' for every
+ * numbered format (Markdown renderers renumber sequentially). Unknown
+ * numbering (no numbering.xml entry) keeps the historical '* '.
+ */
+export function get_list_marker(
+  paragraph_part: any,
+  num_id: string | null,
+  ilvl: number,
+): string {
+  let fmt: string | null = null;
+  if (num_id !== null && num_id !== undefined) {
+    const lvl_map = _get_numbering_cache(paragraph_part)[num_id];
+    if (lvl_map && Object.keys(lvl_map).length > 0) {
+      fmt = lvl_map[ilvl] !== undefined ? lvl_map[ilvl] : null;
+      if (fmt === null) {
+        // Fall back to the nearest defined level at or below ilvl.
+        for (let lookup = ilvl; lookup >= 0; lookup--) {
+          if (lvl_map[lookup] !== undefined) {
+            fmt = lvl_map[lookup];
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (fmt !== null && fmt !== "bullet") return "1. ";
+  return "* ";
 }
 
 function _detect_heading_level_from_name(name: string): number | null {
@@ -256,20 +413,53 @@ export function get_paragraph_prefix(
 
   if (style_name === "Title") return "# ";
 
+  // Check for List Formatting (direct paragraph numPr first, then the
+  // style chain — Word's built-in List Bullet/List Number styles keep their
+  // numPr in styles.xml, QA 2026-07-18 M4).
+  let list_num_id: string | null = null;
+  let list_ilvl: number | null = null;
+  let numbering_disabled = false;
   if (pPr) {
     const numPr = findChild(pPr, QN_W_NUMPR);
     if (numPr) {
       const numId = findChild(numPr, QN_W_NUMID);
-      if (numId && numId.getAttribute(QN_W_VAL) !== "0") {
-        let level = 0;
-        const ilvl = findChild(numPr, QN_W_ILVL);
-        if (ilvl) {
-          const valAttr = ilvl.getAttribute(QN_W_VAL);
-          if (valAttr) level = parseInt(valAttr, 10) || 0;
+      if (numId) {
+        const val = numId.getAttribute(QN_W_VAL);
+        if (val === "0") {
+          // ECMA-376 §17.9.15: a direct numId of 0 REMOVES the numbering a
+          // style would otherwise apply.
+          numbering_disabled = true;
+        } else if (val) {
+          list_num_id = val;
+          const ilvl = findChild(numPr, QN_W_ILVL);
+          if (ilvl) {
+            const valAttr = ilvl.getAttribute(QN_W_VAL);
+            if (valAttr !== null && /^\d+$/.test(valAttr)) {
+              list_ilvl = parseInt(valAttr, 10);
+            }
+          }
         }
-        return "    ".repeat(level) + "* ";
       }
     }
+  }
+  if (list_num_id === null && !numbering_disabled && style_info) {
+    const style_num_id = style_info.num_id;
+    if (style_num_id) {
+      list_num_id = style_num_id;
+      if (list_ilvl === null) {
+        list_ilvl =
+          style_info.num_ilvl !== undefined ? style_info.num_ilvl : null;
+      }
+    }
+  }
+  if (list_num_id !== null) {
+    const level = list_ilvl !== null ? list_ilvl : 0;
+    const marker = get_list_marker(
+      paragraph._parent ? paragraph._parent.part || paragraph._parent : null,
+      list_num_id,
+      level,
+    );
+    return "    ".repeat(level) + marker;
   }
 
   if (style_name && style_name !== "Normal") {
@@ -415,6 +605,17 @@ export function* iter_block_items(
         child.getAttribute("w:type") === "continuationSeparator"
       )
         continue;
+      // Word reserves non-positive note ids (-1 separator, 0 continuation
+      // separator). Some generators omit the w:type attribute on them, so
+      // filter by id as well — they must never surface as user footnotes
+      // like "[^fn--1]:" (QA 2026-07-18 M6).
+      const note_id = child.getAttribute("w:id");
+      if (
+        note_id !== null &&
+        /^\s*[-+]?\d+\s*$/.test(note_id) &&
+        parseInt(note_id, 10) <= 0
+      )
+        continue;
       yield new FootnoteItem(child, parent, parent.note_type);
     }
     return;
@@ -433,16 +634,34 @@ export function* iter_block_items(
 }
 
 export function* iter_document_parts(doc: any): Generator<any> {
+  for (const [container] of iter_document_parts_with_kind(doc)) {
+    yield container;
+  }
+}
+
+/**
+ * Like iter_document_parts, but yields [container, kind] where kind is one
+ * of "header" / "body" / "footer" / "footnotes" / "endnotes".
+ *
+ * The kind sequence defines the document's structural part layout. The
+ * projection flattens all parts into one string, so diff/apply need these
+ * kinds to refuse (or correctly re-anchor) edits that would otherwise cross
+ * an OPC part boundary — the QA 2026-07-18 C1 failure wrote a final body
+ * paragraph into word/footer1.xml.
+ */
+export function* iter_document_parts_with_kind(
+  doc: any,
+): Generator<[any, string]> {
   // 1. Headers
   const headers = doc.pkg.parts.filter(
     (p: any) =>
       p.contentType ===
       "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
   );
-  for (const h of headers) yield h;
+  for (const h of headers) yield [h, "header"];
 
   // 2. Main Document Body
-  yield doc;
+  yield [doc, "body"];
 
   // 3. Footers
   const footers = doc.pkg.parts.filter(
@@ -450,14 +669,14 @@ export function* iter_document_parts(doc: any): Generator<any> {
       p.contentType ===
       "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
   );
-  for (const f of footers) yield f;
+  for (const f of footers) yield [f, "footer"];
 
   // 4. Notes
   const fnPart = doc.pkg.getPartByPath("word/footnotes.xml");
   const enPart = doc.pkg.getPartByPath("word/endnotes.xml");
 
-  if (fnPart) yield new NotesPart(fnPart, "fn");
-  if (enPart) yield new NotesPart(enPart, "en");
+  if (fnPart) yield [new NotesPart(fnPart, "fn"), "footnotes"];
+  if (enPart) yield [new NotesPart(enPart, "en"), "endnotes"];
 }
 
 function _is_page_instr(instr: string): boolean {
@@ -505,7 +724,29 @@ export function* iter_paragraph_content(
       if (child.nodeType !== 1) continue;
 
       const tag = child.tagName;
-      if (tag === QN_W_COMMENTREFERENCE) {
+      if (tag === QN_W_DRAWING || tag === QN_W_OBJECT) {
+        // Inline image/object: project a read-only marker so the agent can
+        // see that a material element exists here (QA 2026-07-18 M5).
+        // id/date carry (docPr id, alt text) — the marker renders as
+        // ![alt](docx-image:id).
+        const doc_pr = findAllDescendants(child, QN_WP_DOCPR)[0] || null;
+        let alt = "";
+        let img_id = "0";
+        if (doc_pr) {
+          alt = doc_pr.getAttribute("descr") || doc_pr.getAttribute("title") || "";
+          img_id = doc_pr.getAttribute("id") || "0";
+        }
+        yield { type: "image", id: img_id, date: alt };
+      } else if (tag === QN_W_PICT) {
+        // Legacy VML picture. Only actual images (v:imagedata) get a
+        // marker; textpath-only shapes (watermarks) are reported by
+        // sanitize's watermark audit instead of polluting the text.
+        const imagedata = findAllDescendants(child, QN_V_IMAGEDATA)[0] || null;
+        if (imagedata) {
+          const alt = imagedata.getAttribute(QN_O_TITLE) || "";
+          yield { type: "image", id: "vml", date: alt };
+        }
+      } else if (tag === QN_W_COMMENTREFERENCE) {
         const ref_id = child.getAttribute(QN_W_ID);
         if (ref_id) yield { type: "ref", id: ref_id };
       } else if (tag === QN_W_FOOTNOTEREFERENCE) {

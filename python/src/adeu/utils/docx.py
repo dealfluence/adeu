@@ -60,6 +60,12 @@ QN_W_OUTLINELVL = qn("w:outlineLvl")
 QN_W_NUMPR = qn("w:numPr")
 QN_W_NUMID = qn("w:numId")
 QN_W_ILVL = qn("w:ilvl")
+QN_W_DRAWING = qn("w:drawing")
+QN_W_OBJECT = qn("w:object")
+QN_W_PICT = qn("w:pict")
+QN_WP_DOCPR = qn("wp:docPr")
+QN_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
+QN_O_TITLE = "{urn:schemas-microsoft-com:office:office}title"
 
 
 def is_heading_paragraph(
@@ -197,6 +203,8 @@ def _get_style_cache(part):
         based_on = based_on_el.get(qn("w:val")) if based_on_el is not None else None
 
         outline_lvl = None
+        num_id = None
+        num_ilvl = None
         pPr = s.find(qn("w:pPr"))
         if pPr is not None:
             oLvl = pPr.find(qn("w:outlineLvl"))
@@ -204,6 +212,23 @@ def _get_style_cache(part):
                 val = oLvl.get(qn("w:val"))
                 if val and val.isdigit():
                     outline_lvl = int(val)
+            # Style-level list binding: Word's built-in "List Bullet" /
+            # "List Number" styles carry <w:numPr> in styles.xml, not on the
+            # paragraph. Without this, style-based lists project as plain
+            # paragraphs and the agent loses ordered-vs-unordered semantics
+            # (QA 2026-07-18 M4).
+            numPr = pPr.find(qn("w:numPr"))
+            if numPr is not None:
+                numId_el = numPr.find(qn("w:numId"))
+                if numId_el is not None:
+                    n_val = numId_el.get(qn("w:val"))
+                    if n_val and n_val != "0":
+                        num_id = n_val
+                ilvl_el = numPr.find(qn("w:ilvl"))
+                if ilvl_el is not None:
+                    i_val = ilvl_el.get(qn("w:val"))
+                    if i_val and i_val.isdigit():
+                        num_ilvl = int(i_val)
 
         bold = None
         rPr = s.find(qn("w:rPr"))
@@ -218,6 +243,8 @@ def _get_style_cache(part):
             "based_on": based_on,
             "outline_level": outline_lvl,
             "bold": bold,
+            "num_id": num_id,
+            "num_ilvl": num_ilvl,
         }
 
     # 2. Recursively resolve inheritance chains
@@ -225,7 +252,7 @@ def _get_style_cache(part):
         if s_id in cache:
             return cache[s_id]
         if s_id in visited or s_id not in raw_styles:
-            return {"name": s_id, "outline_level": None, "bold": False}
+            return {"name": s_id, "outline_level": None, "bold": False, "num_id": None, "num_ilvl": None}
 
         visited.add(s_id)
         raw = raw_styles[s_id]
@@ -235,11 +262,21 @@ def _get_style_cache(part):
             parent = resolve_style(based_on_id, visited)
             o_lvl = raw["outline_level"] if raw["outline_level"] is not None else parent["outline_level"]
             bold_val = raw["bold"] if raw["bold"] is not None else parent["bold"]
+            n_id = raw["num_id"] if raw["num_id"] is not None else parent.get("num_id")
+            n_ilvl = raw["num_ilvl"] if raw["num_ilvl"] is not None else parent.get("num_ilvl")
         else:
             o_lvl = raw["outline_level"]
             bold_val = raw["bold"] if raw["bold"] is not None else False
+            n_id = raw["num_id"]
+            n_ilvl = raw["num_ilvl"]
 
-        resolved = {"name": raw["name"], "outline_level": o_lvl, "bold": bold_val}
+        resolved = {
+            "name": raw["name"],
+            "outline_level": o_lvl,
+            "bold": bold_val,
+            "num_id": n_id,
+            "num_ilvl": n_ilvl,
+        }
         cache[s_id] = resolved
         return resolved
 
@@ -248,6 +285,85 @@ def _get_style_cache(part):
 
     pkg._adeu_style_cache = (cache, default_pstyle)
     return cache, default_pstyle
+
+
+def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
+    """
+    Parses word/numbering.xml once per package into
+    {numId: {ilvl: numFmt}} (e.g. {"5": {0: "decimal", 1: "lowerLetter"}}).
+
+    Used to distinguish bullet lists from ordered lists in the projection
+    (QA 2026-07-18 M4). Missing part / malformed XML yields an empty cache,
+    which projects every list with the bullet marker (the historical default).
+    """
+    pkg = part.package
+    if hasattr(pkg, "_adeu_numbering_cache"):
+        return pkg._adeu_numbering_cache
+
+    cache: Dict[str, Dict[int, str]] = {}
+    numbering_root = None
+    try:
+        for p in pkg.parts:
+            if str(p.partname).endswith("/numbering.xml"):
+                if hasattr(p, "element"):
+                    numbering_root = p.element
+                else:
+                    from docx.oxml import parse_xml
+
+                    numbering_root = parse_xml(p.blob)
+                break
+    except Exception:
+        numbering_root = None
+
+    if numbering_root is not None:
+        abstract_fmts: Dict[str, Dict[int, str]] = {}
+        for abstract in numbering_root.findall(qn("w:abstractNum")):
+            a_id = abstract.get(qn("w:abstractNumId"))
+            if a_id is None:
+                continue
+            lvl_map: Dict[int, str] = {}
+            for lvl in abstract.findall(qn("w:lvl")):
+                ilvl_val = lvl.get(qn("w:ilvl"))
+                fmt_el = lvl.find(qn("w:numFmt"))
+                if ilvl_val is not None and ilvl_val.lstrip("-").isdigit() and fmt_el is not None:
+                    fmt = fmt_el.get(qn("w:val"))
+                    if fmt:
+                        lvl_map[int(ilvl_val)] = fmt
+            abstract_fmts[a_id] = lvl_map
+
+        for num in numbering_root.findall(qn("w:num")):
+            n_id = num.get(qn("w:numId"))
+            a_ref = num.find(qn("w:abstractNumId"))
+            if n_id is None or a_ref is None:
+                continue
+            a_id = a_ref.get(qn("w:val"))
+            if a_id in abstract_fmts:
+                cache[n_id] = abstract_fmts[a_id]
+
+    pkg._adeu_numbering_cache = cache
+    return cache
+
+
+def get_list_marker(paragraph_part, num_id: Optional[str], ilvl: int) -> str:
+    """
+    Markdown marker for a list paragraph: '* ' for bullets, '1. ' for every
+    numbered format (Markdown renderers renumber sequentially). Unknown
+    numbering (no numbering.xml entry) keeps the historical '* '.
+    """
+    fmt = None
+    if num_id is not None:
+        lvl_map = _get_numbering_cache(paragraph_part).get(num_id)
+        if lvl_map:
+            fmt = lvl_map.get(ilvl)
+            if fmt is None and lvl_map:
+                # Fall back to the nearest defined level at or below ilvl.
+                for lookup in range(ilvl, -1, -1):
+                    if lookup in lvl_map:
+                        fmt = lvl_map[lookup]
+                        break
+    if fmt is not None and fmt != "bullet":
+        return "1. "
+    return "* "
 
 
 # --- Types ---
@@ -351,25 +467,39 @@ def get_paragraph_prefix(
     if style_name == "Title":
         return "# "
 
-    # 3. Check for List Formatting
+    # 3. Check for List Formatting (direct paragraph numPr first, then the
+    # style chain — Word's built-in List Bullet/List Number styles keep their
+    # numPr in styles.xml, QA 2026-07-18 M4).
+    list_num_id = None
+    list_ilvl = None
+    numbering_disabled = False
     if pPr is not None:
         numPr = pPr.find(QN_W_NUMPR)
         if numPr is not None:
             numId = numPr.find(QN_W_NUMID)
             if numId is not None:
                 val = numId.get(QN_W_VAL)
-                if val and val != "0":
-                    ilvl_str = "0"
+                if val == "0":
+                    # ECMA-376 §17.9.15: a direct numId of 0 REMOVES the
+                    # numbering a style would otherwise apply.
+                    numbering_disabled = True
+                elif val:
+                    list_num_id = val
                     ilvl = numPr.find(QN_W_ILVL)
                     if ilvl is not None:
                         val_attr = ilvl.get(QN_W_VAL)
-                        if val_attr is not None:
-                            ilvl_str = val_attr
-                    try:
-                        level = int(ilvl_str)
-                    except ValueError:
-                        level = 0
-                    return ("    " * level) + "* "
+                        if val_attr is not None and val_attr.isdigit():
+                            list_ilvl = int(val_attr)
+    if list_num_id is None and not numbering_disabled and style_info:
+        style_num_id = style_info.get("num_id")
+        if style_num_id:
+            list_num_id = style_num_id
+            if list_ilvl is None:
+                list_ilvl = style_info.get("num_ilvl")
+    if list_num_id is not None:
+        level = list_ilvl if list_ilvl is not None else 0
+        marker = get_list_marker(paragraph.part, list_num_id, level)
+        return ("    " * level) + marker
 
     # 4. Custom heading style name fallback.
     if style_name and style_name != "Normal":
@@ -493,7 +623,27 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
         # Iterate children once to handle references, fields, and text
         for child in r_element:
             tag = child.tag
-            if tag == QN_W_COMMENTREFERENCE:
+            if tag == QN_W_DRAWING or tag == QN_W_OBJECT:
+                # Inline image/object: project a read-only marker so the agent
+                # can see that a material element exists here (QA 2026-07-18
+                # M5). id/date carry (docPr id, alt text) — the marker renders
+                # as ![alt](docx-image:id).
+                doc_pr = child.find(f".//{QN_WP_DOCPR}")
+                alt = ""
+                img_id = "0"
+                if doc_pr is not None:
+                    alt = doc_pr.get("descr") or doc_pr.get("title") or ""
+                    img_id = doc_pr.get("id") or "0"
+                yield DocxEvent("image", img_id, date=alt)
+            elif tag == QN_W_PICT:
+                # Legacy VML picture. Only actual images (v:imagedata) get a
+                # marker; textpath-only shapes (watermarks) are reported by
+                # sanitize's watermark audit instead of polluting the text.
+                imagedata = child.find(f".//{QN_V_IMAGEDATA}")
+                if imagedata is not None:
+                    alt = imagedata.get(QN_O_TITLE) or ""
+                    yield DocxEvent("image", "vml", date=alt)
+            elif tag == QN_W_COMMENTREFERENCE:
                 ref_id = child.get(QN_W_ID)
                 if ref_id:
                     yield DocxEvent("ref", ref_id)
@@ -744,6 +894,21 @@ def iter_document_parts(doc: DocumentObject):
 
     Handles 'Link to Previous' to avoid duplication.
     """
+    for container, _kind in iter_document_parts_with_kind(doc):
+        yield container
+
+
+def iter_document_parts_with_kind(doc: DocumentObject):
+    """
+    Like iter_document_parts, but yields (container, kind) where kind is one
+    of "header" / "body" / "footer" / "footnotes" / "endnotes".
+
+    The kind sequence defines the document's structural part layout. The
+    projection flattens all parts into one string, so diff/apply need these
+    kinds to refuse (or correctly re-anchor) edits that would otherwise cross
+    an OPC part boundary — the QA 2026-07-18 C1 failure wrote a final body
+    paragraph into word/footer1.xml.
+    """
 
     def _iter_section_parts(section, part_type_attr):
         # 1. Primary
@@ -765,14 +930,16 @@ def iter_document_parts(doc: DocumentObject):
 
     # 1. Headers
     for section in doc.sections:
-        yield from _iter_section_parts(section, "header")
+        for part in _iter_section_parts(section, "header"):
+            yield part, "header"
 
     # 2. Main Body (The Document object itself acts as the container)
-    yield doc
+    yield doc, "body"
 
     # 3. Footers
     for section in doc.sections:
-        yield from _iter_section_parts(section, "footer")
+        for part in _iter_section_parts(section, "footer"):
+            yield part, "footer"
 
     # 4. Footnotes & Endnotes (ordered)
     fn_part = None
@@ -785,9 +952,9 @@ def iter_document_parts(doc: DocumentObject):
             en_part = part
 
     if fn_part:
-        yield NotesPart(fn_part, "fn")
+        yield NotesPart(fn_part, "fn"), "footnotes"
     if en_part:
-        yield NotesPart(en_part, "en")
+        yield NotesPart(en_part, "en"), "endnotes"
 
 
 def normalize_docx(doc: DocumentObject):
@@ -837,6 +1004,16 @@ def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
         for child in parent._element.findall(qn(tag)):
             if child.get(qn("w:type")) in ("separator", "continuationSeparator"):
                 continue
+            # Word reserves non-positive note ids (-1 separator, 0
+            # continuation separator). Some generators omit the w:type
+            # attribute on them, so filter by id as well — they must never
+            # surface as user footnotes like "[^fn--1]:" (QA 2026-07-18 M6).
+            note_id = child.get(qn("w:id"))
+            try:
+                if note_id is not None and int(note_id) <= 0:
+                    continue
+            except ValueError:
+                pass
             yield FootnoteItem(child, parent, parent.note_type)
         return
     elif type(parent).__name__ == "FootnoteItem":

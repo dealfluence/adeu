@@ -133,7 +133,10 @@ def _read_text(path: Path, clean_view: bool) -> str:
 
     with open(path, "rb") as f:
         stream = BytesIO(f.read())
-    return extract_text_from_stream(stream, filename=path.name, clean_view=clean_view)
+    # include_appendix=False: the generated structural appendix ("used N
+    # times", diagnostics) is not document content — diffing it produces
+    # phantom edits (QA 2026-07-18 H1). Mirrors the MCP diff_docx_files fix.
+    return extract_text_from_stream(stream, filename=path.name, clean_view=clean_view, include_appendix=False)
 
 
 __all__ = ["AdeuDiffDocx", "AdeuDiffDocxInput"]

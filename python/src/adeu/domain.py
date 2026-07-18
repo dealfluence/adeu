@@ -17,207 +17,42 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return Levenshtein.distance(s1, s2)
 
 
-# FILE: src/adeu/domain.py
-def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+_TERM_BODY = r"[A-Z][A-Za-z0-9\s\-&\'’]{1,60}"
+# Definition typography, matched repeatedly within a paragraph (QA 2026-07-18
+# M7 — a paragraph defining Alpha, Beta AND Gamma must yield all three):
+#   1. paragraph-leading quoted term (optionally after a numbering token)
+#   2. sentence-leading quoted term (after . ; : ! ?)
+#   3. parenthesized inline definition — (the "Term")
+_LEADING_TERM_RE = re.compile(rf"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]({_TERM_BODY})[\"”]")
+# Like the leading pattern, a sentence-start definition may carry a numbering
+# token ('… the product. 2.2 "Beta" means …').
+_SENTENCE_TERM_RE = re.compile(rf"(?<=[\.\;\:\!\?])\s+(?:[\d\.\-\(\)a-zA-Z]+\s+)?[\"“]({_TERM_BODY})[\"”]")
+_INLINE_TERM_RE = re.compile(rf'\([^)]*?["“]({_TERM_BODY})["”][^)]*?\)')
+
+
+def extract_terms_from_paragraph(text: str) -> List[str]:
     """
-    Heuristically extracts terms wrapped in quotes (Glossary & Inline)
-    and generates semantic diagnostics (Unresolved, Unused, Duplicate, Typo).
+    All defined terms declared in one paragraph, in appearance order,
+    deduplicated. Language-agnostic: keyed on quoting typography, never on
+    English phrases like "means".
     """
-    definitions: Dict[str, Dict[str, Any]] = {}
-    duplicates = set()
+    found: List[Tuple[int, str]] = []
+    leading = _LEADING_TERM_RE.match(text)
+    if leading:
+        found.append((leading.start(1), leading.group(1).strip()))
+    for m in _SENTENCE_TERM_RE.finditer(text):
+        found.append((m.start(1), m.group(1).strip()))
+    for m in _INLINE_TERM_RE.finditer(text):
+        found.append((m.start(1), m.group(1).strip()))
 
-    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
-    inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
-
-    for item in iter_block_items(doc):
-        if isinstance(item, Paragraph):
-            text = _get_paragraph_text(item).strip()
-            if not text:
-                continue
-
-            extracted_terms = []
-            leading_match = leading_re.match(text)
-            if leading_match:
-                extracted_terms.append(leading_match.group(1).strip())
-            for m in inline_re.finditer(text):
-                extracted_terms.append(m.group(1).strip())
-
-            for term in extracted_terms:
-                if term in definitions:
-                    duplicates.add(term)
-                else:
-                    definitions[term] = {"count": 0}
-
-    diagnostics = []
-
-    # === Single-pass usage counting ===
-    # Build one alternation regex over all terms (sorted longest-first to prefer longer matches)
-    # and scan base_text exactly once instead of N times.
-    if definitions:
-        sorted_terms = sorted(definitions.keys(), key=len, reverse=True)
-        # Each term: not preceded by quote, whole word, not followed by quote
-        alt = "|".join(re.escape(t) for t in sorted_terms)
-        usage_pattern = re.compile(rf'(?<!["“])\b({alt})\b(?!["”])')
-
-        for m in usage_pattern.finditer(base_text):
-            matched_term = m.group(1)
-            if matched_term in definitions:
-                definitions[matched_term]["count"] += 1
-
-        # Drop unused terms from the SYMBOL TABLE only — that filter is noise
-        # reduction for the Defined Terms listing, and must not gate the
-        # Semantic Diagnostics: a term defined twice and never used is two
-        # drafting errors, not zero (QA 2026-07-17 F6). Surface the orphan
-        # definition itself as a diagnostic instead.
-        for term in list(definitions.keys()):
-            if definitions[term]["count"] == 0:
-                del definitions[term]
-                if term not in duplicates:
-                    diagnostics.append(f"[Warning] Unused Definition: '{term}' is defined but never used.")
-
-    for term in duplicates:
-        diagnostics.append(f"[Error] Duplicate Definition: '{term}' is defined multiple times.")
-
-    stop_words = {
-        "The",
-        "This",
-        "That",
-        "Such",
-        "A",
-        "An",
-        "Any",
-        "All",
-        "Some",
-        "No",
-        "Every",
-        "Each",
-        "As",
-        "In",
-        "Of",
-        "For",
-        "To",
-        "On",
-        "By",
-        "With",
-    }
-
-    all_cap_pattern = r"\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b"
-    all_caps = set(re.findall(all_cap_pattern, base_text))
-
-    valid_terms = set(definitions.keys())
-    # Pre-bucket valid terms by first letter (lowercased) for O(1) prune.
-    terms_by_first_letter: Dict[str, List[str]] = {}
-    for term in valid_terms:
-        terms_by_first_letter.setdefault(term[0].lower(), []).append(term)
-
-    candidates_by_term: Dict[str, List[str]] = {}
-
-    for candidate in all_caps:
-        candidate = candidate.strip()
-        words = candidate.split()
-        while words and words[0].title() in stop_words:
-            words = words[1:]
-        candidate = " ".join(words)
-
-        if len(candidate) < 4:
+    terms: List[str] = []
+    seen_positions: set = set()
+    for pos, term in sorted(found):
+        if pos in seen_positions:
             continue
-        if candidate in valid_terms:
-            continue
-
-        # Only check terms that share a first letter (with the original logic, mismatched
-        # first letters were only excluded for short acronyms — but in practice the dist
-        # check already filters them. This prefilter is a strict performance win when
-        # combined with the explicit `dist > 2` skip below.)
-        first_letter = candidate[0].lower()
-        candidate_terms = terms_by_first_letter.get(first_letter, [])
-
-        # Also include other-first-letter terms ONLY for length 6+ to preserve original
-        # behavior for non-acronym typos that change the first character.
-        if len(candidate) > 5:
-            for k, v in terms_by_first_letter.items():
-                if k != first_letter:
-                    candidate_terms = candidate_terms + v
-
-        for term in candidate_terms:
-            if abs(len(candidate) - len(term)) > 2:
-                continue
-            if candidate == term + "s" or candidate == term + "es":
-                continue
-            if term == candidate + "s" or term == candidate + "es":
-                continue
-
-            dist = Levenshtein.distance(candidate, term, score_cutoff=2)
-            if dist == 0 or dist > 2:
-                continue
-
-            if len(term) <= 5:
-                if dist > 1:
-                    continue
-                if candidate[0].lower() != term[0].lower():
-                    continue
-
-            if term not in candidates_by_term:
-                candidates_by_term[term] = []
-            if candidate not in candidates_by_term[term]:
-                candidates_by_term[term].append(candidate)
-
-    for term, candidates in candidates_by_term.items():
-        c_str = ", ".join(f"'{c}'" for c in sorted(candidates))
-        diagnostics.append(f"[Info] Possible Typos for '{term}': Found {c_str}")
-
-    def diag_sort_key(msg):
-        if msg.startswith("[Error]"):
-            return 0
-        if msg.startswith("[Warning]"):
-            return 1
-        return 2
-
-    diagnostics.sort(key=lambda x: (diag_sort_key(x), x))
-
-    return definitions, diagnostics
-
-
-def extract_anchors(doc) -> Dict[str, Dict[str, Any]]:
-    """
-    Deterministically builds a dependency map of Bookmarks and Cross-References.
-    """
-    anchors: Dict[str, Dict[str, Any]] = {}
-
-    # Pass 1: Find bookmarks
-    for item in iter_block_items(doc):
-        if isinstance(item, Paragraph):
-            for node in item._element.iter():
-                if node.tag == qn("w:bookmarkStart"):
-                    b_name = node.get(qn("w:name"))
-                    if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
-                        if b_name not in anchors:
-                            text = _get_paragraph_text(item).strip()
-                            anchors[b_name] = {
-                                "anchored_to": text[:60] + ("..." if len(text) > 60 else ""),
-                                "referenced_from": [],
-                            }
-
-    # Pass 2: Find references
-    for item in iter_block_items(doc):
-        if isinstance(item, Paragraph):
-            p_text = _get_paragraph_text(item).strip()
-            for node in item._element.iter():
-                target = None
-                if node.tag == qn("w:fldSimple"):
-                    instr = node.get(qn("w:instr"), "")
-                    parts = instr.strip().split()
-                    if parts and parts[0] == "REF" and len(parts) > 1:
-                        target = parts[1]
-                elif node.tag == qn("w:instrText"):
-                    instr = node.text or ""
-                    parts = instr.strip().split()
-                    if parts and parts[0] == "REF" and len(parts) > 1:
-                        target = parts[1]
-
-                if target and target in anchors:
-                    anchors[target]["referenced_from"].append(p_text[:60] + ("..." if len(p_text) > 60 else ""))
-
-    return anchors
+        seen_positions.add(pos)
+        terms.append(term)
+    return terms
 
 
 # FILE: src/adeu/domain.py
@@ -315,9 +150,6 @@ def extract_all_domain_metadata(
     raw_anchors: Dict[str, Dict[str, Any]] = {}
     raw_references: List[Tuple[str, str]] = []  # (target_bookmark, referencing_text)
 
-    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
-    inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
-
     # --- SINGLE DOCUMENT WALK ---
     for item in iter_block_items(doc):
         if not isinstance(item, Paragraph):
@@ -328,15 +160,8 @@ def extract_all_domain_metadata(
         if not text:
             continue
 
-        # 1. Extract Definitions
-        extracted_terms = []
-        leading_match = leading_re.match(text)
-        if leading_match:
-            extracted_terms.append(leading_match.group(1).strip())
-        for m in inline_re.finditer(text):
-            extracted_terms.append(m.group(1).strip())
-
-        for term in extracted_terms:
+        # 1. Extract Definitions (every declaration in the paragraph — QA M7)
+        for term in extract_terms_from_paragraph(text):
             if term in definitions:
                 duplicates.add(term)
             else:

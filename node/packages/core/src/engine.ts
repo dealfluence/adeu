@@ -303,6 +303,21 @@ export function validate_edit_strings(
       }
     }
 
+    // QA 2026-07-18 M5: image markers are read-only projections of
+    // w:drawing elements. They cannot be fabricated, duplicated or removed
+    // through text replacement.
+    if (t_text.includes("docx-image:") || n_text.includes("docx-image:")) {
+      const t_imgs = (t_text.match(/!\[[^\]]*\]\(docx-image:[^)]*\)/g) || []).sort();
+      const n_imgs = (n_text.match(/!\[[^\]]*\]\(docx-image:[^)]*\)/g) || []).sort();
+      if (JSON.stringify(t_imgs) !== JSON.stringify(n_imgs)) {
+        errors.push(
+          `- Edit ${i + 1 + index_offset} Failed: image markers (![alt](docx-image:N)) are read-only ` +
+            "projections of embedded images. They cannot be inserted, altered, or removed " +
+            "via text replacement — edit the text around the image instead.",
+        );
+      }
+    }
+
     if (t_text.includes("{#") || n_text.includes("{#")) {
       const t_anchors = t_text.match(/\{#[^\}]+\}/g) || [];
       const n_anchors = n_text.match(/\{#[^\}]+\}/g) || [];
@@ -1184,6 +1199,54 @@ export class RedlineEngine {
   }
 
   /**
+   * Walks `element` to its XML root element. Word (and LibreOffice, which
+   * refuses to LOAD such files) only supports comment ranges in the main
+   * document story ("w:document") — never in headers, footers, footnotes or
+   * endnotes (QA 2026-07-18 H4/C1).
+   */
+  private _comment_anchor_in_main_story(element: Element): boolean {
+    let root: Element = element;
+    while (root.parentNode && root.parentNode.nodeType === 1) {
+      root = root.parentNode as Element;
+    }
+    return root.tagName === "w:document";
+  }
+
+  /**
+   * When the anchor lives outside the main document story, records a
+   * user-visible warning and returns true (caller must skip the comment).
+   * The tracked change itself still applies — only the bubble is dropped.
+   */
+  private _skip_comment_outside_main_story(
+    element: Element,
+    text: string,
+  ): boolean {
+    if (this._comment_anchor_in_main_story(element)) return false;
+    let root: Element = element;
+    while (root.parentNode && root.parentNode.nodeType === 1) {
+      root = root.parentNode as Element;
+    }
+    const story =
+      (
+        {
+          "w:ftr": "footer",
+          "w:hdr": "header",
+          "w:footnotes": "footnote",
+          "w:endnotes": "endnote",
+        } as Record<string, string>
+      )[root.tagName] || "non-body";
+    const msg =
+      `- Warning: the comment "${text.substring(0, 60)}" was NOT attached: Word does not support ` +
+      `comments inside a ${story} part, and writing one produces a document other ` +
+      "applications cannot open. The tracked change itself was applied.";
+    this.skipped_details.push(msg);
+    console.error(
+      `Comment anchor outside main story; comment dropped (story=${story})`,
+    );
+    return true;
+  }
+
+  /**
    * Attaches a comment that wraps a contiguous range within a single paragraph.
    * start_element and end_element must both be direct children of parent_element
    * and start_element must come before (or equal) end_element in document order.
@@ -1196,6 +1259,8 @@ export class RedlineEngine {
     text: string,
   ) {
     if (!text) return;
+    if (!parent_element || !start_element || !end_element) return;
+    if (this._skip_comment_outside_main_story(parent_element, text)) return;
 
     const comment_id = this.comments_manager.addComment(this.author, text);
     const xmlDoc = parent_element.ownerDocument!;
@@ -1247,6 +1312,12 @@ export class RedlineEngine {
     text: string,
   ) {
     if (!text) return;
+    if (!start_p || !end_p) return;
+    if (
+      this._skip_comment_outside_main_story(start_p, text) ||
+      this._skip_comment_outside_main_story(end_p, text)
+    )
+      return;
 
     const comment_id = this.comments_manager.addComment(this.author, text);
     const xmlDocStart = start_p.ownerDocument!;
@@ -2030,6 +2101,99 @@ export class RedlineEngine {
           pfx,
           (edit.new_text || "").length - sfx,
         );
+
+        // QA 2026-07-18 C1: the projection flattens headers, body, footers
+        // and notes into one string, but a text edit whose matched span
+        // covers real text from two different OPC parts cannot be applied
+        // without putting content in the wrong part — including the
+        // insertion shape, whose anchor point at the part gap is inherently
+        // ambiguous. Refuse the RAW match range outright and ask for a
+        // single-part anchor. (Single-part documents skip the scan.)
+        const multi_part_doc =
+          target_mapper.part_ranges.filter((r) => r[1] > r[0]).length > 1;
+        const raw_span_parts = multi_part_doc
+          ? Array.from(
+              new Set(
+                target_mapper.spans
+                  .filter(
+                    (s) =>
+                      s.run !== null &&
+                      s.end > m_start &&
+                      s.start < m_start + m_len,
+                  )
+                  .map((s) => s.part_index),
+              ),
+            ).sort((a, b) => a - b)
+          : [];
+        if (raw_span_parts.length > 1) {
+          const kinds = raw_span_parts
+            .map((pi) => target_mapper.part_kind_of(pi) || "?")
+            .join(" → ");
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: target_text spans a structural document-part ` +
+              `boundary (${kinds}). Headers, body, footers and footnotes are separate ` +
+              "Word parts — an edit cannot cross between them. Anchor the edit on text " +
+              "within a single part (split it into one edit per part if both sides " +
+              "must change).",
+          );
+        }
+
+        // QA 2026-07-18 M5: image markers are read-only projections. Only
+        // the CHANGED span matters — markers sitting untouched in the
+        // shared context are fine.
+        const eff_start = m_start + pfx;
+        const eff_end = m_start + m_len - sfx;
+        if (eff_end > eff_start) {
+          const overlapping = target_mapper.spans.filter(
+            (s) =>
+              s.end > eff_start &&
+              s.start < eff_end &&
+              (s.run !== null || s.text.trim() !== ""),
+          );
+          if (overlapping.some((s) => (s as any).is_image_marker)) {
+            errors.push(
+              `- Edit ${i + 1 + index_offset} Failed: the target overlaps a read-only image marker ` +
+                "(![alt](docx-image:N)). Images cannot be edited or removed via text " +
+                "replacement — target the text around the image instead.",
+            );
+          }
+        }
+
+        // QA 2026-07-18 H4: comments can only be anchored in the main
+        // document story. A comment-only edit (target == new) whose match
+        // lives in a header/footer/footnote has no effect Word or
+        // LibreOffice could render — refuse it clearly.
+        if (edit.comment && (edit.new_text || "") === (edit.target_text || "")) {
+          const kind_here = target_mapper.part_kind_at(m_start);
+          if (kind_here !== null && kind_here !== "body") {
+            errors.push(
+              `- Edit ${i + 1 + index_offset} Failed: comments cannot be anchored inside a ${kind_here} ` +
+                "part — Word only supports comments in the main document body. Comment on " +
+                "the related body text instead.",
+            );
+          }
+        }
+
+        // QA 2026-07-18 C2: a replacement may not smuggle new pipe-delimited
+        // row lines into a table cell. Rows are structural; adding one
+        // requires the insert_row operation.
+        if (
+          RedlineEngine._introduces_table_row_text(
+            target_mapper,
+            m_start,
+            m_len,
+            final_target,
+            final_new,
+          )
+        ) {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: new_text introduces a pipe-delimited row line inside ` +
+              "a table. Text replacement cannot create table rows — use the structured " +
+              `'insert_row' operation instead (e.g. {"type": "insert_row", ` +
+              `"target_text": "<anchor row text>", "cells": ["...", "..."]}).`,
+          );
+        }
+
         if (final_target.includes("\n\n")) {
           // A *balanced* multi-paragraph modification (target and replacement
           // carry the same number of paragraph breaks) is safe: it is split
@@ -2182,6 +2346,33 @@ export class RedlineEngine {
    * [start, start+length) in `mapper`, or null if that text is not inside a
    * table row.
    */
+  /**
+   * True when a replacement anchored in a table would ADD line-separated
+   * pipe-delimited content — the text shape of a table row. Writing that
+   * into a cell renders a fake row inside one cell while the real grid
+   * stays unchanged (QA 2026-07-18 C2); such edits must use insert_row.
+   */
+  private static _introduces_table_row_text(
+    mapper: DocumentMapper,
+    start: number,
+    length: number,
+    final_target: string,
+    final_new: string,
+  ): boolean {
+    if (!final_new.includes("\n") || !final_new.includes(" | ")) return false;
+    const new_pipe_lines = final_new
+      .split("\n")
+      .filter((line) => line.includes(" | ")).length;
+    const old_pipe_lines = final_target
+      .split("\n")
+      .filter((line) => line.includes(" | ")).length;
+    if (new_pipe_lines <= old_pipe_lines) return false;
+    return (
+      RedlineEngine._column_count_at(mapper, start, Math.max(length, 1)) !==
+      null
+    );
+  }
+
   private static _column_count_at(
     mapper: DocumentMapper,
     start: number,
@@ -2744,7 +2935,13 @@ export class RedlineEngine {
 
     for (const [edit, orig_new] of resolved_edits) {
       const start = edit._resolved_start_idx || 0;
-      const end = start + (edit.target_text ? edit.target_text.length : 0);
+      // An insert_row does not consume its anchor text — it adds an adjacent
+      // row. Give it a zero-width range so several inserts sharing one
+      // anchor (consecutive new rows) never flag each other as overlapping.
+      const end =
+        edit.type === "insert_row"
+          ? start
+          : start + (edit.target_text ? edit.target_text.length : 0);
 
       const overlaps = occupied_ranges.some(
         ([occ_start, occ_end]) => start < occ_end && end > occ_start,
@@ -3605,11 +3802,69 @@ export class RedlineEngine {
       return true;
     }
     if (op === "INSERTION") {
-      const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
-        start_idx,
-        rebuild_map,
-      );
+      let final_new_text = edit.new_text || "";
+
+      // QA 2026-07-18 C1: a MACHINE-PINNED pure insertion (diff/text
+      // round-trip output: authored with an empty target and no parent
+      // edit) positioned in the separator gap between the body and a
+      // following part used to anchor on the NEXT part's first paragraph,
+      // writing the new final body paragraph into word/footer1.xml.
+      // Re-anchor it to the end of the body and force new-paragraph
+      // semantics. Insertions DERIVED from a target-anchored edit (parent
+      // ref set — e.g. prepending "DRAFT " to "FOOTER MARKER") keep the
+      // user's chosen anchor: their context names the part they meant.
+      let boundary_anchor: TextSpan | null = null;
+      const boundary =
+        typeof (active_mapper as any).part_boundary_at === "function"
+          ? active_mapper.part_boundary_at(start_idx)
+          : null;
+      const is_machine_pure_insertion =
+        !edit.target_text &&
+        (edit._parent_edit_ref === undefined || edit._parent_edit_ref === null);
+      if (boundary !== null && is_machine_pure_insertion) {
+        const [prev_i, next_i] = boundary;
+        const prev_kind = active_mapper.part_kind_of(prev_i);
+        const next_kind = active_mapper.part_kind_of(next_i);
+        if (prev_kind === "body" && next_kind !== "body") {
+          const real_before = active_mapper.spans.filter(
+            (s: TextSpan) => s.run !== null && s.part_index === prev_i,
+          );
+          if (real_before.length > 0) {
+            boundary_anchor = real_before[real_before.length - 1];
+          }
+        }
+      }
+
+      let anchor_run: Run | null;
+      let anchor_para: Paragraph | null;
+      if (boundary_anchor !== null) {
+        anchor_run = boundary_anchor.run;
+        anchor_para = boundary_anchor.paragraph;
+        if (!final_new_text.startsWith("\n")) {
+          final_new_text = "\n\n" + final_new_text;
+        }
+      } else {
+        [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
+          start_idx,
+          rebuild_map,
+        );
+      }
       if (!anchor_run && !anchor_para) return false;
+
+      // QA 2026-07-18 C2 (apply-level backstop, pinned edits bypass
+      // validate_edits): refuse insertions that would write row-shaped pipe
+      // text into a table cell.
+      if (
+        RedlineEngine._introduces_table_row_text(
+          active_mapper,
+          start_idx,
+          1,
+          "",
+          final_new_text,
+        )
+      ) {
+        return false;
+      }
 
       // BUG-23-3: a prefix insertion whose new_text ends in a paragraph break
       // (e.g. "Summary\n\n" inserted before "Conclusion") must become a NEW
@@ -3617,8 +3872,10 @@ export class RedlineEngine {
       // into a neighbouring paragraph. _track_insert_multiline drops the
       // trailing break and inlines the remainder, which both loses the
       // paragraph boundary and mis-orders the content. Handle this case here.
-      const _bug233_new = edit.new_text || "";
-      const _bug233_trailing_break = /\n\s*$/.test(_bug233_new);
+      // (Skipped when the C1 boundary re-anchor above took over the anchor.)
+      const _bug233_new = final_new_text;
+      const _bug233_trailing_break =
+        boundary_anchor === null && /\n\s*$/.test(_bug233_new);
       let _bug233_target_para: Element | null = null;
       {
         const startingSpans = active_mapper.spans.filter(
@@ -3696,7 +3953,7 @@ export class RedlineEngine {
       }
 
       const result = this._track_insert_multiline(
-        edit.new_text || "",
+        final_new_text,
         anchor_run,
         anchor_para,
         ins_id!,
@@ -3821,6 +4078,29 @@ export class RedlineEngine {
         }
       }
       return true;
+    }
+
+    // QA 2026-07-18 C1 (apply-level backstop, pinned edits bypass
+    // validate_edits): a modification/deletion may never mutate real text
+    // from two different OPC parts in one span. Single-part documents skip
+    // the scan.
+    if (
+      (op === "DELETION" || op === "MODIFICATION") &&
+      length &&
+      active_mapper.part_ranges.filter((r: [number, number, string]) => r[1] > r[0]).length > 1
+    ) {
+      const crossed_parts = new Set<number>();
+      for (const s of active_mapper.spans) {
+        if (s.run !== null && s.end > start_idx && s.start < start_idx + length) {
+          crossed_parts.add(s.part_index);
+        }
+      }
+      if (crossed_parts.size > 1) {
+        console.error(
+          `Refusing edit that spans OPC part boundary (start=${start_idx}, parts=${Array.from(crossed_parts).sort().join(",")})`,
+        );
+        return false;
+      }
     }
 
     // DELETION / MODIFICATION

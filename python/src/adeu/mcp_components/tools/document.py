@@ -384,11 +384,18 @@ async def diff_docx_files(
     try:
         await ctx.debug("Extracting text from original document")
         stream_orig = read_file_bytes(original_path)
-        text_orig = extract_text_from_stream(stream_orig, filename=Path(original_path).name, clean_view=compare_clean)
+        # include_appendix=False: the generated appendix ("used N times",
+        # diagnostics) is not document content — diffing it produces phantom
+        # changes no apply can consume (QA 2026-07-18 H1).
+        text_orig = extract_text_from_stream(
+            stream_orig, filename=Path(original_path).name, clean_view=compare_clean, include_appendix=False
+        )
 
         await ctx.debug("Extracting text from modified document")
         stream_mod = read_file_bytes(modified_path)
-        text_mod = extract_text_from_stream(stream_mod, filename=Path(modified_path).name, clean_view=compare_clean)
+        text_mod = extract_text_from_stream(
+            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean, include_appendix=False
+        )
 
         await ctx.debug("Generating text differences")
         edits = generate_edits_from_text(text_orig, text_mod)

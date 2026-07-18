@@ -9,16 +9,15 @@ import enum
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, cast
+from typing import Optional
 
 import structlog
 from docx import Document
 
-from adeu.diff import generate_edits_from_text
-from adeu.ingest import extract_text_from_stream
-from adeu.models import DeleteTableRow, InsertTableRow, ModifyText
+from adeu.diff import generate_structured_edits
+from adeu.ingest import _extract_text_from_doc
 from adeu.redline.comments import CommentsManager
-from adeu.redline.engine import RedlineEngine
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.sanitize import transforms
 from adeu.sanitize.report import SanitizeReport
 from adeu.utils.docx import strip_bom_from_docx_bytes
@@ -103,7 +102,20 @@ def sanitize_docx(
         _sanitize_keep_markup(doc, report, author=author)
     elif mode == SanitizeMode.BASELINE:
         assert baseline_path is not None
-        _sanitize_baseline(doc, input_path, baseline_path, report, author=author)
+        try:
+            doc = _sanitize_baseline(doc, input_path, baseline_path, report, author=author)
+        except SanitizeError:
+            raise
+        except KeyError as e:
+            # A relationship/key lookup failure means the documents are
+            # structurally incompatible — surface guidance, never a raw
+            # `Error: 'rId9'` (QA 2026-07-18 H3).
+            raise SanitizeError(
+                f"❌ Baseline recomputation failed: the documents reference incompatible "
+                f"internal structures (missing key {e}). Verify that --baseline points to an "
+                "earlier version of THIS document (same headers/footers, links and images), "
+                "not an unrelated file."
+            ) from e
 
     if report.status == "blocked":
         report_text = report.render()
@@ -224,54 +236,92 @@ def _sanitize_baseline(
     *,
     author: Optional[str],
 ):
-    """Recompute delta against baseline document."""
-    # Step 1: Extract text from both documents
+    """
+    Recompute delta against a baseline document.
+
+    Returns the Document to continue sanitizing/saving: the BASELINE package
+    with the working document's changes applied as tracked changes. Working
+    on the baseline package (instead of grafting its body into the working
+    document, as pre-1.23 code did) keeps every relationship id (hyperlinks,
+    images, headers) resolvable — the graft produced dangling rIds, raw
+    KeyError('rIdN') crashes and files LibreOffice refused to open
+    (QA 2026-07-18 H3).
+    """
+    # Step 1: Extract structured projections from both documents
     with open(input_path, "rb") as f:
         working_stream = BytesIO(strip_bom_from_docx_bytes(f.read()))
     with open(baseline_path, "rb") as f:
         baseline_stream = BytesIO(strip_bom_from_docx_bytes(f.read()))
 
-    working_text = extract_text_from_stream(
-        BytesIO(working_stream.getvalue()),
-        filename=Path(input_path).name,
-        clean_view=True,
+    working_doc = Document(BytesIO(working_stream.getvalue()))
+    baseline_doc_view = Document(BytesIO(baseline_stream.getvalue()))
+
+    # The appendix is generated metadata, not document content — diffing it
+    # writes phantom "used N times" edits into the output (QA H1/H3).
+    working_text, working_struct = _extract_text_from_doc(
+        working_doc, clean_view=True, include_appendix=False, return_structure=True
     )
-    baseline_text = extract_text_from_stream(
-        BytesIO(baseline_stream.getvalue()),
-        filename=Path(baseline_path).name,
-        clean_view=True,
+    baseline_text, baseline_struct = _extract_text_from_doc(
+        baseline_doc_view, clean_view=True, include_appendix=False, return_structure=True
     )
 
-    # Divergence check
+    # Divergence check: a real sequence similarity over paragraphs. The old
+    # positional character comparison reported a one-paragraph insertion at
+    # the top of the document as "93% different" (QA H3).
     if baseline_text and working_text:
-        # Simple character-level similarity
-        longer = max(len(baseline_text), len(working_text))
-        if longer > 0:
-            # Count matching characters at same positions
-            matches = sum(1 for a, b in zip(baseline_text, working_text, strict=False) if a == b)
-            similarity = matches / longer
-            if similarity < 0.5:
-                divergence_pct = int((1 - similarity) * 100)
-                report.warnings.append(
-                    f"Baseline and working document differ by {divergence_pct}%. "
-                    f"This may indicate the wrong baseline file was selected."
-                )
+        import difflib
 
-    # Step 2: Compute word-level diff
-    raw_edits = generate_edits_from_text(baseline_text, working_text)
-    edits = cast(list[ModifyText | InsertTableRow | DeleteTableRow], raw_edits)
+        ratio = difflib.SequenceMatcher(
+            None, baseline_text.split("\n"), working_text.split("\n"), autojunk=False
+        ).ratio()
+        difference_pct = round((1 - ratio) * 100)
+        if ratio < 0.5:
+            report.warnings.append(
+                f"Baseline and working document share only {round(ratio * 100)}% of their content "
+                f"({difference_pct}% differs). This may indicate the wrong baseline file was selected."
+            )
 
-    # Step 3: Apply edits to baseline as track changes
+    # Step 2: Compute the structured diff (part-aware, table-row-aware).
+    edits, diff_warnings = generate_structured_edits(baseline_text, baseline_struct, working_text, working_struct)
+    report.warnings.extend(diff_warnings)
+
+    # Step 3: Apply edits to the baseline as tracked changes — sequentially
+    # and transactionally, exactly like `adeu apply`.
     baseline_stream.seek(0)
     engine_author = author or "Author"
     engine = RedlineEngine(baseline_stream, author=engine_author)
 
     if edits:
-        engine.apply_edits(edits)
+        try:
+            stats = engine.process_batch(list(edits))
+        except BatchValidationError as e:
+            details = "\n".join(e.errors)
+            raise SanitizeError(
+                "❌ Baseline recomputation failed — the computed changes could not be applied "
+                f"to the baseline:\n{details}"
+            ) from e
+        # Apply-stage skips return in stats instead of raising. A partial
+        # redline silently reverts the skipped working-document changes to
+        # baseline text — the same false-success shape as QA M2, so fail
+        # closed here too.
+        if stats.get("edits_skipped", 0) > 0 or stats.get("actions_skipped", 0) > 0:
+            details = "\n".join(stats.get("skipped_details") or [])
+            raise SanitizeError(
+                "❌ Baseline recomputation failed — "
+                f"{stats.get('edits_skipped', 0)} computed change(s) could not be applied to the "
+                "baseline, so the output would silently miss part of the working document's "
+                f"changes:\n{details}"
+            )
+        # Non-fatal engine notices (e.g. a comment dropped because it landed
+        # in a footer part) must reach the sanitize report, not vanish with
+        # the discarded stats.
+        for detail in stats.get("skipped_details") or []:
+            if detail.startswith("- Warning:"):
+                report.warnings.append(detail[2:])
 
-    # Save the engine's output back to stream to measure the ACTUAL XML changes
-    result_stream = engine.save_to_stream()
-    result_doc = Document(result_stream)
+    # Reload from the engine's serialized output so every later transform and
+    # the final save operate on a self-consistent package.
+    result_doc = Document(engine.save_to_stream())
 
     # Accurately count the generated track changes XML nodes
     ins_count, del_count, fmt_count = transforms.count_tracked_changes(result_doc)
@@ -279,18 +329,14 @@ def _sanitize_baseline(
     report.tracked_changes_kept = report.tracked_changes_found
 
     # Step 4: Handle comments from working doc (keep those not in baseline)
-    # For now, comments are attached to the working doc's XML, not the baseline.
-    # The baseline-reconstructed doc won't have any comments from the working version.
-    # This is a known limitation — comments require XML-level transplanting.
-    # For v1, we note this in the report.
-
-    working_doc = Document(BytesIO(working_stream.getvalue()))
+    # Comments are attached to the working doc's XML, not the baseline.
+    # The baseline-reconstructed doc won't have any comments from the working
+    # version. This is a known limitation — comments require XML-level
+    # transplanting. We note this in the report.
     working_cm = CommentsManager(working_doc)
     working_comments = working_cm.extract_comments_data()
 
-    baseline_stream.seek(0)
-    baseline_doc = Document(BytesIO(baseline_stream.getvalue()))
-    baseline_cm = CommentsManager(baseline_doc)
+    baseline_cm = CommentsManager(baseline_doc_view)
     baseline_comments = baseline_cm.extract_comments_data()
 
     # Identify comments unique to working doc
@@ -311,16 +357,7 @@ def _sanitize_baseline(
         status = "[Resolved]" if c.get("resolved") else "[Baseline]"
         report.removed_comment_lines.append(f'{status} "{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
-    # We need to replace the doc object. Since we can't reassign it in the caller,
-    # we'll modify the approach: return the stream and let caller handle it.
-    # Actually, we modify the doc's element tree in-place by loading from the result.
-    # This is hacky but works with the current architecture.
-
-    # Replace the original doc's body with the result
-    # We need to copy the entire element tree
-    doc.element.body.clear()
-    for child in list(result_doc.element.body):
-        doc.element.body.append(child)
+    return result_doc
 
 
 def _apply_common_transforms(doc, report: SanitizeReport):
@@ -339,3 +376,4 @@ def _apply_common_transforms(doc, report: SanitizeReport):
     # Audit (non-destructive — just warnings)
     hyperlink_warnings = transforms.audit_hyperlinks(doc)
     report.warnings.extend(hyperlink_warnings)
+    report.warnings.extend(transforms.detect_watermarks(doc))

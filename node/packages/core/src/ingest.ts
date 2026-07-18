@@ -9,19 +9,46 @@ import {
   get_run_text,
   apply_formatting_to_segments,
   iter_block_items,
-  iter_document_parts,
+  iter_document_parts_with_kind,
   iter_paragraph_content,
 } from "./utils/docx.js";
 import { findChild } from "./docx/dom.js";
 import { build_structural_appendix } from "./domain.js";
 import { extract_comments_data } from "./comments.js";
 
+/** Text-space extent of one projected table row plus its cell texts. */
+export interface RowGeometry {
+  start: number;
+  end: number;
+  cells: string[];
+}
+
+/** Text-space extent of one projected top-level table. */
+export interface TableGeometry {
+  start: number;
+  end: number;
+  rows: RowGeometry[];
+}
+
+/**
+ * Structural map of a projection: which offset ranges belong to which OPC
+ * part, and where top-level table rows live. Produced in the SAME pass as
+ * the text, so offsets always agree with it. Consumed by the diff pipeline
+ * to keep generated edits from crossing part boundaries (QA 2026-07-18 C1)
+ * and to emit structured row operations for table changes (QA C2).
+ */
+export interface ExtractStructure {
+  part_ranges: [number, number, string][]; // [start, end, kind]
+  tables: TableGeometry[];
+}
+
 export async function extractTextFromBuffer(
   buffer: Buffer,
   cleanView = false,
+  includeAppendix = true,
 ): Promise<string> {
   const doc = await DocumentObject.load(buffer);
-  return _extractTextFromDoc(doc, cleanView) as string;
+  return _extractTextFromDoc(doc, cleanView, includeAppendix) as string;
 }
 
 export function _extractTextFromDoc(
@@ -29,14 +56,21 @@ export function _extractTextFromDoc(
   cleanView = false,
   includeAppendix = true,
   return_paragraph_offsets = false,
-): string | { text: string; paragraph_offsets: Map<any, [number, number]> } {
+  return_structure = false,
+):
+  | string
+  | { text: string; paragraph_offsets: Map<any, [number, number]> }
+  | { text: string; structure: ExtractStructure } {
   const comments_map = extract_comments_data(doc.pkg);
 
   const full_text: string[] = [];
   const paragraph_offsets = new Map<any, [number, number]>();
+  const structure: ExtractStructure | null = return_structure
+    ? { part_ranges: [], tables: [] }
+    : null;
   let cursor = 0;
 
-  for (const part of iter_document_parts(doc)) {
+  for (const [part, part_kind] of iter_document_parts_with_kind(doc)) {
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
     const part_text = _extract_blocks(
       part,
@@ -44,10 +78,14 @@ export function _extractTextFromDoc(
       cleanView,
       part_cursor,
       return_paragraph_offsets ? paragraph_offsets : undefined,
+      structure ? structure.tables : undefined,
     );
     if (part_text) {
       if (full_text.length > 0) cursor += 2;
       full_text.push(part_text);
+      if (structure) {
+        structure.part_ranges.push([cursor, cursor + part_text.length, part_kind]);
+      }
       cursor += part_text.length;
     }
   }
@@ -62,15 +100,24 @@ export function _extractTextFromDoc(
   if (return_paragraph_offsets) {
     return { text: base_text, paragraph_offsets };
   }
+  if (structure) {
+    return { text: base_text, structure };
+  }
   return base_text;
 }
 
+/**
+ * table_acc: optional list collecting TableGeometry for TOP-LEVEL tables.
+ * Deliberately not forwarded into cells — nested tables stay invisible to
+ * the structured row-op diff, whose row pairing assumes one flat grid.
+ */
 function _extract_blocks(
   container: any,
   comments_map: any,
   cleanView: boolean,
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
+  table_acc?: TableGeometry[],
 ): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
@@ -129,17 +176,25 @@ function _extract_blocks(
       is_first_para = false;
       is_first_block = false;
     } else if (item instanceof Table) {
+      const geometry: TableGeometry | null = table_acc
+        ? { start: block_start, end: block_start, rows: [] }
+        : null;
       const table_text = extract_table(
         item,
         comments_map,
         cleanView,
         block_start,
         paragraph_offsets,
+        geometry,
       );
       if (table_text) {
         blocks.push(table_text);
         local_cursor = block_start + table_text.length;
         is_first_block = false;
+        if (geometry && table_acc) {
+          geometry.end = block_start + table_text.length;
+          table_acc.push(geometry);
+        }
       } else if (!is_first_block) {
         local_cursor -= 2;
       }
@@ -156,6 +211,7 @@ export function extract_table(
   cleanView: boolean,
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
+  geometry?: TableGeometry | null,
 ): string {
   const rows_text: string[] = [];
   let rows_processed = 0;
@@ -221,6 +277,13 @@ export function extract_table(
 
     rows_text.push(row_str);
     local_cursor = row_start + row_str.length;
+    if (geometry) {
+      geometry.rows.push({
+        start: row_start,
+        end: local_cursor,
+        cells: [...cell_texts],
+      });
+    }
     rows_processed++;
   }
 
@@ -424,7 +487,16 @@ export function build_paragraph_text(
       else if (ev.type === "del_end") delete active_del[ev.id];
       else if (ev.type === "fmt_start") active_fmt[ev.id] = ev;
       else if (ev.type === "fmt_end") delete active_fmt[ev.id];
-      else if (ev.type === "footnote" || ev.type === "endnote") {
+      else if (ev.type === "image") {
+        // Read-only image marker (QA 2026-07-18 M5); hidden with its run in
+        // clean view when it sits inside an active tracked deletion.
+        if (!(cleanView && Object.keys(active_del).length > 0)) {
+          const alt = (ev.date || "image")
+            .replace(/\]/g, ")")
+            .replace(/\n/g, " ");
+          parts.push(`![${alt}](docx-image:${ev.id})`);
+        }
+      } else if (ev.type === "footnote" || ev.type === "endnote") {
         if (pending_text) {
           parts.push(
             `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,

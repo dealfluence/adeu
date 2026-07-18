@@ -1,5 +1,12 @@
 import diff_match_patch from "diff-match-patch";
-import { ModifyText } from "./models.js";
+import { DeleteTableRow, InsertTableRow, ModifyText } from "./models.js";
+import type {
+  ExtractStructure,
+  RowGeometry,
+  TableGeometry,
+} from "./ingest.js";
+
+export type DiffEdit = ModifyText | InsertTableRow | DeleteTableRow;
 
 function _count_standalone_underscores(s: string): number {
   let count = 0;
@@ -346,6 +353,498 @@ export function generate_edits_from_text(
 
   return edits;
 }
+// ---------------------------------------------------------------------------
+// Structured (part- and table-aware) diff — QA 2026-07-18 C1/C2.
+// ---------------------------------------------------------------------------
+
+type Opcode = [
+  tag: "equal" | "replace" | "delete" | "insert",
+  i1: number,
+  i2: number,
+  j1: number,
+  j2: number,
+];
+
+/**
+ * difflib.SequenceMatcher.get_opcodes() equivalent over string arrays,
+ * LCS-based. The row-key arrays this runs on are tiny (table row counts), so
+ * the O(n*m) table is negligible. Adjacent non-equal steps coalesce into one
+ * "replace"/"delete"/"insert" block exactly like difflib's opcodes.
+ */
+function _sequence_opcodes(a: string[], b: string[]): Opcode[] {
+  const n = a.length;
+  const m = b.length;
+  // dp[i][j] = LCS length of a[i:] vs b[j:]
+  const dp: Int32Array[] = [];
+  for (let i = 0; i <= n; i++) dp.push(new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] =
+        a[i] === b[j]
+          ? dp[i + 1][j + 1] + 1
+          : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const ops: Opcode[] = [];
+  let i = 0;
+  let j = 0;
+  let pend_i1 = 0;
+  let pend_j1 = 0;
+  let pend_del = 0;
+  let pend_ins = 0;
+
+  const flushPending = () => {
+    if (pend_del === 0 && pend_ins === 0) return;
+    const tag =
+      pend_del > 0 && pend_ins > 0
+        ? "replace"
+        : pend_del > 0
+          ? "delete"
+          : "insert";
+    ops.push([tag, pend_i1, pend_i1 + pend_del, pend_j1, pend_j1 + pend_ins]);
+    pend_del = 0;
+    pend_ins = 0;
+  };
+
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) {
+      flushPending();
+      const i1 = i;
+      const j1 = j;
+      while (i < n && j < m && a[i] === b[j]) {
+        i++;
+        j++;
+      }
+      ops.push(["equal", i1, i, j1, j]);
+    } else {
+      if (pend_del === 0 && pend_ins === 0) {
+        pend_i1 = i;
+        pend_j1 = j;
+      }
+      if (j < m && (i === n || dp[i][j + 1] >= dp[i + 1][j])) {
+        pend_ins++;
+        j++;
+      } else {
+        pend_del++;
+        i++;
+      }
+    }
+  }
+  flushPending();
+  return ops;
+}
+
+const _IMAGE_MARKER_RE = /!\[[^\]]*\]\(docx-image:[^)]*\)/g;
+
+/**
+ * Removes generated edits whose image-marker multisets differ between
+ * target and new text. The engine (validate_edit_strings) rightly refuses
+ * such edits — markers are read-only projections — so emitting them would
+ * make the diff pipeline reject its own output. An added/removed image is
+ * reported as a warning instead of an unappliable edit.
+ */
+function _drop_image_marker_hunks(
+  edits: ModifyText[],
+  warnings: string[],
+): ModifyText[] {
+  const _normalized = (s: string): string =>
+    s.replace(_IMAGE_MARKER_RE, "").replace(/\s+/g, " ").trim();
+
+  const kept: ModifyText[] = [];
+  for (const e of edits) {
+    const t_imgs = ((e.target_text || "").match(_IMAGE_MARKER_RE) || []).sort();
+    const n_imgs = ((e.new_text || "").match(_IMAGE_MARKER_RE) || []).sort();
+    if (JSON.stringify(t_imgs) === JSON.stringify(n_imgs)) {
+      kept.push(e);
+      continue;
+    }
+    if (_normalized(e.target_text || "") === _normalized(e.new_text || "")) {
+      warnings.push(
+        "An inline image was added or removed between the documents. Images cannot be " +
+          "transferred by text edits — the image-only difference was skipped; apply it " +
+          "manually in Word.",
+      );
+    } else {
+      warnings.push(
+        "A text change overlapping an added/removed inline image was skipped — images " +
+          "cannot be transferred by text edits. Apply that section manually in Word.",
+      );
+    }
+  }
+  return kept;
+}
+
+/**
+ * True when every projected row reads exactly as its cells joined by " | ".
+ * Rows wrapped in tracked-row CriticMarkup ({++ … ++} / {-- … --}) do not,
+ * and such tables are diffed as plain text rather than as row structures.
+ */
+function _rows_are_plain(text: string, table: TableGeometry): boolean {
+  for (const row of table.rows) {
+    if (text.substring(row.start, row.end) !== row.cells.join(" | ")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const _ROW_KEY_SEP = "\x1f";
+
+/**
+ * Row-level alignment opcodes between two tables, or null when the row sets
+ * differ only cell-internally (no rows added/removed) — the caller then
+ * keeps fine-grained word-level text edits instead of row operations.
+ */
+function _table_row_opcodes(
+  rows_o: RowGeometry[],
+  rows_m: RowGeometry[],
+): Opcode[] | null {
+  const keys_o = rows_o.map((r) => r.cells.join(_ROW_KEY_SEP));
+  const keys_m = rows_m.map((r) => r.cells.join(_ROW_KEY_SEP));
+  const opcodes = _sequence_opcodes(keys_o, keys_m);
+  for (const [tag, i1, i2, j1, j2] of opcodes) {
+    if (
+      tag === "insert" ||
+      tag === "delete" ||
+      (tag === "replace" && i2 - i1 !== j2 - j1)
+    ) {
+      return opcodes;
+    }
+  }
+  return null;
+}
+
+/**
+ * Emits structured operations (delete_row / insert_row / per-row modify)
+ * that transform table_o's row set into table_m's, following the alignment
+ * `opcodes` from _table_row_opcodes (QA 2026-07-18 C2: a generic text edit
+ * cannot add or remove rows — it writes fake pipe text into one cell or is
+ * rejected by the cell-count validator).
+ */
+function _row_ops_for_table(
+  table_o: TableGeometry,
+  table_m: TableGeometry,
+  opcodes: Opcode[],
+  warnings: string[],
+): DiffEdit[] {
+  const rows_o = table_o.rows;
+  const rows_m = table_m.rows;
+  const keys_o = rows_o.map((r) => r.cells.join(_ROW_KEY_SEP));
+
+  const row_text = (r: RowGeometry): string => r.cells.join(" | ");
+
+  // Duplicate row texts make text-anchored row operations ambiguous. The
+  // engine fails closed with a strict-mode ambiguity error at apply time;
+  // tell the user up front so the rejection is not a surprise.
+  if (new Set(keys_o).size !== keys_o.length) {
+    warnings.push(
+      "A table contains rows with identical text; the generated row operations anchor by " +
+        "row text and may be rejected as ambiguous at apply time. If that happens, apply the " +
+        "row changes with explicit insert_row/delete_row edits.",
+    );
+  }
+
+  // Rows removed by the transformation (deletes + surplus rows of shrinking
+  // replaces) can never anchor an insert.
+  const removed = new Set<number>();
+  const replaced_new_text: Record<number, string> = {};
+  for (const [tag, i1, i2, j1, j2] of opcodes) {
+    if (tag === "delete") {
+      for (let k = i1; k < i2; k++) removed.add(k);
+    } else if (tag === "replace") {
+      const pairs = Math.min(i2 - i1, j2 - j1);
+      for (let k = i1 + pairs; k < i2; k++) removed.add(k);
+      for (let k = 0; k < pairs; k++) {
+        replaced_new_text[i1 + k] = row_text(rows_m[j1 + k]);
+      }
+    }
+  }
+
+  const surviving: number[] = [];
+  for (let k = 0; k < rows_o.length; k++) {
+    if (!removed.has(k)) surviving.push(k);
+  }
+
+  const anchor_text = (orig_idx: number): string => {
+    // Anchor on the row's FINAL text: modified rows are matched via the
+    // engine's clean-view fallback after their own edit applies.
+    return replaced_new_text[orig_idx] !== undefined
+      ? replaced_new_text[orig_idx]
+      : row_text(rows_o[orig_idx]);
+  };
+
+  const insert_ops = (
+    new_rows: RowGeometry[],
+    at_orig_index: number,
+  ): DiffEdit[] => {
+    const ops: DiffEdit[] = [];
+    const before = surviving.filter((k) => k < at_orig_index);
+    const after = surviving.filter((k) => k >= at_orig_index);
+    if (before.length > 0) {
+      // Insert below the preceding surviving row. Emitting in reverse keeps
+      // the final order: below-A(B), then below-A(C) yields A,C,B — so emit
+      // C first.
+      const anchor_idx = before[before.length - 1];
+      const anchor = anchor_text(anchor_idx);
+      for (const r of [...new_rows].reverse()) {
+        ops.push({
+          type: "insert_row",
+          target_text: anchor,
+          position: "below",
+          cells: [...r.cells],
+          // Pin to the anchor row's offset: text anchors alone are
+          // ambiguous when tables share identical rows. Pins do not
+          // survive JSON round-trips (the strict text match applies then,
+          // failing closed with the duplicate-row warning above).
+          _match_start_index: rows_o[anchor_idx].start,
+        });
+      }
+    } else if (after.length > 0) {
+      const anchor_idx = after[0];
+      const anchor = anchor_text(anchor_idx);
+      for (const r of new_rows) {
+        ops.push({
+          type: "insert_row",
+          target_text: anchor,
+          position: "above",
+          cells: [...r.cells],
+          _match_start_index: rows_o[anchor_idx].start,
+        });
+      }
+    } else {
+      warnings.push(
+        "A table gained rows but no original row survives to anchor them; " +
+          "these row insertions were skipped — add them with explicit insert_row operations.",
+      );
+    }
+    return ops;
+  };
+
+  const ops: DiffEdit[] = [];
+  for (const [tag, i1, i2, j1, j2] of opcodes) {
+    if (tag === "equal") continue;
+    if (tag === "replace") {
+      const pairs = Math.min(i2 - i1, j2 - j1);
+      for (let k = 0; k < pairs; k++) {
+        const o_txt = row_text(rows_o[i1 + k]);
+        const m_txt = row_text(rows_m[j1 + k]);
+        if (o_txt !== m_txt) {
+          ops.push({
+            type: "modify",
+            target_text: o_txt,
+            new_text: m_txt,
+            comment: "Diff: Table row modified",
+          });
+        }
+      }
+      for (let k = i1 + pairs; k < i2; k++) {
+        ops.push({
+          type: "delete_row",
+          target_text: row_text(rows_o[k]),
+          _match_start_index: rows_o[k].start,
+        });
+      }
+      const surplus_new = rows_m.slice(j1 + pairs, j2);
+      if (surplus_new.length > 0) {
+        ops.push(...insert_ops(surplus_new, i2));
+      }
+    } else if (tag === "delete") {
+      for (let k = i1; k < i2; k++) {
+        ops.push({
+          type: "delete_row",
+          target_text: row_text(rows_o[k]),
+          _match_start_index: rows_o[k].start,
+        });
+      }
+    } else if (tag === "insert") {
+      ops.push(...insert_ops(rows_m.slice(j1, j2), i1));
+    }
+  }
+  return ops;
+}
+
+/**
+ * DOCX-to-DOCX diff over projections extracted with return_structure=true.
+ *
+ * Improvements over a flat generate_edits_from_text pass:
+ *   - each OPC part (header/body/footer/notes) diffs against its
+ *     counterpart, so no edit can span a part boundary and content that
+ *     moved between parts is reported instead of hidden (QA 2026-07-18 C1);
+ *   - table row insertions/deletions become structured insert_row /
+ *     delete_row operations instead of pipe-text edits (QA C2).
+ *
+ * Every ModifyText keeps its _match_start_index pinned into text_orig, which
+ * the engine consumes positionally (the Node engine has no
+ * make_edits_self_contained JSON round trip like the Python CLI).
+ *
+ * Returns { edits, warnings }. Warnings describe fallbacks the caller should
+ * surface (differing part layouts, unanchorable rows, …).
+ */
+export function generate_structured_edits(
+  text_orig: string,
+  struct_orig: ExtractStructure,
+  text_mod: string,
+  struct_mod: ExtractStructure,
+): { edits: DiffEdit[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const edits: DiffEdit[] = [];
+
+  const kinds_o = struct_orig.part_ranges
+    .filter(([s, e]) => e > s)
+    .map(([, , k]) => k);
+  const kinds_m = struct_mod.part_ranges
+    .filter(([s, e]) => e > s)
+    .map(([, , k]) => k);
+
+  if (JSON.stringify(kinds_o) !== JSON.stringify(kinds_m)) {
+    warnings.push(
+      `The documents have different part layouts (${kinds_o.join(" + ") || "none"} vs ` +
+        `${kinds_m.join(" + ") || "none"}); comparing flattened text instead. Header/footer ` +
+        "additions or removals cannot be expressed as text edits.",
+    );
+    const flat = _drop_image_marker_hunks(
+      generate_edits_from_text(text_orig, text_mod),
+      warnings,
+    );
+    return { edits: [...flat], warnings };
+  }
+
+  const ranges_o = struct_orig.part_ranges
+    .filter(([s, e]) => e > s)
+    .map(([s, e]) => [s, e] as [number, number]);
+  const ranges_m = struct_mod.part_ranges
+    .filter(([s, e]) => e > s)
+    .map(([s, e]) => [s, e] as [number, number]);
+
+  for (let p = 0; p < ranges_o.length; p++) {
+    const [po_start, po_end] = ranges_o[p];
+    const [pm_start, pm_end] = ranges_m[p];
+
+    const tables_o = struct_orig.tables.filter(
+      (t) => po_start <= t.start && t.end <= po_end,
+    );
+    const tables_m = struct_mod.tables.filter(
+      (t) => pm_start <= t.start && t.end <= pm_end,
+    );
+
+    const tables_alignable =
+      tables_o.length === tables_m.length &&
+      tables_o.every((t) => _rows_are_plain(text_orig, t)) &&
+      tables_m.every((t) => _rows_are_plain(text_mod, t));
+    if (tables_o.length !== tables_m.length) {
+      warnings.push(
+        `A ${kinds_o[p]} part has ${tables_o.length} table(s) in the ` +
+          `original but ${tables_m.length} in the modified document; its tables were compared as plain ` +
+          "text. Adding or removing whole tables is not supported via diff/apply.",
+      );
+    }
+
+    if (!tables_alignable) {
+      const part_edits = generate_edits_from_text(
+        text_orig.substring(po_start, po_end),
+        text_mod.substring(pm_start, pm_end),
+      );
+      for (const e of part_edits) {
+        e._match_start_index = (e._match_start_index || 0) + po_start;
+      }
+      edits.push(...part_edits);
+      continue;
+    }
+
+    // Walk interleaved segments: text-before-table, table, text-after…
+    const boundaries_o: [number, number][] = [
+      [po_start, po_start],
+      ...tables_o.map((t) => [t.start, t.end] as [number, number]),
+      [po_end, po_end],
+    ];
+    const boundaries_m: [number, number][] = [
+      [pm_start, pm_start],
+      ...tables_m.map((t) => [t.start, t.end] as [number, number]),
+      [pm_end, pm_end],
+    ];
+
+    for (let seg_idx = 0; seg_idx < boundaries_o.length - 1; seg_idx++) {
+      const seg_o_start = boundaries_o[seg_idx][1];
+      const seg_o_end = boundaries_o[seg_idx + 1][0];
+      const seg_m_start = boundaries_m[seg_idx][1];
+      const seg_m_end = boundaries_m[seg_idx + 1][0];
+      const seg_edits = generate_edits_from_text(
+        text_orig.substring(seg_o_start, seg_o_end),
+        text_mod.substring(seg_m_start, seg_m_end),
+      );
+      for (const e of seg_edits) {
+        e._match_start_index = (e._match_start_index || 0) + seg_o_start;
+      }
+      edits.push(...seg_edits);
+
+      if (seg_idx < tables_o.length) {
+        const t_o = tables_o[seg_idx];
+        const t_m = tables_m[seg_idx];
+        const row_opcodes = _table_row_opcodes(t_o.rows, t_m.rows);
+        if (row_opcodes !== null) {
+          edits.push(..._row_ops_for_table(t_o, t_m, row_opcodes, warnings));
+        } else {
+          const tbl_edits = generate_edits_from_text(
+            text_orig.substring(t_o.start, t_o.end),
+            text_mod.substring(t_m.start, t_m.end),
+          );
+          for (const e of tbl_edits) {
+            e._match_start_index = (e._match_start_index || 0) + t_o.start;
+          }
+          edits.push(...tbl_edits);
+        }
+      }
+    }
+  }
+
+  // Row operations anchor by row text (pins do not survive JSON): if the
+  // anchor text also appears elsewhere in the document — e.g. two tables
+  // sharing a header row — the strict text match at apply time is
+  // ambiguous. In-process consumers ride the pinned offsets; JSON consumers
+  // fail closed, so tell the user why up front.
+  const countOccurrences = (haystack: string, needle: string): number => {
+    let count = 0;
+    let from = 0;
+    while (true) {
+      const idx = haystack.indexOf(needle, from);
+      if (idx === -1) break;
+      count++;
+      from = idx + needle.length;
+    }
+    return count;
+  };
+  let ambiguous_anchor_warned = false;
+  for (const e of edits) {
+    if (
+      (e.type === "insert_row" || e.type === "delete_row") &&
+      !ambiguous_anchor_warned
+    ) {
+      if (e.target_text && countOccurrences(text_orig, e.target_text) > 1) {
+        warnings.push(
+          `The row anchor "${e.target_text.substring(0, 60)}" appears more than once in the document. ` +
+            "Applying this diff from its JSON output may be rejected as ambiguous — " +
+            "make the anchor rows unique, or apply the row changes with explicit " +
+            "insert_row/delete_row edits.",
+        );
+        ambiguous_anchor_warned = true;
+      }
+    }
+  }
+
+  // Our own output must never trip the engine's read-only image-marker
+  // validation: an added/removed image becomes a warning, not an edit.
+  const modify_edits = edits.filter(
+    (e): e is ModifyText => e.type === "modify",
+  );
+  const kept_modifies = new Set(_drop_image_marker_hunks(modify_edits, warnings));
+  const final_edits = edits.filter(
+    (e) => e.type !== "modify" || kept_modifies.has(e as ModifyText),
+  );
+
+  return { edits: final_edits, warnings };
+}
+
 export function create_unified_diff(
   original_text: string,
   modified_text: string,

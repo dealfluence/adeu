@@ -10,15 +10,13 @@ import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
-from adeu.diff import generate_edits_from_text
-from adeu.ingest import extract_text_from_stream
 from adeu.markup import apply_edits_to_markdown
 from adeu.mcp_components.shared import get_build_info
-from adeu.models import BatchChanges, DocumentChange, ModifyText
+from adeu.models import BatchChanges, DeleteTableRow, DocumentChange, InsertTableRow, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -57,18 +55,15 @@ def handle_init(args: argparse.Namespace):
     print(f"📍 Config found: {config_path}", file=sys.stderr)
 
     data: Dict[str, Any] = {"mcpServers": {}}
+    existing_valid_json = True
     if config_path.exists():
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
-        shutil.copy2(config_path, backup_path)
-        print(f"📦 Backup created: {backup_path.name}", file=sys.stderr)
-
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if content:
                     data = json.loads(content)
         except json.JSONDecodeError:
+            existing_valid_json = False
             print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
 
     mcp_servers = data.setdefault("mcpServers", {})
@@ -76,6 +71,22 @@ def handle_init(args: argparse.Namespace):
     if args.local:
         cwd = Path.cwd().resolve()
         python_exe = sys.executable
+        # --local means "run the MCP server from this source checkout". From
+        # an arbitrary directory that claim is false and the resulting config
+        # is misleading (QA 2026-07-18 L6) — verify before writing.
+        looks_like_checkout = (cwd / "src" / "adeu" / "__init__.py").is_file() or (
+            (cwd / "pyproject.toml").is_file()
+            and 'name = "adeu"' in (cwd / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
+        )
+        if not looks_like_checkout:
+            print(
+                f"❌ --local expects to run from an Adeu source checkout, but '{cwd}' contains "
+                "no src/adeu package or adeu pyproject.toml.\n"
+                "   cd into your adeu repository's python/ directory and re-run, or use plain "
+                "'adeu init' to configure the installed package.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print("🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
         print(f"   - CWD: {cwd}", file=sys.stderr)
         print(f"   - Python: {python_exe}", file=sys.stderr)
@@ -108,24 +119,78 @@ def handle_init(args: argparse.Namespace):
             "args": ["--from", "adeu", "adeu-server", "--scope", args.scope],
         }
 
+    new_content = json.dumps(data, indent=2)
+
+    # No-op detection: re-running init with an unchanged result must neither
+    # rewrite the config nor pile up .bak files (QA 2026-07-18 L5).
+    if config_path.exists():
+        try:
+            current_content = config_path.read_text(encoding="utf-8")
+        except OSError:
+            current_content = None
+        if current_content is not None and existing_valid_json:
+            try:
+                unchanged = json.loads(current_content or "{}") == data
+            except json.JSONDecodeError:
+                unchanged = False
+            if unchanged:
+                print("✅ Adeu is already configured — config unchanged, no backup needed.", file=sys.stderr)
+                return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
+        shutil.copy2(config_path, backup_path)
+        print(f"📦 Backup created: {backup_path.name}", file=sys.stderr)
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        f.write(new_content)
 
     print("✅ Adeu successfully configured in Claude Desktop.", file=sys.stderr)
     print("   Please restart Claude to load the new toolset.", file=sys.stderr)
 
 
-def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
-    print(f"❌ File not found: {path}", file=sys.stderr)
-    print(
-        "Note: If you are running in a sandboxed/containerized environment, "
-        "the host application or MCP server may not have access to your local workspace files. "
-        "You can resolve this by installing Adeu directly inside your sandboxed environment using "
-        "'uv tool install adeu' and executing the commands via the CLI.",
-        file=sys.stderr,
-    )
+# When True (set per-invocation from a subcommand's --json flag), every fatal
+# CLI error emits one machine-readable JSON object on stdout in addition to
+# the human diagnostics on stderr. Without this, automation had to parse two
+# unrelated error protocols (QA 2026-07-18 M8).
+_JSON_MODE = False
+
+
+def _set_json_mode(enabled: bool) -> None:
+    global _JSON_MODE
+    _JSON_MODE = bool(enabled)
+
+
+def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" = None) -> None:
+    """
+    Terminates the CLI with a consistent error contract:
+      - human-readable diagnostics on stderr (always)
+      - a single {"error": code, "message": ...} JSON object on stdout when
+        the invocation asked for --json
+    Stable codes: file_not_found, invalid_input, invalid_docx,
+    invalid_changes_file, write_failed, unsupported, batch_validation_failed.
+    """
+    print(f"❌ {message}", file=sys.stderr)
+    if hint:
+        print(hint, file=sys.stderr)
+    if _JSON_MODE:
+        print(json.dumps({"error": code, "message": message}))
     sys.exit(exit_code)
+
+
+def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
+    _cli_error(
+        "file_not_found",
+        f"File not found: {path}",
+        exit_code=exit_code,
+        hint=(
+            "Note: If you are running in a sandboxed/containerized environment, "
+            "the host application or MCP server may not have access to your local workspace files. "
+            "You can resolve this by installing Adeu directly inside your sandboxed environment using "
+            "'uv tool install adeu' and executing the commands via the CLI."
+        ),
+    )
 
 
 def _require_input_file(path: Path, exit_code: int = 1) -> None:
@@ -137,8 +202,7 @@ def _require_input_file(path: Path, exit_code: int = 1) -> None:
     if not path.exists():
         _print_sandbox_warning_and_exit(path, exit_code)
     if not path.is_file():
-        print(f"❌ Error: '{path}' is a directory, not a file.", file=sys.stderr)
-        sys.exit(exit_code)
+        _cli_error("invalid_input", f"'{path}' is a directory, not a file.", exit_code=exit_code)
 
 
 def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
@@ -150,8 +214,7 @@ def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
         match = re.search(r"not a valid DOCX file \(([^)]+)\)", err_str)
         if match:
             reason = match.group(1)
-    print(f"❌ Error: '{filename}' is not a valid DOCX file ({reason}).", file=sys.stderr)
-    sys.exit(1)
+    _cli_error("invalid_docx", f"'{filename}' is not a valid DOCX file ({reason}).")
 
 
 def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
@@ -169,34 +232,21 @@ def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
             with open(path, "w", encoding="utf-8") as ft:
                 ft.write(data)
     except OSError as e:
-        print(f"❌ Could not write output file '{path}': {e.strerror or e}", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("write_failed", f"Could not write output file '{path}': {e.strerror or e}")
 
 
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
-    _require_input_file(path)
-    if path.suffix.lower() != ".docx":
-        print(
-            f"❌ Error: '{path.name}' must be a DOCX file (got {path.suffix or 'no extension'})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    """Projects a DOCX to text through the single shared open path."""
+    doc = _load_docx_or_exit(path)
     try:
-        with open(path, "rb") as f:
-            header = f.read(4)
-            if header != b"PK\x03\x04":
-                print(
-                    f"❌ Error: '{path.name}' is not a valid DOCX file (got bad zip signature).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            f.seek(0)
-            return extract_text_from_stream(BytesIO(f.read()), filename=path.name, clean_view=clean_view)
+        from adeu.ingest import _extract_text_from_doc
+
+        return _extract_text_from_doc(doc, clean_view=clean_view)
+    except SystemExit:
+        raise
     except Exception as e:
-        if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or "not a valid DOCX file" in str(e):
-            _handle_docx_error_and_exit(path.name, e)
-        print(f"❌ Error reading DOCX file '{path.name}': {e}", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_docx", f"Error reading DOCX file '{path.name}': {e}")
+        raise AssertionError("unreachable") from None
 
 
 # The decorative header every extract response starts with (see
@@ -404,7 +454,7 @@ def _format_batch_validation_error(exc: "ValidationError") -> str:
         if msg not in seen:
             seen.add(msg)
             lines.append(f"  - {msg}")
-    return "❌ The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
+    return "The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
 
 
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
@@ -433,48 +483,56 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
         # 'type', malformed match_mode.
         adapter = TypeAdapter(BatchChanges)
         return adapter.validate_python(data)
+    except SystemExit:
+        raise
     except ValidationError as e:
-        print(_format_batch_validation_error(e), file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_changes_file", _format_batch_validation_error(e))
+        raise AssertionError("unreachable") from None
     except Exception as e:
-        print(f"Error parsing JSON batch: {e}", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_changes_file", f"Error parsing JSON batch: {e}")
+        raise AssertionError("unreachable") from None
+
+
+def _warn_ignored_extract_flags(args) -> None:
+    """
+    Flags that only apply to one extract mode are warned about (never silently
+    dropped) when combined with a mode that ignores them (QA 2026-07-18 L2).
+    """
+    in_search = bool(getattr(args, "search_query", None))
+    if in_search and args.mode != "full":
+        print(
+            f"⚠️  --search-query takes precedence over --mode {args.mode}: "
+            "running search mode; the outline/appendix view is not produced.",
+            file=sys.stderr,
+        )
+        return
+    if args.mode == "outline" and args.page is not None:
+        print(
+            "⚠️  --page is ignored with --mode outline (the outline always covers the whole document).",
+            file=sys.stderr,
+        )
+    if args.mode != "outline":
+        if args.outline_verbose:
+            print(f"⚠️  --outline-verbose is ignored with --mode {args.mode} (outline mode only).", file=sys.stderr)
+        # argparse default is 2; only warn when the user explicitly set it.
+        if args.outline_max_level != 2:
+            print(f"⚠️  --outline-max-level is ignored with --mode {args.mode} (outline mode only).", file=sys.stderr)
 
 
 def handle_extract(args):
+    _set_json_mode(args.json)
+    _warn_ignored_extract_flags(args)
     if args.live:
         if sys.platform != "win32":
-            print("❌ --live is only supported on Windows.", file=sys.stderr)
-            sys.exit(1)
+            _cli_error("unsupported", "--live is only supported on Windows.")
         from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
         text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
     else:
         if not args.input:
-            print("❌ Must provide input file or use --live", file=sys.stderr)
-            sys.exit(1)
-        _require_input_file(args.input)
+            _cli_error("invalid_input", "Must provide input file or use --live")
 
-        import zipfile
-
-        try:
-            with open(args.input, "rb") as f:
-                stream = BytesIO(f.read())
-            from adeu.utils.docx import strip_bom_from_docx_bytes
-
-            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-            from docx import Document as load_document
-
-            doc = load_document(BytesIO(sanitized_bytes))
-        except Exception as e:
-            if (
-                "bad zip signature" in str(e)
-                or "not a zip file" in str(e).lower()
-                or "not a valid DOCX file" in str(e)
-                or isinstance(e, zipfile.BadZipFile)
-            ):
-                _handle_docx_error_and_exit(args.input.name, e)
-            raise
+        doc = _load_docx_or_exit(args.input)
 
         # Perform extraction
         needs_appendix = args.mode == "appendix"
@@ -540,6 +598,7 @@ def handle_extract(args):
                 not getattr(args, "search_case_insensitive", False),
                 args.page,
                 "Active Document" if args.live else str(args.input),
+                is_cli=True,
             )
         elif args.mode == "outline":
             res = build_outline_response(
@@ -577,53 +636,128 @@ def handle_extract(args):
             output_text = "\n".join(item.text if hasattr(item, "text") else str(item) for item in res.content)
         else:
             output_text = str(res.content)
+    except SystemExit:
+        raise
     except Exception as e:
-        print(f"❌ Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_input", f"Error: {e}")
+        raise AssertionError("unreachable") from None
 
     json_output = json.dumps(res.structured_content or {}) if args.json else None
 
     if args.output:
-        _write_output_or_exit(args.output, output_text)
-        print(f"Extracted text to {args.output}", file=sys.stderr)
-        if json_output is not None:
-            print(json_output)
+        # -o redirects the PRIMARY payload: the JSON object under --json, the
+        # extracted text otherwise. stdout stays quiet either way — printing
+        # the full payload again surprised pipeline users (QA 2026-07-18 L4).
+        _write_output_or_exit(args.output, json_output if json_output is not None else output_text)
+        print(f"Extracted {'JSON' if json_output is not None else 'text'} to {args.output}", file=sys.stderr)
     elif json_output is not None:
         print(json_output)
     else:
         print(output_text)
 
 
-def handle_diff(args):
-    from adeu.diff import make_edits_self_contained
+def _load_docx_or_exit(path: Path):
+    """Loads a python-docx Document from `path` with the shared error handling."""
+    _require_input_file(path)
+    # Content beats extension: a valid ZIP is loaded whatever the filename
+    # says (temp files, extension-less artifacts). The extension only shapes
+    # the error message when the content is NOT a DOCX package (QA L3: a
+    # .txt input deserves "must be a DOCX file", not a zip-signature error).
+    try:
+        with open(path, "rb") as _fh:
+            _magic = _fh.read(4)
+    except OSError as e:
+        _cli_error("invalid_input", f"Could not read '{path.name}': {e.strerror or e}")
+        raise AssertionError("unreachable") from None
+    if _magic != b"PK\x03\x04" and path.suffix.lower() != ".docx":
+        _cli_error(
+            "invalid_docx",
+            f"'{path.name}' must be a DOCX file (got {path.suffix or 'no extension'}).",
+        )
+    import zipfile
 
+    try:
+        with open(path, "rb") as f:
+            stream = BytesIO(f.read())
+        from adeu.utils.docx import strip_bom_from_docx_bytes
+
+        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
+        from docx import Document as load_document
+
+        return load_document(BytesIO(sanitized_bytes))
+    except Exception as e:
+        if (
+            "bad zip signature" in str(e)
+            or "not a zip file" in str(e).lower()
+            or "not a valid DOCX file" in str(e)
+            or isinstance(e, zipfile.BadZipFile)
+        ):
+            _handle_docx_error_and_exit(path.name, e)
+        raise
+
+
+def _open_redline_engine_or_exit(path: Path, author: "str | None" = None) -> RedlineEngine:
+    """Opens a RedlineEngine on `path` through the single shared error path."""
+    _require_input_file(path)
+    import zipfile
+
+    try:
+        with open(path, "rb") as f:
+            stream = BytesIO(f.read())
+        if author is not None:
+            return RedlineEngine(stream, author=author)
+        return RedlineEngine(stream)
+    except SystemExit:
+        raise
+    except Exception as e:
+        if (
+            "bad zip signature" in str(e)
+            or "not a zip file" in str(e).lower()
+            or "not a valid DOCX file" in str(e)
+            or isinstance(e, zipfile.BadZipFile)
+        ):
+            _handle_docx_error_and_exit(path.name, e)
+        raise
+
+
+def handle_diff(args):
+    _set_json_mode(args.json)
+    from adeu.diff import DiffEdit, make_edits_self_contained
+
+    edits: "Sequence[DiffEdit]"
     if args.modified.suffix.lower() == ".docx":
         compare_clean = getattr(args, "compare_clean", True)
-        text_orig = _read_docx_text(args.original, clean_view=compare_clean)
-        text_mod = _read_docx_text(args.modified, clean_view=compare_clean)
-        edits = generate_edits_from_text(text_orig, text_mod)
-    else:
-        _require_input_file(args.original)
-        import zipfile
+        from adeu.ingest import _extract_text_from_doc
 
+        # Appendix always excluded: its generated text ("used N times",
+        # diagnostics) is not writable document content, and diffing it emits
+        # edits apply can never resolve (QA 2026-07-18 H1). Extraction is
+        # structure-aware so the diff can compare part-by-part (QA C1) and
+        # emit structured table-row operations (QA C2).
         try:
-            with open(args.original, "rb") as f:
-                stream = BytesIO(f.read())
-            from adeu.utils.docx import strip_bom_from_docx_bytes
-
-            sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-            from docx import Document as load_document
-
-            doc = load_document(BytesIO(sanitized_bytes))
-        except Exception as e:
-            if (
-                "bad zip signature" in str(e)
-                or "not a zip file" in str(e).lower()
-                or "not a valid DOCX file" in str(e)
-                or isinstance(e, zipfile.BadZipFile)
-            ):
-                _handle_docx_error_and_exit(args.original.name, e)
+            doc_orig = _load_docx_or_exit(args.original)
+            text_orig, struct_orig = _extract_text_from_doc(
+                doc_orig, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+            doc_mod = _load_docx_or_exit(args.modified)
+            text_mod, struct_mod = _extract_text_from_doc(
+                doc_mod, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+        except SystemExit:
             raise
+        except Exception as e:
+            # Projection failures (corrupt comments/notes/numbering parts)
+            # must honor the CLI error contract, not dump a traceback (QA M8).
+            _cli_error("invalid_docx", f"Could not extract text for comparison: {e}")
+            raise AssertionError("unreachable") from None
+
+        from adeu.diff import generate_structured_edits
+
+        edits, diff_warnings = generate_structured_edits(text_orig, struct_orig, text_mod, struct_mod)
+        for warning in diff_warnings:
+            print(f"⚠️  {warning}", file=sys.stderr)
+    else:
+        doc = _load_docx_or_exit(args.original)
 
         from adeu.ingest import _extract_text_from_doc
 
@@ -633,12 +767,12 @@ def handle_diff(args):
 
         from adeu.diff import generate_edits_via_paragraph_alignment
 
-        edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
-
-    # diff output must be re-appliable by text matching alone: JSON consumers
-    # never see the private position index, so widen ambiguous/pure-insertion
-    # edits with surrounding context until each target is unique (QA C1).
-    edits = make_edits_self_contained(edits, text_orig)
+        text_edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
+        # diff output must be re-appliable by text matching alone: JSON
+        # consumers never see the private position index, so widen
+        # ambiguous/pure-insertion edits with surrounding context until each
+        # target is unique (QA C1).
+        edits = make_edits_self_contained(text_edits, text_orig)
 
     if args.json:
         output = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
@@ -646,7 +780,11 @@ def handle_diff(args):
     else:
         print(f"Found {len(edits)} changes:", file=sys.stderr)
         for edit in edits:
-            if not edit.new_text:
+            if isinstance(edit, InsertTableRow):
+                print(f"[+row] {' | '.join(edit.cells)} ({edit.position} '{edit.target_text[:40]}')")
+            elif isinstance(edit, DeleteTableRow):
+                print(f"[-row] {edit.target_text}")
+            elif not edit.new_text:
                 print(f"[-] {edit.target_text}")
             elif not edit.target_text:
                 print(f"[+] {edit.new_text}")
@@ -655,18 +793,18 @@ def handle_diff(args):
 
 
 def handle_apply(args):
+    _set_json_mode(args.json)
     # Author flows into w:author attributes; XML-illegal control characters
     # would otherwise surface as a raw lxml traceback mid-apply (QA F11).
     from adeu.redline.engine import describe_illegal_control_chars
 
     author_ctrl = describe_illegal_control_chars(args.author or "")
     if author_ctrl:
-        print(
-            f"❌ --author contains control character(s) ({author_ctrl}) that cannot be "
+        _cli_error(
+            "invalid_input",
+            f"--author contains control character(s) ({author_ctrl}) that cannot be "
             "stored in a DOCX. Remove them and re-run.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     if args.live:
         if args.changes is None and args.original is not None:
@@ -675,15 +813,10 @@ def handle_apply(args):
             args.original = None
 
     if args.live and args.dry_run:
-        print(
-            "❌ Dry-run simulation is only supported for disk-based files.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _cli_error("unsupported", "Dry-run simulation is only supported for disk-based files.")
 
     if not args.changes:
-        print("❌ Must provide changes file.", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_input", "Must provide changes file.")
 
     changes: List[DocumentChange] = []
 
@@ -702,8 +835,7 @@ def handle_apply(args):
             print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         if args.live:
             if sys.platform != "win32":
-                print("❌ --live is only supported on Windows.", file=sys.stderr)
-                sys.exit(1)
+                _cli_error("unsupported", "--live is only supported on Windows.")
             from adeu.mcp_components.tools.live_word import (
                 _read_active_word_document_core,
             )
@@ -711,29 +843,8 @@ def handle_apply(args):
             text_orig, _, _ = _read_active_word_document_core(clean_view=False)
         else:
             if not args.original:
-                print("❌ Must provide original file if not using --live", file=sys.stderr)
-                sys.exit(1)
-            _require_input_file(args.original)
-            import zipfile
-
-            try:
-                with open(args.original, "rb") as f:
-                    stream = BytesIO(f.read())
-                from adeu.utils.docx import strip_bom_from_docx_bytes
-
-                sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-                from docx import Document as load_document
-
-                doc = load_document(BytesIO(sanitized_bytes))
-            except Exception as e:
-                if (
-                    "bad zip signature" in str(e)
-                    or "not a zip file" in str(e).lower()
-                    or "not a valid DOCX file" in str(e)
-                    or isinstance(e, zipfile.BadZipFile)
-                ):
-                    _handle_docx_error_and_exit(args.original.name, e)
-                raise
+                _cli_error("invalid_input", "Must provide original file if not using --live")
+            doc = _load_docx_or_exit(args.original)
 
             from adeu.ingest import _extract_text_from_doc
 
@@ -767,8 +878,7 @@ def handle_apply(args):
 
     if args.live:
         if sys.platform != "win32":
-            print("❌ --live is only supported on Windows.", file=sys.stderr)
-            sys.exit(1)
+            _cli_error("unsupported", "--live is only supported on Windows.")
         from adeu.mcp_components.tools.live_word import _process_active_word_batch_core
 
         if not args.json:
@@ -786,28 +896,12 @@ def handle_apply(args):
         return
 
     if not args.original:
-        print("❌ Must provide original file if not using --live", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("invalid_input", "Must provide original file if not using --live")
     _require_input_file(args.original)
-
-    import zipfile
 
     if not args.json:
         print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
-    try:
-        with open(args.original, "rb") as f:
-            stream = BytesIO(f.read())
-
-        engine = RedlineEngine(stream, author=args.author)
-    except Exception as e:
-        if (
-            "bad zip signature" in str(e)
-            or "not a zip file" in str(e).lower()
-            or "not a valid DOCX file" in str(e)
-            or isinstance(e, zipfile.BadZipFile)
-        ):
-            _handle_docx_error_and_exit(args.original.name, e)
-        raise
+    engine = _open_redline_engine_or_exit(args.original, author=args.author)
     try:
         stats = engine.process_batch(changes, dry_run=args.dry_run)
     except BatchValidationError as e:
@@ -823,8 +917,15 @@ def handle_apply(args):
                 print("", file=sys.stderr)
         sys.exit(1)
 
+    # A batch with ANY skipped action/edit is a failed batch: writing an
+    # output anyway (and calling it "Batch complete") made pipelines treat an
+    # unmodified copy as success (QA 2026-07-18 M2). Validation failures are
+    # already transactional (BatchValidationError above); this covers
+    # apply-stage skips (overlaps, unresolvable anchors).
+    batch_failed = stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0
+
     output_path = None
-    if not args.dry_run:
+    if not args.dry_run and not batch_failed:
         output_path = args.output
         if not output_path:
             if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
@@ -840,7 +941,12 @@ def handle_apply(args):
     if args.json:
         print(json.dumps(stats))
     else:
-        if not args.dry_run:
+        if batch_failed and not args.dry_run:
+            print(
+                "❌ Batch failed — no output was written. Fix the failed edits below and re-run.",
+                file=sys.stderr,
+            )
+        elif not args.dry_run:
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
         else:
             print("Dry-run simulation complete.", file=sys.stderr)
@@ -884,23 +990,8 @@ def handle_accept_all(args: argparse.Namespace):
     Accepts all tracked changes and removes all comments, producing a
     finalized clean document. Mirrors the `accept_all_changes` MCP tool.
     """
-    _require_input_file(args.input)
-
-    import zipfile
-
-    try:
-        with open(args.input, "rb") as f:
-            stream = BytesIO(f.read())
-        engine = RedlineEngine(stream)
-    except Exception as e:
-        if (
-            "bad zip signature" in str(e)
-            or "not a zip file" in str(e).lower()
-            or "not a valid DOCX file" in str(e)
-            or isinstance(e, zipfile.BadZipFile)
-        ):
-            _handle_docx_error_and_exit(args.input.name, e)
-        raise
+    _set_json_mode(args.json)
+    engine = _open_redline_engine_or_exit(args.input)
 
     engine.accept_all_revisions(remove_comments=True)
 
@@ -929,6 +1020,20 @@ def handle_markup(args):
 
     changes = _load_batch_from_json(args.edits)
     edits = [c for c in changes if isinstance(c, ModifyText)]
+    non_text = [c for c in changes if not isinstance(c, ModifyText)]
+
+    if non_text:
+        # markup is a text-preview tool; review/table actions have no textual
+        # rendering here — but they must never vanish silently (QA 2026-07-18 M1).
+        type_counts: Dict[str, int] = {}
+        for c in non_text:
+            type_counts[c.type] = type_counts.get(c.type, 0) + 1
+        summary = ", ".join(f"{count}× {name}" for name, count in sorted(type_counts.items()))
+        print(
+            f"⚠️  {len(non_text)} non-text change(s) ignored by markup ({summary}). "
+            "markup only previews 'modify' text edits — run these through `adeu apply`.",
+            file=sys.stderr,
+        )
 
     if not edits:
         print("Warning: No text edits found in JSON file.", file=sys.stderr)
@@ -944,12 +1049,32 @@ def handle_markup(args):
             print(err, file=sys.stderr)
         sys.exit(1)
 
+    edit_reports: List[Dict[str, Any]] = []
     result = apply_edits_to_markdown(
         markdown_text=text,
         edits=edits,
         include_index=args.index,
         highlight_only=args.highlight,
+        edit_reports=edit_reports,
     )
+
+    failed = [r for r in edit_reports if r["status"] == "failed"]
+    applied = [r for r in edit_reports if r["status"] == "applied"]
+
+    if failed:
+        # Mirror apply's transactional behavior: a preview of half the batch
+        # is not a faithful preview (QA 2026-07-18 M1).
+        print(f"\n❌ {len(failed)} edit(s) failed — no markup was written:\n", file=sys.stderr)
+        for r in failed:
+            print(r["error"], file=sys.stderr)
+            print("", file=sys.stderr)
+        print(
+            f"Stats: {len(applied)} applied, {len(failed)} failed"
+            + (f", {len(non_text)} non-text actions ignored" if non_text else "")
+            + ".",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     output_path = args.output
     if not output_path:
@@ -960,7 +1085,12 @@ def handle_markup(args):
     _write_output_or_exit(output_path, result)
 
     print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
-    print(f"Stats: {len(edits)} edits processed.", file=sys.stderr)
+    print(
+        f"Stats: {len(applied)} applied, 0 failed"
+        + (f", {len(non_text)} non-text actions ignored" if non_text else "")
+        + ".",
+        file=sys.stderr,
+    )
 
 
 def handle_sanitize(args: argparse.Namespace):
@@ -1029,6 +1159,28 @@ def handle_sanitize(args: argparse.Namespace):
         if not outdir:
             print("❌ Batch mode requires --outdir.", file=sys.stderr)
             sys.exit(2)
+
+        # Destination collision check BEFORE any processing: two inputs with
+        # the same basename would silently overwrite each other in --outdir
+        # while the summary counts both as successes (QA 2026-07-18 H2).
+        dest_map: Dict[str, List[Path]] = {}
+        for input_path in input_files:
+            dest_map.setdefault(input_path.name, []).append(input_path)
+        collisions = {name: paths for name, paths in dest_map.items() if len(paths) > 1}
+        if collisions:
+            print(
+                "❌ Output filename collision — refusing to overwrite results silently:",
+                file=sys.stderr,
+            )
+            for name, paths in collisions.items():
+                sources = ", ".join(str(p) for p in paths)
+                print(f"   {outdir / name}  would collide from: {sources}", file=sys.stderr)
+            print(
+                "   Rename the inputs, run them in separate batches, or use distinct --outdir targets.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
         outdir.mkdir(parents=True, exist_ok=True)
 
         all_reports: list[SanitizeResult | SanitizeError] = []
@@ -1366,6 +1518,7 @@ def main():
         logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),  # type: ignore[arg-type]
     )
 
+    _set_json_mode(bool(getattr(args, "json", False)))
     args.func(args)
 
 
