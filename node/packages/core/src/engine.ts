@@ -2841,15 +2841,22 @@ export class RedlineEngine {
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         let matches = this.mapper.find_all_match_indices(edit.target_text);
+        let resolved_mapper = this.mapper;
         if (matches.length === 0) {
           if (!this.clean_mapper) {
             this.clean_mapper = new DocumentMapper(this.doc, true);
           }
           matches = this.clean_mapper.find_all_match_indices(edit.target_text);
+          resolved_mapper = this.clean_mapper;
         }
 
         if (matches.length > 0) {
+          // Record WHICH mapper produced the offset: a clean-view index
+          // resolved against the raw mapper lands rows at the wrong position
+          // once earlier edits in the batch put tracked changes in the
+          // anchor row (QA 2026-07-18 v6 H1).
           edit._resolved_start_idx = matches[0][0];
+          edit._active_mapper_ref = resolved_mapper;
           resolved_edits.push([edit, null]);
         } else {
           skipped++;
@@ -3160,7 +3167,11 @@ export class RedlineEngine {
       edit._resolved_start_idx !== null
         ? edit._resolved_start_idx
         : edit._match_start_index || 0;
-    const [anchor_run, anchor_para] = this.mapper.get_insertion_anchor(
+    // The offset must be looked up in the coordinate space it was resolved
+    // in (QA 2026-07-18 v6 H1): a clean-view offset applied to the raw
+    // mapper points at earlier text once tracked changes exist.
+    const active_mapper: DocumentMapper = edit._active_mapper_ref || this.mapper;
+    const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
       start_idx,
       rebuild_map,
     );
@@ -3573,6 +3584,28 @@ export class RedlineEngine {
           for (const sub of split_sub_edits) all_sub_edits.push(sub);
           continue;
         }
+      }
+
+      // QA 2026-07-18 v6 H2 (parity with Python): after trimming shared
+      // context, an edit whose target remainder is EMPTY is a pure insertion
+      // with exactly one hunk. Resolve it directly at the effective offset
+      // instead of word-diffing the full strings: dmp's alignment may
+      // cross-match punctuation between the shared context and the inserted
+      // text (pairing the period of "two." with "marker."), splitting the
+      // insertion around a stranded suffix character and gluing paragraphs
+      // after accept-all.
+      if (!final_target && final_new) {
+        all_sub_edits.push({
+          type: "modify",
+          target_text: "",
+          new_text: final_new,
+          comment: edit.comment,
+          _resolved_start_idx: effective_start_idx,
+          _match_start_index: effective_start_idx,
+          _internal_op: "INSERTION",
+          _active_mapper_ref: active_mapper,
+        });
+        continue;
       }
 
       const sub_edits = this._word_diff_sub_edits(

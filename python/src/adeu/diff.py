@@ -799,6 +799,18 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
 
         elif tag == "insert":
             inserted_text = "\n\n".join(mod_paragraphs[j1:j2])
+            # QA 2026-07-18 v6 H2: an inserted paragraph must CARRY its
+            # paragraph separator, or the engine (rightly) treats the text as
+            # an inline insertion and glues it to the neighboring paragraph —
+            # "marker.Final sentinel" after accept-all. Mid-document inserts
+            # anchor at the following paragraph's start and keep it separate
+            # with a trailing "\n\n" (the same hunk shape word-level diffs
+            # emit); end-of-document appends lead with "\n\n" so the new text
+            # becomes its own paragraph after the current last one.
+            if i1 < len(orig_paragraphs):
+                inserted_text = inserted_text + "\n\n"
+            else:
+                inserted_text = "\n\n" + inserted_text
             edit = ModifyText(
                 type="modify",
                 target_text="",

@@ -2122,15 +2122,22 @@ class RedlineEngine:
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
                 # Simplified resolution for structural edits
                 matches = self.mapper.find_all_match_indices(edit.target_text)
+                resolved_mapper = self.mapper
                 if not matches:
                     # Try clean view
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
                     matches = self.clean_mapper.find_all_match_indices(edit.target_text)
+                    resolved_mapper = self.clean_mapper
 
                 if matches:
-                    # validate_edits already ensured uniqueness
+                    # validate_edits already ensured uniqueness. Record WHICH
+                    # mapper produced the offset: a clean-view index resolved
+                    # against the raw mapper lands rows at the wrong position
+                    # once earlier edits in the batch put tracked changes in
+                    # the anchor row (QA 2026-07-18 v6 H1).
                     edit._resolved_start_idx = matches[0][0]
+                    edit._active_mapper_ref = resolved_mapper
                     resolved_edits.append((edit, None))
                 else:
                     skipped += 1
@@ -2310,7 +2317,11 @@ class RedlineEngine:
         if start_idx is None:
             return False
 
-        target_runs = self.mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
+        # The offset must be looked up in the coordinate space it was
+        # resolved in (QA 2026-07-18 v6 H1): a clean-view offset applied to
+        # the raw mapper points at earlier text once tracked changes exist.
+        active_mapper = edit._active_mapper_ref or self.mapper
+        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
         if not target_runs:
             return False
 
@@ -2367,7 +2378,9 @@ class RedlineEngine:
         if start_idx is None:
             return False
 
-        target_runs = self.mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
+        # Same coordinate-space rule as _apply_insert_row (QA v6 H1).
+        active_mapper = edit._active_mapper_ref or self.mapper
+        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
         if not target_runs:
             return False
 
@@ -2828,6 +2841,26 @@ class RedlineEngine:
                 seg_offset += len(t_seg) + 2
             if split_sub_edits:
                 return split_sub_edits
+
+        # QA 2026-07-18 v6 H2: after trimming shared context, an edit whose
+        # target remainder is EMPTY is a pure insertion with exactly one hunk.
+        # Resolve it directly at the effective offset instead of word-diffing
+        # the full strings: dmp's alignment may cross-match punctuation
+        # between the shared context and the inserted text (pairing the
+        # period of "two." with "marker."), splitting the insertion around a
+        # stranded suffix character and gluing paragraphs after accept-all.
+        if not final_target and final_new:
+            proxy_edit = ModifyText(
+                type="modify",
+                target_text="",
+                new_text=final_new,
+                comment=edit.comment,
+            )
+            proxy_edit._resolved_start_idx = effective_start_idx
+            proxy_edit._match_start_index = effective_start_idx
+            proxy_edit._internal_op = EditOperationType.INSERTION
+            proxy_edit._active_mapper_ref = active_mapper
+            return proxy_edit
 
         # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
         # to prevent structural paragraph-break corruption.

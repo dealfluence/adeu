@@ -133,10 +133,10 @@ def sanitize_docx(
         # from inferring when edits were made
         report.add_transform_lines(transforms.normalize_change_dates(doc))
 
-    # --- Save ---
+    # --- Save (verify BEFORE anything reaches disk) ---
     output = BytesIO()
     doc.save(output)
-    output.seek(0)
+    _verify_sanitized_package(output.getvalue())
     with open(output_path, "wb") as f:
         f.write(output.getvalue())
 
@@ -371,9 +371,63 @@ def _apply_common_transforms(doc, report: SanitizeReport):
     report.add_transform_lines(transforms.scrub_doc_properties(doc))
     report.add_transform_lines(transforms.scrub_timestamps(doc))
     report.add_transform_lines(transforms.strip_custom_xml(doc))
+    report.add_transform_lines(transforms.strip_custom_properties(doc))
     report.add_transform_lines(transforms.strip_image_alt_text(doc))
 
     # Audit (non-destructive — just warnings)
     hyperlink_warnings = transforms.audit_hyperlinks(doc)
     report.warnings.extend(hyperlink_warnings)
     report.warnings.extend(transforms.detect_watermarks(doc))
+
+
+# Core-property elements the pipeline claims to scrub; the post-sanitize
+# verification re-checks each one in the SAVED bytes (QA 2026-07-18 v6 C1).
+_DC_NS = "http://purl.org/dc/elements/1.1/"
+_CP_NS = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+_VERIFIED_CORE_FIELDS = (
+    (f"{{{_DC_NS}}}creator", "author (dc:creator)"),
+    (f"{{{_CP_NS}}}lastModifiedBy", "last modified by (cp:lastModifiedBy)"),
+    (f"{{{_DC_NS}}}identifier", "identifier (dc:identifier)"),
+    (f"{{{_DC_NS}}}description", "description (dc:description)"),
+    (f"{{{_CP_NS}}}keywords", "keywords (cp:keywords)"),
+    (f"{{{_CP_NS}}}category", "category (cp:category)"),
+    (f"{{{_DC_NS}}}subject", "subject (dc:subject)"),
+    (f"{{{_CP_NS}}}contentStatus", "content status (cp:contentStatus)"),
+    (f"{{{_DC_NS}}}language", "language (dc:language)"),
+    (f"{{{_CP_NS}}}version", "version (cp:version)"),
+)
+
+
+def _verify_sanitized_package(output_bytes: bytes) -> None:
+    """
+    Post-sanitize package scan (QA 2026-07-18 v6 C1): before any output is
+    written or a report rendered, re-open the SAVED bytes — bypassing every
+    python-docx caching layer — and verify the claims the report is about to
+    make. A "Result: CLEAN" verdict over a package that still carries custom
+    properties or an identifier is worse than no sanitizer at all.
+    """
+    import zipfile
+
+    from lxml import etree
+
+    problems = []
+    with zipfile.ZipFile(BytesIO(output_bytes)) as z:
+        names = set(z.namelist())
+        if "docProps/custom.xml" in names:
+            problems.append("docProps/custom.xml (custom document properties) is still in the package")
+        if any(n.startswith("customXml/") for n in names):
+            problems.append("customXml/* parts are still in the package")
+        if "docProps/core.xml" in names:
+            root = etree.fromstring(z.read("docProps/core.xml"))
+            for tag, label in _VERIFIED_CORE_FIELDS:
+                for el in root.iter(tag):
+                    if (el.text or "").strip():
+                        problems.append(f"core property {label} still contains a value")
+
+    if problems:
+        raise SanitizeError(
+            "❌ Sanitize integrity check failed — the saved package still contains metadata "
+            "this run claims to remove:\n  - "
+            + "\n  - ".join(problems)
+            + "\nNo output was written. Refusing to report a clean document."
+        )

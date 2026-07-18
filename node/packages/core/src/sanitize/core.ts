@@ -1,7 +1,8 @@
+import { strFromU8, unzipSync } from 'fflate';
 import { DocumentObject } from '../docx/bridge.js';
 import { SanitizeReport } from './report.js';
 import * as transforms from './transforms.js';
-import { findAllDescendants } from '../docx/dom.js';
+import { findAllDescendants, parseXml } from '../docx/dom.js';
 
 export interface FinalizeOptions {
   filename: string;
@@ -67,6 +68,7 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
   report.add_transform_lines(transforms.scrub_doc_properties(doc));
   report.add_transform_lines(transforms.scrub_timestamps(doc));
   report.add_transform_lines(transforms.strip_custom_xml(doc));
+  report.add_transform_lines(transforms.strip_custom_properties(doc));
   report.add_transform_lines(transforms.strip_image_alt_text(doc));
   
   const warnings = transforms.audit_hyperlinks(doc);
@@ -130,5 +132,59 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
   if (report.warnings.length > 0) report.status = 'clean_with_warnings';
 
   const outBuffer = await doc.save();
+  verifySanitizedPackage(outBuffer);
   return { reportText: report.render(), outBuffer };
+}
+
+// Core-property elements the pipeline claims to scrub; the post-sanitize
+// verification re-checks each one in the SAVED bytes (QA 2026-07-18 v6 C1).
+const VERIFIED_CORE_FIELDS: Array<[string, string]> = [
+  ['creator', 'author (dc:creator)'],
+  ['lastModifiedBy', 'last modified by (cp:lastModifiedBy)'],
+  ['identifier', 'identifier (dc:identifier)'],
+  ['description', 'description (dc:description)'],
+  ['keywords', 'keywords (cp:keywords)'],
+  ['category', 'category (cp:category)'],
+  ['subject', 'subject (dc:subject)'],
+  ['contentStatus', 'content status (cp:contentStatus)'],
+  ['language', 'language (dc:language)'],
+  ['version', 'version (cp:version)'],
+];
+
+/**
+ * Post-sanitize package scan (QA 2026-07-18 v6 C1): re-open the SAVED bytes —
+ * bypassing every in-memory caching layer — and verify the claims the report
+ * is about to make. A "Result: CLEAN" verdict over a package that still
+ * carries custom properties or an identifier is worse than no sanitizer.
+ */
+export function verifySanitizedPackage(outBuffer: Buffer): void {
+  const unzipped = unzipSync(new Uint8Array(outBuffer));
+  const names = Object.keys(unzipped);
+  const problems: string[] = [];
+
+  if (names.includes('docProps/custom.xml')) {
+    problems.push('docProps/custom.xml (custom document properties) is still in the package');
+  }
+  if (names.some(n => n.startsWith('customXml/'))) {
+    problems.push('customXml/* parts are still in the package');
+  }
+  if (names.includes('docProps/core.xml')) {
+    const core = parseXml(strFromU8(unzipped['docProps/core.xml']));
+    for (const [local, label] of VERIFIED_CORE_FIELDS) {
+      for (const el of transforms.findDescendantsByLocalName(core.documentElement! as unknown as Element, local)) {
+        if ((el.textContent || '').trim()) {
+          problems.push(`core property ${label} still contains a value`);
+        }
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      'Sanitize integrity check failed — the saved package still contains metadata this run ' +
+        'claims to remove:\n  - ' +
+        problems.join('\n  - ') +
+        '\nRefusing to report a clean document.',
+    );
+  }
 }

@@ -217,6 +217,47 @@ def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
     _cli_error("invalid_docx", f"'{filename}' is not a valid DOCX file ({reason}).")
 
 
+def _paths_alias_same_file(a: Path, b: Path) -> bool:
+    """
+    True when `a` and `b` name the same filesystem object — string-equal
+    paths, relative/absolute aliases, symlinks, or hard links. Falls back to
+    resolved-path comparison when either side does not exist yet.
+    """
+    try:
+        if a.exists() and b.exists() and os.path.samefile(a, b):
+            return True
+    except OSError:
+        pass
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def _guard_text_output_path(output: Path, protected: "list[tuple[Path, str]]", payload: str = "extracted text") -> None:
+    """
+    Refuses text-payload output paths that would destroy a document the
+    command depends on. `adeu extract victim.docx -o victim.docx` used to
+    replace the only source DOCX with UTF-8 text and exit 0
+    (QA 2026-07-18 v6 C2). `protected` maps each input/output path to its
+    role for the error message; DOCX-suffixed targets are rejected outright
+    so extracted text can never masquerade as a Word document.
+    """
+    for path, role in protected:
+        if path is not None and _paths_alias_same_file(output, path):
+            _cli_error(
+                "invalid_input",
+                f"Output path '{output}' is the same file as the {role}. Writing {payload} "
+                "over it would destroy it. Choose a different output path.",
+            )
+    if output.suffix.lower() == ".docx":
+        _cli_error(
+            "invalid_input",
+            f"Refusing to write {payload} to '{output}': a .docx extension promises a Word "
+            "document, but this command's output is text. Use a .md or .txt output path.",
+        )
+
+
 def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
     """
     Writes an output file, converting filesystem failures (name too long,
@@ -522,6 +563,11 @@ def _warn_ignored_extract_flags(args) -> None:
 def handle_extract(args):
     _set_json_mode(args.json)
     _warn_ignored_extract_flags(args)
+    if args.output:
+        # extract's -o payload is text (or JSON): writing it over the input
+        # DOCX destroyed the only source document (QA 2026-07-18 v6 C2).
+        protected = [(args.input, "input DOCX")] if args.input else []
+        _guard_text_output_path(args.output, protected)
     if args.live:
         if sys.platform != "win32":
             _cli_error("unsupported", "--live is only supported on Windows.")
@@ -1082,6 +1128,15 @@ def handle_markup(args):
         if args.input.suffix.lower() == ".md":
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
+    # markup's output is CriticMarkup text: it may never replace the DOCX
+    # input or the JSON edits batch (QA 2026-07-18 v6 C2). In-place output
+    # over a MARKDOWN input stays allowed — text-to-text preview in place is
+    # an intentional workflow.
+    protected = [(args.edits, "JSON edits file")]
+    if args.input.suffix.lower() == ".docx":
+        protected.append((args.input, "input DOCX"))
+    _guard_text_output_path(output_path, protected, payload="CriticMarkup text")
+
     _write_output_or_exit(output_path, result)
 
     print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
@@ -1122,6 +1177,15 @@ def handle_sanitize(args: argparse.Namespace):
         output_path = args.output
         if not output_path:
             output_path = input_path.parent / f"{input_path.stem}_sanitized{input_path.suffix}"
+
+        if args.report_file:
+            # The report is text: writing it over the input DOCX or the
+            # sanitized output destroys a document (QA 2026-07-18 v6 C2).
+            _guard_text_output_path(
+                args.report_file,
+                [(input_path, "input DOCX"), (output_path, "sanitized output")],
+                payload="the sanitize report",
+            )
 
         try:
             result = sanitize_docx(
@@ -1180,6 +1244,13 @@ def handle_sanitize(args: argparse.Namespace):
                 file=sys.stderr,
             )
             sys.exit(2)
+
+        if args.report_file:
+            # Same text-report guard as single-file mode, across every batch
+            # input and every computed destination (QA 2026-07-18 v6 C2).
+            batch_protected = [(p, "input DOCX") for p in input_files]
+            batch_protected.extend((outdir / p.name, "sanitized output") for p in input_files)
+            _guard_text_output_path(args.report_file, batch_protected, payload="the sanitize report")
 
         outdir.mkdir(parents=True, exist_ok=True)
 
