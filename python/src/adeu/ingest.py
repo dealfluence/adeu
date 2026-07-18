@@ -61,17 +61,6 @@ class ExtractStructure:
     part_ranges: List[Tuple[int, int, str]] = field(default_factory=list)  # (start, end, kind)
     tables: List[TableGeometry] = field(default_factory=list)
 
-    def part_index_at(self, offset: int) -> int:
-        """
-        Index of the part containing `offset`. Offsets inside the "\\n\\n"
-        separator between two parts belong to the PRECEDING part (an
-        insertion there reads most naturally as appending to it).
-        """
-        for i, (_start, end, _kind) in enumerate(self.part_ranges):
-            if offset <= end:
-                return i
-        return max(0, len(self.part_ranges) - 1)
-
 
 def extract_text_from_stream(
     file_stream: io.BytesIO,

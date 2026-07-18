@@ -509,38 +509,39 @@ def _rows_are_plain(text: str, table: "TableGeometry") -> bool:
     return True
 
 
-def _table_structure_changed(rows_o, rows_m) -> bool:
+def _table_row_opcodes(rows_o, rows_m):
+    """
+    Row-level alignment opcodes between two tables, or None when the row sets
+    differ only cell-internally (no rows added/removed) — the caller then
+    keeps fine-grained word-level text edits instead of row operations.
+    """
     import difflib
 
     keys_o = ["\x1f".join(r.cells) for r in rows_o]
     keys_m = ["\x1f".join(r.cells) for r in rows_m]
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, keys_o, keys_m, autojunk=False).get_opcodes():
-        if tag in ("insert", "delete"):
-            return True
-        if tag == "replace" and (i2 - i1) != (j2 - j1):
-            return True
-    return False
+    opcodes = difflib.SequenceMatcher(None, keys_o, keys_m, autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag in ("insert", "delete") or (tag == "replace" and (i2 - i1) != (j2 - j1)):
+            return opcodes
+    return None
 
 
 def _row_ops_for_table(
     table_o: "TableGeometry",
     table_m: "TableGeometry",
+    opcodes,
     warnings: List[str],
 ) -> List[DiffEdit]:
     """
     Emits structured operations (delete_row / insert_row / per-row modify)
-    that transform table_o's row set into table_m's. Called only when
-    _table_structure_changed is True (QA 2026-07-18 C2: a generic text edit
+    that transform table_o's row set into table_m's, following the alignment
+    `opcodes` from _table_row_opcodes (QA 2026-07-18 C2: a generic text edit
     cannot add or remove rows — it writes fake pipe text into one cell or is
     rejected by the cell-count validator).
     """
-    import difflib
-
     rows_o = table_o.rows
     rows_m = table_m.rows
     keys_o = ["\x1f".join(r.cells) for r in rows_o]
-    keys_m = ["\x1f".join(r.cells) for r in rows_m]
-    opcodes = difflib.SequenceMatcher(None, keys_o, keys_m, autojunk=False).get_opcodes()
 
     def row_text(r) -> str:
         return " | ".join(r.cells)
@@ -721,8 +722,9 @@ def generate_structured_edits(
             if seg_idx < len(tables_o):
                 t_o = tables_o[seg_idx]
                 t_m = tables_m[seg_idx]
-                if _table_structure_changed(t_o.rows, t_m.rows):
-                    edits.extend(_row_ops_for_table(t_o, t_m, warnings))
+                row_opcodes = _table_row_opcodes(t_o.rows, t_m.rows)
+                if row_opcodes is not None:
+                    edits.extend(_row_ops_for_table(t_o, t_m, row_opcodes, warnings))
                 else:
                     tbl_edits = generate_edits_from_text(text_orig[t_o.start : t_o.end], text_mod[t_m.start : t_m.end])
                     for e in tbl_edits:

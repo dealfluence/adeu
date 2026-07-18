@@ -1591,12 +1591,17 @@ class RedlineEngine:
                 # — including the insertion shape, whose anchor point at the
                 # part gap is inherently ambiguous. Refuse the RAW match
                 # range outright and ask for a single-part anchor.
-                raw_span_parts = sorted(
-                    {
-                        s.part_index
-                        for s in target_mapper.spans
-                        if s.run is not None and s.end > start and s.start < start + length
-                    }
+                multi_part_doc = len([r for r in target_mapper.part_ranges if r[1] > r[0]]) > 1
+                raw_span_parts = (
+                    sorted(
+                        {
+                            s.part_index
+                            for s in target_mapper.spans
+                            if s.run is not None and s.end > start and s.start < start + length
+                        }
+                    )
+                    if multi_part_doc
+                    else []
                 )
                 if len(raw_span_parts) > 1:
                     kinds = " → ".join(target_mapper.part_kind_of(pi) or "?" for pi in raw_span_parts)
@@ -3138,7 +3143,11 @@ class RedlineEngine:
         # QA 2026-07-18 C1 (apply-level backstop, pinned edits bypass
         # validate_edits): a modification/deletion may never mutate real text
         # from two different OPC parts in one span.
-        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and length:
+        if (
+            op in (EditOperationType.DELETION, EditOperationType.MODIFICATION)
+            and length
+            and len([r for r in active_mapper.part_ranges if r[1] > r[0]]) > 1
+        ):
             crossed_parts = {
                 s.part_index
                 for s in active_mapper.spans
