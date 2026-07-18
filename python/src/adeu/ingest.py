@@ -1,6 +1,7 @@
 # FILE: src/adeu/ingest.py
 import io
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
 
 import structlog
 from docx import Document
@@ -21,7 +22,7 @@ from adeu.utils.docx import (
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
-    iter_document_parts,
+    iter_document_parts_with_kind,
     iter_paragraph_content,
     strip_bom_from_docx_bytes,
 )
@@ -29,7 +30,55 @@ from adeu.utils.docx import (
 logger = structlog.get_logger(__name__)
 
 
-def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.docx", clean_view: bool = False) -> str:
+@dataclass
+class RowGeometry:
+    """Text-space extent of one projected table row plus its cell texts."""
+
+    start: int
+    end: int
+    cells: List[str]
+
+
+@dataclass
+class TableGeometry:
+    """Text-space extent of one projected top-level table."""
+
+    start: int
+    end: int
+    rows: List[RowGeometry] = field(default_factory=list)
+
+
+@dataclass
+class ExtractStructure:
+    """
+    Structural map of a projection: which offset ranges belong to which OPC
+    part, and where top-level table rows live. Produced in the SAME pass as
+    the text, so offsets always agree with it. Consumed by the diff pipeline
+    to keep generated edits from crossing part boundaries (QA 2026-07-18 C1)
+    and to emit structured row operations for table changes (QA C2).
+    """
+
+    part_ranges: List[Tuple[int, int, str]] = field(default_factory=list)  # (start, end, kind)
+    tables: List[TableGeometry] = field(default_factory=list)
+
+    def part_index_at(self, offset: int) -> int:
+        """
+        Index of the part containing `offset`. Offsets inside the "\\n\\n"
+        separator between two parts belong to the PRECEDING part (an
+        insertion there reads most naturally as appending to it).
+        """
+        for i, (_start, end, _kind) in enumerate(self.part_ranges):
+            if offset <= end:
+                return i
+        return max(0, len(self.part_ranges) - 1)
+
+
+def extract_text_from_stream(
+    file_stream: io.BytesIO,
+    filename: str = "document.docx",
+    clean_view: bool = False,
+    include_appendix: bool = True,
+) -> str:
     """
     Extracts text from a file stream using raw run concatenation.
     Includes Markdown headers (#) and CriticMarkup Comments ({==Text==}{>>Comment<<}).
@@ -37,6 +86,9 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
     Args:
         clean_view: If True, simulates "Accept All Changes": hides deletions,
                     removes insertion wrappers, hides comments.
+        include_appendix: If False, omits the generated read-only structural
+                    appendix — required whenever the text feeds a comparison
+                    (QA 2026-07-18 H1).
 
     CRITICAL: This must match DocumentMapper._build_map logic exactly.
     """
@@ -45,7 +97,7 @@ def extract_text_from_stream(file_stream: io.BytesIO, filename: str = "document.
 
         sanitized_bytes = strip_bom_from_docx_bytes(file_stream.read())
         doc = Document(io.BytesIO(sanitized_bytes))
-        return _extract_text_from_doc(doc, clean_view)
+        return _extract_text_from_doc(doc, clean_view, include_appendix=include_appendix)
     except Exception as e:
         logger.error(f"Text extraction failed: {e}", exc_info=True)
         raise ValueError(f"Could not extract text: {str(e)}") from e
@@ -56,6 +108,7 @@ def _extract_text_from_doc(
     clean_view: bool = False,
     include_appendix: bool = True,
     return_paragraph_offsets: bool = False,
+    return_structure: bool = False,
 ):
     """
     Extracts text from an already-loaded python-docx Document.
@@ -70,10 +123,15 @@ def _extract_text_from_doc(
             (text, offset_map) where offset_map is Dict[id(p._element), (start, length)]
             for every paragraph projected. Used by mode='outline'
             to avoid re-projecting paragraphs to extract heading text.
+        return_structure: if True (default False), returns a tuple
+            (text, ExtractStructure) mapping offset ranges to OPC parts and
+            top-level table rows. Mutually exclusive with
+            return_paragraph_offsets.
 
     Returns:
         - text: str   (default)
         - (text, offset_map): tuple   (when return_paragraph_offsets=True)
+        - (text, structure): tuple    (when return_structure=True)
 
     PERF: normalize_docx() is deliberately not called here. The ingest
     pipeline tolerates fragmented runs (build_paragraph_text coalesces
@@ -88,9 +146,10 @@ def _extract_text_from_doc(
     # Store the lxml proxy as the 3rd tuple item to keep it alive, preventing
     # CPython from recycling the id() memory address between passes.
     offset_map: Optional[dict[int, tuple[int, int, Any]]] = {} if return_paragraph_offsets else None
+    structure: Optional[ExtractStructure] = ExtractStructure() if return_structure else None
     cursor = 0
 
-    for part in iter_document_parts(doc):
+    for part, part_kind in iter_document_parts_with_kind(doc):
         # part_cursor accounts for the \n\n separator that will precede this part
         # in the final join, ensuring internal offsets align exactly.
         part_cursor = cursor + 2 if full_text else cursor
@@ -100,6 +159,7 @@ def _extract_text_from_doc(
             clean_view,
             offset_map=offset_map,
             cursor=part_cursor,
+            table_acc=structure.tables if structure is not None else None,
         )
         if part_text:
             if full_text:
@@ -108,6 +168,8 @@ def _extract_text_from_doc(
                 # remain accurate.
                 cursor += 2
             full_text.append(part_text)
+            if structure is not None:
+                structure.part_ranges.append((cursor, cursor + len(part_text), part_kind))
             cursor += len(part_text)
 
     base_text = "\n\n".join(full_text)
@@ -119,6 +181,8 @@ def _extract_text_from_doc(
 
     if return_paragraph_offsets:
         return base_text, offset_map
+    if return_structure:
+        return base_text, structure
     return base_text
 
 
@@ -128,10 +192,15 @@ def _extract_blocks(
     clean_view: bool,
     offset_map: dict | None = None,
     cursor: int = 0,
+    table_acc: list | None = None,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
     iterating over Paragraphs and Tables in order.
+
+    table_acc: optional list collecting TableGeometry for TOP-LEVEL tables.
+    Deliberately not forwarded into cells — nested tables stay invisible to
+    the structured row-op diff, whose row pairing assumes one flat grid.
     """
     # Fetch style cache exactly once per container block
     part = getattr(container, "part", container)
@@ -199,17 +268,22 @@ def _extract_blocks(
             is_first_block = False
 
         elif isinstance(item, Table):
+            geometry = TableGeometry(start=block_start, end=block_start) if table_acc is not None else None
             table_text = extract_table(
                 item,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
                 cursor=block_start,
+                geometry=geometry,
             )
             if table_text:
                 blocks.append(table_text)
                 local_cursor = block_start + len(table_text)
                 is_first_block = False
+                if geometry is not None:
+                    geometry.end = block_start + len(table_text)
+                    table_acc.append(geometry)
             else:
                 if not is_first_block:
                     local_cursor -= 2
@@ -224,11 +298,13 @@ def extract_table(
     clean_view: bool,
     offset_map: dict | None = None,
     cursor: int = 0,
+    geometry: "TableGeometry | None" = None,
 ) -> str:
     """
     Args:
         offset_map: see _extract_blocks docstring.
         cursor: absolute offset where this table begins in the final body.
+        geometry: optional TableGeometry to fill with per-row offsets/cells.
     """
     rows_text: list[str] = []
     rows_processed = 0
@@ -291,6 +367,8 @@ def extract_table(
 
         rows_text.append(row_str)
         local_cursor = row_start + len(row_str)
+        if geometry is not None:
+            geometry.rows.append(RowGeometry(start=row_start, end=local_cursor, cells=list(cell_texts)))
         rows_processed += 1
 
     return "\n".join(rows_text)
@@ -506,6 +584,17 @@ def build_paragraph_text(
                 active_fmt[item.id] = item
             elif item.type == "fmt_end":
                 active_fmt.pop(item.id, None)
+            elif item.type == "image":
+                if clean_view and active_del:
+                    continue
+                if pending_text:
+                    s_tok, e_tok = current_wrappers
+                    parts.append(f"{s_tok}{pending_text}{e_tok}")
+                    pending_text = ""
+                    current_wrappers = ("", "")
+                    current_style = ("", "")
+                alt = (item.date or "image").replace("]", ")").replace("\n", " ")
+                parts.append(f"![{alt}](docx-image:{item.id})")
             elif item.type in ("footnote", "endnote"):
                 if pending_text:
                     s_tok, e_tok = current_wrappers

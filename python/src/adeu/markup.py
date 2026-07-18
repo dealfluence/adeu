@@ -1,10 +1,11 @@
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
 from adeu.diff import trim_common_context
 from adeu.models import ModifyText
+from adeu.utils.safe_regex import RegexTimeoutError, user_finditer
 
 logger = structlog.get_logger(__name__)
 
@@ -278,34 +279,57 @@ def _find_match_in_text(text: str, target: str) -> Tuple[int, int]:
     Finds target in text using progressive matching strategies.
     Returns (start_idx, end_idx) or (-1, -1) if not found.
     """
-    if not target:
-        return -1, -1
+    matches = _find_all_matches_in_text(text, target)
+    if matches:
+        return matches[0]
+    return -1, -1
 
-    # 1. Exact match
-    idx = text.find(target)
-    if idx != -1:
-        return _find_safe_boundaries(text, idx, idx + len(target))
+
+def _find_all_matches_in_text(text: str, target: str, is_regex: bool = False) -> List[Tuple[int, int]]:
+    """
+    Every non-overlapping match of `target` in `text` as (start, end) pairs,
+    using the SAME strategy ladder as the apply engine's
+    DocumentMapper.find_all_match_indices: regex (when requested) or
+    exact → smart-quote-normalized → fuzzy. Markup previews must resolve
+    matching identically to apply, or the preview lies (QA 2026-07-18 M1).
+    """
+    if not target:
+        return []
+
+    if is_regex:
+        # Same semantics as the mapper: budgeted user regex; an invalid
+        # pattern simply produces no matches (surfaced as "not found").
+        try:
+            return [m.span() for m in user_finditer(target, text)]
+        except re.error:
+            return []
+
+    # 1. Exact matches
+    spans = [m.span() for m in re.finditer(re.escape(target), text)]
+    if spans:
+        return [_find_safe_boundaries(text, s, e) for s, e in spans]
 
     # 2. Smart quote normalization
     norm_text = _replace_smart_quotes(text)
     norm_target = _replace_smart_quotes(target)
-    idx = norm_text.find(norm_target)
-    if idx != -1:
-        return _find_safe_boundaries(text, idx, idx + len(norm_target))
+    spans = [m.span() for m in re.finditer(re.escape(norm_target), norm_text)]
+    if spans:
+        return [_find_safe_boundaries(text, s, e) for s, e in spans]
 
     # 3. Fuzzy regex match (handles markdown noise, list markers, etc.).
     # Atomic groups in _make_fuzzy_regex prevent catastrophic backtracking.
     try:
         pattern = _make_fuzzy_regex(target)
-        match = re.search(pattern, text)
-        if match:
-            raw_start, raw_end = match.start(), match.end()
-            refined_start, refined_end = _refine_match_boundaries(text, raw_start, raw_end)
-            return _find_safe_boundaries(text, refined_start, refined_end)
+        results = []
+        for match in re.finditer(pattern, text):
+            refined_start, refined_end = _refine_match_boundaries(text, match.start(), match.end())
+            results.append(_find_safe_boundaries(text, refined_start, refined_end))
+        if results:
+            return results
     except re.error:
         pass
 
-    return -1, -1
+    return []
 
 
 # Maximum number of match examples to include in an ambiguity error message.
@@ -459,35 +483,80 @@ def apply_edits_to_markdown(
     edits: List[ModifyText],
     include_index: bool = False,
     highlight_only: bool = False,
+    edit_reports: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Applies edits to Markdown text and returns CriticMarkup-annotated output.
+
+    Edit resolution follows the SAME semantics as `apply` (QA 2026-07-18 M1):
+      - `regex: true` targets match as regular expressions
+      - `match_mode` is honored: "strict" (default) refuses ambiguous targets,
+        "first" marks the first occurrence, "all" marks every occurrence
+      - a missing target is a per-edit failure, never a silent skip
+
+    When `edit_reports` is provided, one dict per input edit is appended:
+    {"index": 0-based input position, "status": "applied"|"failed",
+     "error": str|None, "occurrences": int}.
     """
     if not edits:
         return markdown_text
 
+    def _report(idx: int, status: str, error: Optional[str] = None, occurrences: int = 0):
+        if edit_reports is not None:
+            edit_reports.append({"index": idx, "status": status, "error": error, "occurrences": occurrences})
+
     # Step 1: Find match positions for each edit
     matched_edits: List[Tuple[int, int, str, ModifyText, int]] = []
+    failed_indices: set = set()
 
     for idx, edit in enumerate(edits):
         target = edit.target_text or ""
+        match_mode = getattr(edit, "match_mode", "strict") or "strict"
+        is_regex = bool(getattr(edit, "regex", False))
 
         if not target:
-            if highlight_only:
-                logger.debug(f"Skipping edit {idx}: no target_text in highlight_only mode")
-                continue
-            else:
-                logger.warning(f"Skipping edit {idx}: pure insertion without target_text not supported in text mode")
-                continue
-
-        start, end = _find_match_in_text(markdown_text, target)
-
-        if start == -1:
-            logger.warning(f"Skipping edit {idx}: target_text not found: '{target[:50]}...'")
+            msg = (
+                f"- Edit {idx + 1} Failed: target_text is empty. Pure insertions are expressed as a "
+                "replacement: put the text immediately around the insertion point in target_text and "
+                "repeat it (plus the new text) in new_text."
+            )
+            logger.warning(msg)
+            failed_indices.add(idx)
+            _report(idx, "failed", msg)
             continue
 
-        actual_matched_text = markdown_text[start:end]
-        matched_edits.append((start, end, actual_matched_text, edit, idx))
+        try:
+            spans = _find_all_matches_in_text(markdown_text, target, is_regex=is_regex)
+        except RegexTimeoutError as e:
+            msg = f"- Edit {idx + 1} Failed: {e}"
+            logger.warning(msg)
+            failed_indices.add(idx)
+            _report(idx, "failed", msg)
+            continue
+
+        if not spans:
+            msg = f'- Edit {idx + 1} Failed: Target text not found in document:\n  "{target[:80]}"'
+            logger.warning(msg)
+            failed_indices.add(idx)
+            _report(idx, "failed", msg)
+            continue
+
+        if len(spans) > 1 and match_mode == "strict":
+            msg = format_ambiguity_error(
+                edit_index=idx + 1,
+                target_text=target,
+                haystack=markdown_text,
+                match_positions=spans,
+            )
+            logger.warning(msg)
+            failed_indices.add(idx)
+            _report(idx, "failed", msg)
+            continue
+
+        selected = spans[:1] if match_mode in ("strict", "first") else spans
+        for start, end in selected:
+            matched_edits.append((start, end, markdown_text[start:end], edit, idx))
+        _report(idx, "applied", None, len(selected))
 
     # Step 2: Check for overlapping edits
     matched_edits_filtered: List[Tuple[int, int, str, ModifyText, int]] = []
@@ -500,7 +569,14 @@ def apply_edits_to_markdown(
         for occ_start, occ_end in occupied_ranges:
             if start < occ_end and end > occ_start:
                 overlaps = True
-                logger.warning(f"Skipping edit {orig_idx}: overlaps with previously matched edit")
+                msg = f"- Edit {orig_idx + 1} Failed: overlaps with a previously matched edit."
+                logger.warning(msg)
+                if edit_reports is not None:
+                    for r in edit_reports:
+                        if r["index"] == orig_idx:
+                            r["status"] = "failed"
+                            r["error"] = msg
+                            r["occurrences"] = 0
                 break
 
         if not overlaps:

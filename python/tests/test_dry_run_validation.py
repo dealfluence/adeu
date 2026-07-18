@@ -71,8 +71,10 @@ def test_validation_not_found():
 
 def test_validation_success_and_pure_insertion():
     """
-    Scenario: Perfect targets. Includes a pure insertion (empty target text)
-    which should bypass validation safely.
+    Scenario: Perfect targets. A pure insertion is only valid when its
+    position is pinned internally (diff output); a TEXT-anchored edit with an
+    empty target can never resolve and used to be silently "skipped" at apply
+    time while the batch still wrote an unmodified output (QA 2026-07-18 M2).
     """
     doc = Document()
     doc.add_paragraph("This is a unique clause.")
@@ -84,14 +86,22 @@ def test_validation_success_and_pure_insertion():
     engine = RedlineEngine(stream)
 
     edit1 = ModifyText(target_text="unique clause", new_text="special clause")
-
-    # Pure insertion (relies on index internally, skipping target_text validation)
-    edit2 = ModifyText(target_text="", new_text="Inserted text.")
-
-    errors = engine.validate_edits([edit1, edit2])
-
-    # Should pass perfectly with zero errors
+    errors = engine.validate_edits([edit1])
     assert len(errors) == 0
+
+    # Pure insertion WITH a pinned index (the diff pipeline's shape) bypasses
+    # text validation safely.
+    pinned = ModifyText(target_text="", new_text="Inserted text.")
+    pinned._match_start_index = 0
+    errors = engine.validate_edits([edit1, pinned])
+    assert len(errors) == 0
+
+    # The SAME edit without a pinned index is unresolvable and must be
+    # rejected up front rather than skipped after a partial batch.
+    unpinned = ModifyText(target_text="", new_text="Inserted text.")
+    errors = engine.validate_edits([unpinned])
+    assert len(errors) == 1
+    assert "target_text is empty" in errors[0]
 
 
 def test_validation_fuzzy_match_ambiguity():

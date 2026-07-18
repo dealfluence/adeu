@@ -271,6 +271,7 @@ def build_search_response(
     search_case_sensitive: bool,
     page: int | str | None,
     file_path: str,
+    is_cli: bool = False,
 ) -> ToolResult:
     """
     Filters projected Markdown to exact substring or regex matches.
@@ -370,10 +371,21 @@ def build_search_response(
 
     # ---- No matches anywhere. ----
     if not matches:
+        # The retry advice must name knobs the caller can actually type: CLI
+        # flags for the CLI, tool parameters for MCP (QA 2026-07-18 L1).
+        if is_cli:
+            retry_hint = (
+                "Verify your search spelling, or retry with --search-case-insensitive "
+                "or with --search-regex if you used pattern wildcards."
+            )
+        else:
+            retry_hint = (
+                "Verify your search spelling, or try setting `search_case_sensitive` to false "
+                "or enabling `search_regex` if you used pattern wildcards."
+            )
         ui_markdown = (
             f"> **Search Results** — No matches found for query `{search_query}` in `{Path(file_path).name}`.\n\n"
-            "Verify your search spelling, or try setting `search_case_sensitive` to false "
-            "or enabling `search_regex` if you used pattern wildcards."
+            + retry_hint
         )
         if regex_downgraded_note:
             ui_markdown = f"{regex_downgraded_note}\n\n{ui_markdown}"

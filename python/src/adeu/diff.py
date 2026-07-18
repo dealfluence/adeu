@@ -1,12 +1,17 @@
 import re
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import structlog
 from diff_match_patch import diff_match_patch
 
-from adeu.models import ModifyText
+from adeu.models import DeleteTableRow, InsertTableRow, ModifyText
+
+if TYPE_CHECKING:
+    from adeu.ingest import ExtractStructure, TableGeometry
 
 logger = structlog.get_logger(__name__)
+
+DiffEdit = Union[ModifyText, InsertTableRow, DeleteTableRow]
 
 
 def _count_standalone_underscores(s: str) -> int:
@@ -371,7 +376,11 @@ def _next_word_boundary(text: str, pos: int) -> int:
 _MAX_CONTEXT_EXPANSIONS = 60
 
 
-def make_edits_self_contained(edits: List[ModifyText], original_text: str) -> List[ModifyText]:
+def make_edits_self_contained(
+    edits: List[ModifyText],
+    original_text: str,
+    part_ranges: Optional[List[Tuple[int, int, str]]] = None,
+) -> List[ModifyText]:
     """
     Rewrites diff-generated edits so each one can be re-applied by TEXT MATCHING
     alone against `original_text`.
@@ -388,10 +397,33 @@ def make_edits_self_contained(edits: List[ModifyText], original_text: str) -> Li
     trim_common_context re-trims that shared context at apply time, so the
     resulting redline is identical to the positional one.
 
+    When `part_ranges` is provided ((start, end, kind) tuples from
+    ExtractStructure), context expansion never crosses an OPC part boundary:
+    widening a body edit into footer text produced exactly the cross-part
+    targets that corrupted documents in QA 2026-07-18 C1. If uniqueness cannot
+    be reached inside the part, the widest in-part candidate is emitted — a
+    strict-mode ambiguity error at apply time beats structural corruption.
+
     Returns the same edit objects, mutated in place (target_text, new_text and
     _match_start_index updated).
     """
     n = len(original_text)
+
+    def _bounds_for(idx: int) -> Tuple[int, int]:
+        ranges = [(s, e) for s, e, _k in (part_ranges or []) if e > s]
+        prev: Optional[Tuple[int, int]] = None
+        for p_start, p_end in ranges:
+            if idx < p_start:
+                # Inside the separator before this part: the offset belongs to
+                # the PREVIOUS part (an insertion there appends to it).
+                return prev if prev is not None else (p_start, p_end)
+            if idx <= p_end:
+                return p_start, p_end
+            prev = (p_start, p_end)
+        if prev is not None:
+            return prev
+        return 0, n
+
     for edit in edits:
         idx = edit._match_start_index
         if idx is None:
@@ -404,15 +436,19 @@ def make_edits_self_contained(edits: List[ModifyText], original_text: str) -> Li
         if target and original_text.count(target) == 1:
             continue  # Already unambiguous.
 
+        min_start, max_end = _bounds_for(idx)
         start, end = idx, idx + len(target)
+        # Clamp the seed range too (a target should never span parts, but be safe).
+        end = min(end, max_end)
+
         for _ in range(_MAX_CONTEXT_EXPANSIONS):
             candidate = original_text[start:end]
             if candidate and original_text.count(candidate) == 1:
                 break
-            if start == 0 and end == n:
+            if start == min_start and end == max_end:
                 break
-            start = _prev_word_boundary(original_text, start)
-            end = _next_word_boundary(original_text, end)
+            start = max(min_start, _prev_word_boundary(original_text, start))
+            end = min(max_end, _next_word_boundary(original_text, end))
 
         prefix = original_text[start:idx]
         suffix = original_text[idx + len(target) : end]
@@ -423,6 +459,219 @@ def make_edits_self_contained(edits: List[ModifyText], original_text: str) -> Li
         edit._match_start_index = start
 
     return edits
+
+
+def _rows_are_plain(text: str, table: "TableGeometry") -> bool:
+    """
+    True when every projected row reads exactly as its cells joined by " | ".
+    Rows wrapped in tracked-row CriticMarkup ({++ … ++} / {-- … --}) do not,
+    and such tables are diffed as plain text rather than as row structures.
+    """
+    for row in table.rows:
+        if text[row.start : row.end] != " | ".join(row.cells):
+            return False
+    return True
+
+
+def _table_structure_changed(rows_o, rows_m) -> bool:
+    import difflib
+
+    keys_o = ["\x1f".join(r.cells) for r in rows_o]
+    keys_m = ["\x1f".join(r.cells) for r in rows_m]
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, keys_o, keys_m, autojunk=False).get_opcodes():
+        if tag in ("insert", "delete"):
+            return True
+        if tag == "replace" and (i2 - i1) != (j2 - j1):
+            return True
+    return False
+
+
+def _row_ops_for_table(
+    table_o: "TableGeometry",
+    table_m: "TableGeometry",
+    warnings: List[str],
+) -> List[DiffEdit]:
+    """
+    Emits structured operations (delete_row / insert_row / per-row modify)
+    that transform table_o's row set into table_m's. Called only when
+    _table_structure_changed is True (QA 2026-07-18 C2: a generic text edit
+    cannot add or remove rows — it writes fake pipe text into one cell or is
+    rejected by the cell-count validator).
+    """
+    import difflib
+
+    rows_o = table_o.rows
+    rows_m = table_m.rows
+    keys_o = ["\x1f".join(r.cells) for r in rows_o]
+    keys_m = ["\x1f".join(r.cells) for r in rows_m]
+    opcodes = difflib.SequenceMatcher(None, keys_o, keys_m, autojunk=False).get_opcodes()
+
+    def row_text(r) -> str:
+        return " | ".join(r.cells)
+
+    # Rows removed by the transformation (deletes + surplus rows of shrinking
+    # replaces) can never anchor an insert.
+    removed: set = set()
+    replaced_new_text: Dict[int, str] = {}
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "delete":
+            removed.update(range(i1, i2))
+        elif tag == "replace":
+            pairs = min(i2 - i1, j2 - j1)
+            removed.update(range(i1 + pairs, i2))
+            for k in range(pairs):
+                replaced_new_text[i1 + k] = row_text(rows_m[j1 + k])
+
+    surviving = [i for i in range(len(rows_o)) if i not in removed]
+
+    def anchor_text(orig_idx: int) -> str:
+        # Anchor on the row's FINAL text: modified rows are matched via the
+        # engine's clean-view fallback after their own edit applies.
+        return replaced_new_text.get(orig_idx, row_text(rows_o[orig_idx]))
+
+    def insert_ops(new_rows, at_orig_index: int) -> List[DiffEdit]:
+        ops: List[DiffEdit] = []
+        before = [i for i in surviving if i < at_orig_index]
+        after = [i for i in surviving if i >= at_orig_index]
+        if before:
+            # Insert below the preceding surviving row. Emitting in reverse
+            # keeps the final order: below-A(B), then below-A(C) yields A,C,B —
+            # so emit C first.
+            anchor = anchor_text(before[-1])
+            for r in reversed(new_rows):
+                ops.append(InsertTableRow(type="insert_row", target_text=anchor, position="below", cells=list(r.cells)))
+        elif after:
+            anchor = anchor_text(after[0])
+            for r in new_rows:
+                ops.append(InsertTableRow(type="insert_row", target_text=anchor, position="above", cells=list(r.cells)))
+        else:
+            warnings.append(
+                "A table gained rows but no original row survives to anchor them; "
+                "these row insertions were skipped — add them with explicit insert_row operations."
+            )
+        return ops
+
+    ops: List[DiffEdit] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            pairs = min(i2 - i1, j2 - j1)
+            for k in range(pairs):
+                o_txt = row_text(rows_o[i1 + k])
+                m_txt = row_text(rows_m[j1 + k])
+                if o_txt != m_txt:
+                    ops.append(
+                        ModifyText(
+                            type="modify",
+                            target_text=o_txt,
+                            new_text=m_txt,
+                            comment="Diff: Table row modified",
+                        )
+                    )
+            for k in range(i1 + pairs, i2):
+                ops.append(DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k])))
+            surplus_new = [rows_m[j] for j in range(j1 + pairs, j2)]
+            if surplus_new:
+                ops.extend(insert_ops(surplus_new, i2))
+        elif tag == "delete":
+            for k in range(i1, i2):
+                ops.append(DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k])))
+        elif tag == "insert":
+            ops.extend(insert_ops([rows_m[j] for j in range(j1, j2)], i1))
+    return ops
+
+
+def generate_structured_edits(
+    text_orig: str,
+    struct_orig: "ExtractStructure",
+    text_mod: str,
+    struct_mod: "ExtractStructure",
+) -> Tuple[List[DiffEdit], List[str]]:
+    """
+    DOCX-to-DOCX diff over projections extracted with return_structure=True.
+
+    Improvements over a flat generate_edits_from_text pass:
+      - each OPC part (header/body/footer/notes) diffs against its
+        counterpart, so no edit can span a part boundary and content that
+        moved between parts is reported instead of hidden (QA 2026-07-18 C1);
+      - table row insertions/deletions become structured insert_row /
+        delete_row operations instead of pipe-text edits (QA C2);
+      - every ModifyText is widened with in-part context until unique.
+
+    Returns (edits, warnings). Warnings describe fallbacks the caller should
+    surface (differing part layouts, unanchorable rows, …).
+    """
+    warnings: List[str] = []
+    edits: List[DiffEdit] = []
+
+    kinds_o = [k for s, e, k in struct_orig.part_ranges if e > s]
+    kinds_m = [k for s, e, k in struct_mod.part_ranges if e > s]
+
+    if kinds_o != kinds_m:
+        warnings.append(
+            f"The documents have different part layouts ({' + '.join(kinds_o) or 'none'} vs "
+            f"{' + '.join(kinds_m) or 'none'}); comparing flattened text instead. Header/footer "
+            "additions or removals cannot be expressed as text edits."
+        )
+        flat = generate_edits_from_text(text_orig, text_mod)
+        make_edits_self_contained(flat, text_orig, part_ranges=struct_orig.part_ranges)
+        return list(flat), warnings
+
+    ranges_o = [(s, e) for s, e, k in struct_orig.part_ranges if e > s]
+    ranges_m = [(s, e) for s, e, k in struct_mod.part_ranges if e > s]
+
+    for (po_start, po_end), (pm_start, pm_end) in zip(ranges_o, ranges_m, strict=True):
+        tables_o = [t for t in struct_orig.tables if po_start <= t.start and t.end <= po_end]
+        tables_m = [t for t in struct_mod.tables if pm_start <= t.start and t.end <= pm_end]
+
+        tables_alignable = (
+            len(tables_o) == len(tables_m)
+            and all(_rows_are_plain(text_orig, t) for t in tables_o)
+            and all(_rows_are_plain(text_mod, t) for t in tables_m)
+        )
+        if len(tables_o) != len(tables_m):
+            warnings.append(
+                f"A {kinds_o[ranges_o.index((po_start, po_end))]} part has {len(tables_o)} table(s) in the "
+                f"original but {len(tables_m)} in the modified document; its tables were compared as plain "
+                "text. Adding or removing whole tables is not supported via diff/apply."
+            )
+
+        if not tables_alignable:
+            part_edits = generate_edits_from_text(text_orig[po_start:po_end], text_mod[pm_start:pm_end])
+            for e in part_edits:
+                e._match_start_index = (e._match_start_index or 0) + po_start
+            edits.extend(part_edits)
+            continue
+
+        # Walk interleaved segments: text-before-table, table, text-after…
+        boundaries_o = [(po_start, po_start)] + [(t.start, t.end) for t in tables_o] + [(po_end, po_end)]
+        boundaries_m = [(pm_start, pm_start)] + [(t.start, t.end) for t in tables_m] + [(pm_end, pm_end)]
+
+        for seg_idx in range(len(boundaries_o) - 1):
+            seg_o_start = boundaries_o[seg_idx][1]
+            seg_o_end = boundaries_o[seg_idx + 1][0]
+            seg_m_start = boundaries_m[seg_idx][1]
+            seg_m_end = boundaries_m[seg_idx + 1][0]
+            seg_edits = generate_edits_from_text(text_orig[seg_o_start:seg_o_end], text_mod[seg_m_start:seg_m_end])
+            for e in seg_edits:
+                e._match_start_index = (e._match_start_index or 0) + seg_o_start
+            edits.extend(seg_edits)
+
+            if seg_idx < len(tables_o):
+                t_o = tables_o[seg_idx]
+                t_m = tables_m[seg_idx]
+                if _table_structure_changed(t_o.rows, t_m.rows):
+                    edits.extend(_row_ops_for_table(t_o, t_m, warnings))
+                else:
+                    tbl_edits = generate_edits_from_text(text_orig[t_o.start : t_o.end], text_mod[t_m.start : t_m.end])
+                    for e in tbl_edits:
+                        e._match_start_index = (e._match_start_index or 0) + t_o.start
+                    edits.extend(tbl_edits)
+
+    text_edits = [e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None]
+    make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)
+    return edits, warnings
 
 
 def generate_edits_via_paragraph_alignment(original_text: str, modified_text: str) -> List[ModifyText]:

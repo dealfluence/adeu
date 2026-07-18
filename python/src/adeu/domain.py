@@ -17,6 +17,42 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return Levenshtein.distance(s1, s2)
 
 
+_TERM_BODY = r"[A-Z][A-Za-z0-9\s\-&\'’]{1,60}"
+# Definition typography, matched repeatedly within a paragraph (QA 2026-07-18
+# M7 — a paragraph defining Alpha, Beta AND Gamma must yield all three):
+#   1. paragraph-leading quoted term (optionally after a numbering token)
+#   2. sentence-leading quoted term (after . ; : ! ?)
+#   3. parenthesized inline definition — (the "Term")
+_LEADING_TERM_RE = re.compile(rf"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]({_TERM_BODY})[\"”]")
+_SENTENCE_TERM_RE = re.compile(rf"(?<=[\.\;\:\!\?])\s+[\"“]({_TERM_BODY})[\"”]")
+_INLINE_TERM_RE = re.compile(rf'\([^)]*?["“]({_TERM_BODY})["”][^)]*?\)')
+
+
+def extract_terms_from_paragraph(text: str) -> List[str]:
+    """
+    All defined terms declared in one paragraph, in appearance order,
+    deduplicated. Language-agnostic: keyed on quoting typography, never on
+    English phrases like "means".
+    """
+    found: List[Tuple[int, str]] = []
+    leading = _LEADING_TERM_RE.match(text)
+    if leading:
+        found.append((leading.start(1), leading.group(1).strip()))
+    for m in _SENTENCE_TERM_RE.finditer(text):
+        found.append((m.start(1), m.group(1).strip()))
+    for m in _INLINE_TERM_RE.finditer(text):
+        found.append((m.start(1), m.group(1).strip()))
+
+    terms: List[str] = []
+    seen_positions: set = set()
+    for pos, term in sorted(found):
+        if pos in seen_positions:
+            continue
+        seen_positions.add(pos)
+        terms.append(term)
+    return terms
+
+
 # FILE: src/adeu/domain.py
 def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """
@@ -26,23 +62,13 @@ def extract_definitions_and_diagnostics(doc, base_text: str) -> Tuple[Dict[str, 
     definitions: Dict[str, Dict[str, Any]] = {}
     duplicates = set()
 
-    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
-    inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
-
     for item in iter_block_items(doc):
         if isinstance(item, Paragraph):
             text = _get_paragraph_text(item).strip()
             if not text:
                 continue
 
-            extracted_terms = []
-            leading_match = leading_re.match(text)
-            if leading_match:
-                extracted_terms.append(leading_match.group(1).strip())
-            for m in inline_re.finditer(text):
-                extracted_terms.append(m.group(1).strip())
-
-            for term in extracted_terms:
+            for term in extract_terms_from_paragraph(text):
                 if term in definitions:
                     duplicates.add(term)
                 else:
@@ -315,9 +341,6 @@ def extract_all_domain_metadata(
     raw_anchors: Dict[str, Dict[str, Any]] = {}
     raw_references: List[Tuple[str, str]] = []  # (target_bookmark, referencing_text)
 
-    leading_re = re.compile(r"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})[\"”]")
-    inline_re = re.compile(r'\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&\'’]{1,60})["”][^)]*?\)')
-
     # --- SINGLE DOCUMENT WALK ---
     for item in iter_block_items(doc):
         if not isinstance(item, Paragraph):
@@ -328,15 +351,8 @@ def extract_all_domain_metadata(
         if not text:
             continue
 
-        # 1. Extract Definitions
-        extracted_terms = []
-        leading_match = leading_re.match(text)
-        if leading_match:
-            extracted_terms.append(leading_match.group(1).strip())
-        for m in inline_re.finditer(text):
-            extracted_terms.append(m.group(1).strip())
-
-        for term in extracted_terms:
+        # 1. Extract Definitions (every declaration in the paragraph — QA M7)
+        for term in extract_terms_from_paragraph(text):
             if term in definitions:
                 duplicates.add(term)
             else:

@@ -27,7 +27,7 @@ from adeu.models import (
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager
-from adeu.redline.mapper import DocumentMapper
+from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
 from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import PREVIEW_TEXT_CAP, REPORT_ECHO_CAP, truncate_middle
@@ -214,6 +214,19 @@ def validate_edit_strings(
                             f"- Edit {i + 1} Failed: Modifying cross-reference markers is disallowed "
                             "to prevent dependency corruption."
                         )
+
+        # QA 2026-07-18 M5: image markers are read-only projections of
+        # w:drawing elements. They cannot be fabricated, duplicated or
+        # removed through text replacement.
+        if "docx-image:" in t_text or "docx-image:" in n_text:
+            t_imgs = re.findall(r"!\[[^\]]*\]\(docx-image:[^)]*\)", t_text)
+            n_imgs = re.findall(r"!\[[^\]]*\]\(docx-image:[^)]*\)", n_text)
+            if sorted(t_imgs) != sorted(n_imgs):
+                errors.append(
+                    f"- Edit {i + 1} Failed: image markers (![alt](docx-image:N)) are read-only "
+                    "projections of embedded images. They cannot be inserted, altered, or removed "
+                    "via text replacement — edit the text around the image instead."
+                )
 
         # VAL-OBS-9: Internal Anchor Structural Integrity
         if "{#" in t_text or "{#" in n_text:
@@ -1309,6 +1322,44 @@ class RedlineEngine:
             cur = cur.getparent()
         return cur
 
+    # XML root tags of stories that can host comment anchors. Word (and
+    # LibreOffice, which refuses to LOAD such files) only supports comment
+    # ranges in the main document story — never in headers, footers,
+    # footnotes or endnotes (QA 2026-07-18 H4/C1).
+    _MAIN_STORY_ROOT = qn("w:document")
+
+    def _comment_anchor_in_main_story(self, element) -> bool:
+        root = element
+        while root.getparent() is not None:
+            root = root.getparent()
+        return root.tag == self._MAIN_STORY_ROOT
+
+    def _skip_comment_outside_main_story(self, element, text: str) -> bool:
+        """
+        When the anchor lives outside the main document story, records a
+        user-visible warning and returns True (caller must skip the comment).
+        The tracked change itself still applies — only the bubble is dropped.
+        """
+        if self._comment_anchor_in_main_story(element):
+            return False
+        root = element
+        while root.getparent() is not None:
+            root = root.getparent()
+        story = {
+            qn("w:ftr"): "footer",
+            qn("w:hdr"): "header",
+            qn("w:footnotes"): "footnote",
+            qn("w:endnotes"): "endnote",
+        }.get(root.tag, "non-body")
+        msg = (
+            f'- Warning: the comment "{text[:60]}" was NOT attached: Word does not support '
+            f"comments inside a {story} part, and writing one produces a document other "
+            "applications cannot open. The tracked change itself was applied."
+        )
+        self.skipped_details.append(msg)
+        logger.warning("Comment anchor outside main story; comment dropped", story=story, text=text[:60])
+        return True
+
     def _attach_comment(self, parent_element, start_element, end_element, text: str):
         if not text:
             return
@@ -1319,6 +1370,8 @@ class RedlineEngine:
         # leaving an orphaned entry in comments.xml (QA 2026-07-17 F8).
         if parent_element is None or start_element is None or end_element is None:
             logger.warning("Comment anchor context missing; skipping comment attachment", text=text[:60])
+            return
+        if self._skip_comment_outside_main_story(parent_element, text):
             return
         try:
             start_index = parent_element.index(start_element)
@@ -1351,6 +1404,11 @@ class RedlineEngine:
 
     def _attach_comment_spanning(self, start_p, start_el, end_p, end_el, text: str):
         if not text:
+            return
+        if start_p is None or end_p is None:
+            logger.warning("Comment anchor context missing; skipping comment attachment", text=text[:60])
+            return
+        if self._skip_comment_outside_main_story(start_p, text) or self._skip_comment_outside_main_story(end_p, text):
             return
         comment_id = self.comments_manager.add_comment(self.author, text)
 
@@ -1411,8 +1469,6 @@ class RedlineEngine:
         errors.extend(validate_edit_strings(edits, index_offset=index_offset))
 
         for i, edit in enumerate(edits, start=index_offset):
-            if not edit.target_text:
-                continue  # Skip validation for pure index-based insertions
             # Caller-pinned indexes (e.g. generate_edits_from_text output)
             # resolve by position, not content: ambiguity / not-found checks
             # are meaningless for them and false-positive whenever the target
@@ -1422,6 +1478,17 @@ class RedlineEngine:
                 getattr(edit, "_match_start_index", None) is not None
                 or getattr(edit, "_resolved_start_idx", None) is not None
             ):
+                continue
+            if not edit.target_text:
+                # A text-anchored edit with no anchor can never resolve. It
+                # used to be silently "skipped" at apply time while the batch
+                # still wrote an unmodified output (QA 2026-07-18 M2); reject
+                # it up front so the transactional contract applies.
+                errors.append(
+                    f"- Edit {i + 1} Failed: target_text is empty. Pure insertions are expressed as a "
+                    "replacement: put the text immediately around the insertion point in target_text "
+                    "and repeat it (plus the new text) in new_text."
+                )
                 continue
             is_regex = getattr(edit, "regex", False)
             match_mode = getattr(edit, "match_mode", "strict")
@@ -1516,6 +1583,64 @@ class RedlineEngine:
                 t_end = len(actual_doc_text) - suffix_len
                 final_target = actual_doc_text[prefix_len:t_end]
                 final_new = effective_new_text[prefix_len : len(effective_new_text) - suffix_len]
+
+                # QA 2026-07-18 C1: the projection flattens headers, body,
+                # footers and notes into one string, but a text edit whose
+                # CHANGED span covers real text from two different OPC parts
+                # cannot be applied without writing content into the wrong
+                # part. Refuse it outright.
+                eff_start = start + prefix_len
+                eff_end = start + length - suffix_len
+                if eff_end > eff_start:
+                    overlapping = [
+                        s
+                        for s in target_mapper.spans
+                        if s.end > eff_start and s.start < eff_end and (s.run is not None or s.text.strip())
+                    ]
+                    part_idxs = sorted({s.part_index for s in overlapping})
+                    if len(part_idxs) > 1:
+                        kinds = " → ".join(target_mapper.part_kind_of(pi) or "?" for pi in part_idxs)
+                        errors.append(
+                            f"- Edit {i + 1} Failed: target_text spans a structural document-part "
+                            f"boundary ({kinds}). Headers, body, footers and footnotes are separate "
+                            "Word parts — an edit cannot cross between them. Split this into one "
+                            "edit per part."
+                        )
+                    # QA 2026-07-18 M5: image markers are read-only projections.
+                    if any(getattr(s, "is_image_marker", False) for s in overlapping):
+                        errors.append(
+                            f"- Edit {i + 1} Failed: the target overlaps a read-only image marker "
+                            "(![alt](docx-image:N)). Images cannot be edited or removed via text "
+                            "replacement — target the text around the image instead."
+                        )
+
+                # QA 2026-07-18 H4: comments can only be anchored in the main
+                # document story. A comment-only edit (target == new) whose
+                # match lives in a header/footer/footnote has no effect Word
+                # or LibreOffice could render — refuse it clearly.
+                if (
+                    edit.comment
+                    and (edit.new_text or "") == (edit.target_text or "")
+                    and hasattr(target_mapper, "part_kind_at")
+                ):
+                    kind_here = target_mapper.part_kind_at(start)
+                    if kind_here not in (None, "body"):
+                        errors.append(
+                            f"- Edit {i + 1} Failed: comments cannot be anchored inside a {kind_here} "
+                            "part — Word only supports comments in the main document body. Comment on "
+                            "the related body text instead."
+                        )
+
+                # QA 2026-07-18 C2: a replacement may not smuggle new
+                # pipe-delimited row lines into a table cell. Rows are
+                # structural; adding one requires the insert_row operation.
+                if self._introduces_table_row_text(target_mapper, start, length, final_target, final_new):
+                    errors.append(
+                        f"- Edit {i + 1} Failed: new_text introduces a pipe-delimited row line inside "
+                        "a table. Text replacement cannot create table rows — use the structured "
+                        '\'insert_row\' operation instead (e.g. {"type": "insert_row", '
+                        '"target_text": "<anchor row text>", "cells": ["...", "..."]}).'
+                    )
 
                 if "\n\n" in final_target:
                     # A *balanced* multi-paragraph modification (the target and the
@@ -1661,6 +1786,29 @@ class RedlineEngine:
                     return len(curr.findall(qn("w:tc")))
                 curr = curr.getparent()
         return None
+
+    @classmethod
+    def _introduces_table_row_text(
+        cls,
+        mapper: DocumentMapper,
+        start: int,
+        length: int,
+        final_target: str,
+        final_new: str,
+    ) -> bool:
+        """
+        True when a replacement anchored in a table would ADD line-separated
+        pipe-delimited content — the text shape of a table row. Writing that
+        into a cell renders a fake row inside one cell while the real grid
+        stays unchanged (QA 2026-07-18 C2); such edits must use insert_row.
+        """
+        if "\n" not in final_new or " | " not in final_new:
+            return False
+        new_pipe_lines = sum(1 for line in final_new.split("\n") if " | " in line)
+        old_pipe_lines = sum(1 for line in final_target.split("\n") if " | " in line)
+        if new_pipe_lines <= old_pipe_lines:
+            return False
+        return cls._column_count_at(mapper, start, max(length, 1)) is not None
 
     def _refresh_after_sequential_edit(self) -> None:
         """
@@ -2784,7 +2932,20 @@ class RedlineEngine:
         if op == "URL_RETARGET":
             target_spans = [s for s in active_mapper.spans if s.start <= start_idx < s.end]
             if target_spans and target_spans[0].hyperlink_id:
-                rel = self.doc.part.rels[target_spans[0].hyperlink_id]
+                # Resolve the relationship on the part that owns the hyperlink
+                # (a footer link's rel lives on the footer part, not the main
+                # document part). A missing id is a clean per-edit failure,
+                # never a raw KeyError('rIdN') traceback (QA 2026-07-18 H3).
+                owner = target_spans[0].paragraph
+                part = owner.part if owner is not None and getattr(owner, "part", None) is not None else self.doc.part
+                try:
+                    rel = part.rels[target_spans[0].hyperlink_id]
+                except KeyError:
+                    logger.warning(
+                        "Hyperlink relationship not found; skipping URL retarget",
+                        r_id=target_spans[0].hyperlink_id,
+                    )
+                    return False
                 rel._target = edit.new_text
                 return True
             return False
@@ -2824,7 +2985,33 @@ class RedlineEngine:
             return True
 
         if op == EditOperationType.INSERTION:
-            anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
+            final_new_text = edit.new_text or ""
+
+            # QA 2026-07-18 C1: an insertion positioned in the separator gap
+            # between the body and a following part (footer/footnotes) used to
+            # anchor on the NEXT part's first paragraph, writing the new final
+            # body paragraph into word/footer1.xml. Re-anchor it to the end of
+            # the body and force new-paragraph semantics. Insertions whose text
+            # ends with a paragraph break keep the next-part anchor — that
+            # shape comes from edits deliberately anchored on next-part text
+            # (e.g. "insert a line above FOOTER MARKER").
+            boundary_anchor: Optional[TextSpan] = None
+            boundary = active_mapper.part_boundary_at(start_idx) if hasattr(active_mapper, "part_boundary_at") else None
+            if boundary is not None and not final_new_text.endswith("\n\n"):
+                prev_i, next_i = boundary
+                prev_kind = active_mapper.part_kind_of(prev_i)
+                next_kind = active_mapper.part_kind_of(next_i)
+                if prev_kind == "body" and next_kind != "body":
+                    real_before = [s for s in active_mapper.spans if s.run is not None and s.part_index == prev_i]
+                    if real_before:
+                        boundary_anchor = real_before[-1]
+
+            if boundary_anchor is not None:
+                anchor_run, anchor_paragraph = boundary_anchor.run, boundary_anchor.paragraph
+                if not final_new_text.startswith("\n"):
+                    final_new_text = "\n\n" + final_new_text
+            else:
+                anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
             if not anchor_run and not anchor_paragraph:
                 return False
 
@@ -2859,7 +3046,11 @@ class RedlineEngine:
             if parent is None:
                 return False
 
-            final_new_text = edit.new_text or ""
+            # QA 2026-07-18 C2 (apply-level backstop, pinned edits bypass
+            # validate_edits): refuse insertions that would write row-shaped
+            # pipe text into a table cell.
+            if self._introduces_table_row_text(active_mapper, start_idx, 1, "", final_new_text):
+                return False
 
             if start_idx == 0:
                 ins_elem, last_p = self.track_insert(
@@ -2914,7 +3105,30 @@ class RedlineEngine:
                             self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+                elif last_p is not None and edit.comment:
+                    # Leading "\n\n" insertions (boundary re-anchors) create
+                    # only new paragraphs — anchor the comment on the last one.
+                    ins_list = last_p.findall(f".//{qn('w:ins')}")
+                    if ins_list:
+                        self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
             return True
+
+        # QA 2026-07-18 C1 (apply-level backstop, pinned edits bypass
+        # validate_edits): a modification/deletion may never mutate real text
+        # from two different OPC parts in one span.
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and length:
+            crossed_parts = {
+                s.part_index
+                for s in active_mapper.spans
+                if s.run is not None and s.end > start_idx and s.start < start_idx + length
+            }
+            if len(crossed_parts) > 1:
+                logger.warning(
+                    "Refusing edit that spans OPC part boundary",
+                    start=start_idx,
+                    parts=sorted(crossed_parts),
+                )
+                return False
 
         target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
         virtual_spans = []

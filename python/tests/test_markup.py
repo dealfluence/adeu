@@ -282,8 +282,17 @@ class TestApplyEditsToMarkdown:
         assert "{--world--}{++universe++}{>>[Edit:2]<<}" in result
 
     def test_first_occurrence_only(self):
+        # Strict (the default) refuses ambiguity, exactly like apply
+        # (QA 2026-07-18 M1); "first" is the explicit opt-in.
         text = "word word word"
-        edits = [ModifyText(target_text="word", new_text="WORD")]
+        strict_edits = [ModifyText(target_text="word", new_text="WORD")]
+        reports = []
+        result = apply_edits_to_markdown(text, strict_edits, edit_reports=reports)
+        assert result == text
+        assert reports[0]["status"] == "failed"
+        assert "Ambiguous" in reports[0]["error"]
+
+        edits = [ModifyText(target_text="word", new_text="WORD", match_mode="first")]
         result = apply_edits_to_markdown(text, edits)
         assert result.count("{--word--}") == 1
         assert result == "{--word--}{++WORD++} word word"
@@ -366,9 +375,16 @@ class TestApplyEditsToMarkdown:
 
     def test_same_word_multiple_occurrences(self):
         text = "The fee shall be paid. The fee is non-refundable. The fee covers all services."
+        # Ambiguous strict target fails like apply (QA 2026-07-18 M1)…
         result = apply_edits_to_markdown(text, [ModifyText(target_text="fee", new_text="payment")])
+        assert result == text
+        # …match_mode="first" marks only the first occurrence…
+        result = apply_edits_to_markdown(text, [ModifyText(target_text="fee", new_text="payment", match_mode="first")])
         assert result.count("{--fee--}") == 1
         assert result.startswith("The {--fee--}{++payment++}")
+        # …and match_mode="all" marks every occurrence.
+        result = apply_edits_to_markdown(text, [ModifyText(target_text="fee", new_text="payment", match_mode="all")])
+        assert result.count("{--fee--}{++payment++}") == 3
 
     def test_very_long_text_performance(self):
         text = "word " * 10000 + "TARGET"

@@ -21,7 +21,7 @@ from adeu.utils.docx import (
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
-    iter_document_parts,
+    iter_document_parts_with_kind,
     iter_paragraph_content,
 )
 from adeu.utils.safe_regex import user_finditer, user_search
@@ -40,6 +40,12 @@ class TextSpan:
     del_id: Optional[str] = None
     hyperlink_id: Optional[str] = None
     comment_ids: Optional[List[str]] = None
+    # Which OPC part (index into DocumentMapper.part_ranges) this span was
+    # projected from. Text edits may never resolve across two different
+    # parts — the QA 2026-07-18 C1 corruption wrote body text into a footer.
+    part_index: int = 0
+    # True for the read-only image marker projection ![alt](docx-image:N).
+    is_image_marker: bool = False
 
 
 def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
@@ -185,9 +191,17 @@ class DocumentMapper:
         self._text_chunks: List[str] = []
         self.full_text = ""
         self._plain_projection = None
+        # (start, end, kind) per projected part, in projection order. Spans
+        # carry the matching index in .part_index. Together these let the
+        # engine refuse or re-anchor edits at OPC part boundaries (QA C1).
+        self.part_ranges: List[Tuple[int, int, str]] = []
+        self._current_part_index = 0
 
-        for part in iter_document_parts(self.doc):
+        for part_idx, (part, part_kind) in enumerate(iter_document_parts_with_kind(self.doc)):
+            self._current_part_index = part_idx
+            part_start = current_offset
             current_offset = self._map_blocks(part, current_offset)
+            self.part_ranges.append((part_start, current_offset, part_kind))
 
             # Add part separator if needed, or rely on block separators
             if self.spans and self.spans[-1].text != "\n\n":
@@ -203,6 +217,39 @@ class DocumentMapper:
         # The appendix is not part of the mapping engine's projection —
         # an O(N) calculation redlining never needs.
         self.appendix_start_index = -1
+
+    def _nonempty_part_ranges(self) -> List[Tuple[int, int, int, str]]:
+        """(part_index, start, end, kind) for parts that projected any text."""
+        return [(i, s, e, k) for i, (s, e, k) in enumerate(self.part_ranges) if e > s]
+
+    def part_kind_of(self, part_index: int) -> Optional[str]:
+        if 0 <= part_index < len(self.part_ranges):
+            return self.part_ranges[part_index][2]
+        return None
+
+    def part_kind_at(self, index: int) -> Optional[str]:
+        """Kind of the part whose projected range contains `index`, or None."""
+        for _i, start, end, kind in self._nonempty_part_ranges():
+            if start <= index <= end:
+                return kind
+        return None
+
+    def part_boundary_at(self, index: int) -> Optional[Tuple[int, int]]:
+        """
+        When `index` falls strictly AFTER one part's text and at-or-before the
+        start of the next part's text (i.e. inside the "\\n\\n" separator or
+        exactly at the next part's first character), returns
+        (previous_part_index, next_part_index). Returns None everywhere else —
+        including index == previous part's end, which is an ordinary
+        end-of-part text position, not a boundary gap.
+        """
+        ranges = self._nonempty_part_ranges()
+        for j in range(1, len(ranges)):
+            prev_i, _ps, prev_end, _pk = ranges[j - 1]
+            next_i, next_start, _ne, _nk = ranges[j]
+            if prev_end < index <= next_start:
+                return (prev_i, next_i)
+        return None
 
     def _map_blocks(self, container, offset: int) -> int:
         current = offset
@@ -348,7 +395,14 @@ class DocumentMapper:
         """
         current = start_offset
 
-        span = TextSpan(start=current, end=current, text="", run=None, paragraph=paragraph)
+        span = TextSpan(
+            start=current,
+            end=current,
+            text="",
+            run=None,
+            paragraph=paragraph,
+            part_index=self._current_part_index,
+        )
         self.spans.append(span)
 
         active_ids: set[str] = set()
@@ -384,6 +438,7 @@ class DocumentMapper:
                         del_id=d_id,
                         hyperlink_id=active_hyperlink_id,
                         comment_ids=c_ids if c_ids else None,
+                        part_index=self._current_part_index,
                     )
                     self.spans.append(span)
                     self._text_chunks.append(txt)
@@ -568,6 +623,16 @@ class DocumentMapper:
                     active_fmt[item.id] = item
                 elif item.type == "fmt_end":
                     active_fmt.pop(item.id, None)
+                elif item.type == "image":
+                    if (self.clean_view and active_del) or (self.original_view and active_ins):
+                        continue
+                    flush_pending_runs()
+                    current_wrappers = ("", "")
+                    current_style = ("", "")
+                    alt = (item.date or "image").replace("]", ")").replace("\n", " ")
+                    txt = f"![{alt}](docx-image:{item.id})"
+                    self._add_virtual_text(txt, current, paragraph, is_image_marker=True)
+                    current += len(txt)
                 elif item.type in ("footnote", "endnote"):
                     flush_pending_runs()
                     current_wrappers = ("", "")
@@ -680,6 +745,7 @@ class DocumentMapper:
         offset: int,
         context_paragraph: Optional[Paragraph],
         hyperlink_id: Optional[str] = None,
+        is_image_marker: bool = False,
     ):
         span = TextSpan(
             start=offset,
@@ -688,6 +754,8 @@ class DocumentMapper:
             run=None,  # Virtual
             paragraph=context_paragraph,
             hyperlink_id=hyperlink_id,
+            part_index=self._current_part_index,
+            is_image_marker=is_image_marker,
         )
         self.spans.append(span)
         self._text_chunks.append(text)
