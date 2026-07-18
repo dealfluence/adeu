@@ -659,8 +659,13 @@ class RedlineEngine:
         if stripped_text.startswith("* ") or stripped_text.startswith("- "):
             return stripped_text[2:].strip(), "List Paragraph"
 
-        # Numbered Lists (e.g., "1. ", "2. ", "10. ")
-        match = re.match(r"^\d+\.\s+", stripped_text)
+        # Numbered lists: the projection emits ordered items with a CONSTANT
+        # "1. " marker (Markdown renumbers), so only that exact shape converts
+        # back into a list style. Any other leading number ("2024. Year in
+        # review", "3. Clause text") is literal document text. Continuation
+        # items inside an existing list anchor keep full "\d+." handling via
+        # the list-anchored insertion path.
+        match = re.match(r"^1\.\s+", stripped_text)
         if match:
             return stripped_text[match.end() :].strip(), "List Number"
 
@@ -724,6 +729,7 @@ class RedlineEngine:
         suppress_inherited: bool = False,
         insert_before: bool = False,
         reuse_id: Optional[str] = None,
+        positional_anchor_run: Optional[Run] = None,
     ) -> Tuple[Optional[Any], Optional[Any]]:
         """
         Inserts text. If text contains newlines, splits into multiple paragraphs.
@@ -733,6 +739,12 @@ class RedlineEngine:
         tracking markers in pPr/rPr) shares that w:id. This collapses multi-
         paragraph and multi-run insertions into a single logical revision
         from the agent's point of view.
+
+        `anchor_run` supplies run STYLING and may be the run after the
+        insertion point (_determine_style_source). `positional_anchor_run`
+        names the run the insertion physically follows; suffix relocation for
+        paragraph-splitting insertions keys on it (falling back to
+        anchor_run when the two coincide).
         """
         lines = re.split(r"[\r\n]+", text)
         if not lines:
@@ -906,9 +918,17 @@ class RedlineEngine:
         positional_anchor = None
         suffix_nodes: list = []
         if current_p is not None:
-            positional_anchor = (
-                ins_elem if ins_elem is not None else (anchor_run._element if anchor_run is not None else None)
-            )
+            # ins_elem is attached by the CALLER after this method returns, so
+            # it usually has no parent yet and cannot locate the insertion
+            # point. The positional anchor run IS attached, and the insertion
+            # lands immediately after it — its following siblings are the
+            # suffix that relocates into the last new paragraph when the text
+            # carries paragraph breaks.
+            pos_run = positional_anchor_run or anchor_run
+            if ins_elem is not None and ins_elem.getparent() is not None:
+                positional_anchor = ins_elem
+            elif pos_run is not None and pos_run._element.getparent() is not None:
+                positional_anchor = pos_run._element
             while positional_anchor is not None and positional_anchor.getparent() is not current_p:
                 positional_anchor = positional_anchor.getparent()
                 if positional_anchor is current_p:
@@ -1480,10 +1500,8 @@ class RedlineEngine:
             ):
                 continue
             if not edit.target_text:
-                # A text-anchored edit with no anchor can never resolve. It
-                # used to be silently "skipped" at apply time while the batch
-                # still wrote an unmodified output (QA 2026-07-18 M2); reject
-                # it up front so the transactional contract applies.
+                # A text-anchored edit with no anchor can never resolve;
+                # reject it up front so the transactional contract applies.
                 errors.append(
                     f"- Edit {i + 1} Failed: target_text is empty. Pure insertions are expressed as a "
                     "replacement: put the text immediately around the insertion point in target_text "
@@ -2135,7 +2153,7 @@ class RedlineEngine:
                     # mapper produced the offset: a clean-view index resolved
                     # against the raw mapper lands rows at the wrong position
                     # once earlier edits in the batch put tracked changes in
-                    # the anchor row (QA 2026-07-18 v6 H1).
+                    # the anchor row.
                     edit._resolved_start_idx = matches[0][0]
                     edit._active_mapper_ref = resolved_mapper
                     resolved_edits.append((edit, None))
@@ -2318,8 +2336,8 @@ class RedlineEngine:
             return False
 
         # The offset must be looked up in the coordinate space it was
-        # resolved in (QA 2026-07-18 v6 H1): a clean-view offset applied to
-        # the raw mapper points at earlier text once tracked changes exist.
+        # resolved in: a clean-view offset applied to the raw mapper points
+        # at earlier text once tracked changes exist.
         active_mapper = edit._active_mapper_ref or self.mapper
         target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
         if not target_runs:
@@ -2378,7 +2396,7 @@ class RedlineEngine:
         if start_idx is None:
             return False
 
-        # Same coordinate-space rule as _apply_insert_row (QA v6 H1).
+        # Same coordinate-space rule as _apply_insert_row.
         active_mapper = edit._active_mapper_ref or self.mapper
         target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
         if not target_runs:
@@ -2695,12 +2713,28 @@ class RedlineEngine:
             actual_cells = actual_doc_text.split("|")
             new_cells = effective_new_text.split("|")
 
-            if len(actual_cells) == len(new_cells) and len(actual_cells) > 1:
+            if len(actual_cells) != len(new_cells):
+                # Reject structural modifications to tables (adding/removing columns) via text replacement
+                raise BatchValidationError(
+                    [
+                        f"Target text spans {len(actual_cells)} table cells, but replacement provides "
+                        f"{len(new_cells)}. "
+                        "To modify text without altering table structure (rows or columns), ensure the replacement "
+                        "contains the exact same number of '|' separators "
+                        "(e.g., replace with 'CellC | ' to empty the second cell)."
+                    ]
+                )
+
+            if len(actual_cells) > 1:
                 sub_edits = []
 
-                # We use the real DOM structure (mapper.full_text) to advance offsets,
-                # completely bypassing any truncated strings from the LLM.
-                search_offset = start_idx
+                # actual_doc_text IS the document slice at
+                # [start_idx, start_idx + len): per-cell offsets are exact
+                # arithmetic over that slice — never a search of
+                # mapper.full_text, which cannot distinguish repeated cell
+                # text and lands in the wrong cell when the matched range
+                # starts inside a " | " separator.
+                cell_start_in_target = 0
 
                 # Determine which cell should receive the comment (first cell that actually changes, or cell 0)
                 target_comment_idx = 0
@@ -2712,14 +2746,7 @@ class RedlineEngine:
                 for cell_idx, (a_cell, n_cell) in enumerate(zip(actual_cells, new_cells, strict=True)):
                     a_clean = a_cell.strip()
                     n_clean = n_cell.strip()
-
-                    if a_clean:
-                        # Align exactly to where this cell's text begins in the real document
-                        actual_start = self.mapper.full_text.find(a_clean, search_offset)
-                        if actual_start == -1 or actual_start > search_offset + 10:
-                            actual_start = search_offset  # fallback if not found cleanly
-                    else:
-                        actual_start = search_offset
+                    actual_start = start_idx + cell_start_in_target + (a_cell.find(a_clean) if a_clean else 0)
 
                     should_attach_comment = (edit.comment is not None) and (cell_idx == target_comment_idx)
 
@@ -2737,29 +2764,13 @@ class RedlineEngine:
                             se._split_group_id = start_idx
                         sub_edits.extend(cell_sub_edits)
 
-                    # Advance search_offset to the start of the next cell safely
-                    if a_clean:
-                        search_offset = actual_start + len(a_clean)
-
-                    next_pipe = self.mapper.full_text.find(" | ", search_offset)
-                    if next_pipe != -1 and next_pipe <= search_offset + 10:
-                        # The start of the next cell is exactly 3 chars after the pipe index
-                        search_offset = next_pipe + 3
-                    else:
-                        search_offset += len(a_cell) + 1
+                    cell_start_in_target += len(a_cell) + 1  # +1 for the '|'
 
                 return sub_edits
-            else:
-                # Reject structural modifications to tables (adding/removing columns) via text replacement
-                raise BatchValidationError(
-                    [
-                        f"Target text spans {len(actual_cells)} table cells, but replacement provides "
-                        f"{len(new_cells)}. "
-                        "To modify text without altering table structure (rows or columns), ensure the replacement "
-                        "contains the exact same number of '|' separators "
-                        "(e.g., replace with 'CellC | ' to empty the second cell)."
-                    ]
-                )
+            # Exactly one "cell": the target merely brushes a separator (its
+            # match range starts or ends inside " | ") without crossing into
+            # another cell's text. That is an ordinary in-cell edit — fall
+            # through to the standard resolution.
 
         if actual_doc_text == effective_new_text or edit.target_text == effective_new_text:
             proxy_edit = ModifyText(
@@ -2842,13 +2853,12 @@ class RedlineEngine:
             if split_sub_edits:
                 return split_sub_edits
 
-        # QA 2026-07-18 v6 H2: after trimming shared context, an edit whose
-        # target remainder is EMPTY is a pure insertion with exactly one hunk.
-        # Resolve it directly at the effective offset instead of word-diffing
-        # the full strings: dmp's alignment may cross-match punctuation
-        # between the shared context and the inserted text (pairing the
-        # period of "two." with "marker."), splitting the insertion around a
-        # stranded suffix character and gluing paragraphs after accept-all.
+        # After trimming shared context, an edit whose target remainder is
+        # EMPTY is a pure insertion with exactly one hunk. Resolve it
+        # directly at the effective offset instead of word-diffing the full
+        # strings: dmp's alignment can cross-match punctuation between the
+        # shared context and the inserted text (pairing the period of
+        # "two." with "marker.") and split the insertion apart.
         if not final_target and final_new:
             proxy_edit = ModifyText(
                 type="modify",
@@ -3044,16 +3054,15 @@ class RedlineEngine:
         if op == EditOperationType.INSERTION:
             final_new_text = edit.new_text or ""
 
-            # QA 2026-07-18 C1: a MACHINE-PINNED pure insertion (diff/text
-            # round-trip output: authored with an empty target and no parent
-            # edit) positioned in the separator gap between the body and a
-            # following part used to anchor on the NEXT part's first
-            # paragraph, writing the new final body paragraph into
-            # word/footer1.xml. Re-anchor it to the end of the body and force
-            # new-paragraph semantics. Insertions DERIVED from a
-            # target-anchored edit (parent ref set — e.g. prepending "DRAFT "
-            # to "FOOTER MARKER") keep the user's chosen anchor: their
-            # context names the part they meant.
+            # A MACHINE-PINNED pure insertion (diff/text round-trip output:
+            # authored with an empty target and no parent edit) positioned in
+            # the separator gap between the body and a following part anchors
+            # to the end of the BODY with forced new-paragraph semantics —
+            # anchoring on the next part's first paragraph writes the new
+            # final body paragraph into word/footer1.xml. Insertions DERIVED
+            # from a target-anchored edit (parent ref set — e.g. prepending
+            # "DRAFT " to "FOOTER MARKER") keep the user's chosen anchor:
+            # their context names the part they meant.
             boundary_anchor: Optional[TextSpan] = None
             boundary = active_mapper.part_boundary_at(start_idx) if hasattr(active_mapper, "part_boundary_at") else None
             is_machine_pure_insertion = not edit.target_text and getattr(edit, "_parent_edit_ref", None) is None
@@ -3149,6 +3158,10 @@ class RedlineEngine:
                     comment=edit.comment,
                     insert_before=insert_before,
                     reuse_id=ins_id,
+                    # style_run may be the run AFTER the insertion point (it
+                    # carries formatting only); the insertion physically
+                    # follows anchor_run — suffix relocation keys on it.
+                    positional_anchor_run=anchor_run,
                 )
                 if ins_elem is not None:
                     if parent.tag == qn("w:ins"):

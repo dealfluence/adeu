@@ -666,8 +666,8 @@ def apply_structural_ops_to_markdown(
     Renders structured table-row operations (insert_row / delete_row) into a
     CriticMarkup preview: a deleted row's line is wrapped in {--…--}, an
     inserted row appears as a {++cells | joined | like | this++} line beside
-    its anchor (QA 2026-07-18 v6 L3 — structural changes belong in the
-    rendered preview, not in a stderr footnote).
+    its anchor — structural changes belong in the rendered preview, not in
+    a stderr footnote.
 
     Anchors resolve against each line's CLEAN reading, mirroring the apply
     engine: an insert_row anchored on the final text of a row an earlier

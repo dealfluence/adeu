@@ -56,7 +56,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
     """
     Stages to a same-directory temporary file and os.replace()s it into
     place: a failed or interrupted write never truncates or corrupts an
-    existing file at `path` (QA 2026-07-18 v6 M1).
+    existing file at `path`.
     """
     import os
     import tempfile
@@ -264,11 +264,10 @@ def _sanitize_baseline(
 
     Returns the Document to continue sanitizing/saving: the BASELINE package
     with the working document's changes applied as tracked changes. Working
-    on the baseline package (instead of grafting its body into the working
-    document, as pre-1.23 code did) keeps every relationship id (hyperlinks,
-    images, headers) resolvable — the graft produced dangling rIds, raw
-    KeyError('rIdN') crashes and files LibreOffice refused to open
-    (QA 2026-07-18 H3).
+    on the baseline package keeps every relationship id (hyperlinks, images,
+    headers) resolvable; grafting the recomputed body into the working
+    document's package leaves dangling rIds and produces files other
+    applications refuse to open.
     """
     # Step 1: Extract structured projections from both documents
     with open(input_path, "rb") as f:
@@ -404,7 +403,7 @@ def _apply_common_transforms(doc, report: SanitizeReport):
 
 
 # Core-property elements the pipeline claims to scrub; the post-sanitize
-# verification re-checks each one in the SAVED bytes (QA 2026-07-18 v6 C1).
+# verification re-checks each one in the SAVED bytes.
 _DC_NS = "http://purl.org/dc/elements/1.1/"
 _CP_NS = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
 _VERIFIED_CORE_FIELDS = (
@@ -423,7 +422,7 @@ _VERIFIED_CORE_FIELDS = (
 
 def _verify_sanitized_package(output_bytes: bytes) -> None:
     """
-    Post-sanitize package scan (QA 2026-07-18 v6 C1): before any output is
+    Post-sanitize package scan: before any output is
     written or a report rendered, re-open the SAVED bytes — bypassing every
     python-docx caching layer — and verify the claims the report is about to
     make. A "Result: CLEAN" verdict over a package that still carries custom

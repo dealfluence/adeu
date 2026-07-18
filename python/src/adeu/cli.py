@@ -240,9 +240,8 @@ def _paths_alias_same_file(a: Path, b: Path) -> bool:
 def _guard_text_output_path(output: Path, protected: "list[tuple[Path, str]]", payload: str = "extracted text") -> None:
     """
     Refuses text-payload output paths that would destroy a document the
-    command depends on. `adeu extract victim.docx -o victim.docx` used to
-    replace the only source DOCX with UTF-8 text and exit 0
-    (QA 2026-07-18 v6 C2). `protected` maps each input/output path to its
+    command depends on — writing a text payload over a DOCX replaces the
+    package wholesale. `protected` maps each input/output path to its
     role for the error message; DOCX-suffixed targets are rejected outright
     so extracted text can never masquerade as a Word document.
     """
@@ -264,8 +263,8 @@ def _guard_text_output_path(output: Path, protected: "list[tuple[Path, str]]", p
 def _require_docx_output(output: "Path | None") -> None:
     """
     Commands whose output is a DOCX package require the output name to say
-    so. A binary Word package behind result.txt breaks every downstream
-    consumer that trusts the extension (QA 2026-07-18 v6 M1).
+    so: a binary Word package behind result.txt breaks every downstream
+    consumer that trusts the extension.
     """
     if output is not None and output.suffix.lower() != ".docx":
         _cli_error(
@@ -278,7 +277,7 @@ def _require_docx_output(output: "Path | None") -> None:
 
 def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
     """
-    Single write path for CLI output files (QA 2026-07-18 v6 M1):
+    Single write path for CLI output files:
 
       - stages to a same-directory temporary file and os.replace()s it into
         place, so a failed or interrupted write never truncates or corrupts
@@ -577,8 +576,8 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
 
 def _changes_file_is_json_batch(path: Path) -> bool:
     """
-    The changes file's kind is decided by CONTENT, not filename
-    (QA 2026-07-18 v6 M4): a JSON array (or object) is a structured edit
+    The changes file's kind is decided by CONTENT, not filename:
+    a JSON array (or object) is a structured edit
     batch whatever the file is called — temporary files rarely carry
     conventional suffixes. A .json suffix always means a batch, so a
     malformed .json file surfaces as a parse error instead of being diffed
@@ -625,8 +624,8 @@ def handle_extract(args):
     _set_json_mode(args.json)
     _warn_ignored_extract_flags(args)
     if args.output:
-        # extract's -o payload is text (or JSON): writing it over the input
-        # DOCX destroyed the only source document (QA 2026-07-18 v6 C2).
+        # extract's -o payload is text (or JSON); it never lands on a path
+        # that aliases the input DOCX.
         protected = [(args.input, "input DOCX")] if args.input else []
         _guard_text_output_path(args.output, protected)
     if args.live:
@@ -747,7 +746,7 @@ def handle_extract(args):
         raise
     except Exception as e:
         # BuilderError carries argument-shaped failures (invalid
-        # --search-regex pattern, bad page value) — a usage error, exit
+        # --search-regex pattern, bad page value): a usage error, exit
         # code 2. Everything else is a runtime failure, exit code 1.
         from adeu.mcp_components._response_builders import BuilderError
 
@@ -1176,8 +1175,7 @@ def handle_markup(args):
     )
 
     # Structural row operations render into the same preview: deleted rows
-    # wrapped in {--…--}, inserted rows as {++…++} lines beside their anchor
-    # (QA 2026-07-18 v6 L3).
+    # wrapped in {--…--}, inserted rows as {++…++} lines beside their anchor.
     result = apply_structural_ops_to_markdown(result, row_ops, edit_reports)
 
     failed = [r for r in edit_reports if r["status"] == "failed"]
@@ -1215,7 +1213,7 @@ def handle_markup(args):
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
     # markup's output is CriticMarkup text: it may never replace the DOCX
-    # input or the JSON edits batch (QA 2026-07-18 v6 C2). In-place output
+    # input or the JSON edits batch. In-place output
     # over a MARKDOWN input stays allowed — text-to-text preview in place is
     # an intentional workflow.
     protected = [(args.edits, "JSON edits file")]
@@ -1274,8 +1272,8 @@ def handle_sanitize(args: argparse.Namespace):
             output_path = input_path.parent / f"{input_path.stem}_sanitized{input_path.suffix}"
 
         if args.report_file:
-            # The report is text: writing it over the input DOCX or the
-            # sanitized output destroys a document (QA 2026-07-18 v6 C2).
+            # The report is text: it may never land on the input DOCX or
+            # the sanitized output path.
             _guard_text_output_path(
                 args.report_file,
                 [(input_path, "input DOCX"), (output_path, "sanitized output")],
@@ -1341,14 +1339,14 @@ def handle_sanitize(args: argparse.Namespace):
 
         if args.report_file:
             # Same text-report guard as single-file mode, across every batch
-            # input and every computed destination (QA 2026-07-18 v6 C2).
+            # input and every computed destination.
             batch_protected = [(p, "input DOCX") for p in input_files]
             batch_protected.extend((outdir / p.name, "sanitized output") for p in input_files)
             _guard_text_output_path(args.report_file, batch_protected, payload="the sanitize report")
 
         outdir.mkdir(parents=True, exist_ok=True)
 
-        # The batch is all-or-nothing (QA 2026-07-18 v6 M3): every output is
+        # The batch is all-or-nothing: every output is
         # sanitized into a staging file first; the staged files move into
         # place only when EVERY input succeeded. A blocked or failed input
         # means no outputs at all — automation never has to clean up a

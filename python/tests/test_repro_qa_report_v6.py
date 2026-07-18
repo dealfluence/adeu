@@ -937,3 +937,142 @@ class TestM6ExtractStartup:
         )
         result = subprocess.run([_sys.executable, "-c", probe], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis-found regressions (2026-07-18 fuzz hunt) — deterministic pins
+# ---------------------------------------------------------------------------
+
+
+class TestFuzzFoundRegressions:
+    """Each case is a minimized hypothesis counterexample; the property suite
+    (test_property_invariants.py) hunts the families, these pin the fixes."""
+
+    def _text_roundtrip(self, paras, mod, via_json=False):
+        from adeu.diff import make_edits_self_contained
+
+        orig = BytesIO()
+        doc = Document()
+        for p in paras:
+            doc.add_paragraph(p)
+        doc.save(orig)
+        text_orig = extract_text_from_stream(BytesIO(orig.getvalue()), clean_view=True)
+        text_mod = "\n\n".join(mod)
+        edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
+        if via_json:
+            edits = make_edits_self_contained(edits, text_orig)
+            dumped = json.loads(json.dumps([e.model_dump() for e in edits]))
+            edits = TypeAdapter(BatchChanges).validate_python(dumped)
+        engine = RedlineEngine(BytesIO(orig.getvalue()), author="Fuzz")
+        stats = engine.process_batch(list(edits))
+        assert stats["edits_skipped"] == 0, stats["skipped_details"]
+        engine.accept_all_revisions(remove_comments=True)
+        final = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+        assert final == text_mod
+
+    def test_paragraph_split_keeps_suffix(self):
+        """track_insert suffix relocation: 'alpha beta.' split into two."""
+        self._text_roundtrip(["alpha beta."], ["alpha.", "beta."])
+
+    def test_paragraph_split_with_changed_halves(self):
+        self._text_roundtrip(["alpha beta gamma."], ["alpha beta.", "gamma delta."])
+
+    def test_three_way_paragraph_split(self):
+        self._text_roundtrip(["p q."], ["p.", "q.", "r."])
+
+    def test_repetitive_prefix_insertion_via_json(self):
+        """Positional vs style anchor: insertion whose trim ends with a space."""
+        self._text_roundtrip(["0 00."], ["0 0.", "0 00."], via_json=True)
+
+    def test_inserted_plain_paragraph_with_number_lead_stays_plain(self):
+        """'2024. Year…' must not become a numbered-list item."""
+        self._text_roundtrip(["Intro."], ["Intro.", "2024. Year in review."], via_json=True)
+
+    def test_projected_list_marker_still_creates_list(self):
+        """The projection's own '1. ' shape keeps converting to a list."""
+        from adeu.models import ModifyText
+
+        orig = BytesIO()
+        doc = Document()
+        doc.add_paragraph("Intro.")
+        doc.save(orig)
+        engine = RedlineEngine(BytesIO(orig.getvalue()), author="Fuzz")
+        edit = ModifyText(type="modify", target_text="Intro.", new_text="Intro.\n\n1. first item")
+        stats = engine.process_batch([edit])
+        assert stats["edits_skipped"] == 0
+        raw = engine.save_to_stream().getvalue()
+        assert b"ListNumber" in ZipFile(BytesIO(raw)).read("word/document.xml").replace(b" ", b"")
+
+    def _table_roundtrip(self, rows, mod_rows, drop_pins):
+        orig = BytesIO()
+        doc = Document()
+        doc.add_paragraph("Lead paragraph.")
+        table = doc.add_table(rows=len(rows), cols=3)
+        for r, row in enumerate(rows):
+            for c, cell in enumerate(row):
+                table.rows[r].cells[c].text = cell
+        doc.add_paragraph("Trailing paragraph.")
+        doc.save(orig)
+
+        mod = BytesIO()
+        doc2 = Document()
+        doc2.add_paragraph("Lead paragraph.")
+        table2 = doc2.add_table(rows=len(mod_rows), cols=3)
+        for r, row in enumerate(mod_rows):
+            for c, cell in enumerate(row):
+                table2.rows[r].cells[c].text = cell
+        doc2.add_paragraph("Trailing paragraph.")
+        doc2.save(mod)
+
+        doc_o = Document(BytesIO(orig.getvalue()))
+        doc_m = Document(BytesIO(mod.getvalue()))
+        t_o, s_o = _extract_text_from_doc(doc_o, clean_view=True, include_appendix=False, return_structure=True)
+        t_m, s_m = _extract_text_from_doc(doc_m, clean_view=True, include_appendix=False, return_structure=True)
+        edits, warnings = generate_structured_edits(t_o, s_o, t_m, s_m)
+        assert not warnings, warnings
+        if drop_pins:
+            dumped = json.loads(json.dumps([e.model_dump() for e in edits]))
+            edits = TypeAdapter(BatchChanges).validate_python(dumped)
+        engine = RedlineEngine(BytesIO(orig.getvalue()), author="Fuzz")
+        stats = engine.process_batch(list(edits))
+        assert stats["edits_skipped"] == 0, stats["skipped_details"]
+        engine.accept_all_revisions(remove_comments=True)
+        final = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+        want = extract_text_from_stream(BytesIO(mod.getvalue()), clean_view=True)
+        assert final == want
+
+    def test_cell_edit_lands_in_the_right_cell_json(self):
+        """Middle-cell change on repetitive content: [0,0,0] -> [0,'0 0',0]."""
+        self._table_roundtrip([["0", "0", "0"]], [["0", "0 0", "0"]], drop_pins=True)
+
+    def test_cell_edit_lands_in_the_right_cell_in_process(self):
+        """The in-process (sanitize --baseline) shape of the same edit."""
+        self._table_roundtrip([["0", "0", "0"]], [["0", "0 0", "0"]], drop_pins=False)
+
+    def test_multi_cell_row_modification_json(self):
+        self._table_roundtrip([["0 0", "0 0", "00"]], [["0 0", "0", "0"]], drop_pins=True)
+
+    def test_cell_shrink_brushing_separator_json(self):
+        self._table_roundtrip([["0", "0 00", "0"]], [["0", "0", "0"]], drop_pins=True)
+
+    def test_text_path_cell_edit_roundtrip(self):
+        """Cell edits through the extract → edit text → apply path."""
+        orig = BytesIO()
+        doc = Document()
+        doc.add_paragraph("Lead paragraph.")
+        table = doc.add_table(rows=2, cols=3)
+        for r, row in enumerate([["Seats", "5", "€100"], ["Support", "1", "€500"]]):
+            for c, cell in enumerate(row):
+                table.rows[r].cells[c].text = cell
+        doc.add_paragraph("Trailing paragraph.")
+        doc.save(orig)
+        text_orig = extract_text_from_stream(BytesIO(orig.getvalue()), clean_view=True)
+        text_mod = text_orig.replace("Seats | 5 | €100", "Seats | 10 | €125")
+
+        edits = generate_edits_via_paragraph_alignment(text_orig, text_mod)
+        engine = RedlineEngine(BytesIO(orig.getvalue()), author="Fuzz")
+        stats = engine.process_batch(list(edits))
+        assert stats["edits_skipped"] == 0, stats["skipped_details"]
+        engine.accept_all_revisions(remove_comments=True)
+        final = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+        assert final == text_mod

@@ -362,3 +362,125 @@ describe("QA v6 H2: paragraph boundary preservation", () => {
     expect(finalText).toBe(wantText);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Hypothesis-found regressions (2026-07-18 fuzz hunt, ported from Python)
+// ---------------------------------------------------------------------------
+
+describe("QA v6 fuzz-found regressions", () => {
+  it("paragraph split keeps the suffix in the new paragraph", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "alpha beta.");
+    const buf = await doc.save();
+
+    const workDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "alpha beta.", new_text: "alpha.\n\nbeta." } as any,
+    ]);
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    engine.accept_all_revisions(true);
+    const finalText = await extractTextFromBuffer(await workDoc.save(), true);
+    expect(finalText).toBe("alpha.\n\nbeta.");
+  });
+
+  it("three-way paragraph split with changed content", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "p q.");
+    const buf = await doc.save();
+
+    const workDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "p q.", new_text: "p.\n\nq.\n\nr." } as any,
+    ]);
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    engine.accept_all_revisions(true);
+    const finalText = await extractTextFromBuffer(await workDoc.save(), true);
+    expect(finalText).toBe("p.\n\nq.\n\nr.");
+  });
+
+  it("plain paragraph starting with a number stays plain (no phantom list)", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Intro.");
+    const buf = await doc.save();
+
+    const workDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "Intro.", new_text: "Intro.\n\n2024. Year in review." } as any,
+    ]);
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    engine.accept_all_revisions(true);
+    const outBuf = await workDoc.save();
+    const finalText = await extractTextFromBuffer(outBuf, true);
+    expect(finalText).toBe("Intro.\n\n2024. Year in review.");
+    const { strFromU8, unzipSync } = await import("fflate");
+    const xml = strFromU8(unzipSync(new Uint8Array(outBuf))["word/document.xml"]);
+    expect(xml).not.toContain("ListNumber");
+  });
+
+  it("the projection's own '1. ' marker still creates a list item", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Intro.");
+    const buf = await doc.save();
+
+    const workDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "Intro.", new_text: "Intro.\n\n1. first item" } as any,
+    ]);
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    const outBuf = await workDoc.save();
+    const { strFromU8, unzipSync } = await import("fflate");
+    const xml = strFromU8(unzipSync(new Uint8Array(outBuf))["word/document.xml"]);
+    expect(xml).toContain("ListNumber");
+  });
+
+  it("cell edit on repetitive content lands in the right cell", async () => {
+    const orig = await buildTableDoc([["0", "0", "0"]]);
+    const mod = await buildTableDoc([["0", "0 0", "0"]]);
+    const origBuf = await orig.save();
+    const modBuf = await mod.save();
+
+    const o = extractWithStructure(await DocumentObject.load(origBuf));
+    const m = extractWithStructure(await DocumentObject.load(modBuf));
+    const { edits, warnings } = generate_structured_edits(o.text, o.structure, m.text, m.structure);
+    expect(warnings).toEqual([]);
+
+    const workDoc = await DocumentObject.load(origBuf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch(stripPins(edits));
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    engine.accept_all_revisions(true);
+    const finalText = await extractTextFromBuffer(await workDoc.save(), true);
+    const wantText = await extractTextFromBuffer(modBuf, true);
+    expect(finalText).toBe(wantText);
+  });
+
+  it("multi-cell row modification replays without pins", async () => {
+    const orig = await buildTableDoc([["0 0", "0 0", "00"]]);
+    const mod = await buildTableDoc([["0 0", "0", "0"]]);
+    const origBuf = await orig.save();
+    const modBuf = await mod.save();
+
+    const o = extractWithStructure(await DocumentObject.load(origBuf));
+    const m = extractWithStructure(await DocumentObject.load(modBuf));
+    const { edits } = generate_structured_edits(o.text, o.structure, m.text, m.structure);
+
+    const workDoc = await DocumentObject.load(origBuf);
+    const engine = new RedlineEngine(workDoc, "Fuzz");
+    const stats = engine.process_batch(stripPins(edits));
+    expect(stats.edits_skipped, JSON.stringify(stats.skipped_details)).toBe(0);
+
+    engine.accept_all_revisions(true);
+    const finalText = await extractTextFromBuffer(await workDoc.save(), true);
+    const wantText = await extractTextFromBuffer(modBuf, true);
+    expect(finalText).toBe(wantText);
+  });
+});

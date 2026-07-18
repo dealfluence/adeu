@@ -468,9 +468,8 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
     # Classification-style properties are textbook leak vectors ("Project
     # Falcon", "confidential,merger,..."). Unlike title they carry no
     # legitimate outbound formatting value, so strip them and say so.
-    # dc:identifier, dc:language and cp:version joined the list after QA
-    # 2026-07-18 v6 C1: identifiers are DMS/matter-ID carriers and were
-    # silently retained while the report said CLEAN.
+    # dc:identifier, dc:language and cp:version are scrubbed with them:
+    # identifiers are DMS/matter-ID carriers.
     for attr, label in (
         ("category", "Category"),
         ("keywords", "Keywords"),
@@ -605,8 +604,8 @@ def strip_custom_properties(doc: DocumentObject) -> list[str]:
     """
     Remove the custom document properties part (docProps/custom.xml) and its
     package relationship. Custom properties are a standard home for matter
-    numbers, client names, DMS identifiers and workflow secrets; leaving the
-    part in place while reporting "Result: CLEAN" was QA 2026-07-18 v6 C1.
+    numbers, client names, DMS identifiers and workflow secrets; a package
+    that keeps them can never be reported CLEAN.
     """
     pkg = doc.part.package
 

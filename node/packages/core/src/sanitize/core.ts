@@ -137,7 +137,7 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
 }
 
 // Core-property elements the pipeline claims to scrub; the post-sanitize
-// verification re-checks each one in the SAVED bytes (QA 2026-07-18 v6 C1).
+// verification re-checks each one in the SAVED bytes.
 const VERIFIED_CORE_FIELDS: Array<[string, string]> = [
   ['creator', 'author (dc:creator)'],
   ['lastModifiedBy', 'last modified by (cp:lastModifiedBy)'],
@@ -152,7 +152,7 @@ const VERIFIED_CORE_FIELDS: Array<[string, string]> = [
 ];
 
 /**
- * Post-sanitize package scan (QA 2026-07-18 v6 C1): re-open the SAVED bytes —
+ * Post-sanitize package scan: re-open the SAVED bytes —
  * bypassing every in-memory caching layer — and verify the claims the report
  * is about to make. A "Result: CLEAN" verdict over a package that still
  * carries custom properties or an identifier is worse than no sanitizer.

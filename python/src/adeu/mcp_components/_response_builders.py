@@ -73,9 +73,9 @@ class BuilderError(Exception):
     User-facing validation failure from a response builder (bad page number,
     invalid search pattern). Framework-free on purpose: these builders serve
     both the MCP server and the CLI, and importing fastmcp costs ~0.7 s —
-    more than the rest of an `adeu extract` invocation combined
-    (QA 2026-07-18 v6 M6). The MCP tool layer converts this to ToolError;
-    the CLI reports it as a usage error.
+    more than the rest of an `adeu extract` invocation combined. The MCP
+    tool layer converts this to ToolError; the CLI reports it as a usage
+    error.
     """
 
 
@@ -320,8 +320,8 @@ def build_search_response(
     # either accepts the literal hits or fixes its pattern, without burning a
     # turn on a hard error. The CLI path is strict — automation that asked
     # for regex semantics gets a non-zero exit, never silently-literal
-    # results (QA 2026-07-18 v6 M5). Patterns that blow the matching time
-    # budget (catastrophic backtracking) follow the same split.
+    # results. Patterns that blow the matching time budget (catastrophic
+    # backtracking) follow the same split.
     regex_downgraded_note = ""
     if search_regex:
         try:

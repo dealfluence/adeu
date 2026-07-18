@@ -435,9 +435,8 @@ export function scrub_doc_properties(doc: DocumentObject): string[] {
     // Classification-style properties are textbook leak vectors ("Project
     // Falcon", "confidential,merger,..."). Unlike title they carry no
     // legitimate outbound formatting value, so strip them and say so.
-    // dc:identifier, dc:language and cp:version joined the list after QA
-    // 2026-07-18 v6 C1: identifiers are DMS/matter-ID carriers and were
-    // silently retained while the report said CLEAN.
+    // dc:identifier, dc:language and cp:version are scrubbed with them:
+    // identifiers are DMS/matter-ID carriers.
     const leakFields: Array<[string, string]> = [
       ['category', 'Category'],
       ['keywords', 'Keywords'],
@@ -506,10 +505,10 @@ export function scrub_timestamps(doc: DocumentObject): string[] {
 
 /**
  * Fully ejects package members whose path matches `matcher`: the parsed part
- * list, the raw `pkg.unzipped` bytes (save() re-zips EVERY unzipped member,
- * so skipping this leaks the original bytes into the output — QA 2026-07-18
- * v6 C1), the [Content_Types].xml overrides, and every .rels Relationship
- * whose target matches `relTargetMatcher`.
+ * list, the raw `pkg.unzipped` bytes (save() re-zips EVERY unzipped
+ * member, so skipping this ships the original bytes in the output), the
+ * [Content_Types].xml overrides, and every .rels Relationship whose
+ * target matches `relTargetMatcher`.
  */
 function ejectPackageMembers(
   doc: DocumentObject,
@@ -578,8 +577,8 @@ const CUSTOM_PROPS_PATH = 'docProps/custom.xml';
 /**
  * Remove the custom document properties part (docProps/custom.xml) and its
  * package relationship. Custom properties are a standard home for matter
- * numbers, client names, DMS identifiers and workflow secrets; leaving the
- * part in place while reporting "Result: CLEAN" was QA 2026-07-18 v6 C1.
+ * numbers, client names, DMS identifiers and workflow secrets; a package
+ * that keeps them can never be reported CLEAN.
  */
 export function strip_custom_properties(doc: DocumentObject): string[] {
   const part = doc.pkg.getPartByPath(CUSTOM_PROPS_PATH);
