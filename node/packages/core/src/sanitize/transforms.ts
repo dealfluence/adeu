@@ -543,6 +543,46 @@ export function strip_image_alt_text(doc: DocumentObject): string[] {
   return count ? [`Image alt text: ${count} auto-generated descriptions removed`] : [];
 }
 
+/**
+ * Detect watermark-like embedded text objects (VML shapes with a textpath,
+ * Word's native watermark mechanism) in headers, footers and the body.
+ * Non-destructive: returns warnings so the report never declares a document
+ * fully clean while such an object silently remains (QA 2026-07-18 M3).
+ */
+export function detect_watermarks(doc: DocumentObject): string[] {
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+
+  for (const part of doc.pkg.parts) {
+    const name = String(part.partname);
+    let location: string;
+    if (name.startsWith("/word/header")) location = "header";
+    else if (name.startsWith("/word/footer")) location = "footer";
+    else if (name === "/word/document.xml") location = "body";
+    else continue;
+
+    let textpaths: Element[];
+    try {
+      textpaths = findDescendantsByLocalName(part._element, "textpath");
+    } catch {
+      continue;
+    }
+    for (const tp of textpaths) {
+      const text = (tp.getAttribute("string") || "").trim();
+      const key = `${location}\x1f${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const label = text ? `"${_truncate(text, 60)}"` : "(no text)";
+      warnings.push(
+        `Watermark-like text object in ${location}: ${label} — NOT removed. ` +
+          "It remains in the document package and may render in other applications; " +
+          "review and remove it in Word if it must not reach the counterparty.",
+      );
+    }
+  }
+  return warnings;
+}
+
 export function audit_hyperlinks(doc: DocumentObject): string[] {
   const internal = ["sharepoint.com", "onedrive.com", ".internal", "intranet", "localhost", "10.", "192.168.", "172.16."];
   const warnings: string[] = [];

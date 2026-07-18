@@ -165,6 +165,7 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 *   **Zero-Dependency Finalization**: The Node.js `.mcpb` bundle strictly omits PDF export (`docx2pdf`/LibreOffice) and AES encryption (`msoffcrypto-tool`) capabilities from the `finalize_document` tool to strictly maintain its zero-dependency architecture.
 *   **Native OOXML Locking**: Document protection is achieved natively by injecting `<w:documentProtection w:edit="readOnly" w:enforcement="1"/>` directly into `word/settings.xml` using `@xmldom/xmldom`.
 *   **XML Serialization Quirks**: Emptying elements in `@xmldom/xmldom` (`el.textContent = ""`) serializes them as self-closing tags (e.g., `<Template/>` instead of `<Template></Template>`), requiring mathematically equivalent but structurally loose string assertions in unit tests.
+*   **Lazy w16du Declaration at Save (Node)**: `DocumentObject.save()` declares `xmlns:w16du` on any part whose serialized XML uses the prefix without a root declaration — the Node relocation of Python's `_inject_w16du_if_needed`. Required once part-boundary-correct anchoring (QA 2026-07-18 C1) started writing tracked changes into header/footer/footnote parts; unmodified parts never carry the prefix and stay byte-identical.
 
 ## Developer Workflows
 

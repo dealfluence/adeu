@@ -42,6 +42,62 @@ function _get_paragraph_text(p: Paragraph): string {
   return text;
 }
 
+const _TERM_BODY = "[A-Z][A-Za-z0-9\\s\\-&'’]{1,60}";
+// Definition typography, matched repeatedly within a paragraph (QA 2026-07-18
+// M7 — a paragraph defining Alpha, Beta AND Gamma must yield all three):
+//   1. paragraph-leading quoted term (optionally after a numbering token)
+//   2. sentence-leading quoted term (after . ; : ! ?)
+//   3. parenthesized inline definition — (the "Term")
+// The 'd' flag (ES2022 match indices) recovers each term's exact position for
+// position-keyed dedupe, mirroring Python's m.start(1).
+const _LEADING_TERM_RE = new RegExp(
+  `^(?:[\\d.\\-()a-zA-Z]+\\s*)?["“](${_TERM_BODY})["”]`,
+  "d",
+);
+// Like the leading pattern, a sentence-start definition may carry a numbering
+// token ('… the product. 2.2 "Beta" means …').
+const _SENTENCE_TERM_RE = new RegExp(
+  `(?<=[.;:!?])\\s+(?:[\\d.\\-()a-zA-Z]+\\s+)?["“](${_TERM_BODY})["”]`,
+  "dg",
+);
+const _INLINE_TERM_RE = new RegExp(
+  `\\([^)]*?["“](${_TERM_BODY})["”][^)]*?\\)`,
+  "dg",
+);
+
+/**
+ * All defined terms declared in one paragraph, in appearance order,
+ * deduplicated. Language-agnostic: keyed on quoting typography, never on
+ * English phrases like "means".
+ */
+export function extract_terms_from_paragraph(text: string): string[] {
+  const found: [number, string][] = [];
+  const leading = _LEADING_TERM_RE.exec(text) as RegExpExecArray & {
+    indices?: Array<[number, number]>;
+  };
+  if (leading && leading.indices && leading.indices[1]) {
+    found.push([leading.indices[1][0], leading[1].trim()]);
+  }
+  for (const m of text.matchAll(_SENTENCE_TERM_RE)) {
+    const indices = (m as any).indices as Array<[number, number]> | undefined;
+    if (indices && indices[1]) found.push([indices[1][0], m[1].trim()]);
+  }
+  for (const m of text.matchAll(_INLINE_TERM_RE)) {
+    const indices = (m as any).indices as Array<[number, number]> | undefined;
+    if (indices && indices[1]) found.push([indices[1][0], m[1].trim()]);
+  }
+
+  const terms: string[] = [];
+  const seen_positions = new Set<number>();
+  found.sort((a, b) => a[0] - b[0]);
+  for (const [pos, term] of found) {
+    if (seen_positions.has(pos)) continue;
+    seen_positions.add(pos);
+    terms.push(term);
+  }
+  return terms;
+}
+
 export function extract_all_domain_metadata(
   doc: DocumentObject,
   base_text: string,
@@ -58,26 +114,14 @@ export function extract_all_domain_metadata(
   > = {};
   const raw_references: [string, string][] = [];
 
-  const leading_re =
-    /^(?:[\d.\-()a-zA-Z]+\s*)?["“]([A-Z][A-Za-z0-9\s\-&'’]{1,60})["”]/;
-  const inline_re = /\([^)]*?["“]([A-Z][A-Za-z0-9\s\-&'’]{1,60})["”][^)]*?\)/g;
-
   for (const item of iter_block_items(doc)) {
     if (!(item instanceof Paragraph)) continue;
 
     const text = _get_paragraph_text(item).trim();
     if (!text) continue;
 
-    const extracted_terms: string[] = [];
-    const leading_match = text.match(leading_re);
-    if (leading_match) extracted_terms.push(leading_match[1].trim());
-
-    const inline_matches = text.matchAll(inline_re);
-    for (const m of inline_matches) {
-      extracted_terms.push(m[1].trim());
-    }
-
-    for (const term of extracted_terms) {
+    // 1. Extract Definitions (every declaration in the paragraph — QA M7)
+    for (const term of extract_terms_from_paragraph(text)) {
       if (definitions[term]) duplicates.add(term);
       else definitions[term] = { count: 0 };
     }

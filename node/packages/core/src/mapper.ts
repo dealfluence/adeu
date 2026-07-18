@@ -11,7 +11,7 @@ import {
   is_heading_paragraph,
   is_native_heading,
   iter_block_items,
-  iter_document_parts,
+  iter_document_parts_with_kind,
   iter_paragraph_content,
 } from "./utils/docx.js";
 
@@ -25,6 +25,12 @@ export interface TextSpan {
   del_id?: string | null;
   hyperlink_id?: string | null;
   comment_ids?: string[];
+  // Which OPC part (index into DocumentMapper.part_ranges) this span was
+  // projected from. Text edits may never resolve across two different
+  // parts — the QA 2026-07-18 C1 corruption wrote body text into a footer.
+  part_index: number;
+  // True for the read-only image marker projection ![alt](docx-image:N).
+  is_image_marker?: boolean;
 }
 
 export function renumber_snapshot_ids(
@@ -120,6 +126,11 @@ export class DocumentMapper {
   public full_text: string = "";
   public spans: TextSpan[] = [];
   public appendix_start_index: number = -1;
+  // [start, end, kind] per projected part, in projection order. Spans carry
+  // the matching index in .part_index. Together these let the engine refuse
+  // or re-anchor edits at OPC part boundaries (QA 2026-07-18 C1).
+  public part_ranges: [number, number, string][] = [];
+  private _current_part_index = 0;
   private _text_chunks: string[] = [];
   private _plain_projection: [string, number[]] | null = null;
 
@@ -141,9 +152,15 @@ export class DocumentMapper {
     this._text_chunks = [];
     this.full_text = "";
     this._plain_projection = null;
+    this.part_ranges = [];
+    this._current_part_index = 0;
 
-    for (const part of iter_document_parts(this.doc)) {
+    let part_idx = 0;
+    for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
+      this._current_part_index = part_idx;
+      const part_start = current_offset;
       current_offset = this._map_blocks(part, current_offset);
+      this.part_ranges.push([part_start, current_offset, part_kind]);
 
       if (
         this.spans.length > 0 &&
@@ -152,6 +169,7 @@ export class DocumentMapper {
         this._add_virtual_text("\n\n", current_offset, null);
         current_offset += 2;
       }
+      part_idx++;
     }
 
     while (
@@ -164,6 +182,51 @@ export class DocumentMapper {
 
     this.full_text = this._text_chunks.join("");
     this.appendix_start_index = -1;
+  }
+
+  /** [part_index, start, end, kind] for parts that projected any text. */
+  private _nonempty_part_ranges(): [number, number, number, string][] {
+    const out: [number, number, number, string][] = [];
+    for (let i = 0; i < this.part_ranges.length; i++) {
+      const [s, e, k] = this.part_ranges[i];
+      if (e > s) out.push([i, s, e, k]);
+    }
+    return out;
+  }
+
+  public part_kind_of(part_index: number): string | null {
+    if (part_index >= 0 && part_index < this.part_ranges.length) {
+      return this.part_ranges[part_index][2];
+    }
+    return null;
+  }
+
+  /** Kind of the part whose projected range contains `index`, or null. */
+  public part_kind_at(index: number): string | null {
+    for (const [, start, end, kind] of this._nonempty_part_ranges()) {
+      if (start <= index && index <= end) return kind;
+    }
+    return null;
+  }
+
+  /**
+   * When `index` falls strictly AFTER one part's text and at-or-before the
+   * start of the next part's text (i.e. inside the "\n\n" separator or
+   * exactly at the next part's first character), returns
+   * [previous_part_index, next_part_index]. Returns null everywhere else —
+   * including index == previous part's end, which is an ordinary
+   * end-of-part text position, not a boundary gap.
+   */
+  public part_boundary_at(index: number): [number, number] | null {
+    const ranges = this._nonempty_part_ranges();
+    for (let j = 1; j < ranges.length; j++) {
+      const [prev_i, , prev_end] = ranges[j - 1];
+      const [next_i, next_start] = ranges[j];
+      if (prev_end < index && index <= next_start) {
+        return [prev_i, next_i];
+      }
+    }
+    return null;
   }
 
   private _map_blocks(container: any, offset: number): number {
@@ -335,6 +398,7 @@ export class DocumentMapper {
       text: "",
       run: null,
       paragraph,
+      part_index: this._current_part_index,
     };
     this.spans.push(span);
 
@@ -377,6 +441,7 @@ export class DocumentMapper {
             del_id: d_id || undefined,
             hyperlink_id: active_hyperlink_id || undefined,
             comment_ids: c_ids.length > 0 ? c_ids : undefined,
+            part_index: this._current_part_index,
           };
           this.spans.push(s);
           this._text_chunks.push(txt);
@@ -609,7 +674,21 @@ export class DocumentMapper {
         else if (ev.type === "del_end") delete active_del[ev.id];
         else if (ev.type === "fmt_start") active_fmt[ev.id] = ev;
         else if (ev.type === "fmt_end") delete active_fmt[ev.id];
-        else if (ev.type === "footnote" || ev.type === "endnote") {
+        else if (ev.type === "image") {
+          // Read-only image marker (QA 2026-07-18 M5). Hidden when the run is
+          // filtered by the active view, exactly like its neighbouring text.
+          const hidden =
+            (this.clean_view && Object.keys(active_del).length > 0) ||
+            (this.original_view && Object.keys(active_ins).length > 0);
+          if (!hidden) {
+            const alt = (ev.date || "image")
+              .replace(/\]/g, ")")
+              .replace(/\n/g, " ");
+            const txt = `![${alt}](docx-image:${ev.id})`;
+            this._add_virtual_text(txt, current, paragraph, null, true);
+            current += txt.length;
+          }
+        } else if (ev.type === "footnote" || ev.type === "endnote") {
           flush_pending_runs();
           current_wrappers = ["", ""];
           current_style = ["", ""];
@@ -743,6 +822,7 @@ export class DocumentMapper {
     offset: number,
     context_paragraph: Paragraph | null,
     hyperlink_id: string | null = null,
+    is_image_marker = false,
   ) {
     const span: TextSpan = {
       start: offset,
@@ -751,6 +831,8 @@ export class DocumentMapper {
       run: null,
       paragraph: context_paragraph,
       hyperlink_id: hyperlink_id || undefined,
+      part_index: this._current_part_index,
+      is_image_marker: is_image_marker || undefined,
     };
     this.spans.push(span);
     this._text_chunks.push(text);

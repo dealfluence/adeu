@@ -739,8 +739,11 @@ server.registerTool(
       const origBuf = readFileBytesOrThrow(original_path);
       const modBuf = readFileBytesOrThrow(modified_path);
 
-      const origText = await extractTextFromBuffer(origBuf, compare_clean);
-      const modText = await extractTextFromBuffer(modBuf, compare_clean);
+      // includeAppendix=false: the generated appendix ("used N times",
+      // diagnostics) is not document content — diffing it produces phantom
+      // changes no apply can consume (QA 2026-07-18 H1).
+      const origText = await extractTextFromBuffer(origBuf, compare_clean, false);
+      const modText = await extractTextFromBuffer(modBuf, compare_clean, false);
 
       const diff = create_word_patch_diff(
         origText,
