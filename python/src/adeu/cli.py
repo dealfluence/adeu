@@ -409,45 +409,25 @@ def _format_batch_validation_error(exc: "ValidationError") -> str:
 
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     """
-    Loads a batch of actions and edits from a JSON file.
-    Supports the unified List[DocumentChange] format or the legacy dict format.
+    Loads a batch of changes from a JSON file in the unified
+    List[DocumentChange] format — the same shape the MCP `changes` parameter
+    takes. This is the ONLY supported shape: the pre-v1.1.0
+    {"actions": [...], "edits": [...]} dict format was removed (its tolerant
+    action coercion silently inverted reject into accept, QA 2026-07-17 F2);
+    files in that shape get a targeted migration error instead of a guess.
     """
     try:
         data = json.loads(_read_text_file(path))
 
-        # Legacy dict format support
-        if isinstance(data, dict):
-            changes_data = []
-            for idx, item in enumerate(data.get("actions", [])):
-                raw_action = item.pop("action", None)
-                # Whitespace/case variants of valid values are normalized;
-                # anything else is a hard error. Never default to a value —
-                # least of all "accept", the destructive opposite of "reject"
-                # (QA 2026-07-17 F2: ' reject ' was silently applied as accept).
-                action_val = raw_action.strip().lower() if isinstance(raw_action, str) else None
-                if action_val not in ("accept", "reject", "reply"):
-                    if raw_action is None:
-                        raise ValueError(
-                            f"actions[{idx}] is missing the required 'action' field. "
-                            "Valid values: 'accept', 'reject', 'reply'."
-                        )
-                    raise ValueError(
-                        f"actions[{idx}] has an unrecognized 'action' value: {raw_action!r}. "
-                        "Valid values: 'accept', 'reject', 'reply'. "
-                        "Refusing to guess — a wrong default could apply the opposite of what you asked."
-                    )
-                item["type"] = action_val
-                changes_data.append(item)
-            for item in data.get("edits", []):
-                item["type"] = "modify"
-                if "original" in item:
-                    item["target_text"] = item.pop("original")
-                if "replace" in item:
-                    item["new_text"] = item.pop("replace")
-                changes_data.append(item)
-            data = changes_data
-        elif not isinstance(data, list):
-            raise ValueError("JSON root must be a list of changes or a legacy dict with 'actions' and 'edits'.")
+        if isinstance(data, dict) and ("actions" in data or "edits" in data):
+            raise ValueError(
+                'this file uses the removed pre-v1.1.0 {"actions": [...], "edits": [...]} format. '
+                "Provide a flat JSON list of typed changes instead — rename 'action' to 'type', "
+                "'original' to 'target_text', 'replace' to 'new_text', and merge both arrays "
+                "into one list.\n\n" + _CHANGE_TYPE_REFERENCE
+            )
+        if not isinstance(data, list):
+            raise ValueError("JSON root must be a list of change objects.\n\n" + _CHANGE_TYPE_REFERENCE)
 
         # BatchChanges (not the bare list) so the CLI tolerates the same LLM
         # quirks the MCP server does: stringified items, inferable missing

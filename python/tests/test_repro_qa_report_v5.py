@@ -6,7 +6,9 @@ Finding index (severity as reported):
   F1  🔴 paginated extract → full-document apply/diff silently deletes
       everything past page 1 and writes page chrome into the document
   F2  🟠 legacy {"actions": [...]} batch coerces unrecognized action values
-      (" reject ", "rejcet", missing) to "accept" — semantic inversion
+      (" reject ", "rejcet", missing) to "accept" — semantic inversion.
+      Resolution superseded: the entire undocumented pre-v1.1.0 dict format
+      was removed; that shape now gets a targeted migration error.
   F3  🟠 sanitize reports comments removed while word/comments.xml survives
       (delete_comment guards on the backing field, not the lazy property)
   F4  🟠 dc:title / cp:category / cp:keywords / dc:subject / contentStatus
@@ -311,49 +313,72 @@ class TestF1PaginationRoundTrip:
 # ---------------------------------------------------------------------------
 
 
-class TestF2LegacyActionCoercion:
-    def _apply_legacy(self, tmp_path, capsys, actions) -> tuple[int, str, Path]:
+class TestF2LegacyFormatRemoved:
+    """The pre-v1.1.0 {"actions": [...], "edits": [...]} dict format — F2's
+    entire attack surface — is removed. Any file in that shape must be
+    rejected with a targeted migration error before a single change is
+    interpreted, regardless of its content."""
+
+    def _apply_batch(self, tmp_path, capsys, payload) -> tuple[int, str, Path]:
         docx_path = tmp_path / "tracked.docx"
-        docx_path.write_bytes(_make_doc_with_fee_change().getvalue())
+        input_bytes = _make_doc_with_fee_change().getvalue()
+        docx_path.write_bytes(input_bytes)
         json_path = tmp_path / "a.json"
-        json_path.write_text(json.dumps({"actions": actions}), encoding="utf-8")
+        json_path.write_text(json.dumps(payload), encoding="utf-8")
         out_path = tmp_path / "out.docx"
         rc = _run_cli(["apply", str(docx_path), str(json_path), "-o", str(out_path)])
         err = capsys.readouterr().err
+        # Whatever the outcome, apply must never mutate its input file.
+        assert docx_path.read_bytes() == input_bytes
         return rc, err, out_path
 
-    def test_whitespace_padded_reject_is_normalized_not_inverted(self, tmp_path, capsys):
-        rc, _err, out_path = self._apply_legacy(
+    @pytest.mark.parametrize(
+        "actions",
+        [
+            [{"action": "reject", "target_id": "Chg:101"}],  # even well-formed legacy input
+            [{"action": " reject ", "target_id": "Chg:101"}],  # F2's original repro
+            [{"action": "rejcet", "target_id": "Chg:101"}],
+            [{"target_id": "Chg:101"}],
+            [{"action": None, "target_id": "Chg:101"}],
+        ],
+    )
+    def test_legacy_actions_format_is_rejected_with_migration_guidance(self, tmp_path, capsys, actions):
+        rc, err, out_path = self._apply_batch(tmp_path, capsys, {"actions": actions})
+        assert rc != 0, "the removed legacy format was silently interpreted"
+        assert not out_path.exists()
+        # Actionable migration error: names the removed shape and the modern one.
+        assert "removed" in err
+        assert "'action' to 'type'" in err
+        assert "AttributeError" not in err
+
+    def test_legacy_edits_bucket_is_rejected(self, tmp_path, capsys):
+        rc, err, out_path = self._apply_batch(
+            tmp_path, capsys, {"edits": [{"original": "$12,500", "replace": "$99,999"}]}
+        )
+        assert rc != 0
+        assert not out_path.exists()
+        assert "'original' to 'target_text'" in err
+
+    def test_non_legacy_dict_root_gets_generic_list_error(self, tmp_path, capsys):
+        rc, err, out_path = self._apply_batch(tmp_path, capsys, {"changes": []})
+        assert rc != 0
+        assert not out_path.exists()
+        assert "list of change objects" in err
+
+    def test_migrated_modern_equivalent_applies(self, tmp_path, capsys):
+        """The migration the error message describes must actually work."""
+        rc, _err, out_path = self._apply_batch(
             tmp_path,
             capsys,
             [
-                {"action": " reject ", "target_id": "Chg:101"},
-                {"action": "reject\n", "target_id": "Chg:102"},
+                {"type": "reject", "target_id": "Chg:101"},
+                {"type": "reject", "target_id": "Chg:102"},
             ],
         )
         assert rc == 0
         result = _clean_text(out_path.read_bytes())
-        assert "$10,000" in result, "whitespace-padded 'reject' was silently applied as ACCEPT"
+        assert "$10,000" in result
         assert "$12,500" not in result
-
-    @pytest.mark.parametrize("bad_action", ["rejcet", "PLEASE_DO_NOT_ACCEPT", ""])
-    def test_unrecognized_action_is_a_hard_error(self, tmp_path, capsys, bad_action):
-        rc, err, out_path = self._apply_legacy(tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}])
-        assert rc != 0, f"unrecognized action {bad_action!r} was silently coerced to accept"
-        assert not out_path.exists()
-        assert "accept" in err and "reject" in err  # names the valid values
-
-    def test_missing_action_is_a_hard_error(self, tmp_path, capsys):
-        rc, err, out_path = self._apply_legacy(tmp_path, capsys, [{"target_id": "Chg:101"}])
-        assert rc != 0, "missing 'action' key was silently coerced to accept"
-        assert not out_path.exists()
-
-    @pytest.mark.parametrize("bad_action", [None, 42])
-    def test_non_string_action_produces_clean_error(self, tmp_path, capsys, bad_action):
-        rc, err, out_path = self._apply_legacy(tmp_path, capsys, [{"action": bad_action, "target_id": "Chg:101"}])
-        assert rc != 0
-        assert "AttributeError" not in err
-        assert "has no attribute" not in err
 
 
 # ---------------------------------------------------------------------------
