@@ -19,9 +19,11 @@ import {
   create_word_patch_diff,
   finalize_document,
 } from "@adeu/core";
+import { describe_illegal_control_chars } from "@adeu/core";
 
 import {
   build_paginated_response,
+  build_full_document_response,
   build_outline_response,
   build_appendix_response,
   build_search_response,
@@ -332,6 +334,18 @@ registerAppTool(
         );
         return res as any;
       }
+      // In full mode, page='all' returns the entire document without page
+      // chrome — the round-trip artifact for text-based apply/diff
+      // (QA 2026-07-17 F1 parity with the Python CLI's --page all).
+      if (
+        mode === "full" &&
+        page !== undefined &&
+        page !== null &&
+        String(page).trim().toLowerCase() === "all"
+      ) {
+        const res = build_full_document_response(text, file_path);
+        return res as any;
+      }
       // In non-search mode, `page` defaults to 1 (show document page 1).
       // Non-numeric values must error, not silently fall back to page 1
       // (QA L1 parity with the Python CLI).
@@ -347,7 +361,7 @@ registerAppTool(
                 type: "text",
                 text:
                   `Invalid page value: '${page}'. Provide a positive integer ` +
-                  `(pages are 1-indexed; 'all' is only valid together with search_query).`,
+                  `(pages are 1-indexed; 'all' is valid for mode='full' and together with search_query).`,
               },
             ],
           };
@@ -487,6 +501,18 @@ server.registerTool(
         return {
           content: [
             { type: "text", text: "Error: author_name cannot be empty." },
+          ],
+        };
+      const author_ctrl = describe_illegal_control_chars(author_name);
+      if (author_ctrl)
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Error: author_name contains control character(s) (${author_ctrl}) ` +
+                `that cannot be stored in a DOCX. Remove them and retry.`,
+            },
           ],
         };
       if (!changes || changes.length === 0)

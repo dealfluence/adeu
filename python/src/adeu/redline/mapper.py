@@ -24,6 +24,7 @@ from adeu.utils.docx import (
     iter_document_parts,
     iter_paragraph_content,
 )
+from adeu.utils.safe_regex import user_finditer, user_search
 
 logger = structlog.get_logger(__name__)
 
@@ -822,8 +823,12 @@ class DocumentMapper:
         """
         flags = 0 if case_sensitive else re.IGNORECASE
         if is_regex:
+            # User/LLM-supplied pattern: run it under a wall-clock budget so a
+            # catastrophic pattern cannot hang the process (QA 2026-07-17 F5).
+            # RegexTimeoutError propagates to the caller for a clean per-edit
+            # error; only invalid-pattern errors mean "no match" here.
             try:
-                match = re.search(target_text, self.full_text, flags=flags)
+                match = user_search(target_text, self.full_text, flags=flags)
                 if match and not self._range_in_deletion(match.start(), match.end() - match.start()):
                     return match.start(), match.end() - match.start()
             except re.error:
@@ -876,8 +881,11 @@ class DocumentMapper:
         flags = 0 if case_sensitive else re.IGNORECASE
 
         if is_regex:
+            # Budgeted like find_match_index above (QA 2026-07-17 F5).
             try:
-                return [(m.start(), m.end() - m.start()) for m in re.finditer(target_text, self.full_text, flags=flags)]
+                return [
+                    (m.start(), m.end() - m.start()) for m in user_finditer(target_text, self.full_text, flags=flags)
+                ]
             except re.error:
                 return []
 

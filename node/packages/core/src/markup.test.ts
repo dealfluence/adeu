@@ -115,7 +115,8 @@ describe('apply_edits_to_markdown', () => {
       { type: 'modify', target_text: 'C', new_text: 'Z' }
     ];
     const result = apply_edits_to_markdown(text, edits, true);
-    expect(result).toContain('[Edit:0]');
+    // 1-based, matching apply's "Edit N" reports (QA 2026-07-17 F10).
+    expect(result).toContain('[Edit:1]');
     expect(result.indexOf('{++X++}')).toBeLessThan(result.indexOf('{++Y++}'));
     expect(result.indexOf('{++Y++}')).toBeLessThan(result.indexOf('{++Z++}'));
   });

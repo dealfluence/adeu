@@ -27,6 +27,7 @@ import {
   REPORT_ECHO_CAP,
   truncate_middle,
 } from "./utils/text.js";
+import { RegexTimeoutError } from "./utils/safe-regex.js";
 
 // Width of the surrounding-document window shown in redline previews.
 const PREVIEW_CONTEXT_CHARS = 30;
@@ -178,6 +179,20 @@ const TRANSACTIONAL_NOT_APPLIED_ERROR =
   "Not applied: the batch is transactional and other edits failed " +
   "validation (see their errors). Fix or remove those edits and re-run.";
 
+// Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
+// Word refuses to open a package carrying them, and @xmldom serializes them
+// silently, so they must be rejected before they reach the DOM
+// (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
+const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+
+export function describe_illegal_control_chars(text: string): string | null {
+  if (!text) return null;
+  const found = text.match(XML_ILLEGAL_CHARS_RE);
+  if (!found) return null;
+  const codes = Array.from(new Set(found.map((c) => `0x${c.charCodeAt(0).toString(16).padStart(2, "0")}`))).sort();
+  return codes.join(", ");
+}
+
 export function validate_edit_strings(
   edits: any[],
   index_offset: number = 0,
@@ -188,6 +203,25 @@ export function validate_edit_strings(
     const edit = edits[i];
     const t_text = edit.target_text || "";
     const n_text = edit.new_text || "";
+
+    // VAL-CRIT-8: XML-illegal control characters (QA 2026-07-17 F11).
+    const checked_fields: Array<[string, string]> = [
+      ["target_text", t_text],
+      ["new_text", n_text],
+    ];
+    if (edit.comment) checked_fields.push(["comment", edit.comment]);
+    (edit.cells || []).forEach((cell: string, cell_idx: number) => {
+      checked_fields.push([`cells[${cell_idx}]`, cell || ""]);
+    });
+    for (const [field_name, field_value] of checked_fields) {
+      const described = describe_illegal_control_chars(field_value);
+      if (described) {
+        errors.push(
+          `- Edit ${i + 1 + index_offset} Failed: \`${field_name}\` contains control character(s) ` +
+            `(${described}) that cannot be stored in a DOCX. Remove them and re-submit.`,
+        );
+      }
+    }
 
     if (
       n_text.includes("{++") ||
@@ -2391,7 +2425,15 @@ export class RedlineEngine {
         // not claim any edit "applied" (transactional parity with Python).
         const validation_failed_idx = new Set<number>();
         for (const { edit, i } of ordered_edits) {
-          let single_errors = this.validate_edits([edit], i);
+          let single_errors: string[];
+          try {
+            single_errors = this.validate_edits([edit], i);
+          } catch (e) {
+            // A pathological user pattern must fail as a clean per-edit
+            // validation error, never a hang or crash (QA 2026-07-17 F5).
+            if (!(e instanceof RegexTimeoutError)) throw e;
+            single_errors = [`- Edit ${i + 1} Failed: ${e.message}`];
+          }
           if (single_errors.length > 0) {
             if (applied_edits > 0) {
               const hint = sequential_context_hint(applied_edits);
@@ -2489,7 +2531,14 @@ export class RedlineEngine {
           const sequential_errors: string[] = [];
           let applied_so_far = 0;
           for (const { edit, i } of ordered_edits) {
-            let single_errors = this.validate_edits([edit], i);
+            let single_errors: string[];
+            try {
+              single_errors = this.validate_edits([edit], i);
+            } catch (e) {
+              // Clean per-edit failure for time-budget violations (QA F5).
+              if (!(e instanceof RegexTimeoutError)) throw e;
+              single_errors = [`- Edit ${i + 1} Failed: ${e.message}`];
+            }
             if (single_errors.length > 0) {
               if (applied_so_far > 0) {
                 const hint = sequential_context_hint(applied_so_far);
@@ -2624,7 +2673,20 @@ export class RedlineEngine {
           edit._error_msg = msg;
         }
       } else {
-        const resolved = this._pre_resolve_heuristic_edit(edit);
+        let resolved: any;
+        try {
+          resolved = this._pre_resolve_heuristic_edit(edit);
+        } catch (e) {
+          // Direct apply_edits callers bypass validate_edits; the time
+          // budget must still fail cleanly here (QA F5).
+          if (!(e instanceof RegexTimeoutError)) throw e;
+          skipped++;
+          edit._applied_status = false;
+          const msg = `- Failed to apply edit targeting: '${(edit.target_text || "").substring(0, 40)}...' (${e.message})`;
+          this.skipped_details.push(msg);
+          edit._error_msg = msg;
+          continue;
+        }
         if (resolved) {
           if (Array.isArray(resolved)) {
             for (const r of resolved) {
@@ -2810,6 +2872,29 @@ export class RedlineEngine {
         skipped++;
         this.skipped_details.push(
           `- Failed to apply action: Target ID ${action.target_id} not found.`,
+        );
+        continue;
+      }
+
+      // Refuse accept/reject on a w:id shared by revisions from DIFFERENT
+      // authors. Uniqueness of w:id is assumed but not guaranteed for
+      // externally produced documents (merges, cross-document copy-paste),
+      // where one action would silently resolve several unrelated changes
+      // (QA 2026-07-17 F9). Same-author reuse is legitimate — this engine
+      // itself mints one id across every element of a single logical edit —
+      // so authorship is the discriminator.
+      const dup_authors = Array.from(
+        new Set(all_nodes.map((n) => n.getAttribute("w:author") || "Unknown")),
+      ).sort();
+      if (dup_authors.length > 1) {
+        skipped++;
+        this.skipped_details.push(
+          `- Failed to apply action: ${type} on Chg:${target_id} is ambiguous. The document ` +
+            `contains ${all_nodes.length} tracked-change elements sharing w:id=${target_id} from ` +
+            `different authors (${dup_authors.join(", ")}) — duplicate revision IDs produced ` +
+            `outside this engine (e.g. by a document merge or copy-paste). Acting on this ID ` +
+            `would resolve all of them at once. Resolve these changes individually in Word, or ` +
+            `apply the intended outcome as an explicit text edit instead.`,
         );
         continue;
       }

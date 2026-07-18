@@ -223,7 +223,8 @@ class TestApplyEditsToMarkdown:
         text = "Hello world."
         edits = [ModifyText(target_text="world", new_text="universe")]
         result = apply_edits_to_markdown(text, edits, include_index=True)
-        assert "{--world--}{++universe++}{>>[Edit:0]<<}" in result
+        # 1-based, matching apply's "Edit N" reports (QA 2026-07-17 F10).
+        assert "{--world--}{++universe++}{>>[Edit:1]<<}" in result
 
     def test_highlight_only_mode(self):
         text = "Highlight this section please."
@@ -237,7 +238,7 @@ class TestApplyEditsToMarkdown:
         text = "Mark this text."
         edits = [ModifyText(target_text="this text", new_text="ignored", comment="Review needed")]
         result = apply_edits_to_markdown(text, edits, include_index=True, highlight_only=True)
-        assert "{==this text==}{>>Review needed [Edit:0]<<}" in result
+        assert "{==this text==}{>>Review needed [Edit:1]<<}" in result
 
     def test_multiple_edits_non_overlapping(self):
         text = "First word and second word."
@@ -257,7 +258,7 @@ class TestApplyEditsToMarkdown:
             ModifyText(target_text="C", new_text="Z"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
-        assert "[Edit:0]" in result and "[Edit:1]" in result and "[Edit:2]" in result
+        assert "[Edit:1]" in result and "[Edit:2]" in result and "[Edit:3]" in result
         assert result.find("{++X++}") < result.find("{++Y++}") < result.find("{++Z++}")
 
     def test_overlapping_edits_first_wins(self):
@@ -277,7 +278,8 @@ class TestApplyEditsToMarkdown:
             ModifyText(target_text="world", new_text="universe"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
-        assert "{--world--}{++universe++}{>>[Edit:1]<<}" in result
+        # The skipped edit still owns batch position 1, so this is Edit 2.
+        assert "{--world--}{++universe++}{>>[Edit:2]<<}" in result
 
     def test_first_occurrence_only(self):
         text = "word word word"
@@ -315,8 +317,8 @@ class TestApplyEditsToMarkdown:
             ModifyText(target_text="30 days", new_text="60 days", comment="Extended notice period"),
         ]
         result = apply_edits_to_markdown(text, edits, include_index=True)
-        assert "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:0]<<}" in result
-        assert "{--30--}{++60++}{>>Extended notice period [Edit:1]<<} days" in result
+        assert "{--Tenant--}{++Lessee++}{>>Standardizing terminology [Edit:1]<<}" in result
+        assert "{--30--}{++60++}{>>Extended notice period [Edit:2]<<} days" in result
 
     @pytest.mark.parametrize(
         "text, target, new, expected",

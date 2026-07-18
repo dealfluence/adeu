@@ -64,6 +64,7 @@ from adeu.pagination import (
     paginate,
     split_structural_appendix,
 )
+from adeu.utils.safe_regex import RegexTimeoutError, user_finditer
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentObject
@@ -122,6 +123,30 @@ def render_outline_tree(
                 page_str = f"p{node.page}-p{node.end_page}"
             lines.append(f"{prefix} {node.text} ({page_str})")
     return "\n".join(lines)
+
+
+def build_full_document_response(text: str, file_path: str) -> ToolResult:
+    """
+    Returns the ENTIRE document body in one response, with no page banner,
+    continuation footer, or appendix pointer.
+
+    This is the round-trip artifact for text-based apply/diff: page chrome is
+    presentation, and a single page of a multi-page document can never round-
+    trip safely (QA 2026-07-17 F1 — there was previously no supported way to
+    extract a >19k-char document completely). Reached via `--page all` on the
+    CLI and `page='all'` with `mode='full'` over MCP.
+    """
+    body, _appendix = split_structural_appendix(text)
+    ui_markdown = body
+    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    return ToolResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ui_markdown,
+            "title": Path(file_path).name,
+            "file_path": str(Path(file_path).resolve()),
+        },
+    )
 
 
 def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool = False) -> ToolResult:
@@ -274,17 +299,24 @@ def build_search_response(
     # `(?i)...` that Python's re rejects mid-pattern), do NOT hard-error and
     # burn the turn. Downgrade to a literal search of the raw string and tell
     # the model, so it can accept the literal hits or fix its pattern rather
-    # than retrying the same broken regex.
+    # than retrying the same broken regex. Patterns that blow the matching
+    # time budget (catastrophic backtracking, QA 2026-07-17 F5) get the same
+    # treatment — for a read-only search, degraded results beat a hang.
     regex_downgraded_note = ""
     if search_regex:
         try:
-            matches = list(re.finditer(search_query, body, flags=flags))
+            matches = list(user_finditer(search_query, body, flags=flags))
         except re.error as e:
             regex_downgraded_note = (
                 f"> **Note:** `{search_query}` is not a valid regular expression "
                 f"({e}), so it was searched as literal text instead. "
                 f"If you meant a regex, fix the pattern; if you meant literal "
                 f"text, set `search_regex` to false."
+            )
+            matches = list(re.finditer(re.escape(search_query), body, flags=flags))
+        except RegexTimeoutError as e:
+            regex_downgraded_note = (
+                f"> **Note:** `{search_query}` was searched as literal text instead of as a regular expression: {e}"
             )
             matches = list(re.finditer(re.escape(search_query), body, flags=flags))
     else:

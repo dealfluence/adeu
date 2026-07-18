@@ -18,6 +18,7 @@ from adeu.diff import generate_edits_from_text
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
+    build_full_document_response,
     build_outline_response,
     build_paginated_response,
     build_search_response,
@@ -40,7 +41,7 @@ from adeu.models import (
     coerce_stringified_changes,
     const_to_enum,
 )
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
 
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
@@ -186,6 +187,13 @@ async def _read_docx_disk(
             # `page` is a doc-page filter (None == search all pages).
             return build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
 
+        # In full mode, page='all' returns the entire document without page
+        # chrome — the round-trip artifact for text-based apply/diff
+        # (QA 2026-07-17 F1; mirrors the CLI's --page all). It used to fall
+        # through the isdigit() check below and silently render page 1.
+        if mode == "full" and page is not None and str(page).strip().lower() == "all":
+            return build_full_document_response(text, file_path)
+
         # Non-search modes: `page` means document page; default to 1.
         page_num = int(page) if (page is not None and str(page).isdigit()) else 1
         if mode == "outline":
@@ -234,6 +242,14 @@ async def _process_document_batch_disk(
     if not author_name or not author_name.strip():
         await ctx.warning("Batch processing rejected: author_name is empty.")
         return "Error: author_name cannot be empty."
+
+    author_ctrl = describe_illegal_control_chars(author_name)
+    if author_ctrl:
+        await ctx.warning("Batch processing rejected: author_name contains control characters.")
+        return (
+            f"Error: author_name contains control character(s) ({author_ctrl}) that cannot be "
+            "stored in a DOCX. Remove them and retry."
+        )
 
     if not changes:
         await ctx.warning("Batch processing rejected: No actions or edits provided.")
@@ -625,9 +641,10 @@ if sys.platform == "win32":
             Field(
                 description=(
                     "Without `search_query`: 1-indexed document page to display (defaults to 1) "
-                    "for mode='full' and mode='appendix'. With `search_query`: restricts matches "
-                    "to that document page (defaults to searching all pages; pass `page='all'` "
-                    "to be explicit). 'all' is also valid in CLI."
+                    "for mode='full' and mode='appendix'; pass `page='all'` with mode='full' to "
+                    "get the ENTIRE document in one response without page banners. With "
+                    "`search_query`: restricts matches to that document page (defaults to "
+                    "searching all pages; pass `page='all'` to be explicit)."
                 ),
                 # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
                 json_schema_extra=const_to_enum,
@@ -971,8 +988,10 @@ else:
             Field(
                 description=(
                     "Without `search_query`: 1-indexed document page to display (defaults to 1) "
-                    "for mode='full'. With `search_query`: restricts matches to that document "
-                    "page (defaults to searching all pages; pass `page='all'` to be explicit)."
+                    "for mode='full'; pass `page='all'` to get the ENTIRE document in one "
+                    "response without page banners. With `search_query`: restricts matches to "
+                    "that document page (defaults to searching all pages; pass `page='all'` to "
+                    "be explicit)."
                 ),
                 # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
                 json_schema_extra=const_to_enum,

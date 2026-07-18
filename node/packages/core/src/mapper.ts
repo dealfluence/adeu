@@ -2,6 +2,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extract_comments_data } from "./comments.js";
+import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-regex.js";
 import {
   _get_style_cache,
   get_paragraph_prefix,
@@ -879,11 +880,16 @@ export class DocumentMapper {
     is_regex: boolean = false,
   ): [number, number] {
     if (is_regex) {
+      // User/LLM-supplied pattern: run it under a wall-clock budget so a
+      // catastrophic pattern cannot hang the event loop (QA 2026-07-17 F5).
+      // RegexTimeoutError propagates for a clean per-edit error; only
+      // invalid-pattern errors mean "no match" here.
       try {
-        const pattern = new RegExp(target_text);
-        const match = pattern.exec(this.full_text);
-        if (match) return [match.index, match[0].length];
-      } catch (e) {}
+        const match = userSearch(target_text, this.full_text);
+        if (match) return [match.start, match.end - match.start];
+      } catch (e) {
+        if (e instanceof RegexTimeoutError) throw e;
+      }
       return [-1, 0];
     }
 
@@ -923,12 +929,13 @@ export class DocumentMapper {
     if (!target_text) return [];
 
     if (is_regex) {
+      // Budgeted like find_match_index above (QA 2026-07-17 F5).
       try {
-        const pattern = new RegExp(target_text, "g");
-        const matches = [...this.full_text.matchAll(pattern)];
-        if (matches.length > 0)
-          return matches.map((m) => [m.index!, m[0].length]);
-      } catch (e) {}
+        const matches = userFindAllMatches(target_text, this.full_text);
+        if (matches.length > 0) return matches.map((m) => [m.start, m.end - m.start]);
+      } catch (e) {
+        if (e instanceof RegexTimeoutError) throw e;
+      }
       return [];
     }
     // Exact tiers use plain indexOf scans, NOT RegExp: building a RegExp from

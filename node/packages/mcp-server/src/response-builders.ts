@@ -5,6 +5,8 @@ import {
   split_structural_appendix,
   extract_outline,
   OutlineNode,
+  RegexTimeoutError,
+  userFindAllMatches,
 } from "@adeu/core";
 
 export interface ToolResult {
@@ -62,6 +64,26 @@ export function render_outline_tree(
     }
   }
   return lines.join("\n");
+}
+
+export function build_full_document_response(
+  text: string,
+  file_path: string,
+): ToolResult {
+  // The ENTIRE document body with no page banner, continuation footer, or
+  // appendix pointer — the round-trip artifact for text-based apply/diff
+  // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
+  const [body] = split_structural_appendix(text);
+  const ui_markdown = body;
+  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  return {
+    content: [{ type: "text", text: llm_content }],
+    structuredContent: {
+      markdown: ui_markdown,
+      file_path: resolve(file_path),
+      title: basename(file_path),
+    },
+  };
 }
 
 export function build_paginated_response(
@@ -234,9 +256,11 @@ export function build_search_response(
   // the same broken regex.
   let regexDowngradedNote = "";
   let regex: RegExp;
+  let isUserRegex = false;
   if (search_regex) {
     try {
       regex = new RegExp(search_query, flags);
+      isUserRegex = true;
     } catch (e: any) {
       regexDowngradedNote =
         `> **Note:** \`${search_query}\` is not a valid regular expression ` +
@@ -248,7 +272,26 @@ export function build_search_response(
     regex = new RegExp(escapeRegExp(search_query), flags);
   }
 
-  const allMatches = Array.from(body.matchAll(regex));
+  // Patterns that blow the matching time budget (catastrophic backtracking,
+  // QA 2026-07-17 F5) get the same literal downgrade as invalid patterns —
+  // for a read-only search, degraded results beat a hung event loop.
+  let allMatches: Array<{ 0: string; index?: number }>;
+  if (isUserRegex) {
+    try {
+      allMatches = userFindAllMatches(search_query, body, flags).map((m) => ({
+        0: body.slice(m.start, m.end),
+        index: m.start,
+      }));
+    } catch (e: any) {
+      if (!(e instanceof RegexTimeoutError)) throw e;
+      regexDowngradedNote =
+        `> **Note:** \`${search_query}\` was searched as literal text instead of as ` +
+        `a regular expression: ${e.message}`;
+      allMatches = Array.from(body.matchAll(new RegExp(escapeRegExp(search_query), flags)));
+    }
+  } else {
+    allMatches = Array.from(body.matchAll(regex));
+  }
 
   // Compute document pagination once — needed for both annotation and filtering.
   const pag_res = paginate(body, "");

@@ -396,6 +396,14 @@ if sys.platform == "win32":
                     )
                 elif mode == "appendix":
                     res = build_appendix_response(final_text, page_num, actual_path)
+                elif page is not None and str(page).strip().lower() == "all":
+                    # Full-mode page='all' returns the whole document without
+                    # page chrome (QA 2026-07-17 F1 parity with the disk path).
+                    from adeu.mcp_components._response_builders import (
+                        build_full_document_response,
+                    )
+
+                    res = build_full_document_response(final_text, actual_path)
                 else:
                     res = build_paginated_response(final_text, page_num, actual_path)
             except ToolError:

@@ -360,7 +360,9 @@ export function apply_edits_to_markdown(
       isolated_target,
       isolated_new,
       edit.comment,
-      orig_idx,
+      // 1-based, matching apply's "Edit N" reports and batch validation
+      // errors (QA 2026-07-17 F10; mirrors Python).
+      orig_idx + 1,
       include_index,
       highlight_only,
     );

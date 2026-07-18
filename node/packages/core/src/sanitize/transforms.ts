@@ -423,10 +423,34 @@ export function scrub_doc_properties(doc: DocumentObject): string[] {
   if (corePart) {
     const creators = findDescendantsByLocalName(corePart._element, 'creator');
     creators.forEach(c => { if (c.textContent) { lines.push(`Author: ${c.textContent}`); c.textContent = ""; }});
-    
+
     const modifiers = findDescendantsByLocalName(corePart._element, 'lastModifiedBy');
     modifiers.forEach(c => { if (c.textContent) { lines.push(`Last modified by: ${c.textContent}`); c.textContent = ""; }});
-    
+
+    // Title is often intentional, but can leak. Report it, don't strip —
+    // it previously did neither (QA 2026-07-17 F4; mirrors Python).
+    const titles = findDescendantsByLocalName(corePart._element, 'title');
+    titles.forEach(c => { if (c.textContent) { lines.push(`Title kept (review manually): "${c.textContent}"`); }});
+
+    // Classification-style properties are textbook leak vectors ("Project
+    // Falcon", "confidential,merger,..."). Unlike title they carry no
+    // legitimate outbound formatting value, so strip them and say so.
+    const leakFields: Array<[string, string]> = [
+      ['category', 'Category'],
+      ['keywords', 'Keywords'],
+      ['subject', 'Subject'],
+      ['contentStatus', 'Content status'],
+      ['description', 'Description/comments'],
+    ];
+    for (const [local, label] of leakFields) {
+      findDescendantsByLocalName(corePart._element, local).forEach(c => {
+        if (c.textContent) {
+          lines.push(`${label}: ${c.textContent}`);
+          c.textContent = "";
+        }
+      });
+    }
+
     const revisions = findDescendantsByLocalName(corePart._element, 'revision');
     revisions.forEach(c => { if (c.textContent && parseInt(c.textContent) > 1) { lines.push(`Revision count: ${c.textContent} → 1`); c.textContent = "1"; }});
   }

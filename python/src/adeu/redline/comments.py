@@ -329,10 +329,26 @@ class CommentsManager:
             return ""
         return "".join(part[0] for part in author.split() if part).upper()
 
+    def _has_comments_part(self) -> bool:
+        """
+        True when the package already carries a comments part (loaded or not).
+
+        Read paths must use this guard instead of testing the raw backing field
+        `self._comments_part`: on a fresh manager the backing field is None
+        until the lazy `comments_part` property populates it, so guarding on
+        the field silently no-ops even though the document HAS comments — that
+        is exactly how `sanitize` shipped reporting comments removed while
+        word/comments.xml survived intact (QA 2026-07-17 F3). Checking the
+        package (rather than unconditionally touching the property) keeps the
+        other guarantee: a document with no comments part never has one
+        created as a side effect of a read/delete.
+        """
+        return self._comments_part is not None or self._get_existing_part_by_type(CT.WML_COMMENTS) is not None
+
     def _find_para_id_for_comment(self, comment_id: str) -> Optional[str]:
-        if not self._comments_part:
+        if not self._has_comments_part():
             return None
-        for c in self._comments_part.element.findall(qn("w:comment")):
+        for c in self.comments_part.element.findall(qn("w:comment")):
             if c.get(qn("w:id")) == comment_id:
                 for p in c.findall(qn("w:p")):
                     pid = p.get(qn("w14:paraId"))
@@ -547,14 +563,15 @@ class CommentsManager:
         Safely deletes a comment and all its metadata from the 4 XML parts.
         Also recursively deletes any threaded replies attached to this comment.
         """
-        if not self._comments_part:
+        if not self._has_comments_part():
             return
+        comments_part = self.comments_part
 
         comment_id_str = str(comment_id)
         comment_el = None
 
         # 1. Find the comment element
-        for c in self._comments_part.element.findall(qn("w:comment")):
+        for c in comments_part.element.findall(qn("w:comment")):
             if c.get(qn("w:id")) == comment_id_str:
                 comment_el = c
                 break
@@ -579,7 +596,7 @@ class CommentsManager:
                         child_para_id = child.get(qn("w15:paraId"))
                         if child_para_id:
                             # Map child paraId back to comment ID
-                            for c in self._comments_part.element.findall(qn("w:comment")):
+                            for c in comments_part.element.findall(qn("w:comment")):
                                 for p in c.findall(qn("w:p")):
                                     if p.get(qn("w14:paraId")) == child_para_id:
                                         replies_to_delete.append(c.get(qn("w:id")))

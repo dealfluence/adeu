@@ -134,10 +134,19 @@ export function extract_all_domain_metadata(
       if (definitions[matched_term]) definitions[matched_term].count++;
     }
 
+    // Drop unused terms from the SYMBOL TABLE only — the filter is noise
+    // reduction for the Defined Terms listing, and must not gate the
+    // Semantic Diagnostics: a term defined twice and never used is two
+    // drafting errors, not zero (QA 2026-07-17 F6; mirrors Python). Surface
+    // the orphan definition itself as a diagnostic instead.
     for (const term of def_keys) {
       if (definitions[term].count === 0) {
         delete definitions[term];
-        duplicates.delete(term);
+        if (!duplicates.has(term)) {
+          diagnostics.push(
+            `[Warning] Unused Definition: '${term}' is defined but never used.`,
+          );
+        }
       }
     }
   }
