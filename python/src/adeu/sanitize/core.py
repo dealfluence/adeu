@@ -57,17 +57,27 @@ def _atomic_write(path: Path, payload: bytes) -> None:
     Stages to a same-directory temporary file and os.replace()s it into
     place: a failed or interrupted write never truncates or corrupts an
     existing file at `path`.
+
+    Missing parent directories are created, and any remaining filesystem
+    failure surfaces as a SanitizeError naming the OUTPUT path — never the
+    raw `Errno 2 ... '.sanitize.docx.<random>.tmp'` the temporary file used
+    to leak (QA 2026-07-19 v8 F-09/F-13).
     """
     import os
     import tempfile
 
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent or "."))
-    tmp_path = Path(tmp_name)
+    tmp_path: Optional[Path] = None
     try:
+        if path.parent and str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent or "."))
+        tmp_path = Path(tmp_name)
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
         os.replace(tmp_path, path)
-        tmp_path = None  # type: ignore[assignment]
+        tmp_path = None
+    except OSError as e:
+        raise SanitizeError(f"❌ Could not write output file '{path}': {e.strerror or e}") from e
     finally:
         if tmp_path is not None:
             try:
@@ -84,6 +94,7 @@ def sanitize_docx(
     baseline_path: Optional[str] = None,
     author: Optional[str] = None,
     accept_all: bool = False,
+    allow_low_similarity_baseline: bool = False,
 ) -> SanitizeResult:
     """
     Sanitize a DOCX file.
@@ -127,7 +138,14 @@ def sanitize_docx(
     elif mode == SanitizeMode.BASELINE:
         assert baseline_path is not None
         try:
-            doc = _sanitize_baseline(doc, input_path, baseline_path, report, author=author)
+            doc = _sanitize_baseline(
+                doc,
+                input_path,
+                baseline_path,
+                report,
+                author=author,
+                allow_low_similarity=allow_low_similarity_baseline,
+            )
         except SanitizeError:
             raise
         except KeyError as e:
@@ -254,6 +272,12 @@ def _sanitize_keep_markup(doc, report: SanitizeReport, *, author: Optional[str])
             report.kept_comment_lines.append(f'"{transforms._truncate(c["text"], 60)}" ({c["author"]})')
 
 
+# Below this line-level sequence similarity, a baseline almost certainly is
+# not an earlier version of the working document — proceeding would emit the
+# baseline's text as the "sanitized" output (QA 2026-07-19 v8 F-01).
+_BASELINE_MIN_SIMILARITY = 0.5
+
+
 def _sanitize_baseline(
     doc,
     input_path: str,
@@ -261,6 +285,7 @@ def _sanitize_baseline(
     report: SanitizeReport,
     *,
     author: Optional[str],
+    allow_low_similarity: bool = False,
 ):
     """
     Recompute delta against a baseline document.
@@ -303,17 +328,47 @@ def _sanitize_baseline(
     # Divergence check: a real sequence similarity over paragraphs. The old
     # positional character comparison reported a one-paragraph insertion at
     # the top of the document as "93% different" (QA H3).
-    if baseline_text and working_text:
+    #
+    # Below _BASELINE_MIN_SIMILARITY this is no longer a warning: recomputing
+    # against a clearly unrelated baseline REPLACES the working document with
+    # the baseline's content while exiting 0 and printing "Result: CLEAN"
+    # (QA 2026-07-19 v8 F-01). Block before any diff is computed; the
+    # explicit allow_low_similarity override downgrades the block to the
+    # warning for the rare legitimate near-rewrite.
+    if baseline_text or working_text:
         import difflib
 
         ratio = difflib.SequenceMatcher(
             None, baseline_text.split("\n"), working_text.split("\n"), autojunk=False
         ).ratio()
+        if ratio < _BASELINE_MIN_SIMILARITY and len(baseline_text) + len(working_text) <= 100_000:
+            # Line-level similarity counts only IDENTICAL lines, so on a
+            # small document a legitimate edit to its only paragraph reads
+            # as 0% similar. Confirm with a character-level alignment before
+            # blocking; bounded to small inputs because SequenceMatcher is
+            # quadratic (large related documents share plenty of verbatim
+            # lines, so the line-level ratio is reliable there).
+            ratio = max(
+                ratio,
+                difflib.SequenceMatcher(None, baseline_text, working_text, autojunk=False).ratio(),
+            )
         difference_pct = round((1 - ratio) * 100)
-        if ratio < 0.5:
+        if ratio < _BASELINE_MIN_SIMILARITY:
+            if not allow_low_similarity:
+                report.status = "blocked"
+                report.blocked_reason = (
+                    f"Baseline and working document share only {round(ratio * 100)}% of their "
+                    f"content ({difference_pct}% differs) — '{Path(baseline_path).name}' does not "
+                    f"look like an earlier version of '{Path(input_path).name}'. Proceeding would "
+                    "replace the document's content with the baseline's. Verify the --baseline "
+                    "argument; if this near-total rewrite is intentional, re-run with "
+                    "--allow-low-similarity-baseline."
+                )
+                return doc
             report.warnings.append(
                 f"Baseline and working document share only {round(ratio * 100)}% of their content "
-                f"({difference_pct}% differs). This may indicate the wrong baseline file was selected."
+                f"({difference_pct}% differs). This may indicate the wrong baseline file was "
+                "selected; proceeding because --allow-low-similarity-baseline is set."
             )
 
     # Step 2: Compute the structured diff (part-aware, table-row-aware).

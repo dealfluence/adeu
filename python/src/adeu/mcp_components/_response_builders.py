@@ -91,6 +91,34 @@ class BuilderResult:
     structured_content: "dict | None" = None
 
 
+# Projection style markers: `**bold**` always; `_italic_` only where the
+# underscore is not intra-word (identifiers like snake_case are literal text —
+# the projection's italics markers always hug non-whitespace at a word edge).
+_STYLE_MARKER_RE = re.compile(r"\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])")
+
+
+def _emphasized_snippet(prefix: str, match: str, suffix: str) -> str:
+    """
+    Renders `prefix **match** suffix` with the document's own bold/italic
+    projection markers stripped first, so the highlight cannot collide with
+    markers already present — a regex match crossing styled runs used to
+    render as `**The **Supplier** _shall provide**_` (QA 2026-07-19 v8 F-10).
+    Markers are detected over the WHOLE region (a match boundary can cut a
+    marker away from its word-edge context), then each part is rebuilt from
+    the surviving characters.
+    """
+    region = prefix + match + suffix
+    b1, b2 = len(prefix), len(prefix) + len(match)
+    keep = [True] * len(region)
+    for m in _STYLE_MARKER_RE.finditer(region):
+        for i in range(m.start(), m.end()):
+            keep[i] = False
+    stripped_prefix = "".join(c for i, c in enumerate(region[:b1]) if keep[i])
+    stripped_match = "".join(c for i, c in enumerate(region[b1:b2], start=b1) if keep[i])
+    stripped_suffix = "".join(c for i, c in enumerate(region[b2:], start=b2) if keep[i])
+    return f"{stripped_prefix}**{stripped_match}**{stripped_suffix}"
+
+
 def render_outline_tree(
     nodes: List[Any],
     max_level: int = 2,
@@ -540,8 +568,10 @@ def build_search_response(
         m_start, m_end = m.span()
         matched_str = m.group(0)
 
-        snippet = (
-            body[max(0, m_start - 100) : m_start] + f"**{matched_str}**" + body[m_end : min(len(body), m_end + 100)]
+        snippet = _emphasized_snippet(
+            body[max(0, m_start - 100) : m_start],
+            matched_str,
+            body[m_end : min(len(body), m_end + 100)],
         )
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 

@@ -287,7 +287,7 @@ def _infer_type_in_place(item: dict) -> None:
     # else: leave absent; validation will surface a clear error.
 
 
-def coerce_stringified_changes(value: Any) -> Any:
+def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
     """
     Tolerate LLM clients (notably Gemini) that wrap each object in the `changes`
     array as a JSON-encoded string instead of passing a real object:
@@ -299,7 +299,8 @@ def coerce_stringified_changes(value: Any) -> Any:
     discriminated-union validator downstream sees real dicts.
 
     On each decoded/passed-through dict we additionally:
-      - infer a missing `type` discriminator when unambiguous (_infer_type_in_place)
+      - infer a missing `type` discriminator when unambiguous
+        (_infer_type_in_place) — only when `infer_types` is True
       - normalize a malformed `match_mode` to a canonical value or drop it
         (_coerce_match_mode_in_place)
 
@@ -324,13 +325,15 @@ def coerce_stringified_changes(value: Any) -> Any:
                 coerced.append(item)
                 continue
             if isinstance(decoded, dict):
-                _infer_type_in_place(decoded)
+                if infer_types:
+                    _infer_type_in_place(decoded)
                 _coerce_match_mode_in_place(decoded)
                 coerced.append(decoded)
             else:
                 coerced.append(item)
         elif isinstance(item, dict):
-            _infer_type_in_place(item)
+            if infer_types:
+                _infer_type_in_place(item)
             _coerce_match_mode_in_place(item)
             coerced.append(item)
         else:
@@ -339,4 +342,26 @@ def coerce_stringified_changes(value: Any) -> Any:
     return coerced
 
 
+def coerce_stringified_changes(value: Any) -> Any:
+    """Interactive-LLM tolerance: decode stringified items, infer an
+    unambiguous missing `type`, normalize `match_mode` synonyms."""
+    return _coerce_changes(value, infer_types=True)
+
+
+def coerce_stringified_changes_strict(value: Any) -> Any:
+    """
+    Authored-artifact contract: decode stringified items and normalize
+    `match_mode` synonyms, but NEVER infer a missing `type` — the CLI
+    documents `type` as required on every change, and silently treating a
+    typeless object as `modify` weakens agent-output validation
+    (QA 2026-07-19 v8 F-03). The discriminated union then rejects it with
+    "Change #N is missing the required 'type' field."
+    """
+    return _coerce_changes(value, infer_types=False)
+
+
+# The MCP boundary keeps the documented LLM-tolerance layer (its schema says
+# a missing `type` is inferred when unambiguous); files fed to the CLI are
+# authored artifacts and validate strictly.
 BatchChanges = Annotated[list[DocumentChange], BeforeValidator(coerce_stringified_changes)]
+StrictBatchChanges = Annotated[list[DocumentChange], BeforeValidator(coerce_stringified_changes_strict)]

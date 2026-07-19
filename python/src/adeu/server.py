@@ -1,3 +1,4 @@
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -10,6 +11,38 @@ from mcp.types import Icon
 
 from adeu.mcp_components.shared import get_build_info
 
+
+def _parse_server_args(argv: "list[str]") -> argparse.Namespace:
+    """
+    Minimal argument handling BEFORE the stdio server starts: `--help` and
+    `--version` must print and exit like every other executable instead of
+    silently starting the server (QA 2026-07-19 v8 F-06). Unknown arguments
+    are tolerated (host applications append transport flags), so
+    parse_known_args — never parse_args — keeps startup permissive. Called
+    from main() only: importing this module (e.g. from tests) never parses
+    the host process's argv.
+    """
+    version, git_sha, _ = get_build_info()
+    ver_str = f"{version}+{git_sha}" if git_sha and git_sha != "unknown" else version
+    parser = argparse.ArgumentParser(
+        prog="adeu-server",
+        description="Adeu MCP server (stdio transport). Started by MCP hosts such as Claude Desktop.",
+        epilog="Configure automatically with `adeu init`. Docs: https://github.com/dealfluence/adeu",
+    )
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {ver_str}")
+    parser.add_argument(
+        "--scope",
+        choices=["all", "docx"],
+        default="all",
+        help="Limit exposed tools to local DOCX manipulation ('docx') or everything ('all').",
+    )
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
+# Import-time default; main() re-reads it from the real argv. The legacy scan
+# keeps `--scope` working for in-process embedders that import the module with
+# a pre-set argv but never call main().
 requested_scope = "all"
 for i, arg in enumerate(sys.argv):
     if arg == "--scope" and i + 1 < len(sys.argv):
@@ -93,6 +126,11 @@ mcp.list_tools = wrapped_mcp_list_tools  # type: ignore[method-assign]
 
 
 def main():
+    # --help/--version print and exit inside argparse here — before the stdio
+    # transport ever starts (QA 2026-07-19 v8 F-06).
+    global requested_scope
+    args = _parse_server_args(sys.argv[1:])
+    requested_scope = (args.scope or "all").lower()
     mcp.run()
 
 

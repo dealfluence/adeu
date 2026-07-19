@@ -1172,8 +1172,16 @@ export class DocumentMapper {
     const first_real_span = real_spans[0];
     let start_split_adjustment = 0;
 
+    // A range may START on a virtual span (word-diff hunks absorb a style
+    // marker adjacent to real changes, e.g. the `**` closing a bold run).
+    // Virtual characters have no physical width: clamp to the first real
+    // span's start or the subtraction goes negative and the split point
+    // lands INSIDE the preceding run's kept text — the "**The Suppli**"
+    // partial-word artifact (QA 2026-07-19 v8 F-04).
     const local_start =
-      start_idx - first_real_span.start + (first_real_span.run_offset || 0);
+      Math.max(start_idx, first_real_span.start) -
+      first_real_span.start +
+      (first_real_span.run_offset || 0);
     if (local_start > 0) {
       const split_source = working_runs[0];
       const [, right_run] = this._split_run_at_index(

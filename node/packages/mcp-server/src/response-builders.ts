@@ -16,6 +16,44 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+// Projection style markers: `**bold**` always; `_italic_` only where the
+// underscore is not intra-word (identifiers like snake_case are literal text —
+// the projection's italics markers always hug non-whitespace at a word edge).
+const STYLE_MARKER_RE = /\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])/g;
+
+/**
+ * Renders `prefix **match** suffix` with the document's own bold/italic
+ * projection markers stripped first, so the highlight cannot collide with
+ * markers already present — a regex match crossing styled runs used to
+ * render as `**The **Supplier** _shall provide**_` (QA 2026-07-19 v8 F-10).
+ * Markers are detected over the WHOLE region (a match boundary can cut a
+ * marker away from its word-edge context), then each part is rebuilt from
+ * the surviving characters. Mirrors Python's _emphasized_snippet.
+ */
+export function emphasizedSnippet(
+  prefix: string,
+  match: string,
+  suffix: string,
+): string {
+  const region = prefix + match + suffix;
+  const b1 = prefix.length;
+  const b2 = prefix.length + match.length;
+  const keep = new Array<boolean>(region.length).fill(true);
+  for (const m of region.matchAll(STYLE_MARKER_RE)) {
+    for (let i = m.index!; i < m.index! + m[0].length; i++) keep[i] = false;
+  }
+  let strippedPrefix = "";
+  let strippedMatch = "";
+  let strippedSuffix = "";
+  for (let i = 0; i < region.length; i++) {
+    if (!keep[i]) continue;
+    if (i < b1) strippedPrefix += region[i];
+    else if (i < b2) strippedMatch += region[i];
+    else strippedSuffix += region[i];
+  }
+  return `${strippedPrefix}**${strippedMatch}**${strippedSuffix}`;
+}
+
 function _build_appendix_pointer(has_appendix: boolean): string {
   if (!has_appendix) return "";
   return `\n\n---\n\n> **Appendix available.** This document has structural metadata (defined terms, cross-references, bookmarks, diagnostics) that may be relevant when editing. Call \`read_docx\` with \`mode='appendix'\` to load it before submitting edits.`;
@@ -450,10 +488,11 @@ export function build_search_response(
 
     const snippet_start = Math.max(0, m_start - 100);
     const snippet_end = Math.min(body.length, m_end + 100);
-    const snippet =
-      body.substring(snippet_start, m_start) +
-      `**${matched_str}**` +
-      body.substring(m_end, snippet_end);
+    const snippet = emphasizedSnippet(
+      body.substring(snippet_start, m_start),
+      matched_str,
+      body.substring(m_end, snippet_end),
+    );
 
     const snippet_lines = snippet
       .split("\n")
