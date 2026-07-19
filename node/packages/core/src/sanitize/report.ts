@@ -38,9 +38,11 @@ export class SanitizeReport {
           this.removed_comment_lines.push(line);
         }
       } else if (
-        lower.includes("author") || lower.includes("template") || lower.includes("company") || 
-        lower.includes("manager") || lower.includes("metadata") || lower.includes("timestamp") || 
-        lower.includes("custom xml") || lower.includes("last modified by") || lower.includes("revision count") || lower.includes("last printed")
+        lower.includes("author") || lower.includes("template") || lower.includes("company") ||
+        lower.includes("manager") || lower.includes("metadata") || lower.includes("timestamp") ||
+        lower.includes("custom xml") || lower.includes("custom propert") || lower.includes("identifier") ||
+        lower.includes("language") || lower.includes("version") ||
+        lower.includes("last modified by") || lower.includes("revision count") || lower.includes("last printed")
       ) {
         this.metadata_lines.push(line);
       } else if (lower.includes("hyperlink") || lower.includes("warning")) {

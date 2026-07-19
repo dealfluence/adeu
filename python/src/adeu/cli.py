@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
-from adeu.markup import apply_edits_to_markdown
+from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdown
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import BatchChanges, DeleteTableRow, DocumentChange, InsertTableRow, ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
@@ -52,7 +52,10 @@ def handle_init(args: argparse.Namespace):
         print(f"❌ Error locating Claude config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"📍 Config found: {config_path}", file=sys.stderr)
+    if config_path.exists():
+        print(f"📍 Config found: {config_path}", file=sys.stderr)
+    else:
+        print(f"📍 Config will be created: {config_path}", file=sys.stderr)
 
     data: Dict[str, Any] = {"mcpServers": {}}
     existing_valid_json = True
@@ -217,22 +220,100 @@ def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
     _cli_error("invalid_docx", f"'{filename}' is not a valid DOCX file ({reason}).")
 
 
-def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
+def _paths_alias_same_file(a: Path, b: Path) -> bool:
     """
-    Writes an output file, converting filesystem failures (name too long,
-    permission denied, missing directory, disk full) into the same clean
-    exit-code-1 errors every other CLI failure path produces, instead of a
-    raw traceback (QA H3).
+    True when `a` and `b` name the same filesystem object — string-equal
+    paths, relative/absolute aliases, symlinks, or hard links. Falls back to
+    resolved-path comparison when either side does not exist yet.
     """
     try:
-        if isinstance(data, bytes):
-            with open(path, "wb") as fb:
-                fb.write(data)
-        else:
-            with open(path, "w", encoding="utf-8") as ft:
-                ft.write(data)
+        if a.exists() and b.exists() and os.path.samefile(a, b):
+            return True
+    except OSError:
+        pass
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def _guard_text_output_path(output: Path, protected: "list[tuple[Path, str]]", payload: str = "extracted text") -> None:
+    """
+    Refuses text-payload output paths that would destroy a document the
+    command depends on — writing a text payload over a DOCX replaces the
+    package wholesale. `protected` maps each input/output path to its
+    role for the error message; DOCX-suffixed targets are rejected outright
+    so extracted text can never masquerade as a Word document.
+    """
+    for path, role in protected:
+        if path is not None and _paths_alias_same_file(output, path):
+            _cli_error(
+                "invalid_input",
+                f"Output path '{output}' is the same file as the {role}. Writing {payload} "
+                "over it would destroy it. Choose a different output path.",
+            )
+    if output.suffix.lower() == ".docx":
+        _cli_error(
+            "invalid_input",
+            f"Refusing to write {payload} to '{output}': a .docx extension promises a Word "
+            "document, but this command's output is text. Use a .md or .txt output path.",
+        )
+
+
+def _require_docx_output(output: "Path | None") -> None:
+    """
+    Commands whose output is a DOCX package require the output name to say
+    so: a binary Word package behind result.txt breaks every downstream
+    consumer that trusts the extension.
+    """
+    if output is not None and output.suffix.lower() != ".docx":
+        _cli_error(
+            "invalid_input",
+            f"Output path '{output}' must end in .docx — this command writes a Word document, "
+            f"not text. Rename the output (e.g. '{output.stem or output.name}.docx').",
+            exit_code=2,
+        )
+
+
+def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
+    """
+    Single write path for CLI output files:
+
+      - stages to a same-directory temporary file and os.replace()s it into
+        place, so a failed or interrupted write never truncates or corrupts
+        an existing output;
+      - announces on stderr when an existing file is replaced;
+      - converts filesystem failures (name too long, permission denied,
+        missing directory, disk full) into the standard exit-code-1 error
+        contract instead of a raw traceback.
+
+    Text payloads are written as UTF-8 with \\n newlines on every platform.
+    """
+    import tempfile
+
+    # os.path.exists (not Path.exists): unstatable paths (e.g. a name past
+    # the filesystem limit) report False here and produce the clean
+    # write-failure error below instead of a raw OSError.
+    if os.path.exists(path):
+        print(f"⚠️  Overwriting existing '{path}'.", file=sys.stderr)
+
+    payload = data if isinstance(data, bytes) else data.encode("utf-8")
+    tmp_path: "Path | None" = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent or "."))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "wb") as fb:
+            fb.write(payload)
+        os.replace(tmp_path, path)
+        tmp_path = None
     except OSError as e:
         _cli_error("write_failed", f"Could not write output file '{path}': {e.strerror or e}")
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
@@ -493,6 +574,26 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
         raise AssertionError("unreachable") from None
 
 
+def _changes_file_is_json_batch(path: Path) -> bool:
+    """
+    The changes file's kind is decided by CONTENT, not filename:
+    a JSON array (or object) is a structured edit
+    batch whatever the file is called — temporary files rarely carry
+    conventional suffixes. A .json suffix always means a batch, so a
+    malformed .json file surfaces as a parse error instead of being diffed
+    into the document as prose. Everything else is modified document text.
+    """
+    if path.suffix.lower() == ".json":
+        return True
+    text = _read_text_file(path).lstrip()
+    if not text.startswith(("[", "{")):
+        return False
+    try:
+        return isinstance(json.loads(text), (list, dict))
+    except ValueError:
+        return False
+
+
 def _warn_ignored_extract_flags(args) -> None:
     """
     Flags that only apply to one extract mode are warned about (never silently
@@ -522,6 +623,11 @@ def _warn_ignored_extract_flags(args) -> None:
 def handle_extract(args):
     _set_json_mode(args.json)
     _warn_ignored_extract_flags(args)
+    if args.output:
+        # extract's -o payload is text (or JSON); it never lands on a path
+        # that aliases the input DOCX.
+        protected = [(args.input, "input DOCX")] if args.input else []
+        _guard_text_output_path(args.output, protected)
     if args.live:
         if sys.platform != "win32":
             _cli_error("unsupported", "--live is only supported on Windows.")
@@ -530,7 +636,7 @@ def handle_extract(args):
         text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
     else:
         if not args.input:
-            _cli_error("invalid_input", "Must provide input file or use --live")
+            _cli_error("invalid_input", "Must provide input file or use --live", exit_code=2)
 
         doc = _load_docx_or_exit(args.input)
 
@@ -576,19 +682,19 @@ def handle_extract(args):
                 try:
                     page_num = int(page_str)
                 except ValueError:
-                    print(
-                        f"❌ Invalid --page value: '{args.page}'. Provide a positive integer "
+                    _cli_error(
+                        "invalid_input",
+                        f"Invalid --page value: '{args.page}'. Provide a positive integer "
                         "(pages are 1-indexed; 'all' is valid for --mode full and --search-query).",
-                        file=sys.stderr,
+                        exit_code=2,
                     )
-                    sys.exit(1)
                 if page_num < 1:
-                    print(
-                        f"❌ Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
+                    _cli_error(
+                        "invalid_input",
+                        f"Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
                         "(negative page numbers are not supported).",
-                        file=sys.stderr,
+                        exit_code=2,
                     )
-                    sys.exit(1)
 
         if getattr(args, "search_query", None):
             res = build_search_response(
@@ -639,7 +745,12 @@ def handle_extract(args):
     except SystemExit:
         raise
     except Exception as e:
-        _cli_error("invalid_input", f"Error: {e}")
+        # BuilderError carries argument-shaped failures (invalid
+        # --search-regex pattern, bad page value): a usage error, exit
+        # code 2. Everything else is a runtime failure, exit code 1.
+        from adeu.mcp_components._response_builders import BuilderError
+
+        _cli_error("invalid_input", f"Error: {e}", exit_code=2 if isinstance(e, BuilderError) else 1)
         raise AssertionError("unreachable") from None
 
     json_output = json.dumps(res.structured_content or {}) if args.json else None
@@ -813,14 +924,16 @@ def handle_apply(args):
             args.original = None
 
     if args.live and args.dry_run:
-        _cli_error("unsupported", "Dry-run simulation is only supported for disk-based files.")
+        _cli_error("unsupported", "Dry-run simulation is only supported for disk-based files.", exit_code=2)
 
     if not args.changes:
-        _cli_error("invalid_input", "Must provide changes file.")
+        _cli_error("invalid_input", "Must provide changes file.", exit_code=2)
+
+    _require_docx_output(args.output)
 
     changes: List[DocumentChange] = []
 
-    if args.changes.suffix.lower() == ".json":
+    if _changes_file_is_json_batch(args.changes):
         if not args.json:
             print(f"Loading structured batch from {args.changes}...", file=sys.stderr)
         changes = _load_batch_from_json(args.changes)
@@ -843,7 +956,7 @@ def handle_apply(args):
             text_orig, _, _ = _read_active_word_document_core(clean_view=False)
         else:
             if not args.original:
-                _cli_error("invalid_input", "Must provide original file if not using --live")
+                _cli_error("invalid_input", "Must provide original file if not using --live", exit_code=2)
             doc = _load_docx_or_exit(args.original)
 
             from adeu.ingest import _extract_text_from_doc
@@ -896,7 +1009,7 @@ def handle_apply(args):
         return
 
     if not args.original:
-        _cli_error("invalid_input", "Must provide original file if not using --live")
+        _cli_error("invalid_input", "Must provide original file if not using --live", exit_code=2)
     _require_input_file(args.original)
 
     if not args.json:
@@ -991,6 +1104,7 @@ def handle_accept_all(args: argparse.Namespace):
     finalized clean document. Mirrors the `accept_all_changes` MCP tool.
     """
     _set_json_mode(args.json)
+    _require_docx_output(args.output)
     engine = _open_redline_engine_or_exit(args.input)
 
     engine.accept_all_revisions(remove_comments=True)
@@ -1009,34 +1123,36 @@ def handle_accept_all(args: argparse.Namespace):
 
 def handle_markup(args):
     """Handler for the 'markup' subcommand."""
+    _set_json_mode(getattr(args, "json", False))
     if args.input.suffix.lower() == ".docx":
         text = _read_docx_text(args.input)
     else:
         text = _read_text_file(args.input)
 
     if not args.edits.exists():
-        print(f"Error: Edits file not found: {args.edits}", file=sys.stderr)
-        sys.exit(1)
+        _cli_error("file_not_found", f"Edits file not found: {args.edits}")
 
     changes = _load_batch_from_json(args.edits)
     edits = [c for c in changes if isinstance(c, ModifyText)]
-    non_text = [c for c in changes if not isinstance(c, ModifyText)]
+    row_ops = [c for c in changes if isinstance(c, (InsertTableRow, DeleteTableRow))]
+    ignored = [c for c in changes if not isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
 
-    if non_text:
-        # markup is a text-preview tool; review/table actions have no textual
-        # rendering here — but they must never vanish silently (QA 2026-07-18 M1).
+    if ignored:
+        # Review actions (accept/reject/reply) act on existing change IDs and
+        # have no textual rendering in a preview — say so rather than
+        # dropping them silently (QA 2026-07-18 M1).
         type_counts: Dict[str, int] = {}
-        for c in non_text:
+        for c in ignored:
             type_counts[c.type] = type_counts.get(c.type, 0) + 1
         summary = ", ".join(f"{count}× {name}" for name, count in sorted(type_counts.items()))
         print(
-            f"⚠️  {len(non_text)} non-text change(s) ignored by markup ({summary}). "
-            "markup only previews 'modify' text edits — run these through `adeu apply`.",
+            f"⚠️  {len(ignored)} review action(s) ignored by markup ({summary}). "
+            "markup previews text and table-row changes — run review actions through `adeu apply`.",
             file=sys.stderr,
         )
 
-    if not edits:
-        print("Warning: No text edits found in JSON file.", file=sys.stderr)
+    if not edits and not row_ops:
+        print("Warning: No renderable edits found in JSON file.", file=sys.stderr)
 
     # Same string-shape validation `apply` enforces. Without it, new_text
     # containing raw CriticMarkup tags ({++..++}, {>>..<<}) passes straight
@@ -1044,10 +1160,10 @@ def handle_markup(args):
     # parse user data as structural markup (QA L3).
     shape_errors = validate_edit_strings(list(edits))
     if shape_errors:
-        print(f"❌ {len(shape_errors)} edit(s) failed validation:\n", file=sys.stderr)
-        for err in shape_errors:
-            print(err, file=sys.stderr)
-        sys.exit(1)
+        _cli_error(
+            "batch_validation_failed",
+            f"{len(shape_errors)} edit(s) failed validation:\n" + "\n".join(shape_errors),
+        )
 
     edit_reports: List[Dict[str, Any]] = []
     result = apply_edits_to_markdown(
@@ -1058,8 +1174,16 @@ def handle_markup(args):
         edit_reports=edit_reports,
     )
 
+    # Structural row operations render into the same preview: deleted rows
+    # wrapped in {--…--}, inserted rows as {++…++} lines beside their anchor.
+    result = apply_structural_ops_to_markdown(result, row_ops, edit_reports)
+
     failed = [r for r in edit_reports if r["status"] == "failed"]
     applied = [r for r in edit_reports if r["status"] == "applied"]
+
+    stats_line = f"Stats: {len(applied)} applied, {len(failed)} failed" + (
+        f", {len(ignored)} review actions ignored." if ignored else "."
+    )
 
     if failed:
         # Mirror apply's transactional behavior: a preview of half the batch
@@ -1068,12 +1192,18 @@ def handle_markup(args):
         for r in failed:
             print(r["error"], file=sys.stderr)
             print("", file=sys.stderr)
-        print(
-            f"Stats: {len(applied)} applied, {len(failed)} failed"
-            + (f", {len(non_text)} non-text actions ignored" if non_text else "")
-            + ".",
-            file=sys.stderr,
-        )
+        print(stats_line, file=sys.stderr)
+        if _JSON_MODE:
+            print(
+                json.dumps(
+                    {
+                        "error": "batch_validation_failed",
+                        "message": "\n".join(r["error"] for r in failed if r.get("error")),
+                        "applied": len(applied),
+                        "failed": len(failed),
+                    }
+                )
+            )
         sys.exit(1)
 
     output_path = args.output
@@ -1082,15 +1212,31 @@ def handle_markup(args):
         if args.input.suffix.lower() == ".md":
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
+    # markup's output is CriticMarkup text: it may never replace the DOCX
+    # input or the JSON edits batch. In-place output
+    # over a MARKDOWN input stays allowed — text-to-text preview in place is
+    # an intentional workflow.
+    protected = [(args.edits, "JSON edits file")]
+    if args.input.suffix.lower() == ".docx":
+        protected.append((args.input, "input DOCX"))
+    _guard_text_output_path(output_path, protected, payload="CriticMarkup text")
+
     _write_output_or_exit(output_path, result)
 
+    if _JSON_MODE:
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "output_path": str(output_path),
+                    "applied": len(applied),
+                    "failed": 0,
+                    "ignored_actions": len(ignored),
+                }
+            )
+        )
     print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
-    print(
-        f"Stats: {len(applied)} applied, 0 failed"
-        + (f", {len(non_text)} non-text actions ignored" if non_text else "")
-        + ".",
-        file=sys.stderr,
-    )
+    print(stats_line, file=sys.stderr)
 
 
 def handle_sanitize(args: argparse.Namespace):
@@ -1104,6 +1250,8 @@ def handle_sanitize(args: argparse.Namespace):
             file=sys.stderr,
         )
         sys.exit(2)
+
+    _require_docx_output(args.output)
 
     input_files: List[Path] = args.input
     is_batch = len(input_files) > 1 or args.outdir
@@ -1123,6 +1271,15 @@ def handle_sanitize(args: argparse.Namespace):
         if not output_path:
             output_path = input_path.parent / f"{input_path.stem}_sanitized{input_path.suffix}"
 
+        if args.report_file:
+            # The report is text: it may never land on the input DOCX or
+            # the sanitized output path.
+            _guard_text_output_path(
+                args.report_file,
+                [(input_path, "input DOCX"), (output_path, "sanitized output")],
+                payload="the sanitize report",
+            )
+
         try:
             result = sanitize_docx(
                 input_path=str(input_path),
@@ -1136,8 +1293,7 @@ def handle_sanitize(args: argparse.Namespace):
                 if args.report:
                     print(result.report_text, file=sys.stderr)
                 if args.report_file:
-                    with open(args.report_file, "w", encoding="utf-8") as f:
-                        f.write(result.report_text)
+                    _write_output_or_exit(args.report_file, result.report_text)
                     print(f"📄 Report saved to {args.report_file}", file=sys.stderr)
 
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
@@ -1181,9 +1337,22 @@ def handle_sanitize(args: argparse.Namespace):
             )
             sys.exit(2)
 
+        if args.report_file:
+            # Same text-report guard as single-file mode, across every batch
+            # input and every computed destination.
+            batch_protected = [(p, "input DOCX") for p in input_files]
+            batch_protected.extend((outdir / p.name, "sanitized output") for p in input_files)
+            _guard_text_output_path(args.report_file, batch_protected, payload="the sanitize report")
+
         outdir.mkdir(parents=True, exist_ok=True)
 
+        # The batch is all-or-nothing: every output is
+        # sanitized into a staging file first; the staged files move into
+        # place only when EVERY input succeeded. A blocked or failed input
+        # means no outputs at all — automation never has to clean up a
+        # partial result set.
         all_reports: list[SanitizeResult | SanitizeError] = []
+        staged: List[tuple[Path, Path]] = []
         blocked = 0
         succeeded = 0
 
@@ -1194,6 +1363,7 @@ def handle_sanitize(args: argparse.Namespace):
                 continue
 
             output_path = outdir / input_path.name
+            staging_path = outdir / f".{input_path.name}.staging.tmp"
 
             # Resolve baseline for batch mode
             baseline = None
@@ -1206,12 +1376,14 @@ def handle_sanitize(args: argparse.Namespace):
             try:
                 result = sanitize_docx(
                     input_path=str(input_path),
-                    output_path=str(output_path),
+                    output_path=str(staging_path),
                     keep_markup=args.keep_markup,
                     baseline_path=baseline,
                     author=args.author,
                     accept_all=args.accept_all,
                 )
+                result.output_path = str(output_path)
+                staged.append((staging_path, output_path))
                 all_reports.append(result)
                 succeeded += 1
                 status = "clean"
@@ -1234,9 +1406,24 @@ def handle_sanitize(args: argparse.Namespace):
                     _handle_docx_error_and_exit(input_path.name, e)
                 print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
 
+        if blocked == 0:
+            for staging_path, output_path in staged:
+                try:
+                    os.replace(staging_path, output_path)
+                except OSError as e:
+                    _cli_error("write_failed", f"Could not write output file '{output_path}': {e.strerror or e}")
+        else:
+            for staging_path, _ in staged:
+                try:
+                    staging_path.unlink()
+                except OSError:
+                    pass
+
         # Batch summary
         total = succeeded + blocked
         summary = f"\nBatch Summary: {total} documents processed, {succeeded} succeeded, {blocked} blocked"
+        if blocked > 0:
+            summary += "\nBatch failed — no outputs were written (the batch is all-or-nothing)."
         print(summary, file=sys.stderr)
 
         # Write reports
@@ -1255,8 +1442,7 @@ def handle_sanitize(args: argparse.Namespace):
             if args.report:
                 print(report_text, file=sys.stderr)
             if args.report_file:
-                with open(args.report_file, "w", encoding="utf-8") as f:
-                    f.write(report_text)
+                _write_output_or_exit(args.report_file, report_text)
 
         if blocked > 0:
             sys.exit(1)
@@ -1386,7 +1572,22 @@ def main():
     except Exception:
         default_author = "Adeu AI"
 
-    p_apply = subparsers.add_parser("apply", help="Apply edits to a DOCX")
+    p_apply = subparsers.add_parser(
+        "apply",
+        help="Apply edits to a DOCX",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "changes file format\n"
+            "  Detected by content: a JSON array is a structured edit batch; anything\n"
+            "  else is treated as the document's full modified text (extract with\n"
+            "  --clean-view --page all, edit, apply).\n\n" + _CHANGE_TYPE_REFERENCE + "\n\n"
+            "  'modify' options:\n"
+            "    match_mode — strict (default: exactly one occurrence must match),\n"
+            "                 first (edit the first occurrence), all (edit every occurrence)\n"
+            "    regex      — treat target_text as a regular expression\n"
+            "    comment    — attach a Word comment to the change\n"
+        ),
+    )
     p_apply.add_argument("original", type=Path, nargs="?", help="Original DOCX (omit if --live)")
     p_apply.add_argument("changes", type=Path, nargs="?", help="JSON edits file OR Modified Text file")
     p_apply.add_argument("--live", action="store_true", help="Apply edits to live active Word document")
@@ -1455,6 +1656,11 @@ def main():
         action="store_true",
         help="Highlight-only mode: mark targets with {==...==} without applying changes",
     )
+    p_markup.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the result (output path, applied/failed counts) as machine-readable JSON on stdout.",
+    )
     p_markup.set_defaults(func=handle_markup)
 
     p_sanitize = subparsers.add_parser(
@@ -1463,7 +1669,14 @@ def main():
     )
     p_sanitize.add_argument("input", type=Path, nargs="+", help="Input DOCX file(s)")
     p_sanitize.add_argument("-o", "--output", type=Path, help="Output DOCX path (single file mode)")
-    p_sanitize.add_argument("--outdir", type=Path, help="Output directory (batch mode)")
+    p_sanitize.add_argument(
+        "--outdir",
+        type=Path,
+        help=(
+            "Output directory (batch mode). The batch is all-or-nothing: if any input is "
+            "blocked or fails, NO outputs are written."
+        ),
+    )
     p_sanitize.add_argument(
         "--keep-markup",
         action="store_true",

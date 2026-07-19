@@ -186,6 +186,9 @@ class InsertTableRow(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    # The mapper whose coordinate space _resolved_start_idx belongs to (the
+    # clean-view mapper when the anchor row carries pending tracked changes).
+    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
@@ -206,6 +209,9 @@ class DeleteTableRow(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    # The mapper whose coordinate space _resolved_start_idx belongs to (the
+    # clean-view mapper when the anchor row carries pending tracked changes).
+    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)

@@ -1394,6 +1394,11 @@ export class RedlineEngine {
     anchor_run: Run | null,
     anchor_paragraph: Paragraph | null,
     reuse_id: string,
+    // The attached DOM element the insertion physically follows. anchor_run
+    // supplies STYLING and may already be detached (the deletion step clones
+    // runs into <w:del> and replaces the originals); suffix relocation for
+    // paragraph-splitting insertions keys on this element instead.
+    positional_anchor_el: Element | null = null,
   ): {
     first_node: Element | null;
     last_p: Element | null;
@@ -1424,10 +1429,48 @@ export class RedlineEngine {
       current_p = walker;
     }
 
-    // Drop trailing empty line. "foo\n\nbar\n\n" splits to
-    // ['foo', '', 'bar', '']; that trailing empty is just a terminator, not
-    // a real empty paragraph.
-    while (lines.length > 1 && lines[lines.length - 1] === "") {
+    // Suffix nodes: content that follows the anchor inside current_p. When
+    // the inserted text carries paragraph breaks, this content belongs in
+    // the LAST new paragraph. The positional anchor is attached to the
+    // DOM, and the insertion lands immediately after it, so its following
+    // child-of-paragraph siblings are exactly the suffix.
+    const suffix_nodes: Element[] = [];
+    const pos_source =
+      positional_anchor_el && positional_anchor_el.parentNode
+        ? positional_anchor_el
+        : anchor_run !== null && anchor_run._element.parentNode
+          ? anchor_run._element
+          : null;
+    if (current_p !== null && pos_source !== null) {
+      let pos_anchor: Element | null = pos_source;
+      while (pos_anchor && pos_anchor.parentNode !== current_p) {
+        pos_anchor = pos_anchor.parentNode as Element | null;
+        if (pos_anchor === current_p) {
+          pos_anchor = null;
+          break;
+        }
+      }
+      if (pos_anchor) {
+        const relocatable = new Set(["w:r", "w:ins", "w:del"]);
+        let nxt = pos_anchor.nextSibling;
+        while (nxt) {
+          if (nxt.nodeType === 1 && relocatable.has((nxt as Element).tagName)) {
+            suffix_nodes.push(nxt as Element);
+          }
+          nxt = nxt.nextSibling;
+        }
+      }
+    }
+
+    // Drop the trailing empty line ONLY when there is no suffix to relocate.
+    // "foo\n\nbar\n\n" splits to ['foo', '', 'bar', '']; without a suffix
+    // the trailing empty is just a terminator, but with one it is the fresh
+    // destination paragraph the suffix moves into.
+    while (
+      lines.length > 1 &&
+      lines[lines.length - 1] === "" &&
+      suffix_nodes.length === 0
+    ) {
       lines.pop();
     }
     if (lines.length === 0) {
@@ -1555,6 +1598,16 @@ export class RedlineEngine {
       }
     }
 
+    // Relocate the suffix into the last new paragraph: the paragraph break
+    // the insertion introduced splits current_p at the anchor, so everything
+    // after the anchor continues in the final inserted paragraph.
+    if (!block_mode && last_p && suffix_nodes.length > 0) {
+      for (const node of suffix_nodes) {
+        node.parentNode?.removeChild(node);
+        last_p.appendChild(node);
+      }
+    }
+
     return { first_node, last_p, last_ins, used_block_mode: block_mode };
   }
 
@@ -1628,7 +1681,13 @@ export class RedlineEngine {
       return [stripped_text.substring(2).trim(), "List Paragraph"];
     }
 
-    const match = stripped_text.match(/^\d+\.\s+/);
+    // Numbered lists: the projection emits ordered items with a CONSTANT
+    // "1. " marker (Markdown renumbers), so only that exact shape converts
+    // back into a list style. Any other leading number ("2024. Year in
+    // review", "3. Clause text") is literal document text. Continuation
+    // items inside an existing list anchor keep full "\d+." handling via
+    // the list-anchored insertion path.
+    const match = stripped_text.match(/^1\.\s+/);
     if (match) {
       return [stripped_text.substring(match[0].length).trim(), "List Number"];
     }
@@ -2841,15 +2900,22 @@ export class RedlineEngine {
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         let matches = this.mapper.find_all_match_indices(edit.target_text);
+        let resolved_mapper = this.mapper;
         if (matches.length === 0) {
           if (!this.clean_mapper) {
             this.clean_mapper = new DocumentMapper(this.doc, true);
           }
           matches = this.clean_mapper.find_all_match_indices(edit.target_text);
+          resolved_mapper = this.clean_mapper;
         }
 
         if (matches.length > 0) {
+          // Record WHICH mapper produced the offset: a clean-view index
+          // resolved against the raw mapper lands rows at the wrong position
+          // once earlier edits in the batch put tracked changes in the
+          // anchor row.
           edit._resolved_start_idx = matches[0][0];
+          edit._active_mapper_ref = resolved_mapper;
           resolved_edits.push([edit, null]);
         } else {
           skipped++;
@@ -3160,7 +3226,11 @@ export class RedlineEngine {
       edit._resolved_start_idx !== null
         ? edit._resolved_start_idx
         : edit._match_start_index || 0;
-    const [anchor_run, anchor_para] = this.mapper.get_insertion_anchor(
+    // The offset must be looked up in the coordinate space it was resolved
+    // in: a clean-view offset applied to the raw
+    // mapper points at earlier text once tracked changes exist.
+    const active_mapper: DocumentMapper = edit._active_mapper_ref || this.mapper;
+    const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
       start_idx,
       rebuild_map,
     );
@@ -3396,9 +3466,22 @@ export class RedlineEngine {
         const actual_cells = actual_doc_text.split("|");
         const new_cells = current_effective_new_text.split("|");
 
-        if (actual_cells.length === new_cells.length && actual_cells.length > 1) {
+        if (actual_cells.length !== new_cells.length) {
+          throw new BatchValidationError([
+            `Target text spans ${actual_cells.length} table cells, but replacement provides ${new_cells.length}. To modify text without altering table structure (rows or columns), ensure the replacement contains the exact same number of '|' separators (e.g., replace with 'CellC | ' to empty the second cell).`
+          ]);
+        }
+
+        if (actual_cells.length > 1) {
           const sub_edits: any[] = [];
-          let search_offset = start_idx;
+
+          // actual_doc_text IS the document slice at
+          // [start_idx, start_idx + len): per-cell offsets are exact
+          // arithmetic over that slice — never a search of mapper.full_text,
+          // which cannot distinguish repeated cell text and lands in the
+          // wrong cell when the matched range starts inside a " | "
+          // separator.
+          let cell_start_in_target = 0;
 
           // Determine which cell receives the comment
           let target_comment_idx = 0;
@@ -3414,14 +3497,10 @@ export class RedlineEngine {
             const n_cell = new_cells[cell_idx];
             const a_clean = a_cell.trim();
             const n_clean = n_cell.trim();
-
-            let actual_start = search_offset;
-            if (a_clean) {
-              actual_start = this.mapper.full_text.indexOf(a_clean, search_offset);
-              if (actual_start === -1 || actual_start > search_offset + 10) {
-                actual_start = search_offset;
-              }
-            }
+            const actual_start =
+              start_idx +
+              cell_start_in_target +
+              (a_clean ? a_cell.indexOf(a_clean) : 0);
 
             const should_attach_comment = (edit.comment !== null && edit.comment !== undefined) && (cell_idx === target_comment_idx);
 
@@ -3441,27 +3520,18 @@ export class RedlineEngine {
               }
             }
 
-            if (a_clean) {
-              search_offset = actual_start + a_clean.length;
-            }
-
-            const next_pipe = this.mapper.full_text.indexOf(" | ", search_offset);
-            if (next_pipe !== -1 && next_pipe <= search_offset + 10) {
-              search_offset = next_pipe + 3;
-            } else {
-              search_offset += a_cell.length + 1;
-            }
+            cell_start_in_target += a_cell.length + 1; // +1 for the '|'
           }
 
           for (const sub of sub_edits) {
             all_sub_edits.push(sub);
           }
           continue;
-        } else {
-          throw new BatchValidationError([
-            `Target text spans ${actual_cells.length} table cells, but replacement provides ${new_cells.length}. To modify text without altering table structure (rows or columns), ensure the replacement contains the exact same number of '|' separators (e.g., replace with 'CellC | ' to empty the second cell).`
-          ]);
         }
+        // Exactly one "cell": the target merely brushes a separator (its
+        // match range starts or ends inside " | ") without crossing into
+        // another cell's text. That is an ordinary in-cell edit — fall
+        // through to the standard resolution.
       }
 
       let has_markdown = false;
@@ -3573,6 +3643,26 @@ export class RedlineEngine {
           for (const sub of split_sub_edits) all_sub_edits.push(sub);
           continue;
         }
+      }
+
+      // After trimming shared context, an edit whose target remainder is
+      // EMPTY is a pure insertion with exactly one hunk. Resolve it
+      // directly at the effective offset instead of word-diffing the full
+      // strings: dmp's alignment can cross-match punctuation between the
+      // shared context and the inserted text (pairing the period of "two."
+      // with "marker.") and split the insertion apart.
+      if (!final_target && final_new) {
+        all_sub_edits.push({
+          type: "modify",
+          target_text: "",
+          new_text: final_new,
+          comment: edit.comment,
+          _resolved_start_idx: effective_start_idx,
+          _match_start_index: effective_start_idx,
+          _internal_op: "INSERTION",
+          _active_mapper_ref: active_mapper,
+        });
+        continue;
       }
 
       const sub_edits = this._word_diff_sub_edits(
@@ -3804,15 +3894,15 @@ export class RedlineEngine {
     if (op === "INSERTION") {
       let final_new_text = edit.new_text || "";
 
-      // QA 2026-07-18 C1: a MACHINE-PINNED pure insertion (diff/text
-      // round-trip output: authored with an empty target and no parent
-      // edit) positioned in the separator gap between the body and a
-      // following part used to anchor on the NEXT part's first paragraph,
-      // writing the new final body paragraph into word/footer1.xml.
-      // Re-anchor it to the end of the body and force new-paragraph
-      // semantics. Insertions DERIVED from a target-anchored edit (parent
-      // ref set — e.g. prepending "DRAFT " to "FOOTER MARKER") keep the
-      // user's chosen anchor: their context names the part they meant.
+      // A MACHINE-PINNED pure insertion (diff/text round-trip output:
+      // authored with an empty target and no parent edit) positioned in the
+      // separator gap between the body and a following part anchors to the
+      // end of the BODY with forced new-paragraph semantics — anchoring on
+      // the next part's first paragraph writes the new final body paragraph
+      // into word/footer1.xml. Insertions DERIVED from a target-anchored
+      // edit (parent ref set — e.g. prepending "DRAFT " to "FOOTER MARKER")
+      // keep the user's chosen anchor: their context names the part they
+      // meant.
       let boundary_anchor: TextSpan | null = null;
       const boundary =
         typeof (active_mapper as any).part_boundary_at === "function"
@@ -4168,6 +4258,9 @@ export class RedlineEngine {
         style_source_run,
         mod_anchor_para,
         ins_id!,
+        // The insertion physically follows the deletion block; the style
+        // run was detached when the deletion cloned it into <w:del>.
+        last_del,
       );
 
       if (result.first_node) {

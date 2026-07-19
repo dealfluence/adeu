@@ -635,6 +635,7 @@ function _row_ops_for_table(
             target_text: o_txt,
             new_text: m_txt,
             comment: "Diff: Table row modified",
+            _is_table_edit: true,
           });
         }
       }
@@ -785,14 +786,26 @@ export function generate_structured_edits(
         if (row_opcodes !== null) {
           edits.push(..._row_ops_for_table(t_o, t_m, row_opcodes, warnings));
         } else {
-          const tbl_edits = generate_edits_from_text(
-            text_orig.substring(t_o.start, t_o.end),
-            text_mod.substring(t_m.start, t_m.end),
-          );
-          for (const e of tbl_edits) {
-            e._match_start_index = (e._match_start_index || 0) + t_o.start;
+          // Cell-internal changes only (row sets align 1:1). Emit one
+          // ROW-LEVEL edit per differing row — the engine splits it into
+          // per-cell sub-edits along the " | " boundaries. A word-level diff
+          // over the whole table span produces hunks that start or end
+          // inside a cell separator, which apply into the wrong cell or
+          // write literal pipe text. Unpinned like every other table edit:
+          // pinned application bypasses the cell splitter, and the full row
+          // text is the anchor contract.
+          for (let k = 0; k < t_o.rows.length; k++) {
+            const o_txt = t_o.rows[k].cells.join(" | ");
+            const m_txt = t_m.rows[k].cells.join(" | ");
+            if (o_txt === m_txt) continue;
+            edits.push({
+              type: "modify",
+              target_text: o_txt,
+              new_text: m_txt,
+              comment: "Diff: Table row modified",
+              _is_table_edit: true,
+            });
           }
-          edits.push(...tbl_edits);
         }
       }
     }
@@ -817,7 +830,9 @@ export function generate_structured_edits(
   let ambiguous_anchor_warned = false;
   for (const e of edits) {
     if (
-      (e.type === "insert_row" || e.type === "delete_row") &&
+      (e.type === "insert_row" ||
+        e.type === "delete_row" ||
+        (e as any)._is_table_edit) &&
       !ambiguous_anchor_warned
     ) {
       if (e.target_text && countOccurrences(text_orig, e.target_text) > 1) {

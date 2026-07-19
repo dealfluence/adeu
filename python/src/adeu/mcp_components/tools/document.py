@@ -17,6 +17,8 @@ from pydantic import Field, TypeAdapter
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.mcp_components._response_builders import (
+    BuilderError,
+    BuilderResult,
     build_appendix_response,
     build_full_document_response,
     build_outline_response,
@@ -43,6 +45,12 @@ from adeu.models import (
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
+
+
+def _as_tool_result(res: BuilderResult) -> ToolResult:
+    """Lifts a framework-free BuilderResult into fastmcp's ToolResult."""
+    return ToolResult(content=res.content, structured_content=res.structured_content)
+
 
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
 
@@ -185,31 +193,38 @@ async def _read_docx_disk(
 
         if search_query is not None:
             # `page` is a doc-page filter (None == search all pages).
-            return build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
+            return _as_tool_result(
+                build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
+            )
 
         # In full mode, page='all' returns the entire document without page
         # chrome — the round-trip artifact for text-based apply/diff
         # (QA 2026-07-17 F1; mirrors the CLI's --page all). Dispatched before
         # the isdigit() check below, which would silently render page 1.
         if mode == "full" and page is not None and str(page).strip().lower() == "all":
-            return build_full_document_response(text, file_path)
+            return _as_tool_result(build_full_document_response(text, file_path))
 
         # Non-search modes: `page` means document page; default to 1.
         page_num = int(page) if (page is not None and str(page).isdigit()) else 1
         if mode == "outline":
-            return build_outline_response(
-                doc,
-                text,
-                file_path,
-                outline_max_level=outline_max_level,
-                outline_verbose=outline_verbose,
-                paragraph_offsets=paragraph_offsets,
+            return _as_tool_result(
+                build_outline_response(
+                    doc,
+                    text,
+                    file_path,
+                    outline_max_level=outline_max_level,
+                    outline_verbose=outline_verbose,
+                    paragraph_offsets=paragraph_offsets,
+                )
             )
         if mode == "appendix":
-            return build_appendix_response(text, page_num, file_path)
+            return _as_tool_result(build_appendix_response(text, page_num, file_path))
         # mode == "full"
-        return build_paginated_response(text, page_num, file_path)
+        return _as_tool_result(build_paginated_response(text, page_num, file_path))
 
+    except BuilderError as e:
+        # Builder validation failures are user-facing tool errors.
+        raise ToolError(str(e)) from None
     except ToolError:
         raise
     except FileNotFoundError as e:

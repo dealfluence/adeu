@@ -11,9 +11,8 @@ import json
 
 import pytest
 from docx import Document
-from fastmcp.exceptions import ToolError
 
-from adeu.mcp_components._response_builders import build_search_response
+from adeu.mcp_components._response_builders import BuilderError, build_search_response
 from adeu.mcp_components.tools.document import process_document_batch
 
 
@@ -360,7 +359,7 @@ def test_search_page_filter_empty_with_hits_elsewhere():
 # Case 6: page=N exceeding total document pages -> ToolError
 def test_search_page_filter_exceeds_total_pages_raises():
     body = _single_page_body()  # single doc page
-    with pytest.raises(ToolError) as exc_info:
+    with pytest.raises(BuilderError) as exc_info:
         build_search_response(
             text=body,
             search_query="needle",
@@ -378,7 +377,7 @@ def test_search_page_filter_exceeds_total_pages_raises():
 @pytest.mark.parametrize("bad_page", [0, -1, "garbage", "1.5"])
 def test_search_invalid_page_values_raise(bad_page):
     body = _single_page_body()
-    with pytest.raises(ToolError) as exc_info:
+    with pytest.raises(BuilderError) as exc_info:
         build_search_response(
             text=body,
             search_query="needle",

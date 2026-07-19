@@ -435,12 +435,17 @@ export function scrub_doc_properties(doc: DocumentObject): string[] {
     // Classification-style properties are textbook leak vectors ("Project
     // Falcon", "confidential,merger,..."). Unlike title they carry no
     // legitimate outbound formatting value, so strip them and say so.
+    // dc:identifier, dc:language and cp:version are scrubbed with them:
+    // identifiers are DMS/matter-ID carriers.
     const leakFields: Array<[string, string]> = [
       ['category', 'Category'],
       ['keywords', 'Keywords'],
       ['subject', 'Subject'],
       ['contentStatus', 'Content status'],
       ['description', 'Description/comments'],
+      ['identifier', 'Identifier'],
+      ['language', 'Language'],
+      ['version', 'Version'],
     ];
     for (const [local, label] of leakFields) {
       findDescendantsByLocalName(corePart._element, local).forEach(c => {
@@ -498,33 +503,106 @@ export function scrub_timestamps(doc: DocumentObject): string[] {
   return modified ? ["Timestamps normalized to epoch"] : [];
 }
 
-export function strip_custom_xml(doc: DocumentObject): string[] {
-  const customParts = doc.pkg.parts.filter(p => p.partname.includes('/customXml'));
-  if (customParts.length === 0) return [];
+/**
+ * Fully ejects package members whose path matches `matcher`: the parsed part
+ * list, the raw `pkg.unzipped` bytes (save() re-zips EVERY unzipped
+ * member, so skipping this ships the original bytes in the output), the
+ * [Content_Types].xml overrides, and every .rels Relationship whose
+ * target matches `relTargetMatcher`.
+ */
+function ejectPackageMembers(
+  doc: DocumentObject,
+  matcher: (path: string) => boolean,
+  relTargetMatcher: (target: string) => boolean,
+) {
+  const pkg = doc.pkg;
+  const normalized = (p: string) => (p.startsWith('/') ? p.substring(1) : p);
 
-  const partnames = new Set(customParts.map(p => p.partname));
-  doc.pkg.parts = doc.pkg.parts.filter(p => !partnames.has(p.partname));
-
-  const removeRelationsTo = (relsPart: Part) => {
+  // 1. Sever relationships from every .rels part (and the in-memory rels maps)
+  for (const part of pkg.parts) {
+    if (!part.partname.endsWith('.rels')) continue;
     const toRemove: Element[] = [];
-    for (const rel of findAllDescendants(relsPart._element, 'Relationship')) {
-      const target = rel.getAttribute('Target');
-      if (target && target.includes('customXml')) toRemove.push(rel);
+    for (const rel of findAllDescendants(part._element, 'Relationship')) {
+      const target = rel.getAttribute('Target') || '';
+      if (relTargetMatcher(target)) {
+        toRemove.push(rel);
+        const sourcePath = part.partname.replace('/_rels/', '/').replace('.rels', '');
+        const sourcePart = pkg.getPartByPath(sourcePath);
+        if (sourcePart) {
+          const relId = rel.getAttribute('Id');
+          if (relId) sourcePart.rels.delete(relId);
+        }
+      }
     }
     toRemove.forEach(r => r.parentNode?.removeChild(r));
-  };
+  }
 
-  const rootRels = doc.pkg.getPartByPath('_rels/.rels');
-  if (rootRels) removeRelationsTo(rootRels);
+  // 2. Remove [Content_Types].xml overrides
+  const ctPart = pkg.getPartByPath('[Content_Types].xml');
+  if (ctPart) {
+    const toRemove: Element[] = [];
+    for (const override of findAllDescendants(ctPart._element, 'Override')) {
+      const partName = override.getAttribute('PartName') || '';
+      if (matcher(normalized(partName))) toRemove.push(override);
+    }
+    toRemove.forEach(o => o.parentNode?.removeChild(o));
+  }
 
-  const docRels = doc.pkg.getOrCreateRelsPart(doc.part.partname);
-  if (docRels) removeRelationsTo(docRels);
+  // 3. Drop the parts from the serialization list AND the raw zip map
+  pkg.parts = pkg.parts.filter(p => !matcher(normalized(p.partname)));
+  for (const key of Object.keys(pkg.unzipped)) {
+    if (matcher(normalized(key))) delete pkg.unzipped[key];
+  }
+}
+
+export function strip_custom_xml(doc: DocumentObject): string[] {
+  const isCustomXml = (path: string) => path.startsWith('customXml/');
+  const customParts = doc.pkg.parts.filter(p =>
+    isCustomXml(p.partname.startsWith('/') ? p.partname.substring(1) : p.partname),
+  );
+  const leakedMembers = Object.keys(doc.pkg.unzipped).filter(isCustomXml);
+  if (customParts.length === 0 && leakedMembers.length === 0) return [];
+
+  ejectPackageMembers(doc, isCustomXml, target => target.includes('customXml'));
 
   for (const sdtPr of findAllDescendants(doc.element, 'w:sdtPr')) {
     findChildren(sdtPr, 'w:dataBinding').forEach(b => sdtPr.removeChild(b));
   }
 
-  return [`Custom XML parts: ${customParts.length} removed`];
+  return [`Custom XML parts: ${Math.max(customParts.length, leakedMembers.length)} removed`];
+}
+
+const CUSTOM_PROPS_PATH = 'docProps/custom.xml';
+
+/**
+ * Remove the custom document properties part (docProps/custom.xml) and its
+ * package relationship. Custom properties are a standard home for matter
+ * numbers, client names, DMS identifiers and workflow secrets; a package
+ * that keeps them can never be reported CLEAN.
+ */
+export function strip_custom_properties(doc: DocumentObject): string[] {
+  const part = doc.pkg.getPartByPath(CUSTOM_PROPS_PATH);
+  const leaked = Object.keys(doc.pkg.unzipped).includes(CUSTOM_PROPS_PATH);
+  if (!part && !leaked) return [];
+
+  // Enumerate what is being removed so the report discloses it.
+  const lines: string[] = [];
+  if (part) {
+    for (const prop of findDescendantsByLocalName(part._element, 'property')) {
+      const name = prop.getAttribute('name') || '(unnamed)';
+      const value = (prop.textContent || '').trim();
+      lines.push(`  Custom property removed: ${name} = "${_truncate(value, 60)}"`);
+    }
+  }
+
+  ejectPackageMembers(
+    doc,
+    path => path === CUSTOM_PROPS_PATH,
+    target => target.includes('docProps/custom.xml'),
+  );
+
+  const count = Math.max(lines.length, 1);
+  return [`Custom document properties: ${count} removed (docProps/custom.xml)`].concat(lines);
 }
 
 export function strip_image_alt_text(doc: DocumentObject): string[] {

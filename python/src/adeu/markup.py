@@ -637,3 +637,87 @@ def apply_edits_to_markdown(
         result = result[:start] + full_replacement + result[end:]
 
     return result
+
+
+# CriticMarkup wrappers stripped when computing a line's CLEAN (accepted)
+# reading: deletions and comments vanish, insertions and highlights unwrap.
+_CRITIC_DELETION_RE = re.compile(r"\{--(.*?)--\}", re.DOTALL)
+_CRITIC_COMMENT_RE = re.compile(r"\{>>(.*?)<<\}", re.DOTALL)
+_CRITIC_INSERTION_RE = re.compile(r"\{\+\+(.*?)\+\+\}", re.DOTALL)
+_CRITIC_HIGHLIGHT_RE = re.compile(r"\{==(.*?)==\}", re.DOTALL)
+
+
+def _clean_reading_of_line(line: str) -> str:
+    """A line's accepted text: what the document reads after every rendered
+    CriticMarkup change on it is accepted."""
+    line = _CRITIC_DELETION_RE.sub("", line)
+    line = _CRITIC_COMMENT_RE.sub("", line)
+    line = _CRITIC_INSERTION_RE.sub(r"\1", line)
+    line = _CRITIC_HIGHLIGHT_RE.sub(r"\1", line)
+    return line
+
+
+def apply_structural_ops_to_markdown(
+    markdown_text: str,
+    ops: List[Any],
+    edit_reports: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """
+    Renders structured table-row operations (insert_row / delete_row) into a
+    CriticMarkup preview: a deleted row's line is wrapped in {--…--}, an
+    inserted row appears as a {++cells | joined | like | this++} line beside
+    its anchor — structural changes belong in the rendered preview, not in
+    a stderr footnote.
+
+    Anchors resolve against each line's CLEAN reading, mirroring the apply
+    engine: an insert_row anchored on the final text of a row an earlier
+    edit in the same batch modified finds the {--old--}{++new++} line.
+    Match semantics are strict — exactly one line must match, and both the
+    not-found and ambiguous cases report as failed.
+    """
+    lines = markdown_text.split("\n")
+
+    def _record(op: Any, status: str, error: Optional[str] = None) -> None:
+        if edit_reports is not None:
+            new_text = " | ".join(op.cells) if getattr(op, "cells", None) is not None else ""
+            edit_reports.append(
+                {
+                    "status": status,
+                    "target_text": op.target_text,
+                    "new_text": new_text,
+                    "error": error,
+                }
+            )
+
+    for op in ops:
+        anchor = (op.target_text or "").strip()
+        matches = [i for i, line in enumerate(lines) if anchor and _clean_reading_of_line(line).strip() == anchor]
+        if len(matches) == 0:
+            _record(
+                op,
+                "failed",
+                f"- Row operation failed: no table row line reads '{anchor}'. Structural "
+                "operations anchor on the row's full text (cells joined by ' | ').",
+            )
+            continue
+        if len(matches) > 1:
+            _record(
+                op,
+                "failed",
+                f"- Row operation failed: {len(matches)} lines read '{anchor}' — the anchor is "
+                "ambiguous. Make the anchor row unique.",
+            )
+            continue
+
+        i = matches[0]
+        if op.type == "delete_row":
+            lines[i] = "{--" + lines[i] + "--}"
+        else:
+            new_line = "{++" + " | ".join(op.cells) + "++}"
+            if getattr(op, "position", "below") == "above":
+                lines.insert(i, new_line)
+            else:
+                lines.insert(i + 1, new_line)
+        _record(op, "applied")
+
+    return "\n".join(lines)

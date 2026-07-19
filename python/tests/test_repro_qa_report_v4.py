@@ -503,14 +503,16 @@ class TestCliFindings:
         assert "Traceback" not in err
 
     def test_l1_invalid_page_values_error(self, tmp_path, capsys):
+        # Exit code 2: invalid argument values are usage errors
+        # (QA 2026-07-18 v6 L1).
         doc = _write_docx(tmp_path)
 
         code = _run_cli(["extract", str(doc), "--page", "-1"])
-        assert code == 1
+        assert code == 2
         assert "Invalid --page value" in capsys.readouterr().err
 
         code = _run_cli(["extract", str(doc), "--page", "abc"])
-        assert code == 1
+        assert code == 2
         assert "Invalid --page value" in capsys.readouterr().err
 
     def test_l1_valid_page_still_works(self, tmp_path, capsys):

@@ -618,14 +618,14 @@ def _row_ops_for_table(
                 o_txt = row_text(rows_o[i1 + k])
                 m_txt = row_text(rows_m[j1 + k])
                 if o_txt != m_txt:
-                    ops.append(
-                        ModifyText(
-                            type="modify",
-                            target_text=o_txt,
-                            new_text=m_txt,
-                            comment="Diff: Table row modified",
-                        )
+                    row_edit = ModifyText(
+                        type="modify",
+                        target_text=o_txt,
+                        new_text=m_txt,
+                        comment="Diff: Table row modified",
                     )
+                    row_edit._is_table_edit = True
+                    ops.append(row_edit)
             for k in range(i1 + pairs, i2):
                 del_op = DeleteTableRow(type="delete_row", target_text=row_text(rows_o[k]))
                 del_op._match_start_index = rows_o[k].start
@@ -726,19 +726,40 @@ def generate_structured_edits(
                 if row_opcodes is not None:
                     edits.extend(_row_ops_for_table(t_o, t_m, row_opcodes, warnings))
                 else:
-                    tbl_edits = generate_edits_from_text(text_orig[t_o.start : t_o.end], text_mod[t_m.start : t_m.end])
-                    for e in tbl_edits:
-                        e._match_start_index = (e._match_start_index or 0) + t_o.start
-                    edits.extend(tbl_edits)
+                    # Cell-internal changes only (row sets align 1:1). Emit one
+                    # ROW-LEVEL edit per differing row — the engine splits it
+                    # into per-cell sub-edits along the " | " boundaries. A
+                    # word-level diff over the whole table span produces hunks
+                    # that start or end inside a cell separator, which apply
+                    # into the wrong cell or write literal pipe text. Unpinned
+                    # like every other table edit: pinned application bypasses
+                    # the cell splitter, and the full row text is the anchor
+                    # contract.
+                    for r_o, r_m in zip(t_o.rows, t_m.rows, strict=True):
+                        o_txt = " | ".join(r_o.cells)
+                        m_txt = " | ".join(r_m.cells)
+                        if o_txt == m_txt:
+                            continue
+                        row_edit = ModifyText(
+                            type="modify",
+                            target_text=o_txt,
+                            new_text=m_txt,
+                            comment="Diff: Table row modified",
+                        )
+                        row_edit._is_table_edit = True
+                        edits.append(row_edit)
 
-    # Row operations anchor by row text (pins do not survive JSON): if the
+    # Table edits anchor by row text (pins do not survive JSON): if the
     # anchor text also appears elsewhere in the document — e.g. two tables
     # sharing a header row — the strict text match at apply time is
     # ambiguous. In-process consumers ride the pinned offsets; JSON consumers
     # fail closed, so tell the user why up front.
     ambiguous_anchor_warned = False
     for row_op in edits:
-        if isinstance(row_op, (InsertTableRow, DeleteTableRow)) and not ambiguous_anchor_warned:
+        is_table_anchor = isinstance(row_op, (InsertTableRow, DeleteTableRow)) or (
+            isinstance(row_op, ModifyText) and row_op._is_table_edit
+        )
+        if is_table_anchor and not ambiguous_anchor_warned:
             if row_op.target_text and text_orig.count(row_op.target_text) > 1:
                 warnings.append(
                     f'The row anchor "{row_op.target_text[:60]}" appears more than once in the document. '
@@ -754,9 +775,53 @@ def generate_structured_edits(
     kept_modifies = set(map(id, _drop_image_marker_hunks(modify_edits, warnings)))
     edits = [e for e in edits if not isinstance(e, ModifyText) or id(e) in kept_modifies]
 
-    text_edits = [e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None]
+    # Table row edits are excluded from context widening: their target is the
+    # full row already, and widening would drag " | " separators or "\n" row
+    # boundaries from NEIGHBORING rows into the target, misaligning the
+    # engine's per-cell splitter.
+    text_edits = [
+        e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None and not e._is_table_edit
+    ]
     make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)
     return edits, warnings
+
+
+def _is_table_blob(block: str) -> bool:
+    """
+    True when a "\\n\\n"-separated block reads as projected table rows: every
+    line carries the " | " cell separator. Table rows are separated by single
+    newlines, so a whole table is one block in the paragraph alignment.
+    """
+    lines = block.split("\n")
+    return bool(lines) and all(" | " in line for line in lines)
+
+
+def _table_blob_row_edits(orig_blob: str, mod_blob: str) -> "List[ModifyText] | None":
+    """
+    Pairwise row-level edits between two aligned table blobs, or None when
+    the blobs cannot be row-aligned (different row counts — a structural
+    change the text path hands to the engine's row guards). Row edits are
+    unpinned: the full row text is the anchor, and the engine's per-cell
+    splitter resolves them — word-level hunks across " | " separators land
+    in the wrong cell.
+    """
+    rows_o = orig_blob.split("\n")
+    rows_m = mod_blob.split("\n")
+    if len(rows_o) != len(rows_m):
+        return None
+    row_edits: List[ModifyText] = []
+    for r_o, r_m in zip(rows_o, rows_m, strict=True):
+        if r_o == r_m:
+            continue
+        row_edit = ModifyText(
+            type="modify",
+            target_text=r_o,
+            new_text=r_m,
+            comment="Diff: Table row modified",
+        )
+        row_edit._is_table_edit = True
+        row_edits.append(row_edit)
+    return row_edits
 
 
 def generate_edits_via_paragraph_alignment(original_text: str, modified_text: str) -> List[ModifyText]:
@@ -799,6 +864,17 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
 
         elif tag == "insert":
             inserted_text = "\n\n".join(mod_paragraphs[j1:j2])
+            # An inserted paragraph must CARRY its paragraph separator, or
+            # the engine (rightly) treats the text as an inline insertion and
+            # glues it to the neighboring paragraph. Mid-document inserts
+            # anchor at the following paragraph's start and keep it separate
+            # with a trailing "\n\n" (the same hunk shape word-level diffs
+            # emit); end-of-document appends lead with "\n\n" so the new text
+            # becomes its own paragraph after the current last one.
+            if i1 < len(orig_paragraphs):
+                inserted_text = inserted_text + "\n\n"
+            else:
+                inserted_text = "\n\n" + inserted_text
             edit = ModifyText(
                 type="modify",
                 target_text="",
@@ -809,6 +885,35 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
             edits.append(edit)
 
         elif tag == "replace":
+            # Table blobs in equal-count replace blocks pair up positionally
+            # and diff as ROW-LEVEL edits; word-level hunks over a table blob
+            # start or end inside " | " separators and land in the wrong
+            # cell. Prose pairs (and any block whose counts differ) keep the
+            # word-level chunk diff.
+            if (i2 - i1) == (j2 - j1) and any(
+                _is_table_blob(orig_paragraphs[i1 + k]) or _is_table_blob(mod_paragraphs[j1 + k])
+                for k in range(i2 - i1)
+            ):
+                for k in range(i2 - i1):
+                    orig_p = orig_paragraphs[i1 + k]
+                    mod_p = mod_paragraphs[j1 + k]
+                    if orig_p == mod_p:
+                        continue
+                    pair_offset = orig_offsets[i1 + k]
+                    row_edits = (
+                        _table_blob_row_edits(orig_p, mod_p)
+                        if _is_table_blob(orig_p) and _is_table_blob(mod_p)
+                        else None
+                    )
+                    if row_edits is not None:
+                        edits.extend(row_edits)
+                        continue
+                    pair_edits = generate_edits_from_text(orig_p, mod_p)
+                    for ce in pair_edits:
+                        ce._match_start_index = (ce._match_start_index or 0) + pair_offset
+                        edits.append(ce)
+                continue
+
             orig_chunk = "\n\n".join(orig_paragraphs[i1:i2])
             mod_chunk = "\n\n".join(mod_paragraphs[j1:j2])
             chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk)

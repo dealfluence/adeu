@@ -47,12 +47,12 @@ The appendix is paginated using the same paginator as the body, with the
 appendix text passed AS the body input.
 """
 
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List
-
-from fastmcp.exceptions import ToolError
-from fastmcp.tools.tool import ToolResult
 
 from adeu.outline import extract_outline
 from adeu.pagination import (
@@ -66,6 +66,29 @@ from adeu.utils.safe_regex import RegexTimeoutError, user_finditer
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentObject
+
+
+class BuilderError(Exception):
+    """
+    User-facing validation failure from a response builder (bad page number,
+    invalid search pattern). Framework-free on purpose: these builders serve
+    both the MCP server and the CLI, and importing fastmcp costs ~0.7 s —
+    more than the rest of an `adeu extract` invocation combined. The MCP
+    tool layer converts this to ToolError; the CLI reports it as a usage
+    error.
+    """
+
+
+@dataclass
+class BuilderResult:
+    """
+    Framework-free response payload: `content` is the LLM/CLI-facing
+    markdown, `structured_content` the machine-facing JSON. The MCP tool
+    layer lifts this into a fastmcp ToolResult.
+    """
+
+    content: Any
+    structured_content: "dict | None" = None
 
 
 def render_outline_tree(
@@ -123,7 +146,7 @@ def render_outline_tree(
     return "\n".join(lines)
 
 
-def build_full_document_response(text: str, file_path: str) -> ToolResult:
+def build_full_document_response(text: str, file_path: str) -> BuilderResult:
     """
     Returns the ENTIRE document body in one response, with no page banner,
     continuation footer, or appendix pointer.
@@ -136,7 +159,7 @@ def build_full_document_response(text: str, file_path: str) -> ToolResult:
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
-    return ToolResult(
+    return BuilderResult(
         content=llm_content,
         structured_content={
             "markdown": ui_markdown,
@@ -146,7 +169,7 @@ def build_full_document_response(text: str, file_path: str) -> ToolResult:
     )
 
 
-def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool = False) -> ToolResult:
+def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool = False) -> BuilderResult:
     """
     Splits projected Markdown into pages and returns the requested page.
 
@@ -154,7 +177,7 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
     get a one-line footer pointing the agent at mode='appendix' if the
     document has an appendix.
 
-    Raises ToolError if `page` is out of range.
+    Raises BuilderError if `page` is out of range.
     """
     body, appendix = split_structural_appendix(text)
     has_appendix = bool(appendix.strip())
@@ -164,7 +187,7 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
     result = paginate(body, structural_appendix="")
 
     if page < 1 or page > result.total_pages:
-        raise ToolError(f"Page {page} out of range (doc has {result.total_pages} pages).")
+        raise BuilderError(f"Page {page} out of range (doc has {result.total_pages} pages).")
 
     selected = result.pages[page - 1]
 
@@ -177,7 +200,7 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
     # Prepend the path ONLY for the LLM
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
-    return ToolResult(
+    return BuilderResult(
         content=llm_content,
         structured_content={
             "markdown": ui_markdown,
@@ -195,7 +218,7 @@ def build_outline_response(
     outline_verbose: bool = False,
     paragraph_offsets: dict | None = None,
     is_cli: bool = False,
-) -> ToolResult:
+) -> BuilderResult:
     """
     Returns a structural map of headings as a Markdown tree.
 
@@ -254,7 +277,7 @@ def build_outline_response(
     # Prepend the path ONLY for the LLM
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
-    return ToolResult(
+    return BuilderResult(
         content=llm_content,
         structured_content={
             "markdown": ui_markdown,
@@ -272,7 +295,7 @@ def build_search_response(
     page: int | str | None,
     file_path: str,
     is_cli: bool = False,
-) -> ToolResult:
+) -> BuilderResult:
     """
     Filters projected Markdown to exact substring or regex matches.
 
@@ -283,8 +306,8 @@ def build_search_response(
       - positive int N: return only matches whose offset falls within document
         page N. If N has zero hits but the query exists on other pages, emit a
         helpful empty-result pointer (not an error). If N exceeds the document's
-        total pages, raise ToolError.
-      - anything else (0, negative, non-"all" string): raise ToolError.
+        total pages, raise BuilderError.
+      - anything else (0, negative, non-"all" string): raise BuilderError.
 
     Occurrence counts (the "appears X times" line under each match) are always
     computed from the FULL match set, never filtered.
@@ -292,19 +315,23 @@ def build_search_response(
     body, _ = split_structural_appendix(text)
     flags = 0 if search_case_sensitive else re.IGNORECASE
 
-    # When the caller asked for a regex but supplied something re can't compile
-    # (e.g. an unterminated character class `\[`, or an inline-flag group
-    # `(?i)...` that Python's re rejects mid-pattern), do NOT hard-error and
-    # burn the turn. Downgrade to a literal search of the raw string and tell
-    # the model, so it can accept the literal hits or fix its pattern rather
-    # than retrying the same broken regex. Patterns that blow the matching
-    # time budget (catastrophic backtracking, QA 2026-07-17 F5) get the same
-    # treatment — for a read-only search, degraded results beat a hang.
+    # Invalid-regex handling differs by caller. The MCP path downgrades to a
+    # literal search with an explanatory note: the model reads the note and
+    # either accepts the literal hits or fixes its pattern, without burning a
+    # turn on a hard error. The CLI path is strict — automation that asked
+    # for regex semantics gets a non-zero exit, never silently-literal
+    # results. Patterns that blow the matching time budget (catastrophic
+    # backtracking) follow the same split.
     regex_downgraded_note = ""
     if search_regex:
         try:
             matches = list(user_finditer(search_query, body, flags=flags))
         except re.error as e:
+            if is_cli:
+                raise BuilderError(
+                    f"--search-regex pattern is not a valid regular expression: {e}. "
+                    "Fix the pattern, or drop --search-regex to search for the literal text."
+                ) from None
             regex_downgraded_note = (
                 f"> **Note:** `{search_query}` is not a valid regular expression "
                 f"({e}), so it was searched as literal text instead. "
@@ -313,6 +340,8 @@ def build_search_response(
             )
             matches = list(re.finditer(re.escape(search_query), body, flags=flags))
         except RegexTimeoutError as e:
+            if is_cli:
+                raise BuilderError(str(e)) from None
             regex_downgraded_note = (
                 f"> **Note:** `{search_query}` was searched as literal text instead of as a regular expression: {e}"
             )
@@ -338,31 +367,31 @@ def build_search_response(
             try:
                 page_filter = int(page)
             except (TypeError, ValueError):
-                raise ToolError(
+                raise BuilderError(
                     f"Invalid page value: {page!r}. In search mode, `page` must be "
                     f"omitted (search all pages), `'all'`, or a positive integer "
                     f"document page number."
                 ) from None
             if page_filter < 1:
-                raise ToolError(
+                raise BuilderError(
                     f"Invalid page value: {page!r}. In search mode, `page` must be "
                     f"omitted, `'all'`, or a positive integer document page number."
                 )
     elif isinstance(page, int):
         if page < 1:
-            raise ToolError(
+            raise BuilderError(
                 f"Invalid page value: {page!r}. In search mode, `page` must be "
                 f"omitted, `'all'`, or a positive integer document page number."
             )
         page_filter = page
     else:
-        raise ToolError(
+        raise BuilderError(
             f"Invalid page value: {page!r}. In search mode, `page` must be "
             f"omitted, `'all'`, or a positive integer document page number."
         )
 
     if page_filter is not None and page_filter > total_doc_pages:
-        raise ToolError(
+        raise BuilderError(
             f"Document page {page_filter} is out of range — the document has "
             f"{total_doc_pages} page(s). In search mode, `page` filters matches "
             f"by document page; omit `page` (or pass `page='all'`) to search "
@@ -389,7 +418,7 @@ def build_search_response(
         )
         if regex_downgraded_note:
             ui_markdown = f"{regex_downgraded_note}\n\n{ui_markdown}"
-        return ToolResult(
+        return BuilderResult(
             content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
             structured_content={
                 "markdown": ui_markdown,
@@ -439,7 +468,7 @@ def build_search_response(
                 f"{'s' if len(pages_with_hits) != 1 else ''} {other_pages_str}). "
                 f"Omit `page` or pass `page='all'` to see them."
             )
-            return ToolResult(
+            return BuilderResult(
                 content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
                 structured_content={
                     "markdown": ui_markdown,
@@ -524,7 +553,7 @@ def build_search_response(
     if regex_downgraded_note:
         ui_parts.insert(0, regex_downgraded_note)
     ui_markdown = "\n\n".join(part for part in ui_parts if part)
-    return ToolResult(
+    return BuilderResult(
         content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
         structured_content={
             "markdown": ui_markdown,
@@ -534,7 +563,7 @@ def build_search_response(
     )
 
 
-def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool = False) -> ToolResult:
+def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool = False) -> BuilderResult:
     """
     Returns the structural appendix (defined terms, anchors, diagnostics) for
     the document, paginated. The appendix is treated AS the body for pagination
@@ -543,7 +572,7 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
     The agent fetches this on demand to inform editing decisions on documents
     where the body pages flag an appendix exists.
 
-    Raises ToolError if `page` is out of range.
+    Raises BuilderError if `page` is out of range.
     Returns a single-page "no appendix" response if the document has no
     structural metadata.
     """
@@ -556,7 +585,7 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
             "(no defined terms, named anchors, or diagnostics detected)."
         )
         llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
-        return ToolResult(
+        return BuilderResult(
             content=llm_content,
             structured_content={
                 "markdown": ui_markdown,
@@ -569,7 +598,7 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
     result = paginate(appendix, structural_appendix="")
 
     if page < 1 or page > result.total_pages:
-        raise ToolError(f"Appendix page {page} out of range (appendix has {result.total_pages} pages).")
+        raise BuilderError(f"Appendix page {page} out of range (appendix has {result.total_pages} pages).")
 
     selected = result.pages[page - 1]
 
@@ -604,7 +633,7 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
     ui_markdown = banner + selected.page_content + footer
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
-    return ToolResult(
+    return BuilderResult(
         content=llm_content,
         structured_content={
             "markdown": ui_markdown,

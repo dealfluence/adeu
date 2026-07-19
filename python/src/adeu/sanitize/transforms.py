@@ -468,12 +468,17 @@ def scrub_doc_properties(doc: DocumentObject) -> list[str]:
     # Classification-style properties are textbook leak vectors ("Project
     # Falcon", "confidential,merger,..."). Unlike title they carry no
     # legitimate outbound formatting value, so strip them and say so.
+    # dc:identifier, dc:language and cp:version are scrubbed with them:
+    # identifiers are DMS/matter-ID carriers.
     for attr, label in (
         ("category", "Category"),
         ("keywords", "Keywords"),
         ("subject", "Subject"),
         ("content_status", "Content status"),
         ("comments", "Description/comments"),
+        ("identifier", "Identifier"),
+        ("language", "Language"),
+        ("version", "Version"),
     ):
         value = getattr(core, attr, None)
         if value:
@@ -590,6 +595,61 @@ def strip_custom_xml(doc: DocumentObject) -> list[str]:
             sdt_pr.remove(binding)
 
     return [f"Custom XML parts: {len(custom_parts)} removed"]
+
+
+CUSTOM_PROPS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+
+
+def strip_custom_properties(doc: DocumentObject) -> list[str]:
+    """
+    Remove the custom document properties part (docProps/custom.xml) and its
+    package relationship. Custom properties are a standard home for matter
+    numbers, client names, DMS identifiers and workflow secrets; a package
+    that keeps them can never be reported CLEAN.
+    """
+    pkg = doc.part.package
+
+    custom_parts = [p for p in pkg.parts if str(p.partname) == "/docProps/custom.xml"]
+    if not custom_parts:
+        return []
+
+    # Enumerate what is being removed so the report discloses it.
+    lines = []
+    for part in custom_parts:
+        root = _parse_part_xml(part)
+        if root is None:
+            continue
+        for prop in root.findall(f"{{{CUSTOM_PROPS_NS}}}property"):
+            name = prop.get("name") or "(unnamed)"
+            value = "".join(prop.itertext())
+            lines.append(f'  Custom property removed: {name} = "{_truncate(value, 60)}"')
+
+    custom_partnames = {p.partname for p in custom_parts}
+
+    # Sever relationships from the package root (custom props hang off /_rels/.rels)
+    root_rels_to_remove = [
+        rId
+        for rId, rel in pkg.rels.items()
+        if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
+    ]
+    for rId in root_rels_to_remove:
+        del pkg.rels[rId]
+
+    # ...and from any other part, then from the serialization list.
+    for part in pkg.parts:
+        part_rels_to_remove = [
+            rId
+            for rId, rel in part.rels.items()
+            if not rel.is_external and getattr(rel.target_part, "partname", None) in custom_partnames
+        ]
+        for rId in part_rels_to_remove:
+            del part.rels[rId]
+
+    if hasattr(pkg, "_parts") and isinstance(pkg._parts, list):
+        pkg._parts = [p for p in pkg._parts if p.partname not in custom_partnames]
+
+    count = max(len(lines), 1)
+    return [f"Custom document properties: {count} removed (docProps/custom.xml)"] + lines
 
 
 def audit_hyperlinks(doc: DocumentObject, internal_patterns: Optional[list[str]] = None) -> list[str]:

@@ -13,6 +13,7 @@ from fastmcp.tools.tool import ToolResult
 
 from adeu import RedlineEngine
 from adeu.mcp_components._response_builders import (
+    BuilderError,
     build_appendix_response,
     build_outline_response,
     build_paginated_response,
@@ -413,7 +414,10 @@ if sys.platform == "win32":
             except Exception as e:
                 raise ToolError(str(e)) from e
 
-            return res
+            return ToolResult(content=res.content, structured_content=res.structured_content)
+        except BuilderError as e:
+            # Builder validation failures are user-facing tool errors.
+            raise ToolError(str(e)) from None
         except ToolError:
             raise
 

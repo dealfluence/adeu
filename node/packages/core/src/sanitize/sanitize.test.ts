@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { zipSync } from "fflate";
 import { DOMParser } from "@xmldom/xmldom";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -186,7 +187,7 @@ describe("Finalize Document (Core)", () => {
     doc.pkg.parts.push(settingsPart);
 
     // Mock the doc.save buffer return
-    doc.save = vi.fn().mockResolvedValue(Buffer.from("mock"));
+    doc.save = vi.fn().mockResolvedValue(Buffer.from(zipSync({})));
 
     const res = await finalize_document(doc, {
       filename: "test.docx",
@@ -231,7 +232,7 @@ describe("Finalize Document (Core)", () => {
         </w:p>
       `);
 
-      doc.save = vi.fn().mockResolvedValue(Buffer.from("mock"));
+      doc.save = vi.fn().mockResolvedValue(Buffer.from(zipSync({})));
 
       await finalize_document(doc, {
         filename: "test.docx",
@@ -258,7 +259,7 @@ describe("Finalize Document (Core)", () => {
         "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
       );
 
-      doc.save = vi.fn().mockResolvedValue(Buffer.from("mock"));
+      doc.save = vi.fn().mockResolvedValue(Buffer.from(zipSync({})));
 
       await finalize_document(doc, {
         filename: "test.docx",
@@ -285,7 +286,7 @@ describe("Finalize Document (Core)", () => {
       expect(original_xml).toContain("w:commentReference");
 
       // Mock the doc.save buffer return
-      doc.save = vi.fn().mockResolvedValue(Buffer.from("mock"));
+      doc.save = vi.fn().mockResolvedValue(Buffer.from(zipSync({})));
 
       // 2. Act: Finalize the document in full sanitize mode with accept_all: true
       await finalize_document(doc, {

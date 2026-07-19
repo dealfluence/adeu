@@ -4,6 +4,22 @@ import sys
 import pytest
 from docx import Document
 
+try:
+    from hypothesis import HealthCheck
+    from hypothesis import settings as _hyp_settings
+
+    # Property-test profiles (tests/test_property_invariants.py). Registered
+    # here so `--hypothesis-profile=hunt` resolves at pytest configure time.
+    _hyp_settings.register_profile(
+        "default", deadline=None, max_examples=25, suppress_health_check=[HealthCheck.too_slow]
+    )
+    _hyp_settings.register_profile(
+        "hunt", deadline=None, max_examples=300, suppress_health_check=[HealthCheck.too_slow]
+    )
+    _hyp_settings.load_profile("default")
+except ImportError:
+    pass
+
 
 @pytest.fixture
 def simple_docx_stream():
