@@ -43,8 +43,9 @@ def test_pure_comment_with_formatting_mismatch():
     # The bold formatting on "Important " survives. With meta deferral, the
     # two runs (bold "Important " + plain "Text") coalesce into a single
     # {==...==} highlight rather than splitting per-run, and one meta block
-    # closes the range.
-    assert "{==**Important **Text==}" in text
+    # closes the range. The run's trailing space projects OUTSIDE the bold
+    # markers (QA 2026-07-19 F-03).
+    assert "{==**Important** Text==}" in text
     assert text.count("{==") == 1
     assert text.count("{>>") == 1
     assert text.count("[Com:1]") == 1

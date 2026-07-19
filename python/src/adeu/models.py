@@ -114,6 +114,9 @@ class ModifyText(BaseModel):
     # Sub-edits produced by splitting one balanced multi-paragraph modification
     # share this id so the batch report counts them as a single applied edit.
     _split_group_id: Optional[int] = PrivateAttr(default=None)
+    # True when any resolved sub-edit of this edit failed or was skipped, so
+    # partially-applied fan-outs still count as skipped (all-or-nothing).
+    _any_sub_failure: bool = PrivateAttr(default=False)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
@@ -191,6 +194,7 @@ class InsertTableRow(BaseModel):
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
+    _any_sub_failure: bool = PrivateAttr(default=False)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
@@ -214,6 +218,7 @@ class DeleteTableRow(BaseModel):
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
+    _any_sub_failure: bool = PrivateAttr(default=False)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
@@ -238,26 +243,20 @@ def _coerce_match_mode_in_place(item: dict) -> None:
 
     - canonical values ("strict"/"first"/"all") pass through
     - recognized synonyms map to canonical
-    - anything else (the help-string echo "strict, first, or all", empty
-      string, garbage) is DROPPED so the Pydantic default ("strict") applies.
-
-    We never coerce an unrecognized value to "all" — defaulting to "strict"
-    is fail-safe (ambiguity raises a clear error) whereas "all" would silently
-    mass-edit every occurrence.
+    - anything else (null, "banana", the help-string echo) is left in place so
+      the Pydantic Literal REJECTS it with a clear enum error. Silently
+      falling back to a default meant a caller could believe an option took
+      effect when it was ignored (QA 2026-07-19 F-12); an invalid-option
+      error is recoverable, a silently wrong resolution strategy is not.
     """
     if "match_mode" not in item:
         return
     raw = item["match_mode"]
     if not isinstance(raw, str):
-        # Non-string (e.g. null, number): drop and let the default apply.
-        item.pop("match_mode", None)
+        # Non-string (null, number): leave for the Literal validator to reject.
         return
-    key = raw.strip().lower()
-    mapped = _MATCH_MODE_SYNONYMS.get(key)
-    if mapped is None:
-        # Unrecognized (help-string echo, typo, empty): drop -> default "strict".
-        item.pop("match_mode", None)
-    else:
+    mapped = _MATCH_MODE_SYNONYMS.get(raw.strip().lower())
+    if mapped is not None:
         item["match_mode"] = mapped
 
 

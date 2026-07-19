@@ -114,14 +114,14 @@ def test_a1_policy_missing_type_single_edit():
 
 
 # ---------------------------------------------------------------------------
-# A2 — `match_mode` help-string echo is dropped to the `strict` default
-#
-# Reproduces the literal_error cluster (policy-checklist-review ×1 line 129):
-# the model passed the field's help text as the value.
+# A2 — `match_mode` synonyms normalize; anything else is REJECTED as an enum
+# error (QA 2026-07-19 F-12). Silently defaulting unrecognized values (the
+# old behavior, from the literal_error cluster) let callers believe an option
+# took effect when it was ignored.
 # ---------------------------------------------------------------------------
 
 
-def test_a2_match_mode_help_string_echo_defaults_to_strict():
+def test_a2_match_mode_help_string_echo_is_rejected():
     """loop_analysis.md line 129: match_mode='strict, first, or all'."""
     changes = [
         {
@@ -133,12 +133,9 @@ def test_a2_match_mode_help_string_echo_defaults_to_strict():
         }
     ]
     valid, rejected = _normalize_changes(changes)
-    assert rejected == []
-    assert len(valid) == 1
-    m = valid[0]
-    assert isinstance(m, ModifyText)
-    # Unrecognized value dropped -> fail-safe default, NOT 'all'.
-    assert m.match_mode == "strict"
+    assert valid == []
+    assert len(rejected) == 1
+    assert "match_mode" in rejected[0]
 
 
 @pytest.mark.parametrize(
@@ -150,9 +147,6 @@ def test_a2_match_mode_help_string_echo_defaults_to_strict():
         ("first_only", "first"),
         ("all_occurrences", "all"),
         ("every", "all"),
-        ("strict, first, or all", "strict"),  # help-string echo -> default
-        ("", "strict"),  # empty -> default
-        ("garbage", "strict"),  # unknown -> default
     ],
 )
 def test_a2_match_mode_synonyms(raw, expected):
@@ -162,6 +156,15 @@ def test_a2_match_mode_synonyms(raw, expected):
     m = valid[0]
     assert isinstance(m, ModifyText)
     assert m.match_mode == expected
+
+
+@pytest.mark.parametrize("raw", ["strict, first, or all", "", "garbage", None])
+def test_a2_invalid_match_mode_is_rejected(raw):
+    out = coerce_stringified_changes([{"type": "modify", "target_text": "x", "new_text": "y", "match_mode": raw}])
+    valid, rejected = _normalize_changes(out)
+    assert valid == []
+    assert len(rejected) == 1
+    assert "match_mode" in rejected[0]
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +200,10 @@ def test_a1_infers_reply_and_insert_row_unambiguously():
 
 def test_a3_partial_accept_one_bad_sibling():
     """
-    A mixed batch: 3 salvageable (2 inferred-type modifies + 1 self-healed
-    match_mode) and 1 unsalvageable (target_id alone). The valid ones must
-    survive; the bad one reported at its index.
+    A mixed batch: 2 salvageable (inferred-type modify + inferred reply) and
+    2 unsalvageable (target_id alone; invalid match_mode — rejected as an
+    enum error per QA 2026-07-19 F-12). The valid ones must survive; the bad
+    ones reported at their indexes.
     """
     changes = [
         {"target_text": "X", "new_text": "Y", "match_mode": "all"},  # infer modify
@@ -209,15 +213,14 @@ def test_a3_partial_accept_one_bad_sibling():
             "target_text": "A",
             "new_text": "B",
             "match_mode": "strict, first, or all",
-        },  # heal -> strict
+        },  # invalid enum -> reject
     ]
     valid, rejected = _normalize_changes(changes)
-    assert len(valid) == 3
-    assert len(rejected) == 1
+    assert len(valid) == 2
+    assert len(rejected) == 2
     assert "changes[2]" in rejected[0]
-    # The self-healed one kept its other intent and defaulted match_mode.
-    healed = [c for c in valid if isinstance(c, ModifyText) and c.target_text == "A"][0]
-    assert healed.match_mode == "strict"
+    assert "changes[3]" in rejected[1]
+    assert "match_mode" in rejected[1]
 
 
 def test_a3_all_bad_returns_empty_without_raising():

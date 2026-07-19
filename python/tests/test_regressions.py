@@ -128,9 +128,11 @@ def test_batch_engine_reply_to_fake_comment():
         engine.process_batch([ReplyComment(target_id="Com:999", text="Hello")])
 
 
-def test_batch_engine_formatting_removal_fails():
+def test_batch_engine_formatting_removal_works():
     """
-    Reproduces a bug where the Batch Engine fails to remove formatting.
+    A target with formatting markers (**text**) replaced by plain text must
+    drop the formatting: the user's markers are authoritative (QA 2026-07-19
+    F-02). This test previously pinned the OPPOSITE (buggy) behavior.
     If the target_text has formatting (like **text**), but the new_text
     is plain ('text'), the inserted run inherits the old formatting
     instead of dropping it.
@@ -153,7 +155,7 @@ def test_batch_engine_formatting_removal_fails():
 
     # We look for the inserted run (w:ins) in the XML.
     xml = d2.paragraphs[0]._element.xml
-    assert "<w:b/>" in xml.split("<w:ins")[1], "Bug fixed? The bold tag was properly stripped from the insertion."
+    assert "<w:b/>" not in xml.split("<w:ins")[1], "explicit plain replacement kept inherited bold"
 
 
 def test_batch_engine_corrupts_multipara_insertion():

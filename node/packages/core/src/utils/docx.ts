@@ -560,6 +560,27 @@ export function get_run_style_markers(
   return [prefix, suffix];
 }
 
+/**
+ * Splits `text` into [leading_ws, core, trailing_ws]. Emphasis markers must
+ * wrap only the core: `**The Supplier **` (a bold run with a trailing space)
+ * is malformed Markdown — CommonMark requires the closing delimiter to hug
+ * non-whitespace — and it poisons every downstream CriticMarkup consumer
+ * (QA 2026-07-19 F-03/F-10). Fully-whitespace text yields ["", "", text] so
+ * callers skip the markers entirely.
+ */
+export function split_boundary_whitespace(
+  text: string,
+): [string, string, string] {
+  const core = text.trim();
+  if (!core) return ["", "", text];
+  const lead_len = text.length - text.trimStart().length;
+  return [
+    text.substring(0, lead_len),
+    text.substring(lead_len, lead_len + core.length),
+    text.substring(lead_len + core.length),
+  ];
+}
+
 export function apply_formatting_to_segments(
   text: string,
   prefix: string,
@@ -567,10 +588,17 @@ export function apply_formatting_to_segments(
 ): string {
   if (!prefix && !suffix) return text;
   if (!text) return "";
-  if (!text.includes("\n")) return `${prefix}${text}${suffix}`;
+
+  const wrap = (segment: string): string => {
+    const [lead, core, trail] = split_boundary_whitespace(segment);
+    if (!core) return segment;
+    return `${lead}${prefix}${core}${suffix}${trail}`;
+  };
+
+  if (!text.includes("\n")) return wrap(text);
 
   const parts = text.split("\n");
-  return parts.map((p) => (p ? `${prefix}${p}${suffix}` : "")).join("\n");
+  return parts.map((p) => (p ? wrap(p) : "")).join("\n");
 }
 
 export function get_run_text(run: Run): string {

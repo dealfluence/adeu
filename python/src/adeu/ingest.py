@@ -1,5 +1,6 @@
 # FILE: src/adeu/ingest.py
 import io
+import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
@@ -444,14 +445,20 @@ def build_paragraph_text(
                     # Elide adjacent same-style markers only when both sides carry
                     # the same NON-EMPTY style markers (so "**A**"+"**B**" -> "**AB**",
                     # but "foo_"+"_italic_" is NOT elided because the plain run has
-                    # empty style and its trailing "_" is literal).
+                    # empty style and its trailing "_" is literal). Hoisted leading
+                    # whitespace may sit before the incoming segment's opening
+                    # marker ("**A**" + " **B**" -> "**A B**"), mirroring the
+                    # mapper's part-level elision exactly (QA 2026-07-19 F-03).
+                    lead_match = re.match(r"(\s*)" + re.escape(new_style[0]), seg) if new_style != ("", "") else None
                     if (
                         new_style == current_style
                         and current_style != ("", "")
                         and pending_text.endswith(current_style[1])
-                        and seg.startswith(new_style[0])
+                        and lead_match is not None
                     ):
-                        pending_text = pending_text[: -len(current_style[1])] + seg[len(new_style[0]) :]
+                        pending_text = (
+                            pending_text[: -len(current_style[1])] + lead_match.group(1) + seg[lead_match.end() :]
+                        )
                     else:
                         pending_text += seg
                     current_style = new_style

@@ -397,15 +397,24 @@ def make_edits_self_contained(
     trim_common_context re-trims that shared context at apply time, so the
     resulting redline is identical to the positional one.
 
-    When `part_ranges` is provided ((start, end, kind) tuples from
-    ExtractStructure), context expansion never crosses an OPC part boundary:
-    widening a body edit into footer text produced exactly the cross-part
-    targets that corrupted documents in QA 2026-07-18 C1. If uniqueness cannot
-    be reached inside the part, the widest in-part candidate is emitted — a
-    strict-mode ambiguity error at apply time beats structural corruption.
+    Two hard rules keep the widened batch applicable:
 
-    Returns the same edit objects, mutated in place (target_text, new_text and
-    _match_start_index updated).
+      - Expansion never crosses an OPC part boundary (`part_ranges`): widening
+        a body edit into footer text produced exactly the cross-part targets
+        that corrupted documents in QA 2026-07-18 C1.
+
+      - Expansion never absorbs ANOTHER edit's hunk. Batches apply
+        sequentially, so a later edit whose anchor context contains an earlier
+        edit's original text can only match inside that edit's tracked
+        deletion — apply rightly rejects it, and `diff --json` output stops
+        being applicable by its own `apply` (QA 2026-07-19 F-01). When
+        uniqueness cannot be reached without crossing a neighboring hunk, the
+        two edits are COALESCED into one (hunk + stable gap + hunk), which is
+        both unambiguous and sequentially applicable.
+
+    Returns the surviving edit objects (mutated in place); coalescing removes
+    absorbed edits from the returned list, so callers must use the return
+    value rather than the input list.
     """
     n = len(original_text)
 
@@ -424,6 +433,22 @@ def make_edits_self_contained(
             return prev
         return 0, n
 
+    # Snapshot each pinned edit's RAW hunk (pre-widening coordinates). Edits
+    # without a trustworthy pin pass through untouched and never block others.
+    class _Hunk:
+        __slots__ = ("edit", "idx", "target", "new")
+
+        def __init__(self, edit: ModifyText, idx: int, target: str, new: str):
+            self.edit = edit
+            self.idx = idx
+            self.target = target
+            self.new = new
+
+        @property
+        def end(self) -> int:
+            return self.idx + len(self.target)
+
+    hunks: List[_Hunk] = []
     for edit in edits:
         idx = edit._match_start_index
         if idx is None:
@@ -433,35 +458,190 @@ def make_edits_self_contained(
         # really lives at idx (always true for our own diff generators).
         if target and original_text[idx : idx + len(target)] != target:
             continue
-        if target and original_text.count(target) == 1:
-            continue  # Already unambiguous.
+        hunks.append(_Hunk(edit, idx, target, edit.new_text or ""))
+    hunks.sort(key=lambda h: h.idx)
 
-        min_start, max_end = _bounds_for(idx)
-        start, end = idx, idx + len(target)
-        # Clamp the seed range too (a target should never span parts, but be safe).
-        end = min(end, max_end)
+    dropped: set = set()
 
+    def _widen(h: _Hunk, h_pos: int) -> "Tuple[int, int, Optional[_Hunk]]":
+        """
+        Computes the widened (start, end) for hunk `h` (at index h_pos in
+        `hunks`), clamped at part bounds and neighboring hunks. Returns
+        (start, end, blocking_neighbor); blocking_neighbor is the adjacent
+        hunk that prevented uniqueness, or None when the candidate is unique
+        (or only part bounds constrain it).
+        """
+        min_start, max_end = _bounds_for(h.idx)
+        left = hunks[h_pos - 1] if h_pos > 0 else None
+        right = hunks[h_pos + 1] if h_pos + 1 < len(hunks) else None
+        if left is not None:
+            min_start = max(min_start, left.end)
+        if right is not None:
+            max_end = min(max_end, right.idx)
+
+        start, end = h.idx, min(h.end, max_end)
         for _ in range(_MAX_CONTEXT_EXPANSIONS):
             candidate = original_text[start:end]
             if candidate and original_text.count(candidate) == 1:
-                break
+                return start, end, None
             if start == min_start and end == max_end:
                 break
             start = max(min_start, _prev_word_boundary(original_text, start))
             end = min(max_end, _next_word_boundary(original_text, end))
 
-        prefix = original_text[start:idx]
-        suffix = original_text[idx + len(target) : end]
-        if not prefix and not suffix:
-            continue
-        edit.target_text = original_text[start:end]
-        edit.new_text = f"{prefix}{edit.new_text or ''}{suffix}"
-        edit._match_start_index = start
+        candidate = original_text[start:end]
+        if candidate and original_text.count(candidate) == 1:
+            return start, end, None
 
-    return edits
+        # Ambiguous. Prefer coalescing with the closer clamping neighbor.
+        blockers: List[Tuple[int, _Hunk]] = []
+        if left is not None and start == left.end:
+            blockers.append((h.idx - left.end, left))
+        if right is not None and end == right.idx:
+            blockers.append((right.idx - h.end, right))
+        blockers.sort(key=lambda pair: pair[0])
+        return start, end, blockers[0][1] if blockers else None
+
+    i = 0
+    while i < len(hunks):
+        h = hunks[i]
+        needs_widening = not h.target or original_text.count(h.target) != 1
+        if not needs_widening:
+            i += 1
+            continue
+        _start, _end, blocker = _widen(h, i)
+        if blocker is None:
+            i += 1
+            continue
+        # Coalesce h with its blocking neighbor: hunk + stable gap + hunk.
+        first, second = (blocker, h) if blocker.idx <= h.idx else (h, blocker)
+        gap = original_text[first.end : second.idx]
+        merged = _Hunk(
+            first.edit,
+            first.idx,
+            f"{first.target}{gap}{second.target}",
+            f"{first.new}{gap}{second.new}",
+        )
+        merged.edit.comment = first.edit.comment or second.edit.comment
+        dropped.add(id(second.edit))
+        pos_first = hunks.index(first)
+        hunks[pos_first] = merged
+        hunks.remove(second)
+        i = min(pos_first, i)
+
+    # Write the widened hunks back onto the surviving edit objects.
+    for pos, h in enumerate(hunks):
+        h.edit.target_text = h.target
+        h.edit.new_text = h.new
+        h.edit._match_start_index = h.idx
+        if not h.target or original_text.count(h.target) != 1:
+            start, end, _blocker = _widen(h, pos)
+            prefix = original_text[start : h.idx]
+            suffix = original_text[h.end : end]
+            if prefix or suffix:
+                h.edit.target_text = original_text[start:end]
+                h.edit.new_text = f"{prefix}{h.new}{suffix}"
+                h.edit._match_start_index = start
+
+    if not dropped:
+        return edits
+    return [e for e in edits if id(e) not in dropped]
 
 
 _IMAGE_MARKER_RE = re.compile(r"!\[[^\]]*\]\(docx-image:[^)]*\)")
+
+
+def _drop_marker_interior_hunks(
+    edits: List[ModifyText],
+    text_orig: str,
+    warnings: List[str],
+) -> List[ModifyText]:
+    """
+    Removes generated hunks whose pinned range cuts INTO a read-only image
+    marker without covering it whole — the shape an alt-text-only difference
+    produces (`RED` -> `BLUE` inside `![RED logo](docx-image:1)`). The engine
+    categorically rejects such edits, so emitting them makes diff output
+    unappliable by apply (QA 2026-07-19 F-04/F-14). Hunks that contain
+    complete markers are judged by _drop_image_marker_hunks instead.
+    """
+    marker_spans = [(m.start(), m.end()) for m in _IMAGE_MARKER_RE.finditer(text_orig)]
+    if not marker_spans:
+        return edits
+
+    kept: List[ModifyText] = []
+    warned = False
+    for e in edits:
+        idx = e._match_start_index
+        if idx is None:
+            kept.append(e)
+            continue
+        end = idx + len(e.target_text or "")
+        cuts_into_marker = any(
+            m_start < end and idx < m_end and not (idx <= m_start and m_end <= end) for m_start, m_end in marker_spans
+        )
+        if not cuts_into_marker:
+            kept.append(e)
+            continue
+        if not warned:
+            warnings.append(
+                "An image's alternative text differs between the documents. Image markers "
+                "(![alt](docx-image:N)) are read-only projections, so this difference cannot be "
+                "expressed as a text edit — it was skipped; update the image or its alt text "
+                "manually in Word."
+            )
+            warned = True
+    return kept
+
+
+def collect_media_difference_warnings(original_docx: bytes, modified_docx: bytes) -> List[str]:
+    """
+    Compares embedded media bytes (word/media/*) between two DOCX packages.
+    Adeu's diff is a text comparison: two documents whose images differ but
+    whose projections agree produce an empty diff, which reads as "visually
+    identical" unless the caller says otherwise (QA 2026-07-19 F-04). Returns
+    warning strings describing changed/added/removed media members; empty
+    when the media sets are byte-identical (or either package is unreadable —
+    the caller has already surfaced package-level errors).
+    """
+    import hashlib
+    import zipfile
+    from io import BytesIO
+
+    def media_hashes(data: bytes) -> Dict[str, str]:
+        hashes: Dict[str, str] = {}
+        try:
+            with zipfile.ZipFile(BytesIO(data)) as z:
+                for name in z.namelist():
+                    if name.startswith("word/media/"):
+                        hashes[name] = hashlib.sha256(z.read(name)).hexdigest()
+        except Exception:
+            return {}
+        return hashes
+
+    hashes_orig = media_hashes(original_docx)
+    hashes_mod = media_hashes(modified_docx)
+    if hashes_orig == hashes_mod:
+        return []
+
+    changed = sorted(n for n in hashes_orig.keys() & hashes_mod.keys() if hashes_orig[n] != hashes_mod[n])
+    added = sorted(hashes_mod.keys() - hashes_orig.keys())
+    removed = sorted(hashes_orig.keys() - hashes_mod.keys())
+    if not (changed or added or removed):
+        return []
+
+    parts = []
+    if changed:
+        parts.append(f"{len(changed)} changed")
+    if added:
+        parts.append(f"{len(added)} added")
+    if removed:
+        parts.append(f"{len(removed)} removed")
+    return [
+        f"The documents' embedded media differ ({', '.join(parts)}: "
+        f"{', '.join((changed + added + removed)[:5])}). This diff compares TEXT only — an empty "
+        "edit list does not mean the documents are visually identical. Image changes must be "
+        "applied manually in Word."
+    ]
 
 
 def _drop_image_marker_hunks(edits: List[ModifyText], warnings: List[str]) -> List[ModifyText]:
@@ -676,8 +856,8 @@ def generate_structured_edits(
             "additions or removals cannot be expressed as text edits."
         )
         flat = _drop_image_marker_hunks(generate_edits_from_text(text_orig, text_mod), warnings)
-        make_edits_self_contained(flat, text_orig, part_ranges=struct_orig.part_ranges)
-        return list(flat), warnings
+        flat = _drop_marker_interior_hunks(flat, text_orig, warnings)
+        return list(make_edits_self_contained(flat, text_orig, part_ranges=struct_orig.part_ranges)), warnings
 
     ranges_o = [(s, e) for s, e, k in struct_orig.part_ranges if e > s]
     ranges_m = [(s, e) for s, e, k in struct_mod.part_ranges if e > s]
@@ -770,9 +950,13 @@ def generate_structured_edits(
                 ambiguous_anchor_warned = True
 
     # Our own output must never trip the engine's read-only image-marker
-    # validation: an added/removed image becomes a warning, not an edit.
+    # validation: an added/removed image becomes a warning, not an edit —
+    # and so does an alt-text change, whose hunk lands INSIDE a marker.
     modify_edits = [e for e in edits if isinstance(e, ModifyText)]
     kept_modifies = set(map(id, _drop_image_marker_hunks(modify_edits, warnings)))
+    edits = [e for e in edits if not isinstance(e, ModifyText) or id(e) in kept_modifies]
+    modify_edits = [e for e in edits if isinstance(e, ModifyText)]
+    kept_modifies = set(map(id, _drop_marker_interior_hunks(modify_edits, text_orig, warnings)))
     edits = [e for e in edits if not isinstance(e, ModifyText) or id(e) in kept_modifies]
 
     # Table row edits are excluded from context widening: their target is the
@@ -782,7 +966,13 @@ def generate_structured_edits(
     text_edits = [
         e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None and not e._is_table_edit
     ]
-    make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)
+    surviving = make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)
+    if len(surviving) != len(text_edits):
+        # Coalescing absorbed neighboring hunks; drop the absorbed edit
+        # objects from the outgoing list too.
+        surviving_ids = set(map(id, surviving))
+        absorbed = {id(e) for e in text_edits if id(e) not in surviving_ids}
+        edits = [e for e in edits if id(e) not in absorbed]
     return edits, warnings
 
 
