@@ -25,6 +25,7 @@ async def test_bug16_sanitize_kwargs():
         baseline_path=None,
         author=None,
         accept_all=False,
+        allow_low_similarity_baseline=False,
     ):
         # If called incorrectly, Python raises TypeError: takes X positional arguments but Y were given
         from unittest.mock import MagicMock

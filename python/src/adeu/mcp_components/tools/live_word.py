@@ -19,7 +19,7 @@ from adeu.mcp_components._response_builders import (
     build_paginated_response,
 )
 from adeu.models import DeleteTableRow, InsertTableRow
-from adeu.redline.engine import validate_edit_strings
+from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
 
 logger = structlog.get_logger(__name__)
@@ -557,8 +557,10 @@ if sys.platform == "win32":
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
         edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
 
-        # Category A: document-context-free string-shape validation.
-        category_a_errors = validate_edit_strings(edits)
+        # Category A: document-context-free string-shape validation — the same
+        # checks the disk pipeline runs (blank replies and duplicate/conflicting
+        # review actions included, QA 2026-07-19 v8 F-07).
+        category_a_errors = validate_edit_strings(edits) + validate_review_action_batch(actions)
         if category_a_errors:
             stats["failed"] = len(category_a_errors)
             stats["skipped_details"].extend(category_a_errors)

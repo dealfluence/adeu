@@ -30,7 +30,7 @@ import {
   build_search_response,
 } from "./response-builders.js";
 
-import { MARKDOWN_UI_URI } from "./shared.js";
+import { MARKDOWN_UI_URI, handleServerCliArgs } from "./shared.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
 // (a missing `type` that's unambiguous from the key signature, or a non-canonical
@@ -948,6 +948,12 @@ export function formatBatchResult(
 
 // --- Startup ---
 async function main() {
+  const cliOutput = handleServerCliArgs(process.argv.slice(2), packageVersion);
+  if (cliOutput !== null) {
+    // stdout is safe here: the stdio transport was never started.
+    process.stdout.write(cliOutput + "\n");
+    return;
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   const gitSha = process.env.GIT_SHA || "unknown";

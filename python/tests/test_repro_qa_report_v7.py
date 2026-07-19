@@ -420,7 +420,11 @@ class TestF05PostApplyVerification:
         tiny.write_text("tiny\n", encoding="utf-8")
         out = tmp_path / "result.docx"
 
-        code, stdout, stderr = run_cli(["apply", src, tiny, "-o", out, "--json"], capsys)
+        # --allow-major-deletions: since QA 2026-07-19 v8 F-12 the deletion
+        # guard also arms below 2,000 chars, and it would refuse this apply
+        # before the post-write verification (the behavior under test here)
+        # ever runs.
+        code, stdout, stderr = run_cli(["apply", src, tiny, "-o", out, "--json", "--allow-major-deletions"], capsys)
         assert code != 0, "apply reported success for an unfaithful replacement"
         stats = json.loads(stdout)
         assert stats.get("verified") is False

@@ -16,7 +16,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdown
 from adeu.mcp_components.shared import get_build_info
-from adeu.models import BatchChanges, DeleteTableRow, DocumentChange, InsertTableRow, ModifyText
+from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -282,16 +282,22 @@ def _require_docx_output(output: "Path | None") -> None:
         )
 
 
+def _is_stdout_path(path: "Path | None") -> bool:
+    """True when the user passed `-o -`: the Unix convention for stdout."""
+    return path is not None and str(path) == "-"
+
+
 def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
     """
     Single write path for CLI output files:
 
+      - creates missing parent directories (QA 2026-07-19 v8 F-13);
       - stages to a same-directory temporary file and os.replace()s it into
         place, so a failed or interrupted write never truncates or corrupts
         an existing output;
       - announces on stderr when an existing file is replaced;
       - converts filesystem failures (name too long, permission denied,
-        missing directory, disk full) into the standard exit-code-1 error
+        parent is a file, disk full) into the standard exit-code-1 error
         contract instead of a raw traceback.
 
     Text payloads are written as UTF-8 with \\n newlines on every platform.
@@ -307,6 +313,8 @@ def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
     payload = data if isinstance(data, bytes) else data.encode("utf-8")
     tmp_path: "Path | None" = None
     try:
+        if path.parent and str(path.parent) not in ("", "."):
+            path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent or "."))
         tmp_path = Path(tmp_name)
         with os.fdopen(fd, "wb") as fb:
@@ -321,6 +329,15 @@ def _write_output_or_exit(path: Path, data: "bytes | str") -> None:
                 tmp_path.unlink()
             except OSError:
                 pass
+
+
+def _write_report_file(path: Path, report_text: str) -> None:
+    """Writes a sanitize report to `path`, honoring `-` as stdout (F-05)."""
+    if _is_stdout_path(path):
+        print(report_text)
+        return
+    _write_output_or_exit(path, report_text)
+    print(f"📄 Report saved to {path}", file=sys.stderr)
 
 
 def _read_docx_text(path: Path, clean_view: bool = False) -> str:
@@ -357,10 +374,14 @@ _APPENDIX_POINTER_RE = re.compile(r"\n+---\n+> \*\*Appendix available\.\*\*[^\n]
 _CRITICMARKUP_TOKENS = ("{++", "{--", "{>>", "{==")
 
 # Guardrail for the text-diff path: refuse to silently delete the majority of
-# a document. 2000 chars ≈ one page of prose; below that, halving a document
-# in a single edit is a plausible deliberate workflow.
+# a document. 2000 chars ≈ one page of prose; above that, losing half the
+# document is almost never intentional. Short documents matter too
+# (QA 2026-07-19 v8 F-12): below the threshold the guard still arms, at a
+# higher 75% floor so that deliberately halving a small draft stays a
+# one-command workflow while near-total truncation requires the explicit flag.
 _MAJOR_DELETION_MIN_ORIGINAL_CHARS = 2000
 _MAJOR_DELETION_RATIO = 0.5
+_MAJOR_DELETION_RATIO_SMALL_DOC = 0.25
 
 
 def _strip_page_chrome(text: str) -> "tuple[str, int | None, int | None]":
@@ -496,6 +517,34 @@ def _read_text_file(path: Path) -> str:
     return _EXTRACT_HEADER_RE.sub("", text, count=1)
 
 
+# OS accounts that identify a machine, not a person. Tracked changes signed
+# "root" or "Administrator" are customer-visible defects in outbound legal
+# documents (QA 2026-07-19 v8 F-11).
+_MACHINE_ACCOUNT_NAMES = {"root", "admin", "administrator", "system", "daemon", "nobody"}
+
+
+def _default_author() -> str:
+    """
+    Resolution order for the tracked-changes author when --author is omitted:
+
+      1. ADEU_AUTHOR environment variable (explicit configuration for
+         noninteractive/agent environments);
+      2. the OS username, unless it names a machine account (root,
+         Administrator, ...) rather than a person;
+      3. the neutral engine default "Adeu AI".
+    """
+    env_author = (os.environ.get("ADEU_AUTHOR") or "").strip()
+    if env_author:
+        return env_author
+    try:
+        user = getpass.getuser()
+    except Exception:
+        return "Adeu AI"
+    if not user or user.strip().lower() in _MACHINE_ACCOUNT_NAMES:
+        return "Adeu AI"
+    return user
+
+
 # One-line usage reference per change type, shown when a batch fails schema
 # validation. These are otherwise only discoverable via the MCP schema.
 _CHANGE_TYPE_REFERENCE = (
@@ -566,10 +615,13 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
         if not isinstance(data, list):
             raise ValueError("JSON root must be a list of change objects.\n\n" + _CHANGE_TYPE_REFERENCE)
 
-        # BatchChanges (not the bare list) so the CLI tolerates the same LLM
-        # quirks the MCP server does: stringified items, inferable missing
-        # 'type', malformed match_mode.
-        adapter = TypeAdapter(BatchChanges)
+        # StrictBatchChanges: stringified items and match_mode synonyms are
+        # tolerated (LLM output quirks), but a missing 'type' is a hard error —
+        # the CLI documents 'type' as required on every change, and silently
+        # treating a typeless object as 'modify' turns malformed batches into
+        # unintended edits (QA 2026-07-19 v8 F-03). The MCP server keeps its
+        # documented unambiguous-inference tolerance.
+        adapter = TypeAdapter(StrictBatchChanges)
         return adapter.validate_python(data)
     except SystemExit:
         raise
@@ -630,6 +682,10 @@ def _warn_ignored_extract_flags(args) -> None:
 def handle_extract(args):
     _set_json_mode(args.json)
     _warn_ignored_extract_flags(args)
+    # `-o -` means stdout (QA 2026-07-19 v8 F-05): identical to omitting -o,
+    # never a literal file named '-'.
+    if _is_stdout_path(args.output):
+        args.output = None
     if args.output:
         # extract's -o payload is text (or JSON); it never lands on a path
         # that aliases the input DOCX.
@@ -986,11 +1042,12 @@ def handle_apply(args):
 
             text_mod = _load_roundtrip_text(args.changes, args.original, "apply")
 
-            if (
-                not args.allow_major_deletions
-                and len(text_orig) >= _MAJOR_DELETION_MIN_ORIGINAL_CHARS
-                and len(text_mod) < _MAJOR_DELETION_RATIO * len(text_orig)
-            ):
+            guard_ratio = (
+                _MAJOR_DELETION_RATIO
+                if len(text_orig) >= _MAJOR_DELETION_MIN_ORIGINAL_CHARS
+                else _MAJOR_DELETION_RATIO_SMALL_DOC
+            )
+            if not args.allow_major_deletions and len(text_orig) > 0 and len(text_mod) < guard_ratio * len(text_orig):
                 pct = 100 - int(100 * len(text_mod) / len(text_orig))
                 print(
                     f"❌ '{args.changes.name}' is ~{pct}% shorter than the document's clean text "
@@ -1245,12 +1302,10 @@ def handle_markup(args):
 
     if failed:
         # Mirror apply's transactional behavior: a preview of half the batch
-        # is not a faithful preview (QA 2026-07-18 M1).
-        print(f"\n❌ {len(failed)} edit(s) failed — no markup was written:\n", file=sys.stderr)
-        for r in failed:
-            print(r["error"], file=sys.stderr)
-            print("", file=sys.stderr)
-        print(stats_line, file=sys.stderr)
+        # is not a faithful preview (QA 2026-07-18 M1). Under --json the
+        # error object on stdout is the whole story — the human diagnostics
+        # stay off stderr, matching apply's JSON contract (QA 2026-07-19
+        # v8 F-08).
         if _JSON_MODE:
             print(
                 json.dumps(
@@ -1262,37 +1317,54 @@ def handle_markup(args):
                     }
                 )
             )
+        else:
+            print(f"\n❌ {len(failed)} edit(s) failed — no markup was written:\n", file=sys.stderr)
+            for r in failed:
+                print(r["error"], file=sys.stderr)
+                print("", file=sys.stderr)
+            print(stats_line, file=sys.stderr)
         sys.exit(1)
 
+    # `-o -` streams the CriticMarkup to stdout (QA 2026-07-19 v8 F-05);
+    # under --json the payload travels inside the JSON object instead, so
+    # stdout stays a single machine-readable document.
+    to_stdout = _is_stdout_path(args.output)
     output_path = args.output
     if not output_path:
         output_path = args.input.with_suffix(".md")
         if args.input.suffix.lower() == ".md":
             output_path = args.input.with_name(f"{args.input.stem}_markup.md")
 
-    # markup's output is CriticMarkup text: it may never replace the DOCX
-    # input or the JSON edits batch. In-place output
-    # over a MARKDOWN input stays allowed — text-to-text preview in place is
-    # an intentional workflow.
-    protected = [(args.edits, "JSON edits file")]
-    if args.input.suffix.lower() == ".docx":
-        protected.append((args.input, "input DOCX"))
-    _guard_text_output_path(output_path, protected, payload="CriticMarkup text")
+    if not to_stdout:
+        # markup's output is CriticMarkup text: it may never replace the DOCX
+        # input or the JSON edits batch. In-place output
+        # over a MARKDOWN input stays allowed — text-to-text preview in place is
+        # an intentional workflow.
+        protected = [(args.edits, "JSON edits file")]
+        if args.input.suffix.lower() == ".docx":
+            protected.append((args.input, "input DOCX"))
+        _guard_text_output_path(output_path, protected, payload="CriticMarkup text")
 
-    _write_output_or_exit(output_path, result)
+        _write_output_or_exit(output_path, result)
 
     if _JSON_MODE:
-        print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "output_path": str(output_path),
-                    "applied": len(applied),
-                    "failed": 0,
-                    "ignored_actions": len(ignored),
-                }
-            )
-        )
+        json_result = {
+            "status": "ok",
+            "output_path": "-" if to_stdout else str(output_path),
+            "applied": len(applied),
+            "failed": 0,
+            "ignored_actions": len(ignored),
+        }
+        if to_stdout:
+            json_result["content"] = result
+        print(json.dumps(json_result))
+        # --json promises machine-clean streams: no decorative success/stats
+        # lines on stderr (QA 2026-07-19 v8 F-08).
+        return
+    if to_stdout:
+        print(result)
+        print(stats_line, file=sys.stderr)
+        return
     print(f"✅ Saved CriticMarkup to {output_path}", file=sys.stderr)
     print(stats_line, file=sys.stderr)
 
@@ -1339,15 +1411,16 @@ def handle_sanitize(args: argparse.Namespace):
     if not is_batch and len(input_files) == 1:
         # Single file mode
         input_path = input_files[0]
-        if not input_path.exists():
-            print(f"❌ File not found: {input_path}", file=sys.stderr)
-            sys.exit(2)
+        # Missing/invalid inputs are operational failures: exit 1 through the
+        # same path every other subcommand uses, never argparse's exit 2
+        # (QA 2026-07-19 v8 F-09).
+        _require_input_file(input_path)
 
         output_path = args.output
         if not output_path:
             output_path = input_path.parent / f"{input_path.stem}_sanitized{input_path.suffix}"
 
-        if args.report_file:
+        if args.report_file and not _is_stdout_path(args.report_file):
             # The report is text: it may never land on the input DOCX or
             # the sanitized output path.
             _guard_text_output_path(
@@ -1364,13 +1437,13 @@ def handle_sanitize(args: argparse.Namespace):
                 baseline_path=str(args.baseline) if args.baseline else None,
                 author=args.author,
                 accept_all=args.accept_all,
+                allow_low_similarity_baseline=args.allow_low_similarity_baseline,
             )
             if args.report or args.report_file:
                 if args.report:
                     print(result.report_text, file=sys.stderr)
                 if args.report_file:
-                    _write_output_or_exit(args.report_file, result.report_text)
-                    print(f"📄 Report saved to {args.report_file}", file=sys.stderr)
+                    _write_report_file(args.report_file, result.report_text)
 
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
@@ -1378,13 +1451,13 @@ def handle_sanitize(args: argparse.Namespace):
             print(str(e), file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError as e:
-            print(f"❌ {e}", file=sys.stderr)
-            sys.exit(2)
+            _cli_error("file_not_found", str(e))
         except Exception as e:
             if "bad zip signature" in str(e) or "not a zip file" in str(e).lower() or "not a valid DOCX file" in str(e):
                 _handle_docx_error_and_exit(input_path.name, e)
-            print(f"❌ Error: {e}", file=sys.stderr)
-            sys.exit(2)
+            # Runtime failures follow the operational contract: exit 1
+            # (argument/usage errors exit 2 — QA 2026-07-19 v8 F-09).
+            _cli_error("invalid_input", f"Error: {e}")
     else:
         # Batch mode
         outdir = args.outdir
@@ -1413,7 +1486,7 @@ def handle_sanitize(args: argparse.Namespace):
             )
             sys.exit(2)
 
-        if args.report_file:
+        if args.report_file and not _is_stdout_path(args.report_file):
             # Same text-report guard as single-file mode, across every batch
             # input and every computed destination.
             batch_protected = [(p, "input DOCX") for p in input_files]
@@ -1426,72 +1499,88 @@ def handle_sanitize(args: argparse.Namespace):
         # sanitized into a staging file first; the staged files move into
         # place only when EVERY input succeeded. A blocked or failed input
         # means no outputs at all — automation never has to clean up a
-        # partial result set.
+        # partial result set. The staging files themselves are output
+        # artifacts too: the finally-sweep below guarantees none survive a
+        # failed batch, whatever the exit path (QA 2026-07-19 v8 F-02).
         all_reports: list[SanitizeResult | SanitizeError] = []
         staged: List[tuple[Path, Path]] = []
         blocked = 0
         succeeded = 0
 
-        for input_path in input_files:
-            if not input_path.exists():
-                print(f"❌ File not found: {input_path}", file=sys.stderr)
-                blocked += 1
-                continue
+        try:
+            for input_path in input_files:
+                if not input_path.exists():
+                    print(f"❌ File not found: {input_path}", file=sys.stderr)
+                    blocked += 1
+                    continue
 
-            output_path = outdir / input_path.name
-            staging_path = outdir / f".{input_path.name}.staging.tmp"
+                output_path = outdir / input_path.name
+                staging_path = outdir / f".{input_path.name}.staging.tmp"
 
-            # Resolve baseline for batch mode
-            baseline = None
-            if args.baseline:
-                if args.baseline.is_dir():
-                    baseline = str(args.baseline / input_path.name)
-                else:
-                    baseline = str(args.baseline)
+                # Resolve baseline for batch mode
+                baseline = None
+                if args.baseline:
+                    if args.baseline.is_dir():
+                        baseline = str(args.baseline / input_path.name)
+                    else:
+                        baseline = str(args.baseline)
 
-            try:
-                result = sanitize_docx(
-                    input_path=str(input_path),
-                    output_path=str(staging_path),
-                    keep_markup=args.keep_markup,
-                    baseline_path=baseline,
-                    author=args.author,
-                    accept_all=args.accept_all,
-                )
-                result.output_path = str(output_path)
-                staged.append((staging_path, output_path))
-                all_reports.append(result)
-                succeeded += 1
-                status = "clean"
-                if result.warnings:
-                    status = f"clean ({len(result.warnings)} warning{'s' if len(result.warnings) > 1 else ''})"
-                print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
-
-            except SanitizeError as e:
-                blocked += 1
-                print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
-                all_reports.append(e)
-
-            except Exception as e:
-                blocked += 1
-                if (
-                    "bad zip signature" in str(e)
-                    or "not a zip file" in str(e).lower()
-                    or "not a valid DOCX file" in str(e)
-                ):
-                    _handle_docx_error_and_exit(input_path.name, e)
-                print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
-
-        if blocked == 0:
-            for staging_path, output_path in staged:
                 try:
-                    os.replace(staging_path, output_path)
-                except OSError as e:
-                    _cli_error("write_failed", f"Could not write output file '{output_path}': {e.strerror or e}")
-        else:
+                    result = sanitize_docx(
+                        input_path=str(input_path),
+                        output_path=str(staging_path),
+                        keep_markup=args.keep_markup,
+                        baseline_path=baseline,
+                        author=args.author,
+                        accept_all=args.accept_all,
+                        allow_low_similarity_baseline=args.allow_low_similarity_baseline,
+                    )
+                    result.output_path = str(output_path)
+                    staged.append((staging_path, output_path))
+                    all_reports.append(result)
+                    succeeded += 1
+                    status = "clean"
+                    if result.warnings:
+                        status = f"clean ({len(result.warnings)} warning{'s' if len(result.warnings) > 1 else ''})"
+                    print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
+
+                except SanitizeError as e:
+                    blocked += 1
+                    print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
+                    all_reports.append(e)
+
+                except Exception as e:
+                    # An invalid input blocks the batch like any other failure;
+                    # it must NOT exit the process here — an early exit skips
+                    # the staged-file cleanup and leaves document content
+                    # behind as .staging.tmp files (QA 2026-07-19 v8 F-02).
+                    blocked += 1
+                    if (
+                        "bad zip signature" in str(e)
+                        or "not a zip file" in str(e).lower()
+                        or "not a valid DOCX file" in str(e)
+                    ):
+                        print(
+                            f"  ✗ {input_path.name:<30} — ERROR: not a valid DOCX file (bad zip signature)",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
+
+            if blocked == 0:
+                for staging_path, output_path in staged:
+                    try:
+                        os.replace(staging_path, output_path)
+                    except OSError as e:
+                        _cli_error("write_failed", f"Could not write output file '{output_path}': {e.strerror or e}")
+        finally:
+            # Failed batches promise "NO outputs are written": sweep every
+            # staging file that was not committed, on every exit path
+            # (including _cli_error's SystemExit).
             for staging_path, _ in staged:
                 try:
-                    staging_path.unlink()
+                    if staging_path.exists():
+                        staging_path.unlink()
                 except OSError:
                     pass
 
@@ -1518,7 +1607,7 @@ def handle_sanitize(args: argparse.Namespace):
             if args.report:
                 print(report_text, file=sys.stderr)
             if args.report_file:
-                _write_output_or_exit(args.report_file, report_text)
+                _write_report_file(args.report_file, report_text)
 
         if blocked > 0:
             sys.exit(1)
@@ -1552,7 +1641,7 @@ def main():
         action="store_true",
         help="Extract text from live active Word document",
     )
-    p_extract.add_argument("-o", "--output", type=Path, help="Output file (default: stdout)")
+    p_extract.add_argument("-o", "--output", type=Path, help="Output file ('-' or omitted: stdout)")
     p_extract.add_argument(
         "--clean-view",
         action="store_true",
@@ -1643,10 +1732,7 @@ def main():
     )
     p_diff.set_defaults(func=handle_diff)
 
-    try:
-        default_author = getpass.getuser()
-    except Exception:
-        default_author = "Adeu AI"
+    default_author = _default_author()
 
     p_apply = subparsers.add_parser(
         "apply",
@@ -1672,7 +1758,11 @@ def main():
         "--author",
         type=str,
         default=default_author,
-        help=f"Author name for Track Changes (default: '{default_author}')",
+        help=(
+            f"Author name for Track Changes (default: '{default_author}'). Defaults to the "
+            "ADEU_AUTHOR environment variable, then the OS username; machine accounts like "
+            "'root' fall back to 'Adeu AI'."
+        ),
     )
     p_apply.add_argument(
         "--dry-run",
@@ -1683,12 +1773,13 @@ def main():
         "--allow-major-deletions",
         action="store_true",
         help=(
-            "Text-file apply only: allow the supplied text to be less than half the length of the "
+            "Text-file apply only: allow the supplied text to be far shorter than the "
             "document's clean text. Without this flag such an apply is refused, because a truncated "
             "input (e.g. a single page of a paginated extract) would silently delete everything "
-            "it does not contain. The guard only arms on documents whose clean text is at least "
-            "2,000 characters — below that, halving a document in one edit is a plausible "
-            "deliberate workflow."
+            "it does not contain. The guard arms at 50%% deletion for documents of 2,000+ "
+            "characters, and at 75%% deletion below that — so halving a small draft stays a "
+            "one-command workflow. This flag never overrides the separate 'page N of M' guard: "
+            "a paginated partial extract is refused outright — re-extract with --page all."
         ),
     )
     p_apply.add_argument(
@@ -1722,7 +1813,12 @@ def main():
     )
     p_markup.add_argument("input", type=Path, help="Input DOCX or Markdown file")
     p_markup.add_argument("edits", type=Path, help="JSON file containing edits")
-    p_markup.add_argument("-o", "--output", type=Path, help="Output Markdown path (default: input.md)")
+    p_markup.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output Markdown path (default: input.md; '-' streams the CriticMarkup to stdout)",
+    )
     p_markup.add_argument(
         "-i",
         "--index",
@@ -1766,6 +1862,16 @@ def main():
         help="Baseline document for delta recomputation",
     )
     p_sanitize.add_argument(
+        "--allow-low-similarity-baseline",
+        action="store_true",
+        help=(
+            "Proceed even when the baseline shares less than half of its content with the "
+            "input document. Without this flag such a mismatch is blocked (exit 1, no output "
+            "written), because it almost always means the wrong --baseline file was selected — "
+            "and proceeding would replace the document's content with the baseline's."
+        ),
+    )
+    p_sanitize.add_argument(
         "--author",
         type=str,
         help="Replace all author names with this value",
@@ -1786,6 +1892,26 @@ def main():
         help="Write report to file",
     )
     p_sanitize.set_defaults(func=handle_sanitize)
+
+    # `adeu help` / `adeu help <command>` — the shell convention alongside
+    # -h/--help (QA 2026-07-19 v8 F-13).
+    p_help = subparsers.add_parser("help", help="Show help for adeu or a subcommand")
+    p_help.add_argument("topic", nargs="?", help="Subcommand to show help for")
+
+    def handle_help(help_args: argparse.Namespace):
+        topic = getattr(help_args, "topic", None)
+        target = subparsers.choices.get(topic) if topic else None
+        if topic and target is None:
+            parser.error(f"unknown command '{topic}' (available: {', '.join(sorted(subparsers.choices))})")
+        (target or parser).print_help()
+
+    p_help.set_defaults(func=handle_help)
+
+    # Accept --debug in either position (`adeu --debug extract` and
+    # `adeu extract --debug`, QA 2026-07-19 v8 F-13). SUPPRESS keeps the
+    # subcommand-level flag from clobbering the global one when absent.
+    for sub in subparsers.choices.values():
+        sub.add_argument("--debug", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     args, unknown_args = parser.parse_known_args()
     if unknown_args:

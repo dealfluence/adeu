@@ -72,6 +72,69 @@ def describe_illegal_control_chars(text: str) -> Optional[str]:
     return ", ".join(found)
 
 
+def validate_review_action_batch(
+    actions: List[Union["AcceptChange", "RejectChange", "ReplyComment"]],
+) -> List[str]:
+    """
+    Document-context-free validation of review actions (QA 2026-07-19 v8 F-07):
+
+      - A reply's text must not be blank/whitespace-only — Word renders it as
+        an empty comment bubble that reads as a data-loss bug to reviewers.
+      - The same accept/reject may not name the same target_id twice in one
+        batch, and accept + reject may not both name one target_id: the first
+        action resolves the change, so the duplicate either double-counts as
+        "applied" or conflicts. (Distinct IDs that one action resolves as a
+        group — e.g. the del+ins pair of a single modification — remain fine.)
+      - Duplicated identical replies (same comment, same text) are the
+        double-send shape and are rejected; DIFFERENT replies to one comment
+        are a legitimate thread.
+
+    Shared by the disk engine and the Live Word pipeline; the Node engine
+    mirrors these checks in `validate_review_actions`.
+    """
+    errors: List[str] = []
+    seen_resolutions: dict = {}
+    seen_replies: set = set()
+    for i, act in enumerate(actions):
+        act_type = getattr(act, "type", "")
+        target_id = getattr(act, "target_id", "")
+        if act_type == "reply":
+            reply_text = (getattr(act, "text", "") or "").strip()
+            if not reply_text:
+                errors.append(
+                    f"- Action {i + 1} Failed: reply text for {target_id} is empty or "
+                    "whitespace-only. Word would show a blank comment bubble — provide the "
+                    "reply content in 'text'."
+                )
+                continue
+            reply_key = (target_id, reply_text)
+            if reply_key in seen_replies:
+                errors.append(
+                    f"- Action {i + 1} Failed: duplicate reply — this batch already replies to "
+                    f"{target_id} with the same text. Remove the duplicate action."
+                )
+            seen_replies.add(reply_key)
+        elif act_type in ("accept", "reject"):
+            prior = seen_resolutions.get(target_id)
+            if prior is not None:
+                first_idx, first_type = prior
+                if first_type == act_type:
+                    errors.append(
+                        f"- Action {i + 1} Failed: duplicate action — Action {first_idx + 1} in this "
+                        f"batch already applies '{act_type}' to {target_id}. A change can only be "
+                        "resolved once; remove the duplicate action."
+                    )
+                else:
+                    errors.append(
+                        f"- Action {i + 1} Failed: conflicting actions — Action {first_idx + 1} in "
+                        f"this batch applies '{first_type}' to {target_id}, but this action applies "
+                        f"'{act_type}'. Decide the outcome and keep exactly one of them."
+                    )
+            else:
+                seen_resolutions[target_id] = (i, act_type)
+    return errors
+
+
 def validate_edit_strings(
     edits: List[Union["ModifyText", "InsertTableRow", "DeleteTableRow"]],
     index_offset: int = 0,
@@ -939,6 +1002,7 @@ class RedlineEngine:
         # destination paragraph for the suffix to land in.
         positional_anchor = None
         suffix_nodes: list = []
+        suffix_includes_anchor = False
         if current_p is not None:
             # ins_elem is attached by the CALLER after this method returns, so
             # it usually has no parent yet and cannot locate the insertion
@@ -951,19 +1015,31 @@ class RedlineEngine:
                 positional_anchor = ins_elem
             elif pos_run is not None and pos_run._element.getparent() is not None:
                 positional_anchor = pos_run._element
+                # insert_before: the insertion will be attached BEFORE this
+                # run, so the run itself belongs to the relocating suffix.
+                # Without this, a paragraph-splitting insertion at paragraph
+                # START leaves the host text glued to the FIRST inserted line
+                # ("00." + insert "0.\n\n0 " read "0.00.\n\n0 " instead of
+                # "0.\n\n0 00.") — hunt-profile counterexample, 2026-07-19.
+                suffix_includes_anchor = insert_before
             while positional_anchor is not None and positional_anchor.getparent() is not current_p:
                 positional_anchor = positional_anchor.getparent()
                 if positional_anchor is current_p:
                     positional_anchor = None
                     break
 
+            relocatable_tags = {qn("w:r"), qn("w:ins"), qn("w:del")}
             if positional_anchor is not None:
-                relocatable_tags = {qn("w:r"), qn("w:ins"), qn("w:del")}
-                nxt = positional_anchor.getnext()
+                nxt = positional_anchor if suffix_includes_anchor else positional_anchor.getnext()
                 while nxt is not None:
                     if nxt.tag in relocatable_tags:
                         suffix_nodes.append(nxt)
                     nxt = nxt.getnext()
+            elif insert_before:
+                # No attached anchor run at all (paragraph-anchored insertion
+                # at paragraph START): everything in the host paragraph
+                # follows the insertion point, so it all relocates.
+                suffix_nodes.extend(child for child in current_p if child.tag in relocatable_tags)
 
         # Decide whether to keep the trailing empty in remaining_lines.
         # Keep it when both conditions hold: the new_text ends with a
@@ -1991,6 +2067,9 @@ class RedlineEngine:
 
         applied_actions, skipped_actions = 0, 0
         if actions:
+            action_shape_errors = validate_review_action_batch(actions)
+            if action_shape_errors:
+                raise BatchValidationError(action_shape_errors)
             applied_actions, skipped_actions = self.apply_review_actions(actions)
             if skipped_actions > 0:
                 raise BatchValidationError(self.skipped_details)

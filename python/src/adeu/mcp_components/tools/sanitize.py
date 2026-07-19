@@ -54,6 +54,13 @@ async def sanitize_docx(
         "Required if the document contains unresolved changes. "
         "The report will list every change that was auto-accepted.",
     ] = False,
+    allow_low_similarity_baseline: Annotated[
+        bool,
+        "Baseline mode only: proceed even when the baseline shares less than half of its content "
+        "with the working document. Without this, such a mismatch is blocked because it almost "
+        "always means the wrong baseline file was selected — proceeding would replace the "
+        "document's content with the baseline's.",
+    ] = False,
 ) -> dict:
     start_time = time.perf_counter()
     del reasoning  # reason-first UX; not used by the tool.
@@ -89,6 +96,7 @@ async def sanitize_docx(
             baseline_path=baseline_path,
             author=author,
             accept_all=accept_all,
+            allow_low_similarity_baseline=allow_low_similarity_baseline,
         )
 
         await ctx.info(

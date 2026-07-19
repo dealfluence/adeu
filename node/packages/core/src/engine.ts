@@ -1423,6 +1423,12 @@ export class RedlineEngine {
     // authoritative: strip inherited bold/italic from the anchor style
     // (QA 2026-07-19 F-02).
     suppress_emphasis: boolean = false,
+    // True when the caller will attach the insertion BEFORE the anchor
+    // (paragraph-start insertions): the anchor itself then belongs to the
+    // relocating suffix (hunt-profile counterexample, 2026-07-19 —
+    // "00." + insert "0.\n\n0 " must read "0.\n\n0 00.", never
+    // "0.00.\n\n0 "). Mirrors the Python engine.
+    insert_before: boolean = false,
   ): {
     first_node: Element | null;
     last_p: Element | null;
@@ -1459,12 +1465,21 @@ export class RedlineEngine {
     // DOM, and the insertion lands immediately after it, so its following
     // child-of-paragraph siblings are exactly the suffix.
     const suffix_nodes: Element[] = [];
-    const pos_source =
+    const relocatable = new Set(["w:r", "w:ins", "w:del"]);
+    // insert_before with a RUN anchor: the insertion precedes the anchor, so
+    // the anchor run itself is part of the suffix. (The explicit
+    // positional_anchor_el is only passed by flows that insert AFTER it.)
+    const pos_from_positional =
       positional_anchor_el && positional_anchor_el.parentNode
         ? positional_anchor_el
-        : anchor_run !== null && anchor_run._element.parentNode
-          ? anchor_run._element
-          : null;
+        : null;
+    const pos_from_anchor_run =
+      anchor_run !== null && anchor_run._element.parentNode
+        ? anchor_run._element
+        : null;
+    const pos_source = pos_from_positional ?? pos_from_anchor_run;
+    const suffix_includes_anchor =
+      insert_before && pos_from_positional === null && pos_from_anchor_run !== null;
     if (current_p !== null && pos_source !== null) {
       let pos_anchor: Element | null = pos_source;
       while (pos_anchor && pos_anchor.parentNode !== current_p) {
@@ -1475,14 +1490,29 @@ export class RedlineEngine {
         }
       }
       if (pos_anchor) {
-        const relocatable = new Set(["w:r", "w:ins", "w:del"]);
-        let nxt = pos_anchor.nextSibling;
+        let nxt: Node | null = suffix_includes_anchor
+          ? pos_anchor
+          : pos_anchor.nextSibling;
         while (nxt) {
           if (nxt.nodeType === 1 && relocatable.has((nxt as Element).tagName)) {
             suffix_nodes.push(nxt as Element);
           }
           nxt = nxt.nextSibling;
         }
+      }
+    } else if (current_p !== null && insert_before) {
+      // No attached anchor run at all (paragraph-anchored insertion at
+      // paragraph START): everything in the host paragraph follows the
+      // insertion point, so it all relocates (mirrors the Python engine).
+      let child = current_p.firstChild;
+      while (child) {
+        if (
+          child.nodeType === 1 &&
+          relocatable.has((child as Element).tagName)
+        ) {
+          suffix_nodes.push(child as Element);
+        }
+        child = child.nextSibling;
       }
     }
 
@@ -2523,6 +2553,60 @@ export class RedlineEngine {
 
   public validate_review_actions(actions: any[]): string[] {
     const errors: string[] = [];
+
+    // Document-context-free shape checks (QA 2026-07-19 v8 F-07), mirroring
+    // Python's validate_review_action_batch: blank replies render as empty
+    // Word comment bubbles; a duplicated or conflicting accept/reject on one
+    // target_id either double-counts as "applied" or contradicts itself.
+    // Distinct IDs one action resolves as a group (a modification's del+ins
+    // pair) stay legitimate, as do DIFFERENT replies to the same comment.
+    const seen_resolutions = new Map<string, [number, string]>();
+    const seen_replies = new Set<string>();
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i];
+      const type = action.type;
+      const target_id = action.target_id ?? "";
+      if (type === "reply") {
+        if (!String(action.text ?? "").trim()) {
+          errors.push(
+            `- Action ${i + 1} Failed: reply text for ${target_id} is empty or ` +
+              `whitespace-only. Word would show a blank comment bubble — provide the ` +
+              `reply content in 'text'.`,
+          );
+          continue;
+        }
+        const reply_key = `${target_id} ${String(action.text).trim()}`;
+        if (seen_replies.has(reply_key)) {
+          errors.push(
+            `- Action ${i + 1} Failed: duplicate reply — this batch already replies to ` +
+              `${target_id} with the same text. Remove the duplicate action.`,
+          );
+        }
+        seen_replies.add(reply_key);
+      } else if (type === "accept" || type === "reject") {
+        const prior = seen_resolutions.get(target_id);
+        if (prior !== undefined) {
+          const [first_idx, first_type] = prior;
+          if (first_type === type) {
+            errors.push(
+              `- Action ${i + 1} Failed: duplicate action — Action ${first_idx + 1} in this ` +
+                `batch already applies '${type}' to ${target_id}. A change can only be ` +
+                `resolved once; remove the duplicate action.`,
+            );
+          } else {
+            errors.push(
+              `- Action ${i + 1} Failed: conflicting actions — Action ${first_idx + 1} in ` +
+                `this batch applies '${first_type}' to ${target_id}, but this action applies ` +
+                `'${type}'. Decide the outcome and keep exactly one of them.`,
+            );
+          }
+        } else {
+          seen_resolutions.set(target_id, [i, type]);
+        }
+      }
+    }
+    if (errors.length > 0) return errors;
+
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i];
       const type = action.type;
@@ -4161,6 +4245,9 @@ export class RedlineEngine {
         ins_id!,
         null,
         suppress_emphasis,
+        // Paragraph-start insertions attach BEFORE the anchor (see
+        // before_anchor below): the suffix relocation must know.
+        start_idx === 0,
       );
 
       if (!result.first_node) return false;

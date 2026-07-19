@@ -1043,6 +1043,18 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
 
         if tag == "delete":
             deleted_text = "\n\n".join(orig_paragraphs[i1:i2])
+            # A deleted paragraph block must CARRY one adjacent separator, or
+            # the deletion leaves an empty paragraph container behind — the
+            # clean view then reads "\n\n\n\n" where the supplied text has
+            # "\n\n", and the post-apply verification rightly fails
+            # (QA 2026-07-19 v8 F-12 fallout; mirrors the insert branch
+            # below). Mid-document deletions take the FOLLOWING break;
+            # deleting the document's trailing block takes the LEADING one.
+            if i2 < len(orig_paragraphs):
+                deleted_text = deleted_text + "\n\n"
+            elif i1 > 0:
+                deleted_text = "\n\n" + deleted_text
+                offset -= 2
             edit = ModifyText(
                 type="modify",
                 target_text=deleted_text,
