@@ -30,12 +30,12 @@ If the user wants a fresh Word document built from nothing, defer to the `docx` 
 Adeu runs in two modes. Pick the first that applies and stop:
 
 1. **MCP tools available.** If you see Adeu MCP tools in the session (`read_docx`, `process_document_batch`, `accept_all_changes`, `diff_docx_files`, `finalize_document`), use them. This is the preferred path on every platform. Load `references/mcp-tools.md` before planning any non-trivial batch.
-2. **Bash available, no MCP tools.** Shell out to the Python CLI: `uvx adeu <subcommand>`. This is the only CLI Adeu ships — there is no Node CLI. Load `references/cli-fallback.md` for the command surface and the JSON shape `adeu apply` expects.
+2. **Bash available, no MCP tools.** Shell out to the Python CLI: `uvx 'adeu>=1' <subcommand>`. Keep the quoted `>=1` floor — a bare `uvx adeu` can resolve PyPI's empty 0.0.1 name-reservation release on hosts whose default Python is ≤3.11 and fail with "does not provide any executables". This is the only CLI Adeu ships — there is no Node CLI. Load `references/cli-fallback.md` for the command surface and the JSON shape `adeu apply` expects.
 3. **Neither available.** Tell the user. Suggested install lines, in this order:
    - Claude Code plugin (covers everything): `/plugin marketplace add dealfluence/adeu` then `/plugin install adeu-redlining@adeu-skills`
    - Node MCP server (recommended for most users, zero Python required): `npx -y @adeu/mcp-server`
-   - Python MCP server (required for Live MS Word integration on Windows, and for `protection_mode="encrypt"` on `finalize_document`): `uvx --from adeu adeu-server`
-   - Python CLI only (for scripted/headless pipelines): `uv tool install adeu`
+   - Python MCP server (required for Live MS Word integration on Windows, and for `protection_mode="encrypt"` on `finalize_document`): `uvx --from 'adeu>=1' adeu-server`
+   - Python CLI only (for scripted/headless pipelines): `uv tool install 'adeu>=1'`
 
 Do not present these as options to the user mid-task. Pick the available path and proceed.
 
@@ -43,7 +43,7 @@ Do not present these as options to the user mid-task. Pick the available path an
 
 Every redlining task follows the same shape. Follow it in order:
 
-1. **Read first.** Always read the document before editing. Use `read_docx` (MCP) or `uvx adeu extract` (CLI). For long contracts, start with `mode="outline"` to see the heading structure, then read specific pages.
+1. **Read first.** Always read the document before editing. Use `read_docx` (MCP) or `uvx 'adeu>=1' extract` (CLI). For long contracts, start with `mode="outline"` to see the heading structure, then read specific pages.
 2. **Plan the edits.** Each edit is either a search-and-replace (most common), an accept/reject of an existing tracked change by ID, a reply to a comment by ID, or a structural table edit. Write the plan down explicitly before applying.
 3. **Apply as one batch.** Send all edits in a single `process_document_batch` call (MCP) or one `adeu apply` invocation (CLI). Edits apply _sequentially_: each edit evaluates against the document state produced by the edits before it, so dependent edits may be chained — a later edit must target the text as it reads _after_ the earlier edits.
 4. **Verify.** If the user asked for a specific outcome, re-read the modified file with `clean_view=true` (MCP) or `--clean` (CLI) and confirm.
@@ -93,5 +93,5 @@ Use `references/mcp-tools.md` for the full schema. The five operations:
 Load these only when relevant — they're not part of the base context:
 
 - **`references/mcp-tools.md`** — full MCP tool schemas, parameter details, `process_document_batch` discriminated union. Load before planning any non-trivial edit batch on the MCP path.
-- **`references/cli-fallback.md`** — `uvx adeu` subcommands and the `edits.json` shape. Load on the CLI path.
+- **`references/cli-fallback.md`** — `uvx 'adeu>=1'` subcommands and the `edits.json` shape. Load on the CLI path.
 - **`references/criticmarkup.md`** — CriticMarkup syntax and Adeu's semantic projections (footnotes, cross-refs, anchors, defined-terms appendix). Load when interpreting raw `read_docx` output or when the user asks about a marker like `[^fn-3]` or `{#_BookmarkName}`.

@@ -37,7 +37,7 @@ Adeu ships as a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code
 /plugin install adeu-redlining@adeu-skills
 ```
 
-For best results, also connect either the Node MCP server (`npx -y @adeu/mcp-server`) or the Python MCP server (`uvx --from adeu adeu-server`). The plugin works without an MCP server too — it falls back to driving the `uvx adeu` CLI via Bash.
+For best results, also connect either the Node MCP server (`npx -y @adeu/mcp-server`) or the Python MCP server (`uvx --from 'adeu>=1' adeu-server`). The plugin works without an MCP server too — it falls back to driving the `uvx 'adeu>=1'` CLI via Bash.
 
 ### Other Skills-Compatible Agents (Cursor, Windsurf, VS Code Copilot, etc.)
 Adeu's redlining skill follows the open [Agent Skills specification](https://agentskills.io) and works with any compatible agent:
@@ -82,7 +82,7 @@ For IDEs or clients that configure MCP servers via JSON, you can use either the 
   "mcpServers": {
     "adeu": {
       "command": "uvx",
-      "args": ["--from", "adeu", "adeu-server"]
+      "args": ["--from", "adeu>=1", "adeu-server"]
     }
   }
 }
@@ -122,22 +122,22 @@ If you are running on Windows with Microsoft Word installed, Adeu can act as a r
 If you are building a legal-tech application, an automated pipeline, or want to use the local CLI, use our SDKs.
 
 ### The Python CLI
-The Python toolchain is managed via [uv](https://docs.astral.sh/uv/).
+The Python toolchain is managed via [uv](https://docs.astral.sh/uv/). Keep the quoted `'adeu>=1'` requirement in the commands below (uvx infers the `adeu` command from it) — it steers installers away from the reserved, empty `adeu==0.0.1` placeholder release, which an unconstrained `adeu` resolves to on hosts whose default Python is older than 3.12. For repeated use, install once with `uv tool install 'adeu>=1'` and call plain `adeu`.
 
 ```bash
 pip install uv
 
 # Extract clean text for RAG or prompting
-uvx adeu extract contract.docx -o contract.md
+uvx 'adeu>=1' extract contract.docx -o contract.md
 
 # Generate a visual diff between two versions
-uvx adeu diff v1.docx v2.docx
+uvx 'adeu>=1' diff v1.docx v2.docx
 
 # Apply edits to the DOCX
-uvx adeu apply contract.docx edits.json --author "Review Bot"
+uvx 'adeu>=1' apply contract.docx edits.json --author "Review Bot"
 
 # Scrub author metadata and internal trackers
-uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
+uvx 'adeu>=1' sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
 
 ### The Python SDK

@@ -21,7 +21,7 @@ def test_sandbox_warning_on_read_failure():
 
     msg = str(exc_info.value)
     assert "If you are running in a sandboxed/containerized environment" in msg
-    assert "uv tool install adeu" in msg
+    assert "uv tool install 'adeu>=1'" in msg
 
 
 def test_cli_extract_modes(capsys):

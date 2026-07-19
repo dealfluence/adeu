@@ -122,7 +122,9 @@ def handle_init(args: argparse.Namespace):
         # PyPI release, so the MCP server silently drifts away from the CLI
         # the user tested (QA 2026-07-19 F-16).
         version, _sha, _ = get_build_info()
-        package_ref = f"adeu=={version}" if version and version not in ("unknown", "0.0.0") else "adeu"
+        # The '>=1' fallback floor avoids the empty 0.0.1 name-reservation release,
+        # which an unconstrained "adeu" resolves to on Pythons <=3.11.
+        package_ref = f"adeu=={version}" if version and version not in ("unknown", "0.0.0") else "adeu>=1"
 
         mcp_servers["adeu"] = {
             "command": uvx_path,  # absolute path, not bare "uvx"
@@ -198,7 +200,7 @@ def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
             "Note: If you are running in a sandboxed/containerized environment, "
             "the host application or MCP server may not have access to your local workspace files. "
             "You can resolve this by installing Adeu directly inside your sandboxed environment using "
-            "'uv tool install adeu' and executing the commands via the CLI."
+            "\"uv tool install 'adeu>=1'\" and executing the commands via the CLI."
         ),
     )
 

@@ -26,7 +26,10 @@ def read_file_bytes(path: str) -> BytesIO:
             "All of these commands accept a --json flag that emits a machine-readable\n"
             "result on stdout; logs and errors go to stderr.\n"
             "To run the local tool, install it via:\n"
-            "  uv tool install adeu\n"
+            # The '>=1' floor keeps resolvers off the empty 0.0.1 name-reservation
+            # release on PyPI, which otherwise wins on hosts whose default Python
+            # is <=3.11 (real releases require >=3.12) and installs no executables.
+            "  uv tool install 'adeu>=1'\n"
             "and run the mapped CLI command directly in your terminal."
         )
     with open(p, "rb") as f:

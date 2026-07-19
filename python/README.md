@@ -27,59 +27,59 @@ The `adeu` CLI provides a powerful suite of tools for interacting with documents
 Extract text as CriticMarkup. Use `--clean-view` to simulate "Accept All Changes".
 ```bash
 # Extract full text
-uvx adeu extract contract.docx -o output.md
+uvx 'adeu>=1' extract contract.docx -o output.md
 
 # Extract only the structural heading outline
-uvx adeu extract contract.docx --mode outline
+uvx 'adeu>=1' extract contract.docx --mode outline
 
 # Windows Only: Extract text from the actively open Word document
-uvx adeu extract --live
+uvx 'adeu>=1' extract --live
 ```
 
 ### Diffing
 Generate a word-level patch diff between two document versions.
 ```bash
 # Compare two DOCX files
-uvx adeu diff original.docx modified.docx
+uvx 'adeu>=1' diff original.docx modified.docx
 
 # Output raw JSON edits for programmatic use
-uvx adeu diff original.docx modified.docx --json
+uvx 'adeu>=1' diff original.docx modified.docx --json
 ```
 
 ### Applying Edits
 Apply a JSON array of `DocumentChange` objects (or a modified markdown file) back to the DOCX.
 ```bash
 # Apply a JSON batch of edits to a file
-uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
+uvx 'adeu>=1' apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
 
 # Simulate the changes without modifying the file to get a preview report
-uvx adeu apply original.docx edits.json --dry-run
+uvx 'adeu>=1' apply original.docx edits.json --dry-run
 
 # Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
-uvx adeu apply original.docx edits.json --json
+uvx 'adeu>=1' apply original.docx edits.json --json
 
 # Windows Only: Apply edits directly to the live, open Word canvas
-uvx adeu apply edits.json --live
+uvx 'adeu>=1' apply edits.json --live
 ```
 
 ### Accepting All Changes
 Accept every tracked change and remove all comments in one operation, producing a finalized clean document. Mirrors the `accept_all_changes` MCP tool.
 ```bash
 # Writes contract_clean.docx next to the input
-uvx adeu accept-all contract.docx
+uvx 'adeu>=1' accept-all contract.docx
 
 # Explicit output path, machine-readable result on stdout
-uvx adeu accept-all contract.docx -o final.docx --json
+uvx 'adeu>=1' accept-all contract.docx -o final.docx --json
 ```
 
 ### Sanitization
 Strip sensitive metadata, hidden text, and author names before external distribution.
 ```bash
 # Full scrub (fails if unresolved track changes exist unless --accept-all is passed)
-uvx adeu sanitize contract.docx --accept-all -o clean.docx
+uvx 'adeu>=1' sanitize contract.docx --accept-all -o clean.docx
 
 # Keep your redlines/comments, but anonymize the author and strip metadata
-uvx adeu sanitize redline.docx --keep-markup --author "My Firm"
+uvx 'adeu>=1' sanitize redline.docx --keep-markup --author "My Firm"
 ```
 
 ### Agentic / Headless Usage (the CLI as an API)
@@ -94,7 +94,7 @@ When an agent operates in a closed sandbox (a CI pipeline, a containerized codin
 
 The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
 
-* **stdout** carries only document data (Markdown/CriticMarkup) or, with `--json`, a machine-readable JSON result. `uvx adeu extract doc.docx > out.md` always produces a clean file, even with `--debug`.
+* **stdout** carries only document data (Markdown/CriticMarkup) or, with `--json`, a machine-readable JSON result. `uvx 'adeu>=1' extract doc.docx > out.md` always produces a clean file, even with `--debug`.
 * **stderr** carries all logs, progress messages, warnings, and errors.
 * **Exit codes**: `0` = full success; `1` = failure or a partially applied batch (check `edits_skipped` in the JSON stats).
 
@@ -175,7 +175,7 @@ The Python backend exposes Adeu's capabilities to AI agents via the Model Contex
 ### Running the Server
 You can boot the server over stdio for agent consumption:
 ```bash
-uvx --from adeu adeu-server
+uvx --from 'adeu>=1' adeu-server
 ```
 
 ### Claude Desktop Integration
@@ -183,7 +183,7 @@ Adeu provides an initialization command to automatically inject the MCP server i
 
 ```bash
 # Installs to Claude Desktop using the global uvx path
-uvx adeu init
+uvx 'adeu>=1' init
 
 # Local Developer Mode: Configures Claude to run the server from your current source tree
 uv run adeu init --local

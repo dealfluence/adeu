@@ -7,8 +7,8 @@ Status: **Implemented** (July 2026)
 When an agent operates in a closed sandbox (e.g., an LLM running in a raw bash
 environment or a CI pipeline), it cannot connect to an MCP server. The
 `read_file_bytes` fallback in `python/src/adeu/mcp_components/shared.py`
-explicitly tells sandboxed agents to install the CLI (`uv tool install adeu`)
-and run the mapped commands directly.
+explicitly tells sandboxed agents to install the CLI (`uv tool install
+'adeu>=1'`) and run the mapped commands directly.
 
 The CLI is therefore a **Command-Line API**, not just a human convenience: it
 must accept the exact same JSON change schema as the MCP tools and be able to
@@ -59,8 +59,8 @@ single JSON document and the human-readable progress logs are suppressed.
 ## 4. Strict I/O discipline
 
 * **stdout** is reserved for document data (Markdown/CriticMarkup) and `--json`
-  results — nothing else. `uvx adeu extract doc.docx > out.md` must produce a
-  mathematically clean file.
+  results — nothing else. `uvx 'adeu>=1' extract doc.docx > out.md` must
+  produce a mathematically clean file.
 * **stderr** carries all logs, debug output, progress messages, warnings, and
   error text. The CLI configures structlog with
   `PrintLoggerFactory(file=sys.stderr)` so `--debug` logging can never pollute
@@ -74,13 +74,20 @@ single JSON document and the human-readable progress logs are suppressed.
 The canonical sandbox workflow the CLI must keep supporting:
 
 ```bash
-uv tool install adeu                                  # once, inside the sandbox
+uv tool install 'adeu>=1'                             # once, inside the sandbox
 adeu extract contract.docx --json > doc.json          # read
 # ... agent plans edits, writes changes.json ...
 adeu apply contract.docx changes.json --json > result.json
 jq -e '.edits_skipped == 0' result.json               # verify systematically
 adeu accept-all contract_redlined.docx --json         # finalize (optional)
 ```
+
+The `>=1` floor is not decorative: PyPI also hosts an empty `adeu==0.0.1`
+name-reservation release (`requires-python >=3.7`, no entry points). On a host
+whose default Python is ≤3.11, an unconstrained `adeu` resolves to that
+placeholder and installs no executables; the floor forces resolvers to pick
+(or, with uv, auto-provision) a Python ≥3.12 and the real package. This also
+protects against mirrors that ignore PyPI yank markers.
 
 Regression coverage lives in `python/tests/test_cli_features.py`
 (`test_cli_apply_json*`, `test_cli_accept_all*`,

@@ -1,25 +1,27 @@
 # Adeu CLI Reference (Fallback Path)
 
-When the Adeu MCP tools are unavailable, drive Adeu via the `uvx adeu` CLI through Bash.
+When the Adeu MCP tools are unavailable, drive Adeu via the Python CLI through Bash: `uvx 'adeu>=1' <subcommand>`.
 
-**The CLI is Python-only.** Adeu does not ship a Node CLI — only a Node MCP server (`@adeu/mcp-server`). If the user is on a Node-only setup and the MCP server isn't running, the right move is usually to suggest they install the MCP server (`npx -y @adeu/mcp-server`) rather than introduce a Python toolchain just for one-off CLI use. Only fall through to `uvx adeu` when the MCP path genuinely isn't an option.
+**The CLI is Python-only.** Adeu does not ship a Node CLI — only a Node MCP server (`@adeu/mcp-server`). If the user is on a Node-only setup and the MCP server isn't running, the right move is usually to suggest they install the MCP server (`npx -y @adeu/mcp-server`) rather than introduce a Python toolchain just for one-off CLI use. Only fall through to the uvx CLI when the MCP path genuinely isn't an option.
 
 If `uvx` is not available, install it once: `pip install uv` (or see https://docs.astral.sh/uv/).
+
+Always keep the quoted `'adeu>=1'` requirement (uvx infers the `adeu` command from it). A bare `uvx adeu` or `pip install adeu` on a host whose default Python is ≤3.11 resolves PyPI's empty `0.0.1` name-reservation release and fails with "does not provide any executables"; the `>=1` floor makes uv pick (or fetch) a Python ≥3.12 and the real package. For repeated calls, install once with `uv tool install 'adeu>=1'` and use plain `adeu <subcommand>`.
 
 ## Subcommands
 
 ### `adeu extract` — read a document
 
 ```bash
-uvx adeu extract contract.docx -o contract.md
+uvx 'adeu>=1' extract contract.docx -o contract.md
 # Clean view (accepted state):
-uvx adeu extract contract.docx --clean-view -o accepted.md
+uvx 'adeu>=1' extract contract.docx --clean-view -o accepted.md
 # Outline / appendix / search modes, mirroring read_docx:
-uvx adeu extract contract.docx --mode outline
-uvx adeu extract contract.docx --mode appendix
-uvx adeu extract contract.docx --search-query "Governing Law"
+uvx 'adeu>=1' extract contract.docx --mode outline
+uvx 'adeu>=1' extract contract.docx --mode appendix
+uvx 'adeu>=1' extract contract.docx --search-query "Governing Law"
 # Machine-readable JSON envelope ({"markdown", "title", "file_path"}) on stdout:
-uvx adeu extract contract.docx --json
+uvx 'adeu>=1' extract contract.docx --json
 ```
 
 Output is Markdown with CriticMarkup for tracked changes and comments. The same semantic appendix (defined terms, cross-refs, bookmarks) appears at the bottom. Long documents are paginated — pass `--page N` to continue reading.
@@ -27,7 +29,7 @@ Output is Markdown with CriticMarkup for tracked changes and comments. The same 
 ### `adeu diff` — compare two versions
 
 ```bash
-uvx adeu diff v1.docx v2.docx
+uvx 'adeu>=1' diff v1.docx v2.docx
 ```
 
 Returns Adeu's `@@ Word Patch @@` sub-word diff. Not a unified diff.
@@ -35,11 +37,11 @@ Returns Adeu's `@@ Word Patch @@` sub-word diff. Not a unified diff.
 ### `adeu apply` — apply edits as tracked changes
 
 ```bash
-uvx adeu apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
+uvx 'adeu>=1' apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
 # Preview without touching any file:
-uvx adeu apply contract.docx edits.json --dry-run
+uvx 'adeu>=1' apply contract.docx edits.json --dry-run
 # Machine-readable stats on stdout (recommended — parse it to verify your batch):
-uvx adeu apply contract.docx edits.json --json
+uvx 'adeu>=1' apply contract.docx edits.json --json
 ```
 
 With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`, `dry_run`) and human logs are suppressed. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1. Exit code 1 also signals a partially applied batch — check `edits_skipped`.
@@ -73,10 +75,10 @@ The `edits.json` file is a JSON array. Each entry has a `type` discriminator mat
 
 ```bash
 # Full scrub:
-uvx adeu sanitize redline.docx -o clean.docx --author "My Firm" --report
+uvx 'adeu>=1' sanitize redline.docx -o clean.docx --author "My Firm" --report
 
 # Keep redline markup but redact author metadata:
-uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
+uvx 'adeu>=1' sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
 
 Use `--report` to print a sanitization report — useful for verifying what was removed.
@@ -84,17 +86,17 @@ Use `--report` to print a sanitization report — useful for verifying what was 
 ### `adeu accept-all` — accept every change and drop every comment
 
 ```bash
-uvx adeu accept-all redline.docx -o final.docx
+uvx 'adeu>=1' accept-all redline.docx -o final.docx
 # Default output is <input>_clean.docx; --json prints {"status": "ok", "output_path": ...}
-uvx adeu accept-all redline.docx --json
+uvx 'adeu>=1' accept-all redline.docx --json
 ```
 
 ## Workflow on the CLI path
 
-1. `uvx adeu extract <doc> -o doc.md` — read it.
+1. `uvx 'adeu>=1' extract <doc> -o doc.md` — read it.
 2. Construct `edits.json` based on what the user asked for.
-3. `uvx adeu apply <doc> edits.json --author "<name>" -o <out>.docx --json` — parse the stats to confirm `edits_skipped == 0`.
-4. `uvx adeu extract <out>.docx --clean-view -o verify.md` — verify by reading the clean view.
+3. `uvx 'adeu>=1' apply <doc> edits.json --author "<name>" -o <out>.docx --json` — parse the stats to confirm `edits_skipped == 0`.
+4. `uvx 'adeu>=1' extract <out>.docx --clean-view -o verify.md` — verify by reading the clean view.
 
 For ID-based operations (`accept`, `reject`, `reply`), step 1 and step 2 must be back-to-back. Do not reuse IDs across multiple `apply` runs.
 
