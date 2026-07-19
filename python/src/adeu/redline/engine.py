@@ -613,7 +613,9 @@ class RedlineEngine:
                 s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
             ]
             if not real_spans:
-                return start, length
+                # Virtual-only range (meta bubble, marker): not document text
+                # (ADEU-QA-002 C) — never a live match.
+                continue
             if any(not s.del_id for s in real_spans):
                 return start, length
         return self.mapper.find_match_index(target_text, is_regex=is_regex)
@@ -1625,7 +1627,14 @@ class RedlineEngine:
                     )
                     continue
 
-            matches = self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+            # Matches covering ONLY virtual projection text (meta bubbles,
+            # timestamps, style markers) are phantoms: they can neither be
+            # edited nor legitimately ambiguate a real match — a target of
+            # "4" was rejected as "appears 8 times" because comment-bubble
+            # timestamps matched (QA 2026-07-19 ADEU-QA-002 C).
+            matches = self.mapper.drop_virtual_only_matches(
+                self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+            )
             active_text = self.mapper.full_text
             target_mapper = self.mapper
 
@@ -1633,7 +1642,9 @@ class RedlineEngine:
             if len(matches) == 0:
                 if not self.clean_mapper:
                     self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-                matches = self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+                matches = self.clean_mapper.drop_virtual_only_matches(
+                    self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+                )
                 if len(matches) > 0:
                     active_text = self.clean_mapper.full_text
                     target_mapper = self.clean_mapper
@@ -1645,7 +1656,9 @@ class RedlineEngine:
             if len(matches) == 0:
                 if not self.original_mapper:
                     self.original_mapper = DocumentMapper(self.doc, original_view=True)
-                orig_matches = self.original_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+                orig_matches = self.original_mapper.drop_virtual_only_matches(
+                    self.original_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+                )
                 if len(orig_matches) > 0:
                     is_deleted_text = True
                     for start, length in orig_matches:
@@ -2065,12 +2078,18 @@ class RedlineEngine:
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
         edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
 
-        applied_actions, skipped_actions = 0, 0
+        applied_actions, skipped_actions, already_resolved_actions = 0, 0, 0
         if actions:
             action_shape_errors = validate_review_action_batch(actions)
             if action_shape_errors:
                 raise BatchValidationError(action_shape_errors)
-            applied_actions, skipped_actions = self.apply_review_actions(actions)
+            # Document-aware pairing check BEFORE any action mutates the DOM:
+            # accept + reject across one replacement's del+ins pair is a
+            # contradiction, not two independent operations (ADEU-QA-004).
+            pairing_errors = self.validate_action_pairing(actions)
+            if pairing_errors:
+                raise BatchValidationError(pairing_errors)
+            applied_actions, skipped_actions, already_resolved_actions = self.apply_review_actions(actions)
             if skipped_actions > 0:
                 raise BatchValidationError(self.skipped_details)
             if edits:
@@ -2221,6 +2240,11 @@ class RedlineEngine:
         return {
             "actions_applied": applied_actions,
             "actions_skipped": skipped_actions,
+            # Actions whose target was already resolved by an earlier action
+            # of this batch (via its replacement pair): consistent no-ops,
+            # never counted as applied — every reported "applied" action
+            # causes an observable state transition (ADEU-QA-004).
+            "actions_already_resolved": already_resolved_actions,
             "edits_applied": applied_edits,
             "edits_skipped": skipped_edits,
             # edits_applied counts change OBJECTS; this is the total number of
@@ -2262,13 +2286,15 @@ class RedlineEngine:
                 resolved_edits.append((edit, getattr(edit, "new_text", None)))
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
                 # Simplified resolution for structural edits
-                matches = self.mapper.find_all_match_indices(edit.target_text)
+                matches = self.mapper.drop_virtual_only_matches(self.mapper.find_all_match_indices(edit.target_text))
                 resolved_mapper = self.mapper
                 if not matches:
                     # Try clean view
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-                    matches = self.clean_mapper.find_all_match_indices(edit.target_text)
+                    matches = self.clean_mapper.drop_virtual_only_matches(
+                        self.clean_mapper.find_all_match_indices(edit.target_text)
+                    )
                     resolved_mapper = self.clean_mapper
 
                 if matches:
@@ -2664,13 +2690,17 @@ class RedlineEngine:
         is_regex = getattr(edit, "regex", False)
         match_mode = getattr(edit, "match_mode", "strict")
 
-        matches = self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+        matches = self.mapper.drop_virtual_only_matches(
+            self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+        )
         active_mapper = self.mapper
 
         if not matches:
             if not self.clean_mapper:
                 self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-            matches = self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+            matches = self.clean_mapper.drop_virtual_only_matches(
+                self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
+            )
             if matches:
                 active_mapper = self.clean_mapper
             else:
@@ -2683,6 +2713,8 @@ class RedlineEngine:
                 for span in active_mapper.spans
                 if span.run is not None and span.end > s and span.start < s + match_len
             ]
+            # Virtual-only matches were already dropped above; here we only
+            # skip matches buried entirely inside tracked deletions.
             if not real_spans or any(not span.del_id for span in real_spans):
                 live_matches.append((s, match_len))
 
@@ -3553,8 +3585,32 @@ class RedlineEngine:
                         p2_element = p2_element.getnext()
 
                     if p2_element is not None and p2_element.tag == qn("w:p"):
+                        # Decide the merged container's properties BEFORE p2's
+                        # children move in: when p1 keeps no visible content
+                        # (a FULL paragraph deletion), the only surviving text
+                        # is p2's — the merged paragraph must carry p2's
+                        # properties (style, numbering). Keeping p1's restyled
+                        # the following paragraph: deleting a heading turned
+                        # the next body paragraph into a heading, deleting a
+                        # plain paragraph before a list item stripped the
+                        # item's numbering (QA 2026-07-19 ADEU-QA-002 B).
+                        p1_fully_deleted = not self._paragraph_has_visible_content(p1_element)
+
                         # 1. Track pilcrow deletion in p1
                         pPr = p1_element.find(qn("w:pPr"))
+                        if p1_fully_deleted:
+                            p2_pPr = p2_element.find(qn("w:pPr"))
+                            adopted = deepcopy(p2_pPr) if p2_pPr is not None else create_element("w:pPr")
+                            # Section properties belong to p1's position in the
+                            # document flow, never to p2's styling — carry them
+                            # over so a section boundary is not destroyed.
+                            if pPr is not None:
+                                sect = pPr.find(qn("w:sectPr"))
+                                if sect is not None and adopted.find(qn("w:sectPr")) is None:
+                                    adopted.append(deepcopy(sect))
+                                p1_element.remove(pPr)
+                            p1_element.insert(0, adopted)
+                            pPr = adopted
                         if pPr is None:
                             pPr = create_element("w:pPr")
                             p1_element.insert(0, pPr)
@@ -3563,8 +3619,9 @@ class RedlineEngine:
                             rPr = create_element("w:rPr")
                             pPr.append(rPr)
 
-                        del_mark = self._create_track_change_tag("w:del")
-                        rPr.append(del_mark)
+                        if rPr.find(qn("w:del")) is None:
+                            del_mark = self._create_track_change_tag("w:del")
+                            rPr.append(del_mark)
 
                         # 2. Coalesce children from p2 to p1
                         for child in list(p2_element):
@@ -3577,23 +3634,7 @@ class RedlineEngine:
                             parent.remove(p2_element)
 
         for p_elem in affected_ps:
-            has_visible = False
-            for tag in ["w:t", "w:tab", "w:br"]:
-                for node in p_elem.findall(f".//{qn(tag)}"):
-                    is_deleted = False
-                    curr = node.getparent()
-                    while curr is not None and curr != p_elem.getparent():
-                        if curr.tag == qn("w:del"):
-                            is_deleted = True
-                            break
-                        curr = curr.getparent()
-                    if not is_deleted:
-                        if tag == "w:t" and not node.text:
-                            continue
-                        has_visible = True
-                        break
-                if has_visible:
-                    break
+            has_visible = self._paragraph_has_visible_content(p_elem)
 
             if not has_visible:
                 pPr = p_elem.find(qn("w:pPr"))
@@ -3609,6 +3650,27 @@ class RedlineEngine:
                     rPr.append(del_mark)
 
         return True
+
+    def _paragraph_has_visible_content(self, p_elem) -> bool:
+        """
+        True when the paragraph still carries visible content (w:t text,
+        w:tab, w:br) that is NOT wrapped in a tracked deletion — i.e. the
+        paragraph would render non-empty in the accepted document.
+        """
+        for tag in ["w:t", "w:tab", "w:br"]:
+            for node in p_elem.findall(f".//{qn(tag)}"):
+                is_deleted = False
+                curr = node.getparent()
+                while curr is not None and curr != p_elem.getparent():
+                    if curr.tag == qn("w:del"):
+                        is_deleted = True
+                        break
+                    curr = curr.getparent()
+                if not is_deleted:
+                    if tag == "w:t" and not node.text:
+                        continue
+                    return True
+        return False
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
         curr = run._element
@@ -3716,12 +3778,80 @@ class RedlineEngine:
             "an explicit text edit instead."
         )
 
-    def apply_review_actions(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> tuple[int, int]:
+    def _resolution_group_ids(self, target_id: str) -> set:
+        """
+        All revision ids that resolve as ONE unit with `target_id`: the ids of
+        every contiguous same-author <w:ins>/<w:del> sibling of its elements
+        (a replacement's del+ins pair), plus the id itself.
+        """
+        nodes = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
+        nodes += [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
+        group = {target_id} if nodes else set()
+        for node in nodes:
+            for paired in self._get_paired_nodes(node):
+                pid = paired.get(qn("w:id"))
+                if pid:
+                    group.add(pid)
+        return group
+
+    def validate_action_pairing(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> List[str]:
+        """
+        Document-aware validation (QA 2026-07-19 ADEU-QA-004): a replacement's
+        del+ins pair carries two distinct ids but resolves as one unit, so a
+        batch that accepts one side and rejects the other is contradictory.
+        Rejecting it up front — before any action mutates the document — keeps
+        the batch transactional; the first-action-silently-wins behavior
+        reported the contradictory follow-up as "applied".
+        """
+        errors: List[str] = []
+        group_first: dict = {}  # member id -> (action_pos, action_type, id named by that action)
+        for pos, act in enumerate(actions):
+            if not isinstance(act, (AcceptChange, RejectChange)):
+                continue
+            raw_id = act.target_id
+            if raw_id.startswith("Com:"):
+                continue
+            target_id = raw_id[4:] if raw_id.startswith("Chg:") else raw_id
+            group = self._resolution_group_ids(target_id)
+            if not group:
+                continue  # unknown ids fail with their own not-found error later
+            conflict = None
+            for gid in group:
+                prior = group_first.get(gid)
+                if prior is not None and prior[1] != act.type:
+                    conflict = prior
+                    break
+            if conflict is not None:
+                first_pos, first_type, first_id = conflict
+                errors.append(
+                    f"- Action {pos + 1} Failed: conflicting actions on one replacement — Action "
+                    f"{first_pos + 1} applies '{first_type}' to Chg:{first_id}, and Chg:{target_id} is "
+                    "part of the same change (a replacement's contiguous del+ins pair resolves as one "
+                    f"unit, so '{first_type}' already decides both sides). Accepting one side and "
+                    "rejecting the other is contradictory — decide the outcome and submit exactly one "
+                    "action for the pair."
+                )
+                continue
+            for gid in group:
+                group_first.setdefault(gid, (pos, act.type, target_id))
+        return errors
+
+    def apply_review_actions(
+        self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]
+    ) -> tuple[int, int, int]:
+        """
+        Returns (applied, skipped, already_resolved). `applied` counts actions
+        that caused an observable state transition; an action naming an id an
+        earlier action of this batch already resolved (via its replacement
+        pair) is counted in `already_resolved` instead — never as applied
+        (QA 2026-07-19 ADEU-QA-004).
+        """
         applied = 0
         skipped = 0
-        resolved_history = set()
+        already_resolved = 0
+        resolved_history: dict = {}  # revision id -> action type that resolved it
 
-        for act in actions:
+        for pos, act in enumerate(actions):
             raw_id = act.target_id
             target_id = raw_id
 
@@ -3738,8 +3868,27 @@ class RedlineEngine:
                 is_change = True
                 is_comment = True
 
-            if is_change and target_id in resolved_history:
-                applied += 1
+            if is_change and isinstance(act, (AcceptChange, RejectChange)) and target_id in resolved_history:
+                prior_type = resolved_history[target_id]
+                if prior_type == act.type:
+                    # Consistent follow-up on the pair: legitimate agent
+                    # workflow ("accept both ids of the replacement"), but no
+                    # state transition happens — report it accurately.
+                    already_resolved += 1
+                    self.skipped_details.append(
+                        f"- Note: Action {pos + 1} ('{act.type}' on {raw_id}) had no additional effect — "
+                        "the change was already resolved together with its replacement pair by an "
+                        "earlier action in this batch. Counted as already_resolved, not applied."
+                    )
+                    continue
+                # Contradiction. validate_action_pairing rejects this shape
+                # before anything mutates; this guard covers direct callers.
+                self.skipped_details.append(
+                    f"- Action {pos + 1} Failed: contradictory action — '{act.type}' on {raw_id}, but "
+                    f"the change was already resolved as '{prior_type}' together with its replacement "
+                    "pair by an earlier action in this batch."
+                )
+                skipped += 1
                 continue
 
             if is_change and isinstance(act, (AcceptChange, RejectChange)):
@@ -3765,14 +3914,15 @@ class RedlineEngine:
                     success = self._reply_to_comment(target_id, getattr(act, "text", ""))
 
             if success:
-                if resolved_now:
-                    resolved_history.update(resolved_now)
+                for rid in resolved_now:
+                    if rid:
+                        resolved_history[rid] = act.type
                 applied += 1
             else:
                 self.skipped_details.append(f"- Failed to apply action: {act.type} on {target_id}")
                 skipped += 1
 
-        return applied, skipped
+        return applied, skipped, already_resolved
 
     def _clean_wrapping_comments(self, element):
         """

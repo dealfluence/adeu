@@ -40,7 +40,11 @@ describe('Atomic Batch Pipeline (Node.js Port)', () => {
     const stats = engine2.process_batch(changes);
 
     // 4. Assertions on the Tool Execution
-    expect(stats.actions_applied).toBe(actions.length);
+    // The two ids form ONE replacement pair: the first accept resolves both,
+    // the second is an accurate no-op (QA 2026-07-19 ADEU-QA-004) — never a
+    // second "applied" state transition.
+    expect(stats.actions_applied).toBe(1);
+    expect(stats.actions_already_resolved).toBe(actions.length - 1);
     expect(stats.edits_applied).toBe(1);
 
     // 5. Assertions on the Final Document State

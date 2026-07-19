@@ -2134,9 +2134,13 @@ export class RedlineEngine {
         }
       }
 
-      let matches = this.mapper.find_all_match_indices(
-        edit.target_text,
-        is_regex,
+      // Matches covering ONLY virtual projection text (meta bubbles,
+      // timestamps, style markers) are phantoms: they can neither be edited
+      // nor legitimately ambiguate a real match — a target of "4" was
+      // rejected as "appears 8 times" because comment-bubble timestamps
+      // matched (QA 2026-07-19 ADEU-QA-002 C).
+      let matches = this.mapper.drop_virtual_only_matches(
+        this.mapper.find_all_match_indices(edit.target_text, is_regex),
       );
       let activeText = this.mapper.full_text;
       let target_mapper = this.mapper;
@@ -2144,9 +2148,8 @@ export class RedlineEngine {
       if (matches.length === 0) {
         if (!this.clean_mapper)
           this.clean_mapper = new DocumentMapper(this.doc, true);
-        matches = this.clean_mapper.find_all_match_indices(
-          edit.target_text,
-          is_regex,
+        matches = this.clean_mapper.drop_virtual_only_matches(
+          this.clean_mapper.find_all_match_indices(edit.target_text, is_regex),
         );
         if (matches.length > 0) {
           activeText = this.clean_mapper.full_text;
@@ -2164,9 +2167,9 @@ export class RedlineEngine {
           const realSpans = this.mapper.spans.filter(
             (s) => s.run !== null && s.end > start && s.start < start + length,
           );
-          if (realSpans.length === 0) return true; // virtual-only; keep
-          // Keep only if at least one overlapping real span is live (not
-          // part of a tracked deletion).
+          // Virtual-only matches were already dropped above; here we only
+          // skip matches buried entirely inside tracked deletions.
+          if (realSpans.length === 0) return true;
           return realSpans.some((s) => !s.del_id);
         });
         matches = liveMatches;
@@ -2179,9 +2182,11 @@ export class RedlineEngine {
         if (!this.original_mapper) {
           this.original_mapper = new DocumentMapper(this.doc, false, true);
         }
-        const orig_matches = this.original_mapper.find_all_match_indices(
-          edit.target_text,
-          is_regex,
+        const orig_matches = this.original_mapper.drop_virtual_only_matches(
+          this.original_mapper.find_all_match_indices(
+            edit.target_text,
+            is_regex,
+          ),
         );
         if (orig_matches.length > 0) {
           is_deleted_text = true;
@@ -2743,9 +2748,15 @@ export class RedlineEngine {
     // _insert_and_split_ins).
 
     // BUG-7: Unified single-pass validation in wet-run / standard mode.
+    // The document-aware pairing check runs BEFORE any action mutates the
+    // DOM: accept + reject across one replacement's del+ins pair is a
+    // contradiction, not two independent operations (ADEU-QA-004).
     if (!dry_run_mode) {
-      const action_errors =
+      let action_errors =
         actions.length > 0 ? this.validate_review_actions(actions) : [];
+      if (actions.length > 0 && action_errors.length === 0) {
+        action_errors = this.validate_action_pairing(actions);
+      }
       const validate_edits_now = edits.length > 0 && action_errors.length > 0;
       const edit_errors = validate_edits_now ? this.validate_edits(edits) : [];
       const all_errors = [...action_errors, ...edit_errors];
@@ -2754,7 +2765,10 @@ export class RedlineEngine {
       }
     } else {
       if (actions.length > 0) {
-        const action_errors = this.validate_review_actions(actions);
+        let action_errors = this.validate_review_actions(actions);
+        if (action_errors.length === 0) {
+          action_errors = this.validate_action_pairing(actions);
+        }
         if (action_errors.length > 0) {
           throw new BatchValidationError(action_errors);
         }
@@ -2763,10 +2777,12 @@ export class RedlineEngine {
 
     let applied_actions = 0;
     let skipped_actions = 0;
+    let already_resolved_actions = 0;
     if (actions.length > 0) {
       const res = this.apply_review_actions(actions);
       applied_actions = res[0];
       skipped_actions = res[1];
+      already_resolved_actions = res[2];
       if (skipped_actions > 0) {
         throw new BatchValidationError(this.skipped_details);
       }
@@ -3004,6 +3020,11 @@ export class RedlineEngine {
     return {
       actions_applied: applied_actions,
       actions_skipped: skipped_actions,
+      // Actions whose target was already resolved by an earlier action of
+      // this batch (via its replacement pair): consistent no-ops, never
+      // counted as applied — every reported "applied" action causes an
+      // observable state transition (ADEU-QA-004).
+      actions_already_resolved: already_resolved_actions,
       edits_applied: applied_edits,
       edits_skipped: skipped_edits,
       // edits_applied counts change OBJECTS; this is the total number of
@@ -3059,13 +3080,17 @@ export class RedlineEngine {
         edit._resolved_start_idx = edit._match_start_index;
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
-        let matches = this.mapper.find_all_match_indices(edit.target_text);
+        let matches = this.mapper.drop_virtual_only_matches(
+          this.mapper.find_all_match_indices(edit.target_text),
+        );
         let resolved_mapper = this.mapper;
         if (matches.length === 0) {
           if (!this.clean_mapper) {
             this.clean_mapper = new DocumentMapper(this.doc, true);
           }
-          matches = this.clean_mapper.find_all_match_indices(edit.target_text);
+          matches = this.clean_mapper.drop_virtual_only_matches(
+            this.clean_mapper.find_all_match_indices(edit.target_text),
+          );
           resolved_mapper = this.clean_mapper;
         }
 
@@ -3289,11 +3314,165 @@ export class RedlineEngine {
     return [applied_logical, skipped_logical];
   }
 
-  public apply_review_actions(actions: any[]): [number, number] {
+  /**
+   * True when the paragraph still carries visible content (w:t text, w:tab,
+   * w:br) that is NOT wrapped in a tracked deletion — i.e. the paragraph
+   * would render non-empty in the accepted document.
+   */
+  private _paragraph_has_visible_content(p_elem: Element): boolean {
+    for (const tag of ["w:t", "w:tab", "w:br"]) {
+      const nodes = findAllDescendants(p_elem, tag);
+      for (const node of nodes) {
+        let is_deleted = false;
+        let curr = node.parentNode as Element | null;
+        while (curr && curr !== p_elem.parentNode) {
+          if (curr.tagName === "w:del") {
+            is_deleted = true;
+            break;
+          }
+          curr = curr.parentNode as Element | null;
+        }
+        if (!is_deleted) {
+          if (tag === "w:t" && !node.textContent) continue;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * All contiguous same-author w:ins/w:del siblings that form one logical
+   * modification block with `node` (a replacement's del+ins pair). Mirrors
+   * the Python engine's _get_paired_nodes: comment range markers and
+   * rPr/pPr are transparent; a different author or any other element breaks
+   * the group.
+   */
+  private _get_paired_nodes(node: Element): Element[] {
+    const pairs: Element[] = [];
+    const author = node.getAttribute("w:author");
+    const transparent = new Set([
+      "w:commentRangeStart",
+      "w:commentRangeEnd",
+      "w:commentReference",
+      "w:rPr",
+      "w:pPr",
+    ]);
+
+    const walk = (start: Element, dir: "next" | "prev") => {
+      let cur: Node | null =
+        dir === "next" ? start.nextSibling : start.previousSibling;
+      while (cur) {
+        if (cur.nodeType !== 1) {
+          cur = dir === "next" ? cur.nextSibling : cur.previousSibling;
+          continue;
+        }
+        const el = cur as Element;
+        if (transparent.has(el.tagName)) {
+          cur = dir === "next" ? cur.nextSibling : cur.previousSibling;
+          continue;
+        }
+        if (
+          (el.tagName === "w:ins" || el.tagName === "w:del") &&
+          el.getAttribute("w:author") === author
+        ) {
+          pairs.push(el);
+          cur = dir === "next" ? cur.nextSibling : cur.previousSibling;
+          continue;
+        }
+        break;
+      }
+    };
+
+    walk(node, "next");
+    walk(node, "prev");
+    return pairs;
+  }
+
+  /**
+   * All revision ids that resolve as ONE unit with `target_id`: the ids of
+   * every contiguous same-author w:ins/w:del sibling of its elements (a
+   * replacement's del+ins pair), plus the id itself.
+   */
+  private _resolution_group_ids(target_id: string): Set<string> {
+    const nodes = [
+      ...findAllDescendants(this.doc.element, "w:ins"),
+      ...findAllDescendants(this.doc.element, "w:del"),
+    ].filter((n) => n.getAttribute("w:id") === target_id);
+    const group = new Set<string>();
+    if (nodes.length === 0) return group;
+    group.add(target_id);
+    for (const node of nodes) {
+      for (const paired of this._get_paired_nodes(node)) {
+        const pid = paired.getAttribute("w:id");
+        if (pid) group.add(pid);
+      }
+    }
+    return group;
+  }
+
+  /**
+   * Document-aware validation (QA 2026-07-19 ADEU-QA-004): a replacement's
+   * del+ins pair carries two distinct ids but resolves as one unit, so a
+   * batch that accepts one side and rejects the other is contradictory.
+   * Rejecting it up front — before any action mutates the document — keeps
+   * the batch transactional.
+   */
+  public validate_action_pairing(actions: any[]): string[] {
+    const errors: string[] = [];
+    const group_first = new Map<string, [number, string, string]>();
+    for (let pos = 0; pos < actions.length; pos++) {
+      const act = actions[pos];
+      if (act.type !== "accept" && act.type !== "reject") continue;
+      const raw_id = String(act.target_id ?? "");
+      if (raw_id.startsWith("Com:")) continue;
+      const target_id = raw_id.startsWith("Chg:") ? raw_id.slice(4) : raw_id;
+      const group = this._resolution_group_ids(target_id);
+      if (group.size === 0) continue; // unknown ids fail with their own not-found error
+      let conflict: [number, string, string] | null = null;
+      for (const gid of group) {
+        const prior = group_first.get(gid);
+        if (prior !== undefined && prior[1] !== act.type) {
+          conflict = prior;
+          break;
+        }
+      }
+      if (conflict !== null) {
+        const [first_pos, first_type, first_id] = conflict;
+        errors.push(
+          `- Action ${pos + 1} Failed: conflicting actions on one replacement — Action ` +
+            `${first_pos + 1} applies '${first_type}' to Chg:${first_id}, and Chg:${target_id} is ` +
+            `part of the same change (a replacement's contiguous del+ins pair resolves as one ` +
+            `unit, so '${first_type}' already decides both sides). Accepting one side and ` +
+            `rejecting the other is contradictory — decide the outcome and submit exactly one ` +
+            `action for the pair.`,
+        );
+        continue;
+      }
+      for (const gid of group) {
+        if (!group_first.has(gid)) {
+          group_first.set(gid, [pos, act.type, target_id]);
+        }
+      }
+    }
+    return errors;
+  }
+
+  /**
+   * Returns [applied, skipped, already_resolved]. `applied` counts actions
+   * that caused an observable state transition; an action naming an id an
+   * earlier action of this batch already resolved (via its replacement pair)
+   * is counted in `already_resolved` instead — never as applied
+   * (QA 2026-07-19 ADEU-QA-004).
+   */
+  public apply_review_actions(actions: any[]): [number, number, number] {
     let applied = 0;
     let skipped = 0;
+    let already_resolved = 0;
+    const resolved_history = new Map<string, string>(); // id -> resolving action type
 
-    for (const action of actions) {
+    for (let pos = 0; pos < actions.length; pos++) {
+      const action = actions[pos];
       const type = action.type;
       if (type === "reply") {
         const cid = action.target_id.replace("Com:", "");
@@ -3308,6 +3487,32 @@ export class RedlineEngine {
       }
 
       const target_id = action.target_id.replace("Chg:", "");
+
+      const prior_type = resolved_history.get(target_id);
+      if (prior_type !== undefined) {
+        if (prior_type === type) {
+          // Consistent follow-up on the pair: legitimate agent workflow
+          // ("accept both ids of the replacement"), but no state transition
+          // happens — report it accurately (ADEU-QA-004).
+          already_resolved++;
+          this.skipped_details.push(
+            `- Note: Action ${pos + 1} ('${type}' on ${action.target_id}) had no additional effect — ` +
+              `the change was already resolved together with its replacement pair by an earlier ` +
+              `action in this batch. Counted as already_resolved, not applied.`,
+          );
+          continue;
+        }
+        // Contradiction. validate_action_pairing rejects this shape before
+        // anything mutates; this guard covers direct callers.
+        this.skipped_details.push(
+          `- Action ${pos + 1} Failed: contradictory action — '${type}' on ${action.target_id}, but ` +
+            `the change was already resolved as '${prior_type}' together with its replacement ` +
+            `pair by an earlier action in this batch.`,
+        );
+        skipped++;
+        continue;
+      }
+
       const all_ins = findAllDescendants(this.doc.element, "w:ins").filter(
         (n) => n.getAttribute("w:id") === target_id,
       );
@@ -3347,7 +3552,25 @@ export class RedlineEngine {
         continue;
       }
 
+      // A modification is one logical unit stored as a contiguous
+      // same-author del+ins pair: resolving either side resolves BOTH —
+      // Word's atomic replacement handling, and the Python engine's
+      // long-standing behavior. Without this, accepting the deletion side
+      // left the paired insertion pending (engine divergence,
+      // QA 2026-07-19 ADEU-QA-004).
+      const group_nodes = new Set<Element>(all_nodes);
       for (const node of all_nodes) {
+        for (const paired of this._get_paired_nodes(node)) {
+          group_nodes.add(paired);
+        }
+      }
+      const resolved_now = new Set<string>();
+      for (const node of group_nodes) {
+        const rid = node.getAttribute("w:id");
+        if (rid) resolved_now.add(rid);
+      }
+
+      for (const node of group_nodes) {
         const is_ins = node.tagName === "w:ins";
         const parent_tag = node.parentNode
           ? (node.parentNode as Element).tagName
@@ -3402,9 +3625,12 @@ export class RedlineEngine {
           }
         }
       }
+      for (const rid of resolved_now) {
+        resolved_history.set(rid, type);
+      }
       applied++;
     }
-    return [applied, skipped];
+    return [applied, skipped, already_resolved];
   }
 
   private _apply_table_edit(edit: any, rebuild_map: boolean): boolean {
@@ -3486,18 +3712,16 @@ export class RedlineEngine {
     const is_regex = edit.regex || false;
     const match_mode = edit.match_mode || "strict";
 
-    let matches = this.mapper.find_all_match_indices(
-      edit.target_text,
-      is_regex,
+    let matches = this.mapper.drop_virtual_only_matches(
+      this.mapper.find_all_match_indices(edit.target_text, is_regex),
     );
     let use_clean_map = false;
 
     if (matches.length === 0) {
       if (!this.clean_mapper)
         this.clean_mapper = new DocumentMapper(this.doc, true);
-      matches = this.clean_mapper.find_all_match_indices(
-        edit.target_text,
-        is_regex,
+      matches = this.clean_mapper.drop_virtual_only_matches(
+        this.clean_mapper.find_all_match_indices(edit.target_text, is_regex),
       );
       if (matches.length > 0) use_clean_map = true;
       else return null;
@@ -3511,6 +3735,8 @@ export class RedlineEngine {
         (span) =>
           span.run !== null && span.end > s && span.start < s + match_len,
       );
+      // Virtual-only matches were already dropped above; here we only skip
+      // matches buried entirely inside tracked deletions.
       if (realSpans.length === 0 || realSpans.some((span) => !span.del_id)) {
         live_matches.push([s, match_len]);
       }
@@ -4534,7 +4760,41 @@ export class RedlineEngine {
           }
 
           if (p2_element && p2_element.tagName === "w:p") {
+            // Decide the merged container's properties BEFORE p2's children
+            // move in: when p1 keeps no visible content (a FULL paragraph
+            // deletion), the only surviving text is p2's — the merged
+            // paragraph must carry p2's properties (style, numbering).
+            // Keeping p1's restyled the following paragraph: deleting a
+            // heading turned the next body paragraph into a heading,
+            // deleting a plain paragraph before a list item stripped the
+            // item's numbering (QA 2026-07-19 ADEU-QA-002 B).
+            const p1_fully_deleted =
+              !this._paragraph_has_visible_content(p1_element);
+
             let pPr = findChild(p1_element, "w:pPr");
+            if (p1_fully_deleted) {
+              const p2_pPr = findChild(p2_element, "w:pPr");
+              const adopted = (
+                p2_pPr
+                  ? p2_pPr.cloneNode(true)
+                  : p1_element.ownerDocument!.createElement("w:pPr")
+              ) as Element;
+              // Section properties belong to p1's position in the document
+              // flow, never to p2's styling — carry them over so a section
+              // boundary is not destroyed.
+              if (pPr) {
+                const sect = findChild(pPr, "w:sectPr");
+                if (sect && !findChild(adopted, "w:sectPr")) {
+                  adopted.appendChild(sect.cloneNode(true));
+                }
+                p1_element.removeChild(pPr);
+              }
+              p1_element.insertBefore(
+                adopted,
+                p1_element.firstChild as Node | null,
+              );
+              pPr = adopted;
+            }
             if (!pPr) {
               pPr = p1_element.ownerDocument!.createElement("w:pPr") as Element;
               p1_element.insertBefore(
@@ -4547,8 +4807,10 @@ export class RedlineEngine {
               rPr = p1_element.ownerDocument!.createElement("w:rPr") as Element;
               pPr!.appendChild(rPr);
             }
-            const del_mark = this._create_track_change_tag("w:del");
-            rPr!.appendChild(del_mark);
+            if (!findChild(rPr!, "w:del")) {
+              const del_mark = this._create_track_change_tag("w:del");
+              rPr!.appendChild(del_mark);
+            }
 
             const children = Array.from(p2_element.childNodes);
             for (const child of children) {
@@ -4618,27 +4880,7 @@ export class RedlineEngine {
 
     // PHASE 2: Check for orphaned paragraphs with zero visible content remaining
     for (const p_elem of affected_ps) {
-      let has_visible = false;
-      for (const tag of ["w:t", "w:tab", "w:br"]) {
-        const nodes = findAllDescendants(p_elem, tag);
-        for (const node of nodes) {
-          let is_deleted = false;
-          let curr = node.parentNode as Element | null;
-          while (curr && curr !== p_elem.parentNode) {
-            if (curr.tagName === "w:del") {
-              is_deleted = true;
-              break;
-            }
-            curr = curr.parentNode as Element | null;
-          }
-          if (!is_deleted) {
-            if (tag === "w:t" && !node.textContent) continue;
-            has_visible = true;
-            break;
-          }
-        }
-        if (has_visible) break;
-      }
+      const has_visible = this._paragraph_has_visible_content(p_elem);
 
       if (!has_visible) {
         let pPr = findChild(p_elem, "w:pPr");

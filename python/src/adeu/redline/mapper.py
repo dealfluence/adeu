@@ -15,6 +15,7 @@ from docx.text.run import Run
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
+    compute_change_pair_map,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
@@ -749,18 +750,26 @@ class DocumentMapper:
         comment_lines = []
         seen_sigs = set()
 
+        # Must render EXACTLY as ingest's _build_merged_meta_block (Virtual
+        # Text contract), including the resolution-group annotation
+        # (QA 2026-07-19 ADEU-QA-004).
+        pair_map = compute_change_pair_map(states_list)
+
+        def _pair_suffix(uid) -> str:
+            return f" (pairs with {pair_map[uid]})" if uid in pair_map else ""
+
         for ins_map, del_map, comments_set, fmt_map in states_list:
             for uid, meta in ins_map.items():
                 sig = f"Chg:{uid}"
                 if sig not in seen_sigs:
                     auth = meta.author or "Unknown"
-                    change_lines.append(f"[{sig} insert] {auth}")
+                    change_lines.append(f"[{sig} insert] {auth}{_pair_suffix(uid)}")
                     seen_sigs.add(sig)
             for uid, meta in del_map.items():
                 sig = f"Chg:{uid}"
                 if sig not in seen_sigs:
                     auth = meta.author or "Unknown"
-                    change_lines.append(f"[{sig} delete] {auth}")
+                    change_lines.append(f"[{sig} delete] {auth}{_pair_suffix(uid)}")
                     seen_sigs.add(sig)
             for uid, meta in fmt_map.items():
                 sig = f"Chg:{uid}"
@@ -917,14 +926,40 @@ class DocumentMapper:
             return False
         return all(s.del_id for s in real_spans)
 
+    def range_is_virtual_only(self, start: int, length: int) -> bool:
+        """
+        True when no run-backed span overlaps [start, start+length): the range
+        covers only virtual projection text — meta bubbles (change/comment
+        headers, timestamps), style markers, list prefixes. Such text does not
+        exist in the document, so it can neither satisfy a match nor count
+        toward ambiguity (QA 2026-07-19 ADEU-QA-002 C): an edit targeting "4"
+        used to be rejected as "appears 8 times" because a comment bubble's
+        timestamp matched.
+
+        Anchor tokens ({#Bookmark}, {#cell:paraId}) are the exception: they
+        are deliberate virtual TARGETING surfaces (empty-cell writes, bookmark
+        anchors) and must stay matchable.
+        """
+        end = start + length
+        overlapping = [s for s in self.spans if s.end > start and s.start < end]
+        if any(s.run is not None for s in overlapping):
+            return False
+        return not any(s.run is None and s.text.startswith("{#") for s in overlapping)
+
+    def drop_virtual_only_matches(self, matches: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """Filters find_all_match_indices output down to matches that touch
+        at least one run-backed span. See range_is_virtual_only."""
+        return [(start, length) for start, length in matches if not self.range_is_virtual_only(start, length)]
+
     def _first_live_index(self, haystack: str, needle: str) -> int:
         """
-        Like str.find, but skips occurrences that fall inside tracked deletions.
+        Like str.find, but skips occurrences that fall inside tracked
+        deletions or cover only virtual projection text.
         Returns -1 if no live occurrence exists.
         """
         idx = haystack.find(needle)
         while idx != -1:
-            if not self._range_in_deletion(idx, len(needle)):
+            if not self._range_in_deletion(idx, len(needle)) and not self.range_is_virtual_only(idx, len(needle)):
                 return idx
             idx = haystack.find(needle, idx + 1)
         return -1
@@ -944,7 +979,11 @@ class DocumentMapper:
             # error; only invalid-pattern errors mean "no match" here.
             try:
                 match = user_search(target_text, self.full_text, flags=flags)
-                if match and not self._range_in_deletion(match.start(), match.end() - match.start()):
+                if (
+                    match
+                    and not self._range_in_deletion(match.start(), match.end() - match.start())
+                    and not self.range_is_virtual_only(match.start(), match.end() - match.start())
+                ):
                     return match.start(), match.end() - match.start()
             except re.error:
                 pass
@@ -975,9 +1014,11 @@ class DocumentMapper:
         # 4. Fuzzy Regex Match
         try:
             pattern = self._make_fuzzy_regex(target_text)
-            match = re.search(pattern, self.full_text, flags=flags)
-            if match:
-                return match.start(), match.end() - match.start()
+            for match in re.finditer(pattern, self.full_text, flags=flags):
+                # Virtual-only ranges (meta bubbles, markers) are projection
+                # chrome, not document text (ADEU-QA-002 C).
+                if not self.range_is_virtual_only(match.start(), match.end() - match.start()):
+                    return match.start(), match.end() - match.start()
         except re.error:
             pass
 

@@ -40,7 +40,7 @@ def test_reply_creates_new_comment_entry():
     engine2 = RedlineEngine(stream_mid, author="Author2")
     action = ReplyComment(target_id=f"Com:{com_id}", text="This is a reply.")
 
-    applied, skipped = engine2.apply_review_actions([action])
+    applied, skipped, _already = engine2.apply_review_actions([action])
 
     assert applied == 1, "Reply action should be applied"
     assert skipped == 0
@@ -92,7 +92,7 @@ def test_threaded_comment_structure():
     # 2. Create Reply (Action: REPLY)
     engine2 = RedlineEngine(stream_mid, author="UserB")
     action = ReplyComment(target_id=f"Com:{parent_id}", text="Reply Content")
-    applied, skipped = engine2.apply_review_actions([action])
+    applied, skipped, _already = engine2.apply_review_actions([action])
 
     assert applied == 1
     assert skipped == 0

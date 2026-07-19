@@ -436,6 +436,235 @@ function _sequence_opcodes(a: string[], b: string[]): Opcode[] {
   return ops;
 }
 
+/**
+ * True when a "\n\n"-separated block reads as projected table rows: every
+ * line carries the " | " cell separator. Table rows are separated by single
+ * newlines, so a whole table is one block in the paragraph alignment.
+ */
+function _is_table_blob(block: string): boolean {
+  const lines = block.split("\n");
+  return lines.length > 0 && lines.every((line) => line.includes(" | "));
+}
+
+/**
+ * Pairwise row-level edits between two aligned table blobs, or null when the
+ * blobs cannot be row-aligned (different row counts — a structural change the
+ * text path hands to the engine's row guards). Row edits are unpinned: the
+ * full row text is the anchor, and the engine's per-cell splitter resolves
+ * them — word-level hunks across " | " separators land in the wrong cell.
+ */
+function _table_blob_row_edits(
+  orig_blob: string,
+  mod_blob: string,
+): ModifyText[] | null {
+  const rows_o = orig_blob.split("\n");
+  const rows_m = mod_blob.split("\n");
+  if (rows_o.length !== rows_m.length) return null;
+  const row_edits: ModifyText[] = [];
+  for (let k = 0; k < rows_o.length; k++) {
+    if (rows_o[k] === rows_m[k]) continue;
+    row_edits.push({
+      type: "modify",
+      target_text: rows_o[k],
+      new_text: rows_m[k],
+      comment: "Diff: Table row modified",
+      _is_table_edit: true,
+    });
+  }
+  return row_edits;
+}
+
+/**
+ * Splits generated hunks the engine would reject: an UNBALANCED target
+ * spanning a paragraph break with body text on both sides ("tail of A\n\n
+ * head of B" — the shape dmp produces when adjacent paragraphs share a
+ * prefix). Each leading paragraph piece becomes its own separator-carrying
+ * deletion (an allowed merge shape) and the final piece carries the whole
+ * replacement text; sequential application produces the identical merged
+ * result. Without this, one such hunk poisons the entire batch — apply is
+ * all-or-nothing (QA 2026-07-19 ADEU-QA-002 A).
+ */
+function _split_cross_paragraph_hunks(edits: ModifyText[]): ModifyText[] {
+  const out: ModifyText[] = [];
+  for (const e of edits) {
+    const target = e.target_text || "";
+    const newText = e.new_text || "";
+    const idx = e._match_start_index;
+    if (
+      idx === undefined ||
+      idx === null ||
+      !target.includes("\n\n") ||
+      target.split("\n\n").length - 1 === newText.split("\n\n").length - 1
+    ) {
+      out.push(e);
+      continue;
+    }
+    const parts = target.split("\n\n");
+    if (parts.length < 2 || !parts[0].trim() || !parts[parts.length - 1].trim()) {
+      // One-sided shapes (separator-carrying deletions/insertions) are the
+      // engine's supported merge protocol — leave them intact.
+      out.push(e);
+      continue;
+    }
+    let offset = idx;
+    for (const piece of parts.slice(0, -1)) {
+      out.push({
+        type: "modify",
+        target_text: piece + "\n\n",
+        new_text: "",
+        comment: e.comment || "Diff: Text deleted",
+        _match_start_index: offset,
+      });
+      offset += piece.length + 2;
+    }
+    out.push({
+      type: "modify",
+      target_text: parts[parts.length - 1],
+      new_text: newText,
+      comment: e.comment,
+      _match_start_index: offset,
+    });
+  }
+  return out;
+}
+
+/**
+ * Aligns original and modified text by paragraph (using the difflib-style
+ * opcodes), then performs precise word-level diffing on replaced blocks.
+ * Whole-paragraph structural changes come out as engine-applicable shapes:
+ * a deleted paragraph is ONE deletion per paragraph carrying its "\n\n"
+ * separator, an inserted paragraph carries its separator — a raw word-level
+ * diff instead legally shifts hunk boundaries across paragraphs sharing a
+ * prefix ("...arrears.\n\nThe "), which the engine rightly rejects; every
+ * paragraph deletion/reordering in the QA corpus failed replay that way
+ * (QA 2026-07-19 ADEU-QA-002 A). Mirrors the Python engine's
+ * generate_edits_via_paragraph_alignment.
+ */
+export function generate_edits_via_paragraph_alignment(
+  original_text: string,
+  modified_text: string,
+): ModifyText[] {
+  const orig_paragraphs = original_text.split("\n\n");
+  const mod_paragraphs = modified_text.split("\n\n");
+
+  const orig_offsets: number[] = [];
+  let current_offset = 0;
+  for (const p of orig_paragraphs) {
+    orig_offsets.push(current_offset);
+    current_offset += p.length + 2;
+  }
+
+  const opcodes = _sequence_opcodes(orig_paragraphs, mod_paragraphs);
+  const edits: ModifyText[] = [];
+
+  for (const [tag, i1, i2, j1, j2] of opcodes) {
+    if (tag === "equal") continue;
+
+    const offset =
+      i1 < orig_offsets.length ? orig_offsets[i1] : original_text.length;
+
+    if (tag === "delete") {
+      // Multi-paragraph mid-document blocks are emitted as ONE deletion PER
+      // paragraph ("A\n\n", "B\n\n"), never "A\n\nB\n\n": the engine's merge
+      // protocol supports one deleted paragraph break per edit
+      // (QA 2026-07-19 ADEU-QA-002 A). The document's trailing block takes
+      // the LEADING separator instead (QA 2026-07-19 v8 F-12 fallout).
+      if (i2 < orig_paragraphs.length) {
+        let piece_offset = offset;
+        for (let k = i1; k < i2; k++) {
+          const piece = orig_paragraphs[k] + "\n\n";
+          edits.push({
+            type: "modify",
+            target_text: piece,
+            new_text: "",
+            comment: "Diff: Text deleted",
+            _match_start_index: piece_offset,
+          });
+          piece_offset += piece.length;
+        }
+      } else {
+        let deleted_text = orig_paragraphs.slice(i1, i2).join("\n\n");
+        let del_offset = offset;
+        if (i1 > 0) {
+          deleted_text = "\n\n" + deleted_text;
+          del_offset -= 2;
+        }
+        edits.push({
+          type: "modify",
+          target_text: deleted_text,
+          new_text: "",
+          comment: "Diff: Text deleted",
+          _match_start_index: del_offset,
+        });
+      }
+    } else if (tag === "insert") {
+      // An inserted paragraph must CARRY its paragraph separator, or the
+      // engine (rightly) treats the text as an inline insertion and glues it
+      // to the neighboring paragraph (QA 2026-07-18 v6 H2).
+      let inserted_text = mod_paragraphs.slice(j1, j2).join("\n\n");
+      if (i1 < orig_paragraphs.length) {
+        inserted_text = inserted_text + "\n\n";
+      } else {
+        inserted_text = "\n\n" + inserted_text;
+      }
+      edits.push({
+        type: "modify",
+        target_text: "",
+        new_text: inserted_text,
+        comment: "Diff: Text inserted",
+        _match_start_index: offset,
+      });
+    } else if (tag === "replace") {
+      // Table blobs in equal-count replace blocks pair up positionally and
+      // diff as ROW-LEVEL edits; word-level hunks over a table blob start or
+      // end inside " | " separators and land in the wrong cell. Prose pairs
+      // (and any block whose counts differ) keep the word-level chunk diff.
+      if (
+        i2 - i1 === j2 - j1 &&
+        Array.from({ length: i2 - i1 }).some(
+          (_, k) =>
+            _is_table_blob(orig_paragraphs[i1 + k]) ||
+            _is_table_blob(mod_paragraphs[j1 + k]),
+        )
+      ) {
+        for (let k = 0; k < i2 - i1; k++) {
+          const orig_p = orig_paragraphs[i1 + k];
+          const mod_p = mod_paragraphs[j1 + k];
+          if (orig_p === mod_p) continue;
+          const pair_offset = orig_offsets[i1 + k];
+          const row_edits =
+            _is_table_blob(orig_p) && _is_table_blob(mod_p)
+              ? _table_blob_row_edits(orig_p, mod_p)
+              : null;
+          if (row_edits !== null) {
+            edits.push(...row_edits);
+            continue;
+          }
+          const pair_edits = generate_edits_from_text(orig_p, mod_p);
+          for (const ce of pair_edits) {
+            ce._match_start_index = (ce._match_start_index || 0) + pair_offset;
+            edits.push(ce);
+          }
+        }
+        continue;
+      }
+
+      const orig_chunk = orig_paragraphs.slice(i1, i2).join("\n\n");
+      const mod_chunk = mod_paragraphs.slice(j1, j2).join("\n\n");
+      const chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk);
+      for (const ce of chunk_edits) {
+        ce._match_start_index = (ce._match_start_index || 0) + offset;
+        edits.push(ce);
+      }
+    }
+  }
+
+  // Word-level diffs over unequal replace chunks can still emit hunks that
+  // straddle a paragraph break with body text on both sides; split them into
+  // engine-applicable pieces (ADEU-QA-002 A).
+  return _split_cross_paragraph_hunks(edits);
+}
+
 const _IMAGE_MARKER_RE = /!\[[^\]]*\]\(docx-image:[^)]*\)/g;
 
 /**
@@ -756,7 +985,7 @@ export function generate_structured_edits(
     );
     const flat = _drop_marker_interior_hunks(
       _drop_image_marker_hunks(
-        generate_edits_from_text(text_orig, text_mod),
+        generate_edits_via_paragraph_alignment(text_orig, text_mod),
         warnings,
       ),
       text_orig,
@@ -796,7 +1025,7 @@ export function generate_structured_edits(
     }
 
     if (!tables_alignable) {
-      const part_edits = generate_edits_from_text(
+      const part_edits = generate_edits_via_paragraph_alignment(
         text_orig.substring(po_start, po_end),
         text_mod.substring(pm_start, pm_end),
       );
@@ -824,7 +1053,11 @@ export function generate_structured_edits(
       const seg_o_end = boundaries_o[seg_idx + 1][0];
       const seg_m_start = boundaries_m[seg_idx][1];
       const seg_m_end = boundaries_m[seg_idx + 1][0];
-      const seg_edits = generate_edits_from_text(
+      // Paragraph alignment, never a raw word-level diff over the whole
+      // segment: dmp legally shifts hunk boundaries across paragraphs
+      // sharing a prefix, and the engine rightly rejects a deletion with
+      // body text on both sides of a paragraph break (ADEU-QA-002 A).
+      const seg_edits = generate_edits_via_paragraph_alignment(
         text_orig.substring(seg_o_start, seg_o_end),
         text_mod.substring(seg_m_start, seg_m_end),
       );

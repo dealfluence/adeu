@@ -462,6 +462,7 @@ def _apply_common_transforms(doc, report: SanitizeReport):
     report.add_transform_lines(transforms.scrub_timestamps(doc))
     report.add_transform_lines(transforms.strip_custom_xml(doc))
     report.add_transform_lines(transforms.strip_custom_properties(doc))
+    report.add_transform_lines(transforms.strip_document_variables(doc))
     report.add_transform_lines(transforms.strip_image_alt_text(doc))
 
     # Audit (non-destructive — just warnings)
@@ -513,6 +514,14 @@ def _verify_sanitized_package(output_bytes: bytes) -> None:
                 for el in root.iter(tag):
                     if (el.text or "").strip():
                         problems.append(f"core property {label} still contains a value")
+        if "word/settings.xml" in names:
+            # Document variables are invisible metadata (QA ADEU-QA-001): a
+            # surviving w:docVar means the strip transform silently failed.
+            settings_root = etree.fromstring(z.read("word/settings.xml"))
+            for el in settings_root.iter():
+                if isinstance(el.tag, str) and el.tag.endswith("}docVar"):
+                    problems.append("word/settings.xml still contains document variables (w:docVar)")
+                    break
 
     if problems:
         raise SanitizeError(

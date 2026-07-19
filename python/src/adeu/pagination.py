@@ -374,12 +374,18 @@ def build_page_banner(page: int, total: int, file_path: str, is_cli: bool = Fals
     """
     if total <= 1:
         return ""
+    # "synthetic" is load-bearing: Adeu pages are length-based content chunks
+    # sized for LLM consumption, and readers must never mistake them for
+    # printed Word pages or explicit page breaks (QA 2026-07-19 ADEU-QA-005).
     if is_cli:
         cmd = f"adeu extract {file_path} --mode outline"
-        return f"> **Page {page} of {total}** — run `{cmd}` for a heading map of the full document.\n\n---\n\n"
+        return (
+            f"> **Page {page} of {total}** (synthetic page — a length-based chunk, not a printed "
+            f"Word page) — run `{cmd}` for a heading map of the full document.\n\n---\n\n"
+        )
     return (
-        f"> **Page {page} of {total}** — "
-        f"call `read_docx` with `mode='outline'` for a heading map of the full document.\n\n"
+        f"> **Page {page} of {total}** (synthetic page — a length-based chunk, not a printed "
+        f"Word page) — call `read_docx` with `mode='outline'` for a heading map of the full document.\n\n"
         f"---\n\n"
     )
 

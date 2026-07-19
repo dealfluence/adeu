@@ -17,6 +17,7 @@ from adeu.utils.docx import (
     DocxEvent,
     _get_style_cache,
     apply_formatting_to_segments,
+    compute_change_pair_map,
     get_paragraph_prefix,
     get_run_style_markers,
     get_run_text,
@@ -700,18 +701,26 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
             for child_id in children:
                 render_comment(child_id)
 
+    # Ids of one resolution group (a replacement's contiguous same-author
+    # del+ins pair) must not read as independently resolvable — either side
+    # resolves the whole group (QA 2026-07-19 ADEU-QA-004).
+    pair_map = compute_change_pair_map(states_list)
+
+    def _pair_suffix(uid) -> str:
+        return f" (pairs with {pair_map[uid]})" if uid in pair_map else ""
+
     for ins_map, del_map, comments_set, fmt_map in states_list:
         for uid, meta in ins_map.items():
             sig = f"Chg:{uid}"
             if sig not in seen_sigs:
                 auth = meta.author or "Unknown"
-                change_lines.append(f"[{sig} insert] {auth}")
+                change_lines.append(f"[{sig} insert] {auth}{_pair_suffix(uid)}")
                 seen_sigs.add(sig)
         for uid, meta in del_map.items():
             sig = f"Chg:{uid}"
             if sig not in seen_sigs:
                 auth = meta.author or "Unknown"
-                change_lines.append(f"[{sig} delete] {auth}")
+                change_lines.append(f"[{sig} delete] {auth}{_pair_suffix(uid)}")
                 seen_sigs.add(sig)
         for uid, meta in fmt_map.items():
             sig = f"Chg:{uid}"

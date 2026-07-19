@@ -23,7 +23,9 @@ describe('Ingestion Engine (Node.js Port)', () => {
     expect(markdown.length).toBeGreaterThan(0);
     
     // Assert exact parity with the Python engine's CriticMarkup generation
-    expect(markdown).toBe('This is the {--initial --}{++golden ++}{>>[Chg:3 delete] Mikko Korpela\n[Chg:4 insert] Mikko Korpela\n[Com:0] Mikko Korpela @ 2026-01-23T07:25:00Z: Start of comment thread\n[Com:1] Mikko Korpela @ 2026-01-23T07:25:00Z: Second comment\n[Com:2] Mikko Korpela @ 2026-01-23T07:26:00Z: Third comment in the thread<<}document');
+    // The del+ins pair of one modification is annotated as a resolution
+    // group (QA 2026-07-19 ADEU-QA-004).
+    expect(markdown).toBe('This is the {--initial --}{++golden ++}{>>[Chg:3 delete] Mikko Korpela (pairs with Chg:4)\n[Chg:4 insert] Mikko Korpela (pairs with Chg:3)\n[Com:0] Mikko Korpela @ 2026-01-23T07:25:00Z: Start of comment thread\n[Com:1] Mikko Korpela @ 2026-01-23T07:25:00Z: Second comment\n[Com:2] Mikko Korpela @ 2026-01-23T07:26:00Z: Third comment in the thread<<}document');
   });
 
   it('should execute in cleanView mode without failing', async () => {

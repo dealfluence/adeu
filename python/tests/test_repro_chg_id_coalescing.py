@@ -194,13 +194,18 @@ def test_accept_resolves_all_shared_id_elements_together():
     # Now accept both sides.
     redlined_stream.seek(0)
     engine2 = RedlineEngine(redlined_stream, author="Reviewer AI")
-    applied, skipped = engine2.apply_review_actions(
+    applied, skipped, already_resolved = engine2.apply_review_actions(
         [
             AcceptChange(target_id=f"Chg:{coalesced_del_id}"),
             AcceptChange(target_id=f"Chg:{coalesced_ins_id}"),
         ]
     )
-    assert applied == 2, f"Expected 2 actions applied, got {applied} (skipped={skipped})"
+    # The del+ins pair resolves as ONE unit on the first accept; the second
+    # action is an accurate no-op, never a second "applied" transition
+    # (QA 2026-07-19 ADEU-QA-004).
+    assert applied == 1, f"Expected 1 action applied, got {applied} (skipped={skipped})"
+    assert already_resolved == 1
+    assert skipped == 0
 
     final_doc = Document(engine2.save_to_stream())
     final_del_ids, final_ins_ids = _collect_revision_ids(final_doc)
@@ -230,13 +235,15 @@ def test_reject_resolves_all_shared_id_elements_together():
 
     redlined_stream.seek(0)
     engine2 = RedlineEngine(redlined_stream, author="Reviewer AI")
-    applied, _ = engine2.apply_review_actions(
+    applied, _, already_resolved = engine2.apply_review_actions(
         [
             RejectChange(target_id=f"Chg:{coalesced_del_id}"),
             RejectChange(target_id=f"Chg:{coalesced_ins_id}"),
         ]
     )
-    assert applied == 2
+    # One resolution unit + one accurate no-op (QA 2026-07-19 ADEU-QA-004).
+    assert applied == 1
+    assert already_resolved == 1
 
     final_doc = Document(engine2.save_to_stream())
     final_del_ids, final_ins_ids = _collect_revision_ids(final_doc)

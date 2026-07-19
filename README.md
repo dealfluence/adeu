@@ -140,6 +140,10 @@ uvx adeu apply contract.docx edits.json --author "Review Bot"
 uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
 
+What the text projection preserves exactly, what it normalizes (lists,
+styles, synthetic pages), and what stays read-only is specified in
+[docs/FIDELITY.md](docs/FIDELITY.md).
+
 ### The Python SDK
 ```python
 from adeu import RedlineEngine, ModifyText
