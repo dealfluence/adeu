@@ -327,8 +327,10 @@ async def _process_document_batch_disk(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
         )
         occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
+        already = stats.get("actions_already_resolved", 0)
+        already_text = f", {already} already resolved (no effect)" if already else ""
         res += (
-            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
             f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
         )
 

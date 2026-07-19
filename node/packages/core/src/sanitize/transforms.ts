@@ -634,6 +634,45 @@ export function strip_custom_properties(doc: DocumentObject): string[] {
   return [`Custom document properties: ${count} removed (docProps/custom.xml)`].concat(lines);
 }
 
+/**
+ * Remove Word document variables (<w:docVars>/<w:docVar>) from
+ * word/settings.xml. Document variables are invisible in Word's UI but are a
+ * standard carrier for matter references, DMS identifiers, template state and
+ * integration tokens — a package that keeps them can never be reported CLEAN
+ * (QA 2026-07-19 ADEU-QA-001). Variables are disclosed by NAME only: their
+ * values are exactly the secrets a sanitize report must not echo.
+ */
+export function strip_document_variables(doc: DocumentObject): string[] {
+  const settingsPart = doc.pkg.getPartByPath('word/settings.xml');
+  if (!settingsPart) return [];
+
+  const names: string[] = [];
+  let removedAny = false;
+
+  for (const container of findDescendantsByLocalName(settingsPart._element, 'docVars')) {
+    for (const child of Array.from(container.childNodes)) {
+      const el = child as Element;
+      const tag = el.tagName || '';
+      if (tag === 'docVar' || tag.endsWith(':docVar')) {
+        names.push(el.getAttribute('w:name') || el.getAttribute('name') || '(unnamed)');
+      }
+    }
+    container.parentNode?.removeChild(container);
+    removedAny = true;
+  }
+
+  // Defensive: stray <w:docVar> elements outside a <w:docVars> container.
+  for (const stray of findDescendantsByLocalName(settingsPart._element, 'docVar')) {
+    names.push(stray.getAttribute('w:name') || stray.getAttribute('name') || '(unnamed)');
+    stray.parentNode?.removeChild(stray);
+    removedAny = true;
+  }
+
+  if (!removedAny) return [];
+  const shown = Array.from(new Set(names)).sort().join(', ') || '(unnamed)';
+  return [`Document variables: ${names.length} removed (${shown})`];
+}
+
 export function strip_image_alt_text(doc: DocumentObject): string[] {
   let count = 0;
   for (const docPr of findDescendantsByLocalName(doc.element, 'docPr')) {

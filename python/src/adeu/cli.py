@@ -1122,18 +1122,17 @@ def handle_apply(args):
             else:
                 output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
 
-        _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
-
-    stats["dry_run"] = args.dry_run
-    stats["output_path"] = str(output_path) if output_path else None
-
     # Post-apply verification (text-file path only): the accepted view of the
     # applied document must read exactly as the supplied text. Structural
     # remnants a text replacement cannot remove (empty headings, table
     # skeletons) otherwise ship behind a success report whose clean_text
-    # preview says something else (QA 2026-07-19 F-05). The output file is
-    # kept as a diagnostic copy; the exit code and report say it diverged.
+    # preview says something else (QA 2026-07-19 F-05). Verification runs
+    # BEFORE anything reaches disk: on failure the requested output path must
+    # not exist — automation that checks file existence would consume a wrong
+    # document (QA 2026-07-19 ADEU-QA-003). The failed result is written to a
+    # clearly-marked `.unverified.docx` sibling for inspection instead.
     verification_error = None
+    unverified_path = None
     if verify_against is not None and not args.dry_run and not batch_failed:
         from adeu.ingest import _extract_text_from_doc
 
@@ -1145,19 +1144,36 @@ def handle_apply(args):
                 (k for k, (a, b) in enumerate(zip(actual, expected, strict=False)) if a != b),
                 min(len(actual), len(expected)),
             )
+            assert output_path is not None
+            unverified_path = output_path.with_name(f"{output_path.stem}.unverified.docx")
             verification_error = (
                 "Post-apply verification failed: the applied document's clean text does not match "
                 f"the supplied text (first divergence at character {div}: "
                 f"applied reads {actual[div : div + 40]!r}, supplied text reads "
                 f"{expected[div : div + 40]!r}). The document structure could not fully realize "
                 "the requested text (e.g. headings or table cells cannot be deleted via text "
-                "replacement). The output file was kept for inspection but is NOT the requested "
-                "document."
+                f"replacement). Nothing was written to '{output_path}'; a diagnostic copy was "
+                f"kept at '{unverified_path}' — it is NOT the requested document."
             )
             stats["verified"] = False
             stats["verification_error"] = verification_error
         else:
             stats["verified"] = True
+
+    if not args.dry_run and not batch_failed:
+        assert output_path is not None
+        if verification_error is not None:
+            assert unverified_path is not None
+            _write_output_or_exit(unverified_path, engine.save_to_stream().getvalue())
+        else:
+            _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
+
+    stats["dry_run"] = args.dry_run
+    # Exit status is authoritative, but output_path must never point at a
+    # file that does not represent success (ADEU-QA-003).
+    stats["output_path"] = str(output_path) if output_path and verification_error is None else None
+    if unverified_path is not None:
+        stats["unverified_output_path"] = str(unverified_path)
 
     if args.json:
         print(json.dumps(stats))
@@ -1167,6 +1183,12 @@ def handle_apply(args):
                 "❌ Batch failed — no output was written. Fix the failed edits below and re-run.",
                 file=sys.stderr,
             )
+        elif verification_error is not None:
+            print(
+                f"❌ Verification failed — no output was written to: {output_path}\n"
+                f"   A diagnostic copy (NOT the requested document) was kept at: {unverified_path}",
+                file=sys.stderr,
+            )
         elif not args.dry_run:
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
         else:
@@ -1174,8 +1196,10 @@ def handle_apply(args):
 
         occurrences = stats.get("occurrences_modified", 0)
         occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
+        already = stats.get("actions_already_resolved", 0)
+        already_text = f", {already} already resolved (no effect)" if already else ""
         print(
-            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
             f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
             file=sys.stderr,
         )
@@ -1614,6 +1638,33 @@ def handle_sanitize(args: argparse.Namespace):
 
 
 def main():
+    """CLI entry point: run the parser/dispatcher with Unix pipe manners.
+
+    A downstream consumer closing the pipe early (`adeu extract doc.docx |
+    head`) is normal shell behavior, not an application error. Python
+    surfaces it as BrokenPipeError from any print; without handling it, the
+    CLI dumps a traceback and pytest-style noise into the terminal
+    (QA 2026-07-19 ADEU-QA-006). Exit quietly with the platform-conventional
+    128+SIGPIPE status instead, and point stdout at devnull first so the
+    interpreter's shutdown flush cannot raise a second BrokenPipeError.
+    """
+    try:
+        _main_impl()
+    except BrokenPipeError:
+        import os
+
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                os.dup2(devnull, stream.fileno())
+            except Exception:
+                # Wrapped/captured streams without a real fd (tests, hosts)
+                # have no shutdown-flush problem to begin with.
+                pass
+        sys.exit(128 + 13)
+
+
+def _main_impl():
     # Must run before anything prints and before structlog captures stderr:
     # forces deterministic UTF-8 output and picks emoji-vs-ASCII glyphs.
     configure_cli_streams()

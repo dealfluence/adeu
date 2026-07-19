@@ -69,6 +69,7 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
   report.add_transform_lines(transforms.scrub_timestamps(doc));
   report.add_transform_lines(transforms.strip_custom_xml(doc));
   report.add_transform_lines(transforms.strip_custom_properties(doc));
+  report.add_transform_lines(transforms.strip_document_variables(doc));
   report.add_transform_lines(transforms.strip_image_alt_text(doc));
   
   const warnings = transforms.audit_hyperlinks(doc);
@@ -179,6 +180,16 @@ export function verifySanitizedPackage(outBuffer: Buffer): void {
           problems.push(`core property ${label} still contains a value`);
         }
       }
+    }
+  }
+  if (names.includes('word/settings.xml')) {
+    // Document variables are invisible metadata (QA ADEU-QA-001): a surviving
+    // w:docVar means the strip transform silently failed.
+    const settings = parseXml(strFromU8(unzipped['word/settings.xml']));
+    if (
+      transforms.findDescendantsByLocalName(settings.documentElement! as unknown as Element, 'docVar').length > 0
+    ) {
+      problems.push('word/settings.xml still contains document variables (w:docVar)');
     }
   }
 

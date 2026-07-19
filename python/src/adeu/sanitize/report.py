@@ -65,6 +65,7 @@ class SanitizeReport:
                     "custom xml",
                     "custom propert",
                     "custom document propert",
+                    "document variable",
                     "identifier",
                     "language",
                     "version",

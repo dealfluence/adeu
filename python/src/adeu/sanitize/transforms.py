@@ -682,6 +682,60 @@ def strip_custom_properties(doc: DocumentObject) -> list[str]:
     return [f"Custom document properties: {count} removed (docProps/custom.xml)"] + lines
 
 
+def strip_document_variables(doc: DocumentObject) -> list[str]:
+    """
+    Remove Word document variables (<w:docVars>/<w:docVar>) from
+    word/settings.xml. Document variables are invisible in Word's UI but are
+    a standard carrier for matter references, DMS identifiers, template state
+    and integration tokens — a package that keeps them can never be reported
+    CLEAN (QA 2026-07-19 ADEU-QA-001). Variables are disclosed by NAME only:
+    their values are exactly the secrets a sanitize report must not echo.
+    """
+    settings_part = _find_part(doc, "word/settings.xml")
+    if settings_part is None:
+        return []
+
+    # The settings part may be an XmlPart (serializes its live _element) or a
+    # generic Part (serializes _blob) depending on how python-docx loaded the
+    # package — mutate whichever object will actually be saved.
+    live_element = getattr(settings_part, "_element", None)
+    root = live_element if live_element is not None else _parse_part_xml(settings_part)
+    if root is None:
+        return []
+
+    def _local_name_is(el, name: str) -> bool:
+        tag = el.tag
+        return isinstance(tag, str) and (tag == name or tag.endswith("}" + name))
+
+    names: list[str] = []
+    removed_any = False
+    for container in [el for el in root.iter() if _local_name_is(el, "docVars")]:
+        for var in list(container):
+            if _local_name_is(var, "docVar"):
+                names.append(var.get(qn("w:name")) or var.get("name") or "(unnamed)")
+        parent = container.getparent()
+        if parent is not None:
+            parent.remove(container)
+            removed_any = True
+
+    # Defensive: stray <w:docVar> elements outside a <w:docVars> container.
+    for var in [el for el in root.iter() if _local_name_is(el, "docVar")]:
+        names.append(var.get(qn("w:name")) or var.get("name") or "(unnamed)")
+        parent = var.getparent()
+        if parent is not None:
+            parent.remove(var)
+            removed_any = True
+
+    if not removed_any:
+        return []
+
+    if live_element is None:
+        _write_part_xml(settings_part, root)
+
+    shown = ", ".join(sorted(set(names))) or "(unnamed)"
+    return [f"Document variables: {len(names)} removed ({shown})"]
+
+
 def audit_hyperlinks(doc: DocumentObject, internal_patterns: Optional[list[str]] = None) -> list[str]:
     """Find hyperlinks targeting internal URLs. Returns warnings (does not modify)."""
     if internal_patterns is None:

@@ -5,6 +5,7 @@ import { extract_comments_data } from "./comments.js";
 import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-regex.js";
 import {
   _get_style_cache,
+  compute_change_pair_map,
   get_paragraph_prefix,
   get_run_style_markers,
   get_run_text,
@@ -810,6 +811,13 @@ export class DocumentMapper {
     const comment_lines: string[] = [];
     const seen_sigs = new Set<string>();
 
+    // Must render EXACTLY as ingest's _build_merged_meta_block (Virtual Text
+    // contract), including the resolution-group annotation
+    // (QA 2026-07-19 ADEU-QA-004).
+    const pair_map = compute_change_pair_map(states_list);
+    const pairSuffix = (uid: string): string =>
+      pair_map[uid] ? ` (pairs with ${pair_map[uid]})` : "";
+
     for (const [ins_map, del_map, comments_set, fmt_map] of states_list) {
       for (const [uid, meta] of Object.entries(
         ins_map as Record<string, DocxEvent>,
@@ -817,7 +825,7 @@ export class DocumentMapper {
         const sig = `Chg:${uid}`;
         if (!seen_sigs.has(sig)) {
           const auth = meta.author || "Unknown";
-          change_lines.push(`[${sig} insert] ${auth}`);
+          change_lines.push(`[${sig} insert] ${auth}${pairSuffix(uid)}`);
           seen_sigs.add(sig);
         }
       }
@@ -827,7 +835,7 @@ export class DocumentMapper {
         const sig = `Chg:${uid}`;
         if (!seen_sigs.has(sig)) {
           const auth = meta.author || "Unknown";
-          change_lines.push(`[${sig} delete] ${auth}`);
+          change_lines.push(`[${sig} delete] ${auth}${pairSuffix(uid)}`);
           seen_sigs.add(sig);
         }
       }
@@ -1000,6 +1008,40 @@ export class DocumentMapper {
     return results;
   }
 
+  /**
+   * True when no run-backed span overlaps [start, start+length): the range
+   * covers only virtual projection text — meta bubbles (change/comment
+   * headers, timestamps), style markers, list prefixes. Such text does not
+   * exist in the document, so it can neither satisfy a match nor count
+   * toward ambiguity (QA 2026-07-19 ADEU-QA-002 C): an edit targeting "4"
+   * used to be rejected as "appears 8 times" because a comment bubble's
+   * timestamp matched.
+   *
+   * Anchor tokens ({#Bookmark}, {#cell:paraId}) are the exception: they are
+   * deliberate virtual TARGETING surfaces (empty-cell writes, bookmark
+   * anchors) and must stay matchable.
+   */
+  public range_is_virtual_only(start: number, length: number): boolean {
+    const end = start + length;
+    const overlapping = this.spans.filter(
+      (s) => s.end > start && s.start < end,
+    );
+    if (overlapping.some((s) => s.run !== null)) return false;
+    return !overlapping.some(
+      (s) => s.run === null && s.text.startsWith("{#"),
+    );
+  }
+
+  /** Filters find_all_match_indices output down to matches that touch at
+   * least one run-backed span. See range_is_virtual_only. */
+  public drop_virtual_only_matches(
+    matches: [number, number][],
+  ): [number, number][] {
+    return matches.filter(
+      ([start, length]) => !this.range_is_virtual_only(start, length),
+    );
+  }
+
   public find_match_index(
     target_text: string,
     is_regex: boolean = false,
@@ -1011,19 +1053,33 @@ export class DocumentMapper {
       // invalid-pattern errors mean "no match" here.
       try {
         const match = userSearch(target_text, this.full_text);
-        if (match) return [match.start, match.end - match.start];
+        if (
+          match &&
+          !this.range_is_virtual_only(match.start, match.end - match.start)
+        ) {
+          return [match.start, match.end - match.start];
+        }
       } catch (e) {
         if (e instanceof RegexTimeoutError) throw e;
       }
       return [-1, 0];
     }
 
-    let start_idx = this.full_text.indexOf(target_text);
-    if (start_idx !== -1) return [start_idx, target_text.length];
+    // Exact tier: skip occurrences that cover only virtual projection text
+    // (meta bubbles, markers) — they are not document text (ADEU-QA-002 C).
+    let from = 0;
+    while (true) {
+      const idx = this.full_text.indexOf(target_text, from);
+      if (idx === -1) break;
+      if (!this.range_is_virtual_only(idx, target_text.length)) {
+        return [idx, target_text.length];
+      }
+      from = idx + 1;
+    }
 
     const norm_full = this._replace_smart_quotes(this.full_text);
     const norm_target = this._replace_smart_quotes(target_text);
-    start_idx = norm_full.indexOf(norm_target);
+    let start_idx = norm_full.indexOf(norm_target);
     if (start_idx !== -1) return [start_idx, target_text.length];
 
     const stripped_target = this._strip_markdown_formatting(target_text);
@@ -1039,9 +1095,13 @@ export class DocumentMapper {
     if (plain_first.length > 0) return plain_first[0];
 
     try {
-      const pattern = new RegExp(this._make_fuzzy_regex(target_text));
-      const match = pattern.exec(this.full_text);
-      if (match) return [match.index, match[0].length];
+      const pattern = new RegExp(this._make_fuzzy_regex(target_text), "g");
+      for (const match of this.full_text.matchAll(pattern)) {
+        // Virtual-only ranges are projection chrome, not document text.
+        if (!this.range_is_virtual_only(match.index!, match[0].length)) {
+          return [match.index!, match[0].length];
+        }
+      }
     } catch (e) {}
 
     return [-1, 0];

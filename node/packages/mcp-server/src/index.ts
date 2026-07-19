@@ -896,7 +896,11 @@ export function formatBatchResult(
       ? ` (${total_occurrences} occurrences)`
       : "";
 
-  res += `Actions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped.\n`;
+  const already = stats.actions_already_resolved || 0;
+  const already_text = already
+    ? `, ${already} already resolved (no effect)`
+    : "";
+  res += `Actions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped${already_text}.\n`;
   res += `Edits: ${stats.edits_applied} applied${occ_text}, ${stats.edits_skipped} skipped.\n`;
 
   if (stats.edits && stats.edits.length > 0) {
