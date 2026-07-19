@@ -21,6 +21,24 @@ except ImportError:
     pass
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_windows_appdata(tmp_path_factory):
+    """On Windows, `adeu init` resolves the Claude Desktop config via %APPDATA%.
+    A test that runs init without patching _get_claude_config_path would rewrite
+    the developer's real claude_desktop_config.json (this happened 2026-07-20:
+    two QA-repro tests injected fake uvx entries into a live config). Pointing
+    APPDATA at a throwaway directory for the whole session makes that class of
+    accident impossible; tests that assert on the config still patch the path
+    getter explicitly."""
+    if sys.platform != "win32":
+        yield
+        return
+    mp = pytest.MonkeyPatch()
+    mp.setenv("APPDATA", str(tmp_path_factory.mktemp("appdata")))
+    yield
+    mp.undo()
+
+
 @pytest.fixture
 def simple_docx_stream():
     """Returns a BytesIO stream containing a simple DOCX."""

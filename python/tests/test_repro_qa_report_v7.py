@@ -634,14 +634,16 @@ class TestF16InitPinsVersion:
     def test_generated_uvx_command_is_pinned(self, tmp_path, monkeypatch, capsys):
         import adeu
 
-        monkeypatch.setenv("HOME", str(tmp_path))
+        # Patch the path getter itself: env-var tricks (HOME) don't reach the
+        # Windows %APPDATA% branch, and init must never touch the real config.
+        config_path = tmp_path / "Claude" / "claude_desktop_config.json"
+        monkeypatch.setattr("adeu.cli._get_claude_config_path", lambda: config_path)
         # shutil.which("uvx") must succeed regardless of test environment.
         monkeypatch.setattr("shutil.which", lambda name: f"/fake/bin/{name}")
 
         code, _, err = run_cli(["init"], capsys)
         assert code == 0
 
-        config_path = tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
         data = json.loads(config_path.read_text(encoding="utf-8"))
         args = data["mcpServers"]["adeu"]["args"]
         assert f"adeu=={adeu.__version__}" in args, f"unpinned uvx args: {args}"
