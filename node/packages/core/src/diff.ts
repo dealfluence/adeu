@@ -1,3 +1,4 @@
+import { unzipSync } from "fflate";
 import diff_match_patch from "diff-match-patch";
 import { DeleteTableRow, InsertTableRow, ModifyText } from "./models.js";
 import type {
@@ -476,6 +477,55 @@ function _drop_image_marker_hunks(
 }
 
 /**
+ * Removes generated hunks whose pinned range cuts INTO a read-only image
+ * marker without covering it whole — the shape an alt-text-only difference
+ * produces (`RED` -> `BLUE` inside `![RED logo](docx-image:1)`). The engine
+ * categorically rejects such edits, so emitting them makes diff output
+ * unappliable by apply (QA 2026-07-19 F-04/F-14). Hunks that contain
+ * complete markers are judged by _drop_image_marker_hunks instead.
+ */
+function _drop_marker_interior_hunks(
+  edits: ModifyText[],
+  text_orig: string,
+  warnings: string[],
+): ModifyText[] {
+  const marker_spans: [number, number][] = [];
+  for (const m of text_orig.matchAll(_IMAGE_MARKER_RE)) {
+    marker_spans.push([m.index!, m.index! + m[0].length]);
+  }
+  if (marker_spans.length === 0) return edits;
+
+  const kept: ModifyText[] = [];
+  let warned = false;
+  for (const e of edits) {
+    const idx = e._match_start_index;
+    if (idx === undefined || idx === null) {
+      kept.push(e);
+      continue;
+    }
+    const end = idx + (e.target_text || "").length;
+    const cuts_into_marker = marker_spans.some(
+      ([m_start, m_end]) =>
+        m_start < end && idx < m_end && !(idx <= m_start && m_end <= end),
+    );
+    if (!cuts_into_marker) {
+      kept.push(e);
+      continue;
+    }
+    if (!warned) {
+      warnings.push(
+        "An image's alternative text differs between the documents. Image markers " +
+          "(![alt](docx-image:N)) are read-only projections, so this difference cannot be " +
+          "expressed as a text edit — it was skipped; update the image or its alt text " +
+          "manually in Word.",
+      );
+      warned = true;
+    }
+  }
+  return kept;
+}
+
+/**
  * True when every projected row reads exactly as its cells joined by " | ".
  * Rows wrapped in tracked-row CriticMarkup ({++ … ++} / {-- … --}) do not,
  * and such tables are diffed as plain text rather than as row structures.
@@ -704,8 +754,12 @@ export function generate_structured_edits(
         `${kinds_m.join(" + ") || "none"}); comparing flattened text instead. Header/footer ` +
         "additions or removals cannot be expressed as text edits.",
     );
-    const flat = _drop_image_marker_hunks(
-      generate_edits_from_text(text_orig, text_mod),
+    const flat = _drop_marker_interior_hunks(
+      _drop_image_marker_hunks(
+        generate_edits_from_text(text_orig, text_mod),
+        warnings,
+      ),
+      text_orig,
       warnings,
     );
     return { edits: [...flat], warnings };
@@ -848,16 +902,87 @@ export function generate_structured_edits(
   }
 
   // Our own output must never trip the engine's read-only image-marker
-  // validation: an added/removed image becomes a warning, not an edit.
+  // validation: an added/removed image becomes a warning, not an edit —
+  // and so does an alt-text change, whose hunk lands INSIDE a marker.
   const modify_edits = edits.filter(
     (e): e is ModifyText => e.type === "modify",
   );
-  const kept_modifies = new Set(_drop_image_marker_hunks(modify_edits, warnings));
+  const kept_modifies = new Set(
+    _drop_marker_interior_hunks(
+      _drop_image_marker_hunks(modify_edits, warnings),
+      text_orig,
+      warnings,
+    ),
+  );
   const final_edits = edits.filter(
     (e) => e.type !== "modify" || kept_modifies.has(e as ModifyText),
   );
 
   return { edits: final_edits, warnings };
+}
+
+/**
+ * Compares embedded media bytes (word/media/*) between two DOCX packages.
+ * Adeu's diff is a text comparison: two documents whose images differ but
+ * whose projections agree produce an empty diff, which reads as "visually
+ * identical" unless the caller says otherwise (QA 2026-07-19 F-04). Returns
+ * warning strings describing changed/added/removed media members; empty when
+ * the media sets are byte-identical (or either package is unreadable — the
+ * caller has already surfaced package-level errors).
+ */
+export function collect_media_difference_warnings(
+  original_docx: Uint8Array,
+  modified_docx: Uint8Array,
+): string[] {
+  const media_hashes = (data: Uint8Array): Map<string, string> => {
+    const hashes = new Map<string, string>();
+    try {
+      const unzipped = unzipSync(data);
+      for (const [name, bytes] of Object.entries(unzipped)) {
+        if (!name.startsWith("word/media/")) continue;
+        // FNV-1a over the bytes: cheap, dependency-free content fingerprint.
+        let h1 = 0x811c9dc5;
+        let h2 = 0xcbf29ce4;
+        for (let i = 0; i < bytes.length; i++) {
+          h1 = Math.imul(h1 ^ bytes[i], 0x01000193) >>> 0;
+          h2 = Math.imul(h2 ^ bytes[bytes.length - 1 - i], 0x01000193) >>> 0;
+        }
+        hashes.set(name, `${bytes.length}:${h1.toString(16)}:${h2.toString(16)}`);
+      }
+    } catch {
+      return new Map();
+    }
+    return hashes;
+  };
+
+  const hashes_orig = media_hashes(original_docx);
+  const hashes_mod = media_hashes(modified_docx);
+
+  const changed: string[] = [];
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const [name, hash] of hashes_orig) {
+    if (!hashes_mod.has(name)) removed.push(name);
+    else if (hashes_mod.get(name) !== hash) changed.push(name);
+  }
+  for (const name of hashes_mod.keys()) {
+    if (!hashes_orig.has(name)) added.push(name);
+  }
+  changed.sort();
+  added.sort();
+  removed.sort();
+  if (changed.length + added.length + removed.length === 0) return [];
+
+  const parts: string[] = [];
+  if (changed.length) parts.push(`${changed.length} changed`);
+  if (added.length) parts.push(`${added.length} added`);
+  if (removed.length) parts.push(`${removed.length} removed`);
+  const names = [...changed, ...added, ...removed].slice(0, 5).join(", ");
+  return [
+    `The documents' embedded media differ (${parts.join(", ")}: ${names}). This diff compares ` +
+      "TEXT only — an empty edit list does not mean the documents are visually identical. " +
+      "Image changes must be applied manually in Word.",
+  ];
 }
 
 export function create_unified_diff(

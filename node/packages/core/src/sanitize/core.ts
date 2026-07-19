@@ -78,6 +78,9 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
   for (const w of transforms.detect_watermarks(doc)) report.warnings.push(w);
 
   report.add_transform_lines(transforms.normalize_change_dates(doc));
+  // Retained comments carry the same when-did-they-work signal in
+  // word/comments.xml as tracked changes do in the body (QA 2026-07-19 F-09).
+  report.add_transform_lines(transforms.normalize_comment_dates(doc));
 
   // Protection (Settings injection)
   if (options.protection_mode === 'read_only' || options.protection_mode === 'encrypt') {

@@ -116,8 +116,10 @@ def test_ingest_critic_markup_overlapping():
     # formatting (bold / italic / bold) — wrapper coalescing requires identical
     # style markers. But the meta block is correctly deferred and emitted ONCE
     # at the end, listing both comment IDs in document order.
-    assert "{==**A **==}" in text
-    assert "{==_B _==}" in text
+    # Boundary whitespace projects outside the emphasis markers
+    # (QA 2026-07-19 F-03).
+    assert "{==**A** ==}" in text
+    assert "{==_B_ ==}" in text
     assert "{==**C**==}" in text
 
     # Exactly one meta block, containing both comments.

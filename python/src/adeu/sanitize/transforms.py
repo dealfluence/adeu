@@ -445,6 +445,36 @@ def normalize_change_dates(doc: DocumentObject) -> list[str]:
     return []
 
 
+def normalize_comment_dates(doc: DocumentObject) -> list[str]:
+    """Normalize timestamps on RETAINED comments to the fixed sanitize date.
+
+    Keep-markup sanitize normalized core and tracked-change timestamps but
+    left the original comment timestamps in word/comments.xml (w:date) and
+    word/commentsExtensible.xml (w16cex:dateUtc) — visible through any
+    extraction and carrying exactly the when-did-they-work signal the other
+    normalizations remove (QA 2026-07-19 F-09).
+    """
+    from adeu.redline.comments import CommentsManager, w16cex_ns
+
+    cm = CommentsManager(doc)
+    count = 0
+    fixed_date = "2025-01-01T00:00:00Z"
+    if cm.comments_part:
+        for c in cm.comments_part.element.findall(qn("w:comment")):
+            if c.get(qn("w:date")):
+                c.set(qn("w:date"), fixed_date)
+                count += 1
+    if cm.extensible_part is not None:
+        date_utc_attr = f"{{{w16cex_ns}}}dateUtc"
+        for el in cm.extensible_part.element.iter(f"{{{w16cex_ns}}}commentExtensible"):
+            if el.get(date_utc_attr):
+                el.set(date_utc_attr, fixed_date)
+                count += 1
+    if count:
+        return [f"Comment timestamps: {count} normalized"]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Document property transforms
 # ---------------------------------------------------------------------------

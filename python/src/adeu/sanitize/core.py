@@ -153,9 +153,12 @@ def sanitize_docx(
         if author:
             report.add_transform_lines(transforms.replace_comment_authors(doc, author))
             report.add_transform_lines(transforms.replace_change_authors(doc, author))
-        # Always normalize change dates on outbound docs — prevents counterparty
-        # from inferring when edits were made
+        # Always normalize change AND comment dates on outbound docs —
+        # prevents counterparty from inferring when edits were made. Retained
+        # comments carry the same signal in word/comments.xml as tracked
+        # changes do in the body (QA 2026-07-19 F-09).
         report.add_transform_lines(transforms.normalize_change_dates(doc))
+        report.add_transform_lines(transforms.normalize_comment_dates(doc))
 
     # --- Save (verify BEFORE anything reaches disk; write atomically) ---
     output = BytesIO()
@@ -272,11 +275,21 @@ def _sanitize_baseline(
     # Step 1: Extract structured projections from both documents
     with open(input_path, "rb") as f:
         working_stream = BytesIO(strip_bom_from_docx_bytes(f.read()))
-    with open(baseline_path, "rb") as f:
-        baseline_stream = BytesIO(strip_bom_from_docx_bytes(f.read()))
+    try:
+        with open(baseline_path, "rb") as f:
+            baseline_stream = BytesIO(strip_bom_from_docx_bytes(f.read()))
+        baseline_doc_view = Document(BytesIO(baseline_stream.getvalue()))
+    except Exception as e:
+        # The generic CLI error handler blames the INPUT document for package
+        # failures; when the file that failed to open is the baseline, the
+        # error must say so (QA 2026-07-19 F-19).
+        raise SanitizeError(
+            f"❌ Baseline file '{Path(baseline_path).name}' is not a valid DOCX file ({e}). "
+            f"The input document '{Path(input_path).name}' itself is fine — fix or replace "
+            "the --baseline argument."
+        ) from e
 
     working_doc = Document(BytesIO(working_stream.getvalue()))
-    baseline_doc_view = Document(BytesIO(baseline_stream.getvalue()))
 
     # The appendix is generated metadata, not document content — diffing it
     # writes phantom "used N times" edits into the output (QA H1/H3).

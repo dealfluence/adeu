@@ -166,8 +166,9 @@ def test_ambiguous_batch_rejection_then_match_mode_all_through_real_tool(tmp_pat
     )
 
     assert "Batch complete" in result
-    # match_mode="all" fans the single edit out into one applied edit per occurrence.
-    assert "Edits: 2 applied" in result
+    # match_mode="all" is ONE change object touching two occurrences; the two
+    # counts are reported separately (QA 2026-07-19 F-21).
+    assert "Edits: 1 applied (2 occurrences)" in result
 
     # 3. The document on disk is genuinely modified in BOTH clauses. (The engine
     # trims the shared "PROVIDER: " prefix, so only the differing tail is redlined.)

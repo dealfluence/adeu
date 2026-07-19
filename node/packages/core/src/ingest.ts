@@ -347,16 +347,25 @@ export function build_paragraph_text(
           new_wrappers[0] === current_wrappers[0] &&
           new_wrappers[1] === current_wrappers[1]
         ) {
+          // Hoisted leading whitespace may sit before the incoming segment's
+          // opening marker ("**A**" + " **B**" -> "**A B**"), mirroring the
+          // mapper's part-level elision exactly (QA 2026-07-19 F-03).
+          const escaped_prefix = new_style[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const lead_match =
+            new_style[0] !== "" || new_style[1] !== ""
+              ? seg.match(new RegExp("^(\\s*)" + escaped_prefix))
+              : null;
           if (
             new_style[0] === current_style[0] &&
             new_style[1] === current_style[1] &&
             current_style[0] !== "" &&
             pending_text.endsWith(current_style[1]) &&
-            seg.startsWith(new_style[0])
+            lead_match !== null
           ) {
             pending_text =
               pending_text.slice(0, -current_style[1].length) +
-              seg.slice(new_style[0].length);
+              lead_match[1] +
+              seg.slice(lead_match[0].length);
           } else {
             pending_text += seg;
           }

@@ -579,21 +579,45 @@ def get_run_style_markers(run: Run, is_heading: Optional[bool] = None) -> tuple[
     return prefix, suffix
 
 
+def split_boundary_whitespace(text: str) -> tuple[str, str, str]:
+    """
+    Splits `text` into (leading_ws, core, trailing_ws). Emphasis markers must
+    wrap only the core: `**The Supplier **` (a bold run with a trailing space)
+    is malformed Markdown — CommonMark requires the closing delimiter to hug
+    non-whitespace — and it poisons every downstream CriticMarkup consumer
+    (QA 2026-07-19 F-03/F-10). A fully-whitespace text yields ("", "", text)
+    so callers skip the markers entirely.
+    """
+    core = text.strip()
+    if not core:
+        return "", "", text
+    lead_len = len(text) - len(text.lstrip())
+    return text[:lead_len], text[lead_len : lead_len + len(core)], text[lead_len + len(core) :]
+
+
 def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     """
-    Applies formatting markers to text, ensuring newlines are excluded from the formatting.
-    Example: "**A\nB**" -> "**A**\n**B**"
+    Applies formatting markers to text, ensuring newlines are excluded from the
+    formatting and boundary whitespace stays OUTSIDE the markers.
+    Examples: "**A\nB**" -> "**A**\n**B**";  bold "The Supplier " ->
+    "**The Supplier** " (never "**The Supplier **").
     """
     if not prefix and not suffix:
         return text
     if not text:
         return ""
 
+    def wrap(segment: str) -> str:
+        lead, core, trail = split_boundary_whitespace(segment)
+        if not core:
+            return segment
+        return f"{lead}{prefix}{core}{suffix}{trail}"
+
     if "\n" not in text:
-        return f"{prefix}{text}{suffix}"
+        return wrap(text)
 
     parts = text.split("\n")
-    return "\n".join(f"{prefix}{p}{suffix}" if p else "" for p in parts)
+    return "\n".join(wrap(p) if p else "" for p in parts)
 
 
 def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:

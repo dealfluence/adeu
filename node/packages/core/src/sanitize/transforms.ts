@@ -417,6 +417,35 @@ export function normalize_change_dates(doc: DocumentObject): string[] {
   return count ? [`Track change timestamps: ${count} normalized`] : [];
 }
 
+/**
+ * Normalize timestamps on RETAINED comments to the fixed sanitize date.
+ * Keep-markup sanitize normalized core and tracked-change timestamps but
+ * left the original comment timestamps in word/comments.xml (w:date) and
+ * word/commentsExtensible.xml (w16cex:dateUtc) — visible through any
+ * extraction and carrying exactly the when-did-they-work signal the other
+ * normalizations remove (QA 2026-07-19 F-09).
+ */
+export function normalize_comment_dates(doc: DocumentObject): string[] {
+  let count = 0;
+  const fixed = "2025-01-01T00:00:00Z";
+  for (const part of doc.pkg.parts) {
+    if (!part.contentType.includes('comments')) continue;
+    for (const el of findAllDescendants(part._element, 'w:comment')) {
+      if (el.hasAttribute('w:date')) {
+        el.setAttribute('w:date', fixed);
+        count++;
+      }
+    }
+    for (const el of findAllDescendants(part._element, 'w16cex:commentExtensible')) {
+      if (el.hasAttribute('w16cex:dateUtc')) {
+        el.setAttribute('w16cex:dateUtc', fixed);
+        count++;
+      }
+    }
+  }
+  return count ? [`Comment timestamps: ${count} normalized`] : [];
+}
+
 export function scrub_doc_properties(doc: DocumentObject): string[] {
   const lines: string[] = [];
   const corePart = doc.pkg.getPartByPath('docProps/core.xml');

@@ -437,6 +437,26 @@ export class RedlineEngine {
       raw_sub_edits = [];
     }
 
+    // Hunks made purely of style markers are projection artifacts, never
+    // user intent: they arise when a PLAIN target fuzzy-matched styled
+    // document text ("Net 90 Days" against "**Net 90 Days**"), and the
+    // resulting `**`-deletion sub-edits target virtual spans that can never
+    // apply — phantom skips while the formatting silently stays (QA
+    // 2026-07-19 F-02 sibling). Edits that DO declare markers never reach
+    // this word-diff path (they resolve as whole-span markdown proxies).
+    const _marker_only = (text: string): boolean => {
+      const stripped = text.trim();
+      return stripped.length > 0 && /^[*_]+$/.test(stripped);
+    };
+    raw_sub_edits = raw_sub_edits.filter(
+      (e: any) =>
+        !(
+          (!e.target_text || _marker_only(e.target_text)) &&
+          (!e.new_text || _marker_only(e.new_text)) &&
+          (e.target_text || e.new_text)
+        ),
+    );
+
     if (!raw_sub_edits || raw_sub_edits.length === 0) {
       const fallback_edit: any = {
         type: "modify",
@@ -1399,6 +1419,10 @@ export class RedlineEngine {
     // runs into <w:del> and replaces the originals); suffix relocation for
     // paragraph-splitting insertions keys on this element instead.
     positional_anchor_el: Element | null = null,
+    // When the edit declares explicit emphasis markers, the markers are
+    // authoritative: strip inherited bold/italic from the anchor style
+    // (QA 2026-07-19 F-02).
+    suppress_emphasis: boolean = false,
   ): {
     first_node: Element | null;
     last_p: Element | null;
@@ -1497,6 +1521,7 @@ export class RedlineEngine {
         anchor_run,
         reuse_id,
         xmlDoc,
+        suppress_emphasis,
       );
       first_node = inline_ins;
       // Caller will attach `inline_ins` to the DOM later — keep it for now.
@@ -1582,6 +1607,7 @@ export class RedlineEngine {
         anchor_run,
         reuse_id,
         xmlDoc,
+        suppress_emphasis,
       );
       if (content_ins) {
         new_p.appendChild(content_ins);
@@ -1621,6 +1647,7 @@ export class RedlineEngine {
     anchor_run: Run | null,
     reuse_id: string,
     xmlDoc: Document,
+    suppress_emphasis: boolean = false,
   ): Element | null {
     if (!line_text && line_text !== "") return null;
     const ins = this._create_track_change_tag("w:ins", "", reuse_id);
@@ -1630,25 +1657,26 @@ export class RedlineEngine {
     }
     for (const [segText, segProps] of segments) {
       const r = xmlDoc.createElement("w:r");
-      // Inherit run formatting (e.g. bold from a heading style) only when we
-      // have an anchor run AND we are not overriding via segment props.
+      // Inherit run formatting from the anchor so partial replacements inside
+      // a styled span keep the style (matching Word's type-into-selection
+      // behavior and the Python engine — the old blanket strip made
+      // "Important" -> "Critical" inside a bold span come out unstyled).
       if (anchor_run && anchor_run._element) {
         const anchor_rPr = findChild(anchor_run._element, "w:rPr");
         if (anchor_rPr) {
           const clone = anchor_rPr.cloneNode(true) as Element;
-          // Strip vanish / strike to avoid invisible inserts, and emphasis
-          // (bold/italic) so inserted replacement text does not silently
-          // inherit the anchor run's character formatting (BUG-23-2). Explicit
-          // markdown emphasis is re-applied per-segment via _apply_run_props.
-          for (const tag of [
-            "w:vanish",
-            "w:strike",
-            "w:dstrike",
-            "w:i",
-            "w:iCs",
-            "w:b",
-            "w:bCs",
-          ]) {
+          // Always strip vanish / strike (invisible inserts) and italic
+          // (BUG-23-2: an inserted replacement must not silently inherit the
+          // surrounding italic styling). Bold is preserved — it usually
+          // carries structural meaning (headings, defined terms) — UNLESS
+          // the edit's own markers are authoritative (QA 2026-07-19 F-02):
+          // `**X**` -> `_X_` must yield italic-only, `**X**` -> `X` plain.
+          // Mirrors the Python engine's _track_insert_inline exactly.
+          const strip_tags = ["w:vanish", "w:strike", "w:dstrike", "w:i", "w:iCs"];
+          if (suppress_emphasis) {
+            strip_tags.push("w:b", "w:bCs");
+          }
+          for (const tag of strip_tags) {
             const found = findChild(clone, tag);
             if (found) clone.removeChild(found);
           }
@@ -1693,6 +1721,28 @@ export class RedlineEngine {
     }
 
     return [text, null];
+  }
+
+  /**
+   * True when this edit's target or replacement text carries explicit
+   * bold/italic markers, making the markers AUTHORITATIVE for the inserted
+   * runs' formatting. Replacing `**X**` with `_X_` must yield italic-only
+   * text, and replacing `**X**` with `X` must yield plain text — inheriting
+   * the replaced span's run properties on top of (or instead of) the
+   * requested markers silently produces the wrong document while the report
+   * claims success (QA 2026-07-19 F-02). Plain-text edits (no markers on
+   * either side) keep inheriting the context style so partial replacements
+   * inside a styled span never lose formatting.
+   */
+  private _edit_declares_emphasis(edit: any): boolean {
+    for (const text of [edit?.target_text, edit?.new_text]) {
+      if (!text || (!text.includes("**") && !text.includes("_"))) continue;
+      const segments = this._parse_inline_markdown(text);
+      if (segments.some(([, props]: [string, any]) => props && Object.keys(props).length > 0)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private _parse_inline_markdown(
@@ -2036,6 +2086,23 @@ export class RedlineEngine {
 
       const is_regex = (edit as any).regex || false;
       const match_mode = (edit as any).match_mode || "strict";
+
+      if (is_regex) {
+        // An unparsable pattern must be diagnosed as a regex problem. Without
+        // this check it falls through the matcher's silent guard and surfaces
+        // as "target text not found", sending the user hunting for a typo in
+        // the document instead of in the pattern (QA 2026-07-19 F-13).
+        try {
+          new RegExp(edit.target_text);
+        } catch (regex_err: any) {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: target_text is not a valid regular expression ` +
+              `(${regex_err?.message ?? regex_err}). Fix the pattern, or set "regex": false to ` +
+              "match the text literally.",
+          );
+          continue;
+        }
+      }
 
       let matches = this.mapper.find_all_match_indices(
         edit.target_text,
@@ -2855,6 +2922,14 @@ export class RedlineEngine {
       actions_skipped: skipped_actions,
       edits_applied: applied_edits,
       edits_skipped: skipped_edits,
+      // edits_applied counts change OBJECTS; this is the total number of
+      // document occurrences they modified (match_mode="all" fan-out), so
+      // automation never has to guess which of the two a count means
+      // (QA 2026-07-19 F-21).
+      occurrences_modified: edits_reports.reduce(
+        (sum: number, r: any) => sum + (r.occurrences_modified || 0),
+        0,
+      ),
       skipped_details: this.skipped_details,
       edits: edits_reports,
       engine: "node",
@@ -2882,6 +2957,7 @@ export class RedlineEngine {
       }
       edit._applied_status = false;
       edit._error_msg = null;
+      edit._any_sub_failure = false;
     }
 
     for (const edit of edits) {
@@ -3020,18 +3096,25 @@ export class RedlineEngine {
         this.skipped_details.push(msg);
         edit._applied_status = false;
         edit._error_msg = msg;
+        edit._any_sub_failure = true;
         const parent = edit._parent_edit_ref;
         if (parent) {
           parent._applied_status = false;
           parent._error_msg = msg;
+          parent._any_sub_failure = true;
         }
         continue;
       }
 
       let success = false;
       if (edit.type === "modify") {
-        const rebuild = edit._split_group_id !== undefined && edit._split_group_id !== null;
-        success = this._apply_single_edit_indexed(edit, orig_new, rebuild);
+        // Never rebuild the map inside the sweep: sub-edits apply in strictly
+        // descending offset order, and every DOM mutation (run splits, w:del
+        // wraps, w:ins insertions, bottom-up paragraph merges) happens at or
+        // above the current offset, so spans below it stay valid in the stale
+        // map. Rebuilding here made regex + match_mode="all"
+        // O(occurrences × document) (QA 2026-07-19 F-06).
+        success = this._apply_single_edit_indexed(edit, orig_new, false);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         success = this._apply_table_edit(edit, false);
       }
@@ -3089,8 +3172,10 @@ export class RedlineEngine {
         this.skipped_details.push(msg);
         edit._applied_status = false;
         edit._error_msg = msg;
+        edit._any_sub_failure = true;
         const parent = edit._parent_edit_ref;
         if (parent) {
+          parent._any_sub_failure = true;
           if (!parent._applied_status) {
             parent._applied_status = false;
             parent._error_msg = msg;
@@ -3099,7 +3184,25 @@ export class RedlineEngine {
       }
     }
 
-    return [applied, skipped];
+    // Return LOGICAL edit counts over the caller's input list: one
+    // match_mode="all" edit over N occurrences is one applied edit (its
+    // occurrence count lives in _occurrences_modified / the report), never N
+    // (QA 2026-07-19 F-21). An edit with any failed or skipped sub-edit
+    // counts as skipped so the all-or-nothing batch contract is unchanged.
+    let applied_logical = 0;
+    let skipped_logical = 0;
+    for (const input_edit of edits) {
+      if (typeof input_edit !== "object" || input_edit === null) {
+        skipped_logical++;
+        continue;
+      }
+      if (input_edit._applied_status && !input_edit._any_sub_failure) {
+        applied_logical++;
+      } else {
+        skipped_logical++;
+      }
+    }
+    return [applied_logical, skipped_logical];
   }
 
   public apply_review_actions(actions: any[]): [number, number] {
@@ -3753,6 +3856,14 @@ export class RedlineEngine {
       }
     }
 
+    // Explicit bold/italic markers in the edit make the markers
+    // authoritative: inserted runs must not additionally inherit the replaced
+    // span's emphasis (QA 2026-07-19 F-02). Keys on THIS resolved edit's
+    // post-trim fields: identical markers on both sides were absorbed into
+    // context (formatting unchanged — keep inheriting), and plain edits
+    // fuzzy-matched onto styled text never receive marker hunks at all.
+    const suppress_emphasis = this._edit_declares_emphasis(edit);
+
     if (op === "STYLE_ONLY" || op === "STYLE_AND_TEXT") {
       const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
         start_idx,
@@ -4013,6 +4124,7 @@ export class RedlineEngine {
             anchor_run,
             ins_id!,
             xmlDoc,
+            suppress_emphasis,
           );
           if (content_ins) new_p.appendChild(content_ins);
           body.insertBefore(new_p, _bug233_target_para);
@@ -4047,6 +4159,8 @@ export class RedlineEngine {
         anchor_run,
         anchor_para,
         ins_id!,
+        null,
+        suppress_emphasis,
       );
 
       if (!result.first_node) return false;
@@ -4261,6 +4375,7 @@ export class RedlineEngine {
         // The insertion physically follows the deletion block; the style
         // run was detached when the deletion cloned it into <w:del>.
         last_del,
+        suppress_emphasis,
       );
 
       if (result.first_node) {
@@ -4314,6 +4429,8 @@ export class RedlineEngine {
             anchor,
             first_span.paragraph,
             ins_id!,
+            null,
+            suppress_emphasis,
           );
           if (result.first_node) {
             p1_el.appendChild(result.first_node);

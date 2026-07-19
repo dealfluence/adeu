@@ -17,6 +17,7 @@ import {
   RedlineEngine,
   BatchValidationError,
   create_word_patch_diff,
+  collect_media_difference_warnings,
   finalize_document,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
@@ -752,8 +753,24 @@ server.registerTool(
         basename(modified_path),
       );
 
+      // A text diff cannot see image bytes: when embedded media differ, an
+      // empty diff must never read as "the documents are identical"
+      // (QA 2026-07-19 F-04).
+      const media_warnings = collect_media_difference_warnings(
+        new Uint8Array(origBuf),
+        new Uint8Array(modBuf),
+      );
+      const warning_text = media_warnings.length
+        ? media_warnings.map((w) => `⚠️  ${w}`).join("\n") + "\n\n"
+        : "";
+
       return {
-        content: [{ type: "text", text: diff || "No differences found." }],
+        content: [
+          {
+            type: "text",
+            text: warning_text + (diff || "No differences found."),
+          },
+        ],
       };
     } catch (e: any) {
       return {

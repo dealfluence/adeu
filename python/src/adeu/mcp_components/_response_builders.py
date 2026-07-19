@@ -510,7 +510,14 @@ def build_search_response(
     def get_heading(idx, txt):
         path: list[str] = []
         current_level = 999
-        for line in reversed(txt[:idx].split("\n")):
+        # Scan through the END of the line containing the match: slicing at
+        # the match offset cuts the line in half, so a hit INSIDE a heading
+        # reported a truncated path ("Master" for a match on "Services" in
+        # "# Master Services Agreement", QA 2026-07-19 F-17).
+        line_end = txt.find("\n", idx)
+        if line_end == -1:
+            line_end = len(txt)
+        for line in reversed(txt[:line_end].split("\n")):
             m = re.match(r"^(#{1,6})\s+(.*)", line)
             if m:
                 level = len(m.group(1))

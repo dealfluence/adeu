@@ -671,6 +671,28 @@ class RedlineEngine:
 
         return text, None
 
+    def _edit_declares_emphasis(self, edit: "ModifyText") -> bool:
+        """
+        True when this edit's target or replacement text carries explicit
+        bold/italic markers, making the markers AUTHORITATIVE for the inserted
+        runs' formatting. Replacing `**X**` with `_X_` must yield italic-only
+        text, and replacing `**X**` with `X` must yield plain text — inheriting
+        the replaced span's run properties on top of (or instead of) the
+        requested markers silently produces the wrong document while the
+        report claims success (QA 2026-07-19 F-02). Plain-text edits (no
+        markers on either side) keep inheriting the context style so partial
+        replacements inside a styled span never lose formatting.
+
+        Detection reuses _parse_inline_markdown so suppression triggers exactly
+        when the style parser will emit marker-derived formatting.
+        """
+        for text in (edit.target_text, edit.new_text):
+            if not text or ("**" not in text and "_" not in text):
+                continue
+            if any(props for _seg, props in self._parse_inline_markdown(text)):
+                return True
+        return False
+
     def _parse_inline_markdown(
         self, text: str, base_style: Optional[Dict[str, Any]] = None
     ) -> List[Tuple[str, Dict[str, Any]]]:
@@ -1511,6 +1533,22 @@ class RedlineEngine:
             is_regex = getattr(edit, "regex", False)
             match_mode = getattr(edit, "match_mode", "strict")
 
+            if is_regex:
+                # An unparsable pattern must be diagnosed as a regex problem.
+                # Without this check it falls through the matcher's silent
+                # re.error guard and surfaces as "target text not found",
+                # sending the user hunting for a typo in the document instead
+                # of in the pattern (QA 2026-07-19 F-13).
+                try:
+                    re.compile(edit.target_text)
+                except re.error as regex_err:
+                    errors.append(
+                        f"- Edit {i + 1} Failed: target_text is not a valid regular expression "
+                        f'({regex_err}). Fix the pattern, or set "regex": false to match the '
+                        "text literally."
+                    )
+                    continue
+
             matches = self.mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
             active_text = self.mapper.full_text
             target_mapper = self.mapper
@@ -2106,6 +2144,11 @@ class RedlineEngine:
             "actions_skipped": skipped_actions,
             "edits_applied": applied_edits,
             "edits_skipped": skipped_edits,
+            # edits_applied counts change OBJECTS; this is the total number of
+            # document occurrences they modified (match_mode="all" fan-out),
+            # so automation never has to guess which of the two a count means
+            # (QA 2026-07-19 F-21).
+            "occurrences_modified": sum((r.get("occurrences_modified") or 0) for r in edits_reports),
             "skipped_details": self.skipped_details,
             "edits": edits_reports,
             "engine": "python",
@@ -2127,6 +2170,7 @@ class RedlineEngine:
         for edit in edits:
             edit._applied_status = False
             edit._error_msg = None
+            edit._any_sub_failure = False
 
         resolved_edits = []
 
@@ -2256,8 +2300,10 @@ class RedlineEngine:
                 self.skipped_details.append(msg)
                 edit._applied_status = False
                 edit._error_msg = msg
+                edit._any_sub_failure = True
                 parent = getattr(edit, "_parent_edit_ref", None)
                 if parent is not None:
+                    parent._any_sub_failure = True
                     parent._applied_status = False
                     parent._error_msg = msg
                 continue
@@ -2268,8 +2314,14 @@ class RedlineEngine:
             elif isinstance(edit, DeleteTableRow):
                 success = self._apply_delete_row(edit)
             else:
-                rebuild = getattr(edit, "_split_group_id", None) is not None
-                success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=rebuild)
+                # Never rebuild the map inside the sweep: sub-edits apply in
+                # strictly descending offset order, and every DOM mutation
+                # (run splits, w:del wraps, w:ins insertions, bottom-up
+                # paragraph merges) happens at or above the current offset, so
+                # spans below it stay valid in the stale map. Rebuilding here
+                # made regex + match_mode="all" O(occurrences × document):
+                # 500 matches took 78s instead of ~2s (QA 2026-07-19 F-06).
+                success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
 
             if success:
                 # A balanced multi-paragraph split fans one logical edit into
@@ -2322,12 +2374,27 @@ class RedlineEngine:
                 self.skipped_details.append(msg)
                 edit._applied_status = False
                 edit._error_msg = msg
+                edit._any_sub_failure = True
                 parent = getattr(edit, "_parent_edit_ref", None)
                 if parent is not None:
+                    parent._any_sub_failure = True
                     if not getattr(parent, "_applied_status", False):
                         parent._applied_status = False
                         parent._error_msg = msg
 
+        # Return LOGICAL edit counts over the caller's input list: one
+        # match_mode="all" edit over N occurrences is one applied edit (its
+        # occurrence count lives in _occurrences_modified / the report),
+        # never N (QA 2026-07-19 F-21). An edit with any failed or skipped
+        # sub-edit counts as skipped so the all-or-nothing batch contract is
+        # unchanged, even when its other occurrences applied.
+        applied = 0
+        skipped = 0
+        for input_edit in edits:
+            if getattr(input_edit, "_applied_status", False) and not getattr(input_edit, "_any_sub_failure", False):
+                applied += 1
+            else:
+                skipped += 1
         return applied, skipped
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
@@ -2604,6 +2671,29 @@ class RedlineEngine:
         except Exception as e:
             logger.warning("generate_edits_from_text failed, falling back to wholesale edit", error=str(e))
             raw_sub_edits = []
+
+        # Hunks made purely of style markers are projection artifacts, never
+        # user intent: they arise when a PLAIN target fuzzy-matched styled
+        # document text ("Net 90 Days" against "**Net 90 Days**"), and the
+        # resulting `**`-deletion sub-edits target virtual spans that can
+        # never apply — the batch reports phantom skips while the formatting
+        # silently stays (QA 2026-07-19 F-02 sibling). Edits that DO declare
+        # markers never reach this word-diff path (they resolve as whole-span
+        # markdown proxies), so dropping marker-only hunks here is always
+        # correct.
+        def _marker_only(text: str) -> bool:
+            stripped = text.strip()
+            return bool(stripped) and not stripped.strip("*_")
+
+        raw_sub_edits = [
+            e
+            for e in raw_sub_edits
+            if not (
+                (not e.target_text or _marker_only(e.target_text))
+                and (not e.new_text or _marker_only(e.new_text))
+                and (e.target_text or e.new_text)
+            )
+        ]
 
         if not raw_sub_edits:
             fallback_edit = ModifyText(
@@ -2972,6 +3062,16 @@ class RedlineEngine:
         target_text = edit.target_text
         length = len(target_text) if target_text else 0
 
+        # Explicit bold/italic markers in the edit make the markers
+        # authoritative: inserted runs must not additionally inherit the
+        # replaced span's emphasis (QA 2026-07-19 F-02). The check keys on
+        # THIS resolved edit's post-trim fields: when both sides carried the
+        # SAME markers, trimming absorbed them into context (formatting
+        # unchanged — keep inheriting), and a plain edit fuzzy-matched onto
+        # styled document text never receives marker hunks at all (the
+        # word-diff path drops marker-only artifacts).
+        suppress_emphasis = self._edit_declares_emphasis(edit)
+
         logger.debug(f"Applying Edit at [{start_idx}:{start_idx + length}] Op={op}")
 
         # Whole-paragraph replacement: track-delete the entire source
@@ -3127,6 +3227,7 @@ class RedlineEngine:
                     anchor_run=anchor_run,
                     anchor_paragraph=anchor_paragraph,
                     comment=edit.comment,
+                    suppress_inherited=suppress_emphasis,
                     insert_before=True,
                     reuse_id=ins_id,
                 )
@@ -3156,6 +3257,7 @@ class RedlineEngine:
                     anchor_run=style_run,
                     anchor_paragraph=anchor_paragraph,
                     comment=edit.comment,
+                    suppress_inherited=suppress_emphasis,
                     insert_before=insert_before,
                     reuse_id=ins_id,
                     # style_run may be the run AFTER the insertion point (it
@@ -3284,7 +3386,7 @@ class RedlineEngine:
                         text_to_insert,
                         anchor_run=Run(del_r, target_runs[-1]._parent),
                         comment=None,
-                        suppress_inherited=False,
+                        suppress_inherited=suppress_emphasis,
                         reuse_id=ins_id,
                     )
                     if ins_elem is not None:

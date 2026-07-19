@@ -179,7 +179,7 @@ def test_process_batch_match_mode_all(repetitive_doc, tmp_path):
         )
     )
 
-    assert "2 applied" in result
+    assert "1 applied (2 occurrences)" in result
     assert "Mode:** `all` (2 occurrences modified" in result  # Enriched Report check
 
     with open(str(tmp_path / "out_all.docx"), "rb") as f:
@@ -209,7 +209,7 @@ def test_process_batch_regex(repetitive_doc, tmp_path):
         )
     )
 
-    assert "2 applied" in result
+    assert "1 applied (2 occurrences)" in result
 
     with open(str(tmp_path / "out_regex.docx"), "rb") as f:
         text = extract_text_from_stream(f, clean_view=True)

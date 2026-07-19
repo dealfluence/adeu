@@ -9,6 +9,7 @@ import {
   get_run_style_markers,
   get_run_text,
   is_heading_paragraph,
+  split_boundary_whitespace,
   is_native_heading,
   iter_block_items,
   iter_document_parts_with_kind,
@@ -31,6 +32,12 @@ export interface TextSpan {
   part_index: number;
   // True for the read-only image marker projection ![alt](docx-image:N).
   is_image_marker?: boolean;
+  // Character offset of this span's text within its run's projected text.
+  // One run may back several spans: hoisting boundary whitespace outside
+  // style markers (QA 2026-07-19 F-03) projects a bold "The Supplier " run
+  // as core + trailing-space spans, and only the first starts at run
+  // offset 0. All span->run local-offset arithmetic must add this.
+  run_offset?: number;
 }
 
 export function renumber_snapshot_ids(
@@ -411,10 +418,12 @@ export class DocumentMapper {
     let current_wrappers: [string, string] = ["", ""];
     let current_style: [string, string] = ["", ""];
     let active_hyperlink_id: string | null = null;
+    // [kind, text, run, run_offset, ins_id, del_id, comment_ids]
     let pending_runs: [
       string,
       string,
       Run | null,
+      number,
       string | null,
       string | null,
       string[],
@@ -427,7 +436,7 @@ export class DocumentMapper {
         this._add_virtual_text(s_tok, current, paragraph);
         current += s_tok.length;
       }
-      for (const [kind, txt, r_obj, i_id, d_id, c_ids] of pending_runs) {
+      for (const [kind, txt, r_obj, r_off, i_id, d_id, c_ids] of pending_runs) {
         if (kind === "virtual") {
           this._add_virtual_text(txt, current, paragraph, active_hyperlink_id);
         } else {
@@ -442,6 +451,7 @@ export class DocumentMapper {
             hyperlink_id: active_hyperlink_id || undefined,
             comment_ids: c_ids.length > 0 ? c_ids : undefined,
             part_index: this._current_part_index,
+            run_offset: r_off,
           };
           this.spans.push(s);
           this._text_chunks.push(txt);
@@ -473,7 +483,8 @@ export class DocumentMapper {
 
       if (item instanceof Run) {
         const [prefix, suffix] = get_run_style_markers(item, native_heading);
-        const run_parts: [string, string, Run | null][] = [];
+        // [kind, text, run, run_offset]
+        const run_parts: [string, string, Run | null, number][] = [];
         const text = get_run_text(item);
 
         if (leading_strip_active) {
@@ -481,20 +492,50 @@ export class DocumentMapper {
           leading_strip_active = false;
         }
 
+        // run_local tracks each real part's offset within the run's projected
+        // text, so spans resolve back to exact run positions even when one
+        // run backs several spans.
+        let run_local = 0;
+        const append_wrapped = (segment: string): void => {
+          // Boundary whitespace stays OUTSIDE the style markers —
+          // `**The Supplier **` is malformed Markdown (QA 2026-07-19 F-03).
+          // Must mirror apply_formatting_to_segments exactly (the Virtual
+          // Text contract).
+          const [lead, core, trail] = split_boundary_whitespace(segment);
+          if (!core) {
+            run_parts.push(["real", segment, item, run_local]);
+            run_local += segment.length;
+            return;
+          }
+          if (lead) {
+            run_parts.push(["real", lead, item, run_local]);
+            run_local += lead.length;
+          }
+          if (prefix) run_parts.push(["virtual", prefix, null, 0]);
+          run_parts.push(["real", core, item, run_local]);
+          run_local += core.length;
+          if (suffix) run_parts.push(["virtual", suffix, null, 0]);
+          if (trail) {
+            run_parts.push(["real", trail, item, run_local]);
+            run_local += trail.length;
+          }
+        };
+
         if (text.includes("\n") && (prefix || suffix)) {
           const parts = text.split("\n");
           for (let idx = 0; idx < parts.length; idx++) {
-            if (idx > 0) run_parts.push(["real", "\n", item]);
-            if (parts[idx]) {
-              if (prefix) run_parts.push(["virtual", prefix, null]);
-              run_parts.push(["real", parts[idx], item]);
-              if (suffix) run_parts.push(["virtual", suffix, null]);
+            if (idx > 0) {
+              run_parts.push(["real", "\n", item, run_local]);
+              run_local += 1;
             }
+            if (parts[idx]) append_wrapped(parts[idx]);
           }
+        } else if ((prefix || suffix) && text) {
+          append_wrapped(text);
         } else {
-          if (prefix) run_parts.push(["virtual", prefix, null]);
-          if (text) run_parts.push(["real", text, item]);
-          if (suffix) run_parts.push(["virtual", suffix, null]);
+          if (prefix) run_parts.push(["virtual", prefix, null, 0]);
+          if (text) run_parts.push(["real", text, item, 0]);
+          if (suffix) run_parts.push(["virtual", suffix, null, 0]);
         }
 
         if (this.clean_view && Object.keys(active_del).length > 0) {
@@ -542,7 +583,7 @@ export class DocumentMapper {
             }
 
             const curr_comment_ids = Array.from(active_ids);
-            for (const [kind, txt, r_obj] of run_parts) {
+            for (const [kind, txt, r_obj, r_off] of run_parts) {
               if (
                 skip_leading_prefix &&
                 kind === "virtual" &&
@@ -555,6 +596,7 @@ export class DocumentMapper {
                 kind,
                 txt,
                 r_obj,
+                r_off,
                 curr_ins_id,
                 curr_del_id,
                 curr_comment_ids,
@@ -566,11 +608,12 @@ export class DocumentMapper {
             current_wrappers = new_wrappers;
             current_style = new_style;
             const curr_comment_ids = Array.from(active_ids);
-            for (const [kind, txt, r_obj] of run_parts) {
+            for (const [kind, txt, r_obj, r_off] of run_parts) {
               pending_runs.push([
                 kind,
                 txt,
                 r_obj,
+                r_off,
                 curr_ins_id,
                 curr_del_id,
                 curr_comment_ids,
@@ -1108,50 +1151,59 @@ export class DocumentMapper {
     );
     if (affected_spans.length === 0) return [];
 
-    const working_runs = affected_spans
-      .filter((s) => s.run !== null)
-      .map((s) => s.run!);
-    if (working_runs.length === 0) return [];
+    const real_spans = affected_spans.filter((s) => s.run !== null);
+    if (real_spans.length === 0) return [];
 
-    let dom_modified = false;
-
-    const first_real_span = affected_spans.find((s) => s.run !== null);
-    let start_split_adjustment = 0;
-
-    if (first_real_span) {
-      const local_start = start_idx - first_real_span.start;
-      if (local_start > 0) {
-        const idx_in_working = 0;
-        const [, right_run] = this._split_run_at_index(
-          working_runs[idx_in_working],
-          local_start,
-        );
-        working_runs[idx_in_working] = right_run;
-        dom_modified = true;
-        start_split_adjustment = local_start;
+    // One run may back several spans (boundary whitespace hoisted outside
+    // style markers projects a run as lead/core/trail spans, QA 2026-07-19
+    // F-03): deduplicate by identity or the run would be split and wrapped
+    // once per span.
+    const working_runs: Run[] = [];
+    for (const s of real_spans) {
+      if (!working_runs.some((r) => r === s.run)) {
+        working_runs.push(s.run!);
       }
     }
 
-    const last_real_span = [...affected_spans]
-      .reverse()
-      .find((s) => s.run !== null);
+    let dom_modified = false;
 
-    if (last_real_span) {
-      const is_same_run = first_real_span === last_real_span;
-      const run_to_split = working_runs[working_runs.length - 1];
-      let overlap_end = Math.min(last_real_span.end, end_idx);
-      let local_end = overlap_end - last_real_span.start;
+    // 1. Start Split — all local offsets are run-relative: span-relative
+    // position plus the span's own offset within the run.
+    const first_real_span = real_spans[0];
+    let start_split_adjustment = 0;
 
-      if (is_same_run && start_split_adjustment > 0) {
-        local_end -= start_split_adjustment;
+    const local_start =
+      start_idx - first_real_span.start + (first_real_span.run_offset || 0);
+    if (local_start > 0) {
+      const split_source = working_runs[0];
+      const [, right_run] = this._split_run_at_index(
+        split_source,
+        local_start,
+      );
+      for (let w = 0; w < working_runs.length; w++) {
+        if (working_runs[w] === split_source) working_runs[w] = right_run;
       }
+      dom_modified = true;
+      start_split_adjustment = local_start;
+    }
 
-      const run_text = get_run_text(run_to_split);
-      if (local_end > 0 && local_end < run_text.length) {
-        const [left_run] = this._split_run_at_index(run_to_split, local_end);
-        working_runs[working_runs.length - 1] = left_run;
-        dom_modified = true;
-      }
+    // 2. End Split
+    const last_real_span = real_spans[real_spans.length - 1];
+    const is_same_run = first_real_span.run === last_real_span.run;
+    const run_to_split = working_runs[working_runs.length - 1];
+    const overlap_end = Math.min(last_real_span.end, end_idx);
+    let local_end =
+      overlap_end - last_real_span.start + (last_real_span.run_offset || 0);
+
+    if (is_same_run && start_split_adjustment > 0) {
+      local_end -= start_split_adjustment;
+    }
+
+    const run_text = get_run_text(run_to_split);
+    if (local_end > 0 && local_end < run_text.length) {
+      const [left_run] = this._split_run_at_index(run_to_split, local_end);
+      working_runs[working_runs.length - 1] = left_run;
+      dom_modified = true;
     }
 
     if (dom_modified && rebuild_map) {
@@ -1206,7 +1258,7 @@ export class DocumentMapper {
         }
         return [null, span.paragraph];
       } else {
-        const offset = index - span.start;
+        const offset = index - span.start + (span.run_offset || 0);
         const [left] = this._split_run_at_index(span.run, offset);
         if (rebuild_map) this._build_map();
         return [left, span.paragraph];

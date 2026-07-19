@@ -23,6 +23,7 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts_with_kind,
     iter_paragraph_content,
+    split_boundary_whitespace,
 )
 from adeu.utils.safe_regex import user_finditer, user_search
 
@@ -46,6 +47,45 @@ class TextSpan:
     part_index: int = 0
     # True for the read-only image marker projection ![alt](docx-image:N).
     is_image_marker: bool = False
+    # Character offset of this span's text within its run's projected text.
+    # One run may back several spans: hoisting boundary whitespace outside
+    # style markers (QA 2026-07-19 F-03) projects a bold "The Supplier " run
+    # as core + trailing-space spans, and only the first starts at run
+    # offset 0. All span->run local-offset arithmetic must add this.
+    run_offset: int = 0
+
+
+def _append_wrapped_run_part(
+    run_parts: List[Tuple[str, str, Optional[Run], int]],
+    segment: str,
+    run: Run,
+    prefix: str,
+    suffix: str,
+    run_local: int,
+) -> int:
+    """
+    Appends a styled run segment to `run_parts` with boundary whitespace kept
+    OUTSIDE the emphasis markers — `**The Supplier **` is malformed Markdown
+    (QA 2026-07-19 F-03). Must mirror apply_formatting_to_segments exactly
+    (the Virtual Text contract). Returns the advanced run-local offset.
+    """
+    lead, core, trail = split_boundary_whitespace(segment)
+    if not core:
+        run_parts.append(("real", segment, run, run_local))
+        return run_local + len(segment)
+    if lead:
+        run_parts.append(("real", lead, run, run_local))
+        run_local += len(lead)
+    if prefix:
+        run_parts.append(("virtual", prefix, None, 0))
+    run_parts.append(("real", core, run, run_local))
+    run_local += len(core)
+    if suffix:
+        run_parts.append(("virtual", suffix, None, 0))
+    if trail:
+        run_parts.append(("real", trail, run, run_local))
+        run_local += len(trail)
+    return run_local
 
 
 def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
@@ -414,7 +454,8 @@ class DocumentMapper:
         current_wrappers = ("", "")
         current_style = ("", "")
         active_hyperlink_id = None
-        pending_runs: List[Tuple[str, str, Optional[Run], Optional[str], Optional[str], List[str]]] = []
+        # (kind, text, run, run_offset, ins_id, del_id, comment_ids)
+        pending_runs: List[Tuple[str, str, Optional[Run], int, Optional[str], Optional[str], List[str]]] = []
 
         def flush_pending_runs():
             nonlocal current, pending_runs
@@ -424,7 +465,7 @@ class DocumentMapper:
             if s_tok:
                 self._add_virtual_text(s_tok, current, paragraph)
                 current += len(s_tok)
-            for kind, txt, r_obj, i_id, d_id, c_ids in pending_runs:
+            for kind, txt, r_obj, r_off, i_id, d_id, c_ids in pending_runs:
                 if kind == "virtual":
                     self._add_virtual_text(txt, current, paragraph, hyperlink_id=active_hyperlink_id)
                 else:
@@ -439,6 +480,7 @@ class DocumentMapper:
                         hyperlink_id=active_hyperlink_id,
                         comment_ids=c_ids if c_ids else None,
                         part_index=self._current_part_index,
+                        run_offset=r_off,
                     )
                     self.spans.append(span)
                     self._text_chunks.append(txt)
@@ -457,7 +499,8 @@ class DocumentMapper:
         for i, item in enumerate(items):
             if isinstance(item, Run):
                 prefix, suffix = get_run_style_markers(item, native_heading)
-                run_parts: List[Tuple[str, str, Optional[Run]]] = []
+                # (kind, text, run, run_offset)
+                run_parts: List[Tuple[str, str, Optional[Run], int]] = []
 
                 text = get_run_text(item)
 
@@ -466,24 +509,28 @@ class DocumentMapper:
                         continue
                     leading_strip_active = False
 
+                # run_local tracks each real part's offset within the run's
+                # projected text, so spans can resolve back to exact run
+                # positions even when one run backs several spans.
+                run_local = 0
+
                 if "\n" in text and (prefix or suffix):
                     parts = text.split("\n")
                     for idx, part in enumerate(parts):
                         if idx > 0:
-                            run_parts.append(("real", "\n", item))
+                            run_parts.append(("real", "\n", item, run_local))
+                            run_local += 1
                         if part:
-                            if prefix:
-                                run_parts.append(("virtual", prefix, None))
-                            run_parts.append(("real", part, item))
-                            if suffix:
-                                run_parts.append(("virtual", suffix, None))
+                            run_local = _append_wrapped_run_part(run_parts, part, item, prefix, suffix, run_local)
+                elif (prefix or suffix) and text:
+                    run_local = _append_wrapped_run_part(run_parts, text, item, prefix, suffix, run_local)
                 else:
                     if prefix:
-                        run_parts.append(("virtual", prefix, None))
+                        run_parts.append(("virtual", prefix, None, 0))
                     if text:
-                        run_parts.append(("real", text, item))
+                        run_parts.append(("real", text, item, 0))
                     if suffix:
-                        run_parts.append(("virtual", suffix, None))
+                        run_parts.append(("virtual", suffix, None, 0))
 
                 if self.clean_view and active_del:
                     pass
@@ -516,11 +563,11 @@ class DocumentMapper:
                             skip_leading_prefix = True
 
                         curr_comment_ids = list(active_ids)
-                        for kind, txt, r_obj in run_parts:
+                        for kind, txt, r_obj, r_off in run_parts:
                             if skip_leading_prefix and kind == "virtual" and txt == new_style[0]:
                                 skip_leading_prefix = False
                                 continue
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id, curr_comment_ids))
+                            pending_runs.append((kind, txt, r_obj, r_off, curr_ins_id, curr_del_id, curr_comment_ids))
 
                         current_style = new_style
                     else:
@@ -528,8 +575,8 @@ class DocumentMapper:
                         current_wrappers = new_wrappers
                         current_style = new_style
                         curr_comment_ids = list(active_ids)
-                        for kind, txt, r_obj in run_parts:
-                            pending_runs.append((kind, txt, r_obj, curr_ins_id, curr_del_id, curr_comment_ids))
+                        for kind, txt, r_obj, r_off in run_parts:
+                            pending_runs.append((kind, txt, r_obj, r_off, curr_ins_id, curr_del_id, curr_comment_ids))
 
                 if not self.clean_view and not self.original_view:
                     has_meta = active_ins or active_del or active_ids or active_fmt
@@ -1019,41 +1066,50 @@ class DocumentMapper:
         if not affected_spans:
             return []
 
-        working_runs = [s.run for s in affected_spans if s.run is not None]
-        if not working_runs:
+        real_spans = [s for s in affected_spans if s.run is not None]
+        if not real_spans:
             return []
+
+        # One run may back several spans (boundary whitespace hoisted outside
+        # style markers projects a run as lead/core/trail spans, QA 2026-07-19
+        # F-03): deduplicate by identity or the run would be split and wrapped
+        # once per span.
+        working_runs: List[Run] = []
+        for s in real_spans:
+            if s.run is not None and not any(s.run is r for r in working_runs):
+                working_runs.append(s.run)
 
         dom_modified = False
 
-        # 1. Start Split
-        first_real_span = next((s for s in affected_spans if s.run is not None), None)
+        # 1. Start Split — all local offsets are run-relative: span-relative
+        # position plus the span's own offset within the run.
+        first_real_span = real_spans[0]
         start_split_adjustment = 0
 
-        if first_real_span:
-            local_start = start_idx - first_real_span.start
-            if local_start > 0:
-                idx_in_working = 0
-                _, right_run = self._split_run_at_index(working_runs[idx_in_working], local_start)
-                working_runs[idx_in_working] = right_run
-                dom_modified = True
-                start_split_adjustment = local_start
+        local_start = (start_idx - first_real_span.start) + first_real_span.run_offset
+        if local_start > 0:
+            split_source = working_runs[0]
+            _, right_run = self._split_run_at_index(split_source, local_start)
+            for idx_in_working, w_run in enumerate(working_runs):
+                if w_run is split_source:
+                    working_runs[idx_in_working] = right_run
+            dom_modified = True
+            start_split_adjustment = local_start
 
         # 2. End Split
-        last_real_span = next((s for s in reversed(affected_spans) if s.run is not None), None)
+        last_real_span = real_spans[-1]
+        is_same_run = first_real_span.run is last_real_span.run
+        run_to_split = working_runs[-1]
+        overlap_end = min(last_real_span.end, end_idx)
+        local_end = (overlap_end - last_real_span.start) + last_real_span.run_offset
 
-        if last_real_span:
-            is_same_run = first_real_span is last_real_span
-            run_to_split = working_runs[-1]
-            overlap_end = min(last_real_span.end, end_idx)
-            local_end = overlap_end - last_real_span.start
+        if is_same_run and start_split_adjustment > 0:
+            local_end -= start_split_adjustment
 
-            if is_same_run and start_split_adjustment > 0:
-                local_end -= start_split_adjustment
-
-            if 0 < local_end < len(run_to_split.text):
-                left_run, _ = self._split_run_at_index(run_to_split, local_end)
-                working_runs[-1] = left_run
-                dom_modified = True
+        if 0 < local_end < len(run_to_split.text):
+            left_run, _ = self._split_run_at_index(run_to_split, local_end)
+            working_runs[-1] = left_run
+            dom_modified = True
 
         if dom_modified and rebuild_map:
             self._build_map()
@@ -1093,7 +1149,7 @@ class DocumentMapper:
                     return self.get_insertion_anchor(span.end, rebuild_map=False)
                 return None, span.paragraph
             else:
-                offset = index - span.start
+                offset = (index - span.start) + span.run_offset
                 left, _ = self._split_run_at_index(span.run, offset)
                 if rebuild_map:
                     self._build_map()

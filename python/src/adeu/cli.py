@@ -117,9 +117,16 @@ def handle_init(args: argparse.Namespace):
 
         print(f"🔍 Found uvx at: {uvx_path}", file=sys.stderr)
 
+        # Pin the package to the version doing the configuring: an unpinned
+        # "--from adeu" makes every Claude Desktop launch resolve the latest
+        # PyPI release, so the MCP server silently drifts away from the CLI
+        # the user tested (QA 2026-07-19 F-16).
+        version, _sha, _ = get_build_info()
+        package_ref = f"adeu=={version}" if version and version not in ("unknown", "0.0.0") else "adeu"
+
         mcp_servers["adeu"] = {
             "command": uvx_path,  # absolute path, not bare "uvx"
-            "args": ["--from", "adeu", "adeu-server", "--scope", args.scope],
+            "args": ["--from", package_ref, "adeu-server", "--scope", args.scope],
         }
 
     new_content = json.dumps(data, indent=2)
@@ -674,7 +681,11 @@ def handle_extract(args):
         # never a silent fallback to page 1 (QA L1).
         page_num = 1
         want_all_pages = False
-        if args.page is not None and not getattr(args, "search_query", None):
+        # Outline mode has already warned that --page is ignored; validating
+        # the ignored value afterwards produced a contradictory message pair
+        # ("--page is ignored" followed by "Invalid --page value", QA
+        # 2026-07-19 F-18).
+        if args.page is not None and not getattr(args, "search_query", None) and args.mode != "outline":
             page_str = str(args.page).strip()
             if page_str.lower() == "all" and args.mode == "full":
                 want_all_pages = True
@@ -862,9 +873,13 @@ def handle_diff(args):
             _cli_error("invalid_docx", f"Could not extract text for comparison: {e}")
             raise AssertionError("unreachable") from None
 
-        from adeu.diff import generate_structured_edits
+        from adeu.diff import collect_media_difference_warnings, generate_structured_edits
 
         edits, diff_warnings = generate_structured_edits(text_orig, struct_orig, text_mod, struct_mod)
+        # A text diff cannot see image bytes: when embedded media differ, an
+        # empty edit list must never read as "the documents are identical"
+        # (QA 2026-07-19 F-04).
+        diff_warnings.extend(collect_media_difference_warnings(args.original.read_bytes(), args.modified.read_bytes()))
         for warning in diff_warnings:
             print(f"⚠️  {warning}", file=sys.stderr)
     else:
@@ -932,6 +947,9 @@ def handle_apply(args):
     _require_docx_output(args.output)
 
     changes: List[DocumentChange] = []
+    # For the text-file path, the supplied text IS the intended final clean
+    # document — keep it to verify the applied result (QA 2026-07-19 F-05).
+    verify_against: "str | None" = None
 
     if _changes_file_is_json_batch(args.changes):
         if not args.json:
@@ -988,6 +1006,7 @@ def handle_apply(args):
             from adeu.diff import generate_edits_via_paragraph_alignment
 
             changes.extend(generate_edits_via_paragraph_alignment(text_orig, text_mod))
+            verify_against = text_mod
 
     if args.live:
         if sys.platform != "win32":
@@ -1051,6 +1070,38 @@ def handle_apply(args):
     stats["dry_run"] = args.dry_run
     stats["output_path"] = str(output_path) if output_path else None
 
+    # Post-apply verification (text-file path only): the accepted view of the
+    # applied document must read exactly as the supplied text. Structural
+    # remnants a text replacement cannot remove (empty headings, table
+    # skeletons) otherwise ship behind a success report whose clean_text
+    # preview says something else (QA 2026-07-19 F-05). The output file is
+    # kept as a diagnostic copy; the exit code and report say it diverged.
+    verification_error = None
+    if verify_against is not None and not args.dry_run and not batch_failed:
+        from adeu.ingest import _extract_text_from_doc
+
+        final_clean = _extract_text_from_doc(engine.doc, clean_view=True, include_appendix=False)
+        expected = verify_against.strip()
+        actual = final_clean.strip()
+        if actual != expected:
+            div = next(
+                (k for k, (a, b) in enumerate(zip(actual, expected, strict=False)) if a != b),
+                min(len(actual), len(expected)),
+            )
+            verification_error = (
+                "Post-apply verification failed: the applied document's clean text does not match "
+                f"the supplied text (first divergence at character {div}: "
+                f"applied reads {actual[div : div + 40]!r}, supplied text reads "
+                f"{expected[div : div + 40]!r}). The document structure could not fully realize "
+                "the requested text (e.g. headings or table cells cannot be deleted via text "
+                "replacement). The output file was kept for inspection but is NOT the requested "
+                "document."
+            )
+            stats["verified"] = False
+            stats["verification_error"] = verification_error
+        else:
+            stats["verified"] = True
+
     if args.json:
         print(json.dumps(stats))
     else:
@@ -1064,9 +1115,11 @@ def handle_apply(args):
         else:
             print("Dry-run simulation complete.", file=sys.stderr)
 
+        occurrences = stats.get("occurrences_modified", 0)
+        occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
         print(
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.\n"
-            f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.",
+            f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
             file=sys.stderr,
         )
 
@@ -1093,6 +1146,11 @@ def handle_apply(args):
             print("\nSkipped Details:", file=sys.stderr)
             for detail in stats["skipped_details"]:
                 print(detail, file=sys.stderr)
+
+    if verification_error is not None:
+        if not args.json:
+            print(f"\n❌ {verification_error}", file=sys.stderr)
+        sys.exit(1)
 
     if stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0:
         sys.exit(1)
@@ -1252,6 +1310,24 @@ def handle_sanitize(args: argparse.Namespace):
         sys.exit(2)
 
     _require_docx_output(args.output)
+
+    # Contradictory option combinations are usage errors, never silent
+    # preferences (QA 2026-07-19 F-07/F-08).
+    if args.keep_markup and args.accept_all:
+        print(
+            "❌ --keep-markup and --accept-all are mutually exclusive: --keep-markup preserves "
+            "tracked changes and comments, --accept-all resolves them into the text. "
+            "Pass exactly one of them.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.output and args.outdir:
+        print(
+            "❌ -o/--output and --outdir are mutually exclusive: -o names a single output file, "
+            "--outdir selects batch mode. Pass exactly one of them.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     input_files: List[Path] = args.input
     is_batch = len(input_files) > 1 or args.outdir
@@ -1610,7 +1686,9 @@ def main():
             "Text-file apply only: allow the supplied text to be less than half the length of the "
             "document's clean text. Without this flag such an apply is refused, because a truncated "
             "input (e.g. a single page of a paginated extract) would silently delete everything "
-            "it does not contain."
+            "it does not contain. The guard only arms on documents whose clean text is at least "
+            "2,000 characters — below that, halving a document in one edit is a plausible "
+            "deliberate workflow."
         ),
     )
     p_apply.add_argument(
