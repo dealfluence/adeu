@@ -2662,6 +2662,61 @@ class RedlineEngine:
 
         return True
 
+    def _is_row_fully_deleted(self, row_el, start_idx: int, length: int, active_mapper) -> bool:
+        # Find all active runs currently under row_el
+        active_runs = []
+        for r_el in row_el.findall(".//" + qn("w:r")):
+            parent = r_el.getparent()
+            is_deleted = False
+            while parent is not None and parent != row_el:
+                if parent.tag == qn("w:del"):
+                    is_deleted = True
+                    break
+                parent = parent.getparent()
+            if not is_deleted:
+                active_runs.append(r_el)
+
+        # If there are still active runs, the row is not fully deleted
+        if active_runs:
+            return False
+
+        # Since row_el was collected in seen_rows, we know it was targeted.
+        return True
+
+    def _mark_fully_deleted_rows_in_range(
+        self, del_elems, virtual_spans, start_idx: int, length: int, active_mapper, del_id: Optional[str]
+    ) -> None:
+        seen_rows = set()
+        for del_elem in del_elems:
+            curr = del_elem
+            row_el = None
+            while curr is not None:
+                if curr.tag == qn("w:tr"):
+                    row_el = curr
+                    break
+                curr = curr.getparent()
+            if row_el is not None and row_el not in seen_rows:
+                seen_rows.add(row_el)
+
+        for span in virtual_spans:
+            if span.paragraph:
+                curr = span.paragraph._element
+                row_el = None
+                while curr is not None:
+                    if curr.tag == qn("w:tr"):
+                        row_el = curr
+                        break
+                    curr = curr.getparent()
+                if row_el is not None and row_el not in seen_rows:
+                    seen_rows.add(row_el)
+
+        for row_el in seen_rows:
+            if self._is_row_fully_deleted(row_el, start_idx, length, active_mapper):
+                trPr = row_el.get_or_add_trPr()
+                if trPr.find(qn("w:del")) is None:
+                    del_el = self._create_track_change_tag("w:del", reuse_id=del_id)
+                    trPr.append(del_el)
+
     def _maybe_paragraph_replace(
         self,
         edit: ModifyText,
@@ -3523,11 +3578,16 @@ class RedlineEngine:
         if op == EditOperationType.DELETION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if edit.comment and first_del_element is not None and last_del_element is not None:
                 # The deletions may be nested inside a foreign author's <w:ins>;
@@ -3556,11 +3616,16 @@ class RedlineEngine:
         elif op == EditOperationType.MODIFICATION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if first_del_element is not None and last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
