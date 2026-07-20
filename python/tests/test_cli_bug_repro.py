@@ -66,14 +66,7 @@ def test_apply_table_deletion_repro(tmp_path):
     edited_txt_path.write_text(edited_clean_text, encoding="utf-8")
 
     # 4. Apply back using the CLI with --allow-major-deletions
-    rc_apply = _run_cli([
-        "apply",
-        str(docx_path),
-        str(edited_txt_path),
-        "-o",
-        str(out_path),
-        "--allow-major-deletions"
-    ])
+    rc_apply = _run_cli(["apply", str(docx_path), str(edited_txt_path), "-o", str(out_path), "--allow-major-deletions"])
 
     # This asserts the CORRECT expected behavior:
     # Under the bug, apply fails (returns non-zero) and does not write out
