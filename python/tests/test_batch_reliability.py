@@ -57,9 +57,13 @@ def test_batch_accept_does_not_corrupt():
     ]
 
     engine2 = RedlineEngine(stream_redlined)
-    applied, skipped = engine2.apply_review_actions(actions)
+    applied, skipped, already_resolved = engine2.apply_review_actions(actions)
 
-    assert applied == 6
+    # Three replacements: each del+ins pair resolves as one unit on the
+    # first accept, so 3 actions transition state and 3 are accurate no-ops
+    # (QA 2026-07-19 ADEU-QA-004).
+    assert applied == 3
+    assert already_resolved == 3
     assert skipped == 0
 
     stream_final = engine2.save_to_stream()
@@ -121,9 +125,13 @@ def test_batch_mixed_accept_reject_integrity():
     ]
 
     engine2 = RedlineEngine(stream_redlined)
-    applied, skipped = engine2.apply_review_actions(actions)
+    applied, skipped, already_resolved = engine2.apply_review_actions(actions)
 
-    assert applied == 4
+    # Two replacement pairs, each resolved by its first action; the paired
+    # follow-ups are accurate no-ops (QA 2026-07-19 ADEU-QA-004).
+    assert applied == 2
+    assert already_resolved == 2
+    assert skipped == 0
 
     stream_final = engine2.save_to_stream()
     text_final = extract_text_from_stream(stream_final)

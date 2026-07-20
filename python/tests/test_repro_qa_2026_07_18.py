@@ -1119,13 +1119,15 @@ class TestLowSeverity:
         assert isinstance(payload, dict)
 
     def test_l5_init_noop_rerun_creates_no_backup(self, tmp_path, capsys, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        # Patch the path getter itself: HOME/Path.home don't reach the Windows
+        # %APPDATA% branch, and this test used to rewrite the real config there
+        # (while passing, because the .bak assertions looked at an empty dir).
+        cfg_dir = tmp_path / "Claude"
+        monkeypatch.setattr("adeu.cli._get_claude_config_path", lambda: cfg_dir / "claude_desktop_config.json")
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/uvx" if name == "uvx" else None)
 
         code, out, err = run_cli(["init"], capsys)
         assert code == 0, err
-        cfg_dir = tmp_path / ".config" / "Claude"
         baks = list(cfg_dir.glob("*.bak"))
         assert len(baks) == 0
 

@@ -37,7 +37,7 @@ def test_repro_invisible_reply_xml_structure():
 
     # Perform Reply
     action = ReplyComment(target_id=f"Com:{base_id}", text="The Reply")
-    applied, skipped = engine2.apply_review_actions([action])
+    applied, skipped, _already = engine2.apply_review_actions([action])
     assert applied == 1
 
     stream_final = engine2.save_to_stream()

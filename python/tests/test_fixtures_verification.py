@@ -37,6 +37,9 @@ def normalize_adeu_extract(text):
     text = re.sub(r"\[Com:\d+\]", "[Com:X]", text)
     # Remove Change IDs: "[Chg:1]" or "[Chg:1 delete]" / "[Chg:1 insert]" / "[Chg:1 format]" -> "[Chg:X]"
     text = re.sub(r"\[Chg:\d+(?:\s+\w+)?\]", "[Chg:X]", text)
+    # ...including inside the resolution-group annotation (ADEU-QA-004):
+    # "(pairs with Chg:2, Chg:3)" -> "(pairs with Chg:X)"
+    text = re.sub(r"\(pairs with Chg:\d+(?:, Chg:\d+)*\)", "(pairs with Chg:X)", text)
 
     # Normalize whitespace artifacts
     text = re.sub(r"(\s+)(?=--\}|\+\+\})", "", text)
@@ -143,7 +146,7 @@ def test_repro_golden_to_golden2(clean_result_file):
 
     # Add the reply seen in golden2.docx
     action = ReplyComment(target_id="Com:2", text="Forth comment")
-    applied, _ = engine.apply_review_actions([action])
+    applied, _, _ = engine.apply_review_actions([action])
     assert applied == 1
 
     with open(RESULT_DOC, "wb") as f:

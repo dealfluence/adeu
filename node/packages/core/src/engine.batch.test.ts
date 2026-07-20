@@ -32,10 +32,15 @@ describe('Batch Reliability (Node.js Port)', () => {
     
     const actions: AcceptChange[] = [1, 2, 3, 4, 5, 6].map(id => ({ type: 'accept', target_id: `Chg:${id}` }));
     
-    // Test direct apply_review_actions (Note: method missing in raw TS port right now, needs implementing)
-    const [applied, skipped] = (engine2 as any).apply_review_actions(actions);
-    
-    expect(applied).toBe(6);
+    // Three replacements: each del+ins pair resolves as one unit on the
+    // first accept, so 3 actions transition state and 3 are accurate no-ops
+    // (QA 2026-07-19 ADEU-QA-004).
+    const [applied, skipped, already_resolved] = (
+      engine2 as any
+    ).apply_review_actions(actions);
+
+    expect(applied).toBe(3);
+    expect(already_resolved).toBe(3);
     expect(skipped).toBe(0);
 
     const finalBuf = await midDoc.save();
@@ -78,8 +83,13 @@ describe('Batch Reliability (Node.js Port)', () => {
       { type: 'reject', target_id: "Chg:2" } as RejectChange,
     ];
 
-    const [applied] = (engine2 as any).apply_review_actions(actions);
-    expect(applied).toBe(4);
+    // Two replacement pairs, each resolved by its first action; the paired
+    // follow-ups are accurate no-ops (QA 2026-07-19 ADEU-QA-004).
+    const [applied, , already_resolved] = (
+      engine2 as any
+    ).apply_review_actions(actions);
+    expect(applied).toBe(2);
+    expect(already_resolved).toBe(2);
 
     const finalBuf = await midDoc.save();
     const text_final = await extractTextFromBuffer(finalBuf);

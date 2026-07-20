@@ -524,18 +524,22 @@ def _f5_search_payload(q, pattern):
 
 def _run_in_subprocess_with_watchdog(payload, pattern) -> tuple[str, str | None]:
     """Catastrophic re backtracking holds the GIL, so an in-process watchdog
-    thread would freeze with it — run the payload in a child process instead."""
+    thread would freeze with it — run the payload in a child process instead.
+    Windows has no fork; spawn pays interpreter+import startup inside the
+    child, so it gets extra join budget before the watchdog calls it a hang."""
     import multiprocessing
 
-    ctx = multiprocessing.get_context("fork")
+    method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+    join_budget = WATCHDOG_SECONDS + (0.0 if method == "fork" else 18.0)
+    ctx = multiprocessing.get_context(method)
     q = ctx.Queue()
     proc = ctx.Process(target=payload, args=(q, pattern), daemon=True)
     proc.start()
-    proc.join(WATCHDOG_SECONDS)
+    proc.join(join_budget)
     if proc.is_alive():
         proc.terminate()
         proc.join(5)
-        pytest.fail(f"ReDoS: regex resolution still running after {WATCHDOG_SECONDS}s")
+        pytest.fail(f"ReDoS: regex resolution still running after {join_budget}s")
     return q.get(timeout=5)
 
 

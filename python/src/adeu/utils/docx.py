@@ -595,6 +595,66 @@ def split_boundary_whitespace(text: str) -> tuple[str, str, str]:
     return text[:lead_len], text[lead_len : lead_len + len(core)], text[lead_len + len(core) :]
 
 
+def compute_change_pair_map(states_list) -> dict:
+    """
+    Maps each tracked-change id in a merged meta bubble to the OTHER ids of
+    its resolution group, rendered ready for the bubble line suffix
+    (`uid -> "Chg:2"` / `uid -> "Chg:2, Chg:3"`).
+
+    A replacement is stored as a contiguous same-author <w:del> + <w:ins>
+    pair with two distinct w:id values, but both engines resolve such a group
+    as ONE unit — accepting or rejecting either side decides the whole
+    replacement. Projecting the two ids side by side with no linkage implied
+    they were independently resolvable (QA 2026-07-19 ADEU-QA-004); every
+    meta-block builder (Python/Node ingest + mapper) uses this map to
+    annotate grouped lines as `(pairs with Chg:N)`.
+
+    Grouping mirrors the engines' `_get_paired_nodes` walk: consecutive
+    ins/del ids in bubble order group while the author stays the same; any
+    state carrying NO active ins/del (a comment- or format-only run between
+    changes — physical text separating the elements) breaks the group.
+    `states_list` entries are (ins_map, del_map, comments_set, fmt_map)
+    snapshots in document order, as accumulated by the ingest/mapper state
+    machines.
+    """
+    groups: list = []
+    current: list = []
+    seen_ids: set = set()
+
+    for ins_map, del_map, _comments_set, _fmt_map in states_list:
+        if not ins_map and not del_map:
+            # A run with only comment/format meta sits between the tracked
+            # elements: they are not siblings, the engine will not group them.
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        state_new = []
+        for uid, meta in ins_map.items():
+            if uid not in seen_ids:
+                state_new.append((uid, getattr(meta, "author", None) or "Unknown"))
+        for uid, meta in del_map.items():
+            if uid not in seen_ids:
+                state_new.append((uid, getattr(meta, "author", None) or "Unknown"))
+        for uid, author in state_new:
+            seen_ids.add(uid)
+            if current and current[-1][1] != author:
+                groups.append(current)
+                current = []
+            current.append((uid, author))
+    if current:
+        groups.append(current)
+
+    pair_map: dict = {}
+    for group in groups:
+        if len(group) < 2:
+            continue
+        for uid, _author in group:
+            others = ", ".join(f"Chg:{u}" for u, _a in group if u != uid)
+            pair_map[uid] = others
+    return pair_map
+
+
 def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     """
     Applies formatting markers to text, ensuring newlines are excluded from the

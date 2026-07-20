@@ -89,8 +89,11 @@ def test_atomic_batch_prevents_cascading_misanchor(tmp_path):
     )
 
     # 4. Assertions on the Tool Execution
+    # The two ids form ONE replacement pair: the first accept resolves both,
+    # the second is an accurate no-op (QA 2026-07-19 ADEU-QA-004) — never a
+    # second "applied" state transition.
     assert "Batch complete" in result_msg
-    assert f"Actions: {len(actions)} applied, 0 skipped" in result_msg
+    assert "Actions: 1 applied, 0 skipped, 1 already resolved (no effect)" in result_msg
     assert "Edits: 1 applied, 0 skipped" in result_msg, "The edit misanchored and was skipped!"
 
     # 5. Assertions on the Final Document State

@@ -383,19 +383,28 @@ def make_edits_self_contained(
 ) -> List[ModifyText]:
     """
     Rewrites diff-generated edits so each one can be re-applied by TEXT MATCHING
-    alone against `original_text`.
+    alone against the document — including against the document state produced
+    by the EARLIER edits of the same batch.
 
     Diff output resolves positions via the private `_match_start_index`, which
     does not survive JSON serialization (`adeu diff --json`). Without it, an
     atomic edit like target_text="2" is ambiguous — and the match_mode
     fallbacks ('first'/'all') can silently modify unrelated occurrences.
 
-    For every edit whose target_text is empty (pure insertion) or occurs more
-    than once in `original_text`, this widens the edit with surrounding words
-    from the original document until the target is unique, mirroring the added
-    context into new_text so the change itself is untouched. The engine's
+    For every edit whose target_text is empty (pure insertion) or does not
+    occur exactly once, this widens the edit with surrounding words from the
+    original document until the target is unique, mirroring the added context
+    into new_text so the change itself is untouched. The engine's
     trim_common_context re-trims that shared context at apply time, so the
     resulting redline is identical to the positional one.
+
+    Uniqueness is evaluated against a SIMULATION of the sequentially applied
+    batch, not against `original_text` alone: batches apply one edit at a
+    time, and an earlier edit's replacement text can duplicate a later edit's
+    target — the paragraph-swap diff shape, where edit 1 writes paragraph B's
+    text over paragraph A and edit 2 then finds B's text twice
+    (QA 2026-07-19 ADEU-QA-002 C). A target unique in the original document
+    is NOT unique mid-batch.
 
     Two hard rules keep the widened batch applicable:
 
@@ -407,10 +416,13 @@ def make_edits_self_contained(
         sequentially, so a later edit whose anchor context contains an earlier
         edit's original text can only match inside that edit's tracked
         deletion — apply rightly rejects it, and `diff --json` output stops
-        being applicable by its own `apply` (QA 2026-07-19 F-01). When
-        uniqueness cannot be reached without crossing a neighboring hunk, the
-        two edits are COALESCED into one (hunk + stable gap + hunk), which is
-        both unambiguous and sequentially applicable.
+        being applicable by its own `apply` (QA 2026-07-19 F-01). This clamp
+        is also what keeps the simulation sound: a candidate never overlaps
+        another hunk, so its text reads identically in the original and in
+        every intermediate state until its own edit applies. When uniqueness
+        cannot be reached without crossing a neighboring hunk, the two edits
+        are COALESCED into one (hunk + stable gap + hunk), which is both
+        unambiguous and sequentially applicable.
 
     Returns the surviving edit objects (mutated in place); coalescing removes
     absorbed edits from the returned list, so callers must use the return
@@ -463,13 +475,15 @@ def make_edits_self_contained(
 
     dropped: set = set()
 
-    def _widen(h: _Hunk, h_pos: int) -> "Tuple[int, int, Optional[_Hunk]]":
+    def _widen_in(h: _Hunk, h_pos: int, sim_text: str) -> "Tuple[int, int, Optional[_Hunk]]":
         """
         Computes the widened (start, end) for hunk `h` (at index h_pos in
-        `hunks`), clamped at part bounds and neighboring hunks. Returns
-        (start, end, blocking_neighbor); blocking_neighbor is the adjacent
-        hunk that prevented uniqueness, or None when the candidate is unique
-        (or only part bounds constrain it).
+        `hunks`), clamped at part bounds and neighboring hunks. Uniqueness is
+        checked against `sim_text` — the document text as it reads when this
+        edit applies (earlier hunks already replaced). Returns (start, end,
+        blocking_neighbor); blocking_neighbor is the adjacent hunk that
+        prevented uniqueness, or None when the candidate is unique (or only
+        part bounds constrain it).
         """
         min_start, max_end = _bounds_for(h.idx)
         left = hunks[h_pos - 1] if h_pos > 0 else None
@@ -479,18 +493,40 @@ def make_edits_self_contained(
         if right is not None:
             max_end = min(max_end, right.idx)
 
+        # Pure insertions widen LEFT-ONLY (right expansion only at a hard
+        # left edge): mirrored right context rides AFTER the inserted text in
+        # new_text, and trim_common_context resolves prefixes first — when
+        # the following text begins like the insertion (e.g. the projection's
+        # "1. " list marker), the mirrored suffix is consumed as prefix and
+        # the anchor lands INSIDE the marker, splitting it
+        # (QA 2026-07-19 ADEU-QA-002 A, list-item swap shape).
+        insertion = not h.target
+
+        def _extend_right(pos: int) -> int:
+            if insertion and pos == h.idx:
+                # First right step for an insertion at a hard left edge:
+                # absorb the whole following line so the anchor edge is a
+                # line boundary, never the interior of a projected marker.
+                nl = original_text.find("\n", pos)
+                return max_end if nl == -1 else min(nl, max_end)
+            return min(max_end, _next_word_boundary(original_text, pos))
+
         start, end = h.idx, min(h.end, max_end)
         for _ in range(_MAX_CONTEXT_EXPANSIONS):
             candidate = original_text[start:end]
-            if candidate and original_text.count(candidate) == 1:
+            if candidate and sim_text.count(candidate) == 1:
                 return start, end, None
             if start == min_start and end == max_end:
                 break
-            start = max(min_start, _prev_word_boundary(original_text, start))
-            end = min(max_end, _next_word_boundary(original_text, end))
+            if start > min_start:
+                start = max(min_start, _prev_word_boundary(original_text, start))
+                if insertion:
+                    continue
+            if not insertion or start == min_start:
+                end = _extend_right(end)
 
         candidate = original_text[start:end]
-        if candidate and original_text.count(candidate) == 1:
+        if candidate and sim_text.count(candidate) == 1:
             return start, end, None
 
         # Ambiguous. Prefer coalescing with the closer clamping neighbor.
@@ -502,18 +538,34 @@ def make_edits_self_contained(
         blockers.sort(key=lambda pair: pair[0])
         return start, end, blockers[0][1] if blockers else None
 
-    i = 0
-    while i < len(hunks):
-        h = hunks[i]
-        needs_widening = not h.target or original_text.count(h.target) != 1
-        if not needs_widening:
-            i += 1
-            continue
-        _start, _end, blocker = _widen(h, i)
-        if blocker is None:
-            i += 1
-            continue
+    # Sequential simulation: process hunks in document order (the order our
+    # generators emit and the engine applies), widening each against the
+    # CURRENT text, then applying its replacement before moving on. When
+    # widening dead-ends against a neighboring hunk, coalesce and restart —
+    # membership changed, so earlier simulation state is void.
+    staged: List[Tuple[_Hunk, int, int]] = []
+    while True:
+        coalesce_pair: "Optional[Tuple[_Hunk, _Hunk]]" = None
+        staged = []
+        sim_text = original_text
+        delta = 0  # cumulative length shift from already-applied hunks
+        for pos, h in enumerate(hunks):
+            start, end, blocker = _widen_in(h, pos, sim_text)
+            if blocker is not None:
+                coalesce_pair = (h, blocker)
+                break
+            staged.append((h, start, end))
+            prefix = original_text[start : h.idx]
+            suffix = original_text[h.end : end]
+            new_full = f"{prefix}{h.new}{suffix}"
+            cur_start = start + delta
+            cur_end = end + delta
+            sim_text = sim_text[:cur_start] + new_full + sim_text[cur_end:]
+            delta += len(new_full) - (end - start)
+        if coalesce_pair is None:
+            break
         # Coalesce h with its blocking neighbor: hunk + stable gap + hunk.
+        h, blocker = coalesce_pair
         first, second = (blocker, h) if blocker.idx <= h.idx else (h, blocker)
         gap = original_text[first.end : second.idx]
         merged = _Hunk(
@@ -527,21 +579,19 @@ def make_edits_self_contained(
         pos_first = hunks.index(first)
         hunks[pos_first] = merged
         hunks.remove(second)
-        i = min(pos_first, i)
 
     # Write the widened hunks back onto the surviving edit objects.
-    for pos, h in enumerate(hunks):
-        h.edit.target_text = h.target
-        h.edit.new_text = h.new
-        h.edit._match_start_index = h.idx
-        if not h.target or original_text.count(h.target) != 1:
-            start, end, _blocker = _widen(h, pos)
-            prefix = original_text[start : h.idx]
-            suffix = original_text[h.end : end]
-            if prefix or suffix:
-                h.edit.target_text = original_text[start:end]
-                h.edit.new_text = f"{prefix}{h.new}{suffix}"
-                h.edit._match_start_index = start
+    for h, start, end in staged:
+        prefix = original_text[start : h.idx]
+        suffix = original_text[h.end : end]
+        if prefix or suffix:
+            h.edit.target_text = original_text[start:end]
+            h.edit.new_text = f"{prefix}{h.new}{suffix}"
+            h.edit._match_start_index = start
+        else:
+            h.edit.target_text = h.target
+            h.edit.new_text = h.new
+            h.edit._match_start_index = h.idx
 
     if not dropped:
         return edits
@@ -855,7 +905,7 @@ def generate_structured_edits(
             f"{' + '.join(kinds_m) or 'none'}); comparing flattened text instead. Header/footer "
             "additions or removals cannot be expressed as text edits."
         )
-        flat = _drop_image_marker_hunks(generate_edits_from_text(text_orig, text_mod), warnings)
+        flat = _drop_image_marker_hunks(generate_edits_via_paragraph_alignment(text_orig, text_mod), warnings)
         flat = _drop_marker_interior_hunks(flat, text_orig, warnings)
         return list(make_edits_self_contained(flat, text_orig, part_ranges=struct_orig.part_ranges)), warnings
 
@@ -879,7 +929,7 @@ def generate_structured_edits(
             )
 
         if not tables_alignable:
-            part_edits = generate_edits_from_text(text_orig[po_start:po_end], text_mod[pm_start:pm_end])
+            part_edits = generate_edits_via_paragraph_alignment(text_orig[po_start:po_end], text_mod[pm_start:pm_end])
             for e in part_edits:
                 e._match_start_index = (e._match_start_index or 0) + po_start
             edits.extend(part_edits)
@@ -894,7 +944,15 @@ def generate_structured_edits(
             seg_o_end = boundaries_o[seg_idx + 1][0]
             seg_m_start = boundaries_m[seg_idx][1]
             seg_m_end = boundaries_m[seg_idx + 1][0]
-            seg_edits = generate_edits_from_text(text_orig[seg_o_start:seg_o_end], text_mod[seg_m_start:seg_m_end])
+            # Paragraph alignment, never a raw word-level diff over the whole
+            # segment: dmp legally shifts hunk boundaries across paragraphs
+            # sharing a prefix ("...arrears.\n\nThe "), and the engine rightly
+            # rejects a deletion with body text on both sides of a paragraph
+            # break — every paragraph deletion/reordering in the QA corpus
+            # failed replay this way (QA 2026-07-19 ADEU-QA-002 A).
+            seg_edits = generate_edits_via_paragraph_alignment(
+                text_orig[seg_o_start:seg_o_end], text_mod[seg_m_start:seg_m_end]
+            )
             for e in seg_edits:
                 e._match_start_index = (e._match_start_index or 0) + seg_o_start
             edits.extend(seg_edits)
@@ -1014,6 +1072,48 @@ def _table_blob_row_edits(orig_blob: str, mod_blob: str) -> "List[ModifyText] | 
     return row_edits
 
 
+def _split_cross_paragraph_hunks(edits: List[ModifyText]) -> List[ModifyText]:
+    """
+    Splits generated hunks the engine would reject: an UNBALANCED target
+    spanning a paragraph break with body text on both sides ("tail of A\\n\\n
+    head of B" — the shape dmp produces when adjacent paragraphs share a
+    prefix). Each leading paragraph piece becomes its own separator-carrying
+    deletion (an allowed merge shape) and the final piece carries the whole
+    replacement text; sequential application produces the identical merged
+    result. Without this, one such hunk poisons the entire batch — apply is
+    all-or-nothing (QA 2026-07-19 ADEU-QA-002 A).
+    """
+    out: List[ModifyText] = []
+    for e in edits:
+        target = e.target_text or ""
+        new = e.new_text or ""
+        idx = e._match_start_index
+        if idx is None or "\n\n" not in target or target.count("\n\n") == new.count("\n\n"):
+            out.append(e)
+            continue
+        parts = target.split("\n\n")
+        if len(parts) < 2 or not parts[0].strip() or not parts[-1].strip():
+            # One-sided shapes (separator-carrying deletions/insertions) are
+            # the engine's supported merge protocol — leave them intact.
+            out.append(e)
+            continue
+        offset = idx
+        for piece in parts[:-1]:
+            deletion = ModifyText(
+                type="modify",
+                target_text=piece + "\n\n",
+                new_text="",
+                comment=e.comment or "Diff: Text deleted",
+            )
+            deletion._match_start_index = offset
+            out.append(deletion)
+            offset += len(piece) + 2
+        final = ModifyText(type="modify", target_text=parts[-1], new_text=new, comment=e.comment)
+        final._match_start_index = offset
+        out.append(final)
+    return out
+
+
 def generate_edits_via_paragraph_alignment(original_text: str, modified_text: str) -> List[ModifyText]:
     """
     Aligns original and modified text by paragraph (using SequenceMatcher),
@@ -1042,7 +1142,6 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
         offset = orig_offsets[i1] if i1 < len(orig_offsets) else len(original_text)
 
         if tag == "delete":
-            deleted_text = "\n\n".join(orig_paragraphs[i1:i2])
             # A deleted paragraph block must CARRY one adjacent separator, or
             # the deletion leaves an empty paragraph container behind — the
             # clean view then reads "\n\n\n\n" where the supplied text has
@@ -1050,19 +1149,38 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
             # (QA 2026-07-19 v8 F-12 fallout; mirrors the insert branch
             # below). Mid-document deletions take the FOLLOWING break;
             # deleting the document's trailing block takes the LEADING one.
+            #
+            # Multi-paragraph mid-document blocks are emitted as ONE deletion
+            # PER paragraph ("A\n\n", "B\n\n"), never "A\n\nB\n\n": the
+            # engine's merge protocol supports one deleted paragraph break
+            # per edit, and the joint form fails at apply time — the shape
+            # that broke paragraph-swap replays (QA 2026-07-19 ADEU-QA-002 A).
             if i2 < len(orig_paragraphs):
-                deleted_text = deleted_text + "\n\n"
-            elif i1 > 0:
-                deleted_text = "\n\n" + deleted_text
-                offset -= 2
-            edit = ModifyText(
-                type="modify",
-                target_text=deleted_text,
-                new_text="",
-                comment="Diff: Text deleted",
-            )
-            edit._match_start_index = offset
-            edits.append(edit)
+                piece_offset = offset
+                for k in range(i1, i2):
+                    piece = orig_paragraphs[k] + "\n\n"
+                    edit = ModifyText(
+                        type="modify",
+                        target_text=piece,
+                        new_text="",
+                        comment="Diff: Text deleted",
+                    )
+                    edit._match_start_index = piece_offset
+                    edits.append(edit)
+                    piece_offset += len(piece)
+            else:
+                deleted_text = "\n\n".join(orig_paragraphs[i1:i2])
+                if i1 > 0:
+                    deleted_text = "\n\n" + deleted_text
+                    offset -= 2
+                edit = ModifyText(
+                    type="modify",
+                    target_text=deleted_text,
+                    new_text="",
+                    comment="Diff: Text deleted",
+                )
+                edit._match_start_index = offset
+                edits.append(edit)
 
         elif tag == "insert":
             inserted_text = "\n\n".join(mod_paragraphs[j1:j2])
@@ -1123,4 +1241,7 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
                 ce._match_start_index = (ce._match_start_index or 0) + offset
                 edits.append(ce)
 
-    return edits
+    # Word-level diffs over unequal replace chunks can still emit hunks that
+    # straddle a paragraph break with body text on both sides; split them
+    # into engine-applicable pieces (ADEU-QA-002 A).
+    return _split_cross_paragraph_hunks(edits)

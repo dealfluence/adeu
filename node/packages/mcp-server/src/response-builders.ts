@@ -61,7 +61,10 @@ function _build_appendix_pointer(has_appendix: boolean): string {
 
 function _build_page_banner(page: number, total: number): string {
   if (total <= 1) return "";
-  return `> **Page ${page} of ${total}** — call \`read_docx\` with \`mode='outline'\` for a heading map of the full document.\n\n---\n\n`;
+  // "synthetic" is load-bearing: Adeu pages are length-based content chunks
+  // sized for LLM consumption, and readers must never mistake them for
+  // printed Word pages or explicit page breaks (QA 2026-07-19 ADEU-QA-005).
+  return `> **Page ${page} of ${total}** (synthetic page — a length-based chunk, not a printed Word page) — call \`read_docx\` with \`mode='outline'\` for a heading map of the full document.\n\n---\n\n`;
 }
 
 function _build_page_footer(

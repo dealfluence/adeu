@@ -2,6 +2,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import {
   _get_style_cache,
+  compute_change_pair_map,
   get_paragraph_prefix,
   is_heading_paragraph,
   is_native_heading,
@@ -603,13 +604,22 @@ function _build_merged_meta_block(
   const comment_lines: string[] = [];
   const seen_sigs = new Set<string>();
 
+  // Ids of one resolution group (a replacement's contiguous same-author
+  // del+ins pair) must not read as independently resolvable — either side
+  // resolves the whole group (QA 2026-07-19 ADEU-QA-004).
+  const pair_map = compute_change_pair_map(states_list);
+  const pairSuffix = (uid: string): string =>
+    pair_map[uid] ? ` (pairs with ${pair_map[uid]})` : "";
+
   for (const [ins_map, del_map, comments_set, fmt_map] of states_list) {
     for (const [uid, meta] of Object.entries(
       ins_map as Record<string, DocxEvent>,
     )) {
       const sig = `Chg:${uid}`;
       if (!seen_sigs.has(sig)) {
-        change_lines.push(`[${sig} insert] ${meta.author || "Unknown"}`);
+        change_lines.push(
+          `[${sig} insert] ${meta.author || "Unknown"}${pairSuffix(uid)}`,
+        );
         seen_sigs.add(sig);
       }
     }
@@ -618,7 +628,9 @@ function _build_merged_meta_block(
     )) {
       const sig = `Chg:${uid}`;
       if (!seen_sigs.has(sig)) {
-        change_lines.push(`[${sig} delete] ${meta.author || "Unknown"}`);
+        change_lines.push(
+          `[${sig} delete] ${meta.author || "Unknown"}${pairSuffix(uid)}`,
+        );
         seen_sigs.add(sig);
       }
     }

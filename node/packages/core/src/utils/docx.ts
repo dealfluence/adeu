@@ -581,6 +581,80 @@ export function split_boundary_whitespace(
   ];
 }
 
+/**
+ * Maps each tracked-change id in a merged meta bubble to the OTHER ids of its
+ * resolution group, rendered ready for the bubble line suffix
+ * (`uid -> "Chg:2"` / `uid -> "Chg:2, Chg:3"`).
+ *
+ * A replacement is stored as a contiguous same-author <w:del> + <w:ins> pair
+ * with two distinct w:id values, but both engines resolve such a group as ONE
+ * unit — accepting or rejecting either side decides the whole replacement.
+ * Projecting the two ids side by side with no linkage implied they were
+ * independently resolvable (QA 2026-07-19 ADEU-QA-004); every meta-block
+ * builder (Python/Node ingest + mapper) uses this map to annotate grouped
+ * lines as `(pairs with Chg:N)`.
+ *
+ * Grouping mirrors the engines' `_get_paired_nodes` walk: consecutive ins/del
+ * ids in bubble order group while the author stays the same; any state
+ * carrying NO active ins/del (a comment- or format-only run between changes —
+ * physical text separating the elements) breaks the group. `states_list`
+ * entries are [ins_map, del_map, comments_set, fmt_map] snapshots in document
+ * order, as accumulated by the ingest/mapper state machines.
+ */
+export function compute_change_pair_map(
+  states_list: any[],
+): Record<string, string> {
+  const groups: Array<Array<[string, string]>> = [];
+  let current: Array<[string, string]> = [];
+  const seen_ids = new Set<string>();
+
+  for (const [ins_map, del_map] of states_list) {
+    const ins_entries = Object.entries(ins_map as Record<string, any>);
+    const del_entries = Object.entries(del_map as Record<string, any>);
+    if (ins_entries.length === 0 && del_entries.length === 0) {
+      // A run with only comment/format meta sits between the tracked
+      // elements: they are not siblings, the engine will not group them.
+      if (current.length > 0) {
+        groups.push(current);
+        current = [];
+      }
+      continue;
+    }
+    const state_new: Array<[string, string]> = [];
+    for (const [uid, meta] of ins_entries) {
+      if (!seen_ids.has(uid)) {
+        state_new.push([uid, (meta && meta.author) || "Unknown"]);
+      }
+    }
+    for (const [uid, meta] of del_entries) {
+      if (!seen_ids.has(uid)) {
+        state_new.push([uid, (meta && meta.author) || "Unknown"]);
+      }
+    }
+    for (const [uid, author] of state_new) {
+      seen_ids.add(uid);
+      if (current.length > 0 && current[current.length - 1][1] !== author) {
+        groups.push(current);
+        current = [];
+      }
+      current.push([uid, author]);
+    }
+  }
+  if (current.length > 0) groups.push(current);
+
+  const pair_map: Record<string, string> = {};
+  for (const group of groups) {
+    if (group.length < 2) continue;
+    for (const [uid] of group) {
+      pair_map[uid] = group
+        .filter(([u]) => u !== uid)
+        .map(([u]) => `Chg:${u}`)
+        .join(", ");
+    }
+  }
+  return pair_map;
+}
+
 export function apply_formatting_to_segments(
   text: string,
   prefix: string,

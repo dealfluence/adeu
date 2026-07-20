@@ -41,6 +41,7 @@ export class SanitizeReport {
         lower.includes("author") || lower.includes("template") || lower.includes("company") ||
         lower.includes("manager") || lower.includes("metadata") || lower.includes("timestamp") ||
         lower.includes("custom xml") || lower.includes("custom propert") || lower.includes("identifier") ||
+        lower.includes("document variable") ||
         lower.includes("language") || lower.includes("version") ||
         lower.includes("last modified by") || lower.includes("revision count") || lower.includes("last printed")
       ) {

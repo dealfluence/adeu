@@ -74,7 +74,7 @@ def test_reject_change_cleans_encapsulated_comments():
 
     # 4. Act: Reject the change (should delete the w:ins and trigger comment cleanup)
     action = RejectChange(target_id="Chg:99")
-    applied, _ = engine.apply_review_actions([action])
+    applied, _, _ = engine.apply_review_actions([action])
 
     assert applied == 1, "Action should be successfully applied"
 
