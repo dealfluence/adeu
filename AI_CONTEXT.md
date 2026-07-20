@@ -224,37 +224,3 @@ To solve domain visibility gaps without adding new MCP tools, `read_docx` projec
 ### Agent Integration Testing
 *   To test changes to the MCP server without publishing to PyPI, use `uv run adeu init --local`.
 *   This configures Claude Desktop to execute the server from the current local source (`sys.executable` + `cwd`), bypassing `uvx`.
-
-## Current Status
-
-> **Note:** The changelog below is not exhaustive — the latest entry is v1.14.0 while the project
-> is currently at **v1.18.4**. See [GitHub Releases](https://github.com/dealfluence/adeu/releases)
-> for the full release history.
-
-- **v1.14.0**: Search & Targeted Write Engine Upgrade.
-    - Introduced flat `search_query` and `regex` filters directly on the `read_docx` endpoint.
-    - Added `match_mode` (`"strict"`, `"first"`, `"all"`) and `regex` parameters to `ModifyText` for highly targeted, multi-occurrence writing workflows.
-    - Hardened Redline Engine safety rollbacks against overlapping foreign-author comments and destructive cross-paragraph boundary merges.
-    - Delegated Live Word COM heuristic resolution to in-memory `RedlineEngine` snapshots via Flat OPC parsing.
-- **v1.6.0**: Native Node.js Monorepo Transition.
-    - Ported the entire XML Redline Engine to TypeScript (`@adeu/core` and `@adeu/mcp-server`).
-    - Replaced the Python `uvx` wrapper in the Claude Desktop extension with a fully standalone Node.js bundle, permanently eliminating Python dependency requirements for end users.
-    - Automated NPM package publishing and GitHub Release bundle generation via CI/CD.
-    - Ported the unified `finalize_document` tool (metadata sanitization and native OOXML locking) to pure TypeScript, successfully maintaining the zero-dependency constraint.
-    - Hardened Phase 2 OOXML Paragraph Merges (bottom-up processing) and established `@@ Word Patch @@` custom diff parity between Node and Python engines.
-- **v1.5.2**: Smithery Marketplace & Desktop Extensions.
-    - Published `adeu/adeu` to the Smithery.ai registry.
-    - Implemented a Node.js bootstrapper for native Claude Desktop `.mcpb` installation, automatically managing `uvx` dependencies.
-    - Resolved schema validation deadlocks between Anthropic and Smithery tooling via dynamic JSON-RPC schema injection.
-- **v1.4.2**: Structural Table Edits & Live Word Stabilization.
-    - Added `InsertTableRow` and `DeleteTableRow` intent-based models for safe OOXML gridspan manipulation.
-    - Resolved COM extraction fragmentation by properly coalescing partial formatting revisions.
-    - Eliminated Word COM anchor bleed during multi-paragraph replacements via SmartSelection circumvention and Sacrificial 'X' anchors.
-    - Cleaned up duplicate MCP tool descriptions across platform environments.
-- **v1.3.0**: UI Integrations
-    - **Native Open**: Added `open_local_file` tool to allow the Custom MCP UI to seamlessly launch the native OS default application (Word, PDF readers, etc.) without hitting iframe sandbox restrictions via the `tools/call` RPC method.
-- **v1.1.0**: Live Word Interop & Agentic Workflows.
-    - **Live MS Word Engine**: Fully integrated Windows COM engine allowing agents to execute live edits on an active MS Word canvas (`sys.platform == "win32"`).
-    - **Flat API**: Unified `DocumentChange` discriminated union deployed for the MCP interface.
-    - **Testing**: End-to-end LLM verification complete and backwards compatibility preserved.
-    - **UI Layer**: Zero-dependency, Vanilla JS custom HTML MCP Apps implementation for tools like `validate_documents`.
