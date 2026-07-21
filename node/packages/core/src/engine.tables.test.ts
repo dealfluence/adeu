@@ -265,4 +265,35 @@ describe("Table Interop & Engine (Node.js Port)", () => {
     expect(errors[0]).toContain('Did you mean the literal "( x )"');
     expect(errors[0]).toContain("drop the ^/$ anchors");
   });
+
+  it("compiled report includes type for structural table operations", async () => {
+    const doc = await createTestDocument();
+    const tbl = addTable(doc, 2, 2);
+    setCellText(tbl, 0, 0, "Row1 Col1");
+    setCellText(tbl, 0, 1, "Row1 Col2");
+    setCellText(tbl, 1, 0, "Row2 Col1");
+    setCellText(tbl, 1, 1, "Row2 Col2");
+
+    const buf = await doc.save();
+    const midDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(midDoc);
+
+    const stats = engine.process_batch([
+      {
+        type: "insert_row",
+        target_text: "Row1 Col1",
+        position: "below",
+        cells: ["NewRow Col1", "NewRow Col2"],
+      } as InsertTableRow,
+      {
+        type: "delete_row",
+        target_text: "Row2 Col1",
+      } as DeleteTableRow,
+    ]);
+
+    expect(stats.edits_applied).toBe(2);
+    expect(stats.edits).toHaveLength(2);
+    expect(stats.edits[0].type).toBe("insert_row");
+    expect(stats.edits[1].type).toBe("delete_row");
+  });
 });

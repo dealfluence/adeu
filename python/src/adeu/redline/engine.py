@@ -2052,6 +2052,7 @@ class RedlineEngine:
             warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
         return {
             "status": "applied" if success else "failed",
+            "type": getattr(edit, "type", "modify"),
             # Echoes of caller-supplied values are bounded so an oversized edit
             # cannot balloon the report/JSON output (QA C2).
             "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
@@ -2180,6 +2181,7 @@ class RedlineEngine:
                     skipped_edits += 1
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
                         "warning": None,
@@ -2223,6 +2225,7 @@ class RedlineEngine:
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
                         "warning": warning,
@@ -2254,6 +2257,7 @@ class RedlineEngine:
                         continue
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": report.get("type", "modify"),
                         "target_text": report["target_text"],
                         "new_text": report["new_text"],
                         "warning": None,

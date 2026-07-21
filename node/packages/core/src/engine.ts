@@ -2893,6 +2893,7 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
@@ -2908,6 +2909,7 @@ export class RedlineEngine {
             const previews = this._build_edit_context_previews(edit);
             reports_by_input[i] = {
               status: "applied",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: null,
@@ -2932,6 +2934,7 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
@@ -2954,6 +2957,7 @@ export class RedlineEngine {
             if (report.status === "applied") {
               reports_by_input[i] = {
                 status: "failed",
+                type: report.type || "modify",
                 target_text: report.target_text,
                 new_text: report.new_text,
                 warning: null,
@@ -3030,6 +3034,7 @@ export class RedlineEngine {
           }
           edits_reports.push({
             status: success ? "applied" : "failed",
+            type: (edit as any).type || "modify",
             target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
             new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
             warning: warning,
