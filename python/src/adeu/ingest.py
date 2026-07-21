@@ -459,14 +459,24 @@ def build_paragraph_text(
                     # marker ("**A**" + " **B**" -> "**A B**"), mirroring the
                     # mapper's part-level elision exactly (QA 2026-07-19 F-03).
                     lead_match = re.match(r"(\s*)" + re.escape(new_style[0]), seg) if new_style != ("", "") else None
+                    trailing_ws = ""
+                    for char in reversed(pending_text):
+                        if char.isspace():
+                            trailing_ws = char + trailing_ws
+                        else:
+                            break
+                    pending_without_ws = pending_text if not trailing_ws else pending_text[: -len(trailing_ws)]
                     if (
                         new_style == current_style
                         and current_style != ("", "")
-                        and pending_text.endswith(current_style[1])
+                        and pending_without_ws.endswith(current_style[1])
                         and lead_match is not None
                     ):
                         pending_text = (
-                            pending_text[: -len(current_style[1])] + lead_match.group(1) + seg[lead_match.end() :]
+                            pending_without_ws[: -len(current_style[1])]
+                            + trailing_ws
+                            + lead_match.group(1)
+                            + seg[lead_match.end() :]
                         )
                     else:
                         pending_text += seg
