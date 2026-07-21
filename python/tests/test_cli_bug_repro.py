@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import docx
@@ -65,3 +66,46 @@ def test_manual_page_breaks_outline(tmp_path):
         expected_page = i + 1
         assert node.text == f"Heading on Page {expected_page}"
         assert node.page == expected_page, f"Expected {node.text} to be on page {expected_page}, got page {node.page}"
+
+
+def run_cli(args, capsys):
+    """Invoke the CLI in-process; returns (exit_code, stdout, stderr)."""
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    code = 0
+    with patch.object(sys, "argv", ["adeu"] + [str(a) for a in args]):
+        try:
+            main()
+        except SystemExit as e:
+            code = e.code or 0
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_cli_apply_large_document_major_deletions(tmp_path, capsys):
+    # 1. Create the original document with 100 sections
+    doc_path = tmp_path / "large_bug.docx"
+    doc = docx.Document()
+    for i in range(1, 101):
+        doc.add_heading(f"Section {i}", level=2)
+        doc.add_paragraph(f"This is the body paragraph for section {i}. " * 15)
+        if i % 10 == 0:
+            doc.add_paragraph("Some special marker for search in section " + str(i))
+    doc.save(str(doc_path))
+
+    # 2. Create the truncated modified text file
+    txt_path = tmp_path / "large_truncated_bug.txt"
+    content = f"> **File Path:** {doc_path.name}\n\n# Large Document Test\n\nOnly Section 1 is here."
+    txt_path.write_text(content, encoding="utf-8")
+
+    # 3. Execute apply command
+    out_path = tmp_path / "large_applied_bug.docx"
+    code, stdout, stderr = run_cli(
+        ["apply", str(doc_path), str(txt_path), "-o", str(out_path), "--allow-major-deletions"], capsys
+    )
+
+    # The regression test asserts that the bug is fixed and it completes successfully
+    assert code == 0, f"apply failed with code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+    assert out_path.exists(), "Output file was not generated."

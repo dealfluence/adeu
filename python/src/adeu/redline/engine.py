@@ -3572,6 +3572,15 @@ class RedlineEngine:
             virtual_spans = active_mapper.get_virtual_spans_in_range(start_idx, length)
 
         if not target_runs and not virtual_spans:
+            affected_spans = [s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + length]
+            if affected_spans and all(
+                s.run is None and s.text != "\n\n" and not getattr(s, "is_image_marker", False) for s in affected_spans
+            ):
+                logger.debug(
+                    f"Applied virtual no-op edit targeting purely virtual projection text: {repr(edit.target_text)}"
+                )
+                edit._applied_status = True
+                return True
             return False
 
         affected_ps = set()
