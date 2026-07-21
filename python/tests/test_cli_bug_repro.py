@@ -373,3 +373,55 @@ def test_cli_init_success_logs_stream_routing(tmp_path, capsys):
 
     # Assert that stderr is completely empty for successful run
     assert stderr_output == ""
+
+
+def test_start_of_run_insertion_alignment_repro(tmp_path, capsys):
+    """
+    Test that modifying the start of a styled run correctly places the insertion
+    at the start of the run (before the target text) instead of at the end of the run.
+    """
+    import json
+
+    docx_path = tmp_path / "simple.docx"
+    edits_path = tmp_path / "edits_modify.json"
+    out_path = tmp_path / "simple_edited.docx"
+
+    # 1. Create a pristine document simple.docx with some bold and italic text
+    doc = Document()
+    p = doc.add_paragraph("This is a simple paragraph with some plain text.")
+    p.add_run(" Bold text.").bold = True
+    p.add_run(" Italic text.").italic = True
+    doc.save(docx_path)
+
+    # 2. Create a JSON edit that prepends text to the bold section
+    edits = [{"type": "modify", "target_text": "Bold text.", "new_text": "Super Bold text."}]
+    with open(edits_path, "w", encoding="utf-8") as f:
+        json.dump(edits, f)
+
+    # 3. Apply the edit to a new document
+    rc_apply = _run_cli(["apply", str(docx_path), str(edits_path), "-o", str(out_path)])
+    assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply}"
+    assert out_path.exists(), "Applied output docx was not written"
+
+    # Clear capsys captured buffers
+    capsys.readouterr()
+
+    # 4. Extract the clean text output of the edited document
+    rc_extract = _run_cli(["extract", "--clean-view", str(out_path)])
+    assert rc_extract == 0, "CLI extract failed"
+
+    captured = capsys.readouterr()
+    stdout_output = captured.out
+
+    # Under the bug, the output contains:
+    # "This is a simple paragraph with some plain text. Bold text.Super  Italic text."
+    # When fixed, it should be:
+    # "This is a simple paragraph with some plain text. Super Bold text. Italic text."
+
+    # Assert that the text is correctly prepended, and "Bold text.Super" is NOT present.
+    assert "Super Bold text." in stdout_output, (
+        f"The insertion was incorrectly placed. Captured output:\n{stdout_output}"
+    )
+    assert "Bold text.Super" not in stdout_output, (
+        "The inserted text was appended to the end of the run instead of prepended."
+    )

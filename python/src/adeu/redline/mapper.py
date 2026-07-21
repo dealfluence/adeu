@@ -1180,6 +1180,16 @@ class DocumentMapper:
         return working_runs
 
     def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Tuple[Optional[Run], Optional[Paragraph]]:
+        following_real = [s for s in self.spans if s.start == index and s.run is not None]
+        if following_real:
+            s_next = following_real[0]
+            next_run = s_next.run
+            if next_run is not None and s_next.run_offset > 0:
+                left, _ = self._split_run_at_index(next_run, s_next.run_offset)
+                if rebuild_map:
+                    self._build_map()
+                return left, s_next.paragraph
+
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
             for s in reversed(preceding):
