@@ -263,3 +263,63 @@ def test_mac_live_flag_help_warning(capsys):
                 f"The '--live' option help message in '{cmd_name}' must clearly state "
                 "that it is Windows-only on non-Windows platforms."
             )
+
+
+def test_detailed_report_table_modifications(tmp_path, capsys):
+    """
+    Test that the detailed report printed to sys.stderr by 'adeu apply'
+    displays clear table operation indications ('Inserted row:' and 'Deleted row')
+    for InsertTableRow and DeleteTableRow operations instead of misleading 'New text:' lines.
+    """
+    import json
+
+    docx_path = tmp_path / "doc_tables.docx"
+    edits_path = tmp_path / "edits_tables.json"
+    out_path = tmp_path / "doc_tables_applied.docx"
+
+    # 1. Create a document with a table
+    doc = Document()
+    doc.add_heading("Table Test", level=1)
+    table = doc.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "Row1 Col1"
+    table.cell(0, 1).text = "Row1 Col2"
+    table.cell(1, 0).text = "Row2 Col1"
+    table.cell(1, 1).text = "Row2 Col2"
+    table.cell(2, 0).text = "Row3 Col1"
+    table.cell(2, 1).text = "Row3 Col2"
+    doc.save(docx_path)
+
+    # 2. Define our structural table edits
+    edits = [
+        {
+            "type": "insert_row",
+            "target_text": "Row1 Col1 | Row1 Col2",
+            "position": "below",
+            "cells": ["NewRow Col1", "NewRow Col2"],
+        },
+        {"type": "delete_row", "target_text": "Row2 Col1"},
+    ]
+    with open(edits_path, "w", encoding="utf-8") as f:
+        json.dump(edits, f)
+
+    # 3. Run adeu apply CLI
+    rc = _run_cli(["apply", "-o", str(out_path), str(docx_path), str(edits_path)])
+    assert rc == 0
+
+    # 4. Capture stderr output
+    captured = capsys.readouterr()
+    err_output = captured.err
+
+    # Under the bug, it prints:
+    #   New text: 'NewRow Col1 | NewRow Col2'
+    # and
+    #   New text: ''
+    # When fixed, it should print:
+    #   Inserted row: 'NewRow Col1 | NewRow Col2'
+    # and
+    #   Deleted row
+    # without displaying "New text:" for these table operations.
+
+    assert "Inserted row: 'NewRow Col1 | NewRow Col2'" in err_output
+    assert "Deleted row" in err_output
+    assert "New text:" not in err_output

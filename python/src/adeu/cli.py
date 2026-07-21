@@ -1210,7 +1210,13 @@ def handle_apply(args):
                 status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
                 print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
                 print(f"  Target: '{report['target_text']}'", file=sys.stderr)
-                print(f"  New text: '{report['new_text']}'", file=sys.stderr)
+                edit_type = report.get("type", "modify")
+                if edit_type == "insert_row":
+                    print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
+                elif edit_type == "delete_row":
+                    print("  Deleted row", file=sys.stderr)
+                else:
+                    print(f"  New text: '{report['new_text']}'", file=sys.stderr)
                 if report.get("warning"):
                     print(f"  Warning: {report['warning']}", file=sys.stderr)
                 if report.get("error"):
