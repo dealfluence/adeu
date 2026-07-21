@@ -219,3 +219,47 @@ def test_silent_comment_deletion_on_accept(tmp_path):
     # Under the bug, the comment [Com:1] is deleted, so the next assertion fails.
     # When fixed, the comment is preserved, and the assertion passes.
     assert f"[{com_id}]" in text_applied, f"Comment {com_id} was silently deleted when accepting change {chg_id}"
+
+
+def test_mac_live_flag_help_warning(capsys):
+    """
+    Test that on non-Windows platforms (like macOS and Linux),
+    the help text for both 'extract' and 'apply' commands either hides the '--live' option
+    or clearly designates it as Windows-only.
+    """
+    import sys
+    from unittest.mock import patch
+
+    import pytest
+
+    from adeu.cli import main
+
+    if sys.platform == "win32":
+        pytest.skip("This check is for non-Windows platforms (macOS/Linux) where --live is unsupported.")
+
+    # 1. Check extract help
+    with patch.object(sys, "argv", ["adeu", "extract", "--help"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+
+    out_extract = capsys.readouterr().out
+
+    # 2. Check apply help
+    with patch.object(sys, "argv", ["adeu", "apply", "--help"]):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+
+    out_apply = capsys.readouterr().out
+
+    # Assert that '--live' is either not present or is labeled as Windows-only / Windows only
+    # Under the bug, '--live' is present but has no platform warning, so the assertion fails.
+    # When fixed, it should either be omitted or have an explicit "Windows-only" warning.
+    for cmd_name, out in [("extract", out_extract), ("apply", out_apply)]:
+        if "--live" in out:
+            # Option is exposed, so it must mention that it is Windows-only
+            assert "Windows-only" in out or "Windows only" in out, (
+                f"The '--live' option help message in '{cmd_name}' must clearly state "
+                "that it is Windows-only on non-Windows platforms."
+            )

@@ -1685,12 +1685,14 @@ def _main_impl():
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
+    live_help_prefix = "Windows-only: " if sys.platform != "win32" else ""
+
     p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
     p_extract.add_argument("input", type=Path, nargs="?", help="Input DOCX file (omit if --live)")
     p_extract.add_argument(
         "--live",
         action="store_true",
-        help="Extract text from live active Word document",
+        help=f"{live_help_prefix}Extract text from live active Word document",
     )
     p_extract.add_argument("-o", "--output", type=Path, help="Output file ('-' or omitted: stdout)")
     p_extract.add_argument(
@@ -1803,7 +1805,11 @@ def _main_impl():
     )
     p_apply.add_argument("original", type=Path, nargs="?", help="Original DOCX (omit if --live)")
     p_apply.add_argument("changes", type=Path, nargs="?", help="JSON edits file OR Modified Text file")
-    p_apply.add_argument("--live", action="store_true", help="Apply edits to live active Word document")
+    p_apply.add_argument(
+        "--live",
+        action="store_true",
+        help=f"{live_help_prefix}Apply edits to live active Word document",
+    )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
