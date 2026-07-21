@@ -472,3 +472,102 @@ Emojis: 🍕🌮🍣🍺🎈🎉🔥💧🌲🧠 ✨🌟
     # When fixed, it should succeed (return 0) and write out the file.
     assert rc_apply == 0, "adeu apply failed due to unicode character-to-byte offset drift"
     assert out_path.exists(), "Applied output docx was not written"
+
+
+def test_apply_trailing_newline_repro(tmp_path, capsys):
+    """
+    Test that adeu diff and adeu apply correctly handle an accidental trailing newline
+    appended to the extracted text file (e.g. by a standard text editor on save).
+    Under the bug, the diff engine computes the trailing newline as a substantive insertion/change
+    and reports/applies it.
+    When fixed, the diff engine should detect and strip trailing blank lines or trailing whitespace
+    from the plain text file, and should not compute or apply any edits, resulting in 0 changes.
+    """
+    docx_path = tmp_path / "initial.docx"
+    txt_path = tmp_path / "extracted.txt"
+    out_path = tmp_path / "result.docx"
+
+    # 1. Create original docx with a single paragraph
+    doc = Document()
+    doc.add_paragraph("This is the final paragraph of the draft.")
+    doc.save(docx_path)
+
+    # 2. Extract clean text using the CLI
+    rc_extract = _run_cli(["extract", "--clean-view", "--page", "all", str(docx_path), "-o", str(txt_path)])
+    assert rc_extract == 0, "CLI extract failed"
+    assert txt_path.exists(), "Extracted text file was not created"
+
+    # 3. Simulate a standard text editor save (adding a trailing newline)
+    orig_text = txt_path.read_text(encoding="utf-8")
+    txt_path.write_text(orig_text + "\n", encoding="utf-8")
+
+    # Clear capsys captured buffers
+    capsys.readouterr()
+
+    # 4. Run adeu diff CLI and assert that 0 changes are found
+    rc_diff = _run_cli(["diff", str(docx_path), str(txt_path)])
+    assert rc_diff == 0, f"adeu diff failed with exit code {rc_diff}"
+
+    captured_diff = capsys.readouterr()
+    assert "Found 0 changes" in captured_diff.err, (
+        f"Expected 0 changes to be found on diff, but got:\n{captured_diff.err}\n{captured_diff.out}"
+    )
+
+    # 5. Run adeu apply CLI and assert that 0 edits are applied
+    rc_apply = _run_cli(["apply", "-o", str(out_path), str(docx_path), str(txt_path)])
+    assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply}"
+
+    captured_apply = capsys.readouterr()
+    assert "Edits: 0 applied" in captured_apply.err, (
+        f"Expected 0 edits to be applied, but got:\n{captured_apply.err}\n{captured_apply.out}"
+    )
+
+
+def test_apply_trailing_newline_table_repro(tmp_path, capsys):
+    """
+    Test that adeu diff and adeu apply correctly handle an accidental trailing newline
+    appended to the extracted text file for a document ending with a table.
+    Under the bug, the diff engine computes the trailing newline as a substantive insertion/change
+    and reports/applies it inside the table cell.
+    When fixed, the diff engine should detect and strip trailing blank lines or trailing whitespace
+    from the plain text file, and should not compute or apply any edits, resulting in 0 changes.
+    """
+    docx_path = tmp_path / "initial_table.docx"
+    txt_path = tmp_path / "extracted_table.txt"
+    out_path = tmp_path / "result_table.docx"
+
+    # 1. Create original docx ending with a table
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Cell content"
+    doc.save(docx_path)
+
+    # 2. Extract clean text using the CLI
+    rc_extract = _run_cli(["extract", "--clean-view", "--page", "all", str(docx_path), "-o", str(txt_path)])
+    assert rc_extract == 0, "CLI extract failed"
+    assert txt_path.exists(), "Extracted text file was not created"
+
+    # 3. Simulate a standard text editor save (adding a trailing newline)
+    orig_text = txt_path.read_text(encoding="utf-8")
+    txt_path.write_text(orig_text + "\n", encoding="utf-8")
+
+    # Clear capsys captured buffers
+    capsys.readouterr()
+
+    # 4. Run adeu diff CLI and assert that 0 changes are found
+    rc_diff = _run_cli(["diff", str(docx_path), str(txt_path)])
+    assert rc_diff == 0, f"adeu diff failed with exit code {rc_diff}"
+
+    captured_diff = capsys.readouterr()
+    assert "Found 0 changes" in captured_diff.err, (
+        f"Expected 0 changes to be found on diff, but got:\n{captured_diff.err}\n{captured_diff.out}"
+    )
+
+    # 5. Run adeu apply CLI and assert that 0 edits are applied
+    rc_apply = _run_cli(["apply", "-o", str(out_path), str(docx_path), str(txt_path)])
+    assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply}"
+
+    captured_apply = capsys.readouterr()
+    assert "Edits: 0 applied" in captured_apply.err, (
+        f"Expected 0 edits to be applied, but got:\n{captured_apply.err}\n{captured_apply.out}"
+    )
