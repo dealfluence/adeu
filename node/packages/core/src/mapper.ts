@@ -348,10 +348,28 @@ export class DocumentMapper {
         // can resolve "write into this cell" even when the cell is empty
         // (pPr-only paragraph with no run).
         if (!this.clean_view && !this.original_view) {
-          const firstP = cell._element.getElementsByTagName("w:p")[0] as
+          let firstP = cell._element.getElementsByTagName("w:p")[0] as
             | Element
             | undefined;
-          const paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+          let paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+          const is_empty = current === cell_start;
+          if (!paraId && is_empty) {
+            if (!firstP) {
+              const xmlDoc = cell._element.ownerDocument!;
+              firstP = xmlDoc.createElement("w:p");
+              cell._element.appendChild(firstP);
+            }
+            const allPs = Array.from(cell._element.ownerDocument!.getElementsByTagName("w:p"));
+            const index = allPs.indexOf(firstP);
+            let hash = 2166136261;
+            const str = `fallback-paraId-${index}`;
+            for (let i = 0; i < str.length; i++) {
+              hash ^= str.charCodeAt(i);
+              hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+            }
+            paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
+            firstP.setAttribute("w14:paraId", paraId);
+          }
           if (paraId && firstP) {
             // Zero-width span bound to the empty cell paragraph: gives
             // get_insertion_anchor a paragraph to land on. Placed at the anchor
