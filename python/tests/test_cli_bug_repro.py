@@ -145,3 +145,77 @@ def test_apply_comment_reply_order_repro(tmp_path):
     # When fixed, it should succeed (return 0) and write out the file.
     assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply} due to strict action ordering constraint"
     assert out_path.exists(), "Applied output docx was not written"
+
+
+def test_silent_comment_deletion_on_accept(tmp_path):
+    """
+    Test that accepting a tracked change (e.g., an insertion or deletion)
+    successfully preserves any associated comment thread attached to that text block.
+
+    Under the bug, the accept action silently deletes the comment range anchors
+    from the main document body, causing quiet data loss. When fixed, accepting
+    the tracked change should promote/commit the text but keep the comments and
+    all of their existing replies.
+    """
+    import io
+    import json
+    import re
+
+    from adeu.ingest import extract_text_from_stream
+    from adeu.models import ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    docx_path = tmp_path / "original.docx"
+    updated_docx_path = tmp_path / "updated.docx"
+    batch_json_path = tmp_path / "batch.json"
+    out_path = tmp_path / "applied.docx"
+
+    # 1. Create a baseline docx file
+    doc = Document()
+    doc.add_paragraph("The quick brown fox jumps.")
+    doc.save(docx_path)
+
+    # 2. Add a tracked change + comment
+    with open(docx_path, "rb") as f:
+        stream = io.BytesIO(f.read())
+
+    engine = RedlineEngine(stream, author="Author1")
+    edit = ModifyText(target_text="fox", new_text="cat", comment="This is our critical comment thread context.")
+    engine.apply_edits([edit])
+
+    stream_mid = engine.save_to_stream()
+    with open(updated_docx_path, "wb") as f:
+        f.write(stream_mid.getbuffer())
+
+    # 3. Extract the comment ID and change ID to prepare our batch actions
+    text_mid = extract_text_from_stream(stream_mid)
+    com_match = re.search(r"\[Com:(\d+)\]", text_mid)
+    chg_match = re.search(r"\[Chg:(\d+)", text_mid)
+
+    assert com_match, "Comment ID not found in intermediate text"
+    assert chg_match, "Change ID not found in intermediate text"
+
+    com_id = f"Com:{com_match.group(1)}"
+    chg_id = f"Chg:{chg_match.group(1)}"
+
+    # 4. Construct a batch array containing only the accept action for the change
+    batch_data = [{"type": "accept", "target_id": chg_id}]
+    with open(batch_json_path, "w", encoding="utf-8") as f:
+        json.dump(batch_data, f)
+
+    # 5. Run the apply CLI command to apply this accept action
+    rc_apply = _run_cli(["apply", str(updated_docx_path), str(batch_json_path), "-o", str(out_path)])
+    assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply}"
+    assert out_path.exists(), "Applied output docx was not written"
+
+    # 6. Extract the text of the generated document and verify that the comment has been preserved
+    rc_extract = _run_cli(["extract", str(out_path)])
+    assert rc_extract == 0, "CLI extract failed"
+
+    with open(out_path, "rb") as f:
+        applied_stream = io.BytesIO(f.read())
+    text_applied = extract_text_from_stream(applied_stream)
+
+    # Under the bug, the comment [Com:1] is deleted, so the next assertion fails.
+    # When fixed, the comment is preserved, and the assertion passes.
+    assert f"[{com_id}]" in text_applied, f"Comment {com_id} was silently deleted when accepting change {chg_id}"
