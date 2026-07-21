@@ -6,7 +6,6 @@ from typing import Any, List, Optional, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -1254,17 +1253,9 @@ class DocumentMapper:
 
         run.text = left_text
         new_r_element = deepcopy(run._element)
-        t_list = new_r_element.findall(qn("w:t"))
-        for t in t_list:
-            new_r_element.remove(t)
-
-        new_t = OxmlElement("w:t")
-        new_t.text = right_text
-        if right_text.strip() != right_text:
-            new_t.set(qn("xml:space"), "preserve")
-        new_r_element.append(new_t)
         run._element.addnext(new_r_element)
         new_run = Run(new_r_element, run._parent)
+        new_run.text = right_text
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:

@@ -425,3 +425,50 @@ def test_start_of_run_insertion_alignment_repro(tmp_path, capsys):
     assert "Bold text.Super" not in stdout_output, (
         "The inserted text was appended to the end of the run instead of prepended."
     )
+
+
+def test_apply_unicode_character_offset_drift_repro(tmp_path):
+    """
+    Test that adeu apply successfully applies text-file edits to a document containing
+    multi-byte unicode characters (Chinese, Cyrillic, Japanese, Finnish, Emojis)
+    without character-to-byte offset drift that causes text corruption and fails
+    post-apply verification.
+    """
+    docx_path = tmp_path / "doc_unicode.docx"
+    txt_path = tmp_path / "modified_unicode.txt"
+    out_path = tmp_path / "unicode_applied.docx"
+
+    # 1. Create the unicode document
+    doc = Document()
+    doc.add_heading("Unicode and Internationalization Test", level=0)
+    p = doc.add_paragraph("This paragraph contains unicode characters from various languages:")
+    p.add_run("\nChinese (Simplified): 🚀 欢迎使用 Adeu 红线引擎！")
+    p.add_run("\nCyrillic (Russian): Быстрая бурая лиса прыгает через ленивую собаку.")
+    p.add_run("\nJapanese: 素早い茶色の狐が怠惰な犬を飛び越えます。")
+    p.add_run("\nFinnish: Vihreä kissa käveli liukkaalla jäällä ja lauloi iloisesti.")
+    p.add_run("\nEmojis: 🍕🌮🍣🍺🎈🎉🔥💧🌲🧠")
+    doc.save(docx_path)
+
+    # 2. Create the modified text file
+    modified_content = f"""> **File Path:** `{docx_path.name}`
+
+# Unicode and Internationalization Test
+
+This paragraph contains unicode characters from various languages:
+Chinese (Simplified): 🚀 欢迎使用 Adeu 红线引擎！ 🎉 (Wow!)
+Cyrillic (Russian): Быстрая бурая лиса прыгает через ленивую собаку.
+Japanese: 素早い茶色の狐が怠惰な犬を飛び越えます。
+Finnish: Keltainen kissa käveli liukkaalla jäällä ja lauloi iloisesti.
+Emojis: 🍕🌮🍣🍺🎈🎉🔥💧🌲🧠 ✨🌟
+"""
+
+    txt_path.write_text(modified_content, encoding="utf-8")
+
+    # 3. Run adeu apply CLI
+    rc_apply = _run_cli(["apply", str(docx_path), str(txt_path), "-o", str(out_path)])
+
+    # Under the bug, apply fails (returns exit code 1) because of character/byte offset drift
+    # which leads to verification mismatch.
+    # When fixed, it should succeed (return 0) and write out the file.
+    assert rc_apply == 0, "adeu apply failed due to unicode character-to-byte offset drift"
+    assert out_path.exists(), "Applied output docx was not written"
