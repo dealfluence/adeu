@@ -870,7 +870,10 @@ def get_run_text(run: Run) -> str:
         elif child.tag == QN_W_TAB:
             text += " "  # Convert tab to space
         elif child.tag == QN_W_BR:
-            text += "\n"
+            if child.get(qn("w:type")) == "page":
+                text += '<w:br w:type="page"/>'
+            else:
+                text += "\n"
         elif child.tag == QN_W_CR:
             text += "\n"
     return text
