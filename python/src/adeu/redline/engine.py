@@ -4082,11 +4082,13 @@ class RedlineEngine:
 
         return applied, skipped, already_resolved
 
-    def _clean_wrapping_comments(self, element):
+    def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
         """
         Removes comment anchors that tightly wrap this element (or a paired del/ins).
         This prevents orphaned comment ranges from leaking when an edit is accepted/rejected.
         """
+        if preserve_comments:
+            return
         first_node = element
         while True:
             prev = first_node.getprevious()
@@ -4193,7 +4195,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=True)
             parent = ins.getparent()
             if parent is None:
                 continue
@@ -4209,7 +4211,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=False)
             self._delete_comments_in_element(d)
             parent = d.getparent()
             if parent is not None:
@@ -4241,7 +4243,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=False)
             self._delete_comments_in_element(ins)
             parent = ins.getparent()
             if parent is None:
@@ -4275,7 +4277,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=True)
             parent = d.getparent()
             if parent is None:
                 continue
@@ -4370,7 +4372,7 @@ class RedlineEngine:
 
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=True)
                 parent = ins.getparent()
                 if parent is None:
                     continue
@@ -4412,13 +4414,13 @@ class RedlineEngine:
                         if has_content:
                             rPr.remove(del_mark)
                         else:
-                            self._clean_wrapping_comments(p)
+                            self._clean_wrapping_comments(p, preserve_comments=False)
                             self._delete_comments_in_element(p)
                             if p.getparent() is not None:
                                 p.getparent().remove(p)
 
             for d in root_element.findall(f".//{qn('w:del')}"):
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=False)
                 self._delete_comments_in_element(d)
                 parent = d.getparent()
                 if parent is not None:
@@ -4547,7 +4549,7 @@ class RedlineEngine:
                 parent = ins.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=False)
                 self._delete_comments_in_element(ins)
                 if parent.tag == qn("w:trPr"):
                     row = parent.getparent()
@@ -4571,7 +4573,7 @@ class RedlineEngine:
                 parent = d.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=True)
                 if parent.tag == qn("w:trPr"):
                     parent.remove(d)
                     continue
