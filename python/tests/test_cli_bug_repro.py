@@ -323,3 +323,53 @@ def test_detailed_report_table_modifications(tmp_path, capsys):
     assert "Inserted row: 'NewRow Col1 | NewRow Col2'" in err_output
     assert "Deleted row" in err_output
     assert "New text:" not in err_output
+
+
+def test_cli_init_success_logs_stream_routing(tmp_path, capsys):
+    """
+    Test that successful configuration logs of the 'init' command
+    are routed to stdout, and stderr remains completely empty.
+    """
+    from unittest.mock import patch
+
+    mock_config_dir = tmp_path / "Claude"
+    mock_config_dir.mkdir()
+    mock_config_path = mock_config_dir / "claude_desktop_config.json"
+
+    # --- Case 1: Fresh Installation ---
+    with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
+        with patch("adeu.cli.shutil.which", return_value="/usr/local/bin/uvx"):
+            rc = _run_cli(["init", "--scope", "docx"])
+            assert rc == 0
+
+    captured = capsys.readouterr()
+    stdout_output = captured.out
+    stderr_output = captured.err
+
+    # Assert that all successful setup logs are in stdout
+    assert "🤖 Adeu Agentic Setup" in stdout_output
+    assert "Config will be created" in stdout_output or "Config found" in stdout_output
+    assert "Found uvx at: /usr/local/bin/uvx" in stdout_output
+    assert "✅ Adeu successfully configured in Claude Desktop." in stdout_output
+
+    # Assert that stderr is completely empty for successful run
+    assert stderr_output == ""
+
+    # --- Case 2: Already Configured (No-op) ---
+    # Re-running the CLI command with unchanged configuration should trigger the no-op path.
+    with patch("adeu.cli._get_claude_config_path", return_value=mock_config_path):
+        with patch("adeu.cli.shutil.which", return_value="/usr/local/bin/uvx"):
+            rc = _run_cli(["init", "--scope", "docx"])
+            assert rc == 0
+
+    captured = capsys.readouterr()
+    stdout_output = captured.out
+    stderr_output = captured.err
+
+    assert "🤖 Adeu Agentic Setup" in stdout_output
+    assert "Config found" in stdout_output
+    assert "Found uvx at: /usr/local/bin/uvx" in stdout_output
+    assert "✅ Adeu is already configured — config unchanged, no backup needed." in stdout_output
+
+    # Assert that stderr is completely empty for successful run
+    assert stderr_output == ""
