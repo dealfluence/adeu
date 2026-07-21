@@ -44,7 +44,7 @@ def handle_init(args: argparse.Namespace):
     3. Backs up existing config.
     4. Injects MCP server entry.
     """
-    print("🤖 Adeu Agentic Setup", file=sys.stderr)
+    print("🤖 Adeu Agentic Setup")
 
     try:
         config_path = _get_claude_config_path()
@@ -53,9 +53,9 @@ def handle_init(args: argparse.Namespace):
         sys.exit(1)
 
     if config_path.exists():
-        print(f"📍 Config found: {config_path}", file=sys.stderr)
+        print(f"📍 Config found: {config_path}")
     else:
-        print(f"📍 Config will be created: {config_path}", file=sys.stderr)
+        print(f"📍 Config will be created: {config_path}")
 
     data: Dict[str, Any] = {"mcpServers": {}}
     existing_valid_json = True
@@ -67,7 +67,7 @@ def handle_init(args: argparse.Namespace):
                     data = json.loads(content)
         except json.JSONDecodeError:
             existing_valid_json = False
-            print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
+            print("⚠️  Existing config was invalid JSON. Starting fresh.")
 
     mcp_servers = data.setdefault("mcpServers", {})
 
@@ -90,9 +90,9 @@ def handle_init(args: argparse.Namespace):
                 file=sys.stderr,
             )
             sys.exit(1)
-        print("🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
-        print(f"   - CWD: {cwd}", file=sys.stderr)
-        print(f"   - Python: {python_exe}", file=sys.stderr)
+        print("🔧 Configuring in LOCAL DEV mode.")
+        print(f"   - CWD: {cwd}")
+        print(f"   - Python: {python_exe}")
 
         mcp_servers["adeu"] = {
             "command": python_exe,
@@ -115,7 +115,7 @@ def handle_init(args: argparse.Namespace):
             )
             sys.exit(1)
 
-        print(f"🔍 Found uvx at: {uvx_path}", file=sys.stderr)
+        print(f"🔍 Found uvx at: {uvx_path}")
 
         # Pin the package to the version doing the configuring: an unpinned
         # "--from adeu" makes every Claude Desktop launch resolve the latest
@@ -144,20 +144,20 @@ def handle_init(args: argparse.Namespace):
             except json.JSONDecodeError:
                 unchanged = False
             if unchanged:
-                print("✅ Adeu is already configured — config unchanged, no backup needed.", file=sys.stderr)
+                print("✅ Adeu is already configured — config unchanged, no backup needed.")
                 return
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
         shutil.copy2(config_path, backup_path)
-        print(f"📦 Backup created: {backup_path.name}", file=sys.stderr)
+        print(f"📦 Backup created: {backup_path.name}")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
-    print("✅ Adeu successfully configured in Claude Desktop.", file=sys.stderr)
-    print("   Please restart Claude to load the new toolset.", file=sys.stderr)
+    print("✅ Adeu successfully configured in Claude Desktop.")
+    print("   Please restart Claude to load the new toolset.")
 
 
 # When True (set per-invocation from a subcommand's --json flag), every fatal

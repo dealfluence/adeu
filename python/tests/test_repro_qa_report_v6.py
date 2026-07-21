@@ -826,14 +826,14 @@ class TestLowSeverityContracts:
         monkeypatch.setattr(cli_mod, "_get_claude_config_path", lambda: config)
         monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/uvx")
 
-        code, _, err = run_cli(["init"], capsys)
+        code, out, err = run_cli(["init"], capsys)
         assert code == 0
-        assert "Config will be created" in err
-        assert "Config found" not in err
+        assert "Config will be created" in out
+        assert "Config found" not in out
 
-        code, _, err = run_cli(["init"], capsys)
+        code, out, err = run_cli(["init"], capsys)
         assert code == 0
-        assert "Config found" in err
+        assert "Config found" in out
 
 
 # ---------------------------------------------------------------------------

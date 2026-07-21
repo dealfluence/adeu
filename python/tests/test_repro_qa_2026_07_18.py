@@ -1138,7 +1138,7 @@ class TestLowSeverity:
         assert code == 0, err
         baks = list(cfg_dir.glob("*.bak"))
         assert len(baks) == 0, "re-running init with no changes must not create backups"
-        assert "unchanged" in err.lower() or "already" in err.lower()
+        assert "unchanged" in out.lower() or "already" in out.lower()
 
     def test_l6_init_local_refuses_non_source_directory(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
