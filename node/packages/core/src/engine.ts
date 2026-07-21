@@ -1409,6 +1409,28 @@ export class RedlineEngine {
    *
    * Does NOT attach comments; callers handle that.
    */
+  private _clone_pPr_scrubbing_headings(existing_pPr: Element): Element {
+    const pPr_clone = existing_pPr.cloneNode(true) as Element;
+    const pStyle_el = findChild(pPr_clone, "w:pStyle");
+    if (pStyle_el) {
+      const style_val = pStyle_el.getAttribute("w:val");
+      if (style_val) {
+        const is_heading =
+          style_val.startsWith("Heading") ||
+          style_val === "Title" ||
+          style_val.replace(/\s+/g, "").startsWith("Heading");
+        if (is_heading) {
+          pPr_clone.removeChild(pStyle_el);
+        }
+      }
+    }
+    const outlineLvl_el = findChild(pPr_clone, "w:outlineLvl");
+    if (outlineLvl_el) {
+      pPr_clone.removeChild(outlineLvl_el);
+    }
+    return pPr_clone;
+  }
+
   private _track_insert_multiline(
     text: string,
     anchor_run: Run | null,
@@ -1613,7 +1635,7 @@ export class RedlineEngine {
         // Inherit pPr from the anchor paragraph (preserves list numbering).
         const existing_pPr = findChild(current_p, "w:pPr");
         if (existing_pPr) {
-          new_p.appendChild(existing_pPr.cloneNode(true));
+          new_p.appendChild(this._clone_pPr_scrubbing_headings(existing_pPr));
         }
       }
 
@@ -2540,10 +2562,15 @@ export class RedlineEngine {
     length: number,
   ): number | null {
     for (const s of mapper.spans) {
-      if (s.run === null || s.end <= start || s.start >= start + length) {
+      if (s.end <= start || s.start >= start + length) {
         continue;
       }
-      let curr: Node | null = s.run._element;
+      let curr: Node | null = null;
+      if (s.run !== null) {
+        curr = s.run._element;
+      } else if (s.paragraph !== null) {
+        curr = s.paragraph._element;
+      }
       while (curr) {
         if (curr.nodeType === 1 && (curr as Element).tagName === "w:tr") {
           return findAllDescendants(curr as Element, "w:tc").filter(
@@ -2866,6 +2893,7 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
@@ -2881,6 +2909,7 @@ export class RedlineEngine {
             const previews = this._build_edit_context_previews(edit);
             reports_by_input[i] = {
               status: "applied",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: null,
@@ -2905,6 +2934,7 @@ export class RedlineEngine {
             );
             reports_by_input[i] = {
               status: "failed",
+              type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               warning: warning,
@@ -2927,6 +2957,7 @@ export class RedlineEngine {
             if (report.status === "applied") {
               reports_by_input[i] = {
                 status: "failed",
+                type: report.type || "modify",
                 target_text: report.target_text,
                 new_text: report.new_text,
                 warning: null,
@@ -3003,6 +3034,7 @@ export class RedlineEngine {
           }
           edits_reports.push({
             status: success ? "applied" : "failed",
+            type: (edit as any).type || "modify",
             target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
             new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
             warning: warning,
@@ -3471,8 +3503,22 @@ export class RedlineEngine {
     let already_resolved = 0;
     const resolved_history = new Map<string, string>(); // id -> resolving action type
 
-    for (let pos = 0; pos < actions.length; pos++) {
-      const action = actions[pos];
+    // Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+    // followed by destructive structural operations (AcceptChange, RejectChange).
+    // Stable sort preserves the original relative ordering, and we preserve `pos`
+    // so diagnostic messages refer to the original array indexes.
+    const sortedActions = actions
+      .map((action, pos) => ({ action, pos }))
+      .sort((a, b) => {
+        const aPri = a.action.type === "reply" ? 0 : 1;
+        const bPri = b.action.type === "reply" ? 0 : 1;
+        if (aPri !== bPri) {
+          return aPri - bPri;
+        }
+        return a.pos - b.pos;
+      });
+
+    for (const { action, pos } of sortedActions) {
       const type = action.type;
       if (type === "reply") {
         const cid = action.target_id.replace("Com:", "");
@@ -4416,7 +4462,9 @@ export class RedlineEngine {
             this._set_paragraph_style(new_p, style_name);
           } else {
             const existing_pPr = findChild(_bug233_target_para, "w:pPr");
-            if (existing_pPr) new_p.appendChild(existing_pPr.cloneNode(true));
+            if (existing_pPr) {
+              new_p.appendChild(this._clone_pPr_scrubbing_headings(existing_pPr));
+            }
           }
           let pPr = findChild(new_p, "w:pPr");
           if (!pPr) {

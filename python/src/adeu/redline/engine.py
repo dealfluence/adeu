@@ -878,7 +878,21 @@ class RedlineEngine:
                 if s_name:
                     self._set_paragraph_style(new_p, s_name)
                 elif current_p.pPr is not None:
-                    new_p.append(deepcopy(current_p.pPr))
+                    pPr_clone = deepcopy(current_p.pPr)
+                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
+                    if pStyle_el is not None:
+                        style_val = pStyle_el.get(qn("w:val"))
+                        is_heading = (
+                            style_val.startswith("Heading")
+                            or style_val == "Title"
+                            or style_val.replace(" ", "").startswith("Heading")
+                        )
+                        if style_val and is_heading:
+                            pPr_clone.remove(pStyle_el)
+                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
+                    if outlineLvl_el is not None:
+                        pPr_clone.remove(outlineLvl_el)
+                    new_p.append(pPr_clone)
 
                 # Track the paragraph break itself as an insertion
                 pPr = new_p.find(qn("w:pPr"))
@@ -1087,6 +1101,19 @@ class RedlineEngine:
                     self._set_paragraph_style(new_p, style_name)
                 elif current_p.pPr is not None:
                     pPr_clone = deepcopy(current_p.pPr)
+                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
+                    if pStyle_el is not None:
+                        style_val = pStyle_el.get(qn("w:val"))
+                        is_heading = (
+                            style_val.startswith("Heading")
+                            or style_val == "Title"
+                            or style_val.replace(" ", "").startswith("Heading")
+                        )
+                        if style_val and is_heading:
+                            pPr_clone.remove(pStyle_el)
+                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
+                    if outlineLvl_el is not None:
+                        pPr_clone.remove(outlineLvl_el)
                     if list_level is not None:
                         numPr = pPr_clone.find(qn("w:numPr"))
                         if numPr is not None:
@@ -1940,9 +1967,14 @@ class RedlineEngine:
         inside a table row.
         """
         for s in mapper.spans:
-            if s.run is None or s.end <= start or s.start >= start + length:
+            if s.end <= start or s.start >= start + length:
                 continue
-            curr = s.run._element
+            curr = None
+            if s.run is not None:
+                curr = s.run._element
+            elif s.paragraph is not None:
+                curr = s.paragraph._element
+
             while curr is not None:
                 if curr.tag == qn("w:tr"):
                     return len(curr.findall(qn("w:tc")))
@@ -2020,6 +2052,7 @@ class RedlineEngine:
             warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
         return {
             "status": "applied" if success else "failed",
+            "type": getattr(edit, "type", "modify"),
             # Echoes of caller-supplied values are bounded so an oversized edit
             # cannot balloon the report/JSON output (QA C2).
             "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
@@ -2148,6 +2181,7 @@ class RedlineEngine:
                     skipped_edits += 1
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
                         "warning": None,
@@ -2191,6 +2225,7 @@ class RedlineEngine:
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
                         "warning": warning,
@@ -2222,6 +2257,7 @@ class RedlineEngine:
                         continue
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": report.get("type", "modify"),
                         "target_text": report["target_text"],
                         "new_text": report["new_text"],
                         "warning": None,
@@ -2511,17 +2547,36 @@ class RedlineEngine:
         # resolved in: a clean-view offset applied to the raw mapper points
         # at earlier text once tracked changes exist.
         active_mapper = edit._active_mapper_ref or self.mapper
-        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
-        if not target_runs:
-            return False
 
+        target_spans = [
+            s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + len(edit.target_text)
+        ]
         row_el = None
-        curr = target_runs[0]._element
-        while curr is not None:
-            if curr.tag == qn("w:tr"):
-                row_el = curr
-                break
-            curr = curr.getparent()
+        if target_spans:
+            # 1. Prefer real runs
+            for s in target_spans:
+                if s.run is not None:
+                    curr = s.run._element
+                    while curr is not None:
+                        if curr.tag == qn("w:tr"):
+                            row_el = curr
+                            break
+                        curr = curr.getparent()
+                    if row_el is not None:
+                        break
+
+            # 2. Fall back to paragraphs (handles virtual empty-cell anchors)
+            if row_el is None:
+                for s in target_spans:
+                    if s.paragraph is not None:
+                        curr = s.paragraph._element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                row_el = curr
+                                break
+                            curr = curr.getparent()
+                        if row_el is not None:
+                            break
 
         if row_el is None:
             return False
@@ -2570,17 +2625,36 @@ class RedlineEngine:
 
         # Same coordinate-space rule as _apply_insert_row.
         active_mapper = edit._active_mapper_ref or self.mapper
-        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
-        if not target_runs:
-            return False
 
+        target_spans = [
+            s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + len(edit.target_text)
+        ]
         row_el = None
-        curr = target_runs[0]._element
-        while curr is not None:
-            if curr.tag == qn("w:tr"):
-                row_el = curr
-                break
-            curr = curr.getparent()
+        if target_spans:
+            # 1. Prefer real runs
+            for s in target_spans:
+                if s.run is not None:
+                    curr = s.run._element
+                    while curr is not None:
+                        if curr.tag == qn("w:tr"):
+                            row_el = curr
+                            break
+                        curr = curr.getparent()
+                    if row_el is not None:
+                        break
+
+            # 2. Fall back to paragraphs
+            if row_el is None:
+                for s in target_spans:
+                    if s.paragraph is not None:
+                        curr = s.paragraph._element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                row_el = curr
+                                break
+                            curr = curr.getparent()
+                        if row_el is not None:
+                            break
 
         if row_el is None:
             return False
@@ -2591,6 +2665,61 @@ class RedlineEngine:
         trPr.append(del_el)
 
         return True
+
+    def _is_row_fully_deleted(self, row_el, start_idx: int, length: int, active_mapper) -> bool:
+        # Find all active runs currently under row_el
+        active_runs = []
+        for r_el in row_el.findall(".//" + qn("w:r")):
+            parent = r_el.getparent()
+            is_deleted = False
+            while parent is not None and parent != row_el:
+                if parent.tag == qn("w:del"):
+                    is_deleted = True
+                    break
+                parent = parent.getparent()
+            if not is_deleted:
+                active_runs.append(r_el)
+
+        # If there are still active runs, the row is not fully deleted
+        if active_runs:
+            return False
+
+        # Since row_el was collected in seen_rows, we know it was targeted.
+        return True
+
+    def _mark_fully_deleted_rows_in_range(
+        self, del_elems, virtual_spans, start_idx: int, length: int, active_mapper, del_id: Optional[str]
+    ) -> None:
+        seen_rows = set()
+        for del_elem in del_elems:
+            curr = del_elem
+            row_el = None
+            while curr is not None:
+                if curr.tag == qn("w:tr"):
+                    row_el = curr
+                    break
+                curr = curr.getparent()
+            if row_el is not None and row_el not in seen_rows:
+                seen_rows.add(row_el)
+
+        for span in virtual_spans:
+            if span.paragraph:
+                curr = span.paragraph._element
+                row_el = None
+                while curr is not None:
+                    if curr.tag == qn("w:tr"):
+                        row_el = curr
+                        break
+                    curr = curr.getparent()
+                if row_el is not None and row_el not in seen_rows:
+                    seen_rows.add(row_el)
+
+        for row_el in seen_rows:
+            if self._is_row_fully_deleted(row_el, start_idx, length, active_mapper):
+                trPr = row_el.get_or_add_trPr()
+                if trPr.find(qn("w:del")) is None:
+                    del_el = self._create_track_change_tag("w:del", reuse_id=del_id)
+                    trPr.append(del_el)
 
     def _maybe_paragraph_replace(
         self,
@@ -2729,6 +2858,23 @@ class RedlineEngine:
         for start_idx, match_len in live_matches:
             actual_doc_text = active_mapper.full_text[start_idx : start_idx + match_len]
             current_effective_new_text = edit.new_text or ""
+
+            if re.match(r"^\{#cell:[^}]+\}$", actual_doc_text.strip()):
+                ins_text = current_effective_new_text
+                ins_text = ins_text.replace(actual_doc_text.strip(), "")
+                if ins_text:
+                    sub_mt = ModifyText(type="modify", target_text="", new_text=ins_text, comment=edit.comment)
+                    sub_mt._match_start_index = start_idx
+                    sub_mt._internal_op = "INSERTION"
+                    sub_mt._active_mapper_ref = active_mapper
+                    all_sub_edits.append(sub_mt)
+                elif edit.comment:
+                    sub_mt = ModifyText(type="modify", target_text="", new_text="", comment=edit.comment)
+                    sub_mt._match_start_index = start_idx
+                    sub_mt._internal_op = "COMMENT_ONLY"
+                    sub_mt._active_mapper_ref = active_mapper
+                    all_sub_edits.append(sub_mt)
+                continue
 
             if is_regex and current_effective_new_text:
                 try:
@@ -3436,11 +3582,16 @@ class RedlineEngine:
         if op == EditOperationType.DELETION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if edit.comment and first_del_element is not None and last_del_element is not None:
                 # The deletions may be nested inside a foreign author's <w:ins>;
@@ -3469,11 +3620,16 @@ class RedlineEngine:
         elif op == EditOperationType.MODIFICATION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if first_del_element is not None and last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
@@ -3851,7 +4007,13 @@ class RedlineEngine:
         already_resolved = 0
         resolved_history: dict = {}  # revision id -> action type that resolved it
 
-        for pos, act in enumerate(actions):
+        # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+        # followed by destructive structural operations (AcceptChange, RejectChange).
+        # Stable sort preserves the original relative ordering, and we preserve `pos`
+        # so diagnostic messages refer to the original array indexes.
+        sorted_actions = sorted(enumerate(actions), key=lambda x: 0 if isinstance(x[1], ReplyComment) else 1)
+
+        for pos, act in sorted_actions:
             raw_id = act.target_id
             target_id = raw_id
 
@@ -3924,11 +4086,13 @@ class RedlineEngine:
 
         return applied, skipped, already_resolved
 
-    def _clean_wrapping_comments(self, element):
+    def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
         """
         Removes comment anchors that tightly wrap this element (or a paired del/ins).
         This prevents orphaned comment ranges from leaking when an edit is accepted/rejected.
         """
+        if preserve_comments:
+            return
         first_node = element
         while True:
             prev = first_node.getprevious()
@@ -4035,7 +4199,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=True)
             parent = ins.getparent()
             if parent is None:
                 continue
@@ -4051,7 +4215,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=False)
             self._delete_comments_in_element(d)
             parent = d.getparent()
             if parent is not None:
@@ -4083,7 +4247,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=False)
             self._delete_comments_in_element(ins)
             parent = ins.getparent()
             if parent is None:
@@ -4117,7 +4281,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=True)
             parent = d.getparent()
             if parent is None:
                 continue
@@ -4212,7 +4376,7 @@ class RedlineEngine:
 
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=True)
                 parent = ins.getparent()
                 if parent is None:
                     continue
@@ -4254,13 +4418,13 @@ class RedlineEngine:
                         if has_content:
                             rPr.remove(del_mark)
                         else:
-                            self._clean_wrapping_comments(p)
+                            self._clean_wrapping_comments(p, preserve_comments=False)
                             self._delete_comments_in_element(p)
                             if p.getparent() is not None:
                                 p.getparent().remove(p)
 
             for d in root_element.findall(f".//{qn('w:del')}"):
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=False)
                 self._delete_comments_in_element(d)
                 parent = d.getparent()
                 if parent is not None:
@@ -4389,7 +4553,7 @@ class RedlineEngine:
                 parent = ins.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=False)
                 self._delete_comments_in_element(ins)
                 if parent.tag == qn("w:trPr"):
                     row = parent.getparent()
@@ -4413,7 +4577,7 @@ class RedlineEngine:
                 parent = d.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=True)
                 if parent.tag == qn("w:trPr"):
                     parent.remove(d)
                     continue

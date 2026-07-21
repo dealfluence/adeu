@@ -1122,6 +1122,12 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
     """
     import difflib
 
+    # Normalize trailing whitespace/newlines in modified_text to match original_text
+    orig_stripped = original_text.rstrip()
+    orig_ws = original_text[len(orig_stripped) :]
+    mod_stripped = modified_text.rstrip()
+    modified_text = mod_stripped + orig_ws
+
     orig_paragraphs = original_text.split("\n\n")
     mod_paragraphs = modified_text.split("\n\n")
 

@@ -48,11 +48,6 @@ class SanitizeReport:
             lower = line.lower()
             if any(k in lower for k in ["tracked change", "insertion", "deletion", "accepted"]):
                 self.change_lines.append(line)
-            elif any(k in lower for k in ["comment", "[open]", "[resolved]"]):
-                if "kept" in lower or "visible" in lower:
-                    self.kept_comment_lines.append(line)
-                else:
-                    self.removed_comment_lines.append(line)
             elif any(
                 k in lower
                 for k in [
@@ -72,9 +67,15 @@ class SanitizeReport:
                     "last modified by",
                     "revision count",
                     "last printed",
+                    "description/comments",
                 ]
             ):
                 self.metadata_lines.append(line)
+            elif any(k in lower for k in ["comment", "[open]", "[resolved]"]):
+                if "kept" in lower or "visible" in lower:
+                    self.kept_comment_lines.append(line)
+                else:
+                    self.removed_comment_lines.append(line)
             elif any(k in lower for k in ["hyperlink", "warning"]):
                 self.warnings.append(line)
             else:

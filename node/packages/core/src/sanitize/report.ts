@@ -31,21 +31,22 @@ export class SanitizeReport {
       const lower = line.toLowerCase();
       if (lower.includes("tracked change") || lower.includes("insertion") || lower.includes("deletion") || lower.includes("accepted")) {
         this.change_lines.push(line);
-      } else if (lower.includes("comment") || lower.includes("[open]") || lower.includes("[resolved]")) {
-        if (lower.includes("kept") || lower.includes("visible")) {
-          this.kept_comment_lines.push(line);
-        } else {
-          this.removed_comment_lines.push(line);
-        }
       } else if (
         lower.includes("author") || lower.includes("template") || lower.includes("company") ||
         lower.includes("manager") || lower.includes("metadata") || lower.includes("timestamp") ||
         lower.includes("custom xml") || lower.includes("custom propert") || lower.includes("identifier") ||
         lower.includes("document variable") ||
         lower.includes("language") || lower.includes("version") ||
-        lower.includes("last modified by") || lower.includes("revision count") || lower.includes("last printed")
+        lower.includes("last modified by") || lower.includes("revision count") || lower.includes("last printed") ||
+        lower.includes("description/comments")
       ) {
         this.metadata_lines.push(line);
+      } else if (lower.includes("comment") || lower.includes("[open]") || lower.includes("[resolved]")) {
+        if (lower.includes("kept") || lower.includes("visible")) {
+          this.kept_comment_lines.push(line);
+        } else {
+          this.removed_comment_lines.push(line);
+        }
       } else if (lower.includes("hyperlink") || lower.includes("warning")) {
         this.warnings.push(line);
       } else {

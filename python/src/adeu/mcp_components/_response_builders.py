@@ -508,6 +508,11 @@ def build_search_response(
     # ---- Render. ----
     ui_parts: list[str] = []
 
+    # Cap results to 20 to avoid LLM context overflow
+    max_matches = 20
+    is_truncated = len(filtered) > max_matches
+    items_to_render = filtered[:max_matches]
+
     if page_filter is None:
         ui_parts.append(
             f"> **Search Results** — Found {total_matches} match"
@@ -518,6 +523,11 @@ def build_search_response(
         if len(pages_with_hits) > 1:
             dist_str = ", ".join(f"p{p}: {page_distribution[p]}" for p in pages_with_hits)
             ui_parts.append(f"> Distribution across {len(pages_with_hits)} document pages — {dist_str}")
+        if is_truncated:
+            ui_parts.append(
+                f"> **Note:** Only the first {max_matches} matches are shown here to prevent LLM context overflow. "
+                f"Narrow your search query or specify a `page` filter to see other matches."
+            )
     else:
         shown = len(filtered)
         ui_parts.append(
@@ -533,6 +543,11 @@ def build_search_response(
                 f"> Additional matches exist on page"
                 f"{'s' if len(other_pages) != 1 else ''} {other_pages_str} — "
                 f"omit `page` or pass `page='all'` to see them."
+            )
+        if is_truncated:
+            ui_parts.append(
+                f"> **Note:** Only the first {max_matches} matches are shown here to prevent LLM context overflow. "
+                f"Narrow your search query or specify a `page` filter to see other matches."
             )
 
     def get_heading(idx, txt):
@@ -564,7 +579,7 @@ def build_search_response(
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
     full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
 
-    for m, p_num in filtered:
+    for m, p_num in items_to_render:
         m_start, m_end = m.span()
         matched_str = m.group(0)
 

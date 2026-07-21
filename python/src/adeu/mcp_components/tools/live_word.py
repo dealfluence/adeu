@@ -607,7 +607,12 @@ if sys.platform == "win32":
                 mapper = DocumentMapper(py_doc)
                 _, _, mapping = _get_haystack()
 
-                for act in actions:
+                # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+                # followed by destructive structural operations (AcceptChange, RejectChange).
+                # Stable sort preserves the original relative ordering.
+                sorted_actions = sorted(actions, key=lambda x: 0 if isinstance(x, ReplyComment) else 1)
+
+                for act in sorted_actions:
                     try:
                         xml_id = act.target_id.split(":")[-1]
                         if isinstance(act, (AcceptChange, RejectChange)):

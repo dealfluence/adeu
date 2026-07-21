@@ -454,6 +454,17 @@ export function build_search_response(
     occurrences_map[matched_str] = (occurrences_map[matched_str] || 0) + 1;
   }
 
+  const max_matches = 20;
+  const is_truncated = matches.length > max_matches;
+  const items_to_render = matches.slice(0, max_matches);
+
+  if (is_truncated) {
+    ui_parts.push(
+      `> **Note:** Only the first ${max_matches} matches are shown here to prevent LLM context overflow. ` +
+      `Narrow your search query or specify a \`page\` filter to see other matches.`
+    );
+  }
+
   function get_heading(idx: number, txt: string): string {
     const txtBefore = txt.substring(0, idx);
     const lines = txtBefore.split("\n");
@@ -483,7 +494,7 @@ export function build_search_response(
   }
 
   let i = 1;
-  for (const m of matches) {
+  for (const m of items_to_render) {
     const matched_str = m[0];
     const m_start = m.index!;
     const m_end = m_start + matched_str.length;

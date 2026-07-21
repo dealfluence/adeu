@@ -161,9 +161,9 @@ def paginate(markdown_body: str, structural_appendix: str = "") -> PaginationRes
 # ---------------------------------------------------------------------------
 
 
-def _tokenize_into_atomic_blocks(markdown_body: str) -> List[Tuple[str, int]]:
+def _tokenize_into_atomic_blocks(markdown_body: str) -> List[Tuple[str, int, bool]]:
     """
-    Splits markdown_body into atomic blocks. Returns a list of (block_text, start_offset)
+    Splits markdown_body into atomic blocks. Returns a list of (block_text, start_offset, force_split_after)
     tuples where start_offset is the index in markdown_body where the block begins.
 
     A block boundary is a "\\n\\n" run where every CriticMarkup wrapper has depth 0.
@@ -178,7 +178,22 @@ def _tokenize_into_atomic_blocks(markdown_body: str) -> List[Tuple[str, int]]:
     """
     raw_blocks = _split_on_safe_paragraph_breaks(markdown_body)
     merged = _merge_footnote_sections(raw_blocks)
-    return merged
+
+    refined: List[Tuple[str, int, bool]] = []
+    for block_text, block_offset in merged:
+        if '<w:br w:type="page"/>' in block_text:
+            parts = block_text.split('<w:br w:type="page"/>')
+            curr_offset = block_offset
+            for idx, part in enumerate(parts):
+                part_len = len(part)
+                is_last_part = idx == len(parts) - 1
+                if part or not is_last_part:
+                    refined.append((part, curr_offset, not is_last_part))
+                curr_offset += part_len + len('<w:br w:type="page"/>')
+        else:
+            refined.append((block_text, block_offset, False))
+
+    return refined
 
 
 def _split_on_safe_paragraph_breaks(text: str) -> List[Tuple[str, int]]:
@@ -296,7 +311,7 @@ def _merge_footnote_sections(blocks: List[Tuple[str, int]]) -> List[Tuple[str, i
 
 
 def _assemble_pages(
-    block_records: List[Tuple[str, int]],
+    block_records: List[Tuple[str, int, bool]],
 ) -> Tuple[List[str], List[int]]:
     """
     Greedy bin-packing of blocks into pages of <= PAGE_TARGET_CHARS.
@@ -320,13 +335,14 @@ def _assemble_pages(
     def flush_current():
         nonlocal current_blocks, current_size, current_start
         if current_blocks:
-            pages.append("\n\n".join(current_blocks))
+            non_empty = [b for b in current_blocks if b]
+            pages.append("\n\n".join(non_empty) if non_empty else "")
             page_starts.append(current_start)
         current_blocks = []
         current_size = 0
         current_start = -1
 
-    for block_text, block_offset in block_records:
+    for block_text, block_offset, force_split in block_records:
         block_size = len(block_text)
         added_size = block_size + (2 if current_blocks else 0)  # +2 for "\n\n"
 
@@ -344,6 +360,9 @@ def _assemble_pages(
             current_start = block_offset
         current_blocks.append(block_text)
         current_size += added_size if current_size > 0 else block_size
+
+        if force_split:
+            flush_current()
 
     flush_current()
 

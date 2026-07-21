@@ -254,12 +254,30 @@ export function extract_table(
       // via the mapper). We key on the cell's first paragraph w14:paraId, which
       // Word assigns and keeps stable across reads.
       if (!cleanView) {
-        const firstP = cell._element.getElementsByTagName("w:p")[0] as
+        let firstP = cell._element.getElementsByTagName("w:p")[0] as
           | Element
           | undefined;
-        const paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+        let paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+        if (!paraId && (!cell_content || cell_content.trim() === "")) {
+          if (!firstP) {
+            const xmlDoc = cell._element.ownerDocument!;
+            firstP = xmlDoc.createElement("w:p");
+            cell._element.appendChild(firstP);
+          }
+          const allPs = Array.from(cell._element.ownerDocument!.getElementsByTagName("w:p"));
+          const index = allPs.indexOf(firstP);
+          let hash = 2166136261;
+          const str = `fallback-paraId-${index}`;
+          for (let i = 0; i < str.length; i++) {
+            hash ^= str.charCodeAt(i);
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+          }
+          paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
+          firstP.setAttribute("w14:paraId", paraId);
+        }
         if (paraId) {
-          const anchor = `{#cell:${paraId}}`;
+          const space_pad = cell_content ? " " : "";
+          const anchor = `${space_pad}{#cell:${paraId}}`;
           cell_content = cell_content + anchor;
         }
       }

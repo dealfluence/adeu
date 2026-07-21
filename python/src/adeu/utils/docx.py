@@ -61,6 +61,7 @@ QN_W_NUMPR = qn("w:numPr")
 QN_W_NUMID = qn("w:numId")
 QN_W_ILVL = qn("w:ilvl")
 QN_W_DRAWING = qn("w:drawing")
+QN_W_TC = qn("w:tc")
 QN_W_OBJECT = qn("w:object")
 QN_W_PICT = qn("w:pict")
 QN_WP_DOCPR = qn("wp:docPr")
@@ -509,30 +510,40 @@ def get_paragraph_prefix(
 
     # 5. Heuristic for "Normal" style headers
     if style_name is None or style_name == "Normal":
-        text = paragraph.text.strip()
-        if text and len(text) < 100:
-            is_all_caps = text.isupper()
+        # Table cells must not be classified as heuristic headings
+        ancestor = p_el.getparent()
+        is_inside_table = False
+        while ancestor is not None:
+            if ancestor.tag == QN_W_TC:
+                is_inside_table = True
+                break
+            ancestor = ancestor.getparent()
 
-            is_bold = False
-            if style_info and style_info.get("bold"):
-                is_bold = True
-            else:
-                # Check if the first visible run is explicitly bold in XML
-                runs = p_el.findall(f".//{QN_W_R}")
-                for r in runs:
-                    t = r.find(f".//{QN_W_T}")
-                    if t is not None and t.text and t.text.strip():
-                        rPr_run = r.find(QN_W_RPR)
-                        if rPr_run is not None:
-                            b = rPr_run.find(QN_W_B)
-                            if b is not None:
-                                val = b.get(QN_W_VAL)
-                                if val not in ("0", "false", "off"):
-                                    is_bold = True
-                        break
+        if not is_inside_table:
+            text = paragraph.text.strip()
+            if text and len(text) < 100:
+                is_all_caps = text.isupper()
 
-            if is_all_caps and is_bold:
-                return "## "
+                is_bold = False
+                if style_info and style_info.get("bold"):
+                    is_bold = True
+                else:
+                    # Check if the first visible run is explicitly bold in XML
+                    runs = p_el.findall(f".//{QN_W_R}")
+                    for r in runs:
+                        t = r.find(f".//{QN_W_T}")
+                        if t is not None and t.text and t.text.strip():
+                            rPr_run = r.find(QN_W_RPR)
+                            if rPr_run is not None:
+                                b = rPr_run.find(QN_W_B)
+                                if b is not None:
+                                    val = b.get(QN_W_VAL)
+                                    if val not in ("0", "false", "off"):
+                                        is_bold = True
+                            break
+
+                if is_all_caps and is_bold:
+                    return "## "
 
     return ""
 
@@ -859,7 +870,10 @@ def get_run_text(run: Run) -> str:
         elif child.tag == QN_W_TAB:
             text += " "  # Convert tab to space
         elif child.tag == QN_W_BR:
-            text += "\n"
+            if child.get(qn("w:type")) == "page":
+                text += '<w:br w:type="page"/>'
+            else:
+                text += "\n"
         elif child.tag == QN_W_CR:
             text += "\n"
     return text

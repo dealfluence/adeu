@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 import sys
+import argparse
 from pathlib import Path
 
 FILES_TO_BUMP = [
@@ -93,20 +94,59 @@ def update_toml_version(filepath, version):
     return True
 
 
+def get_current_version():
+    path = Path("python/pyproject.toml")
+    if not path.exists():
+        print("❌ Cannot find python/pyproject.toml to determine current version.")
+        sys.exit(1)
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', content, flags=re.MULTILINE)
+    if match:
+        return match.group(1)
+    print("❌ Cannot parse version from python/pyproject.toml.")
+    sys.exit(1)
+
+
+def calculate_next_version(current_version, bump_type):
+    bump_type = bump_type.lstrip("v")
+    
+    # Exact version provided
+    if re.match(r"^\d+\.\d+\.\d+(-\w+(\.\d+)?)?$", bump_type):
+        return bump_type
+        
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(-\w+(\.\d+)?)?$", current_version)
+    if not match:
+        print(f"❌ Current version '{current_version}' is not X.Y.Z. Cannot bump automatically.")
+        sys.exit(1)
+        
+    major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    
+    if bump_type == "major":
+        return f"{major + 1}.0.0"
+    elif bump_type == "minor":
+        return f"{major}.{minor + 1}.0"
+    elif bump_type == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    else:
+        print(f"❌ Error: '{bump_type}' is not a valid bump type (major/minor/patch) or exact version.")
+        sys.exit(1)
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python scripts/bump.py <version>")
-        print("Example: python scripts/bump.py 1.6.0")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Bump version across the Adeu monorepo.")
+    parser.add_argument(
+        "bump_type",
+        nargs="?",
+        default="minor",
+        help="Type of bump (major, minor, patch) or exact version (e.g., 1.6.0). Defaults to 'minor'."
+    )
+    args = parser.parse_args()
 
-    target_version = sys.argv[1].lstrip("v")
-    if not re.match(r"^\d+\.\d+\.\d+(-\w+(\.\d+)?)?$", target_version):
-        print(
-            f"❌ Error: '{target_version}' does not look like a valid semver (e.g. 1.6.0)."
-        )
-        sys.exit(1)
+    current_version = get_current_version()
+    target_version = calculate_next_version(current_version, args.bump_type)
 
-    print(f"🚀 Synchronizing monorepo to version {target_version}...\n")
+    print(f"🚀 Synchronizing monorepo from {current_version} to {target_version}...\n")
 
     modified = False
 
