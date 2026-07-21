@@ -879,6 +879,32 @@ class TestL3MarkupStructuralPreview:
         assert code == 0, err
         assert "{--Beta | 2 | b--}" in out.read_text(encoding="utf-8")
 
+    def test_row_substring_anchor_renders_in_preview(self, tmp_path, capsys):
+        orig = tmp_path / "original.docx"
+        build_table_doc(orig, [["ID", "Product", "Price"], ["1", "Apples", "$1.50"], ["2", "Bananas", "$0.80"]])
+        changes = tmp_path / "changes.json"
+        changes.write_text(
+            json.dumps(
+                [
+                    {
+                        "type": "insert_row",
+                        "target_text": "Bananas",
+                        "cells": ["3", "Cherries", "$2.50"],
+                        "position": "below",
+                    },
+                    {"type": "delete_row", "target_text": "Apples"},
+                ]
+            )
+        )
+        out = tmp_path / "preview.md"
+
+        code, _, err = run_cli(["markup", orig, changes, "-o", out], capsys)
+
+        assert code == 0, err
+        preview_content = out.read_text(encoding="utf-8")
+        assert "{--1 | Apples | $1.50--}" in preview_content
+        assert "{++3 | Cherries | $2.50++}" in preview_content
+
     def test_missing_row_anchor_fails_without_output(self, tmp_path, capsys):
         orig = tmp_path / "original.docx"
         build_table_doc(orig, [["Alpha", "1", "a"]])

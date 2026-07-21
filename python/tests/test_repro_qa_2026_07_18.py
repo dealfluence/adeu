@@ -95,11 +95,14 @@ def lo_loads(path: Path, out_dir: Path) -> bool:
     expected = pdf_dir / (path.stem + ".pdf")
     if expected.exists():
         expected.unlink()
-    subprocess.run(
-        ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(path)],
-        capture_output=True,
-        timeout=180,
-    )
+    try:
+        subprocess.run(
+            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(path)],
+            capture_output=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+        return False
     return expected.exists()
 
 
