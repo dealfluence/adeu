@@ -4003,7 +4003,13 @@ class RedlineEngine:
         already_resolved = 0
         resolved_history: dict = {}  # revision id -> action type that resolved it
 
-        for pos, act in enumerate(actions):
+        # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+        # followed by destructive structural operations (AcceptChange, RejectChange).
+        # Stable sort preserves the original relative ordering, and we preserve `pos`
+        # so diagnostic messages refer to the original array indexes.
+        sorted_actions = sorted(enumerate(actions), key=lambda x: 0 if isinstance(x[1], ReplyComment) else 1)
+
+        for pos, act in sorted_actions:
             raw_id = act.target_id
             target_id = raw_id
 

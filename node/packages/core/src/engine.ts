@@ -3498,8 +3498,22 @@ export class RedlineEngine {
     let already_resolved = 0;
     const resolved_history = new Map<string, string>(); // id -> resolving action type
 
-    for (let pos = 0; pos < actions.length; pos++) {
-      const action = actions[pos];
+    // Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+    // followed by destructive structural operations (AcceptChange, RejectChange).
+    // Stable sort preserves the original relative ordering, and we preserve `pos`
+    // so diagnostic messages refer to the original array indexes.
+    const sortedActions = actions
+      .map((action, pos) => ({ action, pos }))
+      .sort((a, b) => {
+        const aPri = a.action.type === "reply" ? 0 : 1;
+        const bPri = b.action.type === "reply" ? 0 : 1;
+        if (aPri !== bPri) {
+          return aPri - bPri;
+        }
+        return a.pos - b.pos;
+      });
+
+    for (const { action, pos } of sortedActions) {
       const type = action.type;
       if (type === "reply") {
         const cid = action.target_id.replace("Com:", "");

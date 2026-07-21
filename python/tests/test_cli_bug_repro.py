@@ -74,3 +74,74 @@ def test_apply_table_deletion_repro(tmp_path):
     # When fixed, it should succeed (return 0) and write out the file.
     assert rc_apply == 0, "adeu apply failed with exit code 1 due to post-apply validation mismatch"
     assert out_path.exists(), "Applied output docx was not written"
+
+
+def test_apply_comment_reply_order_repro(tmp_path):
+    """
+    Test that adeu apply successfully processes a batch of actions containing
+    both an AcceptChange on a tracked change and a ReplyComment on the wrapping comment,
+    even when the AcceptChange is ordered before the ReplyComment in the batch array.
+
+    The correct expected behavior is that both the AcceptChange and ReplyComment are
+    successfully applied. Under the bug, the accept is executed first, which deletes the
+    associated comment from the document structure, causing the reply to fail validation and
+    reverting/failing the entire batch application.
+    """
+    import io
+    import json
+    import re
+
+    from adeu.ingest import extract_text_from_stream
+    from adeu.models import ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    docx_path = tmp_path / "original.docx"
+    updated_docx_path = tmp_path / "updated.docx"
+    batch_json_path = tmp_path / "batch.json"
+    out_path = tmp_path / "applied.docx"
+
+    # 1. Create a baseline docx file
+    doc = Document()
+    doc.add_paragraph("Text with comment.")
+    doc.save(docx_path)
+
+    # 2. Add track change + comment to create a document with pending review actions
+    with open(docx_path, "rb") as f:
+        stream = io.BytesIO(f.read())
+
+    engine = RedlineEngine(stream, author="Author1")
+    edit = ModifyText(target_text="Text", new_text="TextModified", comment="Initial Comment")
+    engine.apply_edits([edit])
+
+    stream_mid = engine.save_to_stream()
+    with open(updated_docx_path, "wb") as f:
+        f.write(stream_mid.getbuffer())
+
+    # 3. Extract the comment ID and change ID to prepare our batch actions
+    text_mid = extract_text_from_stream(stream_mid)
+    com_match = re.search(r"\[Com:(\d+)\]", text_mid)
+    chg_match = re.search(r"\[Chg:(\d+)", text_mid)
+
+    assert com_match, "Comment ID not found in document text"
+    assert chg_match, "Change ID not found in document text"
+
+    com_id = f"Com:{com_match.group(1)}"
+    chg_id = f"Chg:{chg_match.group(1)}"
+
+    # 4. Construct a batch array where AcceptChange comes BEFORE ReplyComment
+    batch_data = [
+        {"type": "accept", "target_id": chg_id},
+        {"type": "reply", "target_id": com_id, "text": "This reply is evaluated too late."},
+    ]
+    with open(batch_json_path, "w", encoding="utf-8") as f:
+        json.dump(batch_data, f)
+
+    # 5. Run the apply CLI command to apply this batch of review actions
+    rc_apply = _run_cli(["apply", str(updated_docx_path), str(batch_json_path), "-o", str(out_path)])
+
+    # This asserts the CORRECT expected behavior:
+    # Under the bug, apply fails (returns non-zero exit code 1) because
+    # the comment is deleted prior to the reply being applied.
+    # When fixed, it should succeed (return 0) and write out the file.
+    assert rc_apply == 0, f"adeu apply failed with exit code {rc_apply} due to strict action ordering constraint"
+    assert out_path.exists(), "Applied output docx was not written"
