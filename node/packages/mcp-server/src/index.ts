@@ -853,16 +853,26 @@ server.registerTool(
         export_pdf: export_pdf as boolean,
       });
 
-      fs.writeFileSync(outPath, result.outBuffer!);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Saved to: ${outPath}\n\n${result.reportText}`,
-          },
-        ],
-      };
+      if (result.outBuffer) {
+        fs.writeFileSync(outPath, result.outBuffer);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Saved to: ${outPath}\n\n${result.reportText}`,
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.reportText,
+            },
+          ],
+        };
+      }
     } catch (e: any) {
       return {
         isError: true,
