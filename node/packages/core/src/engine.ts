@@ -3148,13 +3148,64 @@ export class RedlineEngine {
         }
 
         if (matches.length > 0) {
-          // Record WHICH mapper produced the offset: a clean-view index
-          // resolved against the raw mapper lands rows at the wrong position
-          // once earlier edits in the batch put tracked changes in the
-          // anchor row.
-          edit._resolved_start_idx = matches[0][0];
-          edit._active_mapper_ref = resolved_mapper;
-          resolved_edits.push([edit, null]);
+          const match_mode = edit.match_mode || "strict";
+
+          // We need to resolve matches to unique w:tr elements to deduplicate them.
+          const unique_matches: [number, number][] = [];
+          const seen_trs = new Set<any>();
+
+          for (const match of matches) {
+            const start_idx = match[0];
+            const [anchor_run, anchor_para] = resolved_mapper.get_insertion_anchor(start_idx, false);
+            let target_element: Element | null = null;
+            if (anchor_run) target_element = anchor_run._element;
+            else if (anchor_para) target_element = anchor_para._element;
+
+            let tr: Element | null = target_element;
+            while (tr && tr.tagName !== "w:tr") tr = tr.parentNode as Element;
+
+            if (tr) {
+              if (!seen_trs.has(tr)) {
+                seen_trs.add(tr);
+                unique_matches.push(match);
+              }
+            }
+          }
+
+          if (unique_matches.length > 0) {
+            let matches_to_apply = unique_matches;
+            if (match_mode === "strict" || match_mode === "first") {
+              matches_to_apply = unique_matches.slice(0, 1);
+            }
+
+            if (match_mode === "all" || matches_to_apply.length > 1) {
+              // Create sub-edits for each match so that they are processed as independent operations,
+              // and the occurrences_modified and applied_status are tracked correctly on the parent.
+              for (const m of matches_to_apply) {
+                const sub_edit = {
+                  ...edit,
+                  _resolved_start_idx: m[0],
+                  _active_mapper_ref: resolved_mapper,
+                  _parent_edit_ref: edit,
+                };
+                resolved_edits.push([sub_edit, null]);
+              }
+            } else {
+              // Single match case for non-"all" modes
+              edit._resolved_start_idx = matches_to_apply[0][0];
+              edit._active_mapper_ref = resolved_mapper;
+              resolved_edits.push([edit, null]);
+            }
+          } else {
+            skipped++;
+            edit._applied_status = false;
+            const target_snippet = (edit.target_text || "")
+              .trim()
+              .substring(0, 40);
+            const msg = `- Failed to locate row target: '${target_snippet}...'`;
+            this.skipped_details.push(msg);
+            edit._error_msg = msg;
+          }
         } else {
           skipped++;
           edit._applied_status = false;
