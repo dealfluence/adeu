@@ -1469,6 +1469,18 @@ class RedlineEngine:
             cur = cur.getparent()
         return cur
 
+    @staticmethod
+    def _is_inside_pPr(element) -> bool:
+        """
+        Check if the given element is inside a w:pPr tag.
+        """
+        cur = element
+        while cur is not None:
+            if cur.tag == qn("w:pPr"):
+                return True
+            cur = cur.getparent()
+        return False
+
     # XML root tags of stories that can host comment anchors. Word (and
     # LibreOffice, which refuses to LOAD such files) only supports comment
     # ranges in the main document story — never in headers, footers,
@@ -1520,6 +1532,11 @@ class RedlineEngine:
             return
         if self._skip_comment_outside_main_story(parent_element, text):
             return
+
+        # Ensure the anchor elements are actual direct children of parent_element
+        start_element = self._paragraph_child_ancestor(start_element, parent_element)
+        end_element = self._paragraph_child_ancestor(end_element, parent_element)
+
         try:
             start_index = parent_element.index(start_element)
             end_index = parent_element.index(end_element)
@@ -1557,6 +1574,11 @@ class RedlineEngine:
             return
         if self._skip_comment_outside_main_story(start_p, text) or self._skip_comment_outside_main_story(end_p, text):
             return
+
+        # Ensure the anchor elements are actual direct children of their respective paragraphs
+        start_el = self._paragraph_child_ancestor(start_el, start_p)
+        end_el = self._paragraph_child_ancestor(end_el, end_p)
+
         comment_id = self.comments_manager.add_comment(self.author, text)
 
         range_start = create_element("w:commentRangeStart")
@@ -3498,8 +3520,14 @@ class RedlineEngine:
 
                     if edit.comment:
                         if last_p is not None:
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            else:
+                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             else:
@@ -3533,14 +3561,20 @@ class RedlineEngine:
 
                     if edit.comment:
                         if last_p is not None:
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            else:
+                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                 elif last_p is not None and edit.comment:
                     # Leading "\n\n" insertions (boundary re-anchors) create
                     # only new paragraphs — anchor the comment on the last one.
-                    ins_list = last_p.findall(f".//{qn('w:ins')}")
+                    ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
                     if ins_list:
                         self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
             return True
@@ -3689,14 +3723,18 @@ class RedlineEngine:
                         )
                         if last_p is not None:
                             end_p = last_p
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(
-                                start_p,
-                                first_anchor,
-                                end_p,
-                                last_ins,
-                                edit.comment,
-                            )
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(
+                                    start_p,
+                                    first_anchor,
+                                    end_p,
+                                    last_ins,
+                                    edit.comment,
+                                )
                         elif ins_elem is not None:
                             end_p = ins_elem.getparent()
                             while end_p is not None and end_p.tag != qn("w:p"):

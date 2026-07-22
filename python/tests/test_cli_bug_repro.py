@@ -218,3 +218,54 @@ def test_sanitize_baseline_printf_leak(tmp_path):
     assert "share only 41% of" in formatted
     assert "differs" in formatted
     assert "%!" not in formatted  # Ensure no Go-style formatting errors
+
+
+def test_multi_paragraph_newline_comment(tmp_path):
+    import io
+
+    from docx import Document
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    from adeu.models import ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    # 1. Create a base document with the target text
+    doc = Document()
+    doc.add_paragraph("Hello world. 🚀🔥🌟 and some suffix.")
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    # 2. Define the edit with a comment and a newline (paragraph break) in new_text
+    edit = ModifyText(
+        type="modify",
+        target_text="🚀🔥🌟",
+        new_text="🚀🔥🌟\n\nAdded: This is an extra line.",
+        comment="Diff: Text inserted",
+    )
+
+    # 3. Apply edits
+    engine = RedlineEngine(stream)
+    engine.apply_edits([edit])
+
+    # 4. Save and load document
+    result_stream = engine.save_to_stream()
+    doc = Document(result_stream)
+
+    # 5. Assert the comment ranges and references exist in the main document XML
+    doc_xml = doc.element.xml
+    assert "w:commentRangeStart" in doc_xml
+    assert "w:commentRangeEnd" in doc_xml
+    assert "w:commentReference" in doc_xml
+
+    # 6. Assert the comment actually exists in comments.xml
+    comments_part = None
+    for rel in doc.part.rels.values():
+        if rel.reltype == RT.COMMENTS:
+            comments_part = rel.target_part
+            break
+
+    assert comments_part is not None, "Comments part was not created"
+    comments_xml = comments_part.blob.decode("utf-8")
+    assert "Diff: Text inserted" in comments_xml, "Comment text missing from comments.xml"
