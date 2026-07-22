@@ -205,6 +205,10 @@ class InsertTableRow(BaseModel):
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _any_sub_failure: bool = PrivateAttr(default=False)
+    # A match_mode="all" fan-out deep-copies this edit once per matching row;
+    # each copy points back here so the batch report counts ONE applied edit
+    # and accumulates occurrences on the parent (mirrors ModifyText).
+    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
@@ -239,9 +243,16 @@ class DeleteTableRow(BaseModel):
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _any_sub_failure: bool = PrivateAttr(default=False)
+    # See InsertTableRow._parent_edit_ref.
+    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
+
+
+# Either structural row operation. Both fan out the same way under
+# match_mode="all", so a sub-edit's parent is one of these two.
+TableRowChange = Union[InsertTableRow, DeleteTableRow]
 
 
 class FlatDocumentChange(BaseModel):
