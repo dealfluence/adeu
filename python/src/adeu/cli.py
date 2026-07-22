@@ -1252,7 +1252,7 @@ def handle_accept_all(args: argparse.Namespace):
     _require_docx_output(args.output)
     engine = _open_redline_engine_or_exit(args.input)
 
-    engine.accept_all_revisions(remove_comments=True)
+    stats = engine.accept_all_revisions(remove_comments=True)
 
     output_path = args.output
     if not output_path:
@@ -1261,7 +1261,14 @@ def handle_accept_all(args: argparse.Namespace):
     _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     if args.json:
-        print(json.dumps({"status": "ok", "output_path": str(output_path)}))
+        result = {
+            "status": "ok",
+            "output_path": str(output_path),
+            "accepted_insertions": stats.get("accepted_insertions", 0) if stats else 0,
+            "accepted_deletions": stats.get("accepted_deletions", 0) if stats else 0,
+            "removed_comments": stats.get("removed_comments", 0) if stats else 0,
+        }
+        print(json.dumps(result))
     else:
         print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
 

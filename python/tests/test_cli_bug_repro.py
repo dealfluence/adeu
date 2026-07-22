@@ -109,3 +109,60 @@ def test_cli_apply_large_document_major_deletions(tmp_path, capsys):
     # The regression test asserts that the bug is fixed and it completes successfully
     assert code == 0, f"apply failed with code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
     assert out_path.exists(), "Output file was not generated."
+
+
+def test_accept_all_json_response_enrichment(tmp_path, capsys):
+    import json
+
+    import docx
+
+    # 1. Create a simple base document
+    doc_path = tmp_path / "base.docx"
+    doc = docx.Document()
+    doc.add_paragraph("This is a test document.")
+    doc.save(str(doc_path))
+
+    # 2. Define a modify edit with a comment
+    changes_file = tmp_path / "changes.json"
+    changes_file.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "modify",
+                    "target_text": "document",
+                    "new_text": "dossier",
+                    "comment": "Review note to be stripped",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    redlined_path = tmp_path / "redlined.docx"
+
+    # 3. Apply the edit to create tracked changes + comment
+    code, stdout, stderr = run_cli(
+        ["apply", str(doc_path), str(changes_file), "-o", str(redlined_path), "--json"],
+        capsys,
+    )
+    assert code == 0, f"apply failed with code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+    assert redlined_path.exists()
+
+    # 4. Run accept-all in JSON mode
+    accepted_path = tmp_path / "accepted.docx"
+    code, stdout, stderr = run_cli(
+        ["accept-all", str(redlined_path), "-o", str(accepted_path), "--json"],
+        capsys,
+    )
+    assert code == 0, f"accept-all failed with code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+
+    # 5. Parse JSON output and assert that keys are present and counts are correct
+    result = json.loads(stdout.strip())
+    assert result.get("status") == "ok"
+    assert "accepted_insertions" in result, "accepted_insertions missing from JSON output"
+    assert "accepted_deletions" in result, "accepted_deletions missing from JSON output"
+    assert "removed_comments" in result, "removed_comments missing from JSON output"
+
+    assert result["accepted_insertions"] == 1
+    assert result["accepted_deletions"] == 1
+    assert result["removed_comments"] == 1

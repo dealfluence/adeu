@@ -568,4 +568,26 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(caught.name).toBe("BatchValidationError");
     expect(caught.message).toContain("Invalid change format");
   });
+
+  it("BUG-REPRO: accept_all_revisions returns counts of accepted changes and removed comments", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "This is a test document.");
+    const engine = new RedlineEngine(doc);
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "document",
+        new_text: "dossier",
+        comment: "Review note to be stripped",
+      },
+    ]);
+
+    const stats = engine.accept_all_revisions() as any;
+
+    expect(stats).toBeDefined();
+    expect(stats.accepted_insertions).toBe(1);
+    expect(stats.accepted_deletions).toBe(1);
+    expect(stats.removed_comments).toBe(1);
+  });
 });

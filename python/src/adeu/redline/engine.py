@@ -4367,7 +4367,7 @@ class RedlineEngine:
         new_end.addnext(ref_run)
 
     # FILE: src/adeu/redline/engine.py
-    def accept_all_revisions(self, remove_comments: bool = False):
+    def accept_all_revisions(self, remove_comments: bool = False) -> dict[str, int]:
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:
@@ -4382,6 +4382,20 @@ class RedlineEngine:
                         part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
                     element_to_process = part._adeu_element  # type: ignore[attr-defined]
                 parts_to_process.append(element_to_process)
+
+        # Pre-count revisions and comments before modifying the XML structures
+        accepted_insertions = 0
+        accepted_deletions = 0
+        for root_element in parts_to_process:
+            accepted_insertions += len(root_element.findall(f".//{qn('w:ins')}"))
+            accepted_deletions += len(root_element.findall(f".//{qn('w:del')}"))
+
+        removed_comments = 0
+        if remove_comments:
+            try:
+                removed_comments = len(self.comments_manager.extract_comments_data())
+            except Exception:
+                removed_comments = 0
 
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):
@@ -4505,6 +4519,12 @@ class RedlineEngine:
                     pkg._parts[:] = [p for p in pkg._parts if p.partname not in comment_partnames]
                 elif hasattr(pkg, "parts") and isinstance(pkg.parts, list):
                     pkg.parts[:] = [p for p in pkg.parts if p.partname not in comment_partnames]
+
+        return {
+            "accepted_insertions": accepted_insertions,
+            "accepted_deletions": accepted_deletions,
+            "removed_comments": removed_comments,
+        }
 
     def reject_all_revisions(self):
         """

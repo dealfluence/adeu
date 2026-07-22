@@ -1,7 +1,7 @@
 import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { DocumentMapper, TextSpan } from "./mapper.js";
-import { CommentsManager } from "./comments.js";
+import { CommentsManager, extract_comments_data } from "./comments.js";
 import {
   ModifyText,
   InsertTableRow,
@@ -905,6 +905,21 @@ export class RedlineEngine {
       }
     }
 
+    let accepted_insertions = 0;
+    let accepted_deletions = 0;
+    for (const root_element of parts_to_process) {
+      accepted_insertions += findAllDescendants(root_element, "w:ins").length;
+      accepted_deletions += findAllDescendants(root_element, "w:del").length;
+    }
+
+    let removed_comments = 0;
+    try {
+      const data = extract_comments_data(this.doc.pkg);
+      removed_comments = Object.keys(data).length;
+    } catch (e) {
+      removed_comments = 0;
+    }
+
     for (const root_element of parts_to_process) {
       const insNodes = findAllDescendants(root_element, "w:ins");
       for (const ins of insNodes) {
@@ -1089,6 +1104,12 @@ export class RedlineEngine {
         }
       }
     }
+
+    return {
+      accepted_insertions,
+      accepted_deletions,
+      removed_comments,
+    };
   }
 
   /**
