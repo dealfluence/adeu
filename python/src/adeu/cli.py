@@ -1261,12 +1261,14 @@ def handle_accept_all(args: argparse.Namespace):
     _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     if args.json:
+        stats = stats or {}
         result = {
             "status": "ok",
             "output_path": str(output_path),
-            "accepted_insertions": stats.get("accepted_insertions", 0) if stats else 0,
-            "accepted_deletions": stats.get("accepted_deletions", 0) if stats else 0,
-            "removed_comments": stats.get("removed_comments", 0) if stats else 0,
+            "accepted_insertions": stats.get("accepted_insertions", 0),
+            "accepted_deletions": stats.get("accepted_deletions", 0),
+            "accepted_formatting": stats.get("accepted_formatting", 0),
+            "removed_comments": stats.get("removed_comments", 0),
         }
         print(json.dumps(result))
     else:
@@ -1477,16 +1479,15 @@ def handle_sanitize(args: argparse.Namespace):
                 allow_low_similarity_baseline=args.allow_low_similarity_baseline,
             )
             if args.report or args.report_file:
-                report_text = result.report_text.replace("%%", "%")
                 if args.report:
-                    print(report_text, file=sys.stderr)
+                    print(result.report_text, file=sys.stderr)
                 if args.report_file:
-                    _write_report_file(args.report_file, report_text)
+                    _write_report_file(args.report_file, result.report_text)
 
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
-            print(str(e).replace("%%", "%"), file=sys.stderr)
+            print(str(e), file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
@@ -1634,9 +1635,9 @@ def handle_sanitize(args: argparse.Namespace):
             full_report = []
             for r in all_reports:
                 if isinstance(r, SanitizeError):
-                    full_report.append(str(r).replace("%%", "%"))
+                    full_report.append(str(r))
                 else:
-                    full_report.append(r.report_text.replace("%%", "%"))
+                    full_report.append(r.report_text)
                 full_report.append("")
 
             full_report.append(summary)
@@ -1874,7 +1875,12 @@ def _main_impl():
     p_accept.add_argument(
         "--json",
         action="store_true",
-        help="Emit a machine-readable JSON result on stdout.",
+        help=(
+            "Emit a machine-readable JSON result on stdout. The accepted_* counts are "
+            "REVISION MARKS (the same unit sanitize reports), not user-level edits: Word "
+            "splits one revision into several marks when formatting changes mid-revision, "
+            "so one typed sentence can count as more than one insertion."
+        ),
     )
     p_accept.set_defaults(func=handle_accept_all)
 

@@ -161,19 +161,26 @@ def test_accept_all_json_response_enrichment(tmp_path, capsys):
     assert result.get("status") == "ok"
     assert "accepted_insertions" in result, "accepted_insertions missing from JSON output"
     assert "accepted_deletions" in result, "accepted_deletions missing from JSON output"
+    assert "accepted_formatting" in result, "accepted_formatting missing from JSON output"
     assert "removed_comments" in result, "removed_comments missing from JSON output"
 
     assert result["accepted_insertions"] == 1
     assert result["accepted_deletions"] == 1
+    assert result["accepted_formatting"] == 0
     assert result["removed_comments"] == 1
 
 
-def test_sanitize_baseline_printf_leak(tmp_path):
+def test_sanitize_baseline_similarity_percent_is_literal(tmp_path):
     """
-    Asserts that sanitize_docx raises a SanitizeError with an error message
-    that does not leak printf-style string formatting specifiers (i.e. percent signs are properly escaped as %%).
-    This prevents Go, Python or any other printf-style logging/formatting host from breaking
-    with "not enough arguments" or showing "!o(MISSING)" / "!d(MISSING)".
+    The similarity message carries LITERAL percent signs on every surface.
+
+    An error message is data, not a format string: nothing in Adeu %-formats
+    it, so pre-escaping to '%%' does not protect a printf host — it simply
+    corrupts the text for every consumer that does not un-escape. A previous
+    fix escaped these here and then stripped '%%' back out at the CLI print
+    sites, which left the SDK, the MCP sanitize tool and the Node engine
+    disagreeing about their own message. Format at the point of formatting,
+    never at the point of construction.
     """
     import docx
     import pytest
@@ -193,31 +200,15 @@ def test_sanitize_baseline_printf_leak(tmp_path):
 
     out = tmp_path / "out.docx"
 
-    # 2. Call sanitize_docx and verify the error message is safe from printf leaks
+    # 2. The SDK surface (what the MCP sanitize tool also returns verbatim)
     with pytest.raises(SanitizeError) as exc_info:
         sanitize_docx(str(working), str(out), baseline_path=str(baseline))
 
     err_msg = str(exc_info.value)
 
-    # The error message should contain the similarity warning/block reason
-    assert "share only" in err_msg
+    assert "share only 41% of" in err_msg
     assert "differs" in err_msg
-
-    # Verify that the percent signs are properly escaped as '%%' by applying Python '%' formatting on it.
-    # If any plain '%' is followed by space and characters like 'o' or 'd', it will raise TypeError.
-    # Once fixed (escaped to '%%'), formatting with % () will succeed and produce a clean message with single '%' signs.
-    try:
-        formatted = err_msg % ()
-    except TypeError as e:
-        pytest.fail(
-            f"Printf-style leak detected in error message! Formatting the message failed with: {e}\n"
-            f"Error message: {err_msg}"
-        )
-
-    # After safe formatting, it should have single percent signs and NO formatting leaks
-    assert "share only 41% of" in formatted
-    assert "differs" in formatted
-    assert "%!" not in formatted  # Ensure no Go-style formatting errors
+    assert "%%" not in err_msg
 
 
 def test_multi_paragraph_newline_comment(tmp_path):
@@ -367,15 +358,26 @@ def test_sanitize_blocked_msg_includes_keep_markup(tmp_path, capsys):
     assert "Review in Word first, use --accept-all, or use --keep-markup." in stderr
 
 
-def test_process_document_batch_stringified_changes(tmp_path):
+def test_process_document_batch_changes_payload_shapes(tmp_path):
     """
-    Verifies that if `changes` is passed as a JSON-serialized string rather than
-    a list of objects (to bypass Gemini's nested array-of-object serialization issues),
-    the MCP server safely deserializes and processes the edits.
+    There is exactly ONE `changes` parameter, and both engines treat the same
+    payload the same way.
+
+    A `changes_json` twin was removed: it made the model choose between two
+    spellings of one argument, and Python and Node had drifted into opposite
+    rules for which one wins when both were sent. Per-item stringification is
+    repaired; a WHOLLY stringified payload is rejected on both engines (the
+    Node zod schema cannot accept one without dropping `changes` out of its
+    `required` list, and a silent repair on only one engine is how a working
+    agent call breaks on a backend switch).
     """
     import asyncio
+    import json as _json
     from unittest.mock import patch
 
+    import pytest
+
+    from adeu.ingest import _extract_text_from_doc
     from adeu.server import mcp
 
     doc_path = tmp_path / "minimal.docx"
@@ -386,89 +388,57 @@ def test_process_document_batch_stringified_changes(tmp_path):
 
     output_path = tmp_path / "output.docx"
 
-    arguments = {
-        "reasoning": "Replacing text to test tool viability with stringified changes.",
+    edit = {
+        "type": "modify",
+        "target_text": "It has exactly two paragraphs.",
+        "new_text": "It has exactly three paragraphs after editing.",
+    }
+    base_args = {
+        "reasoning": "Testing the accepted changes payload shapes.",
         "original_docx_path": str(doc_path),
         "author_name": "Reviewer AI",
         "output_path": str(output_path),
-        "changes": (
-            '[{"type": "modify", '
-            '"target_text": "It has exactly two paragraphs.", '
-            '"new_text": "It has exactly three paragraphs after editing."}]'
-        ),
     }
 
-    # Patch FastMCP Context logging to avoid session-not-established RuntimeError when calling directly via call_tool
+    ctx_patches = (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    )
+
+    # 1. Per-item stringification is repaired (the Gemini double-serialize quirk).
+    with ctx_patches[0], ctx_patches[1], ctx_patches[2], ctx_patches[3]:
+        result = asyncio.run(mcp.call_tool("process_document_batch", {**base_args, "changes": [_json.dumps(edit)]}))
+
+    text = "".join(item.text for item in result.content if item.type == "text")
+    assert "Batch complete" in text
+    assert output_path.exists()
+    clean_text = _extract_text_from_doc(docx.Document(str(output_path)), clean_view=True)
+    assert "It has exactly three paragraphs after editing." in clean_text
+
+    # 2. A WHOLLY stringified payload is rejected, not silently repaired and
+    #    not silently treated as an empty batch.
+    output_path.unlink()
     with (
         patch("fastmcp.server.context.Context.info"),
         patch("fastmcp.server.context.Context.debug"),
         patch("fastmcp.server.context.Context.warning"),
         patch("fastmcp.server.context.Context.error"),
+        pytest.raises(Exception) as exc_info,
     ):
-        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+        asyncio.run(mcp.call_tool("process_document_batch", {**base_args, "changes": _json.dumps([edit])}))
 
-    text = "".join(item.text for item in result.content if item.type == "text")
-    assert "Batch complete" in text
-    assert output_path.exists()
+    assert "changes" in str(exc_info.value)
+    assert not output_path.exists(), "a rejected batch must not write a document"
 
-    # Verify the edit was actually applied
-    new_doc = docx.Document(str(output_path))
-    from adeu.ingest import _extract_text_from_doc
-
-    clean_text = _extract_text_from_doc(new_doc, clean_view=True)
-    assert "It has exactly three paragraphs after editing." in clean_text
-
-
-def test_process_document_batch_changes_json_parameter(tmp_path):
-    """
-    Verifies that if a secondary string parameter `changes_json` is offered,
-    the server can accept a JSON-serialized string there to completely bypass
-    client-side schema-handling issues on the `changes` parameter.
-    """
-    import asyncio
-    from unittest.mock import patch
-
-    from adeu.server import mcp
-
-    doc_path = tmp_path / "minimal.docx"
-    doc = docx.Document()
-    doc.add_paragraph("This is a minimal document with some basic text.")
-    doc.add_paragraph("It has exactly two paragraphs.")
-    doc.save(str(doc_path))
-
-    output_path = tmp_path / "output.docx"
-
-    arguments = {
-        "reasoning": "Replacing text to test tool viability with changes_json.",
-        "original_docx_path": str(doc_path),
-        "author_name": "Reviewer AI",
-        "output_path": str(output_path),
-        "changes_json": (
-            '[{"type": "modify", '
-            '"target_text": "It has exactly two paragraphs.", '
-            '"new_text": "It has exactly three paragraphs after editing."}]'
-        ),
-    }
-
-    # Patch FastMCP Context logging to avoid session-not-established RuntimeError when calling directly via call_tool
-    with (
-        patch("fastmcp.server.context.Context.info"),
-        patch("fastmcp.server.context.Context.debug"),
-        patch("fastmcp.server.context.Context.warning"),
-        patch("fastmcp.server.context.Context.error"),
-    ):
-        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
-
-    text = "".join(item.text for item in result.content if item.type == "text")
-    assert "Batch complete" in text
-    assert output_path.exists()
-
-    # Verify the edit was actually applied
-    new_doc = docx.Document(str(output_path))
-    from adeu.ingest import _extract_text_from_doc
-
-    clean_text = _extract_text_from_doc(new_doc, clean_view=True)
-    assert "It has exactly three paragraphs after editing." in clean_text
+    # 3. `changes` is advertised as REQUIRED — omitting it is a schema error,
+    #    never an empty no-op batch reported as success.
+    tools = asyncio.run(mcp.list_tools())
+    pdb = next(t for t in tools if t.name == "process_document_batch")
+    assert "changes" in pdb.parameters["required"]
+    assert pdb.parameters["properties"]["changes"]["type"] == "array"
+    assert "changes_json" not in pdb.parameters["properties"]
 
 
 def test_repro_sanitize_double_percent_escaping(tmp_path, capsys):

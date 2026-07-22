@@ -35,6 +35,7 @@ from adeu.models import (
     AcceptChange,
     DeleteTableRow,
     DocumentChange,
+    FlatSchemaDocumentChange,
     InsertTableRow,
     ModifyText,
     RejectChange,
@@ -55,10 +56,17 @@ _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
 
 _SINGLE_CHANGE_ADAPTER: TypeAdapter[DocumentChange] = TypeAdapter(DocumentChange)
 
+# A REQUIRED list. Per-item stringification (the Gemini double-serialize
+# quirk) is repaired by coerce_stringified_changes; a WHOLLY stringified
+# payload is not accepted, because the Node engine's zod schema cannot accept
+# one without dropping `changes` out of its `required` list — and one engine
+# silently repairing what the other rejects is the divergence that makes an
+# agent's working call break when the backend changes. Both reject it with a
+# clear type error the caller can retry from.
 McpBatchChanges = Annotated[
     List[Any],
     BeforeValidator(coerce_stringified_changes),
-    WithJsonSchema(TypeAdapter(List[DocumentChange]).json_schema()),
+    WithJsonSchema(TypeAdapter(List[FlatSchemaDocumentChange]).json_schema()),
 ]
 
 
@@ -81,17 +89,11 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
 
     Mixed lists are handled. Strings are coerced to dicts first (and missing
     `type` / malformed `match_mode` are repaired) via coerce_stringified_changes.
+
+    A WHOLLY stringified payload is deliberately not repaired here — see
+    McpBatchChanges for why both engines reject that shape rather than one
+    silently accepting it.
     """
-    import json
-
-    if isinstance(changes, str):
-        try:
-            decoded = json.loads(changes)
-            if isinstance(decoded, list):
-                changes = decoded
-        except Exception as e:
-            return [], [f"changes: Invalid JSON format: {str(e)}"]
-
     if not isinstance(changes, list):
         # A non-list input can't be salvaged per-element. Let the list adapter
         # produce its canonical "expected a list" error and report it as a
@@ -802,11 +804,7 @@ if sys.platform == "win32":
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
-        ] = Field(default_factory=list),  # noqa: B008
-        changes_json: Annotated[
-            Optional[str],
-            "JSON-serialized string of changes to apply (alternative to changes).",
-        ] = None,
+        ],
         original_docx_path: Annotated[
             Optional[str],
             "Path to source file. LEAVE EMPTY (Null) to edit the live Word document!",
@@ -822,10 +820,8 @@ if sys.platform == "win32":
     ) -> str:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
-        if (not changes) and changes_json is not None:
-            changes = changes_json  # type: ignore[assignment]
         # FastMCP's parameter validation does not always honor the BeforeValidator
-        # attached to BatchChanges (it flattens the Annotated chain and validates
+        # attached to McpBatchChanges (it flattens the Annotated chain and validates
         # against the bare list type), so coerce here as a defensive second pass.
         # This is also what catches stringified-object lists emitted by some LLM
         # clients (notably Gemini under load).
@@ -1092,11 +1088,7 @@ else:
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
-        ] = Field(default_factory=list),  # noqa: B008
-        changes_json: Annotated[
-            Optional[str],
-            "JSON-serialized string of changes to apply (alternative to changes).",
-        ] = None,
+        ],
         output_path: Annotated[Optional[str], "Optional output path."] = None,
         dry_run: Annotated[
             bool,
@@ -1105,8 +1097,6 @@ else:
     ) -> str:
         start_time = time.perf_counter()
         del reasoning
-        if (not changes) and changes_json is not None:
-            changes = changes_json  # type: ignore[assignment]
         # See win32 branch above for why we re-coerce here.
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:

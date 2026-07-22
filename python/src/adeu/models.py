@@ -317,6 +317,17 @@ DocumentChange = Annotated[
         DeleteTableRow,
     ],
     Field(discriminator="type"),
+]
+
+# Same union, published as ONE flat object instead of a discriminated oneOf.
+# Some MCP hosts cannot consume oneOf/anyOf schemas at all, so the MCP tool
+# boundary advertises this. It is strictly the weaker contract — every field
+# becomes optional, so "modify requires target_text + new_text" stops being
+# expressed — which is why it is opt-in per surface rather than attached to
+# DocumentChange itself. Validation is unaffected: the real discriminated
+# union still runs, and the CLI (StrictBatchChanges) keeps the precise schema.
+FlatSchemaDocumentChange = Annotated[
+    DocumentChange,
     WithJsonSchema(TypeAdapter(FlatDocumentChange).json_schema()),
 ]
 
@@ -382,9 +393,6 @@ def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
     and the agent has no way to recover. We decode any string elements so the
     discriminated-union validator downstream sees real dicts.
 
-    Also tolerates the entire `changes` payload being passed as a serialized
-    JSON string.
-
     On each decoded/passed-through dict we additionally:
       - infer a missing `type` discriminator when unambiguous
         (_infer_type_in_place) — only when `infer_types` is True
@@ -400,14 +408,6 @@ def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
       - Non-string elements (dicts, already-validated models) pass through;
         plain dicts still receive the type/match_mode normalization.
     """
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-            if isinstance(decoded, list):
-                value = decoded
-        except (json.JSONDecodeError, ValueError):
-            pass
-
     if not isinstance(value, list):
         return value
 

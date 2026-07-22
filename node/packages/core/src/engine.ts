@@ -1,7 +1,7 @@
 import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { DocumentMapper, TextSpan } from "./mapper.js";
-import { CommentsManager, extract_comments_data } from "./comments.js";
+import { CommentsManager } from "./comments.js";
 import {
   ModifyText,
   InsertTableRow,
@@ -905,25 +905,30 @@ export class RedlineEngine {
       }
     }
 
+    // Pre-count revisions before mutating. Unit is REVISION ELEMENTS, matching
+    // the Python engine and sanitize's count_tracked_changes so no two surfaces
+    // report different totals for one document.
     let accepted_insertions = 0;
     let accepted_deletions = 0;
+    let accepted_formatting = 0;
     for (const root_element of parts_to_process) {
       accepted_insertions += findAllDescendants(root_element, "w:ins").length;
       accepted_deletions += findAllDescendants(root_element, "w:del").length;
+      for (const tag of ["w:rPrChange", "w:pPrChange", "w:sectPrChange"]) {
+        accepted_formatting += findAllDescendants(root_element, tag).length;
+      }
     }
 
+    // Counted as it happens below, not pre-read from the comments part: this
+    // method only deletes the bodies of OUR OWN comments wrapping a resolved
+    // revision (foreign ones keep their body by design), so the document's
+    // comment total would claim removals that never happened.
     let removed_comments = 0;
-    try {
-      const data = extract_comments_data(this.doc.pkg);
-      removed_comments = Object.keys(data).length;
-    } catch (e) {
-      removed_comments = 0;
-    }
 
     for (const root_element of parts_to_process) {
       const insNodes = findAllDescendants(root_element, "w:ins");
       for (const ins of insNodes) {
-        this._clean_wrapping_comments(ins);
+        removed_comments += this._clean_wrapping_comments(ins);
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
 
@@ -971,8 +976,8 @@ export class RedlineEngine {
             if (has_content) {
               rPr.removeChild(delMark);
             } else {
-              this._clean_wrapping_comments(p);
-              this._delete_comments_in_element(p);
+              removed_comments += this._clean_wrapping_comments(p);
+              removed_comments += this._delete_comments_in_element(p);
               if (p.parentNode) {
                 p.parentNode.removeChild(p);
               }
@@ -983,8 +988,8 @@ export class RedlineEngine {
 
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
-        this._clean_wrapping_comments(d);
-        this._delete_comments_in_element(d);
+        removed_comments += this._clean_wrapping_comments(d);
+        removed_comments += this._delete_comments_in_element(d);
         const parent = d.parentNode as Element | null;
         if (parent) {
           if (parent.tagName === "w:trPr") {
@@ -1108,6 +1113,7 @@ export class RedlineEngine {
     return {
       accepted_insertions,
       accepted_deletions,
+      accepted_formatting,
       removed_comments,
     };
   }
@@ -2006,7 +2012,10 @@ export class RedlineEngine {
     }
     return null;
   }
-  private _clean_wrapping_comments(element: Element) {
+  /** Returns how many comment BODIES were actually deleted (see below: only
+   *  our own are; foreign ones keep their body and lose only the anchor). */
+  private _clean_wrapping_comments(element: Element): number {
+    let deleted = 0;
     let first_node: Element = element;
     while (true) {
       const prev = getPreviousElement(first_node);
@@ -2092,6 +2101,7 @@ export class RedlineEngine {
         const is_own = author !== null && author === this.author;
         if (is_own) {
           this.comments_manager.deleteComment(c_id);
+          deleted++;
         }
         if (s.parentNode) s.parentNode.removeChild(s);
         for (const e of ends_to_remove) {
@@ -2109,14 +2119,18 @@ export class RedlineEngine {
         }
       }
     }
+    return deleted;
   }
 
-  private _delete_comments_in_element(element: Element) {
+  /** Returns how many comment bodies were deleted. */
+  private _delete_comments_in_element(element: Element): number {
+    let deleted = 0;
     const refs = findAllDescendants(element, "w:commentReference");
     for (const ref of refs) {
       const c_id = ref.getAttribute("w:id");
       if (c_id) {
         this.comments_manager.deleteComment(c_id);
+        deleted++;
         for (const tag of ["w:commentRangeStart", "w:commentRangeEnd"]) {
           const nodes = findAllDescendants(this.doc.element, tag);
           for (const node of nodes) {
@@ -2127,6 +2141,7 @@ export class RedlineEngine {
         }
       }
     }
+    return deleted;
   }
 
   public validate_edits(edits: any[], index_offset: number = 0): string[] {

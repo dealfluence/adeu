@@ -4461,13 +4461,26 @@ class RedlineEngine:
                     element_to_process = part._adeu_element  # type: ignore[attr-defined]
                 parts_to_process.append(element_to_process)
 
-        # Pre-count revisions and comments before modifying the XML structures
+        # Pre-count revisions and comments before modifying the XML structures.
+        # The unit is REVISION ELEMENTS, matching sanitize's
+        # transforms.count_tracked_changes so the two surfaces can never report
+        # different totals for the same document. Word fragments one logical
+        # revision across several w:ins when formatting changes mid-revision
+        # (see AI_CONTEXT §10), so this counts marks, not user intentions —
+        # said plainly in the CLI --help rather than left for a caller to
+        # discover. Formatting revisions (w:rPrChange/w:pPrChange/w:sectPrChange)
+        # are accepted by this method too, so they are counted too; omitting
+        # them reported 0 changes for a document that demonstrably changed.
         accepted_insertions = 0
         accepted_deletions = 0
+        accepted_formatting = 0
         for root_element in parts_to_process:
             accepted_insertions += len(root_element.findall(f".//{qn('w:ins')}"))
             accepted_deletions += len(root_element.findall(f".//{qn('w:del')}"))
+            for tag in ("w:rPrChange", "w:pPrChange", "w:sectPrChange"):
+                accepted_formatting += len(root_element.findall(f".//{qn(tag)}"))
 
+        # Only claim comments were removed when they actually are.
         removed_comments = 0
         if remove_comments:
             try:
@@ -4601,6 +4614,7 @@ class RedlineEngine:
         return {
             "accepted_insertions": accepted_insertions,
             "accepted_deletions": accepted_deletions,
+            "accepted_formatting": accepted_formatting,
             "removed_comments": removed_comments,
         }
 
