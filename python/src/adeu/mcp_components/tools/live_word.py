@@ -372,7 +372,13 @@ if sys.platform == "win32":
             try:
                 # In search mode, `page` is a doc-page filter (None == search all).
                 # Outside search mode, `page` means document page and defaults to 1.
-                page_num = int(page) if (page is not None and str(page).isdigit()) else 1
+                if page is None:
+                    page_num = 1
+                else:
+                    try:
+                        page_num = int(str(page).strip())
+                    except (ValueError, TypeError):
+                        page_num = 1
                 if search_query is not None:
                     from adeu.mcp_components._response_builders import (
                         build_search_response,

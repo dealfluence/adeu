@@ -222,7 +222,13 @@ async def _read_docx_disk(
             return _as_tool_result(build_full_document_response(text, file_path))
 
         # Non-search modes: `page` means document page; default to 1.
-        page_num = int(page) if (page is not None and str(page).isdigit()) else 1
+        if page is None:
+            page_num = 1
+        else:
+            try:
+                page_num = int(str(page).strip())
+            except (ValueError, TypeError):
+                page_num = 1
         if mode == "outline":
             return _as_tool_result(
                 build_outline_response(

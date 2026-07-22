@@ -259,4 +259,25 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.isError).toBeUndefined();
     expect(res.result.content[0].text).toContain("golden");
   });
+
+  it("BUG-read_docx-negative-page: Rejects negative page numbers with out of range error", async () => {
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: cleanDocPath,
+          page: -1,
+        },
+      },
+      107,
+    );
+
+    expect(res.error).toBeUndefined();
+    expect(res.result).toBeDefined();
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("Page -1 out of range");
+  });
 });
+

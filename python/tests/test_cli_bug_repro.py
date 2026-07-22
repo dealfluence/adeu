@@ -653,3 +653,55 @@ def test_search_query_paragraph_filtering(tmp_path):
     assert "This is some English text." not in text
     assert "Accented: Café" not in text
     assert "Emojis & Symbols" not in text
+
+
+def test_read_docx_negative_page_boundary(tmp_path):
+    """
+    Verifies that calling read_docx with a negative page number (like -1)
+    correctly raises a ToolError, instead of silently defaulting to page 1.
+    """
+    import asyncio
+
+    import docx
+    import pytest
+    from fastmcp.exceptions import ToolError
+
+    from adeu.mcp_components.tools.document import read_docx
+
+    # Create a 3-page test document
+    doc = docx.Document()
+    doc.add_paragraph("This is Page 1 content.")
+    doc.add_page_break()
+    doc.add_paragraph("This is Page 2 content.")
+    doc.add_page_break()
+    doc.add_paragraph("This is Page 3 content.")
+
+    doc_path = tmp_path / "boundary_test.docx"
+    doc.save(str(doc_path))
+
+    class MockContext:
+        async def info(self, msg, **kwargs):
+            pass
+
+        async def debug(self, msg, **kwargs):
+            pass
+
+        async def warning(self, msg, **kwargs):
+            pass
+
+        async def error(self, msg, **kwargs):
+            pass
+
+    ctx = MockContext()
+
+    # Calling with page=-1 must raise a ToolError indicating that page is out of range
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(read_docx(reasoning="test", file_path=str(doc_path), ctx=ctx, page=-1))
+
+    assert "Page -1 out of range" in str(exc_info.value)
+
+    # Calling with page=0 must also raise a ToolError
+    with pytest.raises(ToolError) as exc_info_zero:
+        asyncio.run(read_docx(reasoning="test", file_path=str(doc_path), ctx=ctx, page=0))
+
+    assert "Page 0 out of range" in str(exc_info_zero.value)
