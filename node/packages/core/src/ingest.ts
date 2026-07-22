@@ -304,6 +304,15 @@ export function extract_table(
       });
     }
     rows_processed++;
+
+    if (rows_processed === 1) {
+      const num_cols = cell_texts.length;
+      if (num_cols > 0) {
+        const divider_str = Array(num_cols).fill("---").join(" | ");
+        rows_text.push(divider_str);
+        local_cursor += 1 + divider_str.length;
+      }
+    }
   }
 
   return rows_text.join("\n");

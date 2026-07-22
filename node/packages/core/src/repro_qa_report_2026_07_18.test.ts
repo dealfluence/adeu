@@ -1118,7 +1118,7 @@ describe("Review hardening: consecutive same-anchor row inserts", () => {
     expect(skipped).toBe(0);
 
     const clean = await extractTextFromBuffer(await orig.save(), true, false);
-    expect(clean).toContain("A | B\nC | D\nX1 | Y1\nX2 | Y2");
+    expect(clean).toContain("A | B\n--- | ---\nC | D\nX1 | Y1\nX2 | Y2");
   });
 });
 

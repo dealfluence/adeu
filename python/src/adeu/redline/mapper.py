@@ -416,6 +416,22 @@ class DocumentMapper:
 
             rows_processed += 1
 
+            if rows_processed == 1:
+                seen_cells_first = set()
+                num_cols = 0
+                for cell in row.cells:
+                    if cell in seen_cells_first:
+                        continue
+                    seen_cells_first.add(cell)
+                    num_cols += 1
+
+                if num_cols > 0:
+                    divider_str = " | ".join(["---"] * num_cols)
+                    self._add_virtual_text("\n", current, None)
+                    current += 1
+                    self._add_virtual_text(divider_str, current, None)
+                    current += len(divider_str)
+
         return current
 
     def _strip_markdown_formatting(self, text: str) -> str:

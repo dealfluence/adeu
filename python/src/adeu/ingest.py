@@ -370,6 +370,13 @@ def extract_table(
             geometry.rows.append(RowGeometry(start=row_start, end=local_cursor, cells=list(cell_texts)))
         rows_processed += 1
 
+        if rows_processed == 1:
+            num_cols = len(cell_texts)
+            if num_cols > 0:
+                divider_str = " | ".join(["---"] * num_cols)
+                rows_text.append(divider_str)
+                local_cursor += 1 + len(divider_str)
+
     return "\n".join(rows_text)
 
 

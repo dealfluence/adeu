@@ -1294,7 +1294,7 @@ class TestReviewRegressions:
         code, out, err = run_cli(["sanitize", mod, "--baseline", orig, "-o", san], capsys)
         assert code == 0, err
         clean = extract_text_from_stream(BytesIO(san.read_bytes()), clean_view=True)
-        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+        assert "A | B\n--- | ---\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
 
         # JSON round trip too.
         code, out, err = run_cli(["diff", orig, mod, "--json"], capsys)
@@ -1304,7 +1304,7 @@ class TestReviewRegressions:
         code, out, err = run_cli(["apply", orig, edits_file, "-o", applied], capsys)
         assert code == 0, err
         clean = extract_text_from_stream(BytesIO(applied.read_bytes()), clean_view=True)
-        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+        assert "A | B\n--- | ---\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
 
     def test_numbering_disabled_override_suppresses_style_list(self, tmp_path):
         """ECMA-376 §17.9.15: a direct numId=0 removes the style's numbering."""

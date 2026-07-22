@@ -400,6 +400,24 @@ export class DocumentMapper {
       }
 
       rows_processed += 1;
+
+      if (rows_processed === 1) {
+        const seen_cells_first = new Set();
+        let num_cols = 0;
+        for (const cell of row.cells) {
+          if (seen_cells_first.has(cell)) continue;
+          seen_cells_first.add(cell);
+          num_cols += 1;
+        }
+
+        if (num_cols > 0) {
+          const divider_str = Array(num_cols).fill("---").join(" | ");
+          this._add_virtual_text("\n", current, null);
+          current += 1;
+          this._add_virtual_text(divider_str, current, null);
+          current += divider_str.length;
+        }
+      }
     }
 
     return current;
