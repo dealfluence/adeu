@@ -365,3 +365,107 @@ def test_sanitize_blocked_msg_includes_keep_markup(tmp_path, capsys):
     # Check that the block message has our updated guidance suggesting --keep-markup
     assert "use --keep-markup" in stderr, "Validation message should suggest --keep-markup"
     assert "Review in Word first, use --accept-all, or use --keep-markup." in stderr
+
+
+def test_process_document_batch_stringified_changes(tmp_path):
+    """
+    Verifies that if `changes` is passed as a JSON-serialized string rather than
+    a list of objects (to bypass Gemini's nested array-of-object serialization issues),
+    the MCP server safely deserializes and processes the edits.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from adeu.server import mcp
+
+    doc_path = tmp_path / "minimal.docx"
+    doc = docx.Document()
+    doc.add_paragraph("This is a minimal document with some basic text.")
+    doc.add_paragraph("It has exactly two paragraphs.")
+    doc.save(str(doc_path))
+
+    output_path = tmp_path / "output.docx"
+
+    arguments = {
+        "reasoning": "Replacing text to test tool viability with stringified changes.",
+        "original_docx_path": str(doc_path),
+        "author_name": "Reviewer AI",
+        "output_path": str(output_path),
+        "changes": (
+            '[{"type": "modify", '
+            '"target_text": "It has exactly two paragraphs.", '
+            '"new_text": "It has exactly three paragraphs after editing."}]'
+        ),
+    }
+
+    # Patch FastMCP Context logging to avoid session-not-established RuntimeError when calling directly via call_tool
+    with (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    ):
+        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+
+    text = "".join(item.text for item in result.content if item.type == "text")
+    assert "Batch complete" in text
+    assert output_path.exists()
+
+    # Verify the edit was actually applied
+    new_doc = docx.Document(str(output_path))
+    from adeu.ingest import _extract_text_from_doc
+
+    clean_text = _extract_text_from_doc(new_doc, clean_view=True)
+    assert "It has exactly three paragraphs after editing." in clean_text
+
+
+def test_process_document_batch_changes_json_parameter(tmp_path):
+    """
+    Verifies that if a secondary string parameter `changes_json` is offered,
+    the server can accept a JSON-serialized string there to completely bypass
+    client-side schema-handling issues on the `changes` parameter.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from adeu.server import mcp
+
+    doc_path = tmp_path / "minimal.docx"
+    doc = docx.Document()
+    doc.add_paragraph("This is a minimal document with some basic text.")
+    doc.add_paragraph("It has exactly two paragraphs.")
+    doc.save(str(doc_path))
+
+    output_path = tmp_path / "output.docx"
+
+    arguments = {
+        "reasoning": "Replacing text to test tool viability with changes_json.",
+        "original_docx_path": str(doc_path),
+        "author_name": "Reviewer AI",
+        "output_path": str(output_path),
+        "changes_json": (
+            '[{"type": "modify", '
+            '"target_text": "It has exactly two paragraphs.", '
+            '"new_text": "It has exactly three paragraphs after editing."}]'
+        ),
+    }
+
+    # Patch FastMCP Context logging to avoid session-not-established RuntimeError when calling directly via call_tool
+    with (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    ):
+        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+
+    text = "".join(item.text for item in result.content if item.type == "text")
+    assert "Batch complete" in text
+    assert output_path.exists()
+
+    # Verify the edit was actually applied
+    new_doc = docx.Document(str(output_path))
+    from adeu.ingest import _extract_text_from_doc
+
+    clean_text = _extract_text_from_doc(new_doc, clean_view=True)
+    assert "It has exactly three paragraphs after editing." in clean_text

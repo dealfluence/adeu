@@ -77,6 +77,16 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
     Mixed lists are handled. Strings are coerced to dicts first (and missing
     `type` / malformed `match_mode` are repaired) via coerce_stringified_changes.
     """
+    import json
+
+    if isinstance(changes, str):
+        try:
+            decoded = json.loads(changes)
+            if isinstance(decoded, list):
+                changes = decoded
+        except Exception as e:
+            return [], [f"changes: Invalid JSON format: {str(e)}"]
+
     if not isinstance(changes, list):
         # A non-list input can't be salvaged per-element. Let the list adapter
         # produce its canonical "expected a list" error and report it as a
@@ -787,7 +797,11 @@ if sys.platform == "win32":
         changes: Annotated[
             BatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
-        ],
+        ] = Field(default_factory=list),  # noqa: B008
+        changes_json: Annotated[
+            Optional[str],
+            "JSON-serialized string of changes to apply (alternative to changes).",
+        ] = None,
         original_docx_path: Annotated[
             Optional[str],
             "Path to source file. LEAVE EMPTY (Null) to edit the live Word document!",
@@ -803,6 +817,8 @@ if sys.platform == "win32":
     ) -> str:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
+        if (not changes) and changes_json is not None:
+            changes = changes_json  # type: ignore[assignment]
         # FastMCP's parameter validation does not always honor the BeforeValidator
         # attached to BatchChanges (it flattens the Annotated chain and validates
         # against the bare list type), so coerce here as a defensive second pass.
@@ -1071,7 +1087,11 @@ else:
         changes: Annotated[
             BatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
-        ],
+        ] = Field(default_factory=list),  # noqa: B008
+        changes_json: Annotated[
+            Optional[str],
+            "JSON-serialized string of changes to apply (alternative to changes).",
+        ] = None,
         output_path: Annotated[Optional[str], "Optional output path."] = None,
         dry_run: Annotated[
             bool,
@@ -1080,6 +1100,8 @@ else:
     ) -> str:
         start_time = time.perf_counter()
         del reasoning
+        if (not changes) and changes_json is not None:
+            changes = changes_json  # type: ignore[assignment]
         # See win32 branch above for why we re-coerce here.
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:
