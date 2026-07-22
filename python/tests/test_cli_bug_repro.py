@@ -269,3 +269,67 @@ def test_multi_paragraph_newline_comment(tmp_path):
     assert comments_part is not None, "Comments part was not created"
     comments_xml = comments_part.blob.decode("utf-8")
     assert "Diff: Text inserted" in comments_xml, "Comment text missing from comments.xml"
+
+
+def test_process_document_batch_flat_schema():
+    """
+    Asserts that the JSON Schema for process_document_batch.changes is a single flat Change object schema,
+    rather than a nested union (oneOf/anyOf) of separate schema definitions.
+    This ensures compatibility with 100% of MCP host implementations.
+    """
+    import asyncio
+
+    from adeu.server import mcp
+
+    tools = asyncio.run(mcp.list_tools())
+    process_tool = next(t for t in tools if t.name == "process_document_batch")
+
+    assert process_tool.parameters is not None, "process_document_batch has no parameters"
+
+    # Extract changes property schema
+    properties = process_tool.parameters.get("properties", {})
+    assert "changes" in properties, "changes parameter missing from process_document_batch tool"
+
+    changes_schema = properties["changes"]
+    assert changes_schema.get("type") == "array", "changes must be an array type"
+
+    items_schema = changes_schema.get("items", {})
+
+    # The schema must NOT use oneOf or anyOf for the items
+    assert "oneOf" not in items_schema, (
+        "changes.items schema uses oneOf, which breaks nested array parsing in some MCP hosts"
+    )
+    assert "anyOf" not in items_schema, (
+        "changes.items schema uses anyOf, which breaks nested array parsing in some MCP hosts"
+    )
+
+    # Instead, it must be a single flat object
+    assert items_schema.get("type") == "object", "changes.items must be a flat object type"
+
+    # Check that individual properties from all change variants are defined as optional properties of this single model
+    item_properties = items_schema.get("properties", {})
+
+    # Must have the type discriminator
+    assert "type" in item_properties, "type field missing in flat change schema"
+
+    # Must have all the other specific properties as optional properties
+    expected_fields = [
+        "target_text",
+        "new_text",
+        "target_id",
+        "text",
+        "cells",
+        "position",
+        "regex",
+        "comment",
+        "match_mode",
+    ]
+    for field in expected_fields:
+        assert field in item_properties, f"expected field {field} missing from the unified flat Change schema"
+
+    # The other fields should NOT be listed as 'required' at the JSON schema level to ensure they are optional
+    required_fields = items_schema.get("required", [])
+    # Only type is required (acting as discriminator), or maybe even type is optional.
+    # Let's make sure none of the variant-specific fields are required.
+    for field in expected_fields:
+        assert field not in required_fields, f"field {field} must be optional (not required) in the flat Change schema"

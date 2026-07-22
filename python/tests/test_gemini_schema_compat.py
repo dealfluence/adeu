@@ -42,11 +42,17 @@ def test_const_to_enum_rewrites_nested_union():
 
 def test_document_change_discriminators_use_enum_not_const():
     schema = TypeAdapter(list[DocumentChange]).json_schema()
-    for name, definition in schema["$defs"].items():
-        type_field = definition["properties"]["type"]
-        assert "const" not in type_field, f"{name}.type still emits const"
-        assert "enum" in type_field, f"{name}.type missing enum"
-        assert len(type_field["enum"]) == 1
+    if "$defs" in schema:
+        for name, definition in schema["$defs"].items():
+            type_field = definition["properties"]["type"]
+            assert "const" not in type_field, f"{name}.type still emits const"
+            assert "enum" in type_field, f"{name}.type missing enum"
+            assert len(type_field["enum"]) == 1
+    else:
+        items_schema = schema.get("items", {})
+        type_field = items_schema.get("properties", {}).get("type", {})
+        assert "const" not in type_field, "type still emits const"
+        assert "enum" in type_field, "type missing enum"
     assert not _find_const(schema)
 
 

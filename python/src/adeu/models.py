@@ -1,7 +1,7 @@
 import json
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, TypeAdapter, WithJsonSchema
 
 from adeu.redline.mapper import DocumentMapper
 
@@ -224,6 +224,69 @@ class DeleteTableRow(BaseModel):
     _occurrences_modified: int = PrivateAttr(default=0)
 
 
+class FlatDocumentChange(BaseModel):
+    """
+    A single unified flat change schema for client/platform JSON Schema exposure,
+    avoiding complex oneOf/anyOf unions which break some MCP hosts.
+    """
+
+    type: Literal["accept", "reject", "reply", "modify", "insert_row", "delete_row"] = Field(
+        ...,
+        description="The type of document change operation.",
+        json_schema_extra=const_to_enum,
+    )
+    target_text: Optional[str] = Field(
+        None,
+        description=(
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
+            "You can include CriticMarkup {==...==} in the target to match text inside existing markup."
+        ),
+    )
+    new_text: Optional[str] = Field(
+        None,
+        description=(
+            "The desired text replacement. You may use Markdown formatting: "
+            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
+            "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
+            "To add a comment, use the 'comment' parameter instead."
+        ),
+    )
+    target_id: Optional[str] = Field(
+        None,
+        description="The full ID string from the document text (e.g. 'Chg:12', 'Com:5').",
+    )
+    text: Optional[str] = Field(
+        None,
+        description="The content of the reply body.",
+    )
+    cells: Optional[list[str]] = Field(
+        None,
+        description="A list of Markdown strings representing the contents of the new cells.",
+    )
+    position: Optional[Literal["above", "below"]] = Field(
+        None,
+        description="Whether to insert the new row above or below the anchor row.",
+    )
+    regex: Optional[bool] = Field(
+        None,
+        description="Treat target_text as a regular expression.",
+    )
+    comment: Optional[str] = Field(
+        None,
+        description="Text to appear in a comment bubble (Review Pane) linked to this edit or optional rationale.",
+    )
+    match_mode: Optional[Literal["strict", "first", "all"]] = Field(
+        None,
+        description=(
+            "Resolution strategy when target_text appears more than once. "
+            "'strict' (default): fail with an ambiguity error if there are multiple matches. "
+            "'first': modify only the first occurrence. "
+            "'all': modify every occurrence. Use 'first'/'all' to resolve an ambiguity error "
+            "without having to add more surrounding context to target_text."
+        ),
+    )
+
+
 DocumentChange = Annotated[
     Union[
         AcceptChange,
@@ -234,6 +297,7 @@ DocumentChange = Annotated[
         DeleteTableRow,
     ],
     Field(discriminator="type"),
+    WithJsonSchema(TypeAdapter(FlatDocumentChange).json_schema()),
 ]
 
 
