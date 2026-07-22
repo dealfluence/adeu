@@ -1,7 +1,7 @@
 import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { DocumentMapper, TextSpan } from "./mapper.js";
-import { CommentsManager } from "./comments.js";
+import { CommentsManager, extract_comments_data } from "./comments.js";
 import {
   ModifyText,
   InsertTableRow,
@@ -421,6 +421,67 @@ export class RedlineEngine {
     return null;
   }
 
+  /**
+   * Build a single (unfragmented) sub-edit for a commented change.
+   *
+   * Shared prefix/suffix are still trimmed (word-boundary aware) so the redline
+   * stays minimal at the edges, but the changed middle is emitted as ONE tracked
+   * change rather than fanned out per word. The comment then anchors around the
+   * whole span. See _word_diff_sub_edits for why a commented change must not be
+   * split.
+   */
+  private _single_commented_sub_edit(
+    target_str: string,
+    new_str: string,
+    base_offset: number,
+    comment: string,
+    is_table: boolean,
+    active_mapper: any,
+  ): any[] {
+    let final_target: string;
+    let final_new: string;
+    let start: number;
+    let op: string;
+
+    if (target_str === new_str) {
+      // A pure comment anchor (no textual change) has nothing to trim to;
+      // trimming identical strings would collapse the span to zero length and
+      // the COMMENT_ONLY apply path would find no runs to attach to. Keep the
+      // whole span as the anchor.
+      final_target = target_str;
+      final_new = new_str;
+      start = base_offset;
+      op = "COMMENT_ONLY";
+    } else {
+      const [prefix_len, suffix_len] = trim_common_context(target_str, new_str);
+      final_target = target_str.slice(prefix_len, target_str.length - suffix_len);
+      final_new = new_str.slice(prefix_len, new_str.length - suffix_len);
+      start = base_offset + prefix_len;
+      if (!final_target && final_new) {
+        op = "INSERTION";
+      } else if (final_target && !final_new) {
+        op = "DELETION";
+      } else {
+        op = "MODIFICATION";
+      }
+    }
+
+    const sub_edit: any = {
+      type: "modify",
+      target_text: final_target,
+      new_text: final_new,
+      comment,
+    };
+    sub_edit._resolved_start_idx = start;
+    sub_edit._match_start_index = start;
+    sub_edit._active_mapper_ref = active_mapper;
+    sub_edit._internal_op = op;
+    if (is_table) {
+      sub_edit._is_table_edit = true;
+    }
+    return [sub_edit];
+  }
+
   private _word_diff_sub_edits(
     target_str: string,
     new_str: string,
@@ -429,6 +490,26 @@ export class RedlineEngine {
     is_table: boolean = false,
     active_mapper: any = null,
   ): any[] {
+    // A modify that carries a comment must stay ONE contiguous tracked change
+    // so its comment anchor wraps the whole logical edit. Word-level fan-out
+    // would split it into several Chg pairs and attach the comment to only one
+    // fragment; rejecting THAT fragment then silently destroys the comment (and
+    // any reply thread) while the other fragments — and the batch's "1 applied"
+    // report — give no hint the annotation is gone (QA 2026-07-22 bug #1). Emit
+    // a single sub-edit over the minimal word-boundary-trimmed changed span so a
+    // commented change is atomic: rejecting it reverts the entire edit, with no
+    // orphaned "other half".
+    if (parent_comment !== null && parent_comment !== undefined) {
+      return this._single_commented_sub_edit(
+        target_str,
+        new_str,
+        base_offset,
+        parent_comment,
+        is_table,
+        active_mapper,
+      );
+    }
+
     let raw_sub_edits: any[] = [];
     try {
       raw_sub_edits = generate_edits_from_text(target_str, new_str);
@@ -2693,7 +2774,7 @@ export class RedlineEngine {
         }
         if (!found) {
           errors.push(
-            `- Action ${i + 1} Failed: Target comment ID ${action.target_id} not found.`,
+            this._action_not_found_error(action.target_id, "reply", `- Action ${i + 1} Failed:`),
           );
         }
       } else if (type === "accept" || type === "reject") {
@@ -2706,7 +2787,7 @@ export class RedlineEngine {
         );
         if (all_ins.length === 0 && all_del.length === 0) {
           errors.push(
-            `- Action ${i + 1} Failed: Target ID ${action.target_id} not found.`,
+            this._action_not_found_error(action.target_id, type, `- Action ${i + 1} Failed:`),
           );
         }
       }
@@ -3584,6 +3665,104 @@ export class RedlineEngine {
    * is counted in `already_resolved` instead — never as applied
    * (QA 2026-07-19 ADEU-QA-004).
    */
+  /** Distinct tracked-change ids (w:id on w:ins/w:del) in the main story. */
+  private _existing_change_ids(): string[] {
+    const ids = new Set<string>();
+    for (const tag of ["w:ins", "w:del"]) {
+      for (const n of findAllDescendants(this.doc.element, tag)) {
+        const id = n.getAttribute("w:id");
+        if (id) ids.add(id);
+      }
+    }
+    return Array.from(ids).sort((a, b) => {
+      const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+      const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+      return na - nb || a.localeCompare(b);
+    });
+  }
+
+  /** Comment ids present in the document, sorted for display. */
+  private _existing_comment_ids(): string[] {
+    let ids: string[] = [];
+    try {
+      ids = Object.keys(extract_comments_data(this.doc.pkg));
+    } catch {
+      ids = [];
+    }
+    return ids.sort((a, b) => {
+      const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+      const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+      return na - nb || a.localeCompare(b);
+    });
+  }
+
+  private static _format_id_list(ids: string[], prefix: string, limit = 20): string {
+    const shown = ids.slice(0, limit);
+    let rendered = shown.map((i) => `${prefix}${i}`).join(", ");
+    if (ids.length > shown.length) {
+      rendered += `, … (+${ids.length - shown.length} more)`;
+    }
+    return rendered;
+  }
+
+  /**
+   * Self-service diagnostic for accept/reject/reply on an id that resolved
+   * nothing. The other errors in this engine explain WHY and HOW to recover;
+   * this path used to emit only "Target ID X not found" with no way to find a
+   * valid id (QA 2026-07-22 bug #3). Names the expected id kind, lists the ids
+   * that actually exist, flags the common change/comment id mix-up, and points
+   * at the command that prints current ids. `lead` is the full sentence
+   * prefix (e.g. "- Action 3 Failed:") so callers can match the surrounding
+   * error style.
+   */
+  private _action_not_found_error(
+    raw_id: string,
+    type: string,
+    lead = "- Failed to apply action:",
+  ): string {
+    const change_ids = this._existing_change_ids();
+    const comment_ids = this._existing_comment_ids();
+    const has_prefix = raw_id.startsWith("Chg:") || raw_id.startsWith("Com:");
+    // Bare numeric id, regardless of which prefix (or none) the caller used.
+    const bare = raw_id.replace(/^(Chg:|Com:)/, "");
+    const find_hint =
+      "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current " +
+      "change (Chg:) and comment (Com:) ids.";
+
+    if (type === "reply") {
+      const echo = has_prefix ? raw_id : `Com:${bare}`;
+      if (change_ids.includes(bare)) {
+        return (
+          `${lead} reply on ${echo} — Chg:${bare} is a tracked-change id, not a comment. ` +
+          "`reply` adds to an existing comment thread (Com:…); to comment on a change instead, " +
+          `apply a modify with a \`comment\`. ${find_hint}`
+        );
+      }
+      const avail =
+        comment_ids.length > 0
+          ? `Comment ids in this document: ${RedlineEngine._format_id_list(comment_ids, "Com:")}. `
+          : "This document has no comments to reply to. ";
+      return `${lead} reply on ${echo} — no comment with that id exists. ${avail}${find_hint}`;
+    }
+
+    const echo = has_prefix ? raw_id : `Chg:${bare}`;
+    if (comment_ids.includes(bare)) {
+      return (
+        `${lead} ${type} on ${echo} — Com:${bare} is a comment id, ` +
+        `not a tracked change. accept/reject act on tracked changes (Chg:…); to respond to a ` +
+        `comment use \`reply\`. ${find_hint}`
+      );
+    }
+    const avail =
+      change_ids.length > 0
+        ? `Tracked-change ids in this document: ${RedlineEngine._format_id_list(change_ids, "Chg:")}. `
+        : "This document has no tracked changes. ";
+    return (
+      `${lead} ${type} on ${echo} — no tracked change with that id exists ` +
+      `(it may already have been accepted or rejected, or the id is stale). ${avail}${find_hint}`
+    );
+  }
+
   public apply_review_actions(actions: any[]): [number, number, number] {
     let applied = 0;
     let skipped = 0;
@@ -3657,7 +3836,7 @@ export class RedlineEngine {
       if (all_nodes.length === 0) {
         skipped++;
         this.skipped_details.push(
-          `- Failed to apply action: Target ID ${action.target_id} not found.`,
+          this._action_not_found_error(action.target_id, type),
         );
         continue;
       }
@@ -3702,6 +3881,12 @@ export class RedlineEngine {
         const rid = node.getAttribute("w:id");
         if (rid) resolved_now.add(rid);
       }
+
+      // Accept/reject can delete a comment as a side effect when the comment's
+      // anchor falls inside the resolved change. Snapshot the comment ids first
+      // so a removal is reported explicitly instead of happening silently under
+      // "1 applied" (QA 2026-07-22 bug #1).
+      const comments_before = new Set(this._existing_comment_ids());
 
       for (const node of group_nodes) {
         const is_ins = node.tagName === "w:ins";
@@ -3762,6 +3947,26 @@ export class RedlineEngine {
         resolved_history.set(rid, type);
       }
       applied++;
+
+      if (comments_before.size > 0) {
+        const after = new Set(this._existing_comment_ids());
+        const removed = Array.from(comments_before).filter((c) => !after.has(c));
+        if (removed.length > 0) {
+          const removed_list = removed
+            .sort((a, b) => {
+              const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+              const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+              return na - nb || a.localeCompare(b);
+            })
+            .map((c) => `Com:${c}`)
+            .join(", ");
+          this.skipped_details.push(
+            `- Note: ${type} on ${action.target_id} also removed comment ${removed_list} ` +
+              `(including any reply thread) because its anchor was inside the resolved change. ` +
+              `This note is informational — the action itself succeeded.`,
+          );
+        }
+      }
     }
     return [applied, skipped, already_resolved];
   }

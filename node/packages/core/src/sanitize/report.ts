@@ -64,7 +64,12 @@ export class SanitizeReport {
     if (this.author) flags.push(`--author "${this.author}"`);
     if (this.tracked_changes_accepted > 0) flags.push("--accept-all");
 
-    if (flags.length > 0) lines.push(flags.join(" "));
+    // Label the invocation flags. A bare "--keep-markup" line directly under
+    // the title reads as a stray debug/args token appended to the filename
+    // (QA 2026-07-22 bug #2); "Options:" marks it as intentional report
+    // metadata — important since report output is shown to a counterparty as
+    // proof of a clean document.
+    if (flags.length > 0) lines.push(`Options: ${flags.join(" ")}`);
     lines.push(sep);
 
     if (this.status === "blocked") {

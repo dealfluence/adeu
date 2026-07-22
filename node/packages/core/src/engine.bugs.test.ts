@@ -77,8 +77,12 @@ describe("Resolved Bugs Core Engine Verification", () => {
 
     expect(caught).toBeDefined();
     expect(caught.name).toBe("BatchValidationError");
-    // Both errors should be accumulated and thrown together
-    expect(caught.message).toContain("Target ID Chg:999 not found");
+    // Both errors should be accumulated and thrown together. The action error
+    // is now self-service (QA 2026-07-22 bug #3) — it names the missing id and
+    // that no such change exists — but must still identify Chg:999 and appear
+    // alongside the text-edit error in the same pass.
+    expect(caught.message).toContain("Chg:999");
+    expect(caught.message).toContain("no tracked change with that id exists");
     expect(caught.message).toContain("Target text not found");
     expect(caught.message).toContain("MISSING_TEXT");
   });

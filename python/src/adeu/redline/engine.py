@@ -2976,6 +2976,60 @@ class RedlineEngine:
             return all_sub_edits
         return all_sub_edits[0]
 
+    def _single_commented_sub_edit(
+        self,
+        target_str: str,
+        new_str: str,
+        base_offset: int,
+        comment: str,
+        is_table: bool,
+        active_mapper,
+    ) -> List[ModifyText]:
+        """
+        Build a single (unfragmented) sub-edit for a commented change.
+
+        Shared prefix/suffix are still trimmed (word-boundary aware) so the
+        redline stays minimal at the edges, but the changed middle is emitted
+        as ONE tracked change rather than fanned out per word. The comment then
+        anchors around the whole span. See _word_diff_sub_edits for why a
+        commented change must not be split.
+        """
+        if target_str == new_str:
+            # A pure comment anchor (no textual change) has nothing to trim to;
+            # trimming identical strings would collapse the span to zero length
+            # and the COMMENT_ONLY apply path would find no runs to attach to.
+            # Keep the whole span as the anchor.
+            final_target = target_str
+            final_new = new_str
+            start = base_offset
+            op = "COMMENT_ONLY"
+        else:
+            prefix_len, suffix_len = trim_common_context(target_str, new_str)
+            final_target = target_str[prefix_len : len(target_str) - suffix_len]
+            final_new = new_str[prefix_len : len(new_str) - suffix_len]
+            start = base_offset + prefix_len
+            if not final_target and final_new:
+                op = EditOperationType.INSERTION
+            elif final_target and not final_new:
+                op = EditOperationType.DELETION
+            else:
+                op = EditOperationType.MODIFICATION
+
+        sub_edit = ModifyText(
+            type="modify",
+            target_text=final_target,
+            new_text=final_new,
+            comment=comment,
+        )
+        sub_edit._resolved_start_idx = start
+        sub_edit._match_start_index = start
+        sub_edit._active_mapper_ref = active_mapper
+        sub_edit._internal_op = op
+        if is_table:
+            sub_edit._is_table_edit = True
+
+        return [sub_edit]
+
     def _word_diff_sub_edits(
         self,
         target_str: str,
@@ -2985,6 +3039,20 @@ class RedlineEngine:
         is_table: bool = False,
         active_mapper=None,
     ) -> List[ModifyText]:
+        # A modify that carries a comment must stay ONE contiguous tracked
+        # change so its comment anchor wraps the whole logical edit. Word-level
+        # fan-out would split it into several Chg pairs and attach the comment
+        # to only one fragment; rejecting THAT fragment then silently destroys
+        # the comment (and any reply thread) while the other fragments — and the
+        # batch's "1 applied" report — give no hint the annotation is gone
+        # (QA 2026-07-22 bug #1). Emit a single sub-edit over the minimal
+        # word-boundary-trimmed changed span so a commented change is atomic:
+        # rejecting it reverts the entire edit, with no orphaned "other half".
+        if parent_comment is not None:
+            return self._single_commented_sub_edit(
+                target_str, new_str, base_offset, parent_comment, is_table, active_mapper
+            )
+
         try:
             raw_sub_edits = generate_edits_from_text(target_str, new_str)
         except Exception as e:
@@ -4021,6 +4089,84 @@ class RedlineEngine:
             "an explicit text edit instead."
         )
 
+    def _existing_change_ids(self) -> List[str]:
+        """Distinct tracked-change ids (w:id on w:ins/w:del) in the main story."""
+        ids = {
+            n.get(qn("w:id"))
+            for tag in ("w:ins", "w:del")
+            for n in self.doc.element.findall(f".//{qn(tag)}")
+            if n.get(qn("w:id"))
+        }
+        return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+
+    def _existing_comment_ids(self) -> List[str]:
+        """Comment ids present in the document, sorted for display."""
+        try:
+            ids = list(self.comments_manager.extract_comments_data().keys())
+        except Exception:
+            ids = []
+        return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+
+    @staticmethod
+    def _format_id_list(ids: List[str], prefix: str, limit: int = 20) -> str:
+        shown = ids[:limit]
+        rendered = ", ".join(f"{prefix}{i}" for i in shown)
+        if len(ids) > len(shown):
+            rendered += f", … (+{len(ids) - len(shown)} more)"
+        return rendered
+
+    def _action_not_found_error(self, raw_id: str, target_id: str, act) -> str:
+        """
+        Self-service diagnostic for accept/reject/reply on an id that resolved
+        nothing. The other errors in this engine explain WHY and HOW to recover
+        (ambiguous-match, major-deletions guard); this path used to emit only
+        "Failed to apply action: reply on 99" with no reason and no way to find
+        a valid id (QA 2026-07-22 bug #3). Names the expected id kind, lists the
+        ids that actually exist, flags the common change/comment id mix-up, and
+        points at the command that prints current ids.
+        """
+        change_ids = self._existing_change_ids()
+        comment_ids = self._existing_comment_ids()
+        has_prefix = raw_id.startswith("Chg:") or raw_id.startswith("Com:")
+        find_hint = (
+            "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current "
+            "change (Chg:) and comment (Com:) ids."
+        )
+
+        if isinstance(act, ReplyComment):
+            # Echo the id the caller passed (normalizing a bare id to Com:N).
+            echo = raw_id if has_prefix else f"Com:{target_id}"
+            if target_id in change_ids:
+                return (
+                    f"- Failed to apply action: reply on {echo} — Chg:{target_id} is a tracked-change "
+                    "id, not a comment. `reply` adds to an existing comment thread (Com:…); to comment "
+                    "on a change instead, apply a modify with a `comment`. " + find_hint
+                )
+            avail = (
+                f"Comment ids in this document: {self._format_id_list(comment_ids, 'Com:')}. "
+                if comment_ids
+                else "This document has no comments to reply to. "
+            )
+            return f"- Failed to apply action: reply on {echo} — no comment with that id exists. " + avail + find_hint
+
+        # AcceptChange / RejectChange
+        echo = raw_id if has_prefix else f"Chg:{target_id}"
+        if target_id in comment_ids:
+            return (
+                f"- Failed to apply action: {act.type} on {echo} — Com:{target_id} is a comment id, "
+                f"not a tracked change. accept/reject act on tracked changes (Chg:…); to respond to a "
+                f"comment use `reply`. " + find_hint
+            )
+        avail = (
+            f"Tracked-change ids in this document: {self._format_id_list(change_ids, 'Chg:')}. "
+            if change_ids
+            else "This document has no tracked changes. "
+        )
+        return (
+            f"- Failed to apply action: {act.type} on {echo} — no tracked change with that id exists "
+            "(it may already have been accepted or rejected, or the id is stale). " + avail + find_hint
+        )
+
     def _resolution_group_ids(self, target_id: str) -> set:
         """
         All revision ids that resolve as ONE unit with `target_id`: the ids of
@@ -4150,6 +4296,14 @@ class RedlineEngine:
             resolved_now = set()
             success = False
 
+            # Accept/reject can delete a comment as a side effect when the
+            # comment's anchor falls inside the resolved change. Snapshot the
+            # comment ids first so a removal is reported explicitly instead of
+            # happening silently under "1 applied" (QA 2026-07-22 bug #1).
+            comments_before: set = set()
+            if isinstance(act, (AcceptChange, RejectChange)) and is_change:
+                comments_before = set(self._existing_comment_ids())
+
             if isinstance(act, AcceptChange):
                 if is_change:
                     resolved_now = self._accept_change(target_id)
@@ -4167,8 +4321,17 @@ class RedlineEngine:
                     if rid:
                         resolved_history[rid] = act.type
                 applied += 1
+                if comments_before:
+                    removed = comments_before - set(self._existing_comment_ids())
+                    if removed:
+                        removed_list = ", ".join(f"Com:{c}" for c in sorted(removed))
+                        self.skipped_details.append(
+                            f"- Note: {act.type} on {raw_id} also removed comment {removed_list} "
+                            "(including any reply thread) because its anchor was inside the resolved "
+                            "change. This note is informational — the action itself succeeded."
+                        )
             else:
-                self.skipped_details.append(f"- Failed to apply action: {act.type} on {target_id}")
+                self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act))
                 skipped += 1
 
         return applied, skipped, already_resolved
