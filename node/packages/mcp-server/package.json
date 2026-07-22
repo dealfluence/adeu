@@ -1,6 +1,6 @@
 {
   "name": "@adeu/mcp-server",
-  "version": "1.28.0",
+  "version": "1.29.0",
   "description": "",
   "mcpName": "ai.adeu/adeu",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@adeu/core": "^1.28.0",
+    "@adeu/core": "^1.29.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@modelcontextprotocol/ext-apps": "^1.7.4",
     "zod": "4.4.3"
