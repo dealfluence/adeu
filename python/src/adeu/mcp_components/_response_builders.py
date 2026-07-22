@@ -583,10 +583,16 @@ def build_search_response(
         m_start, m_end = m.span()
         matched_str = m.group(0)
 
+        last_nl = body.rfind("\n", 0, m_start)
+        snippet_start = 0 if last_nl == -1 else last_nl + 1
+
+        next_nl = body.find("\n", m_end)
+        snippet_end = len(body) if next_nl == -1 else next_nl
+
         snippet = _emphasized_snippet(
-            body[max(0, m_start - 100) : m_start],
+            body[snippet_start:m_start],
             matched_str,
-            body[m_end : min(len(body), m_end + 100)],
+            body[m_end:snippet_end],
         )
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 

@@ -2356,14 +2356,54 @@ class RedlineEngine:
                     resolved_mapper = self.clean_mapper
 
                 if matches:
-                    # validate_edits already ensured uniqueness. Record WHICH
-                    # mapper produced the offset: a clean-view index resolved
-                    # against the raw mapper lands rows at the wrong position
-                    # once earlier edits in the batch put tracked changes in
-                    # the anchor row.
-                    edit._resolved_start_idx = matches[0][0]
-                    edit._active_mapper_ref = resolved_mapper
-                    resolved_edits.append((edit, None))
+                    match_mode = getattr(edit, "match_mode", "strict")
+
+                    unique_matches = []
+                    seen_trs = set()
+
+                    for m_start, m_len in matches:
+                        anchor_run, anchor_paragraph = resolved_mapper.get_insertion_anchor(m_start, rebuild_map=False)
+                        target_element = None
+                        if anchor_run:
+                            target_element = anchor_run._element
+                        elif anchor_paragraph:
+                            target_element = anchor_paragraph._element
+
+                        tr = None
+                        curr = target_element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                tr = curr
+                                break
+                            curr = curr.getparent()
+
+                        if tr is not None and tr not in seen_trs:
+                            seen_trs.add(tr)
+                            unique_matches.append((m_start, m_len))
+
+                    if unique_matches:
+                        matches_to_apply = unique_matches
+                        if match_mode in ("strict", "first"):
+                            matches_to_apply = unique_matches[:1]
+
+                        if match_mode == "all" or len(matches_to_apply) > 1:
+                            for m_start, m_len in matches_to_apply:
+                                sub_edit = deepcopy(edit)
+                                sub_edit._resolved_start_idx = m_start
+                                sub_edit._active_mapper_ref = resolved_mapper
+                                sub_edit._parent_edit_ref = edit
+                                resolved_edits.append((sub_edit, None))
+                        else:
+                            edit._resolved_start_idx = matches_to_apply[0][0]
+                            edit._active_mapper_ref = resolved_mapper
+                            resolved_edits.append((edit, None))
+                    else:
+                        skipped += 1
+                        edit._applied_status = False
+                        target_snippet = edit.target_text.strip()[:40]
+                        msg = f"- Failed to locate row target: '{target_snippet}...'"
+                        self.skipped_details.append(msg)
+                        edit._error_msg = msg
                 else:
                     skipped += 1
                     target_snippet = edit.target_text.strip()[:40]

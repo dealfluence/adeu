@@ -570,3 +570,107 @@ def test_process_document_batch_relaxed_validation_repro(tmp_path):
     text = "".join(item.text for item in result.content if item.type == "text")
     assert "Error: No valid changes to apply" in text
     assert "changes[0]:" in text
+
+
+def test_table_row_match_mode_all(tmp_path):
+    import io
+    import docx
+    from adeu.redline.engine import RedlineEngine
+    from adeu.models import DeleteTableRow, InsertTableRow
+    from adeu.ingest import _extract_text_from_doc
+
+    doc = docx.Document()
+    table = doc.add_table(rows=3, cols=3)
+    # Row 0: ID | Name | Notes
+    # Row 1: 1 | Alice | First record
+    # Row 2: 2 |       | Second record with empty name
+    for row, data in zip(table.rows, [
+        ["ID", "Name", "Notes"],
+        ["1", "Alice", "First record"],
+        ["2", "", "Second record with empty name"]
+    ]):
+        for cell, text in zip(row.cells, data):
+            cell.text = text
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    # --- Test Delete All ---
+    engine_del = RedlineEngine(stream)
+    stats_del = engine_del.process_batch([
+        DeleteTableRow(
+            type="delete_row",
+            target_text="record",
+            match_mode="all"
+        )
+    ])
+
+    assert stats_del["edits_applied"] == 1
+    assert stats_del["occurrences_modified"] == 2
+
+    engine_del.accept_all_revisions()
+    clean_text_del = _extract_text_from_doc(docx.Document(engine_del.save_to_stream()), clean_view=True)
+    assert "First record" not in clean_text_del
+    assert "Second record" not in clean_text_del
+
+    # --- Test Insert All ---
+    stream.seek(0)
+    engine_ins = RedlineEngine(stream)
+    stats_ins = engine_ins.process_batch([
+        InsertTableRow(
+            type="insert_row",
+            target_text="record",
+            match_mode="all",
+            position="below",
+            cells=["NEW_ID", "NEW_NAME", "NEW_NOTES"]
+        )
+    ])
+
+    assert stats_ins["edits_applied"] == 1
+    assert stats_ins["occurrences_modified"] == 2
+
+    engine_ins.accept_all_revisions()
+    clean_text_ins = _extract_text_from_doc(docx.Document(engine_ins.save_to_stream()), clean_view=True)
+    
+    # We should have exactly 2 injected rows
+    occurrences = clean_text_ins.count("NEW_ID | NEW_NAME | NEW_NOTES")
+    assert occurrences == 2
+
+
+def test_search_query_paragraph_filtering(tmp_path):
+    """
+    Ensures that when a document is searched using the MCP read_docx tool, 
+    the snippet returned strictly bounds to the paragraph the match lives in,
+    instead of an arbitrary 100-character window that leaks neighboring lines.
+    """
+    import asyncio
+    import docx
+    from adeu.server import mcp
+
+    doc = docx.Document()
+    doc.add_paragraph("Unicode Test Document")
+    doc.add_paragraph("This is some English text.")
+    doc.add_paragraph("Chinese: 一些中文 and 更多文本")
+    doc.add_paragraph("Accented: Café, naïve, résumé, garçon, déjà vu, Straße.")
+    doc.add_paragraph("Emojis & Symbols: 🌟 🦄 💻 ⚙️ ⛩️ 🎴日本語 🌍")
+
+    doc_path = tmp_path / "search.docx"
+    doc.save(str(doc_path))
+
+    arguments = {
+        "reasoning": "Filter document to target paragraph.",
+        "file_path": str(doc_path),
+        "search_query": "Chinese"
+    }
+
+    result = asyncio.run(mcp.call_tool("read_docx", arguments))
+    text = "".join(item.text for item in result.content if item.type == "text")
+
+    # The query MUST be matched and returned.
+    assert "**Chinese**" in text
+
+    # The search query should filter out non-matching paragraphs to conserve LLM context.
+    assert "This is some English text." not in text
+    assert "Accented: Café" not in text
+    assert "Emojis & Symbols" not in text
