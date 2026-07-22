@@ -481,7 +481,7 @@ server.registerTool(
       // gets a clear "expected array, received string" it can retry from.
       // Per-item stringification is still tolerated, below and in the engine.
       changes: z
-        .array(z.union([z.string(), CHANGE_ITEM_SCHEMA]))
+        .array(z.union([z.string(), z.number(), CHANGE_ITEM_SCHEMA]))
         .describe(
           "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). Items apply SEQUENTIALLY: each one evaluates against the document state produced by the items before it, so later items may target text an earlier item introduced.",
         ),
@@ -528,6 +528,19 @@ server.registerTool(
         return {
           content: [{ type: "text", text: "Error: No changes provided." }],
         };
+
+      const hasNumericChanges = changes.some((item: any) => typeof item === "number");
+      if (hasNumericChanges) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "A numeric reference ID was received in the changes array. This is due to a known platform serialization constraint where structured edit objects are serialized into numbers. As a workaround, please pass change items as a JSON-stringified string instead of raw objects.",
+            },
+          ],
+        };
+      }
 
       // Defensive sanitization at the MCP boundary: some LLM clients
       // "double-serialize" nested arrays, delivering each element of `changes`
