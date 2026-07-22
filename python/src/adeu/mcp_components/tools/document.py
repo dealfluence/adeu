@@ -12,7 +12,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
 from fastmcp.tools.tool import ToolResult
-from pydantic import Field, TypeAdapter
+from pydantic import BeforeValidator, Field, TypeAdapter, WithJsonSchema
 
 from adeu.diff import generate_edits_from_text
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
@@ -33,7 +33,6 @@ from adeu.mcp_components.shared import (
 )
 from adeu.models import (
     AcceptChange,
-    BatchChanges,
     DeleteTableRow,
     DocumentChange,
     InsertTableRow,
@@ -55,6 +54,12 @@ def _as_tool_result(res: BuilderResult) -> ToolResult:
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
 
 _SINGLE_CHANGE_ADAPTER: TypeAdapter[DocumentChange] = TypeAdapter(DocumentChange)
+
+McpBatchChanges = Annotated[
+    List[Any],
+    BeforeValidator(coerce_stringified_changes),
+    WithJsonSchema(TypeAdapter(List[DocumentChange]).json_schema()),
+]
 
 
 def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
@@ -795,7 +800,7 @@ if sys.platform == "win32":
         author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
         ctx: Context,
         changes: Annotated[
-            BatchChanges,
+            McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ] = Field(default_factory=list),  # noqa: B008
         changes_json: Annotated[
@@ -1085,7 +1090,7 @@ else:
         author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
         ctx: Context,
         changes: Annotated[
-            BatchChanges,
+            McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ] = Field(default_factory=list),  # noqa: B008
         changes_json: Annotated[

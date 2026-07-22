@@ -525,3 +525,48 @@ def test_repro_sanitize_double_percent_escaping(tmp_path, capsys):
     assert "69% differs" in stderr or "69% differs" in stdout
     assert "31%%" not in stderr and "31%%" not in stdout
     assert "69%%" not in stderr and "69%%" not in stdout
+
+
+def test_process_document_batch_relaxed_validation_repro(tmp_path):
+    """
+    Verifies that passing a list of changes containing invalid elements (such as `1`)
+    to the `changes` parameter of `process_document_batch` does NOT raise a raw
+    FastMCP ValidationError (Pydantic validation error) during tool parameter validation,
+    but instead successfully executes the tool and returns a friendly validation error message.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    import docx
+
+    from adeu.server import mcp
+
+    doc_path = tmp_path / "minimal.docx"
+    doc = docx.Document()
+    doc.add_paragraph("This is a minimal document with some basic text.")
+    doc.save(str(doc_path))
+
+    output_path = tmp_path / "output.docx"
+
+    arguments = {
+        "reasoning": "Attempting modification via changes parameter with invalid elements to test error handling",
+        "original_docx_path": str(doc_path),
+        "author_name": "Reviewer AI",
+        "output_path": str(output_path),
+        "changes": [1],
+    }
+
+    # Patch FastMCP Context logging to avoid session-not-established RuntimeError
+    with (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    ):
+        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+
+    # The expected behavior is that the tool executes successfully and returns a friendly error message
+    # rather than raising a fastmcp.exceptions.ValidationError before execution.
+    text = "".join(item.text for item in result.content if item.type == "text")
+    assert "Error: No valid changes to apply" in text
+    assert "changes[0]:" in text
