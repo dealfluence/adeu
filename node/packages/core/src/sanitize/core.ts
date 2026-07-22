@@ -29,7 +29,7 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
 
     if (total > 0 && !options.accept_all) {
       report.status = 'blocked';
-      report.blocked_reason = `Document contains ${total} unresolved tracked changes (${counts[0]} insertions, ${counts[1]} deletions, ${counts[2]} formatting). Review in Word first, or set accept_all=true.`;
+      report.blocked_reason = `Document contains ${total} unresolved tracked changes (${counts[0]} insertions, ${counts[1]} deletions, ${counts[2]} formatting). Review in Word first, set accept_all=true, or set sanitize_mode='keep-markup'.`;
       return { reportText: report.render() };
     }
 

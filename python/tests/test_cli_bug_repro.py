@@ -333,3 +333,35 @@ def test_process_document_batch_flat_schema():
     # Let's make sure none of the variant-specific fields are required.
     for field in expected_fields:
         assert field not in required_fields, f"field {field} must be optional (not required) in the flat Change schema"
+
+
+def test_sanitize_blocked_msg_includes_keep_markup(tmp_path, capsys):
+    doc_path = tmp_path / "blocked_repro.docx"
+    doc = docx.Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    d = OxmlElement("w:del")
+    d.set(qn("w:id"), "1")
+    d.set(qn("w:author"), "Opposing Counsel")
+    d.set(qn("w:date"), "2025-01-15T10:00:00Z")
+    rd = OxmlElement("w:r")
+    rt = OxmlElement("w:delText")
+    rt.set(qn("xml:space"), "preserve")
+    rt.text = "Vendor"
+    rd.append(rt)
+    d.append(rd)
+    p._element.append(d)
+
+    doc.save(str(doc_path))
+
+    # Run CLI sanitize on this doc, which should block because it contains unresolved changes
+    code, stdout, stderr = run_cli(["sanitize", str(doc_path)], capsys)
+
+    assert code == 1
+    # Check that the block message has our updated guidance suggesting --keep-markup
+    assert "use --keep-markup" in stderr, "Validation message should suggest --keep-markup"
+    assert "Review in Word first, use --accept-all, or use --keep-markup." in stderr
