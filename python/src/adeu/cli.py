@@ -1477,25 +1477,16 @@ def handle_sanitize(args: argparse.Namespace):
                 allow_low_similarity_baseline=args.allow_low_similarity_baseline,
             )
             if args.report or args.report_file:
-                report_txt = result.report_text
-                try:
-                    report_txt = report_txt % ()
-                except (TypeError, ValueError):
-                    pass
+                report_text = result.report_text.replace("%%", "%")
                 if args.report:
-                    print(report_txt, file=sys.stderr)
+                    print(report_text, file=sys.stderr)
                 if args.report_file:
-                    _write_report_file(args.report_file, report_txt)
+                    _write_report_file(args.report_file, report_text)
 
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
-            err_msg = str(e)
-            try:
-                err_msg = err_msg % ()
-            except (TypeError, ValueError):
-                pass
-            print(err_msg, file=sys.stderr)
+            print(str(e).replace("%%", "%"), file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
@@ -1643,14 +1634,9 @@ def handle_sanitize(args: argparse.Namespace):
             full_report = []
             for r in all_reports:
                 if isinstance(r, SanitizeError):
-                    val = str(r)
+                    full_report.append(str(r).replace("%%", "%"))
                 else:
-                    val = r.report_text
-                try:
-                    val = val % ()
-                except (TypeError, ValueError):
-                    pass
-                full_report.append(val)
+                    full_report.append(r.report_text.replace("%%", "%"))
                 full_report.append("")
 
             full_report.append(summary)
