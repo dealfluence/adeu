@@ -357,8 +357,8 @@ def _sanitize_baseline(
             if not allow_low_similarity:
                 report.status = "blocked"
                 report.blocked_reason = (
-                    f"Baseline and working document share only {round(ratio * 100)}% of their "
-                    f"content ({difference_pct}% differs) — '{Path(baseline_path).name}' does not "
+                    f"Baseline and working document share only {round(ratio * 100)}%% of their "
+                    f"content ({difference_pct}%% differs) — '{Path(baseline_path).name}' does not "
                     f"look like an earlier version of '{Path(input_path).name}'. Proceeding would "
                     "replace the document's content with the baseline's. Verify the --baseline "
                     "argument; if this near-total rewrite is intentional, re-run with "
@@ -366,8 +366,8 @@ def _sanitize_baseline(
                 )
                 return doc
             report.warnings.append(
-                f"Baseline and working document share only {round(ratio * 100)}% of their content "
-                f"({difference_pct}% differs). This may indicate the wrong baseline file was "
+                f"Baseline and working document share only {round(ratio * 100)}%% of their content "
+                f"({difference_pct}%% differs). This may indicate the wrong baseline file was "
                 "selected; proceeding because --allow-low-similarity-baseline is set."
             )
 

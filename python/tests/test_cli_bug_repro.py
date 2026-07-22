@@ -166,3 +166,55 @@ def test_accept_all_json_response_enrichment(tmp_path, capsys):
     assert result["accepted_insertions"] == 1
     assert result["accepted_deletions"] == 1
     assert result["removed_comments"] == 1
+
+
+def test_sanitize_baseline_printf_leak(tmp_path):
+    """
+    Asserts that sanitize_docx raises a SanitizeError with an error message
+    that does not leak printf-style string formatting specifiers (i.e. percent signs are properly escaped as %%).
+    This prevents Go, Python or any other printf-style logging/formatting host from breaking
+    with "not enough arguments" or showing "!o(MISSING)" / "!d(MISSING)".
+    """
+    import docx
+    import pytest
+
+    from adeu.sanitize.core import SanitizeError, sanitize_docx
+
+    # 1. Create two highly different documents to trigger similarity check failure
+    working = tmp_path / "normal.docx"
+    doc_norm = docx.Document()
+    doc_norm.add_paragraph("Agreement between Alpha and Beta.")
+    doc_norm.save(str(working))
+
+    baseline = tmp_path / "unicode.docx"
+    doc_uni = docx.Document()
+    doc_uni.add_paragraph("Different text in Chinese 统一码.")
+    doc_uni.save(str(baseline))
+
+    out = tmp_path / "out.docx"
+
+    # 2. Call sanitize_docx and verify the error message is safe from printf leaks
+    with pytest.raises(SanitizeError) as exc_info:
+        sanitize_docx(str(working), str(out), baseline_path=str(baseline))
+
+    err_msg = str(exc_info.value)
+
+    # The error message should contain the similarity warning/block reason
+    assert "share only" in err_msg
+    assert "differs" in err_msg
+
+    # Verify that the percent signs are properly escaped as '%%' by applying Python '%' formatting on it.
+    # If any plain '%' is followed by space and characters like 'o' or 'd', it will raise TypeError.
+    # Once fixed (escaped to '%%'), formatting with % () will succeed and produce a clean message with single '%' signs.
+    try:
+        formatted = err_msg % ()
+    except TypeError as e:
+        pytest.fail(
+            f"Printf-style leak detected in error message! Formatting the message failed with: {e}\n"
+            f"Error message: {err_msg}"
+        )
+
+    # After safe formatting, it should have single percent signs and NO formatting leaks
+    assert "share only 41% of" in formatted
+    assert "differs" in formatted
+    assert "%!" not in formatted  # Ensure no Go-style formatting errors
