@@ -905,10 +905,30 @@ export class RedlineEngine {
       }
     }
 
+    // Pre-count revisions before mutating. Unit is REVISION ELEMENTS, matching
+    // the Python engine and sanitize's count_tracked_changes so no two surfaces
+    // report different totals for one document.
+    let accepted_insertions = 0;
+    let accepted_deletions = 0;
+    let accepted_formatting = 0;
+    for (const root_element of parts_to_process) {
+      accepted_insertions += findAllDescendants(root_element, "w:ins").length;
+      accepted_deletions += findAllDescendants(root_element, "w:del").length;
+      for (const tag of ["w:rPrChange", "w:pPrChange", "w:sectPrChange"]) {
+        accepted_formatting += findAllDescendants(root_element, tag).length;
+      }
+    }
+
+    // Counted as it happens below, not pre-read from the comments part: this
+    // method only deletes the bodies of OUR OWN comments wrapping a resolved
+    // revision (foreign ones keep their body by design), so the document's
+    // comment total would claim removals that never happened.
+    let removed_comments = 0;
+
     for (const root_element of parts_to_process) {
       const insNodes = findAllDescendants(root_element, "w:ins");
       for (const ins of insNodes) {
-        this._clean_wrapping_comments(ins);
+        removed_comments += this._clean_wrapping_comments(ins);
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
 
@@ -956,8 +976,8 @@ export class RedlineEngine {
             if (has_content) {
               rPr.removeChild(delMark);
             } else {
-              this._clean_wrapping_comments(p);
-              this._delete_comments_in_element(p);
+              removed_comments += this._clean_wrapping_comments(p);
+              removed_comments += this._delete_comments_in_element(p);
               if (p.parentNode) {
                 p.parentNode.removeChild(p);
               }
@@ -968,8 +988,8 @@ export class RedlineEngine {
 
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
-        this._clean_wrapping_comments(d);
-        this._delete_comments_in_element(d);
+        removed_comments += this._clean_wrapping_comments(d);
+        removed_comments += this._delete_comments_in_element(d);
         const parent = d.parentNode as Element | null;
         if (parent) {
           if (parent.tagName === "w:trPr") {
@@ -1089,6 +1109,13 @@ export class RedlineEngine {
         }
       }
     }
+
+    return {
+      accepted_insertions,
+      accepted_deletions,
+      accepted_formatting,
+      removed_comments,
+    };
   }
 
   /**
@@ -1985,7 +2012,10 @@ export class RedlineEngine {
     }
     return null;
   }
-  private _clean_wrapping_comments(element: Element) {
+  /** Returns how many comment BODIES were actually deleted (see below: only
+   *  our own are; foreign ones keep their body and lose only the anchor). */
+  private _clean_wrapping_comments(element: Element): number {
+    let deleted = 0;
     let first_node: Element = element;
     while (true) {
       const prev = getPreviousElement(first_node);
@@ -2071,6 +2101,7 @@ export class RedlineEngine {
         const is_own = author !== null && author === this.author;
         if (is_own) {
           this.comments_manager.deleteComment(c_id);
+          deleted++;
         }
         if (s.parentNode) s.parentNode.removeChild(s);
         for (const e of ends_to_remove) {
@@ -2088,14 +2119,18 @@ export class RedlineEngine {
         }
       }
     }
+    return deleted;
   }
 
-  private _delete_comments_in_element(element: Element) {
+  /** Returns how many comment bodies were deleted. */
+  private _delete_comments_in_element(element: Element): number {
+    let deleted = 0;
     const refs = findAllDescendants(element, "w:commentReference");
     for (const ref of refs) {
       const c_id = ref.getAttribute("w:id");
       if (c_id) {
         this.comments_manager.deleteComment(c_id);
+        deleted++;
         for (const tag of ["w:commentRangeStart", "w:commentRangeEnd"]) {
           const nodes = findAllDescendants(this.doc.element, tag);
           for (const node of nodes) {
@@ -2106,6 +2141,7 @@ export class RedlineEngine {
         }
       }
     }
+    return deleted;
   }
 
   public validate_edits(edits: any[], index_offset: number = 0): string[] {
@@ -3127,13 +3163,64 @@ export class RedlineEngine {
         }
 
         if (matches.length > 0) {
-          // Record WHICH mapper produced the offset: a clean-view index
-          // resolved against the raw mapper lands rows at the wrong position
-          // once earlier edits in the batch put tracked changes in the
-          // anchor row.
-          edit._resolved_start_idx = matches[0][0];
-          edit._active_mapper_ref = resolved_mapper;
-          resolved_edits.push([edit, null]);
+          const match_mode = edit.match_mode || "strict";
+
+          // We need to resolve matches to unique w:tr elements to deduplicate them.
+          const unique_matches: [number, number][] = [];
+          const seen_trs = new Set<any>();
+
+          for (const match of matches) {
+            const start_idx = match[0];
+            const [anchor_run, anchor_para] = resolved_mapper.get_insertion_anchor(start_idx, false);
+            let target_element: Element | null = null;
+            if (anchor_run) target_element = anchor_run._element;
+            else if (anchor_para) target_element = anchor_para._element;
+
+            let tr: Element | null = target_element;
+            while (tr && tr.tagName !== "w:tr") tr = tr.parentNode as Element;
+
+            if (tr) {
+              if (!seen_trs.has(tr)) {
+                seen_trs.add(tr);
+                unique_matches.push(match);
+              }
+            }
+          }
+
+          if (unique_matches.length > 0) {
+            let matches_to_apply = unique_matches;
+            if (match_mode === "strict" || match_mode === "first") {
+              matches_to_apply = unique_matches.slice(0, 1);
+            }
+
+            if (match_mode === "all" || matches_to_apply.length > 1) {
+              // Create sub-edits for each match so that they are processed as independent operations,
+              // and the occurrences_modified and applied_status are tracked correctly on the parent.
+              for (const m of matches_to_apply) {
+                const sub_edit = {
+                  ...edit,
+                  _resolved_start_idx: m[0],
+                  _active_mapper_ref: resolved_mapper,
+                  _parent_edit_ref: edit,
+                };
+                resolved_edits.push([sub_edit, null]);
+              }
+            } else {
+              // Single match case for non-"all" modes
+              edit._resolved_start_idx = matches_to_apply[0][0];
+              edit._active_mapper_ref = resolved_mapper;
+              resolved_edits.push([edit, null]);
+            }
+          } else {
+            skipped++;
+            edit._applied_status = false;
+            const target_snippet = (edit.target_text || "")
+              .trim()
+              .substring(0, 40);
+            const msg = `- Failed to locate row target: '${target_snippet}...'`;
+            this.skipped_details.push(msg);
+            edit._error_msg = msg;
+          }
         } else {
           skipped++;
           edit._applied_status = false;

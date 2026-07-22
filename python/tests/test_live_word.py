@@ -1,4 +1,4 @@
-# FILE: tests/test_live_word.py
+import re
 import sys
 
 import pytest
@@ -172,7 +172,7 @@ def test_live_word_table_structure_and_mapping(active_word_app):
     Ensures live COM natively extracts table cells with `|` and successfully
     maps string replacements perfectly inside complex cell boundaries.
     """
-    app, doc = active_word_app
+    _, doc = active_word_app
     ctx = get_mock_ctx()
 
     doc.Range(0, doc.Content.End).Text = ""
@@ -187,7 +187,7 @@ def test_live_word_table_structure_and_mapping(active_word_app):
         await process_active_word_batch(ctx, changes=changes, author_name="Agent")
         content = extract_content(await read_active_word_document(ctx))
 
-        assert "Region | Revenue" in content
+        assert re.search(r"Region \{#cell:[^}]+\} \| Revenue \{#cell:[^}]+\}", content)
         assert "North{++ America++}" in content
         assert "}North" not in content
 

@@ -568,4 +568,53 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(caught.name).toBe("BatchValidationError");
     expect(caught.message).toContain("Invalid change format");
   });
+
+  it("BUG-REPRO: accept_all_revisions returns counts of accepted changes and removed comments", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "This is a test document.");
+    const engine = new RedlineEngine(doc);
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "document",
+        new_text: "dossier",
+        comment: "Review note to be stripped",
+      },
+    ]);
+
+    const stats = engine.accept_all_revisions() as any;
+
+    expect(stats).toBeDefined();
+    expect(stats.accepted_insertions).toBe(1);
+    expect(stats.accepted_deletions).toBe(1);
+    expect(stats.accepted_formatting).toBe(0);
+    // Counted from comment bodies this call actually deleted, not from the
+    // document's comment total — the two coincide here, but see below.
+    expect(stats.removed_comments).toBe(1);
+  });
+
+  it("BUG-REPRO: removed_comments does not count comments it deliberately keeps", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "This is a test document.");
+    const engine = new RedlineEngine(doc);
+
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "document",
+        new_text: "dossier",
+        comment: "Review note",
+      },
+    ]);
+
+    // A different reviewer now opens the redlined document. The existing
+    // comment is foreign to them, so it keeps its BODY by design (only the
+    // anchor is detached) and must not be reported as removed.
+    const other = new RedlineEngine(doc);
+    other.author = "Someone Else";
+    const stats = other.accept_all_revisions() as any;
+
+    expect(stats.removed_comments).toBe(0);
+  });
 });

@@ -49,7 +49,9 @@ def update_json_version(filepath, version):
     # Regex replace to preserve exact file formatting (indents/newlines)
     new_content = re.sub(r'("version"\s*:\s*)"[^"]+"', f'\\g<1>"{version}"', content)
     # Also update any @adeu/core dependency range to the target version
-    new_content = re.sub(r'("@adeu/core"\s*:\s*)"[^"]+"', f'\\g<1>"^{version}"', new_content)
+    new_content = re.sub(
+        r'("@adeu/core"\s*:\s*)"[^"]+"', f'\\g<1>"^{version}"', new_content
+    )
 
     if new_content == content:
         return False
@@ -110,18 +112,20 @@ def get_current_version():
 
 def calculate_next_version(current_version, bump_type):
     bump_type = bump_type.lstrip("v")
-    
+
     # Exact version provided
     if re.match(r"^\d+\.\d+\.\d+(-\w+(\.\d+)?)?$", bump_type):
         return bump_type
-        
+
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)(-\w+(\.\d+)?)?$", current_version)
     if not match:
-        print(f"❌ Current version '{current_version}' is not X.Y.Z. Cannot bump automatically.")
+        print(
+            f"❌ Current version '{current_version}' is not X.Y.Z. Cannot bump automatically."
+        )
         sys.exit(1)
-        
+
     major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
-    
+
     if bump_type == "major":
         return f"{major + 1}.0.0"
     elif bump_type == "minor":
@@ -129,17 +133,21 @@ def calculate_next_version(current_version, bump_type):
     elif bump_type == "patch":
         return f"{major}.{minor}.{patch + 1}"
     else:
-        print(f"❌ Error: '{bump_type}' is not a valid bump type (major/minor/patch) or exact version.")
+        print(
+            f"❌ Error: '{bump_type}' is not a valid bump type (major/minor/patch) or exact version."
+        )
         sys.exit(1)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Bump version across the Adeu monorepo.")
+    parser = argparse.ArgumentParser(
+        description="Bump version across the Adeu monorepo."
+    )
     parser.add_argument(
         "bump_type",
         nargs="?",
         default="minor",
-        help="Type of bump (major, minor, patch) or exact version (e.g., 1.6.0). Defaults to 'minor'."
+        help="Type of bump (major, minor, patch) or exact version (e.g., 1.6.0). Defaults to 'minor'.",
     )
     args = parser.parse_args()
 
@@ -179,9 +187,7 @@ def main():
 
     print("\n🔎 Verifying release consistency...")
     try:
-        check = run_cmd(
-            ["node", "scripts/check_release_consistency.mjs"], check=False
-        )
+        check = run_cmd(["node", "scripts/check_release_consistency.mjs"], check=False)
         print(check.stdout.strip() or check.stderr.strip())
         if check.returncode != 0:
             print(

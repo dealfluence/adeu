@@ -699,7 +699,11 @@ def test_cli_accept_all_workflow(tmp_path, capsys):
     captured = capsys.readouterr()
     result = json.loads(captured.out.strip())
     clean_path = tmp_path / "redlined_clean.docx"
-    assert result == {"status": "ok", "output_path": str(clean_path)}
+    assert result["status"] == "ok"
+    assert result["output_path"] == str(clean_path)
+    assert result["accepted_insertions"] == 2
+    assert result["accepted_deletions"] == 2
+    assert result["removed_comments"] == 4
     assert clean_path.exists()
 
     # 3. The finalized document has no redlines or comments left

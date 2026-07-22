@@ -1252,7 +1252,7 @@ def handle_accept_all(args: argparse.Namespace):
     _require_docx_output(args.output)
     engine = _open_redline_engine_or_exit(args.input)
 
-    engine.accept_all_revisions(remove_comments=True)
+    stats = engine.accept_all_revisions(remove_comments=True)
 
     output_path = args.output
     if not output_path:
@@ -1261,7 +1261,16 @@ def handle_accept_all(args: argparse.Namespace):
     _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     if args.json:
-        print(json.dumps({"status": "ok", "output_path": str(output_path)}))
+        stats = stats or {}
+        result = {
+            "status": "ok",
+            "output_path": str(output_path),
+            "accepted_insertions": stats.get("accepted_insertions", 0),
+            "accepted_deletions": stats.get("accepted_deletions", 0),
+            "accepted_formatting": stats.get("accepted_formatting", 0),
+            "removed_comments": stats.get("removed_comments", 0),
+        }
+        print(json.dumps(result))
     else:
         print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
 
@@ -1866,7 +1875,12 @@ def _main_impl():
     p_accept.add_argument(
         "--json",
         action="store_true",
-        help="Emit a machine-readable JSON result on stdout.",
+        help=(
+            "Emit a machine-readable JSON result on stdout. The accepted_* counts are "
+            "REVISION MARKS (the same unit sanitize reports), not user-level edits: Word "
+            "splits one revision into several marks when formatting changes mid-revision, "
+            "so one typed sentence can count as more than one insertion."
+        ),
     )
     p_accept.set_defaults(func=handle_accept_all)
 

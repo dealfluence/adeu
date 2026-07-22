@@ -217,7 +217,7 @@ def _sanitize_full(doc, report: SanitizeReport, *, accept_all: bool):
         report.blocked_reason = (
             f"Document contains {total} unresolved tracked changes "
             f"({ins_count} insertions, {del_count} deletions, {fmt_count} formatting). "
-            f"Review in Word first, or use --accept-all."
+            f"Review in Word first, use --accept-all, or use --keep-markup."
         )
         return
 
