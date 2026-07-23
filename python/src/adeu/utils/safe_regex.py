@@ -50,9 +50,28 @@ def _translate_error(pattern: str, exc: Exception) -> Exception:
     return exc
 
 
+def escape_currency_regex_target(pattern: str) -> str:
+    """Escapes unescaped dollar signs preceding digits in user regex patterns so
+    currency figures like $100 are matched as literal dollar signs rather than
+    evaluated as end-of-line anchors."""
+    if not pattern:
+        return pattern
+    return _re.sub(r"(?<!\\)\$(\d)", r"\$\1", pattern)
+
+
+def safe_user_sub(pattern: str, repl: str, string: str, flags: int = 0) -> str:
+    """Performs re.sub with currency-safe pattern escaping and literal replacement."""
+    safe_pattern = escape_currency_regex_target(pattern)
+    try:
+        return _re.sub(safe_pattern, repl, string, flags=flags)
+    except _re.error:
+        return repl
+
+
 def user_finditer(pattern: str, text: str, flags: int = 0) -> Iterator["_regex.Match"]:
     """finditer with a wall-clock budget. Materializes matches so the deadline
     covers the entire scan, not just the first match."""
+    pattern = escape_currency_regex_target(pattern)
     try:
         return iter(list(_regex.finditer(pattern, text, flags=flags, timeout=USER_PATTERN_TIMEOUT_SECONDS)))
     except Exception as exc:  # noqa: BLE001 - translated and re-raised
@@ -61,6 +80,7 @@ def user_finditer(pattern: str, text: str, flags: int = 0) -> Iterator["_regex.M
 
 def user_search(pattern: str, text: str, flags: int = 0) -> Optional["_regex.Match"]:
     """search with a wall-clock budget."""
+    pattern = escape_currency_regex_target(pattern)
     try:
         return _regex.search(pattern, text, flags=flags, timeout=USER_PATTERN_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 - translated and re-raised

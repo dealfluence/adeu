@@ -29,7 +29,7 @@ from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
-from adeu.utils.safe_regex import RegexTimeoutError
+from adeu.utils.safe_regex import RegexTimeoutError, safe_user_sub
 from adeu.utils.text import PREVIEW_TEXT_CAP, REPORT_ECHO_CAP, truncate_middle
 
 logger = structlog.get_logger(__name__)
@@ -3349,10 +3349,9 @@ class RedlineEngine:
                 continue
 
             if is_regex and current_effective_new_text:
-                try:
-                    current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
-                except re.error:
-                    pass
+                current_effective_new_text = safe_user_sub(
+                    edit.target_text, current_effective_new_text, actual_doc_text
+                )
 
             # Stash the first occurrence's full match for the report preview,
             # so it can show the complete logical change rather than only the

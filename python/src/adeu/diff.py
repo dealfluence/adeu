@@ -353,7 +353,7 @@ def _words_to_chars(text1: str, text2: str, atomic_criticmarkup: bool = False) -
     """
     token_array: List[str] = []
     token_hash: Dict[str, int] = {}
-    split_pattern = r"(\s+|\w+|[^\w\s])"
+    split_pattern = r"(\s+|[\$€£¥]\d+(?:,\d{3})*(?:\.\d+)?|\w+|[^\w\s])"
 
     def tokenize(text: str) -> List[str]:
         if not atomic_criticmarkup:
