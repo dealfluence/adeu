@@ -779,3 +779,46 @@ def test_search_query_paragraph_filtering(tmp_path):
     assert "This is some English text." not in text
     assert "Accented: Café" not in text
     assert "Emojis & Symbols" not in text
+
+
+def test_read_docx_appendix_mode_schema_compat(tmp_path):
+    """
+    Verifies that 'appendix' is a valid mode for the read_docx tool,
+    allowing the client/LLM to retrieve defined terms and diagnostics
+    without triggering a Pydantic schema validation error.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    import docx
+
+    from adeu.server import mcp
+
+    # 1. Create a minimal document
+    doc = docx.Document()
+    doc.add_paragraph('The term (the "Agreement") shall mean this contract.')
+
+    doc_path = tmp_path / "test_appendix_mode.docx"
+    doc.save(str(doc_path))
+
+    arguments = {
+        "reasoning": "Retrieve defined terms and references.",
+        "file_path": str(doc_path),
+        "mode": "appendix",
+    }
+
+    # The tool logs progress through the MCP session, which does not exist when
+    # a tool is invoked directly outside a client connection.
+    with (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    ):
+        result = asyncio.run(mcp.call_tool("read_docx", arguments))
+
+    # Get the text content of the result
+    text = "".join(item.text for item in result.content if item.type == "text")
+
+    # Assert that the result was successful and contains appendix information
+    assert "Agreement" in text

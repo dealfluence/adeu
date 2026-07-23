@@ -1029,16 +1029,18 @@ else:
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline"],
+            Literal["full", "outline", "appendix"],
             "'full' returns body content (paginated for large docs). 'outline' returns "
-            "a structural heading map with page numbers; body content is omitted.",
+            "a structural heading map with page numbers; body content is omitted. "
+            "'appendix' returns defined terms, anchors, and diagnostics — consult before "
+            "editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, Literal["all"]]],
             Field(
                 description=(
                     "Without `search_query`: 1-indexed document page to display (defaults to 1) "
-                    "for mode='full'; pass `page='all'` to get the ENTIRE document in one "
+                    "for mode='full' and mode='appendix'; pass `page='all'` to get the ENTIRE document in one "
                     "response without page banners. With `search_query`: restricts matches to "
                     "that document page (defaults to searching all pages; pass `page='all'` to "
                     "be explicit)."
