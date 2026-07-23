@@ -107,3 +107,11 @@ class TestAdeuSanitizeDocxValidation:
                     "output_path": str(bad_output),
                 }
             )
+
+    def test_allow_low_similarity_baseline_option(self) -> None:
+        input_data = AdeuSanitizeDocxInput(
+            reasoning="test",
+            file_path="/tmp/x.docx",
+            allow_low_similarity_baseline=True,
+        )
+        assert input_data.allow_low_similarity_baseline is True

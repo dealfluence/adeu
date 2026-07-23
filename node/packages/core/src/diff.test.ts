@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { trim_common_context, generate_edits_from_text, create_word_patch_diff } from './diff.js';
+import { trim_common_context, generate_edits_from_text, create_word_patch_diff, generate_edits_via_paragraph_alignment } from './diff.js';
 
 describe('Diff Logic & Context Trimming', () => {
   it('handles basic prefix and suffix', () => {
@@ -70,5 +70,12 @@ describe('Diff Logic & Context Trimming', () => {
     expect(diff).toContain("- Company");
     expect(diff).toContain("+ Corporation");
     expect(diff).toContain(" This agreement is made between the"); // Within 40-char context window so no truncation
+  });
+
+  it('handles trailing newline and whitespace safely in paragraph alignment', () => {
+    const original = "This is a single paragraph of the draft.";
+    const modified = "This is a single paragraph of the draft.\n";
+    const edits = generate_edits_via_paragraph_alignment(original, modified);
+    expect(edits.length).toBe(0);
   });
 });

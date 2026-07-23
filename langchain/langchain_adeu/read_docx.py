@@ -14,18 +14,21 @@ and the `mcp_components._response_builders`). The tool returns a two-tuple
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from typing import Any, Literal
 
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
+    build_full_document_response,
     build_outline_response,
     build_paginated_response,
     build_search_response,
 )
+from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
 
@@ -66,16 +69,33 @@ class AdeuReadDocxInput(BaseModel):
             "breaking references."
         ),
     )
-    page: int = Field(
+    page: int | str = Field(
         default=1,
-        ge=1,
         description=(
-            "1-indexed page number for mode='full' or mode='appendix'. "
-            "Defaults to 1. Ignored for mode='outline'. "
-            "Pages are virtual: bounded by content size (~19k chars each), "
-            "not by visual Word page breaks."
+            "1-indexed page number for mode='full' or mode='appendix', or 'all' "
+            "to return the full document without page boundaries. Defaults to 1. "
+            "Ignored for mode='outline'. Pages are virtual: bounded by content "
+            "size (~19k chars each), not by visual Word page breaks."
         ),
     )
+
+    @field_validator("page")
+    @classmethod
+    def _validate_page(cls, v: int | str) -> int | str:
+        if isinstance(v, int):
+            if v < 1:
+                raise ValueError("page must be an integer >= 1, or 'all'")
+            return v
+        s = str(v).strip().lower()
+        if s == "all":
+            return "all"
+        if s.isdigit() or (s.startswith(("-", "+")) and s[1:].isdigit()):
+            val = int(s)
+            if val < 1:
+                raise ValueError("page must be an integer >= 1, or 'all'")
+            return val
+        raise ValueError("page must be an integer >= 1, or 'all'")
+
     outline_max_level: int = Field(
         default=2,
         ge=1,
@@ -148,7 +168,7 @@ class AdeuReadDocx(BaseTool):
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
-        page: int = 1,
+        page: int | str = 1,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -157,7 +177,9 @@ class AdeuReadDocx(BaseTool):
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
 
-        doc = load_document(str(path))
+        raw_bytes = path.read_bytes()
+        sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
+        doc = load_document(BytesIO(sanitized_bytes))
 
         needs_appendix = mode == "appendix"
         needs_offsets = mode == "outline"
@@ -174,21 +196,33 @@ class AdeuReadDocx(BaseTool):
             text = extract_result
             paragraph_offsets = None
 
+        page_str = str(page).strip().lower() if page is not None else "1"
+
         if search_query is not None:
             result = build_search_response(text, search_query, search_regex, search_case_sensitive, page, str(path))
-        elif mode == "outline":
-            result = build_outline_response(
-                doc,
-                text,
-                str(path),
-                outline_max_level=outline_max_level,
-                outline_verbose=outline_verbose,
-                paragraph_offsets=paragraph_offsets,
-            )
-        elif mode == "appendix":
-            result = build_appendix_response(text, page, str(path))
+        elif mode == "full" and page_str == "all":
+            result = build_full_document_response(text, str(path))
         else:
-            result = build_paginated_response(text, page, str(path))
+            page_num = 1
+            if page is not None:
+                s_page = str(page).strip()
+                is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                if s_page.isdigit() or is_signed:
+                    page_num = int(s_page)
+
+            if mode == "outline":
+                result = build_outline_response(
+                    doc,
+                    text,
+                    str(path),
+                    outline_max_level=outline_max_level,
+                    outline_verbose=outline_verbose,
+                    paragraph_offsets=paragraph_offsets,
+                )
+            elif mode == "appendix":
+                result = build_appendix_response(text, page_num, str(path))
+            else:
+                result = build_paginated_response(text, page_num, str(path))
 
         artifact = dict(result.structured_content) if result.structured_content else {}
         ui_markdown = artifact.get("markdown")
@@ -207,7 +241,7 @@ class AdeuReadDocx(BaseTool):
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
-        page: int = 1,
+        page: int | str = 1,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,

@@ -5,7 +5,16 @@ import type {
   INodeExecutionData,
   INodeProperties,
 } from "n8n-workflow";
-import { extractTextFromBuffer, create_word_patch_diff } from "@adeu/core";
+import {
+  DocumentObject,
+  _extractTextFromDoc,
+  type ExtractStructure,
+  extractTextFromBuffer,
+  create_word_patch_diff,
+  create_unified_diff,
+  generate_structured_edits,
+  collect_media_difference_warnings,
+} from "@adeu/core";
 
 import {
   type BinarySource,
@@ -131,6 +140,38 @@ export const generateDiffDescription: INodeProperties[] = [
       },
     },
   },
+  {
+    displayName: "Diff Format",
+    name: "diffFormat",
+    type: "options",
+    default: "wordPatch",
+    description:
+      "Format of the output diff. 'Word Patch' (default) produces an Adeu @@ Word Patch @@ text string showing sub-word modifications. 'Unified' produces a standard Git-style unified diff string. 'Structured Changes' produces a JSON array of DocumentChange objects suitable for feeding directly into Apply Edits.",
+    options: [
+      {
+        name: "Word Patch",
+        value: "wordPatch",
+        description: "Adeu @@ Word Patch @@ sub-word text diff format",
+      },
+      {
+        name: "Unified Diff",
+        value: "unified",
+        description: "Standard Git-style unified text diff format",
+      },
+      {
+        name: "Structured Changes (JSON)",
+        value: "structuredChanges",
+        description:
+          "JSON array of DocumentChange objects that transform original into modified",
+      },
+    ],
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["generateDiff"],
+      },
+    },
+  },
 ];
 
 export async function executeGenerateDiff(
@@ -146,6 +187,11 @@ export async function executeGenerateDiff(
     itemIndex,
   ) as string;
   const cleanView = this.getNodeParameter("cleanView", itemIndex) as boolean;
+  const diffFormat = this.getNodeParameter(
+    "diffFormat",
+    itemIndex,
+    "wordPatch",
+  ) as "wordPatch" | "unified" | "structuredChanges";
 
   const originalDocumentSource = this.getNodeParameter(
     "originalDocumentSource",
@@ -189,15 +235,89 @@ export async function executeGenerateDiff(
   const { buffer: modifiedBuffer, fileName: modifiedName } =
     await getDocxBufferFromSource.call(this, itemIndex, modifiedSource);
 
-  const originalText = await extractTextFromBuffer(originalBuffer, cleanView);
-  const modifiedText = await extractTextFromBuffer(modifiedBuffer, cleanView);
-
-  const diff = create_word_patch_diff(
-    originalText,
-    modifiedText,
-    originalName,
-    modifiedName,
+  const mediaWarnings = collect_media_difference_warnings(
+    new Uint8Array(originalBuffer),
+    new Uint8Array(modifiedBuffer),
   );
+
+  if (diffFormat === "structuredChanges") {
+    const docOrig = await DocumentObject.load(originalBuffer);
+    const docMod = await DocumentObject.load(modifiedBuffer);
+
+    const projOrig = _extractTextFromDoc(
+      docOrig,
+      cleanView,
+      false,
+      false,
+      true,
+    ) as {
+      text: string;
+      structure: ExtractStructure;
+    };
+    const projMod = _extractTextFromDoc(
+      docMod,
+      cleanView,
+      false,
+      false,
+      true,
+    ) as {
+      text: string;
+      structure: ExtractStructure;
+    };
+
+    const { edits, warnings: structWarnings } = generate_structured_edits(
+      projOrig.text,
+      projOrig.structure,
+      projMod.text,
+      projMod.structure,
+    );
+
+    const allWarnings = [...mediaWarnings, ...structWarnings];
+
+    return [
+      {
+        json: {
+          originalFileName: originalName,
+          modifiedFileName: modifiedName,
+          cleanView,
+          diffFormat,
+          changes: edits,
+          ...(allWarnings.length > 0 ? { warnings: allWarnings } : {}),
+        },
+        pairedItem: { item: itemIndex },
+      },
+    ];
+  }
+
+  // includeAppendix=false: the generated appendix is not document content —
+  // diffing it produces phantom changes no apply can consume (QA 2026-07-18 H1).
+  const originalText = await extractTextFromBuffer(
+    originalBuffer,
+    cleanView,
+    false,
+  );
+  const modifiedText = await extractTextFromBuffer(
+    modifiedBuffer,
+    cleanView,
+    false,
+  );
+
+  let diff =
+    diffFormat === "unified"
+      ? create_unified_diff(originalText, modifiedText)
+      : create_word_patch_diff(
+          originalText,
+          modifiedText,
+          originalName,
+          modifiedName,
+        );
+
+  // A text diff cannot see image bytes: when embedded media differ, an empty
+  // diff must never read as "the documents are identical" (QA 2026-07-19 F-04).
+  if (mediaWarnings.length > 0) {
+    const warningText = mediaWarnings.map((w) => `⚠️  ${w}`).join("\n") + "\n\n";
+    diff = warningText + diff;
+  }
 
   return [
     {
@@ -205,7 +325,9 @@ export async function executeGenerateDiff(
         originalFileName: originalName,
         modifiedFileName: modifiedName,
         cleanView,
+        diffFormat,
         diff,
+        ...(mediaWarnings.length > 0 ? { warnings: mediaWarnings } : {}),
       },
       pairedItem: { item: itemIndex },
     },

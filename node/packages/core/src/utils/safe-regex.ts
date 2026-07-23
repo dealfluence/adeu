@@ -7,16 +7,12 @@
  * like `(a|a)*$` against a run of repeated characters hangs the event loop
  * indefinitely (QA 2026-07-17 F5 — ReDoS; mirrors the Python fix).
  *
- * JS regexes cannot be interrupted in-thread, but V8 CAN interrupt regex
- * execution running inside a `vm` context with a `timeout` — that is the
- * mechanism used here. `node:vm` is a builtin, preserving the zero-dependency
- * bundle constraint.
+ * Pure JavaScript safety analyzer and execution budget without node:vm dependency,
+ * compliant with restricted node runtime environments (n8n Cloud, etc.).
  *
  * Only USER-SUPPLIED patterns belong here. The engine's own generated
  * patterns (fuzzy matchers etc.) are built to be linear-time.
  */
-
-import * as vm from "node:vm";
 
 export const USER_PATTERN_TIMEOUT_MS = 2000;
 
@@ -33,17 +29,79 @@ export class RegexTimeoutError extends Error {
   }
 }
 
-function runBudgeted<T>(pattern: string, script: string, sandbox: object): T {
-  try {
-    return vm.runInNewContext(script, sandbox, {
-      timeout: USER_PATTERN_TIMEOUT_MS,
-    }) as T;
-  } catch (e: any) {
-    if (e && e.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
-      throw new RegexTimeoutError(pattern);
+/**
+ * Static analyzer detecting catastrophic backtracking risk in regular expressions
+ * (e.g. nested quantifiers like (a+)+, (a*)*, or quantified alternations like (a|a)*).
+ */
+export function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
+  let inCharClass = false;
+  let escaped = false;
+
+  const groupStack: Array<{ hasInnerQuantifierOrPipe: boolean }> = [];
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
     }
-    throw e;
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (inCharClass) {
+      if (char === "]") inCharClass = false;
+      continue;
+    }
+
+    if (char === "[") {
+      inCharClass = true;
+      continue;
+    }
+
+    if (char === "(") {
+      groupStack.push({ hasInnerQuantifierOrPipe: false });
+      continue;
+    }
+
+    if (char === ")") {
+      if (groupStack.length > 0) {
+        const top = groupStack.pop()!;
+        const remaining = pattern.substring(i + 1);
+        const matchQuant = remaining.match(/^(\*|\+|\{\d+\,\s*\}|\?)/);
+        const nextChar = matchQuant ? matchQuant[1] : "";
+        const isUnboundedQuantifier =
+          nextChar === "*" ||
+          nextChar === "+" ||
+          /^\{\d+\,\s*\}/.test(remaining);
+
+        if (isUnboundedQuantifier && top.hasInnerQuantifierOrPipe) {
+          return true;
+        }
+
+        if (
+          groupStack.length > 0 &&
+          (top.hasInnerQuantifierOrPipe || isUnboundedQuantifier)
+        ) {
+          groupStack[groupStack.length - 1].hasInnerQuantifierOrPipe = true;
+        }
+      }
+      continue;
+    }
+
+    if (groupStack.length > 0) {
+      if (char === "|" || char === "*" || char === "+") {
+        groupStack[groupStack.length - 1].hasInnerQuantifierOrPipe = true;
+      } else if (/^\{\d+\,\s*\}/.test(pattern.substring(i))) {
+        groupStack[groupStack.length - 1].hasInnerQuantifierOrPipe = true;
+      }
+    }
   }
+
+  return false;
 }
 
 /**
@@ -56,35 +114,45 @@ export function userFindAllMatches(
   text: string,
   flags: string = "",
 ): Array<{ start: number; end: number }> {
+  if (hasCatastrophicBacktrackingRisk(pattern)) {
+    throw new RegexTimeoutError(pattern);
+  }
+
   const normalized = flags.includes("g") ? flags : flags + "g";
-  const re = new RegExp(pattern, normalized); // throws SyntaxError on bad pattern
-  const raw = runBudgeted<Array<{ start: number; end: number }>>(
-    pattern,
-    `{
-      const out = [];
-      let m;
-      while ((m = re.exec(text)) !== null) {
-        out.push({ start: m.index, end: m.index + m[0].length });
-        if (m.index === re.lastIndex) re.lastIndex++;
-      }
-      out;
-    }`,
-    { re, text },
-  );
-  // Re-materialize in this realm (vm objects come from another context).
-  return raw.map((r) => ({ start: r.start, end: r.end }));
+  const re = new RegExp(pattern, normalized);
+
+  const startTime = Date.now();
+  const out: Array<{ start: number; end: number }> = [];
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(text)) !== null) {
+    if (Date.now() - startTime > USER_PATTERN_TIMEOUT_MS) {
+      throw new RegexTimeoutError(pattern);
+    }
+    out.push({ start: m.index, end: m.index + m[0].length });
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+
+  return out;
 }
 
 /** First match of a user pattern under the wall-clock budget, or null. */
-export function userSearch(pattern: string, text: string, flags: string = ""): { start: number; end: number } | null {
+export function userSearch(
+  pattern: string,
+  text: string,
+  flags: string = "",
+): { start: number; end: number } | null {
+  if (hasCatastrophicBacktrackingRisk(pattern)) {
+    throw new RegexTimeoutError(pattern);
+  }
+
   const re = new RegExp(pattern, flags.replace("g", ""));
-  const raw = runBudgeted<{ start: number; end: number } | null>(
-    pattern,
-    `{
-      const m = re.exec(text);
-      m ? { start: m.index, end: m.index + m[0].length } : null;
-    }`,
-    { re, text },
-  );
-  return raw ? { start: raw.start, end: raw.end } : null;
+  const startTime = Date.now();
+  const m = re.exec(text);
+
+  if (Date.now() - startTime > USER_PATTERN_TIMEOUT_MS) {
+    throw new RegexTimeoutError(pattern);
+  }
+
+  return m ? { start: m.index, end: m.index + m[0].length } : null;
 }

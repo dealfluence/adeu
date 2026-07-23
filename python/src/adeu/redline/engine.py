@@ -878,7 +878,21 @@ class RedlineEngine:
                 if s_name:
                     self._set_paragraph_style(new_p, s_name)
                 elif current_p.pPr is not None:
-                    new_p.append(deepcopy(current_p.pPr))
+                    pPr_clone = deepcopy(current_p.pPr)
+                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
+                    if pStyle_el is not None:
+                        style_val = pStyle_el.get(qn("w:val"))
+                        is_heading = (
+                            style_val.startswith("Heading")
+                            or style_val == "Title"
+                            or style_val.replace(" ", "").startswith("Heading")
+                        )
+                        if style_val and is_heading:
+                            pPr_clone.remove(pStyle_el)
+                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
+                    if outlineLvl_el is not None:
+                        pPr_clone.remove(outlineLvl_el)
+                    new_p.append(pPr_clone)
 
                 # Track the paragraph break itself as an insertion
                 pPr = new_p.find(qn("w:pPr"))
@@ -1087,6 +1101,19 @@ class RedlineEngine:
                     self._set_paragraph_style(new_p, style_name)
                 elif current_p.pPr is not None:
                     pPr_clone = deepcopy(current_p.pPr)
+                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
+                    if pStyle_el is not None:
+                        style_val = pStyle_el.get(qn("w:val"))
+                        is_heading = (
+                            style_val.startswith("Heading")
+                            or style_val == "Title"
+                            or style_val.replace(" ", "").startswith("Heading")
+                        )
+                        if style_val and is_heading:
+                            pPr_clone.remove(pStyle_el)
+                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
+                    if outlineLvl_el is not None:
+                        pPr_clone.remove(outlineLvl_el)
                     if list_level is not None:
                         numPr = pPr_clone.find(qn("w:numPr"))
                         if numPr is not None:
@@ -1442,6 +1469,18 @@ class RedlineEngine:
             cur = cur.getparent()
         return cur
 
+    @staticmethod
+    def _is_inside_pPr(element) -> bool:
+        """
+        Check if the given element is inside a w:pPr tag.
+        """
+        cur = element
+        while cur is not None:
+            if cur.tag == qn("w:pPr"):
+                return True
+            cur = cur.getparent()
+        return False
+
     # XML root tags of stories that can host comment anchors. Word (and
     # LibreOffice, which refuses to LOAD such files) only supports comment
     # ranges in the main document story — never in headers, footers,
@@ -1493,6 +1532,11 @@ class RedlineEngine:
             return
         if self._skip_comment_outside_main_story(parent_element, text):
             return
+
+        # Ensure the anchor elements are actual direct children of parent_element
+        start_element = self._paragraph_child_ancestor(start_element, parent_element)
+        end_element = self._paragraph_child_ancestor(end_element, parent_element)
+
         try:
             start_index = parent_element.index(start_element)
             end_index = parent_element.index(end_element)
@@ -1530,6 +1574,11 @@ class RedlineEngine:
             return
         if self._skip_comment_outside_main_story(start_p, text) or self._skip_comment_outside_main_story(end_p, text):
             return
+
+        # Ensure the anchor elements are actual direct children of their respective paragraphs
+        start_el = self._paragraph_child_ancestor(start_el, start_p)
+        end_el = self._paragraph_child_ancestor(end_el, end_p)
+
         comment_id = self.comments_manager.add_comment(self.author, text)
 
         range_start = create_element("w:commentRangeStart")
@@ -1940,9 +1989,14 @@ class RedlineEngine:
         inside a table row.
         """
         for s in mapper.spans:
-            if s.run is None or s.end <= start or s.start >= start + length:
+            if s.end <= start or s.start >= start + length:
                 continue
-            curr = s.run._element
+            curr = None
+            if s.run is not None:
+                curr = s.run._element
+            elif s.paragraph is not None:
+                curr = s.paragraph._element
+
             while curr is not None:
                 if curr.tag == qn("w:tr"):
                     return len(curr.findall(qn("w:tc")))
@@ -2020,6 +2074,7 @@ class RedlineEngine:
             warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
         return {
             "status": "applied" if success else "failed",
+            "type": getattr(edit, "type", "modify"),
             # Echoes of caller-supplied values are bounded so an oversized edit
             # cannot balloon the report/JSON output (QA C2).
             "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
@@ -2148,6 +2203,7 @@ class RedlineEngine:
                     skipped_edits += 1
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
                         "warning": None,
@@ -2191,6 +2247,7 @@ class RedlineEngine:
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
                         "warning": warning,
@@ -2222,6 +2279,7 @@ class RedlineEngine:
                         continue
                     reports_by_input[i] = {
                         "status": "failed",
+                        "type": report.get("type", "modify"),
                         "target_text": report["target_text"],
                         "new_text": report["new_text"],
                         "warning": None,
@@ -2298,14 +2356,54 @@ class RedlineEngine:
                     resolved_mapper = self.clean_mapper
 
                 if matches:
-                    # validate_edits already ensured uniqueness. Record WHICH
-                    # mapper produced the offset: a clean-view index resolved
-                    # against the raw mapper lands rows at the wrong position
-                    # once earlier edits in the batch put tracked changes in
-                    # the anchor row.
-                    edit._resolved_start_idx = matches[0][0]
-                    edit._active_mapper_ref = resolved_mapper
-                    resolved_edits.append((edit, None))
+                    match_mode = getattr(edit, "match_mode", "strict")
+
+                    unique_matches = []
+                    seen_trs = set()
+
+                    for m_start, m_len in matches:
+                        anchor_run, anchor_paragraph = resolved_mapper.get_insertion_anchor(m_start, rebuild_map=False)
+                        target_element = None
+                        if anchor_run:
+                            target_element = anchor_run._element
+                        elif anchor_paragraph:
+                            target_element = anchor_paragraph._element
+
+                        tr = None
+                        curr = target_element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                tr = curr
+                                break
+                            curr = curr.getparent()
+
+                        if tr is not None and tr not in seen_trs:
+                            seen_trs.add(tr)
+                            unique_matches.append((m_start, m_len))
+
+                    if unique_matches:
+                        matches_to_apply = unique_matches
+                        if match_mode in ("strict", "first"):
+                            matches_to_apply = unique_matches[:1]
+
+                        if match_mode == "all" or len(matches_to_apply) > 1:
+                            for m_start, _m_len in matches_to_apply:
+                                sub_edit = deepcopy(edit)
+                                sub_edit._resolved_start_idx = m_start
+                                sub_edit._active_mapper_ref = resolved_mapper
+                                sub_edit._parent_edit_ref = edit
+                                resolved_edits.append((sub_edit, None))
+                        else:
+                            edit._resolved_start_idx = matches_to_apply[0][0]
+                            edit._active_mapper_ref = resolved_mapper
+                            resolved_edits.append((edit, None))
+                    else:
+                        skipped += 1
+                        edit._applied_status = False
+                        target_snippet = edit.target_text.strip()[:40]
+                        msg = f"- Failed to locate row target: '{target_snippet}...'"
+                        self.skipped_details.append(msg)
+                        edit._error_msg = msg
                 else:
                     skipped += 1
                     target_snippet = edit.target_text.strip()[:40]
@@ -2511,17 +2609,36 @@ class RedlineEngine:
         # resolved in: a clean-view offset applied to the raw mapper points
         # at earlier text once tracked changes exist.
         active_mapper = edit._active_mapper_ref or self.mapper
-        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
-        if not target_runs:
-            return False
 
+        target_spans = [
+            s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + len(edit.target_text)
+        ]
         row_el = None
-        curr = target_runs[0]._element
-        while curr is not None:
-            if curr.tag == qn("w:tr"):
-                row_el = curr
-                break
-            curr = curr.getparent()
+        if target_spans:
+            # 1. Prefer real runs
+            for s in target_spans:
+                if s.run is not None:
+                    curr = s.run._element
+                    while curr is not None:
+                        if curr.tag == qn("w:tr"):
+                            row_el = curr
+                            break
+                        curr = curr.getparent()
+                    if row_el is not None:
+                        break
+
+            # 2. Fall back to paragraphs (handles virtual empty-cell anchors)
+            if row_el is None:
+                for s in target_spans:
+                    if s.paragraph is not None:
+                        curr = s.paragraph._element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                row_el = curr
+                                break
+                            curr = curr.getparent()
+                        if row_el is not None:
+                            break
 
         if row_el is None:
             return False
@@ -2570,17 +2687,36 @@ class RedlineEngine:
 
         # Same coordinate-space rule as _apply_insert_row.
         active_mapper = edit._active_mapper_ref or self.mapper
-        target_runs = active_mapper.find_target_runs_by_index(start_idx, len(edit.target_text))
-        if not target_runs:
-            return False
 
+        target_spans = [
+            s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + len(edit.target_text)
+        ]
         row_el = None
-        curr = target_runs[0]._element
-        while curr is not None:
-            if curr.tag == qn("w:tr"):
-                row_el = curr
-                break
-            curr = curr.getparent()
+        if target_spans:
+            # 1. Prefer real runs
+            for s in target_spans:
+                if s.run is not None:
+                    curr = s.run._element
+                    while curr is not None:
+                        if curr.tag == qn("w:tr"):
+                            row_el = curr
+                            break
+                        curr = curr.getparent()
+                    if row_el is not None:
+                        break
+
+            # 2. Fall back to paragraphs
+            if row_el is None:
+                for s in target_spans:
+                    if s.paragraph is not None:
+                        curr = s.paragraph._element
+                        while curr is not None:
+                            if curr.tag == qn("w:tr"):
+                                row_el = curr
+                                break
+                            curr = curr.getparent()
+                        if row_el is not None:
+                            break
 
         if row_el is None:
             return False
@@ -2591,6 +2727,61 @@ class RedlineEngine:
         trPr.append(del_el)
 
         return True
+
+    def _is_row_fully_deleted(self, row_el, start_idx: int, length: int, active_mapper) -> bool:
+        # Find all active runs currently under row_el
+        active_runs = []
+        for r_el in row_el.findall(".//" + qn("w:r")):
+            parent = r_el.getparent()
+            is_deleted = False
+            while parent is not None and parent != row_el:
+                if parent.tag == qn("w:del"):
+                    is_deleted = True
+                    break
+                parent = parent.getparent()
+            if not is_deleted:
+                active_runs.append(r_el)
+
+        # If there are still active runs, the row is not fully deleted
+        if active_runs:
+            return False
+
+        # Since row_el was collected in seen_rows, we know it was targeted.
+        return True
+
+    def _mark_fully_deleted_rows_in_range(
+        self, del_elems, virtual_spans, start_idx: int, length: int, active_mapper, del_id: Optional[str]
+    ) -> None:
+        seen_rows = set()
+        for del_elem in del_elems:
+            curr = del_elem
+            row_el = None
+            while curr is not None:
+                if curr.tag == qn("w:tr"):
+                    row_el = curr
+                    break
+                curr = curr.getparent()
+            if row_el is not None and row_el not in seen_rows:
+                seen_rows.add(row_el)
+
+        for span in virtual_spans:
+            if span.paragraph:
+                curr = span.paragraph._element
+                row_el = None
+                while curr is not None:
+                    if curr.tag == qn("w:tr"):
+                        row_el = curr
+                        break
+                    curr = curr.getparent()
+                if row_el is not None and row_el not in seen_rows:
+                    seen_rows.add(row_el)
+
+        for row_el in seen_rows:
+            if self._is_row_fully_deleted(row_el, start_idx, length, active_mapper):
+                trPr = row_el.get_or_add_trPr()
+                if trPr.find(qn("w:del")) is None:
+                    del_el = self._create_track_change_tag("w:del", reuse_id=del_id)
+                    trPr.append(del_el)
 
     def _maybe_paragraph_replace(
         self,
@@ -2730,6 +2921,23 @@ class RedlineEngine:
             actual_doc_text = active_mapper.full_text[start_idx : start_idx + match_len]
             current_effective_new_text = edit.new_text or ""
 
+            if re.match(r"^\{#cell:[^}]+\}$", actual_doc_text.strip()):
+                ins_text = current_effective_new_text
+                ins_text = ins_text.replace(actual_doc_text.strip(), "")
+                if ins_text:
+                    sub_mt = ModifyText(type="modify", target_text="", new_text=ins_text, comment=edit.comment)
+                    sub_mt._match_start_index = start_idx
+                    sub_mt._internal_op = "INSERTION"
+                    sub_mt._active_mapper_ref = active_mapper
+                    all_sub_edits.append(sub_mt)
+                elif edit.comment:
+                    sub_mt = ModifyText(type="modify", target_text="", new_text="", comment=edit.comment)
+                    sub_mt._match_start_index = start_idx
+                    sub_mt._internal_op = "COMMENT_ONLY"
+                    sub_mt._active_mapper_ref = active_mapper
+                    all_sub_edits.append(sub_mt)
+                continue
+
             if is_regex and current_effective_new_text:
                 try:
                     current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
@@ -2768,6 +2976,60 @@ class RedlineEngine:
             return all_sub_edits
         return all_sub_edits[0]
 
+    def _single_commented_sub_edit(
+        self,
+        target_str: str,
+        new_str: str,
+        base_offset: int,
+        comment: str,
+        is_table: bool,
+        active_mapper,
+    ) -> List[ModifyText]:
+        """
+        Build a single (unfragmented) sub-edit for a commented change.
+
+        Shared prefix/suffix are still trimmed (word-boundary aware) so the
+        redline stays minimal at the edges, but the changed middle is emitted
+        as ONE tracked change rather than fanned out per word. The comment then
+        anchors around the whole span. See _word_diff_sub_edits for why a
+        commented change must not be split.
+        """
+        if target_str == new_str:
+            # A pure comment anchor (no textual change) has nothing to trim to;
+            # trimming identical strings would collapse the span to zero length
+            # and the COMMENT_ONLY apply path would find no runs to attach to.
+            # Keep the whole span as the anchor.
+            final_target = target_str
+            final_new = new_str
+            start = base_offset
+            op = "COMMENT_ONLY"
+        else:
+            prefix_len, suffix_len = trim_common_context(target_str, new_str)
+            final_target = target_str[prefix_len : len(target_str) - suffix_len]
+            final_new = new_str[prefix_len : len(new_str) - suffix_len]
+            start = base_offset + prefix_len
+            if not final_target and final_new:
+                op = EditOperationType.INSERTION
+            elif final_target and not final_new:
+                op = EditOperationType.DELETION
+            else:
+                op = EditOperationType.MODIFICATION
+
+        sub_edit = ModifyText(
+            type="modify",
+            target_text=final_target,
+            new_text=final_new,
+            comment=comment,
+        )
+        sub_edit._resolved_start_idx = start
+        sub_edit._match_start_index = start
+        sub_edit._active_mapper_ref = active_mapper
+        sub_edit._internal_op = op
+        if is_table:
+            sub_edit._is_table_edit = True
+
+        return [sub_edit]
+
     def _word_diff_sub_edits(
         self,
         target_str: str,
@@ -2777,6 +3039,20 @@ class RedlineEngine:
         is_table: bool = False,
         active_mapper=None,
     ) -> List[ModifyText]:
+        # A modify that carries a comment must stay ONE contiguous tracked
+        # change so its comment anchor wraps the whole logical edit. Word-level
+        # fan-out would split it into several Chg pairs and attach the comment
+        # to only one fragment; rejecting THAT fragment then silently destroys
+        # the comment (and any reply thread) while the other fragments — and the
+        # batch's "1 applied" report — give no hint the annotation is gone
+        # (QA 2026-07-22 bug #1). Emit a single sub-edit over the minimal
+        # word-boundary-trimmed changed span so a commented change is atomic:
+        # rejecting it reverts the entire edit, with no orphaned "other half".
+        if parent_comment is not None:
+            return self._single_commented_sub_edit(
+                target_str, new_str, base_offset, parent_comment, is_table, active_mapper
+            )
+
         try:
             raw_sub_edits = generate_edits_from_text(target_str, new_str)
         except Exception as e:
@@ -3352,8 +3628,14 @@ class RedlineEngine:
 
                     if edit.comment:
                         if last_p is not None:
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            else:
+                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             else:
@@ -3387,14 +3669,20 @@ class RedlineEngine:
 
                     if edit.comment:
                         if last_p is not None:
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                            else:
+                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                         else:
                             self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
                 elif last_p is not None and edit.comment:
                     # Leading "\n\n" insertions (boundary re-anchors) create
                     # only new paragraphs — anchor the comment on the last one.
-                    ins_list = last_p.findall(f".//{qn('w:ins')}")
+                    ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
                     if ins_list:
                         self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
             return True
@@ -3426,6 +3714,15 @@ class RedlineEngine:
             virtual_spans = active_mapper.get_virtual_spans_in_range(start_idx, length)
 
         if not target_runs and not virtual_spans:
+            affected_spans = [s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + length]
+            if affected_spans and all(
+                s.run is None and s.text != "\n\n" and not getattr(s, "is_image_marker", False) for s in affected_spans
+            ):
+                logger.debug(
+                    f"Applied virtual no-op edit targeting purely virtual projection text: {repr(edit.target_text)}"
+                )
+                edit._applied_status = True
+                return True
             return False
 
         affected_ps = set()
@@ -3436,11 +3733,16 @@ class RedlineEngine:
         if op == EditOperationType.DELETION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if edit.comment and first_del_element is not None and last_del_element is not None:
                 # The deletions may be nested inside a foreign author's <w:ins>;
@@ -3469,11 +3771,16 @@ class RedlineEngine:
         elif op == EditOperationType.MODIFICATION:
             first_del_element = None
             last_del_element = None
+            del_elems = []
             for run in target_runs:
                 del_elem = self.track_delete_run(run, reuse_id=del_id)
+                if del_elem is not None:
+                    del_elems.append(del_elem)
                 if first_del_element is None:
                     first_del_element = del_elem
                 last_del_element = del_elem
+
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
             if first_del_element is not None and last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
@@ -3524,14 +3831,18 @@ class RedlineEngine:
                         )
                         if last_p is not None:
                             end_p = last_p
-                            last_ins = last_p.findall(f".//{qn('w:ins')}")[-1]
-                            self._attach_comment_spanning(
-                                start_p,
-                                first_anchor,
-                                end_p,
-                                last_ins,
-                                edit.comment,
-                            )
+                            last_ins_candidates = [
+                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                            ]
+                            if last_ins_candidates:
+                                last_ins = last_ins_candidates[-1]
+                                self._attach_comment_spanning(
+                                    start_p,
+                                    first_anchor,
+                                    end_p,
+                                    last_ins,
+                                    edit.comment,
+                                )
                         elif ins_elem is not None:
                             end_p = ins_elem.getparent()
                             while end_p is not None and end_p.tag != qn("w:p"):
@@ -3778,6 +4089,84 @@ class RedlineEngine:
             "an explicit text edit instead."
         )
 
+    def _existing_change_ids(self) -> List[str]:
+        """Distinct tracked-change ids (w:id on w:ins/w:del) in the main story."""
+        ids = {
+            n.get(qn("w:id"))
+            for tag in ("w:ins", "w:del")
+            for n in self.doc.element.findall(f".//{qn(tag)}")
+            if n.get(qn("w:id"))
+        }
+        return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+
+    def _existing_comment_ids(self) -> List[str]:
+        """Comment ids present in the document, sorted for display."""
+        try:
+            ids = list(self.comments_manager.extract_comments_data().keys())
+        except Exception:
+            ids = []
+        return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+
+    @staticmethod
+    def _format_id_list(ids: List[str], prefix: str, limit: int = 20) -> str:
+        shown = ids[:limit]
+        rendered = ", ".join(f"{prefix}{i}" for i in shown)
+        if len(ids) > len(shown):
+            rendered += f", … (+{len(ids) - len(shown)} more)"
+        return rendered
+
+    def _action_not_found_error(self, raw_id: str, target_id: str, act) -> str:
+        """
+        Self-service diagnostic for accept/reject/reply on an id that resolved
+        nothing. The other errors in this engine explain WHY and HOW to recover
+        (ambiguous-match, major-deletions guard); this path used to emit only
+        "Failed to apply action: reply on 99" with no reason and no way to find
+        a valid id (QA 2026-07-22 bug #3). Names the expected id kind, lists the
+        ids that actually exist, flags the common change/comment id mix-up, and
+        points at the command that prints current ids.
+        """
+        change_ids = self._existing_change_ids()
+        comment_ids = self._existing_comment_ids()
+        has_prefix = raw_id.startswith("Chg:") or raw_id.startswith("Com:")
+        find_hint = (
+            "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current "
+            "change (Chg:) and comment (Com:) ids."
+        )
+
+        if isinstance(act, ReplyComment):
+            # Echo the id the caller passed (normalizing a bare id to Com:N).
+            echo = raw_id if has_prefix else f"Com:{target_id}"
+            if target_id in change_ids:
+                return (
+                    f"- Failed to apply action: reply on {echo} — Chg:{target_id} is a tracked-change "
+                    "id, not a comment. `reply` adds to an existing comment thread (Com:…); to comment "
+                    "on a change instead, apply a modify with a `comment`. " + find_hint
+                )
+            avail = (
+                f"Comment ids in this document: {self._format_id_list(comment_ids, 'Com:')}. "
+                if comment_ids
+                else "This document has no comments to reply to. "
+            )
+            return f"- Failed to apply action: reply on {echo} — no comment with that id exists. " + avail + find_hint
+
+        # AcceptChange / RejectChange
+        echo = raw_id if has_prefix else f"Chg:{target_id}"
+        if target_id in comment_ids:
+            return (
+                f"- Failed to apply action: {act.type} on {echo} — Com:{target_id} is a comment id, "
+                f"not a tracked change. accept/reject act on tracked changes (Chg:…); to respond to a "
+                f"comment use `reply`. " + find_hint
+            )
+        avail = (
+            f"Tracked-change ids in this document: {self._format_id_list(change_ids, 'Chg:')}. "
+            if change_ids
+            else "This document has no tracked changes. "
+        )
+        return (
+            f"- Failed to apply action: {act.type} on {echo} — no tracked change with that id exists "
+            "(it may already have been accepted or rejected, or the id is stale). " + avail + find_hint
+        )
+
     def _resolution_group_ids(self, target_id: str) -> set:
         """
         All revision ids that resolve as ONE unit with `target_id`: the ids of
@@ -3851,7 +4240,13 @@ class RedlineEngine:
         already_resolved = 0
         resolved_history: dict = {}  # revision id -> action type that resolved it
 
-        for pos, act in enumerate(actions):
+        # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+        # followed by destructive structural operations (AcceptChange, RejectChange).
+        # Stable sort preserves the original relative ordering, and we preserve `pos`
+        # so diagnostic messages refer to the original array indexes.
+        sorted_actions = sorted(enumerate(actions), key=lambda x: 0 if isinstance(x[1], ReplyComment) else 1)
+
+        for pos, act in sorted_actions:
             raw_id = act.target_id
             target_id = raw_id
 
@@ -3901,6 +4296,14 @@ class RedlineEngine:
             resolved_now = set()
             success = False
 
+            # Accept/reject can delete a comment as a side effect when the
+            # comment's anchor falls inside the resolved change. Snapshot the
+            # comment ids first so a removal is reported explicitly instead of
+            # happening silently under "1 applied" (QA 2026-07-22 bug #1).
+            comments_before: set = set()
+            if isinstance(act, (AcceptChange, RejectChange)) and is_change:
+                comments_before = set(self._existing_comment_ids())
+
             if isinstance(act, AcceptChange):
                 if is_change:
                     resolved_now = self._accept_change(target_id)
@@ -3918,17 +4321,28 @@ class RedlineEngine:
                     if rid:
                         resolved_history[rid] = act.type
                 applied += 1
+                if comments_before:
+                    removed = comments_before - set(self._existing_comment_ids())
+                    if removed:
+                        removed_list = ", ".join(f"Com:{c}" for c in sorted(removed))
+                        self.skipped_details.append(
+                            f"- Note: {act.type} on {raw_id} also removed comment {removed_list} "
+                            "(including any reply thread) because its anchor was inside the resolved "
+                            "change. This note is informational — the action itself succeeded."
+                        )
             else:
-                self.skipped_details.append(f"- Failed to apply action: {act.type} on {target_id}")
+                self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act))
                 skipped += 1
 
         return applied, skipped, already_resolved
 
-    def _clean_wrapping_comments(self, element):
+    def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
         """
         Removes comment anchors that tightly wrap this element (or a paired del/ins).
         This prevents orphaned comment ranges from leaking when an edit is accepted/rejected.
         """
+        if preserve_comments:
+            return
         first_node = element
         while True:
             prev = first_node.getprevious()
@@ -4035,7 +4449,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=True)
             parent = ins.getparent()
             if parent is None:
                 continue
@@ -4051,7 +4465,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=False)
             self._delete_comments_in_element(d)
             parent = d.getparent()
             if parent is not None:
@@ -4083,7 +4497,7 @@ class RedlineEngine:
             resolved_ids.add(node.get(qn("w:id")))
 
         for ins in all_ins:
-            self._clean_wrapping_comments(ins)
+            self._clean_wrapping_comments(ins, preserve_comments=False)
             self._delete_comments_in_element(ins)
             parent = ins.getparent()
             if parent is None:
@@ -4117,7 +4531,7 @@ class RedlineEngine:
             parent.remove(ins)
 
         for d in all_del:
-            self._clean_wrapping_comments(d)
+            self._clean_wrapping_comments(d, preserve_comments=True)
             parent = d.getparent()
             if parent is None:
                 continue
@@ -4194,7 +4608,7 @@ class RedlineEngine:
         new_end.addnext(ref_run)
 
     # FILE: src/adeu/redline/engine.py
-    def accept_all_revisions(self, remove_comments: bool = False):
+    def accept_all_revisions(self, remove_comments: bool = False) -> dict[str, int]:
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:
@@ -4210,9 +4624,36 @@ class RedlineEngine:
                     element_to_process = part._adeu_element  # type: ignore[attr-defined]
                 parts_to_process.append(element_to_process)
 
+        # Pre-count revisions and comments before modifying the XML structures.
+        # The unit is REVISION ELEMENTS, matching sanitize's
+        # transforms.count_tracked_changes so the two surfaces can never report
+        # different totals for the same document. Word fragments one logical
+        # revision across several w:ins when formatting changes mid-revision
+        # (see AI_CONTEXT §10), so this counts marks, not user intentions —
+        # said plainly in the CLI --help rather than left for a caller to
+        # discover. Formatting revisions (w:rPrChange/w:pPrChange/w:sectPrChange)
+        # are accepted by this method too, so they are counted too; omitting
+        # them reported 0 changes for a document that demonstrably changed.
+        accepted_insertions = 0
+        accepted_deletions = 0
+        accepted_formatting = 0
+        for root_element in parts_to_process:
+            accepted_insertions += len(root_element.findall(f".//{qn('w:ins')}"))
+            accepted_deletions += len(root_element.findall(f".//{qn('w:del')}"))
+            for tag in ("w:rPrChange", "w:pPrChange", "w:sectPrChange"):
+                accepted_formatting += len(root_element.findall(f".//{qn(tag)}"))
+
+        # Only claim comments were removed when they actually are.
+        removed_comments = 0
+        if remove_comments:
+            try:
+                removed_comments = len(self.comments_manager.extract_comments_data())
+            except Exception:
+                removed_comments = 0
+
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=True)
                 parent = ins.getparent()
                 if parent is None:
                     continue
@@ -4254,13 +4695,13 @@ class RedlineEngine:
                         if has_content:
                             rPr.remove(del_mark)
                         else:
-                            self._clean_wrapping_comments(p)
+                            self._clean_wrapping_comments(p, preserve_comments=False)
                             self._delete_comments_in_element(p)
                             if p.getparent() is not None:
                                 p.getparent().remove(p)
 
             for d in root_element.findall(f".//{qn('w:del')}"):
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=False)
                 self._delete_comments_in_element(d)
                 parent = d.getparent()
                 if parent is not None:
@@ -4333,6 +4774,13 @@ class RedlineEngine:
                 elif hasattr(pkg, "parts") and isinstance(pkg.parts, list):
                     pkg.parts[:] = [p for p in pkg.parts if p.partname not in comment_partnames]
 
+        return {
+            "accepted_insertions": accepted_insertions,
+            "accepted_deletions": accepted_deletions,
+            "accepted_formatting": accepted_formatting,
+            "removed_comments": removed_comments,
+        }
+
     def reject_all_revisions(self):
         """
         Revert every tracked change, returning the document to the state it had
@@ -4389,7 +4837,7 @@ class RedlineEngine:
                 parent = ins.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(ins)
+                self._clean_wrapping_comments(ins, preserve_comments=False)
                 self._delete_comments_in_element(ins)
                 if parent.tag == qn("w:trPr"):
                     row = parent.getparent()
@@ -4413,7 +4861,7 @@ class RedlineEngine:
                 parent = d.getparent()
                 if parent is None:
                     continue
-                self._clean_wrapping_comments(d)
+                self._clean_wrapping_comments(d, preserve_comments=True)
                 if parent.tag == qn("w:trPr"):
                     parent.remove(d)
                     continue

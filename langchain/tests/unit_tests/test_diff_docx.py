@@ -111,3 +111,12 @@ class TestAdeuDiffDocxValidation:
             }
         )
         assert "No text differences found" in result
+
+    def test_diff_format_options(self) -> None:
+        input_data = AdeuDiffDocxInput(
+            reasoning="test",
+            original_path="/tmp/orig.docx",
+            modified_path="/tmp/mod.docx",
+            diff_format="unified",
+        )
+        assert input_data.diff_format == "unified"

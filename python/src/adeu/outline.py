@@ -527,7 +527,20 @@ def _compute_inner_block_offset(
         # We are projection-side (clean_view=False), so include all rows.
 
         if rows_processed > 0:
-            cursor += 1  # "\n" between rows
+            if rows_processed == 1:
+                first_row = table.rows[0]
+                seen_cells_first = set()
+                num_cols = 0
+                for cell in first_row.cells:
+                    cell_id = id(cell._tc)
+                    if cell_id in seen_cells_first:
+                        continue
+                    seen_cells_first.add(cell_id)
+                    num_cols += 1
+                divider_len = len(" | ".join(["---"] * num_cols)) if num_cols > 0 else 0
+                cursor += 1 + divider_len + 1
+            else:
+                cursor += 1  # "\n" between rows
 
         seen_cells: set = set()
         cells_in_row = 0

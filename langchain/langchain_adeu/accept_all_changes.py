@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from adeu import RedlineEngine
+from adeu.utils.docx import strip_bom_from_docx_bytes
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,8 +84,9 @@ class AdeuAcceptAllChanges(BaseTool):
 
         target = _resolve_output_path(source, output_path)
 
-        with open(source, "rb") as f:
-            stream = BytesIO(f.read())
+        raw_bytes = source.read_bytes()
+        sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
+        stream = BytesIO(sanitized_bytes)
 
         engine = RedlineEngine(stream)
         engine.accept_all_revisions(remove_comments=True)

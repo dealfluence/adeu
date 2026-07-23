@@ -169,7 +169,7 @@ def test_insert_table_row_below():
 
     # Check order
     lines = [line.strip() for line in clean_text.split("\n") if "|" in line]
-    assert lines == ["A1 | A2", "New B1 | New B2", "B1 | B2"]
+    assert lines == ["A1 | A2", "--- | ---", "New B1 | New B2", "B1 | B2"]
 
 
 def test_delete_table_row():

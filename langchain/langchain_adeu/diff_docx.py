@@ -11,11 +11,18 @@ hunks than about line-level patches that lump unrelated edits together.
 from __future__ import annotations
 
 import asyncio
+import json
+from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from adeu.diff import generate_edits_from_text
-from adeu.ingest import extract_text_from_stream
+from adeu.diff import (
+    collect_media_difference_warnings,
+    create_unified_diff,
+    generate_edits_from_text,
+    generate_structured_edits,
+)
+from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 
 # Intentional import from a non-public path: `_create_diff_output` is the
 # canonical formatter for Adeu's word-patch diff and currently lives only
@@ -23,6 +30,8 @@ from adeu.ingest import extract_text_from_stream
 # the formatter; in a future Adeu release this helper should be promoted
 # to `adeu.diff` proper. Track in the adeu monorepo when that happens.
 from adeu.mcp_components.tools.document import _create_diff_output
+from adeu.utils.docx import strip_bom_from_docx_bytes
+from docx import Document as load_document
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,6 +60,15 @@ class AdeuDiffDocxInput(BaseModel):
             "were accepted. This is what reviewers usually want. "
             "Set False to compare raw text including CriticMarkup tags for "
             "tracked changes (useful only for debugging Adeu itself)."
+        ),
+    )
+    diff_format: Literal["word_patch", "unified", "structured_changes"] = Field(
+        default="word_patch",
+        description=(
+            "Format of the output diff. 'word_patch' (default) returns Adeu's sub-word "
+            "@@ Word Patch @@ format. 'unified' returns a standard Git-style unified diff. "
+            "'structured_changes' returns a JSON array of DocumentChange objects suitable "
+            "for feeding directly into adeu_apply_changes."
         ),
     )
 
@@ -89,6 +107,7 @@ class AdeuDiffDocx(BaseTool):
         original_path: str,
         modified_path: str,
         compare_clean: bool = True,
+        diff_format: Literal["word_patch", "unified", "structured_changes"] = "word_patch",
     ) -> str:
         orig = validate_docx_path(original_path, label="original document")
         mod = validate_docx_path(modified_path, label="modified document")
@@ -96,15 +115,63 @@ class AdeuDiffDocx(BaseTool):
         if orig == mod:
             return _NO_DIFF_MESSAGE
 
-        text_orig = _read_text(orig, compare_clean)
-        text_mod = _read_text(mod, compare_clean)
+        orig_bytes = strip_bom_from_docx_bytes(orig.read_bytes())
+        mod_bytes = strip_bom_from_docx_bytes(mod.read_bytes())
+
+        media_warnings = collect_media_difference_warnings(orig_bytes, mod_bytes)
+        warning_prefix = "\n\n".join(f"⚠️  {w}" for w in media_warnings) + "\n\n" if media_warnings else ""
+
+        if orig == mod:
+            return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
+
+        if diff_format == "structured_changes":
+            doc_orig = load_document(BytesIO(orig_bytes))
+            doc_mod = load_document(BytesIO(mod_bytes))
+            text_orig, struct_orig = _extract_text_from_doc(
+                doc_orig,
+                clean_view=compare_clean,
+                include_appendix=False,
+                return_structure=True,
+            )
+            text_mod, struct_mod = _extract_text_from_doc(
+                doc_mod,
+                clean_view=compare_clean,
+                include_appendix=False,
+                return_structure=True,
+            )
+            res = generate_structured_edits(text_orig, struct_orig, text_mod, struct_mod)
+            edits_data = [e.model_dump(exclude_unset=True) for e in res["edits"]]
+            output_obj = {
+                "changes": edits_data,
+                "warnings": media_warnings + res.get("warnings", []),
+            }
+            return warning_prefix + json.dumps(output_obj, indent=2)
+
+        text_orig = extract_text_from_stream(
+            BytesIO(orig_bytes),
+            filename=orig.name,
+            clean_view=compare_clean,
+            include_appendix=False,
+        )
+        text_mod = extract_text_from_stream(
+            BytesIO(mod_bytes),
+            filename=mod.name,
+            clean_view=compare_clean,
+            include_appendix=False,
+        )
+
+        if diff_format == "unified":
+            diff_str = create_unified_diff(text_orig, text_mod)
+            if not diff_str:
+                return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
+            return warning_prefix + diff_str
 
         edits = generate_edits_from_text(text_orig, text_mod)
-
         if not edits:
-            return _NO_DIFF_MESSAGE
+            return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
 
-        return _create_diff_output(str(orig), str(mod), text_orig, edits)
+        diff_output = _create_diff_output(str(orig), str(mod), text_orig, edits)
+        return warning_prefix + diff_output
 
     async def _arun(
         self,
@@ -112,6 +179,7 @@ class AdeuDiffDocx(BaseTool):
         original_path: str,
         modified_path: str,
         compare_clean: bool = True,
+        diff_format: Literal["word_patch", "unified", "structured_changes"] = "word_patch",
     ) -> str:
         return await asyncio.to_thread(
             self._run,
@@ -119,6 +187,7 @@ class AdeuDiffDocx(BaseTool):
             original_path,
             modified_path,
             compare_clean,
+            diff_format,
         )
 
 

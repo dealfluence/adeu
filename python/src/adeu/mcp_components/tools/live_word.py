@@ -370,9 +370,12 @@ if sys.platform == "win32":
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
-                # In search mode, `page` is a doc-page filter (None == search all).
-                # Outside search mode, `page` means document page and defaults to 1.
-                page_num = int(page) if (page is not None and str(page).isdigit()) else 1
+                page_num = 1
+                if page is not None:
+                    s_page = str(page).strip()
+                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                    if s_page.isdigit() or is_signed:
+                        page_num = int(s_page)
                 if search_query is not None:
                     from adeu.mcp_components._response_builders import (
                         build_search_response,
@@ -607,7 +610,12 @@ if sys.platform == "win32":
                 mapper = DocumentMapper(py_doc)
                 _, _, mapping = _get_haystack()
 
-                for act in actions:
+                # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
+                # followed by destructive structural operations (AcceptChange, RejectChange).
+                # Stable sort preserves the original relative ordering.
+                sorted_actions = sorted(actions, key=lambda x: 0 if isinstance(x, ReplyComment) else 1)
+
+                for act in sorted_actions:
                     try:
                         xml_id = act.target_id.split(":")[-1]
                         if isinstance(act, (AcceptChange, RejectChange)):

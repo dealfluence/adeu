@@ -1,7 +1,7 @@
 import json
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, TypeAdapter, WithJsonSchema
 
 from adeu.redline.mapper import DocumentMapper
 
@@ -186,6 +186,16 @@ class InsertTableRow(BaseModel):
         description="A list of Markdown strings representing the contents of the new cells.",
     )
 
+    match_mode: Literal["strict", "first", "all"] = Field(
+        default="strict",
+        description=(
+            "Resolution strategy when target_text matches more than one row. "
+            "'strict' (default): fail with an ambiguity error. "
+            "'first': anchor on the first matching row only. "
+            "'all': insert a row relative to EVERY matching row."
+        ),
+    )
+
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
@@ -195,6 +205,10 @@ class InsertTableRow(BaseModel):
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _any_sub_failure: bool = PrivateAttr(default=False)
+    # A match_mode="all" fan-out deep-copies this edit once per matching row;
+    # each copy points back here so the batch report counts ONE applied edit
+    # and accumulates occurrences on the parent (mirrors ModifyText).
+    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
@@ -210,6 +224,16 @@ class DeleteTableRow(BaseModel):
         ),
     )
 
+    match_mode: Literal["strict", "first", "all"] = Field(
+        default="strict",
+        description=(
+            "Resolution strategy when target_text matches more than one row. "
+            "'strict' (default): fail with an ambiguity error. "
+            "'first': delete only the first matching row. "
+            "'all': delete EVERY matching row."
+        ),
+    )
+
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
@@ -219,9 +243,79 @@ class DeleteTableRow(BaseModel):
     _applied_status: bool = PrivateAttr(default=False)
     _error_msg: Optional[str] = PrivateAttr(default=None)
     _any_sub_failure: bool = PrivateAttr(default=False)
+    # See InsertTableRow._parent_edit_ref.
+    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
+
+
+# Either structural row operation. Both fan out the same way under
+# match_mode="all", so a sub-edit's parent is one of these two.
+TableRowChange = Union[InsertTableRow, DeleteTableRow]
+
+
+class FlatDocumentChange(BaseModel):
+    """
+    A single unified flat change schema for client/platform JSON Schema exposure,
+    avoiding complex oneOf/anyOf unions which break some MCP hosts.
+    """
+
+    type: Literal["accept", "reject", "reply", "modify", "insert_row", "delete_row"] = Field(
+        ...,
+        description="The type of document change operation.",
+        json_schema_extra=const_to_enum,
+    )
+    target_text: Optional[str] = Field(
+        None,
+        description=(
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
+            "You can include CriticMarkup {==...==} in the target to match text inside existing markup."
+        ),
+    )
+    new_text: Optional[str] = Field(
+        None,
+        description=(
+            "The desired text replacement. You may use Markdown formatting: "
+            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
+            "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
+            "To add a comment, use the 'comment' parameter instead."
+        ),
+    )
+    target_id: Optional[str] = Field(
+        None,
+        description="The full ID string from the document text (e.g. 'Chg:12', 'Com:5').",
+    )
+    text: Optional[str] = Field(
+        None,
+        description="The content of the reply body.",
+    )
+    cells: Optional[list[str]] = Field(
+        None,
+        description="A list of Markdown strings representing the contents of the new cells.",
+    )
+    position: Optional[Literal["above", "below"]] = Field(
+        None,
+        description="Whether to insert the new row above or below the anchor row.",
+    )
+    regex: Optional[bool] = Field(
+        None,
+        description="Treat target_text as a regular expression.",
+    )
+    comment: Optional[str] = Field(
+        None,
+        description="Text to appear in a comment bubble (Review Pane) linked to this edit or optional rationale.",
+    )
+    match_mode: Optional[Literal["strict", "first", "all"]] = Field(
+        None,
+        description=(
+            "Resolution strategy when target_text appears more than once. "
+            "'strict' (default): fail with an ambiguity error if there are multiple matches. "
+            "'first': modify only the first occurrence. "
+            "'all': modify every occurrence. Use 'first'/'all' to resolve an ambiguity error "
+            "without having to add more surrounding context to target_text."
+        ),
+    )
 
 
 DocumentChange = Annotated[
@@ -234,6 +328,18 @@ DocumentChange = Annotated[
         DeleteTableRow,
     ],
     Field(discriminator="type"),
+]
+
+# Same union, published as ONE flat object instead of a discriminated oneOf.
+# Some MCP hosts cannot consume oneOf/anyOf schemas at all, so the MCP tool
+# boundary advertises this. It is strictly the weaker contract — every field
+# becomes optional, so "modify requires target_text + new_text" stops being
+# expressed — which is why it is opt-in per surface rather than attached to
+# DocumentChange itself. Validation is unaffected: the real discriminated
+# union still runs, and the CLI (StrictBatchChanges) keeps the precise schema.
+FlatSchemaDocumentChange = Annotated[
+    DocumentChange,
+    WithJsonSchema(TypeAdapter(FlatDocumentChange).json_schema()),
 ]
 
 

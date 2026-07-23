@@ -473,6 +473,13 @@ server.registerTool(
       author_name: z
         .string()
         .describe("Name to appear in Track Changes (e.g., 'Reviewer AI')."),
+      // Deliberately a plain REQUIRED array of typed items. Wrapping this in
+      // z.preprocess (to also accept the whole array as one JSON string) drops
+      // it out of the schema's `required` list, and a z.union publishes an
+      // anyOf that hides the item schema — both cost more, on every call, than
+      // they buy for the rare client that stringifies its payload. That client
+      // gets a clear "expected array, received string" it can retry from.
+      // Per-item stringification is still tolerated, below and in the engine.
       changes: z
         .array(z.union([z.string(), CHANGE_ITEM_SCHEMA]))
         .describe(
@@ -516,6 +523,7 @@ server.registerTool(
             },
           ],
         };
+
       if (!changes || changes.length === 0)
         return {
           content: [{ type: "text", text: "Error: No changes provided." }],
@@ -853,16 +861,26 @@ server.registerTool(
         export_pdf: export_pdf as boolean,
       });
 
-      fs.writeFileSync(outPath, result.outBuffer!);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Saved to: ${outPath}\n\n${result.reportText}`,
-          },
-        ],
-      };
+      if (result.outBuffer) {
+        fs.writeFileSync(outPath, result.outBuffer);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Saved to: ${outPath}\n\n${result.reportText}`,
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.reportText,
+            },
+          ],
+        };
+      }
     } catch (e: any) {
       return {
         isError: true,

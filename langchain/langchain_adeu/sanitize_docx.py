@@ -91,6 +91,15 @@ class AdeuSanitizeDocxInput(BaseModel):
             "warning if multiple distinct authors are detected."
         ),
     )
+    allow_low_similarity_baseline: bool = Field(
+        default=False,
+        description=(
+            "Baseline mode only: proceed even when the baseline shares less "
+            "than half of its content with the working document. Without "
+            "this, such a mismatch is blocked to prevent accidental overwrites "
+            "from selecting the wrong baseline file."
+        ),
+    )
 
 
 _DESCRIPTION = (
@@ -130,6 +139,7 @@ class AdeuSanitizeDocx(BaseTool):
         baseline_path: str | None = None,
         author: str | None = None,
         accept_all: bool = False,
+        allow_low_similarity_baseline: bool = False,
     ) -> tuple[str, dict[str, Any]]:
 
         source = validate_docx_path(file_path, label="DOCX file")
@@ -147,6 +157,7 @@ class AdeuSanitizeDocx(BaseTool):
             baseline_path=str(baseline_resolved) if baseline_resolved else None,
             author=author,
             accept_all=accept_all,
+            allow_low_similarity_baseline=allow_low_similarity_baseline,
         )
 
         artifact: dict[str, Any] = {
@@ -167,6 +178,7 @@ class AdeuSanitizeDocx(BaseTool):
         baseline_path: str | None = None,
         author: str | None = None,
         accept_all: bool = False,
+        allow_low_similarity_baseline: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
             self._run,
@@ -177,6 +189,7 @@ class AdeuSanitizeDocx(BaseTool):
             baseline_path,
             author,
             accept_all,
+            allow_low_similarity_baseline,
         )
 
 

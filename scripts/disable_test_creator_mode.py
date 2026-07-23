@@ -14,9 +14,10 @@ DEFAULT_PERMISSIONS = {
         "command(npm run)",
         "command(git diff)",
         "command(uv)",
-        "command(git log)"
+        "command(git log)",
     ]
 }
+
 
 def main():
     if not SETTINGS_PATH.exists():
@@ -29,7 +30,9 @@ def main():
         try:
             shutil.copy(BACKUP_PATH, SETTINGS_PATH)
             os.remove(BACKUP_PATH)
-            print("✅ Successfully disabled Autonomous Test Creator Mode (Restored original settings).")
+            print(
+                "✅ Successfully disabled Autonomous Test Creator Mode (Restored original settings)."
+            )
         except Exception as e:
             print(f"Error restoring backup: {e}")
     else:
@@ -47,8 +50,11 @@ def main():
 
         with open(SETTINGS_PATH, "w") as f:
             json.dump(settings, f, indent=2)
-        
-        print("✅ Successfully disabled Autonomous Test Creator Mode (Restored defaults).")
+
+        print(
+            "✅ Successfully disabled Autonomous Test Creator Mode (Restored defaults)."
+        )
+
 
 if __name__ == "__main__":
     main()

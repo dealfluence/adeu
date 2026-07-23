@@ -468,6 +468,19 @@ export function get_paragraph_prefix(
   }
 
   if (!style_name || style_name === "Normal") {
+    let is_inside_tc = false;
+    let curr: Element | null = paragraph._element;
+    while (curr) {
+      if (curr.tagName === "w:tc") {
+        is_inside_tc = true;
+        break;
+      }
+      curr = curr.parentNode as Element | null;
+    }
+    if (is_inside_tc) {
+      return "";
+    }
+
     const text = paragraph.text.trim();
     if (text && text.length < 100 && text === text.toUpperCase()) {
       let is_bold = false;

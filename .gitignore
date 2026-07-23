@@ -7,6 +7,12 @@ __pycache__/
 
 testing.docx
 
+# Scratch DOCX artifacts dropped by manual/agent runs in a package root.
+# Real fixtures live under */tests/fixtures/ and are re-included below.
+/python/*.docx
+/node/*.docx
+!**/tests/fixtures/*.docx
+
 # C extensions
 *.so
 
@@ -211,6 +217,10 @@ marimo/_lsp/
 __marimo__/
 AI_SESSION.md
 .ralph.json
+
+# Kilo AI Editor
+.kilo/
+.kilocodeignore
 
 # Node / Monorepo
 node_modules/

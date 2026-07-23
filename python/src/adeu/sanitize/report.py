@@ -48,11 +48,6 @@ class SanitizeReport:
             lower = line.lower()
             if any(k in lower for k in ["tracked change", "insertion", "deletion", "accepted"]):
                 self.change_lines.append(line)
-            elif any(k in lower for k in ["comment", "[open]", "[resolved]"]):
-                if "kept" in lower or "visible" in lower:
-                    self.kept_comment_lines.append(line)
-                else:
-                    self.removed_comment_lines.append(line)
             elif any(
                 k in lower
                 for k in [
@@ -72,9 +67,15 @@ class SanitizeReport:
                     "last modified by",
                     "revision count",
                     "last printed",
+                    "description/comments",
                 ]
             ):
                 self.metadata_lines.append(line)
+            elif any(k in lower for k in ["comment", "[open]", "[resolved]"]):
+                if "kept" in lower or "visible" in lower:
+                    self.kept_comment_lines.append(line)
+                else:
+                    self.removed_comment_lines.append(line)
             elif any(k in lower for k in ["hyperlink", "warning"]):
                 self.warnings.append(line)
             else:
@@ -96,7 +97,12 @@ class SanitizeReport:
             flags.append("--accept-all")
 
         if flags:
-            lines.append(" ".join(flags))
+            # Label the invocation flags. A bare "--baseline" line directly
+            # under the title reads as a stray debug/args token appended to the
+            # filename (QA 2026-07-22 bug #2); "Options:" marks it as
+            # intentional report metadata — important since --report output is
+            # shown to a counterparty as proof of a clean document.
+            lines.append(f"Options: {' '.join(flags)}")
         lines.append(sep)
 
         if self.status == "blocked":

@@ -6,7 +6,6 @@ from typing import Any, List, Optional, Tuple
 
 import structlog
 from docx.document import Document as DocumentObject
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -387,7 +386,23 @@ class DocumentMapper:
                     self._add_virtual_text(" | ", current, None)
                     current += 3
 
+                cell_start = current
                 current = self._map_blocks(cell, current)
+
+                if not self.clean_view and not self.original_view:
+                    first_p_list = cell._element.findall(".//" + qn("w:p"))
+                    firstP = first_p_list[0] if first_p_list else None
+                    paraId = firstP.get(qn("w14:paraId")) if firstP is not None else None
+                    if paraId and firstP is not None:
+                        cellPara = Paragraph(firstP, cell)
+                        self._add_virtual_text("", current, cellPara)
+                        if cell_start < current:
+                            self._add_virtual_text(" ", current, cellPara)
+                            current += 1
+                        anchor = f"{{#cell:{paraId}}}"
+                        self._add_virtual_text(anchor, current, cellPara)
+                        current += len(anchor)
+
                 cells_processed += 1
 
             if ins is not None and not self.clean_view and not self.original_view:
@@ -400,6 +415,22 @@ class DocumentMapper:
                 current += len(suffix)
 
             rows_processed += 1
+
+            if rows_processed == 1:
+                seen_cells_first = set()
+                num_cols = 0
+                for cell in row.cells:
+                    if cell in seen_cells_first:
+                        continue
+                    seen_cells_first.add(cell)
+                    num_cols += 1
+
+                if num_cols > 0:
+                    divider_str = " | ".join(["---"] * num_cols)
+                    self._add_virtual_text("\n", current, None)
+                    current += 1
+                    self._add_virtual_text(divider_str, current, None)
+                    current += len(divider_str)
 
         return current
 
@@ -1164,6 +1195,16 @@ class DocumentMapper:
         return working_runs
 
     def get_insertion_anchor(self, index: int, rebuild_map: bool = True) -> Tuple[Optional[Run], Optional[Paragraph]]:
+        following_real = [s for s in self.spans if s.start == index and s.run is not None]
+        if following_real:
+            s_next = following_real[0]
+            next_run = s_next.run
+            if next_run is not None and s_next.run_offset > 0:
+                left, _ = self._split_run_at_index(next_run, s_next.run_offset)
+                if rebuild_map:
+                    self._build_map()
+                return left, s_next.paragraph
+
         preceding = [s for s in self.spans if s.end == index]
         if preceding:
             for s in reversed(preceding):
@@ -1228,17 +1269,9 @@ class DocumentMapper:
 
         run.text = left_text
         new_r_element = deepcopy(run._element)
-        t_list = new_r_element.findall(qn("w:t"))
-        for t in t_list:
-            new_r_element.remove(t)
-
-        new_t = OxmlElement("w:t")
-        new_t.text = right_text
-        if right_text.strip() != right_text:
-            new_t.set(qn("xml:space"), "preserve")
-        new_r_element.append(new_t)
         run._element.addnext(new_r_element)
         new_run = Run(new_r_element, run._parent)
+        new_run.text = right_text
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:

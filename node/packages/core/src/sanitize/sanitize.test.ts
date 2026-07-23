@@ -220,6 +220,7 @@ describe("Finalize Document (Core)", () => {
 
     expect(res.reportText).toContain("BLOCKED:");
     expect(res.reportText).toContain("unresolved tracked changes");
+    expect(res.reportText).toContain("sanitize_mode='keep-markup'");
   });
 
   describe("Resolved Bugs Sanitize Parity Verification", () => {

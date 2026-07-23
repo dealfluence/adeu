@@ -187,7 +187,22 @@ function _compute_inner_block_offset(
   let rows_processed = 0;
 
   for (const row of table.rows) {
-    if (rows_processed > 0) cursor += 1;
+    if (rows_processed > 0) {
+      if (rows_processed === 1) {
+        const first_row = table.rows[0];
+        const seen_cells_first = new Set();
+        let num_cols = 0;
+        for (const cell of first_row.cells) {
+          if (seen_cells_first.has(cell)) continue;
+          seen_cells_first.add(cell);
+          num_cols += 1;
+        }
+        const divider_len = num_cols > 0 ? Array(num_cols).fill("---").join(" | ").length : 0;
+        cursor += 1 + divider_len + 1;
+      } else {
+        cursor += 1;
+      }
+    }
 
     const seen_cells = new Set();
     let cells_in_row = 0;

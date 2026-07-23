@@ -15,6 +15,7 @@ import {
   type BinarySource,
   DOCX_MIME_TYPE,
   buildOutputFileName,
+  coerceChangesArray,
   getDocxBufferFromSource,
   getNestedProperty,
   parseJsonParameter,
@@ -235,6 +236,8 @@ export async function executeApplyEdits(
   if (!Array.isArray(changes)) {
     throw new Error("Changes must be an array of DocumentChange objects.");
   }
+
+  changes = coerceChangesArray(changes);
 
   const documentSource = this.getNodeParameter(
     "documentSource",

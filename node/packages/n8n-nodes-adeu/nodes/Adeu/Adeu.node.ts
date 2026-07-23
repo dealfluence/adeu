@@ -5,7 +5,7 @@ import type {
   INodeType,
   INodeTypeDescription,
 } from "n8n-workflow";
-import { NodeConnectionTypes } from "n8n-workflow";
+import { NodeConnectionTypes, NodeOperationError } from "n8n-workflow";
 import { executeHydrateToolOutput } from "./descriptions/hydrateToolOutput.operation";
 import { documentDescription } from "./descriptions";
 import { executeExtractMarkdown } from "./descriptions/extractMarkdown.operation";
@@ -19,7 +19,7 @@ export class Adeu implements INodeType {
   description: INodeTypeDescription = {
     displayName: "Adeu",
     name: "adeu",
-    icon: "file:adeu.svg",
+    icon: { light: "file:adeu.svg", dark: "file:adeu-dark.svg" },
     group: ["transform"],
     version: 1,
     subtitle: '={{$parameter["operation"]}}',
@@ -97,10 +97,18 @@ export class Adeu implements INodeType {
               result = await executeHydrateToolOutput.call(this, i);
               break;
             default:
-              throw new Error(`Unsupported operation: ${operation}`);
+              throw new NodeOperationError(
+                this.getNode(),
+                `Unsupported operation: ${operation}`,
+                { itemIndex: i },
+              );
           }
         } else {
-          throw new Error(`Unsupported resource: ${resource}`);
+          throw new NodeOperationError(
+            this.getNode(),
+            `Unsupported resource: ${resource}`,
+            { itemIndex: i },
+          );
         }
 
         returnData.push(...result);

@@ -32,13 +32,12 @@ export const documentDescription: INodeProperties[] = [
         value: "extractMarkdown",
         action: "Extract markdown from document",
         description:
-          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix listing defined terms, cross-references, and potential typos. Each tracked change is tagged with a stable id (Chg:N, Com:N) for use in Apply Edits. Supports an optional Page parameter to fetch only one page of a large document (paired with Extract Outline for navigation).",
+          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix listing defined terms, cross-references, and potential typos. Each tracked change is tagged with a stable ID (Chg:N, Com:N) for use in Apply Edits. Supports an optional Page parameter to fetch only one page of a large document (paired with Extract Outline for navigation).",
       },
       {
         name: "Extract Outline",
         value: "extractOutline",
-        action:
-          "Extract a structural outline (table of contents) of the document",
+        action: "Extract a structural outline of the document",
         description:
           "Return a token-cheap structural map of the .docx: a JSON array of headings with their level (1-6), text, page number, paragraph style, whether the section directly contains a table, and any footnote/endnote IDs scoped to that section. Also returns total_pages. Use this as a navigation primitive for large documents — call it first to discover structure, then call Extract Markdown with a specific Page to drill into the relevant section.",
       },
