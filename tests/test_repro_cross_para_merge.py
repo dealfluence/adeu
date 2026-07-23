@@ -1,5 +1,4 @@
 import io
-import pytest
 from docx import Document
 from adeu.redline.engine import RedlineEngine
 from adeu.models import ModifyText

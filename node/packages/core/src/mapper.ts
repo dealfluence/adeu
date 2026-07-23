@@ -348,16 +348,39 @@ export class DocumentMapper {
         // can resolve "write into this cell" even when the cell is empty
         // (pPr-only paragraph with no run).
         if (!this.clean_view && !this.original_view) {
-          const firstP = cell._element.getElementsByTagName("w:p")[0] as
+          let firstP = cell._element.getElementsByTagName("w:p")[0] as
             | Element
             | undefined;
-          const paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+          let paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
+          const is_empty = current === cell_start;
+          if (!paraId && is_empty) {
+            if (!firstP) {
+              const xmlDoc = cell._element.ownerDocument!;
+              firstP = xmlDoc.createElement("w:p");
+              cell._element.appendChild(firstP);
+            }
+            const allPs = Array.from(cell._element.ownerDocument!.getElementsByTagName("w:p"));
+            const index = allPs.indexOf(firstP);
+            let hash = 2166136261;
+            const str = `fallback-paraId-${index}`;
+            for (let i = 0; i < str.length; i++) {
+              hash ^= str.charCodeAt(i);
+              hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+            }
+            paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
+            firstP.setAttribute("w14:paraId", paraId);
+          }
           if (paraId && firstP) {
             // Zero-width span bound to the empty cell paragraph: gives
             // get_insertion_anchor a paragraph to land on. Placed at the anchor
             // token offset so resolution targets THIS cell, not a neighbour.
             const cellPara = new Paragraph(firstP, cell);
             this._add_virtual_text("", current, cellPara);
+            const has_content = current > cell_start;
+            if (has_content) {
+              this._add_virtual_text(" ", current, cellPara);
+              current += 1;
+            }
             const anchor = `{#cell:${paraId}}`;
             this._add_virtual_text(anchor, current, cellPara);
             current += anchor.length;
@@ -377,6 +400,24 @@ export class DocumentMapper {
       }
 
       rows_processed += 1;
+
+      if (rows_processed === 1) {
+        const seen_cells_first = new Set();
+        let num_cols = 0;
+        for (const cell of row.cells) {
+          if (seen_cells_first.has(cell)) continue;
+          seen_cells_first.add(cell);
+          num_cols += 1;
+        }
+
+        if (num_cols > 0) {
+          const divider_str = Array(num_cols).fill("---").join(" | ");
+          this._add_virtual_text("\n", current, null);
+          current += 1;
+          this._add_virtual_text(divider_str, current, null);
+          current += divider_str.length;
+        }
+      }
     }
 
     return current;

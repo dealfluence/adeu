@@ -454,6 +454,17 @@ export function build_search_response(
     occurrences_map[matched_str] = (occurrences_map[matched_str] || 0) + 1;
   }
 
+  const max_matches = 20;
+  const is_truncated = matches.length > max_matches;
+  const items_to_render = matches.slice(0, max_matches);
+
+  if (is_truncated) {
+    ui_parts.push(
+      `> **Note:** Only the first ${max_matches} matches are shown here to prevent LLM context overflow. ` +
+      `Narrow your search query or specify a \`page\` filter to see other matches.`
+    );
+  }
+
   function get_heading(idx: number, txt: string): string {
     const txtBefore = txt.substring(0, idx);
     const lines = txtBefore.split("\n");
@@ -483,14 +494,17 @@ export function build_search_response(
   }
 
   let i = 1;
-  for (const m of matches) {
+  for (const m of items_to_render) {
     const matched_str = m[0];
     const m_start = m.index!;
     const m_end = m_start + matched_str.length;
     const p_num = pageOfOffset(m_start);
 
-    const snippet_start = Math.max(0, m_start - 100);
-    const snippet_end = Math.min(body.length, m_end + 100);
+    const lastNL = m_start <= 0 ? -1 : body.lastIndexOf("\n", m_start - 1);
+    const snippet_start = lastNL === -1 ? 0 : lastNL + 1;
+
+    const nextNL = body.indexOf("\n", m_end);
+    const snippet_end = nextNL === -1 ? body.length : nextNL;
     const snippet = emphasizedSnippet(
       body.substring(snippet_start, m_start),
       matched_str,

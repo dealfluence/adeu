@@ -48,6 +48,20 @@ export const extractMarkdownDescription: INodeProperties[] = [
     },
   },
   {
+    displayName: "Include Appendix",
+    name: "includeAppendix",
+    type: "boolean",
+    default: true,
+    description:
+      "Whether to include the Structural Appendix (defined terms, cross-reference anchors, and potential typos) at the end of the projection. True by default for rich LLM context.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["extractMarkdown"],
+      },
+    },
+  },
+  {
     displayName: "Page",
     name: "page",
     type: "number",
@@ -79,6 +93,11 @@ export async function executeExtractMarkdown(
     itemIndex,
   ) as string;
   const cleanView = this.getNodeParameter("cleanView", itemIndex) as boolean;
+  const includeAppendix = this.getNodeParameter(
+    "includeAppendix",
+    itemIndex,
+    true,
+  ) as boolean;
   const page = this.getNodeParameter("page", itemIndex, 0) as number;
 
   const documentSource = this.getNodeParameter(
@@ -110,7 +129,11 @@ export async function executeExtractMarkdown(
     itemIndex,
     source,
   );
-  const fullMarkdown = await extractTextFromBuffer(buffer, cleanView);
+  const fullMarkdown = await extractTextFromBuffer(
+    buffer,
+    cleanView,
+    includeAppendix,
+  );
 
   // Page 0 / omitted => full document, no pagination metadata (preserves backward compatibility).
   if (!page || page === 0) {

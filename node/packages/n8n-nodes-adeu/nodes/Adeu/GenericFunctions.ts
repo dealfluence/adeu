@@ -270,6 +270,70 @@ export function buildOutputFileName(
   return `${base}_${suffix}.docx`;
 }
 
+const MATCH_MODE_SYNONYMS: Record<string, "strict" | "first" | "all"> = {
+  strict: "strict",
+  exact: "strict",
+  single: "strict",
+  first: "first",
+  "first-occurrence": "first",
+  "first-only": "first",
+  all: "all",
+  global: "all",
+  bulk: "all",
+  alloccurrences: "all",
+  "all-occurrences": "all",
+  every: "all",
+};
+
+/**
+ * Normalizes an individual DocumentChange item in place: infers a missing `type`
+ * when unambiguous and coerces match_mode synonyms.
+ */
+export function coerceChangeItemInPlace(item: any): void {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return;
+
+  // Infer missing `type` when fields fit unambiguously
+  if (!("type" in item) || item.type === undefined || item.type === null) {
+    if ("cells" in item) item.type = "insert_row";
+    else if ("text" in item && "target_id" in item) item.type = "reply";
+    else if ("target_text" in item && "new_text" in item) item.type = "modify";
+  }
+
+  // Normalize match_mode
+  if ("match_mode" in item) {
+    const raw = item.match_mode;
+    if (typeof raw !== "string") {
+      delete item.match_mode;
+    } else {
+      const mapped = MATCH_MODE_SYNONYMS[raw.trim().toLowerCase()];
+      if (mapped === undefined) delete item.match_mode;
+      else item.match_mode = mapped;
+    }
+  }
+}
+
+/**
+ * Coerces and normalizes an array of DocumentChange items, parsing any
+ * stringified elements and repairing recoverable fields.
+ */
+export function coerceChangesArray(changes: unknown[]): unknown[] {
+  return changes.map((item: any) => {
+    let obj: any = item;
+    if (typeof item === "string") {
+      try {
+        const parsed = JSON.parse(item);
+        obj = parsed !== null && typeof parsed === "object" ? parsed : item;
+      } catch {
+        obj = item;
+      }
+    }
+    if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
+      coerceChangeItemInPlace(obj);
+    }
+    return obj;
+  });
+}
+
 /**
  * Parses a JSON-text parameter into an object/array. Natively strips Markdown
  * code blocks (e.g., ```json ... ```) to prevent syntax parsing failures.
@@ -364,6 +428,16 @@ export function mapAdeuErrorToNodeApiError(
         "An edit overlaps with a pending tracked change by another author.";
       descriptionContext =
         "Accept or reject the conflicting change first, or scope your edit outside of it:\n" +
+        joined;
+    } else if (lower.includes("control character")) {
+      messageContext = "An edit contains invalid XML control characters.";
+      descriptionContext =
+        "Remove non-printable control characters from your edit string before submitting:\n" +
+        joined;
+    } else if (lower.includes("criticmarkup tags")) {
+      messageContext = "Do not manually include CriticMarkup tags in new_text.";
+      descriptionContext =
+        "The engine applies tracked change tags automatically. Pass clean replacement text in `new_text`:\n" +
         joined;
     }
 

@@ -544,6 +544,12 @@ export function generate_edits_via_paragraph_alignment(
   original_text: string,
   modified_text: string,
 ): ModifyText[] {
+  // Normalize trailing whitespace/newlines in modified_text to match original_text
+  const orig_stripped = original_text.trimEnd();
+  const orig_ws = original_text.slice(orig_stripped.length);
+  const mod_stripped = modified_text.trimEnd();
+  modified_text = mod_stripped + orig_ws;
+
   const orig_paragraphs = original_text.split("\n\n");
   const mod_paragraphs = modified_text.split("\n\n");
 

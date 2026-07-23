@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import os
 import json
 import shutil
 from pathlib import Path
@@ -18,7 +17,7 @@ TEST_CREATOR_PERMISSIONS = {
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/*.test.ts)",
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/test-utils.ts)",
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/n8n-nodes-adeu/test/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/mcp-server/tests/*)"
+        "write_file(/Users/mkorpela/workspace/adeu/node/packages/mcp-server/tests/*)",
     ],
     "deny": [
         "write_file(/Users/mkorpela/workspace/adeu/python/src/*)",
@@ -34,10 +33,11 @@ TEST_CREATOR_PERMISSIONS = {
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/outline.ts)",
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/pagination.ts)",
         "write_file(/Users/mkorpela/workspace/adeu/node/packages/mcp-server/src/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/n8n-nodes-adeu/nodes/*)"
+        "write_file(/Users/mkorpela/workspace/adeu/node/packages/n8n-nodes-adeu/nodes/*)",
     ],
-    "ask": []
+    "ask": [],
 }
+
 
 def main():
     if not SETTINGS_PATH.exists():
@@ -65,9 +65,12 @@ def main():
     # Write back updated settings
     with open(SETTINGS_PATH, "w") as f:
         json.dump(settings, f, indent=2)
-    
+
     print("✅ Successfully enabled Autonomous Test Creator Mode.")
-    print("Restricted files allowed for write, source files explicitly denied, test commands allowed.")
+    print(
+        "Restricted files allowed for write, source files explicitly denied, test commands allowed."
+    )
+
 
 if __name__ == "__main__":
     main()

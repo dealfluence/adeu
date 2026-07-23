@@ -85,7 +85,7 @@ export const hydrateToolOutputDescription: INodeProperties[] = [
         name: "Emit Empty",
         value: "emit_empty",
         description:
-          "Emit a single item with json.hydrated=false and no binary. Downstream If on json.hydrated gates the write.",
+          "Emit a single item with JSON.hydrated=false and no binary. Downstream If on JSON.hydrated gates the write.",
       },
       {
         name: "Throw",

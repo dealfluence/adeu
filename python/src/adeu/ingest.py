@@ -344,6 +344,14 @@ def extract_table(
                 offset_map=offset_map,
                 cursor=cell_cursor,
             )
+            if not clean_view:
+                first_p_list = cell._element.findall(".//" + qn("w:p"))
+                firstP = first_p_list[0] if first_p_list else None
+                paraId = firstP.get(qn("w14:paraId")) if firstP is not None else None
+                if paraId:
+                    separator = " " if cell_content and not cell_content.endswith(" ") else ""
+                    cell_content = cell_content + separator + f"{{#cell:{paraId}}}"
+
             cell_texts.append(cell_content)
             cell_cursor += len(cell_content)
             first_cell = False
@@ -361,6 +369,13 @@ def extract_table(
         if geometry is not None:
             geometry.rows.append(RowGeometry(start=row_start, end=local_cursor, cells=list(cell_texts)))
         rows_processed += 1
+
+        if rows_processed == 1:
+            num_cols = len(cell_texts)
+            if num_cols > 0:
+                divider_str = " | ".join(["---"] * num_cols)
+                rows_text.append(divider_str)
+                local_cursor += 1 + len(divider_str)
 
     return "\n".join(rows_text)
 
@@ -451,14 +466,24 @@ def build_paragraph_text(
                     # marker ("**A**" + " **B**" -> "**A B**"), mirroring the
                     # mapper's part-level elision exactly (QA 2026-07-19 F-03).
                     lead_match = re.match(r"(\s*)" + re.escape(new_style[0]), seg) if new_style != ("", "") else None
+                    trailing_ws = ""
+                    for char in reversed(pending_text):
+                        if char.isspace():
+                            trailing_ws = char + trailing_ws
+                        else:
+                            break
+                    pending_without_ws = pending_text if not trailing_ws else pending_text[: -len(trailing_ws)]
                     if (
                         new_style == current_style
                         and current_style != ("", "")
-                        and pending_text.endswith(current_style[1])
+                        and pending_without_ws.endswith(current_style[1])
                         and lead_match is not None
                     ):
                         pending_text = (
-                            pending_text[: -len(current_style[1])] + lead_match.group(1) + seg[lead_match.end() :]
+                            pending_without_ws[: -len(current_style[1])]
+                            + trailing_ws
+                            + lead_match.group(1)
+                            + seg[lead_match.end() :]
                         )
                     else:
                         pending_text += seg

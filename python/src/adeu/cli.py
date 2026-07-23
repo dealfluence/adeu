@@ -44,7 +44,7 @@ def handle_init(args: argparse.Namespace):
     3. Backs up existing config.
     4. Injects MCP server entry.
     """
-    print("🤖 Adeu Agentic Setup", file=sys.stderr)
+    print("🤖 Adeu Agentic Setup")
 
     try:
         config_path = _get_claude_config_path()
@@ -53,9 +53,9 @@ def handle_init(args: argparse.Namespace):
         sys.exit(1)
 
     if config_path.exists():
-        print(f"📍 Config found: {config_path}", file=sys.stderr)
+        print(f"📍 Config found: {config_path}")
     else:
-        print(f"📍 Config will be created: {config_path}", file=sys.stderr)
+        print(f"📍 Config will be created: {config_path}")
 
     data: Dict[str, Any] = {"mcpServers": {}}
     existing_valid_json = True
@@ -67,7 +67,7 @@ def handle_init(args: argparse.Namespace):
                     data = json.loads(content)
         except json.JSONDecodeError:
             existing_valid_json = False
-            print("⚠️  Existing config was invalid JSON. Starting fresh.", file=sys.stderr)
+            print("⚠️  Existing config was invalid JSON. Starting fresh.")
 
     mcp_servers = data.setdefault("mcpServers", {})
 
@@ -90,9 +90,9 @@ def handle_init(args: argparse.Namespace):
                 file=sys.stderr,
             )
             sys.exit(1)
-        print("🔧 Configuring in LOCAL DEV mode.", file=sys.stderr)
-        print(f"   - CWD: {cwd}", file=sys.stderr)
-        print(f"   - Python: {python_exe}", file=sys.stderr)
+        print("🔧 Configuring in LOCAL DEV mode.")
+        print(f"   - CWD: {cwd}")
+        print(f"   - Python: {python_exe}")
 
         mcp_servers["adeu"] = {
             "command": python_exe,
@@ -115,7 +115,7 @@ def handle_init(args: argparse.Namespace):
             )
             sys.exit(1)
 
-        print(f"🔍 Found uvx at: {uvx_path}", file=sys.stderr)
+        print(f"🔍 Found uvx at: {uvx_path}")
 
         # Pin the package to the version doing the configuring: an unpinned
         # "--from adeu" makes every Claude Desktop launch resolve the latest
@@ -144,20 +144,20 @@ def handle_init(args: argparse.Namespace):
             except json.JSONDecodeError:
                 unchanged = False
             if unchanged:
-                print("✅ Adeu is already configured — config unchanged, no backup needed.", file=sys.stderr)
+                print("✅ Adeu is already configured — config unchanged, no backup needed.")
                 return
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = config_path.with_name(f"{config_path.name}.{timestamp}.bak")
         shutil.copy2(config_path, backup_path)
-        print(f"📦 Backup created: {backup_path.name}", file=sys.stderr)
+        print(f"📦 Backup created: {backup_path.name}")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
-    print("✅ Adeu successfully configured in Claude Desktop.", file=sys.stderr)
-    print("   Please restart Claude to load the new toolset.", file=sys.stderr)
+    print("✅ Adeu successfully configured in Claude Desktop.")
+    print("   Please restart Claude to load the new toolset.")
 
 
 # When True (set per-invocation from a subcommand's --json flag), every fatal
@@ -1210,7 +1210,13 @@ def handle_apply(args):
                 status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
                 print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
                 print(f"  Target: '{report['target_text']}'", file=sys.stderr)
-                print(f"  New text: '{report['new_text']}'", file=sys.stderr)
+                edit_type = report.get("type", "modify")
+                if edit_type == "insert_row":
+                    print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
+                elif edit_type == "delete_row":
+                    print("  Deleted row", file=sys.stderr)
+                else:
+                    print(f"  New text: '{report['new_text']}'", file=sys.stderr)
                 if report.get("warning"):
                     print(f"  Warning: {report['warning']}", file=sys.stderr)
                 if report.get("error"):
@@ -1246,7 +1252,7 @@ def handle_accept_all(args: argparse.Namespace):
     _require_docx_output(args.output)
     engine = _open_redline_engine_or_exit(args.input)
 
-    engine.accept_all_revisions(remove_comments=True)
+    stats = engine.accept_all_revisions(remove_comments=True)
 
     output_path = args.output
     if not output_path:
@@ -1255,7 +1261,16 @@ def handle_accept_all(args: argparse.Namespace):
     _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
     if args.json:
-        print(json.dumps({"status": "ok", "output_path": str(output_path)}))
+        stats = stats or {}
+        result = {
+            "status": "ok",
+            "output_path": str(output_path),
+            "accepted_insertions": stats.get("accepted_insertions", 0),
+            "accepted_deletions": stats.get("accepted_deletions", 0),
+            "accepted_formatting": stats.get("accepted_formatting", 0),
+            "removed_comments": stats.get("removed_comments", 0),
+        }
+        print(json.dumps(result))
     else:
         print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
 
@@ -1685,12 +1700,14 @@ def _main_impl():
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
+    live_help_prefix = "Windows-only: " if sys.platform != "win32" else ""
+
     p_extract = subparsers.add_parser("extract", help="Extract raw text from a DOCX file")
     p_extract.add_argument("input", type=Path, nargs="?", help="Input DOCX file (omit if --live)")
     p_extract.add_argument(
         "--live",
         action="store_true",
-        help="Extract text from live active Word document",
+        help=f"{live_help_prefix}Extract text from live active Word document",
     )
     p_extract.add_argument("-o", "--output", type=Path, help="Output file ('-' or omitted: stdout)")
     p_extract.add_argument(
@@ -1803,7 +1820,11 @@ def _main_impl():
     )
     p_apply.add_argument("original", type=Path, nargs="?", help="Original DOCX (omit if --live)")
     p_apply.add_argument("changes", type=Path, nargs="?", help="JSON edits file OR Modified Text file")
-    p_apply.add_argument("--live", action="store_true", help="Apply edits to live active Word document")
+    p_apply.add_argument(
+        "--live",
+        action="store_true",
+        help=f"{live_help_prefix}Apply edits to live active Word document",
+    )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(
         "--author",
@@ -1854,7 +1875,12 @@ def _main_impl():
     p_accept.add_argument(
         "--json",
         action="store_true",
-        help="Emit a machine-readable JSON result on stdout.",
+        help=(
+            "Emit a machine-readable JSON result on stdout. The accepted_* counts are "
+            "REVISION MARKS (the same unit sanitize reports), not user-level edits: Word "
+            "splits one revision into several marks when formatting changes mid-revision, "
+            "so one typed sentence can count as more than one insertion."
+        ),
     )
     p_accept.set_defaults(func=handle_accept_all)
 

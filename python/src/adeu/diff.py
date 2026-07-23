@@ -1122,6 +1122,12 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
     """
     import difflib
 
+    # Normalize trailing whitespace/newlines in modified_text to match original_text
+    orig_stripped = original_text.rstrip()
+    orig_ws = original_text[len(orig_stripped) :]
+    mod_stripped = modified_text.rstrip()
+    modified_text = mod_stripped + orig_ws
+
     orig_paragraphs = original_text.split("\n\n")
     mod_paragraphs = modified_text.split("\n\n")
 
@@ -1236,12 +1242,47 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
 
             orig_chunk = "\n\n".join(orig_paragraphs[i1:i2])
             mod_chunk = "\n\n".join(mod_paragraphs[j1:j2])
-            chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk)
-            for ce in chunk_edits:
-                ce._match_start_index = (ce._match_start_index or 0) + offset
-                edits.append(ce)
+
+            # If the replace block represents a massive truncation, rewrite or insert,
+            # do not decompose into fragile, fine-grained character/word diffs.
+            # Just generate a single clean replacement edit.
+            use_wholesale = False
+            if len(orig_chunk) > 120 or len(mod_chunk) > 120:
+                m = difflib.SequenceMatcher(None, orig_chunk, mod_chunk)
+                if m.real_quick_ratio() < 0.35 and m.ratio() < 0.3:
+                    use_wholesale = True
+
+            if use_wholesale:
+                edit = ModifyText(
+                    type="modify",
+                    target_text=orig_chunk,
+                    new_text=mod_chunk,
+                    comment="Diff: Rewrite",
+                )
+                edit._match_start_index = offset
+                edits.append(edit)
+            else:
+                chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk)
+                for ce in chunk_edits:
+                    ce._match_start_index = (ce._match_start_index or 0) + offset
+                    edits.append(ce)
 
     # Word-level diffs over unequal replace chunks can still emit hunks that
     # straddle a paragraph break with body text on both sides; split them
     # into engine-applicable pieces (ADEU-QA-002 A).
     return _split_cross_paragraph_hunks(edits)
+
+
+def create_unified_diff(
+    original_text: str,
+    modified_text: str,
+    fromfile: str = "original",
+    tofile: str = "modified",
+) -> str:
+    """Produce a standard Git-style unified diff string between two texts."""
+    import difflib
+
+    a_lines = original_text.splitlines(keepends=True)
+    b_lines = modified_text.splitlines(keepends=True)
+    diff = difflib.unified_diff(a_lines, b_lines, fromfile=fromfile, tofile=tofile)
+    return "".join(diff)

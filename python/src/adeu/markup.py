@@ -691,20 +691,20 @@ def apply_structural_ops_to_markdown(
 
     for op in ops:
         anchor = (op.target_text or "").strip()
-        matches = [i for i, line in enumerate(lines) if anchor and _clean_reading_of_line(line).strip() == anchor]
+        matches = [i for i, line in enumerate(lines) if anchor and anchor in _clean_reading_of_line(line)]
         if len(matches) == 0:
             _record(
                 op,
                 "failed",
-                f"- Row operation failed: no table row line reads '{anchor}'. Structural "
-                "operations anchor on the row's full text (cells joined by ' | ').",
+                f"- Row operation failed: no table row line contains '{anchor}'. Structural "
+                "operations anchor on the row's full or partial text.",
             )
             continue
         if len(matches) > 1:
             _record(
                 op,
                 "failed",
-                f"- Row operation failed: {len(matches)} lines read '{anchor}' — the anchor is "
+                f"- Row operation failed: {len(matches)} lines contain '{anchor}' — the anchor is "
                 "ambiguous. Make the anchor row unique.",
             )
             continue

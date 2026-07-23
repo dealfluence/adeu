@@ -95,11 +95,14 @@ def lo_loads(path: Path, out_dir: Path) -> bool:
     expected = pdf_dir / (path.stem + ".pdf")
     if expected.exists():
         expected.unlink()
-    subprocess.run(
-        ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(path)],
-        capture_output=True,
-        timeout=180,
-    )
+    try:
+        subprocess.run(
+            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(path)],
+            capture_output=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+        return False
     return expected.exists()
 
 
@@ -1135,7 +1138,7 @@ class TestLowSeverity:
         assert code == 0, err
         baks = list(cfg_dir.glob("*.bak"))
         assert len(baks) == 0, "re-running init with no changes must not create backups"
-        assert "unchanged" in err.lower() or "already" in err.lower()
+        assert "unchanged" in out.lower() or "already" in out.lower()
 
     def test_l6_init_local_refuses_non_source_directory(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
@@ -1291,7 +1294,7 @@ class TestReviewRegressions:
         code, out, err = run_cli(["sanitize", mod, "--baseline", orig, "-o", san], capsys)
         assert code == 0, err
         clean = extract_text_from_stream(BytesIO(san.read_bytes()), clean_view=True)
-        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+        assert "A | B\n--- | ---\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
 
         # JSON round trip too.
         code, out, err = run_cli(["diff", orig, mod, "--json"], capsys)
@@ -1301,7 +1304,7 @@ class TestReviewRegressions:
         code, out, err = run_cli(["apply", orig, edits_file, "-o", applied], capsys)
         assert code == 0, err
         clean = extract_text_from_stream(BytesIO(applied.read_bytes()), clean_view=True)
-        assert "A | B\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
+        assert "A | B\n--- | ---\nC | D\nX1 | Y1\nX2 | Y2" in clean, clean
 
     def test_numbering_disabled_override_suppresses_style_list(self, tmp_path):
         """ECMA-376 §17.9.15: a direct numId=0 removes the style's numbering."""

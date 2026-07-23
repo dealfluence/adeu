@@ -172,6 +172,26 @@ describe("Test Adeu n8n Node", () => {
         /exceeds total_pages/i,
       );
     });
+
+    it("should omit the structural appendix when includeAppendix is false", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "extractMarkdown";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "cleanView") return false;
+        if (paramName === "includeAppendix") return false;
+        return fallback;
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("markdown");
+      expect(typeof item.json.markdown).toBe("string");
+      expect(item.json.markdown).not.toContain("READONLY_BOUNDARY_START");
+    });
   });
   describe("Operation: Extract Outline", () => {
     beforeEach(() => {
@@ -438,6 +458,35 @@ describe("Test Adeu n8n Node", () => {
       // a `prepareBinaryData` mock result.
       expect(outputBinary?.data).toEqual({ fileName: "contract.docx" });
     });
+
+    it("should repair changes missing type or carrying match_mode synonyms", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              {
+                // type missing — should be inferred as "modify"
+                target_text: uniqueTarget,
+                new_text: "Replaced Coerced",
+                match_mode: "all-occurrences", // synonym for "all"
+              },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("stats");
+      const stats = item.json.stats as Record<string, unknown>;
+      const edits = stats.edits as Array<Record<string, unknown>>;
+      expect(edits[0]).toHaveProperty("status", "applied");
+      expect(edits[0]).toHaveProperty("match_mode", "all");
+    });
   });
 
   describe("continueOnFail logic", () => {
@@ -646,6 +695,77 @@ describe("Test Adeu n8n Node", () => {
       await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
         /Failed to load document from Binary ID 'filesystem-v2:corrupted-id'/i,
       );
+    });
+  });
+
+  describe("Operation: Generate Diff", () => {
+    beforeEach(() => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {},
+          binary: {
+            data: { fileName: "orig.docx" },
+            data2: { fileName: "mod.docx" },
+          },
+        },
+      ]);
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<
+          typeof vi.fn
+        >
+      ).mockResolvedValue(goldenBuffer);
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "generateDiff";
+        if (paramName === "originalDocumentSource") return "fromInput";
+        if (paramName === "originalBinaryPropertyName") return "data";
+        if (paramName === "modifiedDocumentSource") return "fromInput";
+        if (paramName === "modifiedBinaryPropertyName") return "data2";
+        if (paramName === "cleanView") return true;
+        return fallback;
+      });
+    });
+
+    it("should generate a diff between two documents without leaking the appendix", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toHaveLength(1);
+
+      const item = result[0][0];
+      expect(item.json).toHaveProperty("originalFileName", "orig.docx");
+      expect(item.json).toHaveProperty("modifiedFileName", "mod.docx");
+      expect(item.json).toHaveProperty("diff");
+      expect(typeof item.json.diff).toBe("string");
+      expect(item.json.diff).not.toContain("READONLY_BOUNDARY_START");
+      expect(item.json.diff).not.toContain("— used ");
+    });
+
+    it("should generate a structured changes array when diffFormat is structuredChanges", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "generateDiff";
+        if (paramName === "originalDocumentSource") return "fromInput";
+        if (paramName === "originalBinaryPropertyName") return "data";
+        if (paramName === "modifiedDocumentSource") return "fromInput";
+        if (paramName === "modifiedBinaryPropertyName") return "data2";
+        if (paramName === "cleanView") return true;
+        if (paramName === "diffFormat") return "structuredChanges";
+        return fallback;
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("diffFormat", "structuredChanges");
+      expect(item.json).toHaveProperty("changes");
+      expect(Array.isArray(item.json.changes)).toBe(true);
     });
   });
 

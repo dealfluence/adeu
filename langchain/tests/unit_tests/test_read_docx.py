@@ -105,3 +105,11 @@ class TestAdeuReadDocxValidation:
                     "mode": "unsupported_mode",
                 }
             )
+
+    def test_page_all_is_allowed(self) -> None:
+        input_data = AdeuReadDocxInput(
+            reasoning="test",
+            file_path="/tmp/x.docx",
+            page="all",
+        )
+        assert input_data.page == "all"
