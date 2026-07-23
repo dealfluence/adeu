@@ -262,8 +262,11 @@ class TestH1PreviewIntegrity:
         assert "{--Non-Solicitation--}{++Indemnification++}" in stats["edits"][1]["critic_markup"]
 
         # A compound change must preview the COMPLETE logical change, not just
-        # its first word-diff sub-edit ("{--two--}{++five++} (2) years").
-        assert "{--two (2)--}{++five (5)++} years" in stats["edits"][2]["critic_markup"]
+        # its first word-diff sub-edit ("{--two--}{++five++} (2) years") — and
+        # faithfully to the SAVED document, which stores this change as two
+        # minimal word-diff pairs (previews slice the actual post-apply
+        # projection since F6, QA 2026-07-23).
+        assert "{--two--}{++five++} ({--2--}{++5++}) years" in stats["edits"][2]["critic_markup"]
         assert "five (5) years" in stats["edits"][2]["clean_text"]
         assert "five (2)" not in stats["edits"][2]["clean_text"]
 

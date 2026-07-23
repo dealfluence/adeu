@@ -51,6 +51,7 @@ dev = [
     "mypy",
     "hypothesis",
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -83,3 +84,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+# Parallel by default. --dist loadgroup pins the xdist_group markers from
+# conftest.py (live-Word COM tests) onto ONE worker so they run sequentially
+# while everything else distributes; two workers driving the live Word
+# instance concurrently crash each other's COM sessions (0x80010108).
+# Debugging opt-out: `uv run pytest -n 0 ...` restores serial in-process runs.
+addopts = "-n auto --dist loadgroup"

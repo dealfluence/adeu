@@ -388,7 +388,9 @@ export function build_structural_appendix(
     has_content = true;
     lines.push("\n## Defined Terms");
     for (const [term, data] of Object.entries(defs)) {
-      lines.push(`- "${term}" \u2014 used ${data.count} times.`);
+      lines.push(
+        `- "${term}" \u2014 used ${data.count} time${data.count === 1 ? "" : "s"}.`,
+      );
     }
   }
 

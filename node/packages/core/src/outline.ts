@@ -366,12 +366,23 @@ function _heading_passes_quality_filter(
   paragraph: Paragraph,
   comments_map: any,
 ): boolean {
+  const text = _heading_text(paragraph, comments_map);
+  // A heading whose visible text carries no word characters at all (empty,
+  // ":", punctuation-only — e.g. an auto-numbered heading whose number lives
+  // in numbering.xml) would render as a bare "## :" outline entry. Drop it
+  // regardless of native style (QA 2026-07-23 F13c).
+  if (!_heading_text_has_words(text)) return false;
   const style = _determine_heading_style(paragraph);
   if (style !== "(heuristic)") return true;
-  const text = _heading_text(paragraph, comments_map);
-  if (!text) return false;
   const word_count = (text.match(/\w+/g) || []).length;
   return word_count >= _HEURISTIC_MIN_WORDS;
+}
+
+/** True when the heading text (anchors stripped) contains a word character. */
+function _heading_text_has_words(text: string): boolean {
+  if (!text) return false;
+  const bare = text.replace(/\{#[^}]+\}/g, "");
+  return /\w/.test(bare);
 }
 
 function _heading_level(paragraph: Paragraph): number {
@@ -379,11 +390,25 @@ function _heading_level(paragraph: Paragraph): number {
   return match ? Math.min(match[1].length, 6) : 1;
 }
 
+// An outline entry is a MAP entry, not body content: cap it so a
+// multi-hundred-word paragraph carrying a heading style cannot flood the
+// outline (QA 2026-07-23 F13b; the Python mirror pins the same 200-char cap).
+const _OUTLINE_TEXT_MAX_CHARS = 200;
+
 function _heading_text(paragraph: Paragraph, comments_map: any): string {
   const p_text = build_paragraph_text(paragraph, comments_map, false);
   let cleaned = _strip_critic_markup(p_text);
+  // Internal line breaks (w:br inside a heading) must collapse BEFORE marker
+  // stripping so "**A\nB**" strips cleanly and every rendered outline line
+  // carries balanced ** markers (QA 2026-07-23 F13a).
+  cleaned = cleaned.replace(/\n+/g, " ");
   cleaned = _strip_inline_formatting(cleaned);
-  return cleaned.trim();
+  return _truncate_outline_text(cleaned.trim());
+}
+
+function _truncate_outline_text(text: string): string {
+  if (text.length <= _OUTLINE_TEXT_MAX_CHARS) return text;
+  return text.substring(0, _OUTLINE_TEXT_MAX_CHARS) + "…";
 }
 
 function _strip_critic_markup(text: string): string {
@@ -397,9 +422,20 @@ function _strip_critic_markup(text: string): string {
 
 function _strip_inline_formatting(text: string): string {
   if (!text) return "";
+  // Protect {#...} anchor tokens ({#_RefN}, {#cell:...}) and literal
+  // underscore runs (form fill-ins like [_________]) from the emphasis
+  // stripping below: the _.._ pairing rules would consume the anchor's
+  // leading underscore and collapse placeholder runs (QA 2026-07-23 F4).
+  // An agent that copies an anchor from the outline must get a REAL anchor.
+  const protected_tokens: string[] = [];
+  text = text.replace(/\{#[^}]+\}|_{3,}/g, (m) => {
+    protected_tokens.push(m);
+    return `\x00${protected_tokens.length - 1}\x00`;
+  });
   text = text.replace(/\*\*(.+?)\*\*/g, "$1");
   text = text.replace(/__(.+?)__/g, "$1");
   text = text.replace(/(?<!\w)_(\S(?:.*?\S)?)_(?!\w)/g, "$1");
+  text = text.replace(/\x00(\d+)\x00/g, (_m, i) => protected_tokens[Number(i)]);
   return text;
 }
 
@@ -663,11 +699,12 @@ function _heading_passes_quality_filter_fast(
   projected_body: string,
   paragraph_offsets: Map<any, [number, number]> | Record<string, [number, number]>,
 ): boolean {
+  const text = _heading_text_fast(paragraph, projected_body, paragraph_offsets);
+  // See _heading_passes_quality_filter: wordless entries ("", ":") are
+  // dropped regardless of native style (QA 2026-07-23 F13c).
+  if (!_heading_text_has_words(text)) return false;
   const style = _determine_heading_style(paragraph);
   if (style !== "(heuristic)") return true;
-
-  const text = _heading_text_fast(paragraph, projected_body, paragraph_offsets);
-  if (!text) return false;
   const words = text.match(/\w+/g) || [];
   return words.length >= _HEURISTIC_MIN_WORDS;
 }
@@ -690,9 +727,12 @@ function _heading_text_fast(
   const [start, length] = offset;
   const raw = projected_body.substring(start, start + length);
   let cleaned = _strip_critic_markup(raw);
+  // Same normalization as _heading_text: collapse internal line breaks
+  // BEFORE marker stripping (F13a), then cap the entry length (F13b).
+  cleaned = cleaned.replace(/\n+/g, " ");
   cleaned = _strip_inline_formatting(cleaned);
   cleaned = cleaned.replace(/^#+\s+/, "");
-  return cleaned.trim();
+  return _truncate_outline_text(cleaned.trim());
 }
 
 function _collect_footnote_ids_fast(owned_items: ["p" | "t", any][]): string[] {

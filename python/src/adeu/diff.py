@@ -217,15 +217,28 @@ def trim_common_context(target: str, new_val: str) -> tuple[int, int]:
     return prefix_len, suffix_len
 
 
-def generate_edits_from_text(original_text: str, modified_text: str) -> List[ModifyText]:
+def generate_edits_from_text(
+    original_text: str,
+    modified_text: str,
+    atomic_criticmarkup: bool = False,
+) -> List[ModifyText]:
     """
     Compares original and modified text to generate structured ModifyText objects.
     Uses Word-Level diffing to ensure natural, readable redlines.
+
+    atomic_criticmarkup: opt-in tokenization mode for the DIFF-DISPLAY path
+    only (diff_docx_files with compare_clean=False). Whole CriticMarkup blocks
+    ({--…--}, {++…++}, {>>…<<}, {==…==}) become single diff tokens so a hunk
+    can never begin or end inside one — the default tokenizer legally split
+    `{--` away from its payload, producing unreadable orphaned-delimiter
+    output lines (QA 2026-07-23 F15). APPLY paths must keep the default:
+    their inputs contain no CriticMarkup (the engine rejects fabricated
+    markup) and their hunk granularity is pinned by round-trip tests.
     """
     dmp = diff_match_patch()
 
     # 1. Word-Level Tokenization & Encoding
-    chars1, chars2, token_array = _words_to_chars(original_text, modified_text)
+    chars1, chars2, token_array = _words_to_chars(original_text, modified_text, atomic_criticmarkup=atomic_criticmarkup)
 
     # 2. Compute Diff on the Encoded Strings
     diffs_encoded = dmp.diff_main(chars1, chars2, False)
@@ -322,16 +335,40 @@ def generate_edits_from_text(original_text: str, modified_text: str) -> List[Mod
     return edits
 
 
-def _words_to_chars(text1: str, text2: str) -> Tuple[str, str, List[str]]:
+# One complete CriticMarkup block. DOTALL: meta bubbles ({>>…<<}) legally
+# span lines (change header + comment thread).
+CRITICMARKUP_BLOCK_RE = re.compile(
+    r"\{--.*?--\}|\{\+\+.*?\+\+\}|\{>>.*?<<\}|\{==.*?==\}",
+    re.DOTALL,
+)
+
+
+def _words_to_chars(text1: str, text2: str, atomic_criticmarkup: bool = False) -> Tuple[str, str, List[str]]:
     """
     Splits text into words/tokens and encodes them as unique Unicode characters.
+
+    With atomic_criticmarkup=True, each complete CriticMarkup block is one
+    token, so diff hunks can never cut into a block (see
+    generate_edits_from_text).
     """
     token_array: List[str] = []
     token_hash: Dict[str, int] = {}
     split_pattern = r"(\s+|\w+|[^\w\s])"
 
+    def tokenize(text: str) -> List[str]:
+        if not atomic_criticmarkup:
+            return [t for t in re.split(split_pattern, text) if t]
+        tokens: List[str] = []
+        last = 0
+        for m in CRITICMARKUP_BLOCK_RE.finditer(text):
+            tokens.extend(t for t in re.split(split_pattern, text[last : m.start()]) if t)
+            tokens.append(m.group(0))
+            last = m.end()
+        tokens.extend(t for t in re.split(split_pattern, text[last:]) if t)
+        return tokens
+
     def encode_text(text: str) -> str:
-        tokens = [t for t in re.split(split_pattern, text) if t]
+        tokens = tokenize(text)
         encoded_chars = []
         for token in tokens:
             if token in token_hash:

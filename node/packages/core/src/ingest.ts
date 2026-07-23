@@ -289,9 +289,17 @@ export function extract_table(
     let row_str = cell_texts.join(" | ");
 
     if (!cleanView) {
-      if (ins) row_str = `{++ ${row_str} |Chg:${ins.getAttribute("w:id")}++}`;
-      else if (del_node)
-        row_str = `{-- ${row_str} |Chg:${del_node.getAttribute("w:id")}--}`;
+      // The change bubble is SEPARATED from the cell content (mirroring the
+      // normal `{++text++}{>>[Chg:N insert] Author<<}` insertion shape) — the
+      // old ` |Chg:N++}` suffix glued the id onto the last cell through a
+      // pipe, so the row read as if it had an extra cell named "Chg:N"
+      // (QA 2026-07-23 F21a). Twin rendering in mapper._map_table — the two
+      // MUST stay byte-identical (Virtual Text contract).
+      if (ins) {
+        row_str = `{++ ${row_str} ++}{>>[Chg:${ins.getAttribute("w:id")} insert] ${ins.getAttribute("w:author") || "Unknown"}<<}`;
+      } else if (del_node) {
+        row_str = `{-- ${row_str} --}{>>[Chg:${del_node.getAttribute("w:id")} delete] ${del_node.getAttribute("w:author") || "Unknown"}<<}`;
+      }
     }
 
     rows_text.push(row_str);

@@ -212,18 +212,37 @@ export function _truncate(text: string, maxLen: number = 60): string {
   return clean.substring(0, maxLen - 3) + "...";
 }
 
+/**
+ * Human label for a revision element carrying no visible text. The headline
+ * count unit is revision ELEMENTS (AI_CONTEXT "Accept-All Counts Are Revision
+ * MARKS"), so every counted element must also be LISTED — a multi-paragraph
+ * insertion's paragraph-mark w:ins elements used to be counted but silently
+ * omitted from the list (QA 2026-07-23 F12a).
+ */
+function _describe_textless_revision(el: Element): string {
+  const parent = el.parentNode as Element | null;
+  if (parent && parent.tagName === 'w:rPr') {
+    const grandparent = parent.parentNode as Element | null;
+    if (grandparent && grandparent.tagName === 'w:pPr') return '(paragraph mark)';
+  }
+  if (parent && parent.tagName === 'w:trPr') return '(table row)';
+  return '(no visible text)';
+}
+
 export function accept_all_tracked_changes(doc: DocumentObject): string[] {
   const lines: string[] = [];
   const insEls = findAllDescendants(doc.element, 'w:ins');
   const delEls = findAllDescendants(doc.element, 'w:del');
-  
+
   for (const ins of insEls) {
     const text = _getElementText(ins).trim();
     if (text) lines.push(`  Accepted insertion: "${_truncate(text, 60)}"`);
+    else lines.push(`  Accepted insertion: ${_describe_textless_revision(ins)}`);
   }
   for (const del of delEls) {
     const text = _getElementText(del).trim();
     if (text) lines.push(`  Accepted deletion of: "${_truncate(text, 60)}"`);
+    else lines.push(`  Accepted deletion of: ${_describe_textless_revision(del)}`);
   }
 
   const engine = new RedlineEngine(doc);

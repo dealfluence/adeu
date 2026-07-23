@@ -96,6 +96,13 @@ class BuilderResult:
 # the projection's italics markers always hug non-whitespace at a word edge).
 _STYLE_MARKER_RE = re.compile(r"\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])")
 
+# Regions the marker stripper must never touch: `{#anchor}` tokens (their
+# leading underscore is document identity, not emphasis — copying
+# `{#Ref444615940}` out of a snippet targets a nonexistent anchor) and literal
+# underscore runs of 3+ (fill-in placeholders like `[_________]`) —
+# QA 2026-07-23 F4b.
+_PROTECTED_UNDERSCORE_RE = re.compile(r"\{#[^}]+\}|_{3,}")
+
 
 def _emphasized_snippet(prefix: str, match: str, suffix: str) -> str:
     """
@@ -105,12 +112,19 @@ def _emphasized_snippet(prefix: str, match: str, suffix: str) -> str:
     render as `**The **Supplier** _shall provide**_` (QA 2026-07-19 v8 F-10).
     Markers are detected over the WHOLE region (a match boundary can cut a
     marker away from its word-edge context), then each part is rebuilt from
-    the surviving characters.
+    the surviving characters. Characters inside `{#anchor}` tokens or literal
+    underscore runs are protected — they are content, not markers (F4b).
     """
     region = prefix + match + suffix
     b1, b2 = len(prefix), len(prefix) + len(match)
     keep = [True] * len(region)
+    protected = [False] * len(region)
+    for m in _PROTECTED_UNDERSCORE_RE.finditer(region):
+        for i in range(m.start(), m.end()):
+            protected[i] = True
     for m in _STYLE_MARKER_RE.finditer(region):
+        if any(protected[i] for i in range(m.start(), m.end())):
+            continue
         for i in range(m.start(), m.end()):
             keep[i] = False
     stripped_prefix = "".join(c for i, c in enumerate(region[:b1]) if keep[i])
@@ -550,6 +564,23 @@ def build_search_response(
                 f"Narrow your search query or specify a `page` filter to see other matches."
             )
 
+    def clean_breadcrumb(raw: str) -> str:
+        # Breadcrumbs render CLEAN-view heading text: a heading carrying a
+        # pending tracked change must not leak raw CriticMarkup into the Path
+        # line (QA 2026-07-23 F22b). Deletions vanish, insertions/highlights
+        # unwrap to their text, meta bubbles drop. Because we operate on ONE
+        # line of the projection, a multi-line `{>>…<<}` bubble can be clipped
+        # by the line break — drop the unterminated tail too, then sweep any
+        # leftover delimiter fragments.
+        s = re.sub(r"\{--.*?--\}", "", raw)
+        s = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", s)
+        s = re.sub(r"\{==(.*?)==\}", r"\1", s)
+        s = re.sub(r"\{>>.*?<<\}", "", s)
+        s = re.sub(r"\{(?:>>|--).*$", "", s)  # line-clipped bubble/deletion tail
+        s = re.sub(r"\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}", "", s)  # stray fragments
+        s = re.sub(r"\*\*|__|[*_]", "", s)
+        return re.sub(r"\{#[^}]+\}", "", s).strip()
+
     def get_heading(idx, txt):
         path: list[str] = []
         current_level = 999
@@ -565,8 +596,7 @@ def build_search_response(
             if m:
                 level = len(m.group(1))
                 if level < current_level:
-                    clean_heading = re.sub(r"\*\*|__|[*_]", "", m.group(2))
-                    clean_heading = re.sub(r"\{#[^}]+\}", "", clean_heading).strip()
+                    clean_heading = clean_breadcrumb(m.group(2))
                     if len(clean_heading) > 80:
                         clean_heading = clean_heading[:80] + "..."
                     path.insert(0, clean_heading)

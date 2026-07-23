@@ -47,6 +47,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff" },
 ]
 

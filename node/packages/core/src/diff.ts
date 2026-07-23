@@ -1284,19 +1284,165 @@ export function create_unified_diff(
   return output.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// QA 2026-07-23 F15: CriticMarkup delimiters must stay atomic in word-patch
+// DIFF OUTPUT. dmp legally splits an inserted `{==anchor==}{>>bubble<<}`
+// around the surviving anchor text, leaving "+ {==" alone in one hunk and the
+// orphaned "==}{>>…<<}" opening a later one; trim_common_context can likewise
+// cut a shared "{" prefix mid-token. Both repairs live strictly on the diff
+// OUTPUT path (create_word_patch_diff) — the tokenizer the APPLY paths use
+// (generate_edits_from_text) is untouched.
+// ---------------------------------------------------------------------------
+
+const _CRITIC_DELIM_RE = /\{\+\+|\{--|\{==|\{>>|\+\+\}|--\}|==\}|<<\}/g;
+const _CRITIC_CLOSER_FOR: Record<string, string> = {
+  "{++": "++}",
+  "{--": "--}",
+  "{==": "==}",
+  "{>>": "<<}",
+};
+
+/**
+ * True when a hunk payload contains only COMPLETE, correctly paired
+ * CriticMarkup delimiter tokens — no bare opener/closer whose partner sits in
+ * another hunk, and no partial fragment at either boundary (`…{`, `…{=`,
+ * leading `=}`). Keeping a bubble's opener, content and closer in ONE payload
+ * follows from the pairing requirement.
+ */
+function _critic_payload_atomic(payload: string): boolean {
+  if (!payload) return true;
+  if (/\{[=+\-><]?$/.test(payload)) return false;
+  if (/^[=+\-><]?\}/.test(payload)) return false;
+  const stack: string[] = [];
+  _CRITIC_DELIM_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = _CRITIC_DELIM_RE.exec(payload)) !== null) {
+    const tok = m[0];
+    if (tok.startsWith("{")) stack.push(tok);
+    else if (stack.length === 0 || _CRITIC_CLOSER_FOR[stack.pop()!] !== tok)
+      return false;
+  }
+  return stack.length === 0;
+}
+
+/**
+ * Shrinks trim_common_context's prefix/suffix so neither cut lands strictly
+ * inside a CriticMarkup delimiter token of either string (reducing trim only
+ * re-adds SHARED context to both payloads — always safe for display).
+ */
+function _clamp_trim_outside_critic_tokens(
+  target: string,
+  new_val: string,
+  prefix_len: number,
+  suffix_len: number,
+): [number, number] {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const s of [target, new_val]) {
+      const cut_end = s.length - suffix_len;
+      _CRITIC_DELIM_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = _CRITIC_DELIM_RE.exec(s)) !== null) {
+        const t0 = m.index;
+        const t1 = m.index + m[0].length;
+        if (prefix_len > t0 && prefix_len < t1) {
+          prefix_len = t0;
+          changed = true;
+        }
+        if (cut_end > t0 && cut_end < t1) {
+          suffix_len = s.length - t1;
+          changed = true;
+          break; // cut_end moved — rescan from the top
+        }
+      }
+    }
+  }
+  return [Math.max(0, prefix_len), Math.max(0, suffix_len)];
+}
+
+/** Post-trim display payloads for one word-patch hunk. */
+function _word_patch_displays(
+  raw_target: string,
+  raw_new: string,
+): [string, string] {
+  let [prefix_len, suffix_len] = trim_common_context(raw_target, raw_new);
+  [prefix_len, suffix_len] = _clamp_trim_outside_critic_tokens(
+    raw_target,
+    raw_new,
+    prefix_len,
+    suffix_len,
+  );
+  return [
+    raw_target.substring(prefix_len, raw_target.length - suffix_len),
+    raw_new.substring(prefix_len, raw_new.length - suffix_len),
+  ];
+}
+
+/**
+ * Merges consecutive diff edits whose rendered payloads would split a
+ * CriticMarkup token across hunks. The stable gap between two merged edits is
+ * an "equal" run of the underlying diff, so it reads identically in both
+ * documents and can safely join the targets and the replacements.
+ */
+function _merge_critic_split_hunks(
+  edits: ModifyText[],
+  original_text: string,
+): ModifyText[] {
+  const merged: ModifyText[] = [];
+  let i = 0;
+  while (i < edits.length) {
+    let target = edits[i].target_text || "";
+    let new_text = edits[i].new_text || "";
+    const start = edits[i]._match_start_index || 0;
+    let j = i + 1;
+    for (;;) {
+      const [d_target, d_new] = _word_patch_displays(target, new_text);
+      if (_critic_payload_atomic(d_target) && _critic_payload_atomic(d_new))
+        break;
+      if (j >= edits.length) break;
+      const nxt = edits[j];
+      const nxt_start = nxt._match_start_index || 0;
+      const gap_start = start + target.length;
+      const gap =
+        nxt_start >= gap_start
+          ? original_text.substring(gap_start, nxt_start)
+          : "";
+      target = target + gap + (nxt.target_text || "");
+      new_text = new_text + gap + (nxt.new_text || "");
+      j++;
+    }
+    if (j > i + 1) {
+      merged.push({
+        ...edits[i],
+        target_text: target,
+        new_text,
+        _match_start_index: start,
+      });
+    } else {
+      merged.push(edits[i]);
+    }
+    i = j;
+  }
+  return merged;
+}
+
 export function create_word_patch_diff(
   original_text: string,
   modified_text: string,
   original_path: string = "Original",
   modified_path: string = "Modified"
 ): string {
-  const edits = generate_edits_from_text(original_text, modified_text);
+  const edits = _merge_critic_split_hunks(
+    generate_edits_from_text(original_text, modified_text),
+    original_text,
+  );
   const output: string[] = [
     `--- ${original_path}`,
     `+++ ${modified_path}`,
     ""
   ];
-  
+
   const CONTEXT_SIZE = 40;
 
   for (const edit of edits) {
@@ -1304,7 +1450,13 @@ export function create_word_patch_diff(
     const raw_target = edit.target_text || "";
     const raw_new = edit.new_text || "";
 
-    const [prefix_len, suffix_len] = trim_common_context(raw_target, raw_new);
+    let [prefix_len, suffix_len] = trim_common_context(raw_target, raw_new);
+    [prefix_len, suffix_len] = _clamp_trim_outside_critic_tokens(
+      raw_target,
+      raw_new,
+      prefix_len,
+      suffix_len,
+    );
 
     const target_end_in_target = raw_target.length - suffix_len;
     const new_end_in_new = raw_new.length - suffix_len;

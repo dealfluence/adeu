@@ -359,10 +359,17 @@ def extract_table(
         row_str = " | ".join(cell_texts)
 
         if not clean_view:
+            # The change bubble is SEPARATED from cell content, mirroring the
+            # normal insertion-bubble shape — the old ` |Chg:N++}` suffix read
+            # as part of the last cell's text (QA 2026-07-23 F21a). Twin
+            # rendering lives in redline/mapper.py (_map_table) and MUST stay
+            # byte-identical (Virtual Text contract).
             if ins is not None:
-                row_str = f"{{++ {row_str} |Chg:{ins.get(qn('w:id'))}++}}"
+                author = ins.get(qn("w:author")) or "Unknown"
+                row_str = f"{{++ {row_str} ++}}{{>>[Chg:{ins.get(qn('w:id'))} insert] {author}<<}}"
             elif del_node is not None:
-                row_str = f"{{-- {row_str} |Chg:{del_node.get(qn('w:id'))}--}}"
+                author = del_node.get(qn("w:author")) or "Unknown"
+                row_str = f"{{-- {row_str} --}}{{>>[Chg:{del_node.get(qn('w:id'))} delete] {author}<<}}"
 
         rows_text.append(row_str)
         local_cursor = row_start + len(row_str)

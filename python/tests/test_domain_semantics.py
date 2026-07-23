@@ -155,7 +155,7 @@ def test_domain_semantics_projection(domain_semantics_stream):
     assert "## Defined Terms" in text
     assert '"Affiliate"' in text
     assert '"Confidential Information"' in text
-    assert "used 1 times" in text
+    assert "used 1 time." in text
 
     # Named Anchors & Back-References
     assert "## Named Anchors" in text

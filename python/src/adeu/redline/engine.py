@@ -226,7 +226,8 @@ def validate_edit_strings(
                 if len(n_links) > len(t_links):
                     errors.append(
                         f"- Edit {i + 1} Failed: Cannot insert hyperlinks via text replace. "
-                        "Use a dedicated structural operation."
+                        "Inserting new hyperlinks is not supported; insert the display text "
+                        "instead (editing the text or URL of an existing link IS supported)."
                     )
                 else:
                     errors.append(
@@ -329,7 +330,17 @@ def validate_edit_strings(
 
 
 class RedlineEngine:
-    def __init__(self, doc_stream: BytesIO, author: str = "Adeu AI"):
+    def __init__(
+        self,
+        doc_stream: BytesIO,
+        author: str = "Adeu AI",
+        id_discovery_hint: Optional[str] = None,
+    ):
+        # Surface-aware advice for "how do I list the current Chg:/Com: ids":
+        # the CLI default points at CLI commands; the MCP layer passes a
+        # read_docx-based hint because MCP callers cannot run the CLI
+        # (QA 2026-07-23 F11).
+        self.id_discovery_hint = id_discovery_hint
         doc_stream.seek(0)
         sanitized_bytes = strip_bom_from_docx_bytes(doc_stream.read())
         self.doc = Document(BytesIO(sanitized_bytes))
@@ -548,9 +559,99 @@ class RedlineEngine:
         clean_text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", clean_text, flags=re.DOTALL)
         return critic_markup, clean_text
 
+    # Virtual projection tokens the preview window absorbs when extending a
+    # modified span outward, so a window never starts/ends between a wrapper
+    # token and its content (which the edge tidier would then chop away).
+    _PREVIEW_MARKUP_TOKENS = frozenset({"{--", "--}", "{++", "++}", "{==", "==}", "**", "_", "__"})
+    # At most this many disjoint windows are rendered per edit; each window is
+    # capped at REPORT_ECHO_CAP chars (bounded reports, QA C2).
+    _PREVIEW_MAX_WINDOWS = 10
+
+    def _build_post_apply_previews(self, edit: Any) -> Optional[Tuple[str, str]]:
+        """
+        Builds the report preview by slicing the document's ACTUAL raw
+        projection AFTER the edit applied (F6, QA 2026-07-23): the
+        critic_markup preview is the window(s) of self.mapper.full_text
+        covering EVERY span the edit modified (located via the revision ids it
+        wrote — all occurrences of a match_mode="all" fan-out), and the clean
+        preview is the same window(s) with markup resolved to the accepted
+        state. Synthesizing previews from pre-apply snapshots instead showed
+        only the first occurrence, rendered other pending insertions as
+        already-accepted text, and nested CriticMarkup on same-author
+        re-edits. {>>…<<} meta bubbles are stripped for compactness
+        (previews must never leak scaffolding, QA H1).
+
+        Returns None when the edit wrote no revision ids (comment-only edits,
+        URL retargets, virtual no-ops) — callers fall back to the snapshot
+        path, which is faithful for those shapes because they change no text.
+        """
+        used_ids = set(getattr(edit, "_used_revision_ids", None) or [])
+        if not used_ids:
+            return None
+
+        spans = self.mapper.spans
+        matched_indices = [
+            i
+            for i, s in enumerate(spans)
+            if s.run is not None and ((s.ins_id and s.ins_id in used_ids) or (s.del_id and s.del_id in used_ids))
+        ]
+        if not matched_indices:
+            return None
+
+        def _absorbable(span) -> bool:
+            if span.run is not None:
+                return False
+            if span.start == span.end:
+                return True  # zero-width anchors
+            return span.text in self._PREVIEW_MARKUP_TOKENS or span.text.startswith("{>>")
+
+        ranges: List[List[int]] = []
+        for i in matched_indices:
+            lo, hi = i, i
+            while lo - 1 >= 0 and _absorbable(spans[lo - 1]):
+                lo -= 1
+            while hi + 1 < len(spans) and _absorbable(spans[hi + 1]):
+                hi += 1
+            ranges.append([spans[lo].start, spans[hi].end])
+
+        # Merge nearby ranges into one window so e.g. the three occurrences of
+        # a fan-out over "apple apple apple." render as a single window.
+        ranges.sort()
+        merged: List[List[int]] = []
+        for st, en in ranges:
+            if merged and st - merged[-1][1] <= 2 * PREVIEW_CONTEXT_CHARS:
+                merged[-1][1] = max(merged[-1][1], en)
+            else:
+                merged.append([st, en])
+
+        full_text = self.mapper.full_text
+        windows = []
+        for st, en in merged[: self._PREVIEW_MAX_WINDOWS]:
+            ws = max(0, st - PREVIEW_CONTEXT_CHARS)
+            we = min(len(full_text), en + PREVIEW_CONTEXT_CHARS)
+            window = full_text[ws:we]
+            # Drop meta bubbles and any wrapper fragments the window edges
+            # chopped in half (same tidy the snapshot path uses).
+            window = self._tidy_preview_context(self._tidy_preview_context(window, "before"), "after")
+            windows.append(truncate_middle(window, REPORT_ECHO_CAP))
+        critic_markup = "\n…\n".join(windows)
+        if len(merged) > self._PREVIEW_MAX_WINDOWS:
+            critic_markup += f"\n…\n({len(merged) - self._PREVIEW_MAX_WINDOWS} more modified regions not shown)"
+
+        clean_text = critic_markup
+        clean_text = re.sub(r"\{>>.*?<<\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{--.*?--\}", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r"\{==(.*?)==\}", r"\1", clean_text, flags=re.DOTALL)
+        return critic_markup, clean_text
+
     def _build_edit_context_previews(self, edit: Any) -> Tuple[Optional[str], Optional[str]]:
         if not isinstance(edit, ModifyText):
             return None, None
+        # Preferred path: slice the actual post-apply projections (F6).
+        post_apply = self._build_post_apply_previews(edit)
+        if post_apply is not None:
+            return post_apply
         if edit._preview_span is not None and edit._preview_context is not None:
             return self._build_full_match_preview(edit)
         if hasattr(edit, "_resolved_proxy_edit") and edit._resolved_proxy_edit is not None:
@@ -620,50 +721,120 @@ class RedlineEngine:
                 return start, length
         return self.mapper.find_match_index(target_text, is_regex=is_regex)
 
+    _PAIR_WALK_SKIP_TAGS = (
+        "w:commentRangeStart",
+        "w:commentRangeEnd",
+        "w:commentReference",
+        "w:rPr",
+        "w:pPr",
+    )
+
+    @staticmethod
+    def _paragraph_mark_revision(p_el):
+        """
+        The pending <w:ins>/<w:del> revision mark on this paragraph's own
+        paragraph mark (pPr/rPr), or None. A pending mark means the paragraph
+        BOUNDARY itself is part of an unresolved revision, so revision
+        elements on either side of it are contiguous in one of the two
+        document states (original or accepted).
+        """
+        if p_el is None or p_el.tag != qn("w:p"):
+            return None
+        pPr = p_el.find(qn("w:pPr"))
+        rPr = pPr.find(qn("w:rPr")) if pPr is not None else None
+        if rPr is None:
+            return None
+        for tag in ("w:ins", "w:del"):
+            mark = rPr.find(qn(tag))
+            if mark is not None:
+                return mark
+        return None
+
     def _get_paired_nodes(self, node):
         """
-        Finds all contiguous w:ins/w:del nodes that form a single logical Modification block.
+        Finds all w:ins/w:del nodes that form a single logical Modification
+        block with `node`: contiguous same-author siblings, extended ACROSS
+        paragraph boundaries whose own paragraph mark is a pending same-author
+        revision (F1, QA 2026-07-23). A multi-paragraph replacement stores its
+        deletion in the source paragraph and spreads its insertion (one shared
+        id, including tracked paragraph marks) over following paragraphs — the
+        pending marks make those elements one contiguous revision even though
+        they are not XML siblings. Ordinary paragraph boundaries (no tracked
+        mark) never group, so contiguous pairing behavior is otherwise
+        unchanged.
         """
         pairs = set()
         author = node.get(qn("w:author"))
+        skip_tags = tuple(qn(t) for t in self._PAIR_WALK_SKIP_TAGS)
+
+        def _paragraph_of(el):
+            cur = el
+            while cur is not None and cur.tag != qn("w:p"):
+                cur = cur.getparent()
+            return cur
+
+        def _sibling_paragraph(p_el, forward: bool):
+            sib = p_el.getnext() if forward else p_el.getprevious()
+            while sib is not None and sib.tag != qn("w:p"):
+                sib = sib.getnext() if forward else sib.getprevious()
+            return sib
+
+        def _crossable_mark(p_el):
+            """The boundary's pending revision mark when it belongs to the
+            same author, else None."""
+            mark = self._paragraph_mark_revision(p_el)
+            if mark is not None and mark.get(qn("w:author")) == author:
+                return mark
+            return None
 
         # Look forward
+        current_p = _paragraph_of(node)
         nxt = node.getnext()
-        while nxt is not None:
-            if nxt.tag in (
-                qn("w:commentRangeStart"),
-                qn("w:commentRangeEnd"),
-                qn("w:commentReference"),
-                qn("w:rPr"),
-                qn("w:pPr"),
-            ):
+        while True:
+            if nxt is None:
+                # End of paragraph: cross into the next paragraph only when
+                # the boundary (this paragraph's own mark) is a pending
+                # same-author revision.
+                mark = _crossable_mark(current_p) if current_p is not None else None
+                next_p = _sibling_paragraph(current_p, forward=True) if mark is not None else None
+                if next_p is None:
+                    break
+                pairs.add(mark)
+                current_p = next_p
+                nxt = next_p[0] if len(next_p) else None
+                continue
+            if nxt.tag in skip_tags:
                 nxt = nxt.getnext()
                 continue
-            if nxt.tag in (qn("w:ins"), qn("w:del")):
-                # Group contiguous edits by the same author
-                if nxt.get(qn("w:author")) == author:
-                    pairs.add(nxt)
-                    nxt = nxt.getnext()
-                    continue
+            if nxt.tag in (qn("w:ins"), qn("w:del")) and nxt.get(qn("w:author")) == author:
+                pairs.add(nxt)
+                nxt = nxt.getnext()
+                continue
             break
 
         # Look backward
+        current_p = _paragraph_of(node)
         prev = node.getprevious()
-        while prev is not None:
-            if prev.tag in (
-                qn("w:commentRangeStart"),
-                qn("w:commentRangeEnd"),
-                qn("w:commentReference"),
-                qn("w:rPr"),
-                qn("w:pPr"),
-            ):
+        while True:
+            if prev is None:
+                # Start of paragraph: cross into the previous paragraph only
+                # when the boundary (the PREVIOUS paragraph's own mark) is a
+                # pending same-author revision.
+                prev_p = _sibling_paragraph(current_p, forward=False) if current_p is not None else None
+                mark = _crossable_mark(prev_p) if prev_p is not None else None
+                if mark is None:
+                    break
+                pairs.add(mark)
+                current_p = prev_p
+                prev = prev_p[-1] if len(prev_p) else None
+                continue
+            if prev.tag in skip_tags:
                 prev = prev.getprevious()
                 continue
-            if prev.tag in (qn("w:ins"), qn("w:del")):
-                if prev.get(qn("w:author")) == author:
-                    pairs.add(prev)
-                    prev = prev.getprevious()
-                    continue
+            if prev.tag in (qn("w:ins"), qn("w:del")) and prev.get(qn("w:author")) == author:
+                pairs.add(prev)
+                prev = prev.getprevious()
+                continue
             break
 
         return list(pairs)
@@ -1182,8 +1353,9 @@ class RedlineEngine:
         p_el = target_para._element
 
         # Mint shared revision IDs so the agent sees this as one logical
-        # change (mirrors the reuse_id pattern used by track_insert).
-        shared_id = self._get_next_id()
+        # change (mirrors the reuse_id pattern used by track_insert). A
+        # reserved id (F20 ascending pre-assignment) takes precedence.
+        shared_id = edit._reserved_del_id or edit._reserved_ins_id or self._get_next_id()
         del_id = shared_id
         ins_id = shared_id
 
@@ -1284,6 +1456,7 @@ class RedlineEngine:
                 # the new paragraph alone.
                 self._attach_comment(new_p, new_ins, new_ins, edit.comment)
 
+        self._record_used_revision_ids(edit, shared_id)
         return True
 
     def _apply_run_props(self, run_element, props: Dict[str, Any], suppress_inherited: bool = False) -> None:
@@ -1347,7 +1520,156 @@ class RedlineEngine:
 
         create_attribute(pStyle, "w:val", style_id)
         pPr.append(pStyle)
+
+        # F5 (QA 2026-07-23): a "- "/"* " markdown bullet resolves to the
+        # "List Paragraph" style, but the style alone renders as indented text
+        # with NO bullet (half-applied) — a real bullet needs w:numPr pointing
+        # at a bullet numbering definition, which is also what makes the clean
+        # re-read project "* item" again (get_paragraph_prefix resolves numPr).
+        if style_name == "List Paragraph":
+            bullet_num_id = self._ensure_bullet_num_id()
+            if bullet_num_id is not None:
+                numPr = create_element("w:numPr")
+                ilvl = create_element("w:ilvl")
+                create_attribute(ilvl, "w:val", "0")
+                numPr.append(ilvl)
+                numId = create_element("w:numId")
+                create_attribute(numId, "w:val", bullet_num_id)
+                numPr.append(numId)
+                pPr.append(numPr)
+
         p_element.insert(0, pPr)
+
+    # Minimal single-level bullet definition, injected when the document has
+    # no numbering part (or none of its definitions is a bullet). The private
+    # use glyph U+F0B7 with the Symbol font is Word's canonical round bullet.
+    _BULLET_LVL_XML = (
+        '<w:lvl {ns} w:ilvl="0">'
+        '<w:start w:val="1"/>'
+        '<w:numFmt w:val="bullet"/>'
+        '<w:lvlText w:val=""/>'
+        '<w:lvlJc w:val="left"/>'
+        '<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>'
+        '<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/></w:rPr>'
+        "</w:lvl>"
+    )
+
+    def _ensure_bullet_num_id(self) -> Optional[str]:
+        """
+        Returns the w:numId of a bullet numbering definition, creating one if
+        needed (F5, QA 2026-07-23). Resolution order:
+
+          1. Reuse: the first w:num in word/numbering.xml whose abstractNum
+             has numFmt="bullet" at ilvl 0.
+          2. Extend: append a minimal single-level bullet abstractNum + num to
+             the existing numbering part.
+          3. Create: mint word/numbering.xml (content-type override and the
+             document-part relationship are handled by python-docx's package
+             writer once the part is registered), following the comments-part
+             creation pattern (redline/comments.py).
+
+        The resolved id is cached per engine instance.
+        """
+        if getattr(self, "_bullet_num_id", None):
+            return self._bullet_num_id
+
+        from docx.oxml.ns import nsdecls
+
+        package = self.doc.part.package
+        numbering_part = None
+        for p in package.parts:
+            if str(p.partname).endswith("/numbering.xml"):
+                numbering_part = p
+                break
+
+        ns = nsdecls("w")
+
+        if numbering_part is None:
+            # 3. Create the numbering part with one bullet definition.
+            from docx.opc.constants import CONTENT_TYPE as CT
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            from docx.opc.packuri import PackURI
+            from docx.opc.part import XmlPart
+
+            xml_bytes = (
+                f"<w:numbering {ns}>"
+                f'<w:abstractNum w:abstractNumId="0">'
+                f'<w:multiLevelType w:val="singleLevel"/>'
+                f"{self._BULLET_LVL_XML.format(ns='')}"
+                f"</w:abstractNum>"
+                f'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+                f"</w:numbering>"
+            ).encode("utf-8")
+            logger.info("Creating new numbering part for markdown bullet")
+            new_part = XmlPart(PackURI("/word/numbering.xml"), CT.WML_NUMBERING, parse_xml(xml_bytes), package)
+            package.parts.append(new_part)
+            self.doc.part.relate_to(new_part, RT.NUMBERING)
+            if hasattr(package, "_adeu_numbering_cache"):
+                del package._adeu_numbering_cache
+            self._bullet_num_id = "1"
+            return self._bullet_num_id
+
+        # Bind an editable root (Proxy Class OPC Binding, AI_CONTEXT §8).
+        if not hasattr(numbering_part, "_adeu_element"):
+            if hasattr(numbering_part, "_element"):
+                numbering_part._adeu_element = numbering_part._element
+            else:
+                numbering_part._adeu_element = parse_xml(numbering_part.blob)
+        root = numbering_part._adeu_element
+
+        # 1. Reuse the first numId whose abstract definition is a bullet at
+        # level 0 (python-docx's default template ships several).
+        bullet_abstract_ids = set()
+        for abstract in root.findall(qn("w:abstractNum")):
+            for lvl in abstract.findall(qn("w:lvl")):
+                if lvl.get(qn("w:ilvl")) == "0":
+                    fmt = lvl.find(qn("w:numFmt"))
+                    if fmt is not None and fmt.get(qn("w:val")) == "bullet":
+                        bullet_abstract_ids.add(abstract.get(qn("w:abstractNumId")))
+                    break
+        for num in root.findall(qn("w:num")):
+            a_ref = num.find(qn("w:abstractNumId"))
+            if a_ref is not None and a_ref.get(qn("w:val")) in bullet_abstract_ids:
+                num_id = num.get(qn("w:numId"))
+                if num_id:
+                    self._bullet_num_id = num_id
+                    return self._bullet_num_id
+
+        # 2. No bullet definition: append a minimal one to the existing part.
+        def _max_attr(tag: str, attr: str) -> int:
+            vals = [el.get(qn(attr)) for el in root.findall(qn(tag))]
+            return max((int(v) for v in vals if v and v.lstrip("-").isdigit()), default=0)
+
+        new_abstract_id = str(_max_attr("w:abstractNum", "w:abstractNumId") + 1)
+        new_num_id = str(_max_attr("w:num", "w:numId") + 1)
+
+        abstract_el = parse_xml(
+            f'<w:abstractNum {ns} w:abstractNumId="{new_abstract_id}">'
+            f'<w:multiLevelType w:val="singleLevel"/>'
+            f"{self._BULLET_LVL_XML.format(ns='')}"
+            f"</w:abstractNum>".encode("utf-8")
+        )
+        num_el = parse_xml(
+            f'<w:num {ns} w:numId="{new_num_id}"><w:abstractNumId w:val="{new_abstract_id}"/></w:num>'.encode("utf-8")
+        )
+
+        # Schema order: every w:abstractNum precedes the first w:num.
+        first_num = root.find(qn("w:num"))
+        if first_num is not None:
+            first_num.addprevious(abstract_el)
+        else:
+            root.append(abstract_el)
+        root.append(num_el)
+
+        # Re-bind so python-docx serializes the mutated root (XmlPart parts
+        # serialize _element; generic parts are re-blobbed by save_to_stream).
+        if hasattr(numbering_part, "_element"):
+            numbering_part._element = root
+        if hasattr(package, "_adeu_numbering_cache"):
+            del package._adeu_numbering_cache
+        logger.info("Added bullet numbering definition", num_id=new_num_id)
+        self._bullet_num_id = new_num_id
+        return self._bullet_num_id
 
     def _track_insert_inline(
         self,
@@ -2046,7 +2368,7 @@ class RedlineEngine:
         """
         if snapshot is None:
             return
-        self.__init__(snapshot, author=self.author)  # type: ignore[misc]
+        self.__init__(snapshot, author=self.author, id_discovery_hint=self.id_discovery_hint)  # type: ignore[misc]
 
     @staticmethod
     def _report_new_text(edit: Any) -> str:
@@ -2079,6 +2401,10 @@ class RedlineEngine:
             # cannot balloon the report/JSON output (QA C2).
             "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
             "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
+            # Every per-edit report carries the edit's comment (dry-run
+            # included) — the report is where an agent verifies the comment
+            # before committing (F7, QA 2026-07-23).
+            "comment": getattr(edit, "comment", None),
             "warning": warning,
             "error": edit_error_msg,
             "critic_markup": critic_markup,
@@ -2094,7 +2420,9 @@ class RedlineEngine:
         Processes a unified batch of actions and edits safely.
         """
         if dry_run:
-            dry_engine = RedlineEngine(self.save_to_stream(), author=self.author)
+            dry_engine = RedlineEngine(
+                self.save_to_stream(), author=self.author, id_discovery_hint=self.id_discovery_hint
+            )
             return dry_engine._process_batch_internal(changes, dry_run_mode=True)
         else:
             return self._process_batch_internal(changes, dry_run_mode=False)
@@ -2206,6 +2534,7 @@ class RedlineEngine:
                         "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
+                        "comment": getattr(e, "comment", None),
                         "warning": None,
                         "error": "\n".join(shape_errors),
                         "critic_markup": None,
@@ -2218,10 +2547,12 @@ class RedlineEngine:
                 p_applied, p_skipped = self.apply_edits([e for _, e in pinned_ok], page_offsets=page_offsets)
                 applied_edits += p_applied
                 skipped_edits += p_skipped
-                for i, e in pinned_ok:
-                    reports_by_input[i] = self._build_edit_report(e)
+                # Refresh projections BEFORE building reports so previews can
+                # slice the actual post-apply document state (F6).
                 if p_applied > 0:
                     self._refresh_after_sequential_edit()
+                for i, e in pinned_ok:
+                    reports_by_input[i] = self._build_edit_report(e)
 
             for i, edit in unpinned:
                 try:
@@ -2233,10 +2564,12 @@ class RedlineEngine:
                 if single_errors:
                     if applied_edits > 0:
                         hint = (
-                            f"\n  Note: {applied_edits} earlier edit(s) in this batch were already "
-                            "applied. Batches apply sequentially — each edit must target the document "
-                            "text as it reads AFTER the preceding edits (e.g. target the replacement "
-                            "text an earlier edit introduced, not the original wording)."
+                            f"\n  Note: {applied_edits} earlier edit(s) in this batch validated "
+                            "against the intermediate document state; because this batch failed, it "
+                            "was rolled back and nothing was saved. Batches apply sequentially — "
+                            "each edit must target the document text as it reads AFTER the preceding "
+                            "edits (e.g. target the replacement text an earlier edit introduced, not "
+                            "the original wording)."
                         )
                         single_errors = [err + hint for err in single_errors]
                     validation_errors.extend(single_errors)
@@ -2250,6 +2583,7 @@ class RedlineEngine:
                         "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
+                        "comment": getattr(edit, "comment", None),
                         "warning": warning,
                         "error": "\n".join(single_errors),
                         "critic_markup": None,
@@ -2260,9 +2594,11 @@ class RedlineEngine:
                 e_applied, e_skipped = self.apply_edits([edit], page_offsets=page_offsets)
                 applied_edits += e_applied
                 skipped_edits += e_skipped
-                reports_by_input[i] = self._build_edit_report(edit)
+                # Refresh projections BEFORE building the report so the
+                # preview slices the actual post-apply document state (F6).
                 if e_applied > 0:
                     self._refresh_after_sequential_edit()
+                reports_by_input[i] = self._build_edit_report(edit)
 
             if validation_errors:
                 if not dry_run_mode:
@@ -2282,6 +2618,7 @@ class RedlineEngine:
                         "type": report.get("type", "modify"),
                         "target_text": report["target_text"],
                         "new_text": report["new_text"],
+                        "comment": report.get("comment"),
                         "warning": None,
                         "error": (
                             "Not applied: the batch is transactional and other edits failed "
@@ -2315,6 +2652,68 @@ class RedlineEngine:
             "engine": "python",
             "version": __version__,
         }
+
+    @staticmethod
+    def _record_used_revision_ids(edit: Any, *ids: Optional[str]) -> None:
+        """
+        Remembers the revision ids an applied edit wrote into the document —
+        on the edit itself and on its parent (fan-out sub-edits report through
+        the parent). The post-apply preview builder locates the edit's spans
+        by these ids (F6, QA 2026-07-23).
+        """
+        real_ids = [i for i in ids if i]
+        if not real_ids:
+            return
+        for target in (edit, getattr(edit, "_parent_edit_ref", None)):
+            if target is None:
+                continue
+            used = getattr(target, "_used_revision_ids", None)
+            if used is not None:
+                used.extend(real_ids)
+
+    @staticmethod
+    def _derive_internal_op(edit: ModifyText) -> str:
+        """The operation `_apply_single_edit_indexed` will run for this edit."""
+        op = edit._internal_op
+        if op is None:
+            if not edit.target_text and edit.new_text:
+                op = EditOperationType.INSERTION
+            elif edit.target_text and not edit.new_text:
+                op = EditOperationType.DELETION
+            else:
+                op = EditOperationType.MODIFICATION
+        return op
+
+    def _reserve_revision_ids(self, resolved_edits: List[Tuple[Any, Any]]) -> None:
+        """
+        Assigns each resolved sub-edit its revision id(s) in ASCENDING
+        document order (first occurrence gets the lowest ids; within one
+        occurrence the del id precedes the ins id), before the descending
+        apply sweep mutates anything (F20, QA 2026-07-23). Ids reserved for
+        sub-edits that later fail or are skipped stay unused — gaps are fine,
+        reverse-reading ids are not.
+        """
+        for edit, _orig_new in sorted(resolved_edits, key=lambda x: x[0]._resolved_start_idx or 0):
+            if isinstance(edit, InsertTableRow):
+                edit._reserved_ins_id = self._get_next_id()
+                continue
+            if isinstance(edit, DeleteTableRow):
+                edit._reserved_del_id = self._get_next_id()
+                continue
+            op = self._derive_internal_op(edit)
+            if op == EditOperationType.PARAGRAPH_REPLACE:
+                # One shared id for both sides (mirrors _apply_paragraph_replace).
+                shared_id = self._get_next_id()
+                edit._reserved_del_id = shared_id
+                edit._reserved_ins_id = shared_id
+            elif op == EditOperationType.DELETION:
+                edit._reserved_del_id = self._get_next_id()
+            elif op == EditOperationType.INSERTION:
+                edit._reserved_ins_id = self._get_next_id()
+            elif op == EditOperationType.MODIFICATION:
+                edit._reserved_del_id = self._get_next_id()
+                edit._reserved_ins_id = self._get_next_id()
+            # COMMENT_ONLY / URL_RETARGET consume no revision ids.
 
     def apply_edits(
         self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]], page_offsets: Optional[List[int]] = None
@@ -2457,6 +2856,15 @@ class RedlineEngine:
                         )
                     self.skipped_details.append(msg)
                     edit._error_msg = msg
+
+        # Reserve revision ids in ASCENDING document order BEFORE the
+        # descending apply sweep: ids minted lazily during the bottom-up sweep
+        # numbered a match_mode="all" fan-out in reverse (Chg:5/6, 3/4, 1/2
+        # for the 1st/2nd/3rd occurrence), making ids read as if the last
+        # occurrence were edited first (F20, QA 2026-07-23). Sequential
+        # separate edits already ascend and are unaffected — each apply_edits
+        # call reserves after the previous call finished minting.
+        self._reserve_revision_ids(resolved_edits)
 
         # Process all edits backwards in a single O(N) sweep to avoid index drift and map rebuilds
         resolved_edits.sort(key=lambda x: x[0]._resolved_start_idx or 0, reverse=True)
@@ -2667,9 +3075,9 @@ class RedlineEngine:
             if i < len(new_row.cells):
                 new_row.cells[i].text = cell_text
 
-        # Inject tracked change info
+        # Inject tracked change info (reserved id: F20 ascending pre-assignment)
         trPr = new_row_el.get_or_add_trPr()
-        ins = self._create_track_change_tag("w:ins")
+        ins = self._create_track_change_tag("w:ins", reuse_id=edit._reserved_ins_id)
         trPr.append(ins)
 
         # Insert into DOM
@@ -2721,9 +3129,10 @@ class RedlineEngine:
         if row_el is None:
             return False
 
-        # Instead of removing, we mark as deleted
+        # Instead of removing, we mark as deleted (reserved id: F20
+        # ascending pre-assignment)
         trPr = row_el.get_or_add_trPr()
-        del_el = self._create_track_change_tag("w:del")
+        del_el = self._create_track_change_tag("w:del", reuse_id=edit._reserved_del_id)
         trPr.append(del_el)
 
         return True
@@ -3349,6 +3758,30 @@ class RedlineEngine:
             proxy_edit._active_mapper_ref = active_mapper
             return proxy_edit
 
+        # F1 (QA 2026-07-23): a replacement whose new text spans MULTIPLE
+        # paragraphs while its target sits inside ONE paragraph must not have
+        # its common affixes trimmed away (nor be word-diffed, which trims the
+        # same way): a shared trailing "." pairs the original sentence's final
+        # period with the replacement's, stranding a "."-only container in the
+        # source paragraph while the replacement's last sentence loses its
+        # period. Emit ONE atomic modification covering the ENTIRE matched
+        # text and carrying the ENTIRE new text, so the deletion consumes the
+        # whole target and the insertion stays complete. (The pure-insertion
+        # proxy above still wins when the trimmed target remainder is empty —
+        # the v6-H2 paragraph-insertion shape.)
+        if "\n\n" in effective_new_text and "\n\n" not in actual_doc_text and final_target:
+            proxy_edit = ModifyText(
+                type="modify",
+                target_text=actual_doc_text,
+                new_text=effective_new_text,
+                comment=edit.comment,
+            )
+            proxy_edit._resolved_start_idx = start_idx
+            proxy_edit._match_start_index = start_idx
+            proxy_edit._internal_op = EditOperationType.MODIFICATION
+            proxy_edit._active_mapper_ref = active_mapper
+            return proxy_edit
+
         # BUG-23-4: Reject boundary-crossing plain-paragraph modifications with text on both sides
         # to prevent structural paragraph-break corruption.
         if "\n\n" in final_target:
@@ -3434,16 +3867,8 @@ class RedlineEngine:
         original_new_text: Optional[str] = None,
         rebuild_map: bool = True,
     ) -> bool:
-        op = edit._internal_op
+        op = self._derive_internal_op(edit)
         active_mapper = edit._active_mapper_ref or self.mapper
-
-        if op is None:
-            if not edit.target_text and edit.new_text:
-                op = EditOperationType.INSERTION
-            elif edit.target_text and not edit.new_text:
-                op = EditOperationType.DELETION
-            else:
-                op = EditOperationType.MODIFICATION
 
         start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else (edit._match_start_index or 0)
         target_text = edit.target_text
@@ -3476,11 +3901,11 @@ class RedlineEngine:
         # the projected bubble for what Word renders as a single review entry.
         # The mapper's _build_merged_meta_block deduplicates repeated IDs via
         # seen_sigs, collapsing the bubble without any projection-side change.
-        del_id: Optional[str] = None
-        ins_id: Optional[str] = None
-        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
+        del_id: Optional[str] = edit._reserved_del_id
+        ins_id: Optional[str] = edit._reserved_ins_id
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and del_id is None:
             del_id = self._get_next_id()
-        if op in (EditOperationType.INSERTION, EditOperationType.MODIFICATION):
+        if op in (EditOperationType.INSERTION, EditOperationType.MODIFICATION) and ins_id is None:
             ins_id = self._get_next_id()
 
         if op == "URL_RETARGET":
@@ -3685,6 +4110,7 @@ class RedlineEngine:
                     ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
                     if ins_list:
                         self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
+            self._record_used_revision_ids(edit, ins_id)
             return True
 
         # QA 2026-07-18 C1 (apply-level backstop, pinned edits bypass
@@ -3957,9 +4383,14 @@ class RedlineEngine:
                     rPr = create_element("w:rPr")
                     pPr.append(rPr)
                 if rPr.find(qn("w:del")) is None:
-                    del_mark = self._create_track_change_tag("w:del")
+                    # The pilcrow deletion of a fully-emptied paragraph is part
+                    # of the SAME logical change as the content deletion, so it
+                    # shares del_id: accepting/rejecting the edit by its id
+                    # then also resolves the paragraph mark (F1, QA 2026-07-23).
+                    del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
                     rPr.append(del_mark)
 
+        self._record_used_revision_ids(edit, del_id, ins_id)
         return True
 
     def _paragraph_has_visible_content(self, p_elem) -> bool:
@@ -4128,7 +4559,7 @@ class RedlineEngine:
         change_ids = self._existing_change_ids()
         comment_ids = self._existing_comment_ids()
         has_prefix = raw_id.startswith("Chg:") or raw_id.startswith("Com:")
-        find_hint = (
+        find_hint = self.id_discovery_hint or (
             "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current "
             "change (Chg:) and comment (Com:) ids."
         )
@@ -4473,8 +4904,26 @@ class RedlineEngine:
                     row = parent.getparent()
                     if row is not None:
                         row.getparent().remove(row)
-                else:
-                    parent.remove(d)
+                    continue
+                # Tracked PARAGRAPH-BREAK deletion (pilcrow del inside
+                # pPr/rPr, part of a fully-deleted paragraph — F1, QA
+                # 2026-07-23): accepting it removes the paragraph container
+                # when no visible content survives, mirroring Safe Paragraph
+                # Acceptance in accept_all_revisions. If content survives,
+                # only the marker is stripped and the container is preserved.
+                grandparent = parent.getparent()
+                if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
+                    p_el = grandparent.getparent()
+                    if (
+                        p_el is not None
+                        and p_el.tag == qn("w:p")
+                        and not self._paragraph_has_visible_content(p_el)
+                    ):
+                        body = p_el.getparent()
+                        if body is not None:
+                            body.remove(p_el)
+                        continue
+                parent.remove(d)
 
         return resolved_ids
 

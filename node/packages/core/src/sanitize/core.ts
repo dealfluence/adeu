@@ -38,12 +38,39 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
       if (authors.size > 1) {
         report.warnings.push(`Multiple authors detected in tracked changes: ${Array.from(authors).sort().join(', ')}. Review per-change list before sending.`);
       }
+      // Snapshot the comments BEFORE accept-all: the engine's
+      // accept_all_revisions (inside accept_all_tracked_changes) removes
+      // comments wrapping resolved revisions, so the later
+      // get_comments_summary runs on an already-comment-free document and
+      // the report used to claim "0 comments removed" over a package the
+      // comment is demonstrably gone from (QA 2026-07-23 F12b).
+      const comments_before = transforms.get_comments_summary(doc);
       report.add_transform_lines(transforms.accept_all_tracked_changes(doc));
       report.tracked_changes_accepted = total;
+      const ids_after = new Set(
+        transforms.get_comments_summary(doc).comments.map((c: any) => c.id),
+      );
+      const removed_by_accept = comments_before.comments.filter(
+        (c: any) => !ids_after.has(c.id),
+      );
+      if (removed_by_accept.length > 0) {
+        report.comments_removed += removed_by_accept.length;
+        // Pushed directly (not via add_transform_lines keyword routing) so
+        // these land in the COMMENTS (stripped) section by construction.
+        report.removed_comment_lines.push(
+          `Comments removed: ${removed_by_accept.length} (anchored to auto-accepted tracked changes)`,
+        );
+        for (const c of removed_by_accept) {
+          const status = c.resolved ? '[Resolved]' : '[Open]';
+          report.removed_comment_lines.push(
+            `  ${status} "${transforms._truncate(c.text || '', 60)}" (${c.author || 'Unknown'})`,
+          );
+        }
+      }
     }
 
     const commentsSummary = transforms.get_comments_summary(doc);
-    report.comments_removed = commentsSummary.total;
+    report.comments_removed += commentsSummary.total;
     report.add_transform_lines(transforms.remove_all_comments(doc));
     transforms.eject_comment_parts(doc);
   } else if (options.sanitize_mode === 'keep-markup') {

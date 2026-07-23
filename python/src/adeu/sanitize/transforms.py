@@ -179,16 +179,33 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
         + doc.element.findall(f".//{qn('w:sectPrChange')}")
     )
 
-    # Collect textual info before mutating (we skip empty strings for the detailed list to reduce noise)
+    # Collect textual info before mutating. Every counted revision element is
+    # listed — the headline unit is revision ELEMENTS (AI_CONTEXT 2026-07-22
+    # "Accept-All Counts Are Revision MARKS"), so a fragmented revision whose
+    # paragraph-mark w:ins elements carry no text must still produce an item,
+    # or the headline and the list silently disagree (QA 2026-07-23 F12a).
     for ins in ins_els:
         text = _get_element_text(ins)
         if text.strip():
             lines.append(f'  Accepted insertion: "{_truncate(text, 60)}"')
+        else:
+            lines.append(f'  Accepted insertion: "{_describe_textless_revision(ins)}"')
 
     for d in del_els:
         text = _get_element_text(d)
         if text.strip():
             lines.append(f'  Accepted deletion of: "{_truncate(text, 60)}"')
+        else:
+            lines.append(f'  Accepted deletion of: "{_describe_textless_revision(d)}"')
+
+    for fmt in fmt_els:
+        tag = fmt.tag.rsplit("}", 1)[-1]
+        kind = {
+            "rPrChange": "run formatting",
+            "pPrChange": "paragraph formatting",
+            "sectPrChange": "section formatting",
+        }.get(tag, "formatting")
+        lines.append(f"  Accepted formatting change ({kind})")
 
     # Now mutate: unwrap insertions
     for ins in ins_els:
@@ -844,6 +861,23 @@ def _truncate(text: str, max_len: int = 60) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _describe_textless_revision(el) -> str:
+    """
+    Display label for a revision element carrying no visible text: the
+    paragraph-mark w:ins/w:del Word records inside w:pPr/w:rPr when a tracked
+    edit adds or removes a paragraph break, or an empty run. These are counted
+    by the accept-all headline (the unit is revision ELEMENTS), so they must
+    be listed too — otherwise the headline and the item list silently disagree
+    (QA 2026-07-23 F12a).
+    """
+    parent = el.getparent()
+    if parent is not None and parent.tag == qn("w:rPr"):
+        grandparent = parent.getparent()
+        if grandparent is not None and grandparent.tag == qn("w:pPr"):
+            return "(paragraph mark)"
+    return "(no visible text)"
 
 
 def _find_part(doc: DocumentObject, partname_suffix: str):

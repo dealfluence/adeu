@@ -189,9 +189,12 @@ describe("H1 — previews are faithful: no scaffolding, no cross-edit bleed", ()
     );
 
     // A compound change must preview the COMPLETE logical change, not just
-    // its first word-diff sub-edit ("{--two--}{++five++} (2) years").
+    // its first word-diff sub-edit ("{--two--}{++five++} (2) years" with the
+    // second hunk missing). Previews slice the ACTUAL post-apply projection
+    // (QA 2026-07-23 F6), so the compound change reads exactly as the saved
+    // document does: every minimal word-diff hunk visible.
     expect(stats.edits[2].critic_markup).toContain(
-      "{--two (2)--}{++five (5)++} years",
+      "{--two--}{++five++} ({--2--}{++5++}) years",
     );
     expect(stats.edits[2].clean_text).toContain("five (5) years");
     expect(stats.edits[2].clean_text).not.toContain("five (2)");

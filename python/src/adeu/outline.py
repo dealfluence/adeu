@@ -327,15 +327,18 @@ def _heading_passes_quality_filter_fast(
 ) -> bool:
     """
     Fast variant of _heading_passes_quality_filter that uses the offset map
-    for heuristic-promoted headings instead of calling build_paragraph_text.
+    instead of calling build_paragraph_text. Same rules: word-character-free
+    headings are dropped regardless of style (F13c); heuristic-promoted ones
+    additionally need _HEURISTIC_MIN_WORDS word tokens.
     """
+    text = _heading_text_fast(paragraph, projected_body, paragraph_offsets)
+    if not re.search(r"\w", text):
+        return False
+
     style = _determine_heading_style(paragraph)
     if style != "(heuristic)":
         return True
 
-    text = _heading_text_fast(paragraph, projected_body, paragraph_offsets)
-    if not text:
-        return False
     word_count = len(re.findall(r"\w+", text))
     return word_count >= _HEURISTIC_MIN_WORDS
 
@@ -357,10 +360,13 @@ def _heading_text_fast(
     start, length, _proxy = offset
     raw = projected_body[start : start + length]
     cleaned = _strip_critic_markup(raw)
+    # Collapse internal newlines BEFORE marker stripping (F13a) — see
+    # _heading_text for rationale.
+    cleaned = re.sub(r"\s*\n\s*", " ", cleaned)
     cleaned = _strip_inline_formatting(cleaned)
     # The projection includes the heading prefix ("# ", "## ", ...). Strip it.
     cleaned = re.sub(r"^#+\s+", "", cleaned)
-    return cleaned.strip()
+    return _truncate_outline_text(cleaned.strip())
 
 
 def _collect_footnote_ids_fast(owned_items: list) -> List[str]:
@@ -770,14 +776,20 @@ def _heading_passes_quality_filter(paragraph: Paragraph, comments_map: dict) -> 
     get_paragraph_prefix) only pass if the cleaned heading text has at least
     _HEURISTIC_MIN_WORDS word tokens. This drops "OR", "_ _", "ES-MSIP",
     and similar fragments without affecting genuine all-caps section titles.
+
+    Regardless of style, headings whose stripped text carries no word
+    characters (empty, a bare ':' — the visible remnant of an auto-numbered
+    heading — or other punctuation-only text) are dropped: a `## :` outline
+    line carries no navigation signal (QA 2026-07-23 F13c).
     """
+    text = _heading_text(paragraph, comments_map)
+    if not re.search(r"\w", text):
+        return False
+
     style = _determine_heading_style(paragraph)
     if style != "(heuristic)":
         return True
 
-    text = _heading_text(paragraph, comments_map)
-    if not text:
-        return False
     word_count = len(re.findall(r"\w+", text))
     return word_count >= _HEURISTIC_MIN_WORDS
 
@@ -806,14 +818,22 @@ def _heading_text(paragraph: Paragraph, comments_map: dict) -> str:
       - heading prefix removed
       - CriticMarkup tags stripped (insertions kept as plain text, deletions
         and meta-blocks dropped)
+      - internal newlines collapsed to a single space BEFORE marker stripping —
+        a bold heading spanning a line break projects as `**A\\nB**`, and
+        stripping markers line-blind leaves an unbalanced `**` on each line
+        (QA 2026-07-23 F13a)
       - leading/trailing whitespace stripped
       - inline bold/italic markers stripped (outline is a summary, not a faithful
-        re-render of formatting — see Concern 5).
+        re-render of formatting — see Concern 5)
+      - truncated to _OUTLINE_TEXT_MAX_CHARS — a body paragraph styled as a
+        heading must not dump 2400 chars into a navigation outline
+        (QA 2026-07-23 F13b).
     """
     p_text = build_paragraph_text(paragraph, comments_map, clean_view=False)
     cleaned = _strip_critic_markup(p_text)
+    cleaned = re.sub(r"\s*\n\s*", " ", cleaned)
     cleaned = _strip_inline_formatting(cleaned)
-    return cleaned.strip()
+    return _truncate_outline_text(cleaned.strip())
 
 
 def _strip_critic_markup(text: str) -> str:
@@ -834,18 +854,50 @@ def _strip_critic_markup(text: str) -> str:
     return text
 
 
+# Maximum rendered length of one outline entry's text. Body paragraphs styled
+# as headings otherwise appear IN FULL (2400+ char lines) in what is meant to
+# be a navigation map (QA 2026-07-23 F13b).
+_OUTLINE_TEXT_MAX_CHARS = 200
+
+# Tokens that markdown-emphasis stripping must never consume: `{#anchor}`
+# tokens (whose leading underscore would otherwise pair with a later italic
+# marker) and literal underscore runs of 3+ (fill-in placeholders like
+# `[_________]`) — QA 2026-07-23 F4.
+_PROTECTED_UNDERSCORE_RE = re.compile(r"\{#[^}]+\}|_{3,}")
+
+
+def _truncate_outline_text(text: str) -> str:
+    if len(text) > _OUTLINE_TEXT_MAX_CHARS:
+        return text[:_OUTLINE_TEXT_MAX_CHARS].rstrip() + "…"
+    return text
+
+
 def _strip_inline_formatting(text: str) -> str:
     """
     Strips inline **bold** and _italic_ markers from heading text.
     Conservative — only strips when the markers wrap word content, not standalone.
+
+    `{#anchor}` tokens and literal underscore runs (3+) are placeholder-
+    extracted first so emphasis pairing cannot eat their underscores — an
+    agent copying `{#Ref444615940}` out of the outline targets an anchor that
+    does not exist (QA 2026-07-23 F4a/F4c).
     """
     if not text:
         return ""
+    protected: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        protected.append(m.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    text = _PROTECTED_UNDERSCORE_RE.sub(_stash, text)
     # Bold: **X** or __X__
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
     # Italic: _X_ at word boundaries (avoid eating snake_case)
     text = re.sub(r"(?<!\w)_(\S(?:.*?\S)?)_(?!\w)", r"\1", text)
+    if protected:
+        text = re.sub(r"\x00(\d+)\x00", lambda m: protected[int(m.group(1))], text)
     return text
 
 

@@ -7,12 +7,22 @@ from typing import Any
 # Centralized MCP Configuration
 MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 
+# MCP callers cannot run the CLI, so id-discovery advice inside engine errors
+# must point at the MCP tool instead (QA 2026-07-23 F11). Passed to
+# RedlineEngine(id_discovery_hint=...) by every MCP-surface engine construction.
+MCP_ID_DISCOVERY_HINT = (
+    "Call `read_docx` on the document again to list the current change (Chg:) "
+    "and comment (Com:) ids — ids shift between document states."
+)
+
 
 def read_file_bytes(path: str) -> BytesIO:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
             f"File not found: {path}.\n"
+            "Provide an absolute path — the MCP server cannot resolve relative "
+            "paths against your workspace.\n"
             "If you are running in a sandboxed/containerized environment\n"
             "(such as Claude Desktop or another containerized client),\n"
             "the host application or MCP server may not have direct access to your local workspace files.\n"

@@ -959,6 +959,10 @@ def handle_diff(args):
     if args.json:
         output = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
         print(json.dumps(output, indent=2))
+    elif not edits:
+        # An explicit statement, on stdout: bare "Found 0 changes:" left the
+        # reader to infer the documents are identical (QA 2026-07-23 F14).
+        print("No textual differences found.")
     else:
         print(f"Found {len(edits)} changes:", file=sys.stderr)
         for edit in edits:

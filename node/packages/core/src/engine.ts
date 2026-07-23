@@ -166,10 +166,12 @@ export class BatchValidationError extends Error {
 // sequential batch contract. Wording mirrors the Python engine exactly.
 function sequential_context_hint(applied_so_far: number): string {
   return (
-    `\n  Note: ${applied_so_far} earlier edit(s) in this batch were already ` +
-    "applied. Batches apply sequentially — each edit must target the document " +
-    "text as it reads AFTER the preceding edits (e.g. target the replacement " +
-    "text an earlier edit introduced, not the original wording)."
+    `\n  Note: ${applied_so_far} earlier edit(s) in this batch validated against ` +
+    "the intermediate document state; because this batch failed, it was rolled " +
+    "back and nothing was saved. Batches apply sequentially — each edit must " +
+    "target the document text as it reads AFTER the preceding edits (e.g. " +
+    "target the replacement text an earlier edit introduced, not the original " +
+    "wording)."
   );
 }
 
@@ -263,7 +265,7 @@ export function validate_edit_strings(
       if (t_links.length !== n_links.length) {
         if (n_links.length > t_links.length) {
           errors.push(
-            `- Edit ${i + 1 + index_offset} Failed: Cannot insert hyperlinks via text replace. Use a dedicated structural operation.`,
+            `- Edit ${i + 1 + index_offset} Failed: Cannot insert hyperlinks via text replace. Inserting new hyperlinks is not supported; insert the display text instead (editing the text or URL of an existing link IS supported).`,
           );
         } else {
           errors.push(
@@ -850,10 +852,138 @@ export class RedlineEngine {
     return (edit && edit.new_text) || "";
   }
 
+  /**
+   * Primary preview path (QA 2026-07-23 F6/F21b): slices the document's
+   * ACTUAL post-apply projection instead of synthesizing
+   * {--target--}{++new++} from the edit's inputs. The edit's revisions are
+   * located through the ids it minted (all occurrences of a match_mode="all"
+   * fan-out), the covering windows (±PREVIEW_CONTEXT_CHARS, merged when they
+   * touch) are cut from the RAW projection, and the clean preview is the
+   * accepted-state rendering of those same windows. This is what makes
+   * previews faithful: every occurrence is visible, OTHER pending changes
+   * keep their CriticMarkup instead of reading as silently accepted, markup
+   * never nests, and an empty resolved target can no longer fabricate a
+   * "{----}" token. {>>…<<} meta bubbles are stripped to keep previews
+   * compact. Returns null when the edit's spans cannot be located (e.g. a
+   * pure restyle with no run-level revision) — callers fall back to the
+   * synthetic preview.
+   */
+  private _build_postapply_previews(
+    edit: any,
+  ): [string, string] | null {
+    const ids = new Set<string>(
+      (edit._minted_change_ids || []).map((x: any) => String(x)),
+    );
+    const cids = new Set<string>(
+      (edit._minted_comment_ids || []).map((x: any) => String(x)),
+    );
+    if (ids.size === 0 && cids.size === 0) return null;
+
+    const mapper = this.mapper;
+    if (!mapper.full_text) mapper["_build_map"]();
+    const full_text = mapper.full_text;
+    if (!full_text) return null;
+
+    const hit_ranges: [number, number][] = [];
+    for (const s of mapper.spans) {
+      const hit =
+        (s.ins_id && ids.has(String(s.ins_id))) ||
+        (s.del_id && ids.has(String(s.del_id))) ||
+        (cids.size > 0 &&
+          s.comment_ids &&
+          s.comment_ids.some((c) => cids.has(String(c))));
+      if (hit) hit_ranges.push([s.start, s.end]);
+    }
+    if (hit_ranges.length === 0) return null;
+
+    // Strip complete {>>…<<} meta bubbles BEFORE computing the windows:
+    // bubbles are projection scaffolding, and their length must neither
+    // fragment adjacent occurrences into separate windows (F6.1) nor eat
+    // the context budget in front of a change (F6.2 — the pending markup
+    // the window exists to show sat just beyond a bubble).
+    const bubble_re = /\{>>[\s\S]*?<<\}/g;
+    const cuts: [number, number][] = [];
+    let bubble_match: RegExpExecArray | null;
+    while ((bubble_match = bubble_re.exec(full_text)) !== null) {
+      cuts.push([
+        bubble_match.index,
+        bubble_match.index + bubble_match[0].length,
+      ]);
+    }
+    let visible_text = full_text;
+    let to_visible = (pos: number) => pos;
+    if (cuts.length > 0) {
+      const pieces: string[] = [];
+      let prev = 0;
+      for (const [c_start, c_end] of cuts) {
+        pieces.push(full_text.substring(prev, c_start));
+        prev = c_end;
+      }
+      pieces.push(full_text.substring(prev));
+      visible_text = pieces.join("");
+      to_visible = (pos: number) => {
+        let removed = 0;
+        for (const [c_start, c_end] of cuts) {
+          if (pos >= c_end) removed += c_end - c_start;
+          else if (pos > c_start) {
+            removed += pos - c_start;
+            break;
+          } else break;
+        }
+        return pos - removed;
+      };
+    }
+
+    hit_ranges.sort((a, b) => a[0] - b[0]);
+    const windows: [number, number][] = [];
+    for (const [r_start, r_end] of hit_ranges) {
+      const v_start = to_visible(r_start);
+      const v_end = to_visible(r_end);
+      const w_start = Math.max(0, v_start - PREVIEW_CONTEXT_CHARS);
+      const w_end = Math.min(
+        visible_text.length,
+        v_end + PREVIEW_CONTEXT_CHARS,
+      );
+      const last = windows.length > 0 ? windows[windows.length - 1] : null;
+      if (last && w_start <= last[1]) {
+        last[1] = Math.max(last[1], w_end);
+      } else {
+        windows.push([w_start, w_end]);
+      }
+    }
+
+    const parts: string[] = [];
+    for (const [w_start, w_end] of windows) {
+      let w = visible_text.substring(w_start, w_end);
+      w = RedlineEngine._tidy_preview_context(w, "before");
+      w = RedlineEngine._tidy_preview_context(w, "after");
+      parts.push(w);
+    }
+    const critic_raw = parts.join("\n…\n");
+
+    let clean = critic_raw;
+    clean = clean.replace(/\{>>[\s\S]*?<<\}/g, "");
+    clean = clean.replace(/\{--[\s\S]*?--\}/g, "");
+    clean = clean.replace(/\{\+\+([\s\S]*?)\+\+\}/g, "$1");
+    clean = clean.replace(/\{==([\s\S]*?)==\}/g, "$1");
+
+    // Previews flow into LLM context windows: bound them even when a huge
+    // insertion makes the covering window itself huge (QA C2). Truncation
+    // happens after the clean derivation so the strip regexes never see a
+    // truncation marker splitting a wrapper token.
+    const cap = PREVIEW_TEXT_CAP * 2 + 4 * PREVIEW_CONTEXT_CHARS;
+    return [
+      truncate_middle(critic_raw, cap),
+      truncate_middle(clean, cap),
+    ];
+  }
+
   private _build_edit_context_previews(
     edit: any,
   ): [string | null, string | null] {
     if (edit.type !== "modify") return [null, null];
+    const sliced = this._build_postapply_previews(edit);
+    if (sliced) return sliced;
     if (edit._preview_span && edit._preview_context) {
       return this._build_full_match_preview(edit);
     }
@@ -909,8 +1039,12 @@ export class RedlineEngine {
     // and must not multiply an oversized new_text/target_text (QA C2).
     const display_target = truncate_middle(target_text, PREVIEW_TEXT_CAP);
     const display_new = truncate_middle(new_text, PREVIEW_TEXT_CAP);
+    // An empty resolved target must never fabricate an empty "{----}"
+    // deletion token (QA 2026-07-23 F21b) — pure insertions render only the
+    // {++...++} side.
+    const deletion = display_target ? `{--${display_target}--}` : "";
     const insertion = display_new ? `{++${display_new}++}` : "";
-    const critic_markup = `${context_before}{--${display_target}--}${insertion}${context_after}`;
+    const critic_markup = `${context_before}${deletion}${insertion}${context_after}`;
 
     let clean_text = critic_markup;
     clean_text = clean_text.replace(/\{>>.*?<<\}/gs, "");
@@ -922,7 +1056,9 @@ export class RedlineEngine {
 
   private _scan_existing_ids(): number {
     let maxId = 0;
-    for (const tag of ["w:ins", "w:del"]) {
+    // w:pPrChange carries revision ids too (tracked paragraph restyles,
+    // QA 2026-07-23 F1) — a fresh engine must never mint a duplicate.
+    for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
       const elements = findAllDescendants(this.doc.element, tag);
       for (const el of elements) {
         const val = parseInt(el.getAttribute("w:id") || "0", 10);
@@ -1083,6 +1219,13 @@ export class RedlineEngine {
           }
         }
       }
+
+      // Accepting a tracked paragraph restyle keeps the NEW style: strip the
+      // w:pPrChange element recording the original properties
+      // (QA 2026-07-23 F1a). Already pre-counted in accepted_formatting.
+      for (const ppc of findAllDescendants(root_element, "w:pPrChange")) {
+        ppc.parentNode?.removeChild(ppc);
+      }
     }
 
     // Final pass: completely eject all comments, anchors, and parts
@@ -1241,6 +1384,12 @@ export class RedlineEngine {
     }
 
     for (const root_element of parts_to_process) {
+      // 0. Reject tracked paragraph restyles: restore the ORIGINAL pPr the
+      //    w:pPrChange snapshot carries (QA 2026-07-23 F1a).
+      for (const ppc of findAllDescendants(root_element, "w:pPrChange")) {
+        this._revert_ppr_change(ppc);
+      }
+
       // 1. Reject insertions: drop the <w:ins> and everything inside it.
       //    Document order means an outer <w:ins> is handled before a nested
       //    one; removing the outer detaches the inner (guarded below).
@@ -1296,6 +1445,33 @@ export class RedlineEngine {
         }
         parent.removeChild(d);
       }
+    }
+  }
+
+  /**
+   * Rejects one tracked paragraph restyle: replaces the paragraph's current
+   * <w:pPr> with the ORIGINAL properties snapshot the <w:pPrChange> carries
+   * (QA 2026-07-23 F1a). An empty snapshot means the paragraph originally
+   * had no pPr at all, so the pPr is removed outright.
+   */
+  private _revert_ppr_change(ppc: Element): void {
+    const pPr = ppc.parentNode as Element | null;
+    if (!pPr || pPr.tagName !== "w:pPr") return;
+    const host_p = pPr.parentNode as Element | null;
+    if (!host_p) return;
+    const original = findChild(ppc, "w:pPr");
+    if (original) {
+      const restored = original.cloneNode(true) as Element;
+      const has_children = Array.from(restored.childNodes).some(
+        (n) => n.nodeType === 1,
+      );
+      if (has_children) {
+        host_p.replaceChild(restored, pPr);
+      } else {
+        host_p.removeChild(pPr);
+      }
+    } else {
+      host_p.removeChild(pPr);
     }
   }
 
@@ -1998,7 +2174,17 @@ export class RedlineEngine {
    * This matches python-docx's default style-id convention for the built-in
    * paragraph styles and is what Word writes by default.
    */
-  private _set_paragraph_style(p_element: Element, style_name: string) {
+  private _set_paragraph_style(
+    p_element: Element,
+    style_name: string,
+    // When set, the restyle targets an EXISTING paragraph and must be a
+    // tracked revision: a <w:pPrChange> carrying the ORIGINAL paragraph
+    // properties is emitted under this revision id, so reject can restore
+    // them and accept strips the record (QA 2026-07-23 F1a). New paragraphs
+    // created by an insertion pass null — their style is part of the
+    // insertion itself.
+    track_change_id: string | null = null,
+  ) {
     const xmlDoc = p_element.ownerDocument!;
 
     const existing_pPr = findChild(p_element, "w:pPr");
@@ -2012,8 +2198,202 @@ export class RedlineEngine {
     pStyle.setAttribute("w:val", style_id);
     pPr.appendChild(pStyle);
 
+    // A ListParagraph style alone renders as indented text with NO bullet —
+    // Word needs a resolvable w:numPr pointing at a bullet numbering
+    // definition (QA 2026-07-23 F5a/b). "List Number" ("1. " continuations)
+    // deliberately keeps its historical style-only behavior (AI_CONTEXT §11).
+    if (style_id === "ListParagraph") {
+      const bullet_num_id = this._ensure_bullet_num_id();
+      if (bullet_num_id) {
+        const numPr = xmlDoc.createElement("w:numPr");
+        const ilvl = xmlDoc.createElement("w:ilvl");
+        ilvl.setAttribute("w:val", "0");
+        const numId = xmlDoc.createElement("w:numId");
+        numId.setAttribute("w:val", bullet_num_id);
+        numPr.appendChild(ilvl);
+        numPr.appendChild(numId);
+        pPr.appendChild(numPr);
+      }
+    }
+
+    if (track_change_id !== null) {
+      const change = this._create_track_change_tag(
+        "w:pPrChange",
+        "",
+        track_change_id,
+      );
+      const original = (
+        existing_pPr
+          ? existing_pPr.cloneNode(true)
+          : xmlDoc.createElement("w:pPr")
+      ) as Element;
+      const old_change = findChild(original, "w:pPrChange");
+      if (old_change) original.removeChild(old_change);
+      change.appendChild(original);
+      // pPrChange is the LAST child of pPr per the OOXML schema.
+      pPr.appendChild(change);
+    }
+
     // pPr is the first child of <w:p> per OOXML schema.
     p_element.insertBefore(pPr, p_element.firstChild);
+  }
+
+  // OPC plumbing for word/numbering.xml (created on demand for F5 bullets).
+  private static readonly _NUMBERING_CT =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
+  private static readonly _NUMBERING_RT =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
+
+  /**
+   * Returns the w:numId of a bullet numbering definition, creating whatever
+   * is missing (QA 2026-07-23 F5a/b):
+   *   - word/numbering.xml exists with a bullet abstractNum → reuse the
+   *     first w:num referencing it (minting a w:num if none does);
+   *   - word/numbering.xml exists without one → add a minimal single-level
+   *     bullet abstractNum + num;
+   *   - no word/numbering.xml → create the part (with [Content_Types].xml
+   *     override + document relationship) holding a minimal bullet
+   *     definition.
+   * Invalidates the package-level numbering cache so projections resolve
+   * the fresh numId immediately.
+   */
+  private _ensure_bullet_num_id(): string | null {
+    const pkg = this.doc.pkg as any;
+    const w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    const bullet_lvl_xml =
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/>` +
+      `<w:lvlText w:val=""/><w:lvlJc w:val="left"/>` +
+      `<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>` +
+      `<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/></w:rPr>` +
+      `</w:lvl>`;
+
+    let part = pkg.parts.find(
+      (p: any) =>
+        String(p.partname).replace(/^\//, "") === "word/numbering.xml",
+    );
+    if (!part) {
+      const xml =
+        `<w:numbering xmlns:w="${w_ns}">` +
+        `<w:abstractNum w:abstractNumId="0">` +
+        `<w:multiLevelType w:val="singleLevel"/>` +
+        bullet_lvl_xml +
+        `</w:abstractNum>` +
+        `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>` +
+        `</w:numbering>`;
+      try {
+        part = pkg.addPart(
+          "/word/numbering.xml",
+          RedlineEngine._NUMBERING_CT,
+          xml,
+        );
+        this.doc.relateTo(part, RedlineEngine._NUMBERING_RT);
+      } catch (e) {
+        console.error("Failed to create word/numbering.xml", e);
+        return null;
+      }
+      delete pkg._adeu_numbering_cache;
+      return "1";
+    }
+
+    const root = part._element as Element;
+    const abstracts = findAllDescendants(root, "w:abstractNum");
+    const nums = findAllDescendants(root, "w:num");
+
+    let bullet_abstract: string | null = null;
+    for (const abs of abstracts) {
+      const a_id = abs.getAttribute("w:abstractNumId");
+      if (a_id === null) continue;
+      for (const lvl of findAllDescendants(abs, "w:lvl")) {
+        if ((lvl.getAttribute("w:ilvl") || "0") !== "0") continue;
+        const fmt = findChild(lvl, "w:numFmt");
+        if (fmt && fmt.getAttribute("w:val") === "bullet") {
+          bullet_abstract = a_id;
+        }
+        break;
+      }
+      if (bullet_abstract !== null) break;
+    }
+
+    let max_num_id = 0;
+    for (const num of nums) {
+      const nid = parseInt(num.getAttribute("w:numId") || "0", 10);
+      if (!isNaN(nid) && nid > max_num_id) max_num_id = nid;
+    }
+
+    const xmlDoc = root.ownerDocument!;
+    if (bullet_abstract !== null) {
+      for (const num of nums) {
+        const ref = findChild(num, "w:abstractNumId");
+        if (ref && ref.getAttribute("w:val") === bullet_abstract) {
+          const nid = num.getAttribute("w:numId");
+          if (nid && nid !== "0") return nid;
+        }
+      }
+      // A bullet abstractNum exists but nothing references it: mint a num.
+      const num = xmlDoc.createElement("w:num");
+      num.setAttribute("w:numId", String(max_num_id + 1));
+      const ref = xmlDoc.createElement("w:abstractNumId");
+      ref.setAttribute("w:val", bullet_abstract);
+      num.appendChild(ref);
+      root.appendChild(num);
+      delete pkg._adeu_numbering_cache;
+      return String(max_num_id + 1);
+    }
+
+    // No bullet definition at all: add abstractNum + num. abstractNum
+    // elements must precede w:num elements in numbering.xml.
+    let max_abs_id = -1;
+    for (const abs of abstracts) {
+      const aid = parseInt(abs.getAttribute("w:abstractNumId") || "-1", 10);
+      if (!isNaN(aid) && aid > max_abs_id) max_abs_id = aid;
+    }
+    const abstract = xmlDoc.createElement("w:abstractNum");
+    abstract.setAttribute("w:abstractNumId", String(max_abs_id + 1));
+    const mlt = xmlDoc.createElement("w:multiLevelType");
+    mlt.setAttribute("w:val", "singleLevel");
+    abstract.appendChild(mlt);
+    const lvl = xmlDoc.createElement("w:lvl");
+    lvl.setAttribute("w:ilvl", "0");
+    const start = xmlDoc.createElement("w:start");
+    start.setAttribute("w:val", "1");
+    lvl.appendChild(start);
+    const numFmt = xmlDoc.createElement("w:numFmt");
+    numFmt.setAttribute("w:val", "bullet");
+    lvl.appendChild(numFmt);
+    const lvlText = xmlDoc.createElement("w:lvlText");
+    lvlText.setAttribute("w:val", "");
+    lvl.appendChild(lvlText);
+    const lvlJc = xmlDoc.createElement("w:lvlJc");
+    lvlJc.setAttribute("w:val", "left");
+    lvl.appendChild(lvlJc);
+    const lvl_pPr = xmlDoc.createElement("w:pPr");
+    const ind = xmlDoc.createElement("w:ind");
+    ind.setAttribute("w:left", "720");
+    ind.setAttribute("w:hanging", "360");
+    lvl_pPr.appendChild(ind);
+    lvl.appendChild(lvl_pPr);
+    const lvl_rPr = xmlDoc.createElement("w:rPr");
+    const rFonts = xmlDoc.createElement("w:rFonts");
+    rFonts.setAttribute("w:ascii", "Symbol");
+    rFonts.setAttribute("w:hAnsi", "Symbol");
+    rFonts.setAttribute("w:hint", "default");
+    lvl_rPr.appendChild(rFonts);
+    lvl.appendChild(lvl_rPr);
+    abstract.appendChild(lvl);
+
+    const first_num = nums.find((n) => n.parentNode === root) || null;
+    if (first_num) root.insertBefore(abstract, first_num);
+    else root.appendChild(abstract);
+
+    const num = xmlDoc.createElement("w:num");
+    num.setAttribute("w:numId", String(max_num_id + 1));
+    const ref = xmlDoc.createElement("w:abstractNumId");
+    ref.setAttribute("w:val", String(max_abs_id + 1));
+    num.appendChild(ref);
+    root.appendChild(num);
+    delete pkg._adeu_numbering_cache;
+    return String(max_num_id + 1);
   }
 
   private _anchor_reply_comment(parent_id: string, new_id: string) {
@@ -2239,12 +2619,12 @@ export class RedlineEngine {
         );
         continue;
       }
-      if (!edit.target_text) continue;
       // Caller-pinned indexes (e.g. generate_edits_from_text output) resolve
       // by position, not content: ambiguity / not-found checks are meaningless
       // for them and false-positive whenever the target coincidentally matches
       // unrelated text (a comment timestamp, an earlier redline). The
-      // string-shape checks above still apply.
+      // string-shape checks above still apply. Checked BEFORE the empty-target
+      // rejection below: pinned pure insertions legitimately carry no target.
       if (
         (edit._match_start_index !== undefined &&
           edit._match_start_index !== null) ||
@@ -2252,6 +2632,35 @@ export class RedlineEngine {
           edit._resolved_start_idx !== null)
       )
         continue;
+      // QA 2026-07-23 F2: a text-anchored edit with an empty (or
+      // whitespace-only) anchor can never resolve — reject it up front so the
+      // transactional contract applies, instead of "skipping" it at apply
+      // time while the rest of the batch saves.
+      if (
+        edit.target_text === undefined ||
+        edit.target_text === null ||
+        !String(edit.target_text).trim()
+      ) {
+        if (edit.type === "insert_row") {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: insert_row requires target_text (text inside an ` +
+              "existing row to anchor on) and cells (the new row's cell values).",
+          );
+        } else if (edit.type === "delete_row") {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: delete_row requires target_text (text inside ` +
+              "the row to delete).",
+          );
+        } else {
+          // Wording mirrors the Python engine exactly.
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: target_text is empty. Pure insertions are expressed as a ` +
+              "replacement: put the text immediately around the insertion point in target_text " +
+              "and repeat it (plus the new text) in new_text.",
+          );
+        }
+        continue;
+      }
 
       const is_regex = (edit as any).regex || false;
       const match_mode = (edit as any).match_mode || "strict";
@@ -2724,7 +3133,7 @@ export class RedlineEngine {
           );
           continue;
         }
-        const reply_key = `${target_id} ${String(action.text).trim()}`;
+        const reply_key = target_id + '\x00' + String(action.text).trim();
         if (seen_replies.has(reply_key)) {
           errors.push(
             `- Action ${i + 1} Failed: duplicate reply — this batch already replies to ` +
@@ -2785,7 +3194,17 @@ export class RedlineEngine {
         const all_del = findAllDescendants(this.doc.element, "w:del").filter(
           (n) => n.getAttribute("w:id") === target_id,
         );
-        if (all_ins.length === 0 && all_del.length === 0) {
+        // Tracked paragraph restyles (w:pPrChange) are resolvable revisions
+        // too (QA 2026-07-23 F1a).
+        const all_ppc = findAllDescendants(
+          this.doc.element,
+          "w:pPrChange",
+        ).filter((n) => n.getAttribute("w:id") === target_id);
+        if (
+          all_ins.length === 0 &&
+          all_del.length === 0 &&
+          all_ppc.length === 0
+        ) {
           errors.push(
             this._action_not_found_error(action.target_id, type, `- Action ${i + 1} Failed:`),
           );
@@ -2979,10 +3398,12 @@ export class RedlineEngine {
 
       if (dry_run_mode) {
         const reports_by_input: any[] = new Array(edits.length);
-        // Indexes that failed VALIDATION (not runtime skips): if any exist,
+        // Indexes that failed — validation OR apply-stage (QA 2026-07-23 F2:
+        // apply-stage failures reject transactionally too): if any exist,
         // the real run rejects the whole batch, so the dry-run report must
         // not claim any edit "applied" (transactional parity with Python).
-        const validation_failed_idx = new Set<number>();
+        const failed_idx = new Set<number>();
+        const applied_entries: Array<[number, any]> = [];
         for (const { edit, i } of ordered_edits) {
           let single_errors: string[];
           try {
@@ -2998,7 +3419,7 @@ export class RedlineEngine {
               const hint = sequential_context_hint(applied_edits);
               single_errors = single_errors.map((err) => err + hint);
             }
-            validation_failed_idx.add(i);
+            failed_idx.add(i);
             skipped_edits++;
             // Only surface the punctuation-anchor warning when the edit actually
             // failed. A clean apply already returns the redline preview, so the
@@ -3013,6 +3434,7 @@ export class RedlineEngine {
               type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
+              comment: (edit as any).comment ?? null,
               warning: warning,
               error: single_errors.join("\n"),
               critic_markup: null,
@@ -3021,18 +3443,23 @@ export class RedlineEngine {
             continue;
           }
           const res = this.apply_edits([edit], page_offsets);
-          if ((edit as any)._applied_status) {
+          if (
+            (edit as any)._applied_status &&
+            !(edit as any)._any_sub_failure
+          ) {
             applied_edits++;
-            const previews = this._build_edit_context_previews(edit);
+            applied_entries.push([i, edit]);
             reports_by_input[i] = {
               status: "applied",
               type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
+              comment: (edit as any).comment ?? null,
               warning: null,
               error: null,
-              critic_markup: previews[0],
-              clean_text: previews[1],
+              // Filled from the post-apply projections after the loop.
+              critic_markup: null,
+              clean_text: null,
               pages: (edit as any)._pages || [],
               heading_path: (edit as any)._heading_path || "",
               occurrences_modified: (edit as any)._occurrences_modified || 0,
@@ -3041,6 +3468,7 @@ export class RedlineEngine {
             this.mapper = new DocumentMapper(this.doc);
             this.clean_mapper = null;
           } else {
+            failed_idx.add(i);
             skipped_edits++;
             const error_msg =
               this.skipped_details.length > 0
@@ -3054,6 +3482,7 @@ export class RedlineEngine {
               type: (edit as any).type || "modify",
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
+              comment: (edit as any).comment ?? null,
               warning: warning,
               error: error_msg,
               critic_markup: null,
@@ -3061,22 +3490,32 @@ export class RedlineEngine {
             };
           }
         }
-        if (validation_failed_idx.size > 0) {
+        if (failed_idx.size === 0) {
+          // Previews slice the ACTUAL post-apply projections (F6). Built
+          // after the loop so pending markup from every batch edit is
+          // visible, mirroring the wet run's report pass.
+          for (const [i, edit] of applied_entries) {
+            const previews = this._build_edit_context_previews(edit);
+            reports_by_input[i].critic_markup = previews[0];
+            reports_by_input[i].clean_text = previews[1];
+          }
+        } else {
           // Dry-run mirrors the real run's transactional rejection: no edit
           // will be applied by the real run, so none may be reported as
-          // applied here. Edits that only failed at runtime keep their own
-          // error; edits that would have applied get the transactional note.
+          // applied here. Edits that failed keep their own error; edits that
+          // would have applied get the transactional note.
           applied_edits = 0;
           skipped_edits = edits.length;
           for (let i = 0; i < reports_by_input.length; i++) {
             const report = reports_by_input[i];
-            if (!report || validation_failed_idx.has(i)) continue;
+            if (!report || failed_idx.has(i)) continue;
             if (report.status === "applied") {
               reports_by_input[i] = {
                 status: "failed",
                 type: report.type || "modify",
                 target_text: report.target_text,
                 new_text: report.new_text,
+                comment: report.comment ?? null,
                 warning: null,
                 error: TRANSACTIONAL_NOT_APPLIED_ERROR,
                 critic_markup: null,
@@ -3110,11 +3549,29 @@ export class RedlineEngine {
               sequential_errors.push(...single_errors);
             } else {
               this.apply_edits([edit], page_offsets);
-              if ((edit as any)._applied_status) {
+              if (
+                (edit as any)._applied_status &&
+                !(edit as any)._any_sub_failure
+              ) {
                 applied_so_far++;
+                this.mapper = new DocumentMapper(this.doc);
+                this.clean_mapper = null;
+              } else {
+                // QA 2026-07-23 F2: an APPLY-stage failure ("Failed to locate
+                // row target", "Failed to apply edit targeting", any skip)
+                // rejects the batch through the SAME transactional path as a
+                // validation failure — never a "skipped" edit in a saved
+                // file. Stop here: later edits would validate against the
+                // failed edit's partial mutations.
+                let msg =
+                  (edit as any)._error_msg ||
+                  `- Edit ${i + 1} Failed: Failed to apply edit.`;
+                if (applied_so_far > 0) {
+                  msg += sequential_context_hint(applied_so_far);
+                }
+                sequential_errors.push(msg);
+                break;
               }
-              this.mapper = new DocumentMapper(this.doc);
-              this.clean_mapper = null;
             }
           }
           if (sequential_errors.length > 0) {
@@ -3129,7 +3586,10 @@ export class RedlineEngine {
           throw err;
         }
 
-        applied_edits = edits.filter((e) => (e as any)._applied_status).length;
+        applied_edits = edits.filter(
+          (e) =>
+            (e as any)._applied_status && !(e as any)._any_sub_failure,
+        ).length;
         skipped_edits = edits.length - applied_edits;
 
         for (const edit of edits) {
@@ -3154,6 +3614,10 @@ export class RedlineEngine {
             type: (edit as any).type || "modify",
             target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
             new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
+            // Every per-edit report carries the edit's comment so a dry-run
+            // (or any report consumer) can verify the annotation that WILL
+            // be attached (QA 2026-07-23 F7).
+            comment: (edit as any).comment ?? null,
             warning: warning,
             error: error_msg,
             critic_markup: critic_markup,
@@ -3191,6 +3655,32 @@ export class RedlineEngine {
     };
   }
 
+  /**
+   * Which revision ids a resolved modify sub-edit will mint: [needs_del,
+   * needs_ins]. Mirrors the op-resolution fallback in
+   * _apply_single_edit_indexed so ids can be RESERVED in ascending document
+   * order before the descending apply sweep (QA 2026-07-23 F20).
+   */
+  private static _ids_needed(edit: any): [boolean, boolean] {
+    let op = edit._internal_op;
+    if (op === undefined || op === null) {
+      if (!edit.target_text && edit.new_text) op = "INSERTION";
+      else if (edit.target_text && !edit.new_text) op = "DELETION";
+      else op = "MODIFICATION";
+    }
+    if (op === "STYLE_ONLY") return [false, false];
+    if (op === "STYLE_AND_TEXT") {
+      if (edit.target_text && edit.new_text) op = "MODIFICATION";
+      else if (!edit.target_text && edit.new_text) op = "INSERTION";
+      else if (edit.target_text && !edit.new_text) op = "DELETION";
+      else op = "COMMENT_ONLY";
+    }
+    return [
+      op === "DELETION" || op === "MODIFICATION",
+      op === "INSERTION" || op === "MODIFICATION",
+    ];
+  }
+
   public apply_edits(
     edits: any[],
     page_offsets: number[] = [],
@@ -3212,6 +3702,14 @@ export class RedlineEngine {
       edit._applied_status = false;
       edit._error_msg = null;
       edit._any_sub_failure = false;
+      // Revision/comment ids this logical edit mints — the post-apply report
+      // previews locate the edit's actual spans through them (F6). Reset per
+      // apply so a re-used edit object never reports a stale run's ids.
+      edit._minted_change_ids = [];
+      edit._minted_comment_ids = [];
+      edit._reserved_del_id = null;
+      edit._reserved_ins_id = null;
+      edit._reserved_row_id = null;
     }
 
     for (const edit of edits) {
@@ -3367,6 +3865,42 @@ export class RedlineEngine {
         (b[0]._resolved_start_idx || 0) - (a[0]._resolved_start_idx || 0),
     );
 
+    // QA 2026-07-23 F20: reserve revision ids in ASCENDING document order
+    // BEFORE the descending bottom-up apply sweep. Ids used to be minted at
+    // DOM-mutation time inside the sweep, so a match_mode="all" fan-out
+    // numbered its occurrences 5/6, 3/4, 1/2 top-to-bottom. Reservation keeps
+    // the del-before-ins convention within each occurrence (a single modify
+    // still yields del id 1, ins id 2).
+    {
+      const ascending = [...resolved_edits].sort(
+        (a, b) =>
+          (a[0]._resolved_start_idx || 0) - (b[0]._resolved_start_idx || 0),
+      );
+      for (const [res_edit] of ascending) {
+        const owner = res_edit._parent_edit_ref || res_edit;
+        if (!Array.isArray(owner._minted_change_ids)) {
+          owner._minted_change_ids = [];
+        }
+        if (res_edit.type === "insert_row" || res_edit.type === "delete_row") {
+          if (res_edit._reserved_row_id == null) {
+            res_edit._reserved_row_id = this._getNextId();
+            owner._minted_change_ids.push(res_edit._reserved_row_id);
+          }
+          continue;
+        }
+        if (res_edit.type !== "modify") continue;
+        const [needs_del, needs_ins] = RedlineEngine._ids_needed(res_edit);
+        if (needs_del && res_edit._reserved_del_id == null) {
+          res_edit._reserved_del_id = this._getNextId();
+          owner._minted_change_ids.push(res_edit._reserved_del_id);
+        }
+        if (needs_ins && res_edit._reserved_ins_id == null) {
+          res_edit._reserved_ins_id = this._getNextId();
+          owner._minted_change_ids.push(res_edit._reserved_ins_id);
+        }
+      }
+    }
+
     // Snapshot preview context now, while every resolved offset still refers
     // to the untouched document. The sweep below mutates the DOM and rebuilds
     // the map, shifting offsets and injecting tracked-change markup —
@@ -3416,6 +3950,12 @@ export class RedlineEngine {
       }
 
       let success = false;
+      // Bracket the apply with id counters so the report previews can locate
+      // exactly this logical edit's revisions/comments in the post-apply
+      // projection (F6) — including auxiliary ids minted mid-apply (paragraph
+      // merge marks) beyond the pre-reserved del/ins pair.
+      const id_before = this.current_id;
+      const comment_next_before = this.comments_manager.nextId;
       if (edit.type === "modify") {
         // Never rebuild the map inside the sweep: sub-edits apply in strictly
         // descending offset order, and every DOM mutation (run splits, w:del
@@ -3426,6 +3966,25 @@ export class RedlineEngine {
         success = this._apply_single_edit_indexed(edit, orig_new, false);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         success = this._apply_table_edit(edit, false);
+      }
+      if (success) {
+        const owner = edit._parent_edit_ref || edit;
+        if (!Array.isArray(owner._minted_change_ids)) {
+          owner._minted_change_ids = [];
+        }
+        for (let n = id_before + 1; n <= this.current_id; n++) {
+          owner._minted_change_ids.push(String(n));
+        }
+        if (!Array.isArray(owner._minted_comment_ids)) {
+          owner._minted_comment_ids = [];
+        }
+        for (
+          let n = comment_next_before;
+          n < this.comments_manager.nextId;
+          n++
+        ) {
+          owner._minted_comment_ids.push(String(n));
+        }
       }
 
       if (success) {
@@ -3547,6 +4106,15 @@ export class RedlineEngine {
    * the Python engine's _get_paired_nodes: comment range markers and
    * rPr/pPr are transparent; a different author or any other element breaks
    * the group.
+   *
+   * QA 2026-07-23 F1: the walk additionally continues ACROSS a paragraph
+   * boundary when that boundary was introduced by this very replacement —
+   * i.e. the neighbouring paragraph's tracked paragraph-mark <w:ins>
+   * (pPr/rPr/w:ins) carries the same author and an id already in the group.
+   * A multi-paragraph insertion spreads one insert id across several
+   * paragraphs; without the crossing, only the sibling-contiguous portion of
+   * the replacement resolved. Ordinary sibling pairing is unchanged: a
+   * boundary with no matching tracked mark still breaks the group.
    */
   private _get_paired_nodes(node: Element): Element[] {
     const pairs: Element[] = [];
@@ -3559,10 +4127,63 @@ export class RedlineEngine {
       "w:pPr",
     ]);
 
+    const group_ids = new Set<string>();
+    const add_id = (el: Element) => {
+      const id = el.getAttribute("w:id");
+      if (id) group_ids.add(id);
+    };
+    add_id(node);
+
+    const paragraph_of = (el: Element): Element | null => {
+      let cur: Element | null = el;
+      while (cur && cur.tagName !== "w:p") {
+        cur = cur.parentNode as Element | null;
+      }
+      return cur;
+    };
+
+    // The tracked paragraph-mark insertion of `p`, if any.
+    const mark_of = (p: Element): Element | null => {
+      const pPr = findChild(p, "w:pPr");
+      const rPr = pPr ? findChild(pPr, "w:rPr") : null;
+      return rPr ? findChild(rPr, "w:ins") : null;
+    };
+
+    // True when the boundary INTO `p` (its own paragraph mark) was inserted
+    // by this same replacement: same author, id already in the group.
+    const boundary_is_ours = (p: Element): boolean => {
+      const mark = mark_of(p);
+      if (!mark) return false;
+      if (mark.getAttribute("w:author") !== author) return false;
+      const mid = mark.getAttribute("w:id");
+      return mid !== null && group_ids.has(mid);
+    };
+
     const walk = (start: Element, dir: "next" | "prev") => {
+      let host: Element | null = paragraph_of(start);
       let cur: Node | null =
         dir === "next" ? start.nextSibling : start.previousSibling;
-      while (cur) {
+      while (true) {
+        if (!cur) {
+          // Ran out of siblings: cross the paragraph boundary only when the
+          // boundary itself is tracked with a group id.
+          if (!host) break;
+          if (dir === "next") {
+            let np = getNextElement(host);
+            while (np && np.tagName !== "w:p") np = getNextElement(np);
+            if (!np || !boundary_is_ours(np)) break;
+            host = np;
+            cur = np.firstChild;
+          } else {
+            if (!boundary_is_ours(host)) break;
+            let pp = getPreviousElement(host);
+            while (pp && pp.tagName !== "w:p") pp = getPreviousElement(pp);
+            if (!pp) break;
+            host = pp;
+            cur = pp.lastChild;
+          }
+          continue;
+        }
         if (cur.nodeType !== 1) {
           cur = dir === "next" ? cur.nextSibling : cur.previousSibling;
           continue;
@@ -3577,6 +4198,7 @@ export class RedlineEngine {
           el.getAttribute("w:author") === author
         ) {
           pairs.push(el);
+          add_id(el);
           cur = dir === "next" ? cur.nextSibling : cur.previousSibling;
           continue;
         }
@@ -3600,7 +4222,15 @@ export class RedlineEngine {
       ...findAllDescendants(this.doc.element, "w:del"),
     ].filter((n) => n.getAttribute("w:id") === target_id);
     const group = new Set<string>();
-    if (nodes.length === 0) return group;
+    if (nodes.length === 0) {
+      // A tracked paragraph restyle (w:pPrChange) is a revision of its own
+      // (QA 2026-07-23 F1a) — resolvable even with no ins/del elements.
+      const has_ppc = findAllDescendants(this.doc.element, "w:pPrChange").some(
+        (n) => n.getAttribute("w:id") === target_id,
+      );
+      if (has_ppc) group.add(target_id);
+      return group;
+    }
     group.add(target_id);
     for (const node of nodes) {
       for (const paired of this._get_paired_nodes(node)) {
@@ -3665,10 +4295,11 @@ export class RedlineEngine {
    * is counted in `already_resolved` instead — never as applied
    * (QA 2026-07-19 ADEU-QA-004).
    */
-  /** Distinct tracked-change ids (w:id on w:ins/w:del) in the main story. */
+  /** Distinct tracked-change ids (w:id on w:ins/w:del/w:pPrChange) in the
+   *  main story. */
   private _existing_change_ids(): string[] {
     const ids = new Set<string>();
-    for (const tag of ["w:ins", "w:del"]) {
+    for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
       for (const n of findAllDescendants(this.doc.element, tag)) {
         const id = n.getAttribute("w:id");
         if (id) ids.add(id);
@@ -3726,8 +4357,8 @@ export class RedlineEngine {
     // Bare numeric id, regardless of which prefix (or none) the caller used.
     const bare = raw_id.replace(/^(Chg:|Com:)/, "");
     const find_hint =
-      "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current " +
-      "change (Chg:) and comment (Com:) ids.";
+      "Call `read_docx` on the document again to list the current change (Chg:) " +
+      "and comment (Com:) ids — ids shift between document states.";
 
     if (type === "reply") {
       const echo = has_prefix ? raw_id : `Com:${bare}`;
@@ -3832,8 +4463,14 @@ export class RedlineEngine {
         (n) => n.getAttribute("w:id") === target_id,
       );
       const all_nodes = [...all_ins, ...all_del];
+      // Tracked paragraph restyles named directly (STYLE_ONLY edits mint a
+      // pPrChange with its own id, QA 2026-07-23 F1a).
+      const direct_ppc = findAllDescendants(
+        this.doc.element,
+        "w:pPrChange",
+      ).filter((n) => n.getAttribute("w:id") === target_id);
 
-      if (all_nodes.length === 0) {
+      if (all_nodes.length === 0 && direct_ppc.length === 0) {
         skipped++;
         this.skipped_details.push(
           this._action_not_found_error(action.target_id, type),
@@ -3849,7 +4486,11 @@ export class RedlineEngine {
       // itself mints one id across every element of a single logical edit —
       // so authorship is the discriminator.
       const dup_authors = Array.from(
-        new Set(all_nodes.map((n) => n.getAttribute("w:author") || "Unknown")),
+        new Set(
+          [...all_nodes, ...direct_ppc].map(
+            (n) => n.getAttribute("w:author") || "Unknown",
+          ),
+        ),
       ).sort();
       if (dup_authors.length > 1) {
         skipped++;
@@ -3870,14 +4511,40 @@ export class RedlineEngine {
       // long-standing behavior. Without this, accepting the deletion side
       // left the paired insertion pending (engine divergence,
       // QA 2026-07-19 ADEU-QA-004).
-      const group_nodes = new Set<Element>(all_nodes);
+      //
+      // QA 2026-07-23 F1: the group is resolved by ID, document-wide. A
+      // multi-paragraph replacement spreads ONE insert id across several
+      // paragraphs (content <w:ins> elements plus tracked paragraph marks),
+      // and the old node-set walk unwound only the sibling-contiguous
+      // portion, leaving orphaned insertions pending — including a duplicate
+      // of the text a reject had just restored. Collect the group's ids (the
+      // named id plus its paired opposite side), then act on EVERY revision
+      // element carrying any of them.
+      const group_ids = new Set<string>([target_id]);
       for (const node of all_nodes) {
         for (const paired of this._get_paired_nodes(node)) {
-          group_nodes.add(paired);
+          const pid = paired.getAttribute("w:id");
+          if (pid) group_ids.add(pid);
         }
       }
+      const group_nodes: Element[] = [];
+      for (const tag of ["w:ins", "w:del"]) {
+        for (const el of findAllDescendants(this.doc.element, tag)) {
+          const id = el.getAttribute("w:id");
+          if (id && group_ids.has(id)) group_nodes.push(el);
+        }
+      }
+      // Tracked paragraph restyles resolve with their group (F1a): accept
+      // strips the pPrChange record, reject restores the original pPr.
+      const group_ppc = findAllDescendants(
+        this.doc.element,
+        "w:pPrChange",
+      ).filter((el) => {
+        const id = el.getAttribute("w:id");
+        return id !== null && group_ids.has(id);
+      });
       const resolved_now = new Set<string>();
-      for (const node of group_nodes) {
+      for (const node of [...group_nodes, ...group_ppc]) {
         const rid = node.getAttribute("w:id");
         if (rid) resolved_now.add(rid);
       }
@@ -3888,12 +4555,22 @@ export class RedlineEngine {
       // "1 applied" (QA 2026-07-22 bug #1).
       const comments_before = new Set(this._existing_comment_ids());
 
+      // Paragraphs whose INSERTED paragraph mark was rejected: the paragraph
+      // break never existed, so each merges back into the paragraph before it
+      // (bottom-up, after the node loop).
+      const rejected_mark_hosts: Element[] = [];
+
       for (const node of group_nodes) {
         const is_ins = node.tagName === "w:ins";
         const parent_tag = node.parentNode
           ? (node.parentNode as Element).tagName
           : "";
         const is_trPr = parent_tag === "w:trPr";
+        const is_paragraph_mark =
+          is_ins &&
+          parent_tag === "w:rPr" &&
+          !!node.parentNode?.parentNode &&
+          (node.parentNode.parentNode as Element).tagName === "w:pPr";
 
         if (type === "accept") {
           if (is_ins) {
@@ -3916,6 +4593,19 @@ export class RedlineEngine {
           }
         } else if (type === "reject") {
           if (is_ins) {
+            if (is_paragraph_mark) {
+              // Rejecting an inserted paragraph mark removes the break the
+              // insertion introduced (QA 2026-07-23 F1): drop the mark now,
+              // merge the paragraph into its predecessor below.
+              let host: Element | null = node.parentNode as Element; // w:rPr
+              node.parentNode?.removeChild(node);
+              host = host?.parentNode as Element | null; // w:pPr
+              host = host?.parentNode as Element | null; // w:p
+              if (host && host.tagName === "w:p") {
+                rejected_mark_hosts.push(host);
+              }
+              continue;
+            }
             this._clean_wrapping_comments(node);
             this._delete_comments_in_element(node);
             if (is_trPr) {
@@ -3943,6 +4633,35 @@ export class RedlineEngine {
           }
         }
       }
+
+      // Merge rejected-mark paragraphs bottom-up so sibling pointers stay
+      // valid while several consecutive inserted paragraphs unwind.
+      for (const host of rejected_mark_hosts.reverse()) {
+        if (!host.parentNode) continue;
+        let prev = getPreviousElement(host);
+        while (prev && prev.tagName !== "w:p") prev = getPreviousElement(prev);
+        if (!prev) continue; // document-leading paragraph: keep the container
+        for (const child of Array.from(host.childNodes)) {
+          if (
+            child.nodeType === 1 &&
+            (child as Element).tagName === "w:pPr"
+          ) {
+            continue;
+          }
+          prev.appendChild(child);
+        }
+        host.parentNode.removeChild(host);
+      }
+
+      for (const ppc of group_ppc) {
+        if (type === "accept") {
+          // The new style becomes permanent; drop the revision record.
+          ppc.parentNode?.removeChild(ppc);
+        } else {
+          this._revert_ppr_change(ppc);
+        }
+      }
+
       for (const rid of resolved_now) {
         resolved_history.set(rid, type);
       }
@@ -3996,19 +4715,25 @@ export class RedlineEngine {
     while (tr && tr.tagName !== "w:tr") tr = tr.parentNode as Element;
     if (!tr) return false;
 
+    // Reserved in ascending document order by apply_edits (F20); direct
+    // callers still mint lazily.
+    const row_rev_id =
+      (edit._reserved_row_id ?? null) !== null
+        ? String(edit._reserved_row_id)
+        : null;
     if (edit.type === "delete_row") {
       let trPr = findChild(tr, "w:trPr");
       if (!trPr) {
         trPr = tr.ownerDocument!.createElement("w:trPr");
         tr.insertBefore(trPr, tr.firstChild);
       }
-      trPr.appendChild(this._create_track_change_tag("w:del"));
+      trPr.appendChild(this._create_track_change_tag("w:del", "", row_rev_id));
       return true;
     } else if (edit.type === "insert_row") {
       const new_tr = tr.ownerDocument!.createElement("w:tr");
       const trPr = tr.ownerDocument!.createElement("w:trPr");
       new_tr.appendChild(trPr);
-      trPr.appendChild(this._create_track_change_tag("w:ins"));
+      trPr.appendChild(this._create_track_change_tag("w:ins", "", row_rev_id));
       // The new row must carry exactly as many cells as the anchor row has
       // columns: pad missing cells with empty strings and drop extras
       // (validation already rejects overfilled batches upfront, QA M3) so a
@@ -4512,6 +5237,12 @@ export class RedlineEngine {
     // fuzzy-matched onto styled text never receive marker hunks at all.
     const suppress_emphasis = this._edit_declares_emphasis(edit);
 
+    // Restyling an EXISTING paragraph is deferred for STYLE_AND_TEXT until
+    // the replacement's revision ids exist: the tracked w:pPrChange shares
+    // the insertion's id so accept/reject resolve the restyle together with
+    // the text change (QA 2026-07-23 F1a).
+    let deferred_restyle_el: Element | null = null;
+
     if (op === "STYLE_ONLY" || op === "STYLE_AND_TEXT") {
       const [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
         start_idx,
@@ -4529,7 +5260,16 @@ export class RedlineEngine {
       }
 
       if (target_para_el && edit._new_style) {
-        this._set_paragraph_style(target_para_el, edit._new_style);
+        if (op === "STYLE_ONLY") {
+          // A pure restyle is a formatting revision of its own.
+          this._set_paragraph_style(
+            target_para_el,
+            edit._new_style,
+            this._getNextId(),
+          );
+        } else {
+          deferred_restyle_el = target_para_el;
+        }
       }
 
       if (op === "STYLE_ONLY") {
@@ -4594,12 +5334,27 @@ export class RedlineEngine {
       }
     }
 
+    // Prefer the ids reserved in ascending document order by apply_edits
+    // (QA 2026-07-23 F20); direct callers that bypass reservation still mint
+    // here.
     const del_id = ["DELETION", "MODIFICATION"].includes(op)
-      ? this._getNextId()
+      ? ((edit._reserved_del_id ?? null) !== null
+          ? String(edit._reserved_del_id)
+          : this._getNextId())
       : null;
     const ins_id = ["INSERTION", "MODIFICATION"].includes(op)
-      ? this._getNextId()
+      ? ((edit._reserved_ins_id ?? null) !== null
+          ? String(edit._reserved_ins_id)
+          : this._getNextId())
       : null;
+
+    if (deferred_restyle_el && edit._new_style) {
+      this._set_paragraph_style(
+        deferred_restyle_el,
+        edit._new_style,
+        ins_id ?? del_id ?? this._getNextId(),
+      );
+    }
 
     if (op === "COMMENT_ONLY") {
       // Resolve the runs covering [start_idx, start_idx+length) and attach a

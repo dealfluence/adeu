@@ -134,6 +134,17 @@ class ModifyText(BaseModel):
     _preview_matched_text: Optional[str] = PrivateAttr(default=None)
     _preview_new_text: Optional[str] = PrivateAttr(default=None)
     _preview_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
+    # Revision ids reserved in ASCENDING document order before the engine's
+    # descending apply sweep, so a match_mode="all" fan-out numbers its
+    # occurrences first-to-last instead of bottom-up (F20, QA 2026-07-23).
+    _reserved_del_id: Optional[str] = PrivateAttr(default=None)
+    _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
+    # Every revision id this edit actually wrote into the document (fan-out
+    # sub-edits bubble theirs up to the parent). The report preview builder
+    # locates the edit's modified spans in the POST-apply raw projection by
+    # these ids, so previews show what the document really looks like
+    # (F6, QA 2026-07-23).
+    _used_revision_ids: list = PrivateAttr(default_factory=list)
 
 
 class AcceptChange(BaseModel):
@@ -212,6 +223,8 @@ class InsertTableRow(BaseModel):
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
+    # See ModifyText._reserved_ins_id (F20, QA 2026-07-23).
+    _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
 
 
 class DeleteTableRow(BaseModel):
@@ -248,6 +261,8 @@ class DeleteTableRow(BaseModel):
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
+    # See ModifyText._reserved_del_id (F20, QA 2026-07-23).
+    _reserved_del_id: Optional[str] = PrivateAttr(default=None)
 
 
 # Either structural row operation. Both fan out the same way under

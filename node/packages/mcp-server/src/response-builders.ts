@@ -21,6 +21,13 @@ export interface ToolResult {
 // the projection's italics markers always hug non-whitespace at a word edge).
 const STYLE_MARKER_RE = /\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])/g;
 
+// Characters the marker stripping must never consume: {#...} anchor tokens
+// ({#_RefN}, {#cell:...}) and literal underscore runs (form fill-ins like
+// [_________]). The word-edge `_` rules above would otherwise eat the
+// anchor's leading underscore, handing agents a nonexistent anchor
+// (QA 2026-07-23 F4).
+const PROTECTED_TOKEN_RE = /\{#[^}]+\}|_{3,}/g;
+
 /**
  * Renders `prefix **match** suffix` with the document's own bold/italic
  * projection markers stripped first, so the highlight cannot collide with
@@ -39,7 +46,20 @@ export function emphasizedSnippet(
   const b1 = prefix.length;
   const b2 = prefix.length + match.length;
   const keep = new Array<boolean>(region.length).fill(true);
+  const protected_idx = new Array<boolean>(region.length).fill(false);
+  for (const m of region.matchAll(PROTECTED_TOKEN_RE)) {
+    for (let i = m.index!; i < m.index! + m[0].length; i++)
+      protected_idx[i] = true;
+  }
   for (const m of region.matchAll(STYLE_MARKER_RE)) {
+    let overlaps_protected = false;
+    for (let i = m.index!; i < m.index! + m[0].length; i++) {
+      if (protected_idx[i]) {
+        overlaps_protected = true;
+        break;
+      }
+    }
+    if (overlaps_protected) continue;
     for (let i = m.index!; i < m.index! + m[0].length; i++) keep[i] = false;
   }
   let strippedPrefix = "";
@@ -477,7 +497,20 @@ export function build_search_response(
       if (m) {
         const level = m[1].length;
         if (level < current_level) {
+          // Clean-view semantics for the breadcrumb (QA 2026-07-23 F22b):
+          // a heading carrying a pending tracked change must not leak raw
+          // CriticMarkup into the Path. Deletions and comment bubbles are
+          // dropped, insertions/highlights unwrap to their text. Because a
+          // bubble's meta block spans lines, its opener can sit on this line
+          // with the closer beyond it — the unclosed forms run to line end,
+          // and orphaned closers from an opener on an earlier line are
+          // stripped too.
           let cleanHeading = m[2]
+            .replace(/\{--[\s\S]*?(?:--\}|$)/g, "")
+            .replace(/\{>>[\s\S]*?(?:<<\}|$)/g, "")
+            .replace(/\{\+\+([\s\S]*?)(?:\+\+\}|$)/g, "$1")
+            .replace(/\{==([\s\S]*?)(?:==\}|$)/g, "$1")
+            .replace(/\+\+\}|--\}|==\}|<<\}/g, "")
             .replace(/\*\*|__|[*_]/g, "")
             .replace(/\{#[^}]+\}/g, "")
             .trim();

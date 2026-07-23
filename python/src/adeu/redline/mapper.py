@@ -405,12 +405,17 @@ class DocumentMapper:
 
                 cells_processed += 1
 
+            # Change bubble SEPARATED from cell content, byte-identical to
+            # ingest._extract_table's rendering (QA 2026-07-23 F21a; Virtual
+            # Text contract).
             if ins is not None and not self.clean_view and not self.original_view:
-                suffix = f" |Chg:{ins.get(qn('w:id'))}++}}"
+                author = ins.get(qn("w:author")) or "Unknown"
+                suffix = f" ++}}{{>>[Chg:{ins.get(qn('w:id'))} insert] {author}<<}}"
                 self._add_virtual_text(suffix, current, None)
                 current += len(suffix)
             elif del_node is not None and not self.clean_view and not self.original_view:
-                suffix = f" |Chg:{del_node.get(qn('w:id'))}--}}"
+                author = del_node.get(qn("w:author")) or "Unknown"
+                suffix = f" --}}{{>>[Chg:{del_node.get(qn('w:id'))} delete] {author}<<}}"
                 self._add_virtual_text(suffix, current, None)
                 current += len(suffix)
 

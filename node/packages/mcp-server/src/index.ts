@@ -11,7 +11,6 @@ import {
 import fs from "node:fs";
 import {
   identifyEngine,
-  extractTextFromBuffer,
   _extractTextFromDoc,
   DocumentObject,
   RedlineEngine,
@@ -102,9 +101,51 @@ function readFileBytesOrThrow(filePath: string): Buffer {
       } catch {
         // Directory unreadable — omit the listing rather than fail.
       }
-      throw new Error(`file not found: ${basename(filePath)};${available}`);
+      // Echo the path AS GIVEN — dropping the directory ("file not found:
+      // alice_copy.docx" for qa_sandbox/alice_copy.docx) hid which path was
+      // actually tried, and relative paths resolve against the server's cwd,
+      // not the caller's (QA 2026-07-23 F16).
+      throw new Error(
+        `file not found: ${filePath};${available} Provide an absolute path — the server cannot resolve relative paths.`,
+      );
     }
     throw err;
+  }
+}
+
+/**
+ * Overwrite disclosure for every tool that writes a document (QA 2026-07-23
+ * F17): repeated default-named runs clobber <name>_processed.docx and
+ * output_path == input silently replaces the source. `existedBefore` must be
+ * captured BEFORE the write. Returns "" when nothing pre-existed.
+ */
+function overwriteNote(
+  outPath: string,
+  inputPath: string,
+  existedBefore: boolean,
+): string {
+  if (!existedBefore) return "";
+  if (resolve(outPath) === resolve(inputPath)) {
+    return `\nNote: the source document at ${outPath} was overwritten in place.`;
+  }
+  return `\nNote: replaced existing file ${outPath}.`;
+}
+
+/**
+ * Loads a DOCX, translating low-level container errors (fflate's bare
+ * "invalid zip data" for a text file named .docx, truncated archives, XML
+ * soup) into a diagnosis the caller can act on (QA 2026-07-23 F19).
+ */
+async function loadDocxOrThrow(
+  buf: Buffer,
+  filePath: string,
+): Promise<DocumentObject> {
+  try {
+    return await DocumentObject.load(buf);
+  } catch (err: any) {
+    throw new Error(
+      `'${filePath}' is not a valid .docx (Word) document: ${err?.message ?? err}`,
+    );
   }
 }
 
@@ -126,13 +167,23 @@ function getAssetContent(
 // --- Tool Description Constants ---
 const READ_DOCX_COMMON_DESC =
   "Reads a DOCX file. Returns text with inline CriticMarkup for Tracked Changes and Comments: {++inserted++}, {--deleted--}, {==highlighted==}{>>comment<<}. Set clean_view=True for the finalized 'Accepted' text without markup.\n\n";
+// `page` guidance lives HERE, not only on the parameter: real MCP clients
+// drop optional-parameter descriptions in transit, so the tool description is
+// the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
 const READ_DOCX_TAIL =
-  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.";
+  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n\n`page`: a positive integer (1-indexed, default 1) or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
+// BUDGET: real MCP clients truncate tool descriptions at ~2048 chars — the
+// tail (wherever it falls) is invisible to the model. COMMON + OPERATIONS +
+// the appended build tag must stay under that ceiling (QA 2026-07-23
+// client-compat test 1). The {#cell:} stability claim must be qualified in
+// the SAME paragraph (finalize/sanitize regenerates the anchors, QA F9), and
+// the row-op fields (`cells` etc.) must be named in prose because clients
+// strip the typed item schema to {} in transit (QA F10).
 const PROCESS_BATCH_COMMON_DESC =
-  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated and applied against the document state produced by the changes before it, so you may chain dependent edits within one batch (e.g. rename X to Y, then modify Y — the second edit must target Y, the text as it reads after the rename). Validation failures reject the whole batch transactionally: nothing is applied until every change resolves.\n\n";
+  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated and applied against the document state produced by the changes before it, so a later change may target text an earlier one introduced. Any validation failure rejects the whole batch transactionally — nothing is applied.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` must specify a `type`:\n1. 'modify': Search-and-replace. By default `target_text` must match uniquely (`match_mode`:'strict') — add surrounding context to disambiguate, or set `match_mode`:'first'/'all' to edit the first or every occurrence. Set `regex`:true to treat `target_text` as a regular expression (capture groups available in `new_text` as $1, $2…). `new_text` supports Markdown: '# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n   • EMPTY/FORM TABLE CELLS: a blank cell has no text to match. `read_docx` renders each cell with a trailing `{#cell:<id>}` anchor — to fill a blank cell, set `target_text` to that exact anchor (e.g. '{#cell:0000005E}') and put the value in `new_text`. Do NOT try to match the pipe layout ('Date |  |  |'); the pipes are display separators, not editable text.\n2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\nID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. Always call `read_docx` immediately before any accept/reject/reply — do not reuse IDs from earlier in the conversation. The `{#cell:<id>}` anchors are stable (Word-assigned) and safe to reuse across reads.\n\n`author_name` is used for attribution on all tracked changes and comments, in both disk and Live Word modes.";
+  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', the default) — add surrounding context, or set `match_mode`:'first'/'all'. Set `regex`:true to treat `target_text` as a regex (capture groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split; empty `new_text` deletes. Never write CriticMarkup ({++, {--, {>>) manually — use the `comment` field.\n   • EMPTY CELLS: a blank table cell has no text to match; `read_docx` renders every cell with a trailing `{#cell:<id>}` anchor — set `target_text` to that exact anchor and put the value in `new_text`. The pipes are display separators, not editable text.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row': add a table row — `target_text` anchors on an existing row's text, `cells` holds the new row's cell values (strings, left to right), `position` is 'above'/'below' (default below). 'delete_row': remove the row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between document states — always call `read_docx` immediately before accept/reject/reply; never reuse ids from earlier turns. `{#cell:<id>}` anchors are stable across reads and edits, but finalize_document/sanitize regenerates them — re-read after finalizing.\n\n`author_name` sets Track Changes attribution; it defaults to 'Adeu AI (TS)' when omitted.";
 
 const DIFF_DOCX_DESC =
   "Compares two DOCX files and returns a compact `@@ Word Patch @@` diff — Adeu's token-level, sub-word patch format — of their text content. Useful for analyzing differences between versions before editing.";
@@ -251,12 +302,23 @@ registerAppTool(
         .describe(
           "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms.",
         ),
+      // ONE published JSON type (string) — real MCP clients strip
+      // property-level anyOf/oneOf to {}, losing the type and docs entirely
+      // (QA 2026-07-23 client-compat test 2). Numbers still arrive at
+      // runtime and are coerced to their string form before validation; the
+      // operative guidance lives in the tool description because clients
+      // also drop optional-parameter descriptions.
       page: z
-        .union([z.number(), z.string()])
-        .optional()
-        .describe(
-          "Without `search_query`: 1-indexed document page to display (defaults to 1). With `search_query`: restricts matches to that document page (defaults to searching all pages; pass `page='all'` to be explicit). Note: pages are synthetic, length-based content chunks sized for LLM consumption — they do NOT correspond to printed Word pages or explicit page breaks.",
-        ),
+        .preprocess(
+          (v) =>
+            typeof v === "number" && Number.isFinite(v) ? String(v) : v,
+          z
+            .string()
+            .describe(
+              "Positive integer (1-indexed, defaults to 1) or 'all'. See the tool description for the full behavior per mode.",
+            ),
+        )
+        .optional(),
       outline_max_level: z.coerce
         .number()
         .default(2)
@@ -301,7 +363,7 @@ registerAppTool(
       const buf = readFileBytesOrThrow(file_path);
 
       if (mode === "outline") {
-        const doc = await DocumentObject.load(buf);
+        const doc = await loadDocxOrThrow(buf, file_path);
         const extract_res = _extractTextFromDoc(
           doc,
           clean_view,
@@ -322,7 +384,8 @@ registerAppTool(
         return res as any;
       }
 
-      const text = await extractTextFromBuffer(buf, clean_view);
+      const readDoc = await loadDocxOrThrow(buf, file_path);
+      const text = _extractTextFromDoc(readDoc, clean_view) as string;
       if (search_query !== undefined && search_query !== null) {
         // In search mode, undefined `page` means "search all document pages".
         const res = build_search_response(
@@ -457,6 +520,39 @@ const CHANGE_ITEM_SCHEMA = z
   })
   .passthrough();
 
+// Per-item repair at the schema boundary (AI_CONTEXT §6 "ONE changes
+// Parameter"): a stringified ITEM (the double-serialize client quirk) is
+// parsed back to its object, and recoverable payloads (missing `type`,
+// match_mode synonyms) are coerced BEFORE the typed item schema validates —
+// so repairs that used to happen only in the handler now survive the typed
+// enum checks too. UNPARSEABLE strings are smuggled through the object schema
+// under a marker key and unwrapped back to the raw string in the handler, so
+// the ENGINE remains the single authority for their error ("Invalid change
+// format… received a primitive string"). z.preprocess at the ITEM level
+// publishes the inner OBJECT schema — no anyOf, which real clients strip to
+// {} (QA 2026-07-23 client-compat test 2) — while `changes` itself stays a
+// plain REQUIRED array: a WHOLLY stringified payload still fails with a
+// retryable "expected array, received string".
+const RAW_STRING_ITEM_KEY = "__adeu_unparseable_item";
+const CHANGE_ITEM_WITH_REPAIR = z.preprocess((item) => {
+  let obj: any = item;
+  if (typeof item === "string") {
+    try {
+      const parsed = JSON.parse(item);
+      obj =
+        parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed
+          : { [RAW_STRING_ITEM_KEY]: item };
+    } catch {
+      obj = { [RAW_STRING_ITEM_KEY]: item };
+    }
+  }
+  if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
+    coerceChangeItemInPlace(obj);
+  }
+  return obj;
+}, CHANGE_ITEM_SCHEMA);
+
 server.registerTool(
   "process_document_batch",
   {
@@ -470,18 +566,26 @@ server.registerTool(
       original_docx_path: z
         .string()
         .describe("Absolute path to the source file."),
+      // Defaulted, not required: real MCP clients drop primitive-typed
+      // entries from required[] anyway, so schema-following models
+      // legitimately omit author_name — the call must succeed cleanly
+      // instead of dumping raw Zod issues (QA 2026-07-23 F3/client-compat).
+      // The default matches the engine's own.
       author_name: z
         .string()
-        .describe("Name to appear in Track Changes (e.g., 'Reviewer AI')."),
-      // Deliberately a plain REQUIRED array of typed items. Wrapping this in
-      // z.preprocess (to also accept the whole array as one JSON string) drops
-      // it out of the schema's `required` list, and a z.union publishes an
-      // anyOf that hides the item schema — both cost more, on every call, than
-      // they buy for the rare client that stringifies its payload. That client
-      // gets a clear "expected array, received string" it can retry from.
-      // Per-item stringification is still tolerated, below and in the engine.
+        .default("Adeu AI (TS)")
+        .describe(
+          "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI (TS)' when omitted.",
+        ),
+      // Deliberately a plain REQUIRED array of typed items. Wrapping the
+      // ARRAY in z.preprocess (to also accept the whole array as one JSON
+      // string) drops it out of the schema's `required` list, and a z.union
+      // publishes an anyOf that real clients strip to {} — so per-item
+      // tolerance lives inside CHANGE_ITEM_WITH_REPAIR's item-level
+      // preprocess instead. A wholly stringified payload gets a clear
+      // "expected array, received string" it can retry from.
       changes: z
-        .array(z.union([z.string(), CHANGE_ITEM_SCHEMA]))
+        .array(CHANGE_ITEM_WITH_REPAIR)
         .describe(
           "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). Items apply SEQUENTIALLY: each one evaluates against the document state produced by the items before it, so later items may target text an earlier item introduced.",
         ),
@@ -531,13 +635,22 @@ server.registerTool(
 
       // Defensive sanitization at the MCP boundary: some LLM clients
       // "double-serialize" nested arrays, delivering each element of `changes`
-      // as a JSON string instead of an object. The core engine also guards
-      // against this, but we normalize here too so the tool layer never hands
-      // raw string primitives downstream regardless of the engine version
-      // bundled. Genuine objects and unparseable strings pass through
-      // untouched so validation surfaces a clear error rather than crashing.
+      // as a JSON string instead of an object. CHANGE_ITEM_WITH_REPAIR's
+      // preprocess already repaired what it could; this second pass keeps the
+      // tool layer safe regardless of the schema wiring, and unwraps the
+      // marker objects the preprocess used to smuggle UNPARSEABLE strings
+      // through the typed item schema — the engine's validate_edits stays the
+      // single authority for their error message.
       const sanitizedChanges = changes.map((item: any) => {
         let obj: any = item;
+        if (
+          obj !== null &&
+          typeof obj === "object" &&
+          !Array.isArray(obj) &&
+          RAW_STRING_ITEM_KEY in obj
+        ) {
+          return obj[RAW_STRING_ITEM_KEY];
+        }
         if (typeof item === "string") {
           try {
             const parsed = JSON.parse(item);
@@ -612,7 +725,7 @@ server.registerTool(
       }
 
       const buf = readFileBytesOrThrow(original_docx_path);
-      const doc = await DocumentObject.load(buf);
+      const doc = await loadDocxOrThrow(buf, original_docx_path);
       const engine = new RedlineEngine(doc, author_name);
 
       let stats;
@@ -633,7 +746,9 @@ server.registerTool(
         throw e;
       }
 
+      let overwrite_note = "";
       if (!dry_run) {
+        const existedBefore = fs.existsSync(outPath);
         const outBuf = await doc.save();
         try {
           fs.writeFileSync(outPath, outBuf);
@@ -650,9 +765,10 @@ server.registerTool(
             ],
           };
         }
+        overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
       }
 
-      let res = formatBatchResult(stats, outPath, !!dry_run);
+      let res = formatBatchResult(stats, outPath, !!dry_run) + overwrite_note;
       if (sanitizedChanges.length === 0) {
         res =
           `⚠️ 0 changes provided — nothing to do. The output is an unmodified copy of the original.\n\n` +
@@ -695,19 +811,42 @@ server.registerTool(
       }
 
       const buf = readFileBytesOrThrow(docx_path);
-      const doc = await DocumentObject.load(buf);
+      const doc = await loadDocxOrThrow(buf, docx_path);
       const engine = new RedlineEngine(doc);
 
-      engine.accept_all_revisions();
+      // Revision-mark counts straight from the engine (AI_CONTEXT
+      // "Accept-All Counts Are Revision MARKS"): a no-op must say so instead
+      // of claiming "Accepted all changes" over an already-clean document
+      // (QA 2026-07-23 F18).
+      const counts = engine.accept_all_revisions();
+      const total =
+        counts.accepted_insertions +
+        counts.accepted_deletions +
+        counts.accepted_formatting +
+        counts.removed_comments;
 
+      const existedBefore = fs.existsSync(outPath);
       const outBuf = await doc.save();
 
       fs.writeFileSync(outPath, outBuf);
 
+      let text: string;
+      if (total === 0) {
+        text = `No tracked changes or comments to accept — the document is already clean. Saved to: ${outPath}`;
+      } else {
+        text =
+          `Accepted all changes. Saved to: ${outPath}\n` +
+          `Accepted: ${counts.accepted_insertions} insertion(s), ` +
+          `${counts.accepted_deletions} deletion(s), ` +
+          `${counts.accepted_formatting} formatting change(s).`;
+        if (counts.removed_comments > 0) {
+          text += `\nComments removed: ${counts.removed_comments}.`;
+        }
+      }
+      text += overwriteNote(outPath, docx_path, existedBefore);
+
       return {
-        content: [
-          { type: "text", text: `Accepted all changes. Saved to: ${outPath}` },
-        ],
+        content: [{ type: "text", text }],
       };
     } catch (e: any) {
       return {
@@ -751,15 +890,26 @@ server.registerTool(
       // includeAppendix=false: the generated appendix ("used N times",
       // diagnostics) is not document content — diffing it produces phantom
       // changes no apply can consume (QA 2026-07-18 H1).
-      const origText = await extractTextFromBuffer(origBuf, compare_clean, false);
-      const modText = await extractTextFromBuffer(modBuf, compare_clean, false);
+      const origDoc = await loadDocxOrThrow(origBuf, original_path);
+      const modDoc = await loadDocxOrThrow(modBuf, modified_path);
+      const origText = _extractTextFromDoc(origDoc, compare_clean, false) as string;
+      const modText = _extractTextFromDoc(modDoc, compare_clean, false) as string;
 
-      const diff = create_word_patch_diff(
+      let diff = create_word_patch_diff(
         origText,
         modText,
         basename(original_path),
         basename(modified_path),
       );
+
+      // Identical documents used to yield ONLY the two header lines, leaving
+      // the caller to infer that nothing differs (QA 2026-07-23 F14). Mirrors
+      // the Python MCP wording.
+      if (!diff.includes("@@ Word Patch @@")) {
+        diff =
+          `--- ${basename(original_path)}\n+++ ${basename(modified_path)}\n\n` +
+          "No textual differences found between the documents.";
+      }
 
       // A text diff cannot see image bytes: when embedded media differ, an
       // empty diff must never read as "the documents are identical"
@@ -776,7 +926,7 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: warning_text + (diff || "No differences found."),
+            text: warning_text + diff,
           },
         ],
       };
@@ -850,7 +1000,7 @@ server.registerTool(
       }
 
       const buf = readFileBytesOrThrow(file_path);
-      const doc = await DocumentObject.load(buf);
+      const doc = await loadDocxOrThrow(buf, file_path);
 
       const result = await finalize_document(doc, {
         filename: basename(file_path),
@@ -862,12 +1012,14 @@ server.registerTool(
       });
 
       if (result.outBuffer) {
+        const existedBefore = fs.existsSync(outPath);
         fs.writeFileSync(outPath, result.outBuffer);
+        const note = overwriteNote(outPath, file_path, existedBefore);
         return {
           content: [
             {
               type: "text",
-              text: `Saved to: ${outPath}\n\n${result.reportText}`,
+              text: `Saved to: ${outPath}${note}\n\n${result.reportText}`,
             },
           ],
         };

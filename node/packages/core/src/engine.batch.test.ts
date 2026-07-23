@@ -76,11 +76,14 @@ describe('Batch Reliability (Node.js Port)', () => {
     const midDoc = await DocumentObject.load(redlinedBuf);
     const engine2 = new RedlineEngine(midDoc);
 
+    // Revision ids ascend in document order (QA 2026-07-23 F20): the first
+    // edit ("Para 1" -> "Para One") carries Chg:1/2, the second Chg:3/4.
+    // Accept the first replacement, reject the second.
     const actions = [
-      { type: 'accept', target_id: "Chg:3" } as AcceptChange,
-      { type: 'accept', target_id: "Chg:4" } as AcceptChange,
-      { type: 'reject', target_id: "Chg:1" } as RejectChange,
-      { type: 'reject', target_id: "Chg:2" } as RejectChange,
+      { type: 'accept', target_id: "Chg:1" } as AcceptChange,
+      { type: 'accept', target_id: "Chg:2" } as AcceptChange,
+      { type: 'reject', target_id: "Chg:3" } as RejectChange,
+      { type: 'reject', target_id: "Chg:4" } as RejectChange,
     ];
 
     // Two replacement pairs, each resolved by its first action; the paired

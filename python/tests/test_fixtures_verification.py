@@ -14,17 +14,14 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "shared", "fi
 INITIAL_DOC = os.path.join(FIXTURES_DIR, "initial.docx")
 GOLDEN_DOC = os.path.join(FIXTURES_DIR, "golden.docx")
 GOLDEN2_DOC = os.path.join(FIXTURES_DIR, "golden2.docx")
-RESULT_DOC = os.path.join(FIXTURES_DIR, "test_result.docx")
 
 
 @pytest.fixture
-def clean_result_file():
-    yield
-    if os.path.exists(RESULT_DOC):
-        try:
-            os.remove(RESULT_DOC)
-        except PermissionError:
-            pass
+def result_doc_path(tmp_path):
+    """Unique per-test output path. A fixed test_result.docx in the shared
+    fixtures directory races under pytest-xdist (two workers write and read
+    the same file concurrently -> corrupt-zip failures)."""
+    return str(tmp_path / "test_result.docx")
 
 
 def normalize_adeu_extract(text):
@@ -49,7 +46,7 @@ def normalize_adeu_extract(text):
 
 
 @pytest.mark.skipif(not os.path.exists(INITIAL_DOC), reason="Initial fixture not found")
-def test_oracle_golden_replica(clean_result_file):
+def test_oracle_golden_replica(result_doc_path):
     # --- 1. GENERATION PHASE ---
     with open(INITIAL_DOC, "rb") as f:
         stream = io.BytesIO(f.read())
@@ -77,10 +74,10 @@ def test_oracle_golden_replica(clean_result_file):
     action2 = ReplyComment(target_id=f"Com:{root_id}", text="Third comment in the thread")
     engine.apply_review_actions([action2])
 
-    with open(RESULT_DOC, "wb") as f:
+    with open(result_doc_path, "wb") as f:
         f.write(engine.save_to_stream().getvalue())
 
-    print(f"\nGenerated: {RESULT_DOC}")
+    print(f"\nGenerated: {result_doc_path}")
 
     if not os.path.exists(GOLDEN_DOC):
         pytest.skip("Golden docx not found")
@@ -88,7 +85,7 @@ def test_oracle_golden_replica(clean_result_file):
     # --- 2. EXTRACT COMPARISON PHASE ---
     with open(GOLDEN_DOC, "rb") as f:
         golden_text = extract_text_from_stream(io.BytesIO(f.read()))
-    with open(RESULT_DOC, "rb") as f:
+    with open(result_doc_path, "rb") as f:
         result_text = extract_text_from_stream(io.BytesIO(f.read()))
 
     norm_golden = normalize_adeu_extract(golden_text)
@@ -109,7 +106,7 @@ def test_oracle_golden_replica(clean_result_file):
 
     # --- 3. XML STRUCTURE COMPARISON PHASE ---
     golden_xml = get_abstracted_xml_snapshot(GOLDEN_DOC)
-    result_xml = get_abstracted_xml_snapshot(RESULT_DOC)
+    result_xml = get_abstracted_xml_snapshot(result_doc_path)
 
     if golden_xml != result_xml:
         print("\n--- XML STRUCTURE DIFF ---")
@@ -129,7 +126,7 @@ def test_oracle_golden_replica(clean_result_file):
     not os.path.exists(GOLDEN_DOC) or not os.path.exists(GOLDEN2_DOC),
     reason="Golden fixtures missing",
 )
-def test_repro_golden_to_golden2(clean_result_file):
+def test_repro_golden_to_golden2(result_doc_path):
     """
     Reproduction of 'Invisible Comment Bug'.
     1. Load golden.docx (Contains existing Modern Comments structure).
@@ -149,17 +146,17 @@ def test_repro_golden_to_golden2(clean_result_file):
     applied, _, _ = engine.apply_review_actions([action])
     assert applied == 1
 
-    with open(RESULT_DOC, "wb") as f:
+    with open(result_doc_path, "wb") as f:
         f.write(engine.save_to_stream().getvalue())
 
-    print(f"\nGenerated: {RESULT_DOC}")
+    print(f"\nGenerated: {result_doc_path}")
 
     # --- 2. VERIFICATION PHASE ---
 
     # Extract Check
     with open(GOLDEN2_DOC, "rb") as f:
         expected_text = extract_text_from_stream(io.BytesIO(f.read()))
-    with open(RESULT_DOC, "rb") as f:
+    with open(result_doc_path, "rb") as f:
         actual_text = extract_text_from_stream(io.BytesIO(f.read()))
 
     norm_expected = normalize_adeu_extract(expected_text)
@@ -169,7 +166,7 @@ def test_repro_golden_to_golden2(clean_result_file):
 
     # XML Structure Check
     expected_xml = get_abstracted_xml_snapshot(GOLDEN2_DOC)
-    actual_xml = get_abstracted_xml_snapshot(RESULT_DOC)
+    actual_xml = get_abstracted_xml_snapshot(result_doc_path)
 
     if expected_xml != actual_xml:
         print("\n--- XML STRUCTURE DIFF (GOLDEN2 vs RESULT) ---")

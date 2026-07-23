@@ -18,6 +18,7 @@ from adeu.mcp_components._response_builders import (
     build_outline_response,
     build_paginated_response,
 )
+from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT
 from adeu.models import DeleteTableRow, InsertTableRow
 from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
@@ -578,7 +579,9 @@ if sys.platform == "win32":
             try:
                 xml_str = doc.WordOpenXML
                 snapshot_stream = _build_mock_docx_stream(xml_str)
-                snapshot_engine = RedlineEngine(snapshot_stream, author=author_name)
+                snapshot_engine = RedlineEngine(
+                    snapshot_stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT
+                )
                 # Bug 5: renumber the snapshot's IDs so that any error messages
                 # mention the same Chg:N / Com:N values the agent saw when it
                 # last read the document via Live Word.

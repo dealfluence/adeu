@@ -171,7 +171,7 @@ describe("Domain Semantics Engine", () => {
     expect(text).toContain("## Defined Terms");
     expect(text).toContain('"Affiliate"');
     expect(text).toContain('"Confidential Information"');
-    expect(text).toContain("used 1 times");
+    expect(text).toContain("used 1 time.");
 
     // Named Anchors & Back-References
     expect(text).toContain("## Named Anchors");

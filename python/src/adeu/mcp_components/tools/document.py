@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from adeu.mcp_components._response_builders import (
 )
 from adeu.mcp_components.shared import (
     MARKDOWN_UI_URI,
+    MCP_ID_DISCOVERY_HINT,
     add_timing_if_debug,
     read_file_bytes,
     save_stream,
@@ -50,6 +52,27 @@ from adeu.utils.docx import strip_bom_from_docx_bytes
 def _as_tool_result(res: BuilderResult) -> ToolResult:
     """Lifts a framework-free BuilderResult into fastmcp's ToolResult."""
     return ToolResult(content=res.content, structured_content=res.structured_content)
+
+
+def _overwrite_note(target_path: str, input_path: str) -> str:
+    """
+    Overwrite disclosure for tool saves (QA 2026-07-23 F17). Must be called
+    BEFORE the write: when the target already exists, the response says so —
+    "overwritten in place" when the save replaces the input document itself
+    (default-output stems ending in _processed, or an explicit output_path
+    equal to the input), "replaced existing file" for any other pre-existing
+    target (e.g. the previous run's default-named output).
+    """
+    target = Path(target_path)
+    if not target.exists():
+        return ""
+    try:
+        same = os.path.samefile(str(target), input_path)
+    except OSError:
+        same = str(target.resolve()) == str(Path(input_path).resolve())
+    if same:
+        return f"\nNote: the source document at {target_path} was overwritten in place."
+    return f"\nNote: replaced existing file {target_path}."
 
 
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
@@ -305,17 +328,17 @@ async def _process_document_batch_disk(
             + "\n\n"
         )
 
-    def _run_batch_sync() -> tuple[bool, Any, str]:
+    def _run_batch_sync() -> tuple[bool, Any, str, str]:
         stream = read_file_bytes(original_docx_path)
-        engine = RedlineEngine(stream, author=author_name)
+        engine = RedlineEngine(stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
         try:
             stats = engine.process_batch(changes, dry_run=dry_run)
         except BatchValidationError as e:
-            return False, e.errors, ""
+            return False, e.errors, "", ""
 
         if dry_run:
-            return True, stats, ""
+            return True, stats, "", ""
 
         final_output = output_path
         if not final_output:
@@ -326,12 +349,16 @@ async def _process_document_batch_disk(
                 final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
         result_stream = engine.save_to_stream()
+        # Disclose overwrites BEFORE writing (QA 2026-07-23 F17): repeated
+        # default-named runs, _processed-stem inputs saving in place, and
+        # output_path == input all silently replaced an existing file.
+        overwrite_note = _overwrite_note(final_output, original_docx_path)
         save_stream(result_stream, final_output)
-        return True, stats, final_output
+        return True, stats, final_output, overwrite_note
 
     try:
         await ctx.debug("Offloading RedlineEngine to background thread")
-        success, result_data, final_output_path = await asyncio.to_thread(_run_batch_sync)
+        success, result_data, final_output_path, overwrite_note = await asyncio.to_thread(_run_batch_sync)
 
         if not success:
             await ctx.error("Batch validation failed", extra={"error_count": len(result_data)})
@@ -343,7 +370,7 @@ async def _process_document_batch_disk(
         if dry_run:
             res = rejection_prefix + "Dry-run simulation complete.\n"
         else:
-            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}\n"
+            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
@@ -369,6 +396,14 @@ async def _process_document_batch_disk(
                 occ = report.get("occurrences_modified", 0)
                 occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
                 res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
+
+                # An edit's comment must be visible in the rendered report —
+                # dry-run is the one place an agent can verify it before
+                # committing (QA 2026-07-23 F7). The engine supplies the
+                # per-edit `comment` field; .get() keeps this safe to render
+                # even against engine builds that predate the field.
+                if report.get("comment"):
+                    res += f'**Comment:** "{report["comment"]}"\n'
 
                 if report.get("warning"):
                     res += f"*Warning:* {report['warning']}\n"
@@ -437,7 +472,9 @@ async def diff_docx_files(
         )
 
         await ctx.debug("Generating text differences")
-        edits = generate_edits_from_text(text_orig, text_mod)
+        # atomic_criticmarkup: diff-display only — hunks must never cut into a
+        # {--/{++/{>>/{== block (QA 2026-07-23 F15). No-op on clean text.
+        edits = generate_edits_from_text(text_orig, text_mod, atomic_criticmarkup=True)
 
         if not edits:
             await ctx.warning("No text differences found between the documents.")
@@ -450,6 +487,82 @@ async def diff_docx_files(
     except Exception as e:
         await ctx.error("Failed to compute diff", extra={"error": str(e)})
         return add_timing_if_debug(start_time, f"Error computing diff: {str(e)}")
+
+
+def _clamp_display_to_criticmarkup_blocks(
+    raw_target: str, raw_new: str, prefix_len: int, suffix_len: int
+) -> tuple[int, int]:
+    """
+    Backtracks trim_common_context's cut points so neither display string is
+    sliced INSIDE a CriticMarkup block: trimming the common `{--A ` prefix of
+    `{--A B--}` -> `{--A C--}` would emit the orphaned-delimiter payloads
+    `B--}` / `C--}` (QA 2026-07-23 F15). Cuts only ever move OUTWARD (prefix
+    shrinks to the block start, suffix shrinks to just past the block end), so
+    the display region stays a superset of the semantic change.
+    """
+    from adeu.diff import CRITICMARKUP_BLOCK_RE
+
+    span_cache = {s: [(m.start(), m.end()) for m in CRITICMARKUP_BLOCK_RE.finditer(s)] for s in (raw_target, raw_new)}
+
+    changed = True
+    while changed:
+        changed = False
+        for s in (raw_target, raw_new):
+            for b_start, b_end in span_cache[s]:
+                if b_start < prefix_len < b_end:
+                    prefix_len = b_start
+                    changed = True
+                suffix_cut = len(s) - suffix_len
+                if b_start < suffix_cut < b_end:
+                    suffix_len = max(0, len(s) - b_end)
+                    changed = True
+    return prefix_len, suffix_len
+
+
+def _escape_newlines_inside_blocks(s: str) -> str:
+    """
+    Keeps each CriticMarkup block on ONE diff payload line by escaping its
+    internal newlines — a multi-line {>>…<<} bubble otherwise ends a `+` line
+    mid-block and leaks bare closers onto continuation lines (F15).
+    """
+    from adeu.diff import CRITICMARKUP_BLOCK_RE
+
+    return CRITICMARKUP_BLOCK_RE.sub(lambda m: m.group(0).replace("\n", "\\n"), s)
+
+
+_CM_DELIMITER_RE = re.compile(r"\{--|\{\+\+|\{>>|\{==|--\}|\+\+\}|<<\}|==\}")
+
+
+def _balance_context_line(s: str) -> str:
+    """
+    Trims a display-only context window so every CriticMarkup delimiter on the
+    line is paired: the fixed-width window legally slices mid-block, leaving
+    an opener whose closer (or a closer whose opener) lies outside the window
+    (F15). Drops the line's head through the last opener-less closer and
+    truncates at the first closer-less opener.
+    """
+    # Head: drop through the LAST closer with no opener inside the window.
+    depth = 0
+    cut_start = 0
+    for m in _CM_DELIMITER_RE.finditer(s):
+        if m.group(0).startswith("{"):
+            depth += 1
+        elif depth == 0:
+            cut_start = m.end()
+        else:
+            depth -= 1
+    s = s[cut_start:]
+
+    # Tail: truncate at the FIRST opener whose closer is beyond the window.
+    stack: list[int] = []
+    for m in _CM_DELIMITER_RE.finditer(s):
+        if m.group(0).startswith("{"):
+            stack.append(m.start())
+        elif stack:
+            stack.pop()
+    if stack:
+        s = s[: stack[0]]
+    return s
 
 
 def _create_diff_output(original_path: str, modified_path: str, text_orig: str, edits: List[ModifyText]):
@@ -471,30 +584,31 @@ def _create_diff_output(original_path: str, modified_path: str, text_orig: str, 
         # `generate_edits_from_text` baked into target_text/new_text (anchor for
         # synthetic insertions, common prefix/suffix from coalesced edits).
         prefix_len, suffix_len = trim_common_context(raw_target, raw_new)
+        # Never cut a display string inside a CriticMarkup block (F15).
+        prefix_len, suffix_len = _clamp_display_to_criticmarkup_blocks(raw_target, raw_new, prefix_len, suffix_len)
 
         target_end_in_target = len(raw_target) - suffix_len
         new_end_in_new = len(raw_new) - suffix_len
 
-        display_target = raw_target[prefix_len:target_end_in_target]
-        display_new = raw_new[prefix_len:new_end_in_new]
+        display_target = _escape_newlines_inside_blocks(raw_target[prefix_len:target_end_in_target])
+        display_new = _escape_newlines_inside_blocks(raw_new[prefix_len:new_end_in_new])
 
         # Shift the anchor point in the original text by the stripped prefix.
         change_start = raw_start + prefix_len
-        change_end = change_start + len(display_target)
+        change_end = change_start + (target_end_in_target - prefix_len)
 
         # Compute context windows around the SEMANTIC change region.
         pre_start = max(0, change_start - CONTEXT_SIZE)
         pre_context = text_orig[pre_start:change_start]
+        pre_context = _balance_context_line(pre_context.replace("\n", " ").replace("\r", ""))
         if pre_start > 0:
             pre_context = "..." + pre_context
 
         post_end = min(len(text_orig), change_end + CONTEXT_SIZE)
         post_context = text_orig[change_end:post_end]
+        post_context = _balance_context_line(post_context.replace("\n", " ").replace("\r", ""))
         if post_end < len(text_orig):
             post_context = post_context + "..."
-
-        pre_context = pre_context.replace("\n", " ").replace("\r", "")
-        post_context = post_context.replace("\n", " ").replace("\r", "")
 
         output.append("@@ Word Patch @@")
         output.append(f" {pre_context}")
@@ -532,19 +646,42 @@ async def accept_all_changes(
     await ctx.info(f"Accepting all changes for document: {Path(docx_path).name}")
     try:
         stream = read_file_bytes(docx_path)
-        engine = RedlineEngine(stream)
+        engine = RedlineEngine(stream, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
         await ctx.debug("Engine loaded, executing accept_all_revisions()")
-        engine.accept_all_revisions(remove_comments=True)
+        counts = engine.accept_all_revisions(remove_comments=True)
 
         if not output_path:
             p = Path(docx_path)
             output_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
 
+        overwrite_note = _overwrite_note(output_path, docx_path)
         save_stream(engine.save_to_stream(), output_path)
         await ctx.info("Clean document saved successfully", extra={"output_path": output_path})
 
-        return add_timing_if_debug(start_time, f"Accepted all changes. Saved to: {output_path}")
+        accepted_ins = counts.get("accepted_insertions", 0)
+        accepted_del = counts.get("accepted_deletions", 0)
+        accepted_fmt = counts.get("accepted_formatting", 0)
+        removed_comments = counts.get("removed_comments", 0)
+
+        # A no-op must be reported as one (QA 2026-07-23 F18), and comment
+        # removal is destructive review-content cleanup that the response
+        # must disclose, never perform silently (F12).
+        if accepted_ins + accepted_del + accepted_fmt + removed_comments == 0:
+            res = (
+                "No tracked changes or comments to accept — the document is "
+                f"already clean. Saved to: {output_path}{overwrite_note}"
+            )
+        else:
+            res = (
+                f"Accepted all changes. Saved to: {output_path}\n"
+                f"Insertions accepted: {accepted_ins}\n"
+                f"Deletions accepted: {accepted_del}\n"
+                f"Formatting changes accepted: {accepted_fmt}\n"
+                f"Comments removed: {removed_comments}"
+                f"{overwrite_note}"
+            )
+        return add_timing_if_debug(start_time, res)
     except Exception as e:
         await ctx.error(
             "Failed to accept all changes",

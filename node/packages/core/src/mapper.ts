@@ -390,11 +390,13 @@ export class DocumentMapper {
       }
 
       if (ins && !this.clean_view && !this.original_view) {
-        const suffix = ` |Chg:${ins.getAttribute("w:id")}++}`;
+        // Byte-identical twin of ingest.extract_table's tracked-row suffix
+        // (QA 2026-07-23 F21a): change bubble separated from cell content.
+        const suffix = ` ++}{>>[Chg:${ins.getAttribute("w:id")} insert] ${ins.getAttribute("w:author") || "Unknown"}<<}`;
         this._add_virtual_text(suffix, current, null);
         current += suffix.length;
       } else if (del_node && !this.clean_view && !this.original_view) {
-        const suffix = ` |Chg:${del_node.getAttribute("w:id")}--}`;
+        const suffix = ` --}{>>[Chg:${del_node.getAttribute("w:id")} delete] ${del_node.getAttribute("w:author") || "Unknown"}<<}`;
         this._add_virtual_text(suffix, current, null);
         current += suffix.length;
       }

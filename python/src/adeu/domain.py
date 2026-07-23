@@ -349,7 +349,8 @@ def build_structural_appendix(doc, base_text: str) -> str:
         has_content = True
         lines.append("\n## Defined Terms")
         for term, data in defs.items():
-            lines.append(f'- "{term}" — used {data["count"]} times.')
+            count = data["count"]
+            lines.append(f'- "{term}" — used {count} time{"" if count == 1 else "s"}.')
 
     if diagnostics:
         has_content = True

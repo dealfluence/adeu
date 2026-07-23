@@ -1,8 +1,25 @@
 import io
+import logging
 import sys
 
 import pytest
+import structlog
 from docx import Document
+
+from adeu.utils.console import dynamic_stderr
+
+# Unconfigured structlog prints DEBUG lines to STDOUT, so any test that calls
+# engine/ingest helpers in its setup pollutes captured stdout (a `--json` CLI
+# test then fails json.loads on "2026-…" log lines). The CLI and server both
+# bind structlog to stderr at entry; tests only got that binding if some
+# earlier test happened to trigger it — an order dependence pytest-xdist's
+# fresh workers expose. Configure it here, once per worker, exactly the way
+# the CLI does (WARNING level, dynamic stderr proxy so capsys replacement and
+# teardown are honored — never pin the sys.stderr object itself).
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+    logger_factory=structlog.PrintLoggerFactory(file=dynamic_stderr),  # type: ignore[arg-type]
+)
 
 try:
     from hypothesis import HealthCheck
@@ -19,6 +36,31 @@ try:
     _hyp_settings.load_profile("default")
 except ImportError:
     pass
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """Serialize live-Word tests under pytest-xdist.
+
+    tryfirst matters: in each xdist worker, WorkerInteractor's own
+    pytest_collection_modifyitems consumes the xdist_group marker (it rewrites
+    the nodeid to "…@group" for the loadgroup scheduler). Our marker must be
+    attached before that hook runs, or the grouping silently does nothing.
+
+    Tests that drive the real Word COM instance (the `active_word_app`
+    fixture, plus everything in test_live_word*.py) all bind to the single
+    active Word application — two xdist workers doing that concurrently
+    corrupt each other's document state. `xdist_group` + `--dist loadgroup`
+    (set in pyproject addopts) pins them to ONE worker, where they run
+    sequentially; every other test still distributes freely.
+    """
+    for item in items:
+        is_live_word = "active_word_app" in getattr(item, "fixturenames", ())
+        if not is_live_word:
+            basename = item.path.name if getattr(item, "path", None) else ""
+            is_live_word = basename.startswith("test_live_word")
+        if is_live_word:
+            item.add_marker(pytest.mark.xdist_group("live_word"))
 
 
 @pytest.fixture(scope="session", autouse=True)

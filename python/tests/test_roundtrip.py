@@ -186,9 +186,10 @@ def test_complex_run_sequence_repro():
     xml = doc.element.xml
 
     idx_fees = xml.find("ARTICLE3 FEES")
-    # Because edits are processed backwards, e2 ("AND") is processed first and gets ID 1.
-    # e1 ("ARTICLE3 FEES") is processed second and gets ID 2.
-    idx_ins1 = xml.find('w:id="2"')
+    # Ids are reserved in ascending document order (F20, QA 2026-07-23), so
+    # e1 ("ARTICLE3 FEES", earlier in the document) gets ID 1 even though the
+    # apply sweep processes e2 ("AND") first.
+    idx_ins1 = xml.find('w:id="1"')
     # Under Surgical Mode, "AN" and "D" are not coalesced. The insertion happens after "D".
     idx_an = xml.find(">D</w:t>")
 
