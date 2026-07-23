@@ -2382,6 +2382,35 @@ class RedlineEngine:
             return " | ".join(edit.cells)
         return getattr(edit, "new_text", "") or ""
 
+    @staticmethod
+    def _flag_surviving_js_backreference(edit: Any, substituted_text: str) -> None:
+        """
+        Non-fatal guardrail (QA 2026-07-23 customer C2): Python's `re` engine
+        does not expand JavaScript-style $N backreferences, so `new_text`
+        containing "$1" is written into the document as the literal text
+        "$1". That is spec-sanctioned platform behavior (spec §6), but doing
+        it SILENTLY corrupted a payment clause in QA. When a $N token from
+        new_text survives substitution verbatim AND the pattern actually has
+        that capture group (i.e. a backreference was plausibly intended),
+        stash a warning for the edit report. Never a hard reject: "$1,000"
+        style literals are everyday legal text.
+        """
+        m = re.search(r"\$(\d+)", getattr(edit, "new_text", None) or "")
+        if not m or m.group(0) not in substituted_text:
+            return
+        try:
+            group_count = re.compile(edit.target_text).groups
+        except re.error:
+            return
+        if not (0 < int(m.group(1)) <= group_count):
+            return
+        edit._warning = (
+            f"new_text contains '{m.group(0)}', which Python's re engine does not expand — "
+            f"the literal text '{m.group(0)}' was written into the document. For a "
+            "capture-group backreference use \\1 or \\g<1> ($N is JavaScript syntax). "
+            "If you meant a literal dollar amount, ignore this warning."
+        )
+
     def _build_edit_report(self, edit: Any) -> dict:
         """Builds the per-edit result dict after apply_edits ran on the edit."""
         success = getattr(edit, "_applied_status", False)
@@ -2390,11 +2419,13 @@ class RedlineEngine:
         clean_text = None
         # Punctuation-anchor warning is failure-context only: on success
         # the redline preview below already reports the change cleanly.
-        warning = None
+        # Resolution advisories (edit._warning, e.g. the surviving-$N
+        # backreference guardrail) surface in BOTH outcomes.
+        warning = getattr(edit, "_warning", None)
         if success:
             critic_markup, clean_text = self._build_edit_context_previews(edit)
         else:
-            warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
+            warning = warning or self._check_punctuation_warning(getattr(edit, "target_text", ""))
         return {
             "status": "applied" if success else "failed",
             "type": getattr(edit, "type", "modify"),
@@ -3353,6 +3384,8 @@ class RedlineEngine:
                     current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
                 except re.error:
                     pass
+                else:
+                    self._flag_surviving_js_backreference(edit, current_effective_new_text)
 
             # Stash the first occurrence's full match for the report preview,
             # so it can show the complete logical change rather than only the

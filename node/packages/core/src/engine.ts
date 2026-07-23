@@ -2662,6 +2662,30 @@ export class RedlineEngine {
         continue;
       }
 
+      // QA 2026-07-23 customer C3: a modify whose new_text is ABSENT
+      // (undefined/null — NOT the explicit empty string, which means delete)
+      // is either an annotation or a mistake. With a comment it is the
+      // pure-comment form (new_text == target_text): coalescing the missing
+      // field to "" would silently DELETE the sentence and hang the comment
+      // on the deletion. Without a comment there is nothing to interpret —
+      // reject instead of silently deleting. Mirrors the Python boundary
+      // normalization (_normalize_comment_only_modify_in_place).
+      if (
+        edit.type === "modify" &&
+        (edit.new_text === undefined || edit.new_text === null)
+      ) {
+        if (edit.comment && String(edit.comment).trim()) {
+          edit.new_text = edit.target_text;
+        } else {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: modify requires new_text (an empty string deletes ` +
+              "the target; to attach a comment without changing the text, supply the comment " +
+              "and omit new_text).",
+          );
+          continue;
+        }
+      }
+
       const is_regex = (edit as any).regex || false;
       const match_mode = (edit as any).match_mode || "strict";
 

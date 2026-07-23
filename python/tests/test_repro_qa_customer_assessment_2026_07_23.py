@@ -125,6 +125,8 @@ class TestC1MinimalRequestParity:
         """The exact payload shape from the Node client-compat repro — no
         author_name — must run through the JSON-RPC boundary, not bounce off
         input validation before the handler is reached."""
+        from fastmcp import Client
+
         from adeu.server import mcp
 
         doc = Document()
@@ -138,14 +140,19 @@ class TestC1MinimalRequestParity:
             "dry_run": True,
             "changes": [{"type": "modify", "target_text": "lazy dog", "new_text": "sleepy cat"}],
         }
+
+        async def _call():
+            async with Client(mcp) as client:
+                return await client.call_tool("process_document_batch", arguments)
+
         try:
-            result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+            result = asyncio.run(_call())
         except Exception as exc:  # noqa: BLE001 — the repro IS the rejection
             pytest.fail(
                 "the minimal request (author_name omitted, as the published "
                 f"client-side schema allows) was rejected at the boundary: {exc}"
             )
-        text = "".join(item.text for item in result.content if item.type == "text")
+        text = "".join(item.text for item in result.content if getattr(item, "type", "") == "text")
         assert "sleepy cat" in text or "1 applied" in text or "Dry run" in text, (
             f"minimal batch did not reach the engine: {text[:400]}"
         )

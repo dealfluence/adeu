@@ -100,11 +100,22 @@ class ModifyText(BaseModel):
             "without having to add more surrounding context to target_text."
         ),
     )
-    regex: bool = Field(default=False, description="Treat target_text as a regular expression.")
+    regex: bool = Field(
+        default=False,
+        description=(
+            "Treat target_text as a regular expression (Python `re` engine). "
+            "Capture-group backreferences in new_text use \\1 or \\g<1>. "
+            "JavaScript-style $1 is NOT expanded here — it stays literal text."
+        ),
+    )
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    # Non-fatal advisory surfaced as the edit report's "warning" field (e.g.
+    # a JS-style $N backreference that Python's re engine left as literal
+    # text — QA 2026-07-23 customer C2).
+    _warning: Optional[str] = PrivateAttr(default=None)
     _internal_op: Optional[str] = PrivateAttr(default=None)
     _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
     _applied_status: bool = PrivateAttr(default=False)
@@ -315,7 +326,11 @@ class FlatDocumentChange(BaseModel):
     )
     regex: Optional[bool] = Field(
         None,
-        description="Treat target_text as a regular expression.",
+        description=(
+            "Treat target_text as a regular expression (Python `re` engine). "
+            "Capture-group backreferences in new_text use \\1 or \\g<1>. "
+            "JavaScript-style $1 is NOT expanded here — it stays literal text."
+        ),
     )
     comment: Optional[str] = Field(
         None,
@@ -408,6 +423,36 @@ def _infer_type_in_place(item: dict) -> None:
     # else: leave absent; validation will surface a clear error.
 
 
+def _normalize_comment_only_modify_in_place(item: dict) -> None:
+    """
+    MCP-boundary tolerance (QA 2026-07-23 customer assessment, C3): the
+    published flat schema advertises `new_text` as optional, so a
+    schema-following model that only wants to annotate legitimately sends
+    `{"type": "modify", "target_text": ..., "comment": ...}` with no
+    new_text. The lossless interpretation is the pure-comment form
+    (new_text == target_text) — never a "Field required" bounce, and never
+    a tracked deletion (the Node-engine variant of this trap).
+
+    Only fires when ALL of:
+      - `type` is explicitly "modify" (never inferred — `target_text` alone
+        stays ambiguous, see _infer_type_in_place);
+      - a non-empty comment is present;
+      - `new_text` is absent or None. An explicit "" is untouched: empty
+        string means delete, and delete-with-explanation is a distinct,
+        legitimate intent.
+    Without a comment there is no meaningful interpretation, so the item is
+    left alone and validation surfaces the missing-new_text error.
+    """
+    if not isinstance(item, dict) or item.get("type") != "modify":
+        return
+    if item.get("new_text") is not None:
+        return
+    target = item.get("target_text")
+    comment = item.get("comment")
+    if isinstance(target, str) and target and isinstance(comment, str) and comment.strip():
+        item["new_text"] = target
+
+
 def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
     """
     Tolerate LLM clients (notably Gemini) that wrap each object in the `changes`
@@ -448,6 +493,7 @@ def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
             if isinstance(decoded, dict):
                 if infer_types:
                     _infer_type_in_place(decoded)
+                    _normalize_comment_only_modify_in_place(decoded)
                 _coerce_match_mode_in_place(decoded)
                 coerced.append(decoded)
             else:
@@ -455,6 +501,7 @@ def _coerce_changes(value: Any, *, infer_types: bool) -> Any:
         elif isinstance(item, dict):
             if infer_types:
                 _infer_type_in_place(item)
+                _normalize_comment_only_modify_in_place(item)
             _coerce_match_mode_in_place(item)
             coerced.append(item)
         else:

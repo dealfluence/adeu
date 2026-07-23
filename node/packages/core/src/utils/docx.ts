@@ -1,4 +1,4 @@
-import { qn, findChild, findAllDescendants } from "../docx/dom.js";
+import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
 import {
   Paragraph,
   Table,
@@ -54,6 +54,75 @@ export const QN_W_PICT = "w:pict";
 export const QN_WP_DOCPR = "wp:docPr";
 export const QN_V_IMAGEDATA = "v:imagedata";
 export const QN_O_TITLE = "o:title";
+export const QN_W_TXBXCONTENT = "w:txbxContent";
+export const QN_MC_ALTERNATECONTENT = "mc:AlternateContent";
+export const QN_MC_CHOICE = "mc:Choice";
+export const QN_MC_FALLBACK = "mc:Fallback";
+
+// Disclosure cap for text projected out of a floating text box marker — long
+// boxed content is truncated, the marker is a disclosure, not a full view.
+const _TEXTBOX_DISCLOSURE_CAP = 300;
+
+/**
+ * Concatenated, whitespace-normalized visible text of every w:txbxContent
+ * under `graphic_el` (a w:drawing / w:object / w:pict), truncated to
+ * _TEXTBOX_DISCLOSURE_CAP chars. Empty string when the shape holds no text
+ * (plain images, watermark textpaths).
+ */
+function _textbox_text(graphic_el: Element): string {
+  const parts: string[] = [];
+  for (const tc of findAllDescendants(graphic_el, QN_W_TXBXCONTENT)) {
+    for (const t of findAllDescendants(tc, QN_W_T)) {
+      if (t.textContent) parts.push(t.textContent);
+    }
+  }
+  let text = parts.join(" ").split(/\s+/).filter(Boolean).join(" ");
+  if (text.length > _TEXTBOX_DISCLOSURE_CAP) {
+    text = text.slice(0, _TEXTBOX_DISCLOSURE_CAP).trimEnd() + "…";
+  }
+  return text;
+}
+
+/**
+ * Projects a read-only marker for a graphic run child (w:drawing, w:object
+ * or w:pict), rendered downstream as ![alt](docx-image:id).
+ *
+ * Floating text boxes get their text quoted in the alt ("Text box: …") so
+ * boxed obligations are DISCLOSED instead of silently invisible
+ * (QA 2026-07-23 customer C4). Textpath-only VML shapes (watermarks) still
+ * project nothing — sanitize's watermark audit reports those.
+ */
+function* _graphic_marker_events(child: Element): Generator<DocxEvent> {
+  const tag = child.tagName;
+  if (tag === QN_W_DRAWING || tag === QN_W_OBJECT) {
+    // Inline image/object: project a read-only marker so the agent can
+    // see that a material element exists here (QA 2026-07-18 M5).
+    const doc_pr = findAllDescendants(child, QN_WP_DOCPR)[0] || null;
+    let alt = "";
+    let img_id = "0";
+    if (doc_pr) {
+      alt = doc_pr.getAttribute("descr") || doc_pr.getAttribute("title") || "";
+      img_id = doc_pr.getAttribute("id") || "0";
+    }
+    const boxed = _textbox_text(child);
+    if (boxed) {
+      alt = alt ? `Text box (${alt}): ${boxed}` : `Text box: ${boxed}`;
+    }
+    yield { type: "image", id: img_id, date: alt };
+  } else if (tag === QN_W_PICT) {
+    // Legacy VML. Actual images (v:imagedata) and text boxes get a marker;
+    // textpath-only shapes (watermarks) stay silent.
+    const imagedata = findAllDescendants(child, QN_V_IMAGEDATA)[0] || null;
+    let alt = imagedata ? imagedata.getAttribute(QN_O_TITLE) || "" : "";
+    const boxed = _textbox_text(child);
+    if (boxed) {
+      alt = alt ? `Text box (${alt}): ${boxed}` : `Text box: ${boxed}`;
+    }
+    if (boxed || imagedata) {
+      yield { type: "image", id: "vml", date: alt };
+    }
+  }
+}
 
 const _CUSTOM_HEADING_NAME_RE = /Heading[ ]?([1-6])(?![0-9])/;
 
@@ -736,6 +805,20 @@ export function* iter_block_items(
     return;
   }
 
+  yield* _iter_block_children(parent_elm, parent);
+}
+
+/**
+ * Yields the block items among `parent_elm`'s children, descending into
+ * block-level w:sdt content controls: Word renders w:sdtContent children as
+ * ordinary flowed body text, so skipping them silently hides live document
+ * content from every view (QA 2026-07-23 customer C4). Recursion covers
+ * nested controls; group/repeating sections project their inner blocks.
+ */
+function* _iter_block_children(
+  parent_elm: Element,
+  parent: any,
+): Generator<Paragraph | Table> {
   for (let i = 0; i < parent_elm.childNodes.length; i++) {
     const child = parent_elm.childNodes[i] as Element;
     if (child.nodeType !== 1) continue;
@@ -744,6 +827,11 @@ export function* iter_block_items(
       yield new Paragraph(child, parent);
     } else if (child.tagName === "w:tbl") {
       yield new Table(child, parent);
+    } else if (child.tagName === QN_W_SDT) {
+      const sdt_content = findChild(child, QN_W_SDTCONTENT);
+      if (sdt_content) {
+        yield* _iter_block_children(sdt_content, parent);
+      }
     }
   }
 }
@@ -839,27 +927,30 @@ export function* iter_paragraph_content(
       if (child.nodeType !== 1) continue;
 
       const tag = child.tagName;
-      if (tag === QN_W_DRAWING || tag === QN_W_OBJECT) {
-        // Inline image/object: project a read-only marker so the agent can
-        // see that a material element exists here (QA 2026-07-18 M5).
-        // id/date carry (docPr id, alt text) — the marker renders as
-        // ![alt](docx-image:id).
-        const doc_pr = findAllDescendants(child, QN_WP_DOCPR)[0] || null;
-        let alt = "";
-        let img_id = "0";
-        if (doc_pr) {
-          alt = doc_pr.getAttribute("descr") || doc_pr.getAttribute("title") || "";
-          img_id = doc_pr.getAttribute("id") || "0";
+      if (tag === QN_W_DRAWING || tag === QN_W_OBJECT || tag === QN_W_PICT) {
+        // Read-only graphic marker, rendered as ![alt](docx-image:id);
+        // floating text boxes disclose their text in the alt
+        // (QA 2026-07-18 M5, QA 2026-07-23 customer C4).
+        yield* _graphic_marker_events(child);
+      } else if (tag === QN_MC_ALTERNATECONTENT) {
+        // Modern floating shapes (Word 2010+ text boxes, images) arrive
+        // wrapped in mc:AlternateContent; without this branch they project
+        // NOTHING — not even a marker (QA 2026-07-23 customer C4). Prefer
+        // the mc:Choice payload, fall back to mc:Fallback, and project
+        // exactly one marker through the same path as bare drawings/picts.
+        let payload: Element | null = null;
+        for (const wrapper_tag of [QN_MC_CHOICE, QN_MC_FALLBACK]) {
+          for (const wrapper of findChildren(child, wrapper_tag)) {
+            payload =
+              findChild(wrapper, QN_W_DRAWING) ||
+              findChild(wrapper, QN_W_OBJECT) ||
+              findChild(wrapper, QN_W_PICT);
+            if (payload) break;
+          }
+          if (payload) break;
         }
-        yield { type: "image", id: img_id, date: alt };
-      } else if (tag === QN_W_PICT) {
-        // Legacy VML picture. Only actual images (v:imagedata) get a
-        // marker; textpath-only shapes (watermarks) are reported by
-        // sanitize's watermark audit instead of polluting the text.
-        const imagedata = findAllDescendants(child, QN_V_IMAGEDATA)[0] || null;
-        if (imagedata) {
-          const alt = imagedata.getAttribute(QN_O_TITLE) || "";
-          yield { type: "image", id: "vml", date: alt };
+        if (payload) {
+          yield* _graphic_marker_events(payload);
         }
       } else if (tag === QN_W_COMMENTREFERENCE) {
         const ref_id = child.getAttribute(QN_W_ID);

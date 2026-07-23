@@ -941,12 +941,19 @@ if sys.platform == "win32":
             str,
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
         ],
-        author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
         ctx: Context,
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ],
+        # Defaulted, not required: real MCP clients drop primitive-typed
+        # entries from required[] anyway, so schema-following models
+        # legitimately omit author_name (QA 2026-07-23 customer C1, mirroring
+        # the Node F3 client-compat fix). The default matches the engine's own.
+        author_name: Annotated[
+            str,
+            "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
+        ] = "Adeu AI",
         original_docx_path: Annotated[
             Optional[str],
             "Path to source file. LEAVE EMPTY (Null) to edit the live Word document!",
@@ -1227,12 +1234,16 @@ else:
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
         ],
         original_docx_path: Annotated[str, "Absolute path to the source file."],
-        author_name: Annotated[str, "Name to appear in Track Changes (e.g., 'Reviewer AI')."],
         ctx: Context,
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ],
+        # Defaulted, not required — see the win32 registration above.
+        author_name: Annotated[
+            str,
+            "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
+        ] = "Adeu AI",
         output_path: Annotated[Optional[str], "Optional output path."] = None,
         dry_run: Annotated[
             bool,

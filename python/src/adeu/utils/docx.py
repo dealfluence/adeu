@@ -67,6 +67,71 @@ QN_W_PICT = qn("w:pict")
 QN_WP_DOCPR = qn("wp:docPr")
 QN_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
 QN_O_TITLE = "{urn:schemas-microsoft-com:office:office}title"
+QN_W_TXBXCONTENT = qn("w:txbxContent")
+# python-docx's nsmap has no 'mc' prefix; use literal Clark notation like the
+# VML/office names above.
+_MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+QN_MC_ALTERNATECONTENT = f"{{{_MC_NS}}}AlternateContent"
+QN_MC_CHOICE = f"{{{_MC_NS}}}Choice"
+QN_MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
+
+# Disclosure cap for text projected out of a floating text box marker — long
+# boxed content is truncated, the marker is a disclosure, not a full view.
+_TEXTBOX_DISCLOSURE_CAP = 300
+
+
+def _textbox_text(graphic_el) -> str:
+    """
+    Concatenated, whitespace-normalized visible text of every w:txbxContent
+    under `graphic_el` (a w:drawing / w:object / w:pict), truncated to
+    _TEXTBOX_DISCLOSURE_CAP chars. Empty string when the shape holds no text
+    (plain images, watermark textpaths).
+    """
+    parts: list[str] = []
+    for tc in graphic_el.findall(f".//{QN_W_TXBXCONTENT}"):
+        for t in tc.iter(QN_W_T):
+            if t.text:
+                parts.append(t.text)
+    text = " ".join(" ".join(parts).split())
+    if len(text) > _TEXTBOX_DISCLOSURE_CAP:
+        text = text[:_TEXTBOX_DISCLOSURE_CAP].rstrip() + "…"
+    return text
+
+
+def _graphic_marker_events(child):
+    """
+    Projects a read-only marker for a graphic run child (w:drawing, w:object
+    or w:pict), rendered downstream as ![alt](docx-image:id).
+
+    Floating text boxes get their text quoted in the alt ("Text box: …") so
+    boxed obligations are DISCLOSED instead of silently invisible
+    (QA 2026-07-23 customer C4). Textpath-only VML shapes (watermarks) still
+    project nothing — sanitize's watermark audit reports those.
+    """
+    tag = child.tag
+    if tag == QN_W_DRAWING or tag == QN_W_OBJECT:
+        # Inline image/object: project a read-only marker so the agent
+        # can see that a material element exists here (QA 2026-07-18 M5).
+        doc_pr = child.find(f".//{QN_WP_DOCPR}")
+        alt = ""
+        img_id = "0"
+        if doc_pr is not None:
+            alt = doc_pr.get("descr") or doc_pr.get("title") or ""
+            img_id = doc_pr.get("id") or "0"
+        boxed = _textbox_text(child)
+        if boxed:
+            alt = f"Text box ({alt}): {boxed}" if alt else f"Text box: {boxed}"
+        yield DocxEvent("image", img_id, date=alt)
+    elif tag == QN_W_PICT:
+        # Legacy VML. Actual images (v:imagedata) and text boxes get a
+        # marker; textpath-only shapes (watermarks) stay silent.
+        imagedata = child.find(f".//{QN_V_IMAGEDATA}")
+        alt = (imagedata.get(QN_O_TITLE) or "") if imagedata is not None else ""
+        boxed = _textbox_text(child)
+        if boxed:
+            alt = f"Text box ({alt}): {boxed}" if alt else f"Text box: {boxed}"
+        if boxed or imagedata is not None:
+            yield DocxEvent("image", "vml", date=alt)
 
 
 def is_heading_paragraph(
@@ -718,26 +783,31 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
         # Iterate children once to handle references, fields, and text
         for child in r_element:
             tag = child.tag
-            if tag == QN_W_DRAWING or tag == QN_W_OBJECT:
-                # Inline image/object: project a read-only marker so the agent
-                # can see that a material element exists here (QA 2026-07-18
-                # M5). id/date carry (docPr id, alt text) — the marker renders
-                # as ![alt](docx-image:id).
-                doc_pr = child.find(f".//{QN_WP_DOCPR}")
-                alt = ""
-                img_id = "0"
-                if doc_pr is not None:
-                    alt = doc_pr.get("descr") or doc_pr.get("title") or ""
-                    img_id = doc_pr.get("id") or "0"
-                yield DocxEvent("image", img_id, date=alt)
-            elif tag == QN_W_PICT:
-                # Legacy VML picture. Only actual images (v:imagedata) get a
-                # marker; textpath-only shapes (watermarks) are reported by
-                # sanitize's watermark audit instead of polluting the text.
-                imagedata = child.find(f".//{QN_V_IMAGEDATA}")
-                if imagedata is not None:
-                    alt = imagedata.get(QN_O_TITLE) or ""
-                    yield DocxEvent("image", "vml", date=alt)
+            if tag == QN_W_DRAWING or tag == QN_W_OBJECT or tag == QN_W_PICT:
+                # Read-only graphic marker, rendered as ![alt](docx-image:id);
+                # floating text boxes disclose their text in the alt
+                # (QA 2026-07-18 M5, QA 2026-07-23 customer C4).
+                yield from _graphic_marker_events(child)
+            elif tag == QN_MC_ALTERNATECONTENT:
+                # Modern floating shapes (Word 2010+ text boxes, images)
+                # arrive wrapped in mc:AlternateContent; without this branch
+                # they project NOTHING — not even a marker (QA 2026-07-23
+                # customer C4). Prefer the mc:Choice payload, fall back to
+                # mc:Fallback, and project exactly one marker through the
+                # same path as bare drawings/picts.
+                payload = None
+                for wrapper_tag in (QN_MC_CHOICE, QN_MC_FALLBACK):
+                    for wrapper in child.findall(wrapper_tag):
+                        payload = next(
+                            (g for g in wrapper if g.tag in (QN_W_DRAWING, QN_W_OBJECT, QN_W_PICT)),
+                            None,
+                        )
+                        if payload is not None:
+                            break
+                    if payload is not None:
+                        break
+                if payload is not None:
+                    yield from _graphic_marker_events(payload)
             elif tag == QN_W_COMMENTREFERENCE:
                 ref_id = child.get(QN_W_ID)
                 if ref_id:
@@ -1123,11 +1193,26 @@ def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
         else:
             raise ValueError(f"Unsupported parent type for iteration: {type(parent)}")
 
+    yield from _iter_block_children(parent_elm, parent)
+
+
+def _iter_block_children(parent_elm, parent):
+    """
+    Yields the block items among `parent_elm`'s children, descending into
+    block-level w:sdt content controls: Word renders w:sdtContent children as
+    ordinary flowed body text, so skipping them silently hides live document
+    content from every view (QA 2026-07-23 customer C4). Recursion covers
+    nested controls; group/repeating sections project their inner blocks.
+    """
     for child in parent_elm.iterchildren():
         if child.tag == qn("w:p"):
             yield Paragraph(child, parent)
         elif child.tag == qn("w:tbl"):
             yield Table(child, parent)
+        elif child.tag == qn("w:sdt"):
+            sdt_content = child.find(qn("w:sdtContent"))
+            if sdt_content is not None:
+                yield from _iter_block_children(sdt_content, parent)
 
 
 def strip_bom_from_docx_bytes(data: bytes) -> bytes:
