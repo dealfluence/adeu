@@ -181,11 +181,13 @@ def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" =
     Stable codes: file_not_found, invalid_input, invalid_docx,
     invalid_changes_file, write_failed, unsupported, batch_validation_failed.
     """
-    print(f"❌ {message}", file=sys.stderr)
+    display_msg = message if message.startswith("❌") else f"❌ {message}"
+    print(display_msg, file=sys.stderr)
     if hint:
         print(hint, file=sys.stderr)
     if _JSON_MODE:
-        print(json.dumps({"error": code, "message": message}))
+        clean_msg = message[1:].strip() if message.startswith("❌") else message
+        print(json.dumps({"error": code, "message": clean_msg}))
     sys.exit(exit_code)
 
 
@@ -1409,43 +1411,43 @@ def handle_markup(args):
 
 
 def handle_sanitize(args: argparse.Namespace):
+    _set_json_mode(getattr(args, "json", False))
     from adeu.redline.engine import describe_illegal_control_chars
 
     author_ctrl = describe_illegal_control_chars(args.author or "")
     if author_ctrl:
-        print(
-            f"❌ --author contains control character(s) ({author_ctrl}) that cannot be "
+        _cli_error(
+            "invalid_input",
+            f"--author contains control character(s) ({author_ctrl}) that cannot be "
             "stored in a DOCX. Remove them and re-run.",
-            file=sys.stderr,
+            exit_code=2,
         )
-        sys.exit(2)
 
     _require_docx_output(args.output)
 
     # Contradictory option combinations are usage errors, never silent
     # preferences (QA 2026-07-19 F-07/F-08).
     if args.keep_markup and args.accept_all:
-        print(
-            "❌ --keep-markup and --accept-all are mutually exclusive: --keep-markup preserves "
+        _cli_error(
+            "invalid_input",
+            "--keep-markup and --accept-all are mutually exclusive: --keep-markup preserves "
             "tracked changes and comments, --accept-all resolves them into the text. "
             "Pass exactly one of them.",
-            file=sys.stderr,
+            exit_code=2,
         )
-        sys.exit(2)
     if args.output and args.outdir:
-        print(
-            "❌ -o/--output and --outdir are mutually exclusive: -o names a single output file, "
+        _cli_error(
+            "invalid_input",
+            "-o/--output and --outdir are mutually exclusive: -o names a single output file, "
             "--outdir selects batch mode. Pass exactly one of them.",
-            file=sys.stderr,
+            exit_code=2,
         )
-        sys.exit(2)
 
     input_files: List[Path] = args.input
     is_batch = len(input_files) > 1 or args.outdir
 
     if not is_batch and args.baseline and len(input_files) > 1:
-        print("❌ --baseline only works with a single input file.", file=sys.stderr)
-        sys.exit(2)
+        _cli_error("invalid_input", "--baseline only works with a single input file.", exit_code=2)
 
     if not is_batch and len(input_files) == 1:
         # Single file mode
@@ -1484,11 +1486,26 @@ def handle_sanitize(args: argparse.Namespace):
                 if args.report_file:
                     _write_report_file(args.report_file, result.report_text)
 
-            print(f"✅ Sanitized → {output_path}", file=sys.stderr)
+            if getattr(args, "json", False):
+                res = {
+                    "status": result.status,
+                    "input_path": str(input_path),
+                    "output_path": str(output_path),
+                    "tracked_changes_found": result.tracked_changes_found,
+                    "tracked_changes_accepted": result.tracked_changes_accepted,
+                    "comments_removed": result.comments_removed,
+                    "comments_kept": result.comments_kept,
+                    "metadata_stripped": result.metadata_stripped,
+                    "warnings": result.warnings,
+                }
+                if args.report:
+                    res["report_text"] = result.report_text
+                print(json.dumps(res))
+            else:
+                print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            _cli_error("invalid_input", str(e))
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
         except Exception as e:
@@ -1628,7 +1645,34 @@ def handle_sanitize(args: argparse.Namespace):
         summary = f"\nBatch Summary: {total} documents processed, {succeeded} succeeded, {blocked} blocked"
         if blocked > 0:
             summary += "\nBatch failed — no outputs were written (the batch is all-or-nothing)."
-        print(summary, file=sys.stderr)
+
+        if getattr(args, "json", False):
+            batch_results: List[Dict[str, Any]] = []
+            for r in all_reports:
+                if isinstance(r, (SanitizeError, Exception)):
+                    batch_results.append({"status": "blocked", "error": str(r)})
+                else:
+                    item = {
+                        "status": r.status,
+                        "output_path": r.output_path,
+                        "tracked_changes_found": r.tracked_changes_found,
+                        "tracked_changes_accepted": r.tracked_changes_accepted,
+                        "comments_removed": r.comments_removed,
+                        "comments_kept": r.comments_kept,
+                        "metadata_stripped": r.metadata_stripped,
+                        "warnings": r.warnings,
+                    }
+                    batch_results.append(item)
+            payload = {
+                "status": "ok" if blocked == 0 else "blocked",
+                "total": total,
+                "succeeded": succeeded,
+                "blocked": blocked,
+                "results": batch_results,
+            }
+            print(json.dumps(payload))
+        else:
+            print(summary, file=sys.stderr)
 
         # Write reports
         if args.report or args.report_file:
@@ -1967,6 +2011,11 @@ def _main_impl():
         "--report-file",
         type=Path,
         help="Write report to file",
+    )
+    p_sanitize.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable JSON result on stdout.",
     )
     p_sanitize.set_defaults(func=handle_sanitize)
 

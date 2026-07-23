@@ -822,3 +822,55 @@ def test_read_docx_appendix_mode_schema_compat(tmp_path):
 
     # Assert that the result was successful and contains appendix information
     assert "Agreement" in text
+
+
+def test_sanitize_cli_accepts_json_flag(tmp_path, capsys):
+    """
+    Verifies that 'adeu sanitize' accepts the --json flag instead of failing
+    with 'unrecognized arguments: --json' (exit 2).
+    Under --json, adeu sanitize must output a machine-readable JSON result on stdout.
+    """
+    import json
+    from unittest.mock import patch
+
+    from docx import Document
+
+    from adeu.cli import main
+
+    # 1. Create a test docx
+    doc = Document()
+    doc.add_paragraph("Contract text to sanitize")
+    input_path = tmp_path / "contract.docx"
+    output_path = tmp_path / "contract_sanitized.docx"
+    doc.save(str(input_path))
+
+    # 2. Run adeu sanitize with --json
+    code = 0
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "adeu",
+            "sanitize",
+            str(input_path),
+            "-o",
+            str(output_path),
+            "--json",
+        ],
+    ):
+        try:
+            main()
+        except SystemExit as e:
+            code = e.code or 0
+
+    captured = capsys.readouterr()
+
+    # Must not fail with argparse usage/unrecognized argument error (exit code 2)
+    assert code != 2, f"adeu sanitize failed with argparse error (code 2): {captured.err}"
+    assert "unrecognized arguments: --json" not in captured.err, f"adeu sanitize rejected --json flag: {captured.err}"
+
+    # Success path should exit 0 and emit valid JSON on stdout
+    assert code == 0, f"adeu sanitize failed with exit code {code}: {captured.err}"
+    assert captured.out.strip(), "Expected JSON output on stdout, got empty stdout"
+    data = json.loads(captured.out)
+    assert "output_path" in data or "file_path" in data or "status" in data
