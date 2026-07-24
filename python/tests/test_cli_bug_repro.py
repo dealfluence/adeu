@@ -974,3 +974,118 @@ def test_sanitize_report_file_written_on_blocked_run(tmp_path, capsys):
     report_text = report_file.read_text(encoding="utf-8")
     assert "BLOCKED: Document contains" in report_text
     assert "unresolved tracked changes" in report_text
+
+
+def test_diff_output_flag_support(tmp_path, capsys):
+    """
+    Verifies that `adeu diff` accepts `-o` / `--output` flags to write diff
+    results directly to a file, matching the interface contract of sibling
+    subcommands (extract, apply, accept-all, markup, sanitize).
+    """
+    import json
+
+    import docx
+
+    # 1. Create original and modified documents
+    orig_path = tmp_path / "orig.docx"
+    mod_path = tmp_path / "mod.docx"
+
+    doc1 = docx.Document()
+    doc1.add_paragraph("Original Section Text")
+    doc1.save(str(orig_path))
+
+    doc2 = docx.Document()
+    doc2.add_paragraph("Modified Section Text")
+    doc2.save(str(mod_path))
+
+    out_json_path = tmp_path / "diff_output.json"
+
+    # 2. Invoke adeu diff with --json -o <path>
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(mod_path), "--json", "-o", str(out_json_path)],
+        capsys,
+    )
+
+    # 3. Assert success and file creation
+    assert code == 0, f"adeu diff -o failed with exit code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
+    assert out_json_path.exists(), f"Expected diff output file {out_json_path} to exist"
+
+    # 4. Verify output file contains valid JSON diff payload
+    content = out_json_path.read_text(encoding="utf-8")
+    data = json.loads(content)
+    assert isinstance(data, list)
+    assert len(data) > 0
+    assert data[0].get("type") == "modify"
+
+    # 5. Also test --output variant
+    out_json_path2 = tmp_path / "diff_output2.json"
+    code2, stdout2, stderr2 = run_cli(
+        ["diff", str(orig_path), str(mod_path), "--json", "--output", str(out_json_path2)],
+        capsys,
+    )
+    assert code2 == 0, f"adeu diff --output failed with exit code {code2}.\nSTDERR:\n{stderr2}"
+    assert out_json_path2.exists(), f"Expected diff output file {out_json_path2} to exist"
+
+
+def test_diff_output_flag_text_and_guards(tmp_path, capsys):
+    """
+    Verifies text-mode output files, `-o -` stdout handling, and path guardrails
+    for `adeu diff -o`.
+    """
+    import docx
+
+    orig_path = tmp_path / "orig.docx"
+    mod_path = tmp_path / "mod.docx"
+
+    doc1 = docx.Document()
+    doc1.add_paragraph("Original Section Text")
+    doc1.save(str(orig_path))
+
+    doc2 = docx.Document()
+    doc2.add_paragraph("Modified Section Text")
+    doc2.save(str(mod_path))
+
+    # 1. Text mode with differences -> written to -o
+    out_txt_path = tmp_path / "diff_output.txt"
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(mod_path), "-o", str(out_txt_path)],
+        capsys,
+    )
+    assert code == 0, f"adeu diff -o text failed: {stderr}"
+    assert out_txt_path.exists()
+    content = out_txt_path.read_text(encoding="utf-8")
+    assert "[~]" in content or "Original Section Text" in content
+
+    # 2. Text mode with no differences -> written to -o
+    out_no_diff = tmp_path / "no_diff.txt"
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(orig_path), "-o", str(out_no_diff)],
+        capsys,
+    )
+    assert code == 0, f"adeu diff -o no diff failed: {stderr}"
+    assert out_no_diff.exists()
+    assert "No textual differences found." in out_no_diff.read_text(encoding="utf-8")
+
+    # 3. `-o -` streams to stdout
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(mod_path), "--json", "-o", "-"],
+        capsys,
+    )
+    assert code == 0
+    assert "Original" in stdout
+
+    # 4. Guard against overwriting input file
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(mod_path), "-o", str(orig_path)],
+        capsys,
+    )
+    assert code == 1
+    assert "same file" in stderr or "invalid_input" in stderr
+
+    # 5. Guard against .docx output path
+    code, stdout, stderr = run_cli(
+        ["diff", str(orig_path), str(mod_path), "-o", str(tmp_path / "out.docx")],
+        capsys,
+    )
+    assert code == 1
+    assert "refusing" in stderr.lower() or "invalid_input" in stderr
