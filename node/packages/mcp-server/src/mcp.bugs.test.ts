@@ -279,5 +279,42 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toContain("Page -1 out of range");
   });
+
+  it("creates non-existent output parent directory when saving batch results", async () => {
+    const nestedOutPath = join(
+      tmpdir(),
+      `adeu_test_dir_${Date.now()}`,
+      "sub_dir",
+      `adeu_out_${Date.now()}.docx`,
+    );
+
+    const res = await sendRpc(
+      "tools/call",
+      {
+        name: "process_document_batch",
+        arguments: {
+          reasoning: "test non-existent directory creation",
+          original_docx_path: cleanDocPath,
+          author_name: "Agent",
+          output_path: nestedOutPath,
+          changes: [
+            {
+              type: "modify",
+              target_text: "document",
+              new_text: "updated document",
+            },
+          ],
+        },
+      },
+      115,
+    );
+
+    expect(res.result.isError).toBeUndefined();
+    expect(res.result.content[0].text).toContain("Batch complete.");
+    expect(existsSync(nestedOutPath)).toBe(true);
+
+    if (existsSync(nestedOutPath)) unlinkSync(nestedOutPath);
+  });
 });
+
 

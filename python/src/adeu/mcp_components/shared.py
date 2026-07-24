@@ -151,5 +151,8 @@ def add_timing_if_debug(start_time: float, result: Any) -> Any:
 
 
 def save_stream(stream: BytesIO, path: str):
-    with open(path, "wb") as f:
+    p = Path(path)
+    if p.parent and str(p.parent) not in ("", "."):
+        p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "wb") as f:
         f.write(stream.getvalue())
