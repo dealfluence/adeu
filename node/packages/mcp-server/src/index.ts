@@ -27,7 +27,10 @@ import {
   build_outline_response,
   build_appendix_response,
   build_search_response,
+  render_outline_response,
 } from "./response-builders.js";
+import { docCache } from "./doc-cache.js";
+import type { ProgressFn } from "./doc-cache.js";
 
 import { MARKDOWN_UI_URI, handleServerCliArgs } from "./shared.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
@@ -176,9 +179,10 @@ function overwriteNote(
 async function loadDocxOrThrow(
   buf: Buffer,
   filePath: string,
+  opts?: Parameters<typeof DocumentObject.load>[1],
 ): Promise<DocumentObject> {
   try {
-    return await DocumentObject.load(buf);
+    return await DocumentObject.load(buf, opts);
   } catch (err: any) {
     throw new Error(
       `'${filePath}' is not a valid .docx (Word) document: ${err?.message ?? err}`,
@@ -383,23 +387,67 @@ registerAppTool(
     }),
     _meta: { ui: { resourceUri: MARKDOWN_UI_URI } },
   },
-  async ({
-    reasoning,
-    file_path,
-    clean_view,
-    mode,
-    page,
-    outline_max_level,
-    outline_verbose,
-    search_query,
-    search_regex,
-    search_case_sensitive,
-  }) => {
+  async (
+    {
+      reasoning,
+      file_path,
+      clean_view,
+      mode,
+      page,
+      outline_max_level,
+      outline_verbose,
+      search_query,
+      search_regex,
+      search_case_sensitive,
+    },
+    extra?: any,
+  ) => {
     try {
       void reasoning;
-      const buf = readFileBytesOrThrow(file_path);
+      const readBytes = () => readFileBytesOrThrow(file_path);
+
+      // Progress relay: only when the client supplied a progressToken, and
+      // never allowed to fail the read. Cold ingests of huge documents use
+      // it so the first read shows live work instead of a silent stall.
+      const progressToken = extra?._meta?.progressToken;
+      const onProgress: ProgressFn | undefined =
+        progressToken !== undefined && extra?.sendNotification
+          ? async (message, progress, total) => {
+              try {
+                await extra.sendNotification({
+                  method: "notifications/progress",
+                  params: { progressToken, progress, total, message },
+                });
+              } catch {
+                /* progress is best-effort */
+              }
+            }
+          : undefined;
+
+      // The cache delegates byte-reading and document-loading back to the
+      // boundary helpers so error shapes stay identical to the uncached
+      // handler (lean file-not-found with sibling listing; container errors
+      // diagnosed as invalid .docx per QA 2026-07-23 F19).
+      const loadDoc = (buf: Buffer, opts?: any) =>
+        loadDocxOrThrow(buf, file_path, opts);
+      const getEntry = () =>
+        docCache.get(file_path, readBytes, loadDoc, onProgress);
 
       if (mode === "outline") {
+        if (!clean_view) {
+          const entry = await getEntry();
+          const res = render_outline_response(
+            entry.outline_nodes,
+            entry.raw_bundle.pagination.total_pages,
+            file_path,
+            outline_max_level,
+            outline_verbose,
+          );
+          return res as any;
+        }
+        // clean_view outline: rare combination, needs clean-text offsets the
+        // cache does not keep — served by the historical uncached path.
+        const buf = readBytes();
         const doc = await loadDocxOrThrow(buf, file_path);
         const extract_res = _extractTextFromDoc(
           doc,
@@ -421,8 +469,14 @@ registerAppTool(
         return res as any;
       }
 
-      const readDoc = await loadDocxOrThrow(buf, file_path);
-      const text = _extractTextFromDoc(readDoc, clean_view) as string;
+      const entry = await getEntry();
+      const text = clean_view
+        ? await docCache.ensureCleanText(entry, readBytes, loadDoc)
+        : entry.raw_text;
+      const bundle = clean_view
+        ? await docCache.ensureCleanBundle(entry, readBytes, loadDoc)
+        : entry.raw_bundle;
+
       if (search_query !== undefined && search_query !== null) {
         // In search mode, undefined `page` means "search all document pages".
         const res = build_search_response(
@@ -432,6 +486,7 @@ registerAppTool(
           search_case_sensitive,
           page,
           file_path,
+          bundle,
         );
         return res as any;
       }
@@ -444,7 +499,7 @@ registerAppTool(
         page !== null &&
         String(page).trim().toLowerCase() === "all"
       ) {
-        const res = build_full_document_response(text, file_path);
+        const res = build_full_document_response(text, file_path, bundle);
         return res as any;
       }
       // In non-search mode, `page` defaults to 1 (show document page 1).
@@ -470,10 +525,20 @@ registerAppTool(
         resolvedPage = parsed;
       }
       if (mode === "appendix") {
-        const res = build_appendix_response(text, resolvedPage, file_path);
+        const res = build_appendix_response(
+          text,
+          resolvedPage,
+          file_path,
+          bundle,
+        );
         return res as any;
       }
-      const res = build_paginated_response(text, resolvedPage, file_path);
+      const res = build_paginated_response(
+        text,
+        resolvedPage,
+        file_path,
+        bundle,
+      );
       return res as any;
     } catch (e: any) {
       return {

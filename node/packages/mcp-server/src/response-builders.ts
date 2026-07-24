@@ -16,6 +16,18 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+/**
+ * Precomputed projection products (doc-cache): the split body/appendix and
+ * the body pagination that every builder would otherwise recompute per call.
+ * All builders accept it OPTIONALLY — omitted, they compute exactly what
+ * they always did, so responses stay byte-identical cached vs uncached.
+ */
+export interface ProjectionBundle {
+  body: string;
+  appendix: string;
+  pagination: ReturnType<typeof paginate>;
+}
+
 // Projection style markers: `**bold**` always; `_italic_` only where the
 // underscore is not intra-word (identifiers like snake_case are literal text —
 // the projection's italics markers always hug non-whitespace at a word edge).
@@ -187,11 +199,12 @@ export function render_outline_tree(
 export function build_full_document_response(
   text: string,
   file_path: string,
+  bundle?: ProjectionBundle,
 ): ToolResult {
   // The ENTIRE document body with no page banner, continuation footer, or
   // appendix pointer — the round-trip artifact for text-based apply/diff
   // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
-  const [body] = split_structural_appendix(text);
+  const body = bundle ? bundle.body : split_structural_appendix(text)[0];
   const ui_markdown = body;
   const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
   return {
@@ -208,11 +221,14 @@ export function build_paginated_response(
   text: string,
   page: number,
   file_path: string,
+  bundle?: ProjectionBundle,
 ): ToolResult {
-  const [body, appendix] = split_structural_appendix(text);
+  const [body, appendix] = bundle
+    ? [bundle.body, bundle.appendix]
+    : split_structural_appendix(text);
   const has_appendix = Boolean(appendix.trim());
 
-  const result = paginate(body, "");
+  const result = bundle ? bundle.pagination : paginate(body, "");
 
   if (page < 1 || page > result.total_pages) {
     throw new Error(
@@ -252,11 +268,6 @@ export function build_outline_response(
   outline_verbose: boolean = false,
   paragraph_offsets: Map<any, [number, number]> | null = null,
 ): ToolResult {
-  // Levels outside 1-6 are meaningless (0/negative would render a
-  // nonsensical "L1-L0" range label, QA L2). Clamp to the nearest sensible
-  // depth, mirroring the Python builder.
-  outline_max_level = Math.max(1, Math.min(outline_max_level, 6));
-
   const [body] = split_structural_appendix(projected_text);
   const pagination_result = paginate(body, "");
 
@@ -267,6 +278,33 @@ export function build_outline_response(
     pagination_result.body_page_offsets,
     paragraph_offsets,
   );
+
+  return render_outline_response(
+    nodes,
+    pagination_result.total_pages,
+    file_path,
+    outline_max_level,
+    outline_verbose,
+  );
+}
+
+/**
+ * Assembly half of build_outline_response, byte-identical to it: lets the
+ * doc-cache serve outline mode from precomputed nodes + pagination without a
+ * document load. Kept as ONE shared function so the header/format can never
+ * drift between the cached and uncached paths.
+ */
+export function render_outline_response(
+  nodes: OutlineNode[],
+  total_pages: number,
+  file_path: string,
+  outline_max_level: number = 2,
+  outline_verbose: boolean = false,
+): ToolResult {
+  // Levels outside 1-6 are meaningless (0/negative would render a
+  // nonsensical "L1-L0" range label, QA L2). Clamp to the nearest sensible
+  // depth, mirroring the Python builder.
+  outline_max_level = Math.max(1, Math.min(outline_max_level, 6));
 
   const rendered = render_outline_tree(
     nodes,
@@ -283,7 +321,7 @@ export function build_outline_response(
       ? ` (${deeper_count} more at deeper levels, raise outline_max_level to see)`
       : "";
 
-  const header = `> **Outline view** — showing ${visible_count} of ${nodes.length} headings (L1-L${outline_max_level}${deeper_hint}) across ${pagination_result.total_pages} page(s). Call \`read_docx\` with \`mode='full'\` and \`page=N\` to read a section.\n\n---\n\n`;
+  const header = `> **Outline view** — showing ${visible_count} of ${nodes.length} headings (L1-L${outline_max_level}${deeper_hint}) across ${total_pages} page(s). Call \`read_docx\` with \`mode='full'\` and \`page=N\` to read a section.\n\n---\n\n`;
   const ui_markdown = header + rendered;
   const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
 
@@ -301,8 +339,11 @@ export function build_appendix_response(
   text: string,
   page: number,
   file_path: string,
+  bundle?: ProjectionBundle,
 ): ToolResult {
-  const [, appendix] = split_structural_appendix(text);
+  const appendix = bundle
+    ? bundle.appendix
+    : split_structural_appendix(text)[1];
 
   if (!appendix.trim()) {
     const ui_markdown =
@@ -361,8 +402,9 @@ export function build_search_response(
   search_case_sensitive: boolean,
   page: number | string | undefined,
   file_path: string,
+  bundle?: ProjectionBundle,
 ): ToolResult {
-  const [body] = split_structural_appendix(text);
+  const body = bundle ? bundle.body : split_structural_appendix(text)[0];
   const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const flags = search_case_sensitive ? "g" : "gi";
 
@@ -412,7 +454,7 @@ export function build_search_response(
   }
 
   // Compute document pagination once — needed for both annotation and filtering.
-  const pag_res = paginate(body, "");
+  const pag_res = bundle ? bundle.pagination : paginate(body, "");
   const page_offsets = pag_res.body_page_offsets;
   const total_doc_pages = pag_res.total_pages;
 

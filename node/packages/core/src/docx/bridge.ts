@@ -148,9 +148,18 @@ export class DocumentObject {
 
   /**
    * Main entrypoint for loading a DOCX buffer into the DOM wrapper.
+   *
+   * `opts.onPart(done, total)` is an optional progress hook awaited every
+   * `partTickEvery` parsed parts (default 200). Long loads (thousands of
+   * parts) use it to surface progress to MCP clients and to yield the event
+   * loop so those notifications actually flush. Zero overhead when omitted.
    */
   public static async load(
     buffer: Buffer | ArrayBuffer,
+    opts?: {
+      onPart?: (done: number, total: number) => void | Promise<void>;
+      partTickEvery?: number;
+    },
   ): Promise<DocumentObject> {
     const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     const unzipped = unzipSync(u8);
@@ -169,6 +178,15 @@ export class DocumentObject {
     }
 
     // 2. Pre-load all XML parts to allow synchronous traversal later
+    const onPart = opts?.onPart;
+    const tickEvery = Math.max(1, opts?.partTickEvery ?? 200);
+    let totalXmlParts = 0;
+    if (onPart) {
+      for (const path of Object.keys(unzipped)) {
+        if (path.endsWith(".xml") || path.endsWith(".rels")) totalXmlParts++;
+      }
+    }
+    let parsedParts = 0;
     for (const [path, fileData] of Object.entries(unzipped)) {
       if (path.endsWith(".xml") || path.endsWith(".rels")) {
         const text = strFromU8(fileData);
@@ -177,7 +195,14 @@ export class DocumentObject {
         const part = new Part("/" + path, text, doc.documentElement, cType);
         part.package = pkg;
         pkg.parts.push(part);
+        parsedParts++;
+        if (onPart && parsedParts % tickEvery === 0) {
+          await onPart(parsedParts, totalXmlParts);
+        }
       }
+    }
+    if (onPart && totalXmlParts > 0) {
+      await onPart(totalXmlParts, totalXmlParts);
     }
 
     // 3. Resolve Relationships for the main document
