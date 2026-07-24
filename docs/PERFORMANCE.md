@@ -1,9 +1,10 @@
 # DOCX Engine Performance: How the Large-Document Gains Were Made
 
-**Status:** Phases 1 (anchor-fallback index) and 4 (server-layer projection
-cache) shipped in the TypeScript engine (2026-07-24). This document describes
-the work in implementation-neutral terms so the same gains can be reproduced
-in the Python engine, which shares the identical architecture and algorithms.
+**Status:** Phases 1 (anchor-fallback index), 4 (server-layer projection
+cache), and 5 (lazy transactional snapshot) shipped in the TypeScript engine
+(2026-07-24). This document describes the work in implementation-neutral
+terms so the same gains can be reproduced in the Python engine, which shares
+the identical architecture and algorithms.
 
 ---
 
@@ -227,11 +228,35 @@ Ordered by user-visible value per unit of risk:
    the wait and pays for it directly. (b) When the client supplies a
    progress token, report parse progress during cold ingests and yield the
    event loop periodically so the notifications actually flush.
-2. **Editing path.** Avoid full projection rebuilds after every edit in a
-   batch (rebuild once per batch, or incrementally patch the affected span);
-   skip clean-view rebuilds when no consumer needs them; on save, re-serialize
-   only parts whose tree actually changed (track a per-part dirty flag or
-   revision counter; reuse original bytes for untouched parts).
+2. **Editing path — transactional snapshot.** *(SHIPPED in the TypeScript
+   engine; stress document: single-edit batch 25.9 s → 2.9 s (9×), batch
+   memory peak halved; 10-edit batch 21.8 s ≈ 2.2 s/edit marginal.)*
+   Profiling — not intuition — found the cost: the batch rollback snapshot
+   **deep-cloned every part's tree up front** (~2.7 M nodes), on every
+   batch, successful or not. The fix inverts the cost: parts that are still
+   "clean" (tree reconstructible from their pristine load-time XML) are not
+   cloned at all — rollback re-parses that XML on the rare failure path.
+   Three portable lessons:
+   - Cleanliness must be tracked through the engine's OWN deterministic
+     writes. Anchor stamps (§3) and the tracked-change namespace
+     declaration the engine adds at construction are re-derived identically
+     by any fresh pass, so they must not flip a part to "dirty" — the first
+     implementation missed the namespace stamp and kept deep-cloning the
+     45 MB main part; a cleanliness probe (count dirty parts at each
+     lifecycle stage) caught it.
+   - Restored-by-reparse parts get fresh tree objects; every restore caller
+     must already rebuild its projection/comment managers (they did — but
+     verify with a use-the-engine-after-rollback test, including a rollback
+     that removes parts added mid-batch).
+   - The remaining per-edit marginal cost is the full projection rebuild
+     between sequential edits (the batch contract validates each edit
+     against the state its predecessors produced). Incremental projection
+     patching is the next frontier; per-batch cost is now linear with a
+     small constant.
+   Still open on this path: dirty-part-only save (reuse original bytes for
+   untouched parts — the cleanliness marker now exists; note it changes
+   which deterministic stamps get persisted, so decide stamp-persistence
+   semantics first), and skipping clean-view rebuilds no consumer needs.
 3. **Appendix on demand.** Full-mode reads should not build the defined-terms
    /anchors appendix they immediately discard; compute a cheap "appendix
    would be non-empty" signal during the main projection walk instead, and

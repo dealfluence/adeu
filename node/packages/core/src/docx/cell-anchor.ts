@@ -40,9 +40,36 @@ interface WpIndexCache {
 }
 
 const CACHE_KEY = "__adeu_wp_index_cache";
+const CLEAN_INC_KEY = "__adeu_clean_inc";
 
 function docInc(ownerDoc: any): number | null {
   return typeof ownerDoc._inc === "number" ? ownerDoc._inc : null;
+}
+
+/**
+ * Cleanliness contract for the engine's lazy transactional snapshot
+ * (docs/PERFORMANCE.md §5.2): a part is "clean" when its live DOM is
+ * byte-reconstructible from its pristine load-time XML (`part.blob`) —
+ * IGNORING this module's deterministic anchor stamps, which any fresh parse
+ * re-derives identically (§3.5 invariant). Rollback may then restore a clean
+ * part by re-parsing its blob instead of deep-cloning 2.7M nodes up front.
+ *
+ * `markPartClean` pins the marker to the document's current mutation counter
+ * (called at load, and after a blob-faithful restore). The stamping code
+ * below advances the marker across its OWN mutations, exactly like the
+ * wp-index resync — foreign mutations (real edits) leave it behind, making
+ * the part dirty.
+ */
+export function markPartClean(ownerDoc: any): void {
+  const inc = docInc(ownerDoc);
+  if (inc !== null) ownerDoc[CLEAN_INC_KEY] = inc;
+}
+
+/** True when the part's DOM still matches blob-modulo-anchor-stamps. A
+ * document without mutation counters is never considered clean. */
+export function isPartClean(ownerDoc: any): boolean {
+  const inc = docInc(ownerDoc);
+  return inc !== null && ownerDoc[CLEAN_INC_KEY] === inc;
 }
 
 /** Preorder walk assigning each w:p its document-order index (matches
@@ -116,6 +143,10 @@ export function resolve_cell_anchor(
 
   if (!paraId && is_empty) {
     const ownerDoc = cell_element.ownerDocument! as any;
+    // Stamps (and the created placeholder paragraph) are deterministic
+    // projection artifacts a fresh parse re-derives identically — they must
+    // not flip the part to "dirty" for the lazy-snapshot contract above.
+    const wasClean = isPartClean(ownerDoc);
     if (!firstP) {
       firstP = ownerDoc.createElement("w:p") as Element;
       cell_element.appendChild(firstP);
@@ -131,6 +162,7 @@ export function resolve_cell_anchor(
     paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, "0");
     firstP.setAttribute("w14:paraId", paraId);
     resyncAfterOwnAttributeMutation(ownerDoc);
+    if (wasClean) markPartClean(ownerDoc);
   }
 
   return { paraId, firstP };

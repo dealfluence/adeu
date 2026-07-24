@@ -6,6 +6,7 @@ import {
   findAllDescendants,
   serializeXml,
 } from "./dom.js";
+import { markPartClean } from "./cell-anchor.js";
 
 export class Relationship {
   constructor(
@@ -191,6 +192,9 @@ export class DocumentObject {
       if (path.endsWith(".xml") || path.endsWith(".rels")) {
         const text = strFromU8(fileData);
         const doc = parseXml(text);
+        // Freshly parsed DOM == blob by definition: pin the cleanliness
+        // marker the engine's lazy transactional snapshot keys on.
+        markPartClean(doc);
         const cType = contentTypes["/" + path] || "application/xml";
         const part = new Part("/" + path, text, doc.documentElement, cType);
         part.package = pkg;

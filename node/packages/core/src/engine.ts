@@ -12,7 +12,8 @@ import {
   DocumentChange,
 } from "./models.js";
 import { trim_common_context, generate_edits_from_text } from "./diff.js";
-import { findChild, findAllDescendants, serializeXml } from "./docx/dom.js";
+import { findChild, findAllDescendants, serializeXml, parseXml } from "./docx/dom.js";
+import { isPartClean, markPartClean } from "./docx/cell-anchor.js";
 import { split_structural_appendix, paginate } from "./pagination.js";
 import {
   is_heading_paragraph,
@@ -100,18 +101,36 @@ function safeCloneEdit(val: any, seen: WeakMap<any, any> = new WeakMap()): any {
   return copy;
 }
 
+/**
+ * Transactional snapshot for batch rollback (docs/PERFORMANCE.md §5.2).
+ *
+ * The historical implementation deep-cloned EVERY part's DOM up front —
+ * on a 45 MB document.xml that is a ~2.7M-element clone paid on every
+ * batch, successful or not (the dominant cost of a single-edit batch,
+ * measured at ~10 s). Parts that are still "clean" (DOM reconstructible
+ * from their pristine load-time XML, modulo deterministic anchor stamps —
+ * see cell-anchor.ts markPartClean/isPartClean) skip the clone entirely
+ * and are restored by RE-PARSING part.blob, shifting that cost to the
+ * rare failure path. Parts dirtied by a prior successful batch in the
+ * same engine session (blob stale) still get the deep clone.
+ */
 function takeSnapshot(doc: any): any {
   const parts = [...doc.pkg.parts];
   const unzipped = { ...doc.pkg.unzipped };
   const rels = new Map<any, Map<string, any>>();
   const elements = new Map<any, Element>();
+  const blobRestores = new Set<any>();
   for (const part of parts) {
     rels.set(part, new Map(part.rels));
-    if (part._element) {
+    if (!part._element) continue;
+    const od = part._element.ownerDocument as any;
+    if (od && isPartClean(od) && typeof part.blob === "string") {
+      blobRestores.add(part);
+    } else {
       elements.set(part, part._element.cloneNode(true) as Element);
     }
   }
-  return { parts, unzipped, rels, elements };
+  return { parts, unzipped, rels, elements, blobRestores };
 }
 
 function restoreSnapshot(doc: any, snapshot: any): void {
@@ -124,6 +143,17 @@ function restoreSnapshot(doc: any, snapshot: any): void {
   }
   for (const part of snapshot.parts) {
     part.rels = new Map(snapshot.rels.get(part)!);
+    if (snapshot.blobRestores && snapshot.blobRestores.has(part)) {
+      // Clean at snapshot time: the pristine load-time XML IS the
+      // pre-batch state (anchor stamps are re-derived deterministically by
+      // the next projection). Fresh parse -> fresh Document; stale element
+      // references are invalidated by the mapper/comments-manager rebuilds
+      // every restore caller already performs.
+      const parsed = parseXml(part.blob);
+      markPartClean(parsed);
+      part._element = parsed.documentElement;
+      continue;
+    }
     const originalEl = snapshot.elements.get(part);
     if (originalEl && part._element) {
       const xmlDoc = part._element.ownerDocument;
@@ -394,7 +424,15 @@ export class RedlineEngine {
     for (const part of this.doc.pkg.parts) {
       if (part === this.doc.part) {
         if (!part._element.hasAttribute("xmlns:w16du")) {
+          // Deterministic engine artifact, like the cell-anchor stamps:
+          // every ctor re-adds it and save() lazily injects it wherever
+          // "w16du:" appears — so it must not mark the 45MB main part
+          // dirty for the lazy snapshot (it would force the full-body
+          // deep clone back on every batch).
+          const od = part._element.ownerDocument as any;
+          const wasClean = isPartClean(od);
           part._element.setAttribute("xmlns:w16du", w16du_ns);
+          if (wasClean) markPartClean(od);
         }
       }
     }
