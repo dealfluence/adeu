@@ -1491,9 +1491,12 @@ def handle_sanitize(args: argparse.Namespace):
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
+            # Block reason goes to stderr BEFORE the report write: if the
+            # report path turns out unwritable, _write_report_file exits the
+            # process and the reason would otherwise be lost.
+            print(str(e), file=sys.stderr)
             if args.report_file:
                 _write_report_file(args.report_file, str(e))
-            print(str(e), file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
