@@ -191,6 +191,57 @@ describe("lazy transactional snapshot rollback", () => {
     expect(project(doc)).toContain("(wet)");
   });
 
+  it("rollback after an intermediate save() restores the SAVED state, not the load state", async () => {
+    // save() re-baselines part.blob, so the post-save document is "clean"
+    // again and batch-2's rollback takes the cheap blob-restore path — it
+    // must land exactly on the saved (post-batch-1) content.
+    const doc = await buildDoc();
+    const engine = new RedlineEngine(doc, "Snap");
+    const s1 = engine.process_batch(
+      [
+        {
+          type: "modify",
+          target_text: "Alpha paragraph about the agreement.",
+          new_text: "Alpha paragraph about the renegotiated agreement.",
+        },
+      ],
+      false,
+    );
+    expect(s1.edits_applied).toBe(1);
+    await doc.save(); // re-baselines blobs
+    const afterSave = project(doc);
+    expect(afterSave).toContain("renegotiated");
+
+    expect(() =>
+      engine.process_batch(
+        [
+          {
+            type: "modify",
+            target_text: "Gamma closing paragraph.",
+            new_text: "Gamma closing paragraph, amended.",
+          },
+          { type: "modify", target_text: "NOT PRESENT AT ALL", new_text: "x" },
+        ],
+        false,
+      ),
+    ).toThrow(BatchValidationError);
+
+    expect(project(doc)).toBe(afterSave);
+
+    // And the engine still applies cleanly afterwards.
+    const s3 = engine.process_batch(
+      [
+        {
+          type: "modify",
+          target_text: "Gamma closing paragraph.",
+          new_text: "Gamma closing paragraph, finalized.",
+        },
+      ],
+      false,
+    );
+    expect(s3.edits_applied).toBe(1);
+  });
+
   it("save/reload after rollback round-trips the pre-batch state", async () => {
     const doc = await buildDoc();
     const before = project(doc);

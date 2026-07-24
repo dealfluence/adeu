@@ -281,6 +281,14 @@ export class DocumentObject {
           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xmlStr;
       }
       this.pkg.unzipped[part.partname.substring(1)] = strToU8(xmlStr); // Strip leading slash
+      // Re-baseline: the serialized XML IS the file's new content, so it
+      // becomes the part's pristine state. This keeps the lazy transactional
+      // snapshot cheap ACROSS saves — a later batch on this same in-memory
+      // document (the hot-DOM chained-edit path) sees clean parts again and
+      // rolls back by re-parsing this blob, i.e. exactly to the saved state.
+      part.blob = xmlStr;
+      const od = part._element.ownerDocument;
+      if (od) markPartClean(od);
     }
     return Buffer.from(zipSync(this.pkg.unzipped));
   }

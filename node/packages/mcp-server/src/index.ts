@@ -826,8 +826,14 @@ server.registerTool(
         }
       }
 
-      const buf = readFileBytesOrThrow(original_docx_path);
-      const doc = await loadDocxOrThrow(buf, original_docx_path);
+      // Hot-DOM reuse (docs/PERFORMANCE.md §5): a read_docx of this same
+      // file version usually preceded this call — take its parse instead of
+      // re-parsing from disk. Consume-on-take: the batch mutates the DOM.
+      let doc = await docCache.takeHotDoc(original_docx_path);
+      if (!doc) {
+        const buf = readFileBytesOrThrow(original_docx_path);
+        doc = await loadDocxOrThrow(buf, original_docx_path);
+      }
       const engine = new RedlineEngine(doc, author_name);
 
       let stats;
@@ -835,6 +841,10 @@ server.registerTool(
         stats = engine.process_batch(sanitizedChanges, dry_run);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
+          // The engine's transactional snapshot restored the DOM to the
+          // exact on-disk state — safe to pin it back for the retry that
+          // typically follows a rejected batch.
+          docCache.restoreHotDoc(original_docx_path, doc);
           return {
             isError: true,
             content: [
@@ -869,6 +879,15 @@ server.registerTool(
           };
         }
         overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
+        // The in-memory document IS the state of the file just written:
+        // adopt it as the output's cache (text products built in the
+        // background; DOM pinned for a chained edit). The agent's
+        // read-after-edit then skips the full re-parse.
+        docCache.primeFromDoc(outPath, doc);
+      } else {
+        // Dry-run: the engine restored the document to the exact on-disk
+        // state — pin it back for the wet run that typically follows.
+        docCache.restoreHotDoc(original_docx_path, doc);
       }
 
       let res = formatBatchResult(stats, outPath, !!dry_run) + overwrite_note;

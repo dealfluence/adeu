@@ -263,13 +263,33 @@ Ordered by user-visible value per unit of risk:
    build the appendix only in appendix mode. (Also fix the typo-detector's
    candidate bucketing, which currently defeats its own first-letter
    bucketing for terms longer than 5 characters.)
-4. **Parse floor.** The remaining floor is XML parsing throughput. Options,
-   in increasing invasiveness: skip decompressing non-XML entries on
-   read-only paths; parse secondary parts lazily on first access; replace
-   the DOM construction for the main part with a streaming (SAX-style)
-   parser feeding a minimal purpose-built tree. The last option is the only
-   one that materially moves the floor, and it carries the most risk — gate
-   it on the same golden-equivalence protocol before adopting.
+4. **Parse floor — first make parsing RARER, then faster.**
+   *4a (SHIPPED in the TypeScript server): hot-document reuse + output
+   priming.* The edit tool used to re-parse from disk even when a read of
+   the same file version had just parsed it, and the agent's
+   read-after-edit parsed a third time. A single hot-DOM slot
+   (stat-keyed, consume-on-take since edits mutate, TTL + heap-pressure
+   valve) lets the edit take the read's parse; after a successful batch
+   the in-memory post-edit document is adopted as the OUTPUT file's cache
+   (products built in the background; DOM pinned for chained edits).
+   Measured on the stress document, whole agent loop
+   read→edit→read→edit→read: 131 s → 52 s (2.5×); edits 37→13 s, output
+   reads 20→4.5 s. Portable invariants: (a) background fills reading a
+   DOM must be forced to completion before the DOM is handed to a
+   mutating consumer; (b) primed products must byte-equal a fresh parse
+   of the written file (equivalence-gate test); (c) a DOM may go back in
+   the slot after dry-runs and rolled-back batches (state provably equals
+   the file); (d) save() must RE-BASELINE each part's pristine XML
+   (serialized output becomes the new blob + clean marker) or the first
+   chained edit pays the full-tree clone again.
+   *4b (measured, pending): a purpose-built parser.* The tokenization
+   ceiling probe on the 45 MB main part: full spec parser 6.70 s, raw
+   scan 0.15 s, scan + minimal node construction 0.49 s — ~93% of parser
+   time is spec overhead (name-validation regexes, namespace resolution,
+   live-collection machinery) that WordprocessingML machine output never
+   exercises. A minimal-DOM parser implementing exactly the API subset
+   the engine uses would cut cold loads ~3-4×; gate adoption on the full
+   suite + goldens.
 
 ## 6. Porting checklist for the Python engine
 

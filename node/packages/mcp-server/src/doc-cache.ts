@@ -26,6 +26,7 @@
 
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
+import { getHeapStatistics } from "node:v8";
 import {
   DocumentObject,
   _extractTextFromDoc,
@@ -86,7 +87,137 @@ export class DocCache {
    * not start while requests are actively arriving). */
   private lastTouch = 0;
 
-  constructor(private maxEntries: number = 3) {}
+  /**
+   * Hot-DOM slot (docs/PERFORMANCE.md §5 "stop re-parsing"): the parsed
+   * DocumentObject of the most recently ingested/edited document version,
+   * kept so the NEXT operation on the same version (typically a
+   * process_document_batch right after a read, or a chained edit on a batch
+   * output) skips the multi-second disk parse entirely.
+   *
+   * Single slot, consume-on-take (an edit mutates the DOM, so it can never
+   * be shared), TTL-evicted, and guarded by a heap-headroom check so a
+   * multi-GB DOM is only pinned when there is room for it.
+   */
+  private hot: {
+    key: string;
+    doc: DocumentObject;
+    /** Background jobs still reading this DOM (clean fill, prime build).
+     * takeHotDoc forces and awaits them all before handing the DOM to a
+     * mutating consumer — otherwise a deferred fill would later extract a
+     * half-edited document into the cache. */
+    jobs: Array<{ force: () => void; promise: Promise<unknown> }>;
+  } | null = null;
+  private hotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Test observability: how many edits reused a hot DOM. */
+  public hot_hits = 0;
+  /** Priming jobs by key: a read arriving mid-prime joins instead of
+   * re-ingesting from disk. */
+  private priming = new Map<
+    string,
+    { promise: Promise<DocCacheEntry>; force: () => void }
+  >();
+
+  constructor(
+    private maxEntries: number = 3,
+    private hotTtlMs: number = 3 * 60_000,
+  ) {}
+
+  /**
+   * Heap headroom check for the pin-release VALVE. Pinning a DOM never
+   * grows the heap (it only delays release of memory the ingest already
+   * allocated), so storing is always safe; the hazard is holding a pinned
+   * multi-GB tree WHILE a new ingest allocates another one. Before any
+   * ingest, the pin is dropped when headroom is low.
+   */
+  private heapHasRoom(): boolean {
+    try {
+      const limit = getHeapStatistics().heap_size_limit;
+      return process.memoryUsage().heapUsed < limit * 0.55;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Drop the pinned DOM if a new multi-GB allocation needs the room. */
+  private releaseHotIfPressured(): void {
+    if (this.hot && !this.heapHasRoom()) {
+      this.hot = null;
+      if (this.hotTimer) {
+        clearTimeout(this.hotTimer);
+        this.hotTimer = null;
+      }
+    }
+  }
+
+  private storeHotDoc(key: string, doc: DocumentObject): void {
+    if (this.hotTimer) clearTimeout(this.hotTimer);
+    this.hot = { key, doc, jobs: [] };
+    this.hotTimer = setTimeout(() => {
+      this.hot = null;
+      this.hotTimer = null;
+    }, this.hotTtlMs);
+    // Never keep the server process alive just to babysit a cached DOM.
+    (this.hotTimer as any).unref?.();
+  }
+
+  /** Attach a background job to the hot slot iff it still holds `doc`. */
+  private registerHotJob(
+    doc: DocumentObject,
+    force: () => void,
+    promise: Promise<unknown>,
+  ) {
+    if (this.hot && this.hot.doc === doc) {
+      this.hot.jobs.push({ force, promise });
+    }
+  }
+
+  /**
+   * Hand the parsed DOM of the CURRENT version of `file_path` to a mutating
+   * consumer (the edit path), or null when the slot holds a different
+   * version/file. Consume-on-take: the slot is cleared; all background jobs
+   * reading the DOM are forced to completion first.
+   */
+  public async takeHotDoc(file_path: string): Promise<DocumentObject | null> {
+    this.lastTouch = Date.now();
+    if (!this.hot) return null;
+    let key: string;
+    try {
+      key = this.keyFor(resolve(file_path));
+    } catch {
+      return null;
+    }
+    if (this.hot.key !== key) return null;
+    const slot = this.hot;
+    this.hot = null;
+    if (this.hotTimer) {
+      clearTimeout(this.hotTimer);
+      this.hotTimer = null;
+    }
+    for (const job of slot.jobs) {
+      try {
+        job.force();
+      } catch {
+        /* forcing is best-effort */
+      }
+    }
+    await Promise.all(slot.jobs.map((j) => j.promise.catch(() => {})));
+    this.hot_hits++;
+    return slot.doc;
+  }
+
+  /**
+   * Put a DOM back in the slot after an operation that provably left it
+   * equal to the on-disk file (dry-run, or a rolled-back failed batch —
+   * both restore via the engine's transactional snapshot).
+   */
+  public restoreHotDoc(file_path: string, doc: DocumentObject): void {
+    try {
+      const key = this.keyFor(resolve(file_path));
+      this.storeHotDoc(key, doc);
+    } catch {
+      /* file gone — nothing to pin */
+    }
+  }
 
   /** Stat-derived identity of the CURRENT file version. */
   private keyFor(resolvedPath: string): string {
@@ -126,6 +257,19 @@ export class DocCache {
       return hit;
     }
 
+    // A prime job for this exact version may be pending (output of a batch
+    // that just wrote this file): join it instead of re-parsing from disk.
+    const prime = this.priming.get(key);
+    if (prime) {
+      prime.force();
+      const primed = await prime.promise.catch(() => null);
+      if (primed) {
+        this.entries.delete(primed.key);
+        this.entries.set(primed.key, primed);
+        return primed;
+      }
+    }
+
     const pending = this.inflight.get(key);
     if (pending) return pending;
 
@@ -148,6 +292,9 @@ export class DocCache {
     onProgress?: ProgressFn,
   ): Promise<DocCacheEntry> {
     this.ingest_count++;
+    // Valve: parsing may allocate a multi-GB tree — release any pinned DOM
+    // first when heap headroom is low, instead of holding two at once.
+    this.releaseHotIfPressured();
     const notify = async (m: string, p: number) => {
       if (onProgress) {
         try {
@@ -161,7 +308,7 @@ export class DocCache {
     await notify("reading file", 2);
     const buf = readBytes();
 
-    let doc: DocumentObject | null = await loadDoc(buf, {
+    const doc = await loadDoc(buf, {
       onPart: onProgress
         ? async (done: number, total: number) => {
             // Parts parsing spans ~2-70 on the progress scale.
@@ -171,16 +318,30 @@ export class DocCache {
         : undefined,
     });
 
-    await notify("projecting text", 75);
+    return await this.buildEntry(key, resolvedPath, doc, notify);
+  }
+
+  /**
+   * Products of one loaded document: shared by the disk-ingest path and by
+   * primeFromDoc (which starts from the in-memory post-edit document).
+   */
+  private async buildEntry(
+    key: string,
+    resolvedPath: string,
+    doc: DocumentObject,
+    notify?: (m: string, p: number) => Promise<void>,
+  ): Promise<DocCacheEntry> {
+    const n = notify ?? (async () => {});
+    await n("projecting text", 75);
     const extract_res = _extractTextFromDoc(doc, false, true, true) as {
       text: string;
       paragraph_offsets: Map<any, [number, number]>;
     };
 
-    await notify("paginating", 88);
+    await n("paginating", 88);
     const raw_bundle = makeBundle(extract_res.text);
 
-    await notify("building outline", 93);
+    await n("building outline", 93);
     const outline_nodes = extract_outline(
       doc,
       raw_bundle.body,
@@ -200,19 +361,32 @@ export class DocCache {
       clean_fill: null,
     };
     this.store(entry);
-    await notify("done", 100);
+    await n("done", 100);
 
-    // Background warm-up of the clean view AFTER the caller's response is
-    // flushed. The clean extraction is ONE synchronous block (seconds on a
-    // huge document), so it must not start while requests are still
-    // arriving — the VVBIG bench caught an innocent warm page-turn stalling
-    // 2.1 s behind it. Wait for a quiet period (no cache request for
-    // QUIET_MS), bounded by MAX_WAIT_MS; ensureCleanText sets _fill_forced
-    // to skip the wait — the clean_view requester pays for clean view,
-    // nobody else does. Failures leave clean_text null — the on-demand path
-    // in ensureCleanText rebuilds from bytes instead.
+    // Pin the DOM for the edit path BEFORE the deferred fill: an edit
+    // arriving next takes the slot and (via the registered job) forces the
+    // fill to completion first, so the fill can never read a half-edited
+    // document.
+    this.storeHotDoc(key, doc);
+    this.scheduleCleanFill(entry, doc);
+    return entry;
+  }
+
+  /**
+   * Background warm-up of the clean view AFTER the caller's response is
+   * flushed. The clean extraction is ONE synchronous block (seconds on a
+   * huge document), so it must not start while requests are still
+   * arriving — the VVBIG bench caught an innocent warm page-turn stalling
+   * 2.1 s behind it. Wait for a quiet period (no cache request for
+   * QUIET_MS), bounded by MAX_WAIT_MS; ensureCleanText sets _fill_forced
+   * to skip the wait — the clean_view requester pays for clean view,
+   * nobody else does. Failures leave clean_text null — the on-demand path
+   * in ensureCleanText rebuilds from bytes instead.
+   */
+  private scheduleCleanFill(entry: DocCacheEntry, doc: DocumentObject): void {
     const QUIET_MS = 400;
     const MAX_WAIT_MS = 30_000;
+    let docRef: DocumentObject | null = doc;
     entry.clean_fill = (async () => {
       try {
         // Quiet = QUIET_MS elapsed since the LATER of (fill became eligible,
@@ -228,16 +402,74 @@ export class DocCache {
         ) {
           await delay(100);
         }
-        entry.clean_text = _extractTextFromDoc(doc!, true, true) as string;
+        entry.clean_text = _extractTextFromDoc(docRef!, true, true) as string;
       } catch {
         entry.clean_text = null;
       } finally {
-        doc = null; // release the multi-GB DOM
+        docRef = null; // the hot slot (if any) now owns the DOM's lifetime
         entry.clean_fill = null;
       }
     })();
+    this.registerHotJob(
+      doc,
+      () => {
+        entry._fill_forced = true;
+      },
+      entry.clean_fill,
+    );
+  }
 
-    return entry;
+  /**
+   * After a successful batch write: adopt the in-memory post-edit document
+   * as the cache state of the OUTPUT file. The DOM is pinned for chained
+   * edits immediately; the text products are built after a quiet period
+   * (forced early if a read arrives and joins via the priming map). The
+   * agent's read-after-edit therefore never re-parses what the server just
+   * had in memory.
+   *
+   * SAFETY GATE: primed products must byte-equal what a fresh parse of the
+   * written file would produce — guaranteed by the deterministic
+   * serialize→parse round-trip and enforced by the prime-equivalence tests.
+   */
+  public primeFromDoc(file_path: string, doc: DocumentObject): void {
+    this.lastTouch = Date.now();
+    const resolvedPath = resolve(file_path);
+    let key: string;
+    try {
+      key = this.keyFor(resolvedPath);
+    } catch {
+      return; // file vanished — nothing to prime
+    }
+    this.storeHotDoc(key, doc);
+
+    let forced = false;
+    const QUIET_MS = 400;
+    const MAX_WAIT_MS = 30_000;
+    const job = (async () => {
+      const eligibleAt = Date.now();
+      const started = eligibleAt;
+      while (
+        !forced &&
+        Date.now() - Math.max(this.lastTouch, eligibleAt) < QUIET_MS &&
+        Date.now() - started < MAX_WAIT_MS
+      ) {
+        await delay(100);
+      }
+      return await this.buildEntry(key, resolvedPath, doc);
+    })();
+    const rec = {
+      promise: job,
+      force: () => {
+        forced = true;
+      },
+    };
+    this.priming.set(key, rec);
+    job
+      .catch(() => {})
+      .finally(() => {
+        if (this.priming.get(key) === rec) this.priming.delete(key);
+      });
+    this.registerHotJob(doc, rec.force, job);
   }
 
   /**
@@ -295,6 +527,12 @@ export class DocCache {
   public clear() {
     this.entries.clear();
     this.inflight.clear();
+    this.priming.clear();
+    this.hot = null;
+    if (this.hotTimer) {
+      clearTimeout(this.hotTimer);
+      this.hotTimer = null;
+    }
   }
 }
 
