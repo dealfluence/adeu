@@ -901,6 +901,16 @@ def _open_redline_engine_or_exit(path: Path, author: "str | None" = None) -> Red
 
 def handle_diff(args):
     _set_json_mode(args.json)
+    if _is_stdout_path(getattr(args, "output", None)):
+        args.output = None
+    if getattr(args, "output", None):
+        protected = []
+        if getattr(args, "original", None):
+            protected.append((args.original, "original DOCX"))
+        if getattr(args, "modified", None):
+            protected.append((args.modified, "modified file"))
+        _guard_text_output_path(args.output, protected, payload="diff output")
+
     from adeu.diff import DiffEdit, make_edits_self_contained
 
     edits: "Sequence[DiffEdit]"
@@ -958,25 +968,43 @@ def handle_diff(args):
         edits = make_edits_self_contained(text_edits, text_orig)
 
     if args.json:
-        output = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
-        print(json.dumps(output, indent=2))
+        output_data = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
+        json_output = json.dumps(output_data, indent=2)
+        if getattr(args, "output", None):
+            _write_output_or_exit(args.output, json_output)
+            print(f"Diff JSON saved to {args.output}", file=sys.stderr)
+        else:
+            print(json_output)
     elif not edits:
         # An explicit statement, on stdout: bare "Found 0 changes:" left the
         # reader to infer the documents are identical (QA 2026-07-23 F14).
-        print("No textual differences found.")
+        msg = "No textual differences found."
+        if getattr(args, "output", None):
+            _write_output_or_exit(args.output, msg + "\n")
+            print(f"Diff output saved to {args.output}", file=sys.stderr)
+        else:
+            print(msg)
     else:
-        print(f"Found {len(edits)} changes:", file=sys.stderr)
+        summary_lines = []
         for edit in edits:
             if isinstance(edit, InsertTableRow):
-                print(f"[+row] {' | '.join(edit.cells)} ({edit.position} '{edit.target_text[:40]}')")
+                summary_lines.append(f"[+row] {' | '.join(edit.cells)} ({edit.position} '{edit.target_text[:40]}')")
             elif isinstance(edit, DeleteTableRow):
-                print(f"[-row] {edit.target_text}")
+                summary_lines.append(f"[-row] {edit.target_text}")
             elif not edit.new_text:
-                print(f"[-] {edit.target_text}")
+                summary_lines.append(f"[-] {edit.target_text}")
             elif not edit.target_text:
-                print(f"[+] {edit.new_text}")
+                summary_lines.append(f"[+] {edit.new_text}")
             else:
-                print(f"[~] '{edit.target_text}' -> '{edit.new_text}'")
+                summary_lines.append(f"[~] '{edit.target_text}' -> '{edit.new_text}'")
+
+        if getattr(args, "output", None):
+            _write_output_or_exit(args.output, "\n".join(summary_lines) + "\n")
+            print(f"Found {len(edits)} changes (saved to {args.output}):", file=sys.stderr)
+        else:
+            print(f"Found {len(edits)} changes:", file=sys.stderr)
+            for line in summary_lines:
+                print(line)
 
 
 def handle_apply(args):
@@ -1798,6 +1826,7 @@ def _main_impl():
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
     p_diff.add_argument("original", type=Path, help="Original DOCX")
     p_diff.add_argument("modified", type=Path, help="Modified DOCX or Text file")
+    p_diff.add_argument("-o", "--output", type=Path, help="Output file path (default: stdout)")
     p_diff.add_argument("--json", action="store_true", help="Output raw JSON edits")
     p_diff.add_argument(
         "--compare-clean",
