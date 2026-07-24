@@ -1491,6 +1491,8 @@ def handle_sanitize(args: argparse.Namespace):
             print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
+            if args.report_file:
+                _write_report_file(args.report_file, str(e))
             print(str(e), file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError as e:

@@ -920,3 +920,57 @@ def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path, caps
     expected_text_clean = re.sub(r"^>\s*\*\*File Path:\*\*.*?\n\n?", "", expected_text, count=1).strip()
 
     assert out_text.strip() == expected_text_clean
+
+
+def test_sanitize_report_file_written_on_blocked_run(tmp_path, capsys):
+    """
+    Verifies that `adeu sanitize --report-file <path>` writes the sanitize
+    report to the requested report file even when sanitization is BLOCKED
+    (e.g. due to unresolved tracked changes).
+    """
+    from io import BytesIO
+
+    import docx
+
+    from adeu.models import ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    # 1. Create a DOCX with tracked changes
+    doc = docx.Document()
+    doc.add_paragraph("This is the original contract text.")
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    engine = RedlineEngine(buf)
+    engine.apply_edits([ModifyText(target_text="original", new_text="modified")])
+    res_buf = engine.save_to_stream()
+
+    input_docx = tmp_path / "doc_blocked.docx"
+    output_docx = tmp_path / "out_sanitized.docx"
+    report_file = tmp_path / "blocked_report.txt"
+
+    input_docx.write_bytes(res_buf.getvalue())
+
+    # 2. Run adeu sanitize requesting --report-file
+    args = [
+        "sanitize",
+        str(input_docx),
+        "-o",
+        str(output_docx),
+        "--report-file",
+        str(report_file),
+    ]
+
+    code, stdout, stderr = run_cli(args, capsys)
+
+    # 3. Verify it is blocked with exit code 1 and output DOCX is NOT created
+    assert code == 1
+    assert not output_docx.exists(), "Sanitized output DOCX should NOT be created on a blocked run"
+
+    # 4. Verify the report file WAS created on disk with the blocking reason
+    assert report_file.exists(), f"Expected report file {report_file} to exist on disk even on a blocked run"
+    report_text = report_file.read_text(encoding="utf-8")
+    assert "BLOCKED: Document contains" in report_text
+    assert "unresolved tracked changes" in report_text
