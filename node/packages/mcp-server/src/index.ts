@@ -751,6 +751,7 @@ server.registerTool(
         const existedBefore = fs.existsSync(outPath);
         const outBuf = await doc.save();
         try {
+          fs.mkdirSync(dirname(outPath), { recursive: true });
           fs.writeFileSync(outPath, outBuf);
         } catch (e: any) {
           // Filesystem failures (name too long, missing directory, perms)
@@ -828,6 +829,7 @@ server.registerTool(
       const existedBefore = fs.existsSync(outPath);
       const outBuf = await doc.save();
 
+      fs.mkdirSync(dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, outBuf);
 
       let text: string;
@@ -1013,6 +1015,7 @@ server.registerTool(
 
       if (result.outBuffer) {
         const existedBefore = fs.existsSync(outPath);
+        fs.mkdirSync(dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, result.outBuffer);
         const note = overwriteNote(outPath, file_path, existedBefore);
         return {

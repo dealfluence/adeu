@@ -822,3 +822,48 @@ def test_read_docx_appendix_mode_schema_compat(tmp_path):
 
     # Assert that the result was successful and contains appendix information
     assert "Agreement" in text
+
+
+def test_process_document_batch_nonexistent_output_parent_directory(tmp_path):
+    """
+    Verifies that process_document_batch automatically creates missing parent
+    directories for output_path when saving batch results, rather than crashing
+    with an unhandled FileNotFoundError ([Errno 2] No such file or directory).
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    import docx
+
+    from adeu.server import mcp
+
+    # Create a minimal document
+    doc_path = tmp_path / "sample.docx"
+    doc = docx.Document()
+    doc.add_paragraph("The quick brown fox jumps over the lazy dog.")
+    doc.save(str(doc_path))
+
+    # Specify output_path in a non-existent parent directory
+    output_dir = tmp_path / "nested_folder" / "sub_folder"
+    output_path = output_dir / "output.docx"
+
+    arguments = {
+        "reasoning": "Save batch output to a new nested directory path",
+        "original_docx_path": str(doc_path),
+        "author_name": "Test Author",
+        "output_path": str(output_path),
+        "changes": [{"type": "modify", "target_text": "fox", "new_text": "wolf"}],
+    }
+
+    with (
+        patch("fastmcp.server.context.Context.info"),
+        patch("fastmcp.server.context.Context.debug"),
+        patch("fastmcp.server.context.Context.warning"),
+        patch("fastmcp.server.context.Context.error"),
+    ):
+        result = asyncio.run(mcp.call_tool("process_document_batch", arguments))
+
+    text = "".join(item.text for item in result.content if item.type == "text")
+
+    assert "Batch complete" in text, f"Expected batch to complete successfully, got: {text}"
+    assert output_path.exists(), f"Output file was not created at {output_path}"
