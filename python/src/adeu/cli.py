@@ -1007,6 +1007,14 @@ def handle_diff(args):
                 print(line)
 
 
+def _normalize_virtual_projection_text(text: str) -> str:
+    """
+    Normalizes virtual Markdown projection chrome (such as heading prefixes)
+    so post-apply verification evaluates pure text equivalence.
+    """
+    return re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+
+
 def handle_apply(args):
     _set_json_mode(args.json)
     # Author flows into w:author attributes; XML-illegal control characters
@@ -1172,18 +1180,22 @@ def handle_apply(args):
         final_clean = _extract_text_from_doc(engine.doc, clean_view=True, include_appendix=False)
         expected = verify_against.strip()
         actual = final_clean.strip()
-        if actual != expected:
+
+        actual_norm = _normalize_virtual_projection_text(actual)
+        expected_norm = _normalize_virtual_projection_text(expected)
+
+        if actual_norm != expected_norm:
             div = next(
-                (k for k, (a, b) in enumerate(zip(actual, expected, strict=False)) if a != b),
-                min(len(actual), len(expected)),
+                (k for k, (a, b) in enumerate(zip(actual_norm, expected_norm, strict=False)) if a != b),
+                min(len(actual_norm), len(expected_norm)),
             )
             assert output_path is not None
             unverified_path = output_path.with_name(f"{output_path.stem}.unverified.docx")
             verification_error = (
                 "Post-apply verification failed: the applied document's clean text does not match "
                 f"the supplied text (first divergence at character {div}: "
-                f"applied reads {actual[div : div + 40]!r}, supplied text reads "
-                f"{expected[div : div + 40]!r}). The document structure could not fully realize "
+                f"applied reads {actual_norm[div : div + 40]!r}, supplied text reads "
+                f"{expected_norm[div : div + 40]!r}). The document structure could not fully realize "
                 "the requested text (e.g. headings or table cells cannot be deleted via text "
                 f"replacement). Nothing was written to '{output_path}'; a diagnostic copy was "
                 f"kept at '{unverified_path}' — it is NOT the requested document."

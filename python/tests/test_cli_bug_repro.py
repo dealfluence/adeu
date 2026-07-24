@@ -1089,3 +1089,41 @@ def test_diff_output_flag_text_and_guards(tmp_path, capsys):
     )
     assert code == 1
     assert "refusing" in stderr.lower() or "invalid_input" in stderr
+
+
+def test_post_apply_verification_plain_text_without_heading_prefix(tmp_path, capsys):
+    """
+    Verifies that applying a plain text file without Markdown heading prefixes (# )
+    to a document containing headings does not fail post-apply verification.
+
+    When adeu apply computes a diff between a docx (extracted as '# Heading') and
+    a plain text file ('Heading'), it produces a virtual edit targeting '# '.
+    Post-apply verification should pass and successfully create the output document.
+    """
+    import docx
+
+    # 1. Create a document with a heading and paragraph
+    doc_path = tmp_path / "doc_with_heading.docx"
+    doc = docx.Document()
+    doc.add_heading("Executive Summary", level=1)
+    doc.add_paragraph("Initial project timeline is 30 days.")
+    doc.save(str(doc_path))
+
+    # 2. Create a modified plain text file without '# ' prefix
+    txt_path = tmp_path / "modified_plain.txt"
+    txt_path.write_text(
+        "Executive Summary\n\nInitial project timeline is 60 days.\n",
+        encoding="utf-8",
+    )
+
+    out_path = tmp_path / "out.docx"
+
+    # 3. Run adeu apply
+    code, stdout, stderr = run_cli(
+        ["apply", str(doc_path), str(txt_path), "-o", str(out_path)],
+        capsys,
+    )
+
+    # 4. Assert that verification passes, return code is 0, and output file is written
+    assert code == 0, f"adeu apply failed with code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
+    assert out_path.exists(), f"Expected output file {out_path} to be created"
