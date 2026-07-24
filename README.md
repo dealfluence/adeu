@@ -27,7 +27,7 @@ Built and maintained by the team at [Adeu](https://adeu.ai).
 
 ## Installation
 
-Adeu can be installed directly into AI assistants as an MCP server, used as a Claude Code plugin or Agent Skill, or used locally as a developer toolchain.
+Adeu can be installed directly into AI assistants as an MCP server, used as a Claude Code plugin or Agent Skill, CLI tool, or used locally as a developer toolchain.
 
 ### Claude Code (Plugin)
 Adeu ships as a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code/plugins) with a built-in agent skill that teaches Claude how to use the engine effectively. Inside Claude Code:
@@ -126,18 +126,19 @@ The Python toolchain is managed via [uv](https://docs.astral.sh/uv/).
 
 ```bash
 pip install uv
+uv tool install adeu
 
 # Extract clean text for RAG or prompting
-uvx adeu extract contract.docx -o contract.md
+adeu extract contract.docx -o contract.md
 
 # Generate a visual diff between two versions
-uvx adeu diff v1.docx v2.docx
+adeu diff v1.docx v2.docx
 
 # Apply edits to the DOCX
-uvx adeu apply contract.docx edits.json --author "Review Bot"
+adeu apply contract.docx edits.json --author "Review Bot"
 
 # Scrub author metadata and internal trackers
-uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
+adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
 
 What the text projection preserves exactly, what it normalizes (lists,
