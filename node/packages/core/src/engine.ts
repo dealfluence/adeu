@@ -3743,12 +3743,24 @@ export class RedlineEngine {
         edit._resolved_start_idx !== undefined &&
         edit._resolved_start_idx !== null
       ) {
+        if (!edit._active_mapper_ref) {
+          if (!this.clean_mapper) {
+            this.clean_mapper = new DocumentMapper(this.doc, true);
+          }
+          edit._active_mapper_ref = this.clean_mapper;
+        }
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (
         edit._match_start_index !== undefined &&
         edit._match_start_index !== null
       ) {
         edit._resolved_start_idx = edit._match_start_index;
+        if (!edit._active_mapper_ref) {
+          if (!this.clean_mapper) {
+            this.clean_mapper = new DocumentMapper(this.doc, true);
+          }
+          edit._active_mapper_ref = this.clean_mapper;
+        }
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         let matches = this.mapper.drop_virtual_only_matches(

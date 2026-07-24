@@ -867,3 +867,70 @@ def test_process_document_batch_nonexistent_output_parent_directory(tmp_path):
 
     assert "Batch complete" in text, f"Expected batch to complete successfully, got: {text}"
     assert output_path.exists(), f"Output file was not created at {output_path}"
+
+
+def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
+    """
+    Regression test for AP-05:
+    Full text-file apply verification failure & paragraph collapse.
+
+    When extracting clean text from a document with tracked changes or comments
+    and applying a modified version of that text back to the document via `adeu apply`,
+    the engine must correctly map clean-view character offsets so that edits are
+    anchored to the proper text runs rather than falling back to index 0/1 of the paragraph,
+    which collapses paragraph structure and fails post-apply verification.
+    """
+    import re
+    import shutil
+    import sys
+    from pathlib import Path
+    from unittest.mock import patch
+
+    import docx
+
+    from adeu.cli import main
+    from adeu.ingest import _extract_text_from_doc
+
+    def run_cli(args):
+        code = 0
+        with patch.object(sys, "argv", ["adeu"] + [str(a) for a in args]):
+            try:
+                main()
+            except SystemExit as e:
+                code = e.code or 0
+        return code
+
+    # Copy dirty_sample.docx fixture to tmp_path
+    fixture_path = Path(__file__).parent.parent.parent / "shared" / "fixtures" / "dirty_sample.docx"
+    doc_path = tmp_path / "input.docx"
+    shutil.copy(fixture_path, doc_path)
+
+    # 1. Extract clean-view text
+    extracted_txt_path = tmp_path / "extracted.txt"
+    extract_args = ["extract", "--clean-view", "--page", "all", str(doc_path), "-o", str(extracted_txt_path)]
+    assert run_cli(extract_args) == 0
+
+    # 2. Modify the extracted text file
+    text = extracted_txt_path.read_text(encoding="utf-8")
+    assert "Typing some text" in text
+    modified_text = text.replace("Typing some text", "Typing some text MODIFIED")
+    modified_txt_path = tmp_path / "modified.txt"
+    modified_txt_path.write_text(modified_text, encoding="utf-8")
+
+    # 3. Apply the modified text file
+    output_docx_path = tmp_path / "output.docx"
+    apply_args = ["apply", str(doc_path), str(modified_txt_path), "-o", str(output_docx_path)]
+    exit_code = run_cli(apply_args)
+
+    # Verification: adeu apply should succeed with exit code 0 and create output.docx
+    assert exit_code == 0, f"adeu apply failed with exit code {exit_code}"
+    assert output_docx_path.exists(), "output.docx was not created"
+
+    # 4. Verify clean-view text of output document matches modified text
+    out_doc = docx.Document(output_docx_path)
+    out_text = _extract_text_from_doc(out_doc, clean_view=True, include_appendix=False)
+
+    expected_text = modified_txt_path.read_text(encoding="utf-8")
+    expected_text_clean = re.sub(r"^>\s*\*\*File Path:\*\*.*?\n\n?", "", expected_text, count=1).strip()
+
+    assert out_text.strip() == expected_text_clean
