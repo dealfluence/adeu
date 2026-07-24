@@ -1091,9 +1091,9 @@ def _determine_heading_style_fast(
     exist in python-docx 1.2 — the AttributeError is swallowed by its
     try/except, so "(outline_level)" is never returned in practice and
     direct-outlineLvl headings resolve through the style name or
-    "(heuristic)". If a python-docx upgrade makes that property real, the
-    ORIGINAL's behavior changes with it — re-verify this mirror against
-    _determine_heading_style before trusting either.
+    "(heuristic)". tests/test_outline_fast_equivalence.py pins this mirror
+    against the original, so a python-docx upgrade that makes the property
+    real will surface as a pin failure, not silent drift.
     """
     # 2. Explicit Heading/Title style
     style = _safe_style_name_fast(paragraph, style_cache, default_pstyle)

@@ -39,7 +39,7 @@ _CHG_ID_PATTERN = re.compile(r"\bChg:(\d+)\b")
 # at most ONE alternative can match (opens start '{', each close starts with a
 # distinct char, breaks start '\n'), and re.finditer consumes non-overlapping
 # matches left to right — together this reproduces the historical
-# char-by-char scan exactly.
+# char-by-char scan exactly (see tests/test_pagination_scanner_equivalence.py).
 _SCAN_TOKEN_RE = re.compile(r"\{\+\+|\{--|\{==|\{>>|\+\+\}|--\}|==\}|<<\}|\n{2,}")
 
 
@@ -216,8 +216,9 @@ def _split_on_safe_paragraph_breaks(text: str) -> List[Tuple[str, int]]:
     PERF: implemented as one compiled-regex scan over the token event stream.
     The historical char-by-char walk called str.startswith at (almost) every
     position — 37 million calls / multiple seconds on a 4.6 MB projection.
-    Equivalence with a verbatim copy of that walk was verified on crafted,
-    randomized, and projection-shaped inputs when this replaced it.
+    Equivalence with a verbatim copy of that walk is pinned by
+    tests/test_pagination_scanner_equivalence.py (crafted, randomized, and
+    projection-shaped inputs).
     """
     counters = {close: 0 for close in _CRITIC_TOKENS.values()}
     blocks: List[Tuple[str, int]] = []

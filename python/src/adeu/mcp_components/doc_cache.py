@@ -18,8 +18,8 @@ Port of the Node MCP server's document cache (docs/Performance.md §5.1):
 
 Every artifact is deterministic from the file bytes (projection goldens
 prove run-to-run byte-stability), so a cache hit is byte-identical to a
-fresh computation by construction — verified against cache-less passes
-when this was introduced.
+fresh computation by construction — and tests/test_doc_cache.py asserts
+exactly that against cache-less passes.
 """
 
 import os

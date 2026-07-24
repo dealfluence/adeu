@@ -402,10 +402,9 @@ the full regression suite stayed green and the projection goldens
    emitted dangling markers (`(docx-image:1)****`), plus a per-run meta
    snapshot the reader only takes for text-projecting runs, and the
    cell-anchor space separator ignored the reader's endswith(" ") check.
-   All six twins (cells/BIGDOC/VVBIG × raw/clean) are now byte-identical —
-   each mechanism and the
-   `extract(include_appendix=False) == mapper.full_text` contract were
-   verified with dedicated parity checks during the fix. One
+   All six twins (cells/BIGDOC/VVBIG × raw/clean) are now byte-identical;
+   tests/test_twin_projection_parity.py pins each mechanism and the
+   `extract(include_appendix=False) == mapper.full_text` contract. One
    dependent semantics fix: validate_edits now drops raw-view matches that
    live entirely inside tracked deletions BEFORE its clean/original-view
    fallbacks (the aligned mapper made such text matchable, silently
