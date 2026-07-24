@@ -927,7 +927,7 @@ def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
     assert output_docx_path.exists(), "output.docx was not created"
 
     # 4. Verify clean-view text of output document matches modified text
-    out_doc = docx.Document(output_docx_path)
+    out_doc = docx.Document(str(output_docx_path))
     out_text = _extract_text_from_doc(out_doc, clean_view=True, include_appendix=False)
 
     expected_text = modified_txt_path.read_text(encoding="utf-8")
