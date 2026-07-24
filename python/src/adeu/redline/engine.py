@@ -2768,14 +2768,12 @@ class RedlineEngine:
 
         # Pre-resolve phase: locate all edits against initial clean state
         for edit in edits:
-            if edit._resolved_start_idx is not None:
-                if edit._active_mapper_ref is None:
-                    if not self.clean_mapper:
-                        self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-                    edit._active_mapper_ref = self.clean_mapper
-                resolved_edits.append((edit, getattr(edit, "new_text", None)))
-            elif edit._match_start_index is not None:
-                edit._resolved_start_idx = edit._match_start_index
+            if edit._resolved_start_idx is not None or edit._match_start_index is not None:
+                if edit._resolved_start_idx is None:
+                    edit._resolved_start_idx = edit._match_start_index
+                # Caller-pinned indices (diff output) are CLEAN-view character
+                # offsets; the raw-view mapper fallback would mis-anchor them
+                # on documents whose views differ (AP-05).
                 if edit._active_mapper_ref is None:
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)

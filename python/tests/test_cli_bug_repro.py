@@ -869,7 +869,7 @@ def test_process_document_batch_nonexistent_output_parent_directory(tmp_path):
     assert output_path.exists(), f"Output file was not created at {output_path}"
 
 
-def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
+def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path, capsys):
     """
     Regression test for AP-05:
     Full text-file apply verification failure & paragraph collapse.
@@ -882,23 +882,8 @@ def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
     """
     import re
     import shutil
-    import sys
-    from pathlib import Path
-    from unittest.mock import patch
 
-    import docx
-
-    from adeu.cli import main
     from adeu.ingest import _extract_text_from_doc
-
-    def run_cli(args):
-        code = 0
-        with patch.object(sys, "argv", ["adeu"] + [str(a) for a in args]):
-            try:
-                main()
-            except SystemExit as e:
-                code = e.code or 0
-        return code
 
     # Copy dirty_sample.docx fixture to tmp_path
     fixture_path = Path(__file__).parent.parent.parent / "shared" / "fixtures" / "dirty_sample.docx"
@@ -908,7 +893,8 @@ def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
     # 1. Extract clean-view text
     extracted_txt_path = tmp_path / "extracted.txt"
     extract_args = ["extract", "--clean-view", "--page", "all", str(doc_path), "-o", str(extracted_txt_path)]
-    assert run_cli(extract_args) == 0
+    code, _, _ = run_cli(extract_args, capsys)
+    assert code == 0
 
     # 2. Modify the extracted text file
     text = extracted_txt_path.read_text(encoding="utf-8")
@@ -920,10 +906,10 @@ def test_repro_text_apply_paragraph_preservation_and_verification(tmp_path):
     # 3. Apply the modified text file
     output_docx_path = tmp_path / "output.docx"
     apply_args = ["apply", str(doc_path), str(modified_txt_path), "-o", str(output_docx_path)]
-    exit_code = run_cli(apply_args)
+    exit_code, _, stderr = run_cli(apply_args, capsys)
 
     # Verification: adeu apply should succeed with exit code 0 and create output.docx
-    assert exit_code == 0, f"adeu apply failed with exit code {exit_code}"
+    assert exit_code == 0, f"adeu apply failed with exit code {exit_code}\nSTDERR:\n{stderr}"
     assert output_docx_path.exists(), "output.docx was not created"
 
     # 4. Verify clean-view text of output document matches modified text

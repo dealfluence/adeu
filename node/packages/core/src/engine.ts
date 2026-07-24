@@ -3740,21 +3740,20 @@ export class RedlineEngine {
       if (typeof edit !== "object" || edit === null) continue;
 
       if (
-        edit._resolved_start_idx !== undefined &&
-        edit._resolved_start_idx !== null
+        (edit._resolved_start_idx !== undefined &&
+          edit._resolved_start_idx !== null) ||
+        (edit._match_start_index !== undefined &&
+          edit._match_start_index !== null)
       ) {
-        if (!edit._active_mapper_ref) {
-          if (!this.clean_mapper) {
-            this.clean_mapper = new DocumentMapper(this.doc, true);
-          }
-          edit._active_mapper_ref = this.clean_mapper;
+        if (
+          edit._resolved_start_idx === undefined ||
+          edit._resolved_start_idx === null
+        ) {
+          edit._resolved_start_idx = edit._match_start_index;
         }
-        resolved_edits.push([edit, edit.new_text || null]);
-      } else if (
-        edit._match_start_index !== undefined &&
-        edit._match_start_index !== null
-      ) {
-        edit._resolved_start_idx = edit._match_start_index;
+        // Caller-pinned indices (diff output) are CLEAN-view character
+        // offsets; the raw-view mapper fallback would mis-anchor them on
+        // documents whose views differ (AP-05).
         if (!edit._active_mapper_ref) {
           if (!this.clean_mapper) {
             this.clean_mapper = new DocumentMapper(this.doc, true);
