@@ -238,21 +238,35 @@ class DocumentMapper:
         self.part_ranges: List[Tuple[int, int, str]] = []
         self._current_part_index = 0
 
+        # Mirrors ingest._extract_text_from_doc exactly: parts are joined by
+        # "\n\n", and a part that projects NO text contributes NOTHING — not
+        # even a separator. The separator is emitted tentatively before each
+        # part and rolled back (spans and chunks truncated) when the part
+        # turns out empty; the historical after-each-part heuristic emitted
+        # separators for empty parts, shifting every downstream offset
+        # relative to the reader (the Virtual Text contract).
+        emitted_any_part = False
         for part_idx, (part, part_kind) in enumerate(iter_document_parts_with_kind(self.doc)):
             self._current_part_index = part_idx
-            part_start = current_offset
-            current_offset = self._map_blocks(part, current_offset)
-            self.part_ranges.append((part_start, current_offset, part_kind))
-
-            # Add part separator if needed, or rely on block separators
-            if self.spans and self.spans[-1].text != "\n\n":
+            spans_mark = len(self.spans)
+            chunks_mark = len(self._text_chunks)
+            offset_mark = current_offset
+            if emitted_any_part:
                 self._add_virtual_text("\n\n", current_offset, None)
                 current_offset += 2
-
-        # Cleanup trailing newlines
-        while self.spans and self.spans[-1].text == "\n\n":
-            self.spans.pop()
-            self._text_chunks.pop()
+            part_start = current_offset
+            current_offset = self._map_blocks(part, current_offset)
+            if current_offset == part_start:
+                # Empty part: drop the tentative separator and any
+                # zero-width anchor spans the walk added — the reader emits
+                # no block for this part, so nothing here is addressable.
+                del self.spans[spans_mark:]
+                del self._text_chunks[chunks_mark:]
+                current_offset = offset_mark
+                self.part_ranges.append((current_offset, current_offset, part_kind))
+            else:
+                emitted_any_part = True
+                self.part_ranges.append((part_start, current_offset, part_kind))
 
         self.full_text = "".join(self._text_chunks)
         # The appendix is not part of the mapping engine's projection —
@@ -301,13 +315,23 @@ class DocumentMapper:
 
         style_cache, default_pstyle = _get_style_cache(part)
 
+        # Block-join semantics mirror ingest._extract_blocks exactly:
+        # "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when
+        # it projects empty text), a Table or FootnoteItem is a block only
+        # when it projects text, and the NotesPart header is that container's
+        # first block (the "\n\n" after it comes from the join, never
+        # eagerly). `emitted_any_block` is the reader's len(blocks) > 0;
+        # `is_first_para` is the reader's separate flag that places the
+        # footnote definition label and is flipped by paragraphs AND tables
+        # (even empty ones), but not by footnote entries.
+        emitted_any_block = False
+
         if c_type == "NotesPart":
             header = "## Footnotes" if container.note_type == "fn" else "## Endnotes"
             sep = f"---\n{header}"
             self._add_virtual_text(sep, current, None)
             current += len(sep)
-            self._add_virtual_text("\n\n", current, None)
-            current += 2
+            emitted_any_block = True
 
         is_first_para = True
 
@@ -316,9 +340,25 @@ class DocumentMapper:
             i_type = type(item).__name__
 
             if i_type == "FootnoteItem":
+                spans_mark = len(self.spans)
+                chunks_mark = len(self._text_chunks)
+                offset_mark = current
+                if emitted_any_block:
+                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    self._add_virtual_text("\n\n", current, prev_para)
+                    current += 2
+                block_start = current
                 current = self._map_blocks(item, current)
+                if current == block_start:
+                    # Empty footnote entry: the reader drops the block, so
+                    # roll back the separator and any zero-width spans.
+                    del self.spans[spans_mark:]
+                    del self._text_chunks[chunks_mark:]
+                    current = offset_mark
+                else:
+                    emitted_any_block = True
             elif isinstance(item, Paragraph):
-                if not is_first_para:
+                if emitted_any_block:
                     # Attach the newline to the previous paragraph so merges work correctly
                     prev_para = previous_item if isinstance(previous_item, Paragraph) else None
                     self._add_virtual_text("\n\n", current, prev_para)
@@ -333,15 +373,28 @@ class DocumentMapper:
 
                 current = self._map_paragraph_content(item, current, style_cache, default_pstyle)
                 is_first_para = False
+                emitted_any_block = True
                 previous_item = item
             elif isinstance(item, Table):
-                if not is_first_para:
+                spans_mark = len(self.spans)
+                chunks_mark = len(self._text_chunks)
+                offset_mark = current
+                if emitted_any_block:
                     # Attach the newline to the previous paragraph so merges work correctly
                     prev_para = previous_item if isinstance(previous_item, Paragraph) else None
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
+                block_start = current
                 current = self._map_table(item, current)
+                if current == block_start:
+                    # Empty table (e.g. every row skipped in this view): the
+                    # reader drops the block AND its separator.
+                    del self.spans[spans_mark:]
+                    del self._text_chunks[chunks_mark:]
+                    current = offset_mark
+                else:
+                    emitted_any_block = True
                 is_first_para = False
                 previous_item = item
 
@@ -398,8 +451,18 @@ class DocumentMapper:
                         cellPara = Paragraph(firstP, cell)
                         self._add_virtual_text("", current, cellPara)
                         if cell_start < current:
-                            self._add_virtual_text(" ", current, cellPara)
-                            current += 1
+                            # Separator only when the projected cell text
+                            # does not already end with a space — mirrors
+                            # ingest.extract_table's endswith(" ") check
+                            # (Virtual Text contract).
+                            last_char = ""
+                            for chunk in reversed(self._text_chunks):
+                                if chunk:
+                                    last_char = chunk[-1]
+                                    break
+                            if last_char != " ":
+                                self._add_virtual_text(" ", current, cellPara)
+                                current += 1
                         anchor = f"{{#cell:{paraId}}}"
                         self._add_virtual_text(anchor, current, cellPara)
                         current += len(anchor)
@@ -536,6 +599,13 @@ class DocumentMapper:
 
         for i, item in enumerate(items):
             if isinstance(item, Run):
+                # Clean view drops deleted runs ENTIRELY, before the heading
+                # leading-whitespace strip — mirroring ingest exactly: a
+                # deleted leading run must leave the strip armed for the runs
+                # that follow it (Virtual Text contract).
+                if self.clean_view and active_del:
+                    continue
+
                 prefix, suffix = get_run_style_markers(item, native_heading)
                 # (kind, text, run, run_offset)
                 run_parts: List[Tuple[str, str, Optional[Run], int]] = []
@@ -562,18 +632,13 @@ class DocumentMapper:
                             run_local = _append_wrapped_run_part(run_parts, part, item, prefix, suffix, run_local)
                 elif (prefix or suffix) and text:
                     run_local = _append_wrapped_run_part(run_parts, text, item, prefix, suffix, run_local)
-                else:
-                    if prefix:
-                        run_parts.append(("virtual", prefix, None, 0))
-                    if text:
-                        run_parts.append(("real", text, item, 0))
-                    if suffix:
-                        run_parts.append(("virtual", suffix, None, 0))
-
-                if self.clean_view and active_del:
-                    pass
-                if self.original_view and active_ins:
-                    pass
+                elif text:
+                    run_parts.append(("real", text, item, 0))
+                # An EMPTY-text run contributes nothing — not even its style
+                # markers. A styled run whose only child is a footnote
+                # reference or drawing otherwise leaves a dangling marker
+                # pair ("[^fn-5]__", "(docx-image:1)****") that the reader
+                # never emits: apply_formatting_to_segments("") is "".
 
                 full_seg_text = "".join(x[1] for x in run_parts)
 
@@ -589,22 +654,42 @@ class DocumentMapper:
                     new_style = (prefix, suffix)
 
                     if pending_runs and new_wrappers == current_wrappers:
-                        skip_leading_prefix = False
-                        if (
-                            new_style == current_style
-                            and current_style != ("", "")
-                            and pending_runs
-                            and pending_runs[-1][0] == "virtual"
-                            and pending_runs[-1][1] == current_style[1]
-                        ):
-                            pending_runs.pop()
-                            skip_leading_prefix = True
+                        # MERGE into the current wrapper group. Adjacent
+                        # same-style marker elision must mirror
+                        # ingest.build_paragraph_text EXACTLY: the closing
+                        # marker is elided only when (a) both sides carry the
+                        # same non-empty style, (b) the pending group really
+                        # ends with that closing marker once trailing
+                        # whitespace parts are ignored, and (c) the incoming
+                        # run really starts with the opening marker after
+                        # optional leading whitespace parts. The historical
+                        # check looked only at the LITERAL last pending part,
+                        # so any boundary whitespace defeated it
+                        # ("**Request for** **Bids**" instead of
+                        # "**Request for Bids**") — and it popped the closing
+                        # marker without confirming (c), losing marker
+                        # balance entirely when a whitespace-only same-style
+                        # run followed ("**March 2012 " with no closer).
+                        incoming = run_parts
+                        if new_style == current_style and current_style != ("", ""):
+                            k = len(pending_runs) - 1
+                            while k >= 0 and pending_runs[k][0] == "real" and pending_runs[k][1].isspace():
+                                k -= 1
+                            pending_ends_with_suffix = (
+                                k >= 0 and pending_runs[k][0] == "virtual" and pending_runs[k][1] == current_style[1]
+                            )
+                            m = 0
+                            while m < len(run_parts) and run_parts[m][0] == "real" and run_parts[m][1].isspace():
+                                m += 1
+                            incoming_starts_with_prefix = (
+                                m < len(run_parts) and run_parts[m][0] == "virtual" and run_parts[m][1] == new_style[0]
+                            )
+                            if pending_ends_with_suffix and incoming_starts_with_prefix:
+                                del pending_runs[k]
+                                incoming = run_parts[:m] + run_parts[m + 1 :]
 
                         curr_comment_ids = list(active_ids)
-                        for kind, txt, r_obj, r_off in run_parts:
-                            if skip_leading_prefix and kind == "virtual" and txt == new_style[0]:
-                                skip_leading_prefix = False
-                                continue
+                        for kind, txt, r_obj, r_off in incoming:
                             pending_runs.append((kind, txt, r_obj, r_off, curr_ins_id, curr_del_id, curr_comment_ids))
 
                         current_style = new_style
@@ -616,7 +701,12 @@ class DocumentMapper:
                         for kind, txt, r_obj, r_off in run_parts:
                             pending_runs.append((kind, txt, r_obj, r_off, curr_ins_id, curr_del_id, curr_comment_ids))
 
-                if not self.clean_view and not self.original_view:
+                # Meta handling mirrors ingest: the state snapshot and the
+                # defer/flush decision run only for runs that projected TEXT
+                # (the reader nests this whole block under `if seg:`). An
+                # empty run inside a tracked change must not, by itself,
+                # accumulate or emit a meta bubble.
+                if full_seg_text and not self.clean_view and not self.original_view:
                     has_meta = active_ins or active_del or active_ids or active_fmt
                     if has_meta:
                         state_snapshot = (
@@ -687,9 +777,25 @@ class DocumentMapper:
 
             elif isinstance(item, DocxEvent):
                 leading_strip_active = False
-                flush_pending_runs()
-                current_wrappers = ("", "")
-                current_style = ("", "")
+                # Pure redline/format state transitions must NOT flush the
+                # pending wrapper group: a replacement is stored as adjacent
+                # w:del + w:ins elements (one per Chg id), and runs on both
+                # sides of such a boundary that share the same wrapper tokens
+                # must coalesce into ONE {--...--}/{++...++} block, exactly
+                # as ingest.build_paragraph_text does. Structural events
+                # (comments, links, footnotes, bookmarks, images) still
+                # flush — their branches below call flush_pending_runs().
+                if item.type not in (
+                    "ins_start",
+                    "ins_end",
+                    "del_start",
+                    "del_end",
+                    "fmt_start",
+                    "fmt_end",
+                ):
+                    flush_pending_runs()
+                    current_wrappers = ("", "")
+                    current_style = ("", "")
 
                 if item.type == "start":
                     active_ids.add(item.id)

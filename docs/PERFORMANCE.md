@@ -309,8 +309,12 @@ Ordered by user-visible value per unit of risk:
 
 ## 6. Porting checklist for the Python engine
 
+*(Executed 2026-07-24 — see §7 for what was actually found and shipped. The
+bench scripts this checklist references were session-local and have since
+been removed; §2 describes the methodology to reproduce.)*
+
 - [ ] Reproduce the stage benchmark and structural census scripts (the
-      TypeScript versions live in `node/bench/`; they are ~200 lines each and
+      TypeScript versions lived in `node/bench/`; they are ~200 lines each and
       translate directly).
 - [ ] Run the census on the same stress document; confirm the same trigger
       counts (430 empty unlabeled cells).
@@ -331,6 +335,98 @@ Ordered by user-visible value per unit of risk:
 
 ---
 
-*Benchmark artifacts: `node/bench/` (stage, pipeline, edit benchmarks; golden
-capture/compare harness; synthetic fixture generator). Raw result JSON files
-under `node/bench/results/`.*
+## 7. Python engine port — what actually shipped (2026-07-24)
+
+The §6 checklist was executed and the census MATCHED (2,682,269 elements,
+6,313 cells all without `paraId`, exactly 430 empty unlabeled cells) — but
+the central §3 assumption did not: **the Python engine has no empty-cell
+fallback at all** (it emits `{#cell:…}` only when a `paraId` already
+exists), so the quadratic scan never existed there and porting the anchor
+index was moot. Porting the FNV fallback itself is a *parity* feature (it
+changes projection output) and was deliberately deferred. Python's costs
+were different, and were found by porting the bench harness (a Python
+mirror of the Node one) and profiling, not by assuming Node's profile.
+
+### 7.1 What was measured, then fixed (VVBIG stress document)
+
+| Cost | Before | After | Fix |
+|---|---|---|---|
+| `strip_bom_from_docx_bytes` | 2.4 s + 1.2 GB RSS spike, every load | ~1.1 s, +7 MB | Probe 3 bytes per XML entry; only re-zip when a BOM exists; validate by lxml-parsing the main part instead of a full python-docx load |
+| w16du stamp in engine `__init__` | 1.1 s (tostring 45 MB + regex + re-parse) | ~0 | `etree.register_namespace("w16du", …)` + no eager stamp: tracked-change writes self-declare the prefix locally; docs already declaring it at root serialize byte-identically |
+| `paginate` | 4.3 s (37 M `str.startswith` — char-by-char CriticMarkup depth scan) | 0.19 s | Single compiled-regex token scan; equivalence pinned against a verbatim copy of the old walk |
+| `iter_document_parts_with_kind` | ~2 s (re-resolved `doc.settings` per section → 14 M relationship probes) | ~0 | Hoist the settings flag once per iteration (both projection twins share this iterator) |
+| `mode='outline'` builder | 15.3 s | 1.35 s | Stop re-paginating; cache-backed style resolution (`paragraph.style` rescans the part's 3,547 rels per access — 52 M probes); lxml prefilter + memo for footnote refs (owned ranges overlap); precompute heading flags/levels |
+| Server read path | no cache; sync on event loop | stat-keyed LRU-3 projection cache + `asyncio.to_thread` + progress relay + quiet-period background fills | Port of §5.1 with the same key/values contract (never the tree) |
+| Pre-batch snapshot | full `save_to_stream()` every batch (2.8 s) | pristine load-time bytes while unmutated (~0) | §5.2's lazy-snapshot idea, Python-shaped: the engine keeps its sanitized input bytes; `apply_edits`/`apply_review_actions` flip a mutation flag; rollback re-inits from whichever bytes were chosen |
+| Dry-run | full `save_to_stream()` + second engine (36.6 s) | pristine-fed second engine (25.8 s) | Same mutation flag |
+
+### 7.2 End-to-end (VVBIG, measured)
+
+| Flow | Before | After |
+|---|---|---|
+| `read_docx` full, cold | 18.1 s | 13.1 s |
+| `read_docx` warm page turn / outline / search | 18.1 s / ~30 s / 18.1 s (all cold, every call) | 3–5 ms / 2.8 ms / 63 ms |
+| Single-edit `process_document_batch` | ~40 s | ~28.5 s (engine 14.9 + batch 11.1 + save 2.5) |
+| Dry-run call | ~55 s | ~40 s |
+| RSS peak (dry-run flow) | 4.9 GB | 4.5 GB (and loads no longer double the archive) |
+
+Control document (BIGDOC, 0.4 MB): read path 0.9 s → 0.35 s warm-independent;
+the full regression suite stayed green and the projection goldens
+(raw/clean/mapper × cells/BIGDOC/VVBIG) byte-identical throughout the work.
+
+### 7.3 Known remaining work (Python)
+
+1. **Run-loop fusion (next frontier).** ~9.5 s of cold projection and ~11 s
+   of every mapper (re)build is per-run Python overhead: each run's children
+   are walked ~3× (`process_run_element` events, `get_run_style_markers`,
+   `get_run_text`) plus a python-docx `Run` wrapper per run (568 K on the
+   stress doc). Fusing these into one pass is the single biggest remaining
+   win (it also cuts the per-edit sequential-rebuild cost) but touches
+   twin-shared rendering code — do it golden-gated, and fix 7.3.3 first.
+2. **Hot-engine slot (§5.4a analog).** Deferred: with the mapper build
+   dominating construction, reusing the read's parse saves only ~2.7 s per
+   edit; revisit after (1) changes the ratio. Output-file read priming IS
+   shipped (background fill after slow batch saves).
+3. **Twin drift — FIXED (2026-07-24, same day).** Reader and mapper
+   projections were NOT byte-identical on real documents (196 diff hunks on
+   BIGDOC alone). Six mechanisms, ALL on the mapper side (the reader is
+   canonical and its bytes did not change): (a) style-marker elision failed
+   across boundary whitespace (`**Request for** **Bids**`); (b) elision
+   popped the closing marker without confirming the incoming run actually
+   opens one, losing balance on whitespace-only same-style runs
+   (`**March 2012 ` with no closer); (c) redline state-transition events
+   flushed the pending wrapper group, splitting one replacement into
+   per-run `{--…--}` blocks; (d) empty parts still contributed part
+   separators (4 extra leading newlines); (e) empty tables/footnote entries
+   likewise; (f) a styled run whose only child is a drawing/reference
+   emitted dangling markers (`(docx-image:1)****`), plus a per-run meta
+   snapshot the reader only takes for text-projecting runs, and the
+   cell-anchor space separator ignored the reader's endswith(" ") check.
+   All six twins (cells/BIGDOC/VVBIG × raw/clean) are now byte-identical —
+   each mechanism and the
+   `extract(include_appendix=False) == mapper.full_text` contract were
+   verified with dedicated parity checks during the fix. One
+   dependent semantics fix: validate_edits now drops raw-view matches that
+   live entirely inside tracked deletions BEFORE its clean/original-view
+   fallbacks (the aligned mapper made such text matchable, silently
+   bypassing the inside-a-deletion diagnostic that fragmentation used to
+   provide by accident; the apply-time resolver always filtered these).
+   Mapper goldens were recaptured; reader goldens byte-unchanged.
+4. **FNV fallback anchors (parity, deferred by decision).** Port would make
+   Python emit Node's derived `{#cell:…}` ids on paraId-less docs; port it
+   WITH the §3.3 index from day one. Cross-engine goldens can't match until
+   this and the nested-table divergence (Node duplicates nested cells as
+   parent-row columns; Python nests inline — Python's rendering was chosen
+   as the keeper) are resolved.
+5. Appendix cost (~4.2 s, appendix mode only) — `domain.py` typo-detector
+   still defeats its own first-letter bucketing for >5-char candidates
+   (same as node's §5.3 note); left semantics-identical on purpose.
+
+---
+
+*The bench harnesses (stage, pipeline, edit benchmarks; golden
+capture/compare; synthetic fixture generator) existed as session-local
+scripts in `node/bench/` and `python/bench/` and were removed after the
+work landed — every headline number they produced is recorded in this
+document. The methodology (§2) is what to reproduce, in either engine,
+before the next round of performance work.*

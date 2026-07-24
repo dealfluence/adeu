@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, List, Tuple
 
 from adeu.outline import extract_outline
 from adeu.pagination import (
+    PaginationResult,
     build_appendix_pointer,
     build_page_banner,
     build_page_footer,
@@ -243,13 +244,23 @@ def build_full_document_response(text: str, file_path: str) -> BuilderResult:
     )
 
 
-def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool = False) -> BuilderResult:
+def build_paginated_response(
+    text: str,
+    page: int,
+    file_path: str,
+    is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+) -> BuilderResult:
     """
     Splits projected Markdown into pages and returns the requested page.
 
     The structural appendix is NOT included in the page content. Body pages
     get a one-line footer pointing the agent at mode='appendix' if the
     document has an appendix.
+
+    `pagination_result`, when provided, MUST be paginate(body_of(text), "")
+    — the server-layer projection cache passes its precomputed result so a
+    warm page turn does no pagination work.
 
     Raises BuilderError if `page` is out of range.
     """
@@ -258,7 +269,7 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
 
     # Paginate body only. Pass empty string as structural_appendix so the
     # paginator does not glue anything onto each page.
-    result = paginate(body, structural_appendix="")
+    result = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
 
     if page < 1 or page > result.total_pages:
         raise BuilderError(f"Page {page} out of range (doc has {result.total_pages} pages).")
@@ -285,13 +296,15 @@ def build_paginated_response(text: str, page: int, file_path: str, is_cli: bool 
 
 
 def build_outline_response(
-    doc: "DocumentObject",
+    doc: "DocumentObject | None",
     projected_text: str,
     file_path: str,
     outline_max_level: int = 2,
     outline_verbose: bool = False,
     paragraph_offsets: dict | None = None,
     is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+    outline_nodes: "list | None" = None,
 ) -> BuilderResult:
     """
     Returns a structural map of headings as a Markdown tree.
@@ -302,6 +315,11 @@ def build_outline_response(
         paragraph_offsets: when provided, enables the fast outline path that
             avoids re-projecting paragraphs. Caller obtains this from
             _extract_text_from_doc(return_paragraph_offsets=True).
+        pagination_result: precomputed paginate(body_of(projected_text), "").
+        outline_nodes: precomputed extract_outline output for this document
+            version. When provided together with pagination_result (the
+            projection-cache path), `doc` and `paragraph_offsets` are not
+            consulted and may be None — rendering needs only the nodes.
     """
 
     # Levels outside 1-6 are meaningless (0/negative would render a
@@ -313,15 +331,21 @@ def build_outline_response(
     # heading->page mapping. We deliberately pass empty string instead of the
     # appendix — the appendix is never injected per page.
     body, _appendix = split_structural_appendix(projected_text)
-    pagination_result = paginate(body, structural_appendix="")
+    if pagination_result is None:
+        pagination_result = paginate(body, structural_appendix="")
 
-    nodes = extract_outline(
-        doc,
-        body,
-        pagination_result.body_pages,
-        pagination_result.body_page_offsets,
-        paragraph_offsets=paragraph_offsets,
-    )
+    if outline_nodes is not None:
+        nodes = outline_nodes
+    else:
+        if doc is None:
+            raise BuilderError("build_outline_response needs either `doc` or precomputed `outline_nodes`.")
+        nodes = extract_outline(
+            doc,
+            body,
+            pagination_result.body_pages,
+            pagination_result.body_page_offsets,
+            paragraph_offsets=paragraph_offsets,
+        )
     rendered = render_outline_tree(
         nodes,
         max_level=outline_max_level,
@@ -369,6 +393,7 @@ def build_search_response(
     page: int | str | None,
     file_path: str,
     is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
 ) -> BuilderResult:
     """
     Filters projected Markdown to exact substring or regex matches.
@@ -425,7 +450,7 @@ def build_search_response(
 
     # Pagination needed for both filter mode and distribution summary, even
     # when there are no matches (to validate `page` is in range).
-    pag_res = paginate(body, "")
+    pag_res = pagination_result if pagination_result is not None else paginate(body, "")
     page_offsets = pag_res.body_page_offsets
     total_doc_pages = pag_res.total_pages
 

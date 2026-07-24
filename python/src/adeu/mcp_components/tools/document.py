@@ -4,11 +4,9 @@ import re
 import subprocess
 import sys
 import time
-from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any, List, Literal, Optional, Union
 
-from docx import Document as load_document
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
@@ -16,7 +14,7 @@ from fastmcp.tools.tool import ToolResult
 from pydantic import BeforeValidator, Field, TypeAdapter, WithJsonSchema
 
 from adeu.diff import generate_edits_from_text
-from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
+from adeu.ingest import extract_text_from_stream
 from adeu.mcp_components._response_builders import (
     BuilderError,
     BuilderResult,
@@ -46,7 +44,6 @@ from adeu.models import (
     const_to_enum,
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
-from adeu.utils.docx import strip_bom_from_docx_bytes
 from adeu.utils.text import batch_details_header
 
 
@@ -175,6 +172,108 @@ def _summarize_validation_error(exc: Exception) -> str:
     return "; ".join(parts) if parts else str(exc)
 
 
+class _ProgressRelay:
+    """
+    Bridges the projection cache's synchronous progress callbacks (invoked in
+    a worker thread) onto MCP progress notifications. Started only when the
+    client supplied a progress token AND the document is cold — a warm read
+    finishes in milliseconds. The Node cache shipped the same lesson: report
+    parse progress during cold ingests and keep the event loop free so the
+    notifications actually flush.
+    """
+
+    def __init__(self, ctx: Context):
+        self._ctx = ctx
+        self._pct: int = 0
+        self._msg: str = ""
+        self._stop = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _has_progress_token(ctx: Context) -> bool:
+        try:
+            rc = ctx.request_context
+            return bool(rc and rc.meta and rc.meta.progressToken is not None)
+        except Exception:
+            return False
+
+    def callback(self, pct: int, msg: str) -> None:
+        # Called from the worker thread — mutate only; the poller flushes.
+        self._pct = pct
+        self._msg = msg
+
+    async def _poll(self) -> None:
+        last = -1
+        while not self._stop.is_set():
+            pct = self._pct
+            if pct != last:
+                try:
+                    await self._ctx.report_progress(pct, 100, self._msg or None)
+                except Exception:
+                    return
+                last = pct
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=0.6)
+            except asyncio.TimeoutError:
+                pass
+
+    def start(self) -> None:
+        if self._has_progress_token(self._ctx):
+            self._task = asyncio.create_task(self._poll())
+
+    async def finish(self) -> None:
+        if self._task is None:
+            return
+        self._stop.set()
+        try:
+            await self._task
+            await self._ctx.report_progress(100, 100, None)
+        except Exception:
+            pass
+
+
+def _schedule_background_fill(entry, clean_view: bool) -> None:
+    """
+    Warms one view of a cache entry in the background ONCE the server has
+    been quiet for a few hundred ms (an immediate multi-second fill would
+    contend with the request that typically follows — Node cache lesson).
+    Used for the clean view after a cold raw read, and for the OUTPUT file's
+    raw view after a batch save (read-after-edit priming). A client that
+    explicitly requests the view never waits on this — its own call computes
+    directly, and the per-entry lock deduplicates the work. Gives up if the
+    server never goes quiet; never lets an exception escape into the loop.
+    """
+    from adeu.mcp_components.doc_cache import doc_cache
+
+    view = entry.view(clean_view)
+    if view.base_text is not None:
+        return
+    if clean_view:
+        if entry.clean_fill_scheduled:
+            return
+        entry.clean_fill_scheduled = True
+
+    async def _fill() -> None:
+        try:
+            for _ in range(16):
+                await asyncio.sleep(0.5)
+                if doc_cache.quiet_for(0.45):
+                    break
+            else:
+                return
+            if view.base_text is None:
+                await asyncio.to_thread(doc_cache.get_base_text, entry, clean_view, None)
+        except Exception:
+            pass
+
+    try:
+        asyncio.create_task(_fill())
+    except RuntimeError:
+        # No running loop (sync test harness) — skip the warm-up.
+        if clean_view:
+            entry.clean_fill_scheduled = False
+
+
 async def _read_docx_disk(
     file_path: str,
     ctx: Context,
@@ -187,7 +286,18 @@ async def _read_docx_disk(
     search_regex: bool = False,
     search_case_sensitive: bool = True,
 ) -> ToolResult:
-    """Core logic for reading a DOCX from disk. Dispatches on `mode`."""
+    """
+    Core logic for reading a DOCX from disk. Dispatches on `mode`.
+
+    All parse/projection work runs in a worker thread against the stat-keyed
+    projection cache (adeu.mcp_components.doc_cache): the cost of parsing a
+    document version is paid once, page turns/search/outline on a warm
+    version are string work over cached projections, and the event loop
+    stays responsive during cold ingests (heartbeats/progress flush instead
+    of the client timing out at the transport level).
+    """
+    from adeu.mcp_components.doc_cache import doc_cache
+
     await ctx.info(
         f"Reading DOCX file: {Path(file_path).name}",
         extra={
@@ -201,72 +311,96 @@ async def _read_docx_disk(
     )
 
     try:
-        stream = read_file_bytes(file_path)
-        await ctx.debug(
-            "File bytes read successfully into memory",
-            extra={"size_bytes": len(stream.getvalue())},
-        )
+        if not Path(file_path).exists():
+            # Raises the rich, CLI-mapping FileNotFoundError message.
+            read_file_bytes(file_path)
 
-        sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-        doc = load_document(BytesIO(sanitized_bytes))
+        doc_cache.mark_activity()
+        key = doc_cache.stat_key(file_path)
+        entry = doc_cache.entry(key)
+        was_cold = doc_cache.is_cold(entry, clean_view)
+        if was_cold:
+            await ctx.debug("Projection cache cold for this document version; ingesting")
 
-        # Only mode='appendix' actually consumes the structural appendix in
-        # the response. Skipping it for the other modes saves the
-        # build_structural_appendix() cost (~8.5s on a 1000-page doc).
-        needs_appendix = mode == "appendix"
-        # mode='outline' uses paragraph offsets to avoid re-projecting each
-        # paragraph.
-        needs_offsets = mode == "outline"
-
-        extract_result = _extract_text_from_doc(
-            doc,
-            clean_view=clean_view,
-            include_appendix=needs_appendix,
-            return_paragraph_offsets=needs_offsets,
-        )
-        if needs_offsets:
-            text, paragraph_offsets = extract_result
-        else:
-            text = extract_result
-            paragraph_offsets = None
-
-        await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
-
-        if search_query is not None:
-            # `page` is a doc-page filter (None == search all pages).
-            return _as_tool_result(
-                build_search_response(text, search_query, search_regex, search_case_sensitive, page, file_path)
-            )
-
-        # In full mode, page='all' returns the entire document without page
-        # chrome — the round-trip artifact for text-based apply/diff
-        # (QA 2026-07-17 F1; mirrors the CLI's --page all). Dispatched before
-        # the isdigit() check below, which would silently render page 1.
-        if mode == "full" and page is not None and str(page).strip().lower() == "all":
-            return _as_tool_result(build_full_document_response(text, file_path))
-
-        # Non-search modes: `page` means document page; default to 1.
-        page_num = 1
-        if page is not None:
-            s_page = str(page).strip()
-            is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-            if s_page.isdigit() or is_signed:
-                page_num = int(s_page)
-        if mode == "outline":
-            return _as_tool_result(
-                build_outline_response(
-                    doc,
-                    text,
-                    file_path,
-                    outline_max_level=outline_max_level,
-                    outline_verbose=outline_verbose,
-                    paragraph_offsets=paragraph_offsets,
+        relay = _ProgressRelay(ctx)
+        if was_cold:
+            relay.start()
+        ingest_started = time.perf_counter()
+        try:
+            if search_query is not None:
+                # `page` is a doc-page filter (None == search all pages).
+                # Search only ever consumes the appendix-free body, so it is
+                # served from the cached base projection regardless of mode.
+                text, pagination = await asyncio.to_thread(doc_cache.get_pagination, entry, clean_view, relay.callback)
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                return _as_tool_result(
+                    build_search_response(
+                        text,
+                        search_query,
+                        search_regex,
+                        search_case_sensitive,
+                        page,
+                        file_path,
+                        pagination_result=pagination,
+                    )
                 )
-            )
-        if mode == "appendix":
-            return _as_tool_result(build_appendix_response(text, page_num, file_path))
-        # mode == "full"
-        return _as_tool_result(build_paginated_response(text, page_num, file_path))
+
+            if mode == "appendix":
+                text = await asyncio.to_thread(doc_cache.get_text_with_appendix, entry, clean_view, relay.callback)
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                page_num = 1
+                if page is not None:
+                    s_page = str(page).strip()
+                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                    if s_page.isdigit() or is_signed:
+                        page_num = int(s_page)
+                return _as_tool_result(build_appendix_response(text, page_num, file_path))
+
+            if mode == "outline":
+                text, pagination, nodes = await asyncio.to_thread(
+                    doc_cache.get_outline, entry, clean_view, relay.callback
+                )
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                return _as_tool_result(
+                    build_outline_response(
+                        None,
+                        text,
+                        file_path,
+                        outline_max_level=outline_max_level,
+                        outline_verbose=outline_verbose,
+                        pagination_result=pagination,
+                        outline_nodes=nodes,
+                    )
+                )
+
+            # mode == "full"
+            text, pagination = await asyncio.to_thread(doc_cache.get_pagination, entry, clean_view, relay.callback)
+            await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+
+            # In full mode, page='all' returns the entire document without page
+            # chrome — the round-trip artifact for text-based apply/diff
+            # (QA 2026-07-17 F1; mirrors the CLI's --page all). Dispatched before
+            # the isdigit() check below, which would silently render page 1.
+            if page is not None and str(page).strip().lower() == "all":
+                return _as_tool_result(build_full_document_response(text, file_path))
+
+            page_num = 1
+            if page is not None:
+                s_page = str(page).strip()
+                is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                if s_page.isdigit() or is_signed:
+                    page_num = int(s_page)
+            return _as_tool_result(build_paginated_response(text, page_num, file_path, pagination_result=pagination))
+        finally:
+            await relay.finish()
+            # Warm the clean view in the background after a cold RAW ingest —
+            # the next thing agents commonly ask for (Node cache lesson).
+            # Only for documents where the ingest actually hurt (>= 2s):
+            # small documents recompute in noise time, and skipping them
+            # keeps short-lived event loops (tests, one-shot CLIs) free of
+            # dangling background tasks.
+            if was_cold and not clean_view and (time.perf_counter() - ingest_started) >= 2.0:
+                _schedule_background_fill(entry, clean_view=True)
 
     except BuilderError as e:
         # Builder validation failures are user-facing tool errors.
@@ -291,6 +425,11 @@ async def _process_document_batch_disk(
     rejected_notes: Optional[List[str]] = None,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
+    # Batches are heavy CPU: let the projection cache's background fills see
+    # them as activity so they defer instead of contending.
+    from adeu.mcp_components.doc_cache import doc_cache
+
+    doc_cache.mark_activity()
     await ctx.info(
         "Initializing atomic batch process",
         extra={
@@ -359,6 +498,7 @@ async def _process_document_batch_disk(
 
     try:
         await ctx.debug("Offloading RedlineEngine to background thread")
+        batch_started = time.perf_counter()
         success, result_data, final_output_path, overwrite_note = await asyncio.to_thread(_run_batch_sync)
 
         if not success:
@@ -366,6 +506,19 @@ async def _process_document_batch_disk(
             return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(result_data)
 
         await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
+
+        # Output priming: the agent's next move after an edit is almost
+        # always a read of the output file. For documents where the batch
+        # was expensive (a proxy for "the cold read will be too"), warm the
+        # output's raw projection in the background once the server goes
+        # quiet — the follow-up read then hits a warm (or in-flight, via the
+        # per-entry lock) cache entry instead of paying a full cold ingest.
+        if not dry_run and final_output_path and (time.perf_counter() - batch_started) >= 4.0:
+            try:
+                out_key = doc_cache.stat_key(final_output_path)
+                _schedule_background_fill(doc_cache.entry(out_key), clean_view=False)
+            except OSError:
+                pass
 
         stats = result_data
         if dry_run:

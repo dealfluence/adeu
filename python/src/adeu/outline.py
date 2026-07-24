@@ -26,6 +26,9 @@ from docx.text.paragraph import Paragraph
 from adeu.ingest import build_paragraph_text, extract_table
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
+    QN_W_ENDNOTEREFERENCE,
+    QN_W_FOOTNOTEREFERENCE,
+    QN_W_P,
     DocxEvent,
     get_paragraph_prefix,
     iter_block_items,
@@ -206,9 +209,18 @@ def _extract_outline_fast(
     projected_body. Heading text is extracted by slicing projected_body and
     stripping markdown markers — no per-paragraph re-projection.
 
-    has_table and footnote_ids are computed by walking the tree, which is
-    fast (lxml structural traversal, not text projection). Owned-range
-    determination is unchanged from the legacy path.
+    PERF (2026-07-24): three per-heading costs made this path scale badly on
+    heading-dense documents (7,066 headings → ~11 s):
+      - style resolution went through python-docx's `paragraph.style`, whose
+        part lookup rescans the document part's relationship list on EVERY
+        access (52M probes on a 3,547-rel document) — replaced with the
+        package-level style cache;
+      - footnote collection re-projected paragraph events over each heading's
+        owned range, and owned ranges overlap (L2 ranges nest inside L1) —
+        replaced with one lxml prefilter for reference-carrying paragraphs
+        plus a per-paragraph memo;
+      - `_is_heading`/`_heading_level` were recomputed inside the owned-range
+        scans — now computed once per item during identification.
     """
     # Walk paragraphs and tables in projection order, but ONLY to detect
     # heading-eligible paragraphs. We do not re-project text.
@@ -235,8 +247,18 @@ def _extract_outline_fast(
     # Body part only — header/footer/notes don't contribute to outline.
     walk(doc)
 
-    # Identify heading paragraphs.
+    from adeu.utils.docx import _get_style_cache
+
+    style_cache, default_pstyle = _get_style_cache(doc.part)
+
+    # Identify heading paragraphs. `is_heading_flags` covers EVERY paragraph
+    # item (pre-quality-filter) because the has_table scan below must stop at
+    # any heading-prefixed paragraph, including ones the quality filter
+    # dropped from the outline itself (historical semantics).
+    n_items = len(paragraphs_and_tables)
+    is_heading_flags = [False] * n_items
     heading_indices: list[int] = []
+    level_by_item: dict[int, int] = {}
     for idx, (kind, item) in enumerate(paragraphs_and_tables):
         if kind != "p":
             continue
@@ -246,45 +268,58 @@ def _extract_outline_fast(
             continue
         if not _is_heading(item):
             continue
-        if not _heading_passes_quality_filter_fast(item, projected_body, paragraph_offsets):
+        is_heading_flags[idx] = True
+        if not _heading_passes_quality_filter_fast(
+            item, projected_body, paragraph_offsets, style_cache, default_pstyle
+        ):
             continue
         heading_indices.append(idx)
+        level_by_item[idx] = _heading_level(item)
 
     if not heading_indices:
         return []
 
+    footnote_ids_for = _build_footnote_memo(doc)
+
     nodes: List[OutlineNode] = []
     for h_pos, item_idx in enumerate(heading_indices):
         _, paragraph = paragraphs_and_tables[item_idx]
-        level = _heading_level(paragraph)
+        level = level_by_item[item_idx]
         text = _heading_text_fast(paragraph, projected_body, paragraph_offsets)
-        style = _determine_heading_style(paragraph)
+        style = _determine_heading_style_fast(paragraph, style_cache, default_pstyle)
 
         # Owned range: items strictly between this heading and the next
         # equal-or-higher heading.
         owned_end = item_idx
         for next_h_pos in range(h_pos + 1, len(heading_indices)):
             next_idx = heading_indices[next_h_pos]
-            next_paragraph = paragraphs_and_tables[next_idx][1]
-            if _heading_level(next_paragraph) <= level:
+            if level_by_item[next_idx] <= level:
                 owned_end = next_idx
                 break
         else:
-            owned_end = len(paragraphs_and_tables)
-
-        owned = paragraphs_and_tables[item_idx + 1 : owned_end]
+            owned_end = n_items
 
         # has_table: nearest-claim semantics (no bubbling to ancestors).
         has_table = False
-        for kind2, item2 in owned:
-            if kind2 == "p" and _is_heading(item2):
+        for idx2 in range(item_idx + 1, owned_end):
+            kind2, _item2 = paragraphs_and_tables[idx2]
+            if kind2 == "p" and is_heading_flags[idx2]:
                 break
             if kind2 == "t":
                 has_table = True
                 break
 
-        # Footnote IDs in document order, deduped.
-        footnote_ids = _collect_footnote_ids_fast(owned)
+        # Footnote IDs in document order, deduped (first-seen order).
+        seen_fn: set = set()
+        footnote_ids: List[str] = []
+        for idx2 in range(item_idx + 1, owned_end):
+            kind2, item2 = paragraphs_and_tables[idx2]
+            if kind2 != "p":
+                continue
+            for fn_id in footnote_ids_for(item2):
+                if fn_id not in seen_fn:
+                    seen_fn.add(fn_id)
+                    footnote_ids.append(fn_id)
 
         # Page resolution from the paragraph's known offset.
         para_offset = paragraph_offsets.get(id(paragraph._element))
@@ -324,6 +359,8 @@ def _heading_passes_quality_filter_fast(
     paragraph: Paragraph,
     projected_body: str,
     paragraph_offsets: dict,
+    style_cache: dict,
+    default_pstyle: Optional[str],
 ) -> bool:
     """
     Fast variant of _heading_passes_quality_filter that uses the offset map
@@ -335,7 +372,7 @@ def _heading_passes_quality_filter_fast(
     if not re.search(r"\w", text):
         return False
 
-    style = _determine_heading_style(paragraph)
+    style = _determine_heading_style_fast(paragraph, style_cache, default_pstyle)
     if style != "(heuristic)":
         return True
 
@@ -392,6 +429,51 @@ def _collect_footnote_ids_fast(owned_items: list) -> List[str]:
                 ordered.append(fn_id)
 
     return ordered
+
+
+_NO_FOOTNOTE_IDS: List[str] = []
+
+
+def _build_footnote_memo(doc: DocumentObject):
+    """
+    Returns footnote_ids_for(paragraph) -> List[str], the per-paragraph
+    footnote/endnote reference ids in document order (not deduped — the
+    caller dedups across the aggregated owned range, preserving the
+    historical first-seen order).
+
+    Owned ranges of nested headings OVERLAP (an L1 heading owns everything
+    its L2 children own), so the historical per-heading event walk
+    re-projected the same paragraphs repeatedly. One C-speed lxml pass finds
+    the (rare) paragraphs that contain references at all; only those are
+    event-walked — through the SAME _iter_paragraph_events used historically,
+    so field-hiding semantics are preserved — and memoized.
+    """
+    candidates: set = set()
+    for ref in doc.element.iter(QN_W_FOOTNOTEREFERENCE, QN_W_ENDNOTEREFERENCE):
+        anc = ref.getparent()
+        while anc is not None and anc.tag != QN_W_P:
+            anc = anc.getparent()
+        if anc is not None:
+            candidates.add(id(anc))
+
+    memo: dict = {}
+
+    def footnote_ids_for(paragraph: Paragraph) -> List[str]:
+        key = id(paragraph._element)
+        if key not in candidates:
+            return _NO_FOOTNOTE_IDS
+        cached = memo.get(key)
+        if cached is None:
+            cached = []
+            for event in _iter_paragraph_events(paragraph):
+                if event.type == "footnote":
+                    cached.append(f"fn-{event.id}")
+                elif event.type == "endnote":
+                    cached.append(f"en-{event.id}")
+            memo[key] = cached
+        return cached
+
+    return footnote_ids_for
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1039,76 @@ def _safe_style_name(paragraph: Paragraph) -> Optional[str]:
     if style is None:
         return None
     return getattr(style, "name", None)
+
+
+def _safe_style_name_fast(
+    paragraph: Paragraph,
+    style_cache: dict,
+    default_pstyle: Optional[str],
+) -> Optional[str]:
+    """
+    Cache-backed mirror of _safe_style_name. python-docx's `paragraph.style`
+    re-resolves the styles part through the document part's relationship list
+    on EVERY access — O(rels) per call, ruinous on documents with thousands
+    of header/footer relationships. The style cache gives the same answer in
+    O(1): a missing or unknown pStyle id resolves to the default paragraph
+    style (python-docx `Styles.get_by_id` semantics), and the raw w:name is
+    passed through BabelFish exactly as `BaseStyle.name` does ("heading 1"
+    -> "Heading 1").
+    """
+    from docx.styles import BabelFish
+
+    from adeu.utils.docx import QN_W_PPR, QN_W_PSTYLE, QN_W_VAL
+
+    pPr = paragraph._element.find(QN_W_PPR)
+    style_id = None
+    if pPr is not None:
+        pStyle = pPr.find(QN_W_PSTYLE)
+        if pStyle is not None:
+            style_id = pStyle.get(QN_W_VAL)
+    if not style_id or style_id not in style_cache:
+        style_id = default_pstyle
+    info = style_cache.get(style_id) if style_id else None
+    if info is None:
+        return None
+    name = info.get("name")
+    if name is None:
+        return None
+    return BabelFish.internal2ui(name)
+
+
+def _determine_heading_style_fast(
+    paragraph: Paragraph,
+    style_cache: dict,
+    default_pstyle: Optional[str],
+) -> str:
+    """
+    Cache-backed mirror of _determine_heading_style — identical OBSERVABLE
+    behavior, with python-docx property access replaced by the style cache.
+
+    Deliberately NO outline-level branch: the original's step 1 reads
+    `paragraph.paragraph_format.outline_level`, a property that does not
+    exist in python-docx 1.2 — the AttributeError is swallowed by its
+    try/except, so "(outline_level)" is never returned in practice and
+    direct-outlineLvl headings resolve through the style name or
+    "(heuristic)". If a python-docx upgrade makes that property real, the
+    ORIGINAL's behavior changes with it — re-verify this mirror against
+    _determine_heading_style before trusting either.
+    """
+    # 2. Explicit Heading/Title style
+    style = _safe_style_name_fast(paragraph, style_cache, default_pstyle)
+    if style and (style.startswith("Heading") or style == "Title"):
+        return style
+
+    # 3. Custom heading style name fallback (e.g. 'StyleHeading2...').
+    if style:
+        from adeu.utils.docx import _detect_heading_level_from_name
+
+        if _detect_heading_level_from_name(style) is not None:
+            return style
+
+    # 4. All-caps + bold heuristic
+    return "(heuristic)"
 
 
 # ---------------------------------------------------------------------------
