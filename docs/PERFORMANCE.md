@@ -282,14 +282,30 @@ Ordered by user-visible value per unit of risk:
    the file); (d) save() must RE-BASELINE each part's pristine XML
    (serialized output becomes the new blob + clean marker) or the first
    chained edit pays the full-tree clone again.
-   *4b (measured, pending): a purpose-built parser.* The tokenization
-   ceiling probe on the 45 MB main part: full spec parser 6.70 s, raw
-   scan 0.15 s, scan + minimal node construction 0.49 s — ~93% of parser
-   time is spec overhead (name-validation regexes, namespace resolution,
-   live-collection machinery) that WordprocessingML machine output never
-   exercises. A minimal-DOM parser implementing exactly the API subset
-   the engine uses would cut cold loads ~3-4×; gate adoption on the full
-   suite + goldens.
+   *4b (SHIPPED in the TypeScript engine): a purpose-built parser +
+   minimal DOM.* The tokenization ceiling probe on the 45 MB main part —
+   full spec parser 6.70 s, raw scan 0.15 s, scan + minimal node
+   construction 0.49 s — showed ~93% of parser time was spec overhead
+   (name-validation regexes, namespace resolution, live-collection
+   machinery) that WordprocessingML machine output never exercises.
+   The replacement implements EXACTLY the DOM subset the engine uses,
+   established by auditing every member access in non-test code first:
+   tree links, mutation ops (each bumping the document mutation counter
+   the snapshot/caching layers contract on), literal prefixed tag names
+   (namespace URIs are never consulted), snapshot (non-live) descendant
+   queries (every call site materializes immediately), attribute
+   get/set, text nodes, and a serializer. Measured: container load
+   11.3 s → 1.87 s (6×); cold read over the wire 16.2 s → 4.9 s; whole
+   agent edit loop 131 s → 29.5 s across phases. Adoption was gated on
+   the full suites plus BYTE-IDENTICAL projection goldens across three
+   documents × three views — the strongest equivalence evidence
+   available, since every character of the projection passed through
+   the new parser. Two portable adoption lessons: (a) audit-then-
+   implement beats implement-then-chase — the two gaps the suite caught
+   (namespace-variant element creation, nodes stringifying to their own
+   XML) were API-surface omissions, not parsing bugs; (b) keep the old
+   spec parser as a dev dependency and use it in tests as an INDEPENDENT
+   cross-check of the new serializer's output.
 
 ## 6. Porting checklist for the Python engine
 
