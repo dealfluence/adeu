@@ -200,9 +200,7 @@ class TestQA13CellAnchorNonEmptyCell:
 
         buf.seek(0)
         engine = RedlineEngine(buf, author="Adeu AI")
-        stats = engine.process_batch(
-            [ModifyText(target_text="{#cell:1A26F0BF}", new_text="By: /s/ Test Signer")]
-        )
+        stats = engine.process_batch([ModifyText(target_text="{#cell:1A26F0BF}", new_text="By: /s/ Test Signer")])
 
         if stats["edits_applied"]:
             out = engine.save_to_stream()
@@ -232,8 +230,7 @@ def apply_chained_edit_batch() -> BytesIO:
     """Reproduces the QA t3 chain topology: pair groups 1<->(2,5) and
     3<->(4,6,7) plus a standalone insertion Chg:8."""
     stream = build_doc(
-        "Unless otherwise stated in the Order Form, invoiced charges are due "
-        "net ten (10) days from the invoice date."
+        "Unless otherwise stated in the Order Form, invoiced charges are due net ten (10) days from the invoice date."
     )
     engine = RedlineEngine(stream, author="Adeu AI")
     stats = engine.process_batch(
@@ -330,17 +327,14 @@ class TestQA22FormatChangeIds:
 
         buf.seek(0)
         engine = RedlineEngine(buf, author="Reviewer")
-        applied, skipped, _ = engine.apply_review_actions(
-            [AcceptChange(target_id=f"Chg:{chg_id}")]
-        )
+        applied, skipped, _ = engine.apply_review_actions([AcceptChange(target_id=f"Chg:{chg_id}")])
 
         marked_view_only = bool(re.search(r"view.?only|not actionable", qualifier, re.I))
         assert applied == 1 or marked_view_only, (
             f"read_docx advertises [Chg:{chg_id} format] with no non-actionable "
             "marker, but accepting that id fails with 'no tracked change with "
             "that id exists' — read and write disagree about what exists "
-            f"(applied={applied}, skipped={skipped}):\n"
-            + "\n".join(map(str, engine.skipped_details))
+            f"(applied={applied}, skipped={skipped}):\n" + "\n".join(map(str, engine.skipped_details))
         )
 
 
@@ -361,10 +355,7 @@ class TestQA24HeadingBodyReplacement:
             [
                 ModifyText(
                     target_text="8.3 Entire Agreement.",
-                    new_text=(
-                        "## 8.3 Entire Agreement; Amendments\n\n"
-                        "No amendment is effective unless in writing."
-                    ),
+                    new_text=("## 8.3 Entire Agreement; Amendments\n\nNo amendment is effective unless in writing."),
                 )
             ]
         )
@@ -378,9 +369,12 @@ class TestQA24HeadingBodyReplacement:
             "No amendment is effective unless in writing.\n\n"
             "This Agreement is the entire agreement between the parties."
         )
+
         # extract may or may not render the heading marker; normalize it away
         # so the assertion pins the PARAGRAPH STRUCTURE, not heading rendering.
-        normalize = lambda s: re.sub(r"^#+\s*", "", s.strip(), flags=re.M)
+        def normalize(s: str) -> str:
+            return re.sub(r"^#+\s*", "", s.strip(), flags=re.M)
+
         assert normalize(clean) == normalize(expected), (
             "the accepted view contains a stray empty paragraph where the "
             "original paragraph used to be (Node replaces in place — parity "
@@ -592,9 +586,7 @@ class TestQA312SearchSnippetTruncation:
             "from the invoice date.\n\n"
             "Unrelated closing paragraph."
         )
-        res = build_search_response(
-            body, "Invoiced charges", False, True, None, "dummy.docx"
-        )
+        res = build_search_response(body, "Invoiced charges", False, True, None, "dummy.docx")
         text = str(res.content)
         opened = text.count("{>>")
         closed = text.count("<<}")
@@ -644,8 +636,7 @@ class TestQA311MissingFileError:
             )
         msg = str(exc_info.value)
         assert "Provide an absolute path" not in msg, (
-            "the relative-path hint fires even though the caller already "
-            f"provided an absolute path ({missing}):\n{msg}"
+            f"the relative-path hint fires even though the caller already provided an absolute path ({missing}):\n{msg}"
         )
 
 
@@ -658,9 +649,7 @@ class TestQA311MissingFileError:
 
 class TestQA11PythonAcceptKeepsComment:
     def test_accepting_a_change_keeps_the_wrapping_comment(self):
-        stream = build_doc(
-            "Agreement between NordicTech and Adeu.ai, a Delaware corporation."
-        )
+        stream = build_doc("Agreement between NordicTech and Adeu.ai, a Delaware corporation.")
         engine = RedlineEngine(stream, author="Claude")
         engine.process_batch(
             [
@@ -677,9 +666,7 @@ class TestQA11PythonAcceptKeepsComment:
 
         out.seek(0)
         engine2 = RedlineEngine(out, author="Reviewer")
-        applied, _, _ = engine2.apply_review_actions(
-            [AcceptChange(target_id=f"Chg:{del_id}")]
-        )
+        applied, _, _ = engine2.apply_review_actions([AcceptChange(target_id=f"Chg:{del_id}")])
         assert applied == 1, "setup: the accept must apply"
 
         raw_after = extract_text_from_stream(engine2.save_to_stream(), clean_view=False)

@@ -42,9 +42,21 @@ export function emphasizedSnippet(
   match: string,
   suffix: string,
 ): string {
-  const region = prefix + match + suffix;
-  const b1 = prefix.length;
-  const b2 = prefix.length + match.length;
+  return emphasizedSnippetSpans(prefix + match + suffix, [
+    [prefix.length, prefix.length + match.length],
+  ]);
+}
+
+/**
+ * Renders `region` with every matched span wrapped in `**…**`, stripping the
+ * document's own style markers first (same rules as emphasizedSnippet).
+ * Accepts MULTIPLE spans so one paragraph with several hits renders as one
+ * entry with every hit highlighted (QA round 3, finding 3.10).
+ */
+export function emphasizedSnippetSpans(
+  region: string,
+  spans: Array<[number, number]>,
+): string {
   const keep = new Array<boolean>(region.length).fill(true);
   const protected_idx = new Array<boolean>(region.length).fill(false);
   for (const m of region.matchAll(PROTECTED_TOKEN_RE)) {
@@ -62,16 +74,61 @@ export function emphasizedSnippet(
     if (overlaps_protected) continue;
     for (let i = m.index!; i < m.index! + m[0].length; i++) keep[i] = false;
   }
-  let strippedPrefix = "";
-  let strippedMatch = "";
-  let strippedSuffix = "";
-  for (let i = 0; i < region.length; i++) {
-    if (!keep[i]) continue;
-    if (i < b1) strippedPrefix += region[i];
-    else if (i < b2) strippedMatch += region[i];
-    else strippedSuffix += region[i];
+  const stripped = (a: number, b: number): string => {
+    let out = "";
+    for (let i = a; i < b; i++) if (keep[i]) out += region[i];
+    return out;
+  };
+  const sorted = [...spans].sort((x, y) => x[0] - y[0]);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const [s, e] of sorted) {
+    parts.push(stripped(cursor, s));
+    parts.push(`**${stripped(s, e)}**`);
+    cursor = e;
   }
-  return `${strippedPrefix}**${strippedMatch}**${strippedSuffix}`;
+  parts.push(stripped(cursor, region.length));
+  return parts.join("");
+}
+
+const SNIPPET_MARKUP_PAIRS: Array<[string, string]> = [
+  ["{>>", "<<}"],
+  ["{--", "--}"],
+  ["{++", "++}"],
+  ["{==", "==}"],
+];
+
+function countIn(haystack: string, needle: string): number {
+  let count = 0;
+  let at = haystack.indexOf(needle);
+  while (at !== -1) {
+    count++;
+    at = haystack.indexOf(needle, at + needle.length);
+  }
+  return count;
+}
+
+/**
+ * Extends a line-sliced snippet window until every CriticMarkup span it
+ * opens is closed. {>>…<<} meta bubbles are MULTI-line, so slicing at the
+ * line break cut them mid-annotation and agents could not harvest
+ * ids/pairings from search results (QA round 3, finding 3.12).
+ */
+function balanceSnippetWindow(body: string, start: number, end: number): number {
+  let prev_end = -1;
+  while (prev_end !== end) {
+    prev_end = end;
+    for (const [opener, closer] of SNIPPET_MARKUP_PAIRS) {
+      let window = body.substring(start, end);
+      while (countIn(window, opener) > countIn(window, closer)) {
+        const close_at = body.indexOf(closer, end);
+        if (close_at === -1) return end;
+        end = close_at + closer.length;
+        window = body.substring(start, end);
+      }
+    }
+  }
+  return end;
 }
 
 function _build_appendix_pointer(has_appendix: boolean): string {
@@ -474,9 +531,27 @@ export function build_search_response(
     occurrences_map[matched_str] = (occurrences_map[matched_str] || 0) + 1;
   }
 
+  // Group hits by their containing projection line: one paragraph renders as
+  // ONE entry with every hit emphasized, instead of once per regex
+  // alternation branch with divergent highlights (QA round 3, finding 3.10).
+  const line_groups: Array<[number, Array<{ 0: string; index?: number }>]> = [];
+  const groups_by_line = new Map<number, Array<{ 0: string; index?: number }>>();
+  for (const m of matches) {
+    const m_start = m.index!;
+    const lastNL = m_start <= 0 ? -1 : body.lastIndexOf("\n", m_start - 1);
+    const line_start = lastNL === -1 ? 0 : lastNL + 1;
+    let group = groups_by_line.get(line_start);
+    if (!group) {
+      group = [];
+      groups_by_line.set(line_start, group);
+      line_groups.push([line_start, group]);
+    }
+    group.push(m);
+  }
+
   const max_matches = 20;
-  const is_truncated = matches.length > max_matches;
-  const items_to_render = matches.slice(0, max_matches);
+  const is_truncated = line_groups.length > max_matches;
+  const items_to_render = line_groups.slice(0, max_matches);
 
   if (is_truncated) {
     ui_parts.push(
@@ -527,22 +602,25 @@ export function build_search_response(
   }
 
   let i = 1;
-  for (const m of items_to_render) {
-    const matched_str = m[0];
-    const m_start = m.index!;
-    const m_end = m_start + matched_str.length;
-    const p_num = pageOfOffset(m_start);
+  for (const [snippet_start, group] of items_to_render) {
+    const first = group[0];
+    const first_start = first.index!;
+    const p_num = pageOfOffset(first_start);
 
-    const lastNL = m_start <= 0 ? -1 : body.lastIndexOf("\n", m_start - 1);
-    const snippet_start = lastNL === -1 ? 0 : lastNL + 1;
-
-    const nextNL = body.indexOf("\n", m_end);
-    const snippet_end = nextNL === -1 ? body.length : nextNL;
-    const snippet = emphasizedSnippet(
-      body.substring(snippet_start, m_start),
-      matched_str,
-      body.substring(m_end, snippet_end),
+    const last_hit_end = Math.max(
+      ...group.map((m) => m.index! + m[0].length),
     );
+    const nextNL = body.indexOf("\n", last_hit_end);
+    let snippet_end = nextNL === -1 ? body.length : nextNL;
+    // Never cut a snippet inside an open {>>…<<}/{--…--} span (3.12).
+    snippet_end = balanceSnippetWindow(body, snippet_start, snippet_end);
+
+    const region = body.substring(snippet_start, snippet_end);
+    const spans: Array<[number, number]> = group.map((m) => [
+      m.index! - snippet_start,
+      m.index! - snippet_start + m[0].length,
+    ]);
+    const snippet = emphasizedSnippetSpans(region, spans);
 
     const snippet_lines = snippet
       .split("\n")
@@ -553,16 +631,32 @@ export function build_search_response(
     ui_parts.push("---");
     ui_parts.push(`### Match ${i} (p${p_num})`);
 
-    const h_path = get_heading(m_start, body);
+    const h_path = get_heading(first_start, body);
     if (h_path) {
       ui_parts.push(`**Path:** \`${h_path}\``);
     }
 
-    const count = occurrences_map[matched_str];
+    const distinct_strs: string[] = [];
+    for (const m of group) {
+      if (!distinct_strs.includes(m[0])) distinct_strs.push(m[0]);
+    }
+    let occurrence_line: string;
+    if (distinct_strs.length === 1) {
+      const count = occurrences_map[distinct_strs[0]];
+      occurrence_line = `*Occurrences:* This exact phrasing appears ${count} time${count !== 1 ? "s" : ""} in the document.`;
+    } else {
+      occurrence_line =
+        "*Occurrences:* " +
+        distinct_strs
+          .map((s) => {
+            const count = occurrences_map[s];
+            return `\`${s}\` appears ${count} time${count !== 1 ? "s" : ""}`;
+          })
+          .join("; ") +
+        " in the document.";
+    }
     ui_parts.push(snippet_lines);
-    ui_parts.push(
-      `*Occurrences:* This exact phrasing appears ${count} time${count !== 1 ? "s" : ""} in the document.`,
-    );
+    ui_parts.push(occurrence_line);
 
     i++;
   }

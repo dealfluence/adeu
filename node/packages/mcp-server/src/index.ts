@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { readFileSync, existsSync } from "node:fs";
-import { basename, resolve, extname, dirname, join } from "node:path";
+import { basename, resolve, extname, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
   registerAppTool as origRegisterAppTool,
@@ -80,34 +80,71 @@ function coerceChangeItemInPlace(item: any): void {
     }
   }
 }
+// At most this many sibling filenames are suggested in a file-not-found
+// error. Dumping a crowded directory's full listing (~300 names in the QA
+// workspace) is thousands of tokens of noise; the closest few names are what
+// enable one-turn self-correction (QA round 3, finding 3.3).
+const NOT_FOUND_SUGGESTION_CAP = 10;
+
+/** Rank candidates by similarity to the requested filename (longest common
+ *  prefix first, then shared-substring length) and return the closest few. */
+function closestFilenames(requested: string, candidates: string[]): string[] {
+  const req = requested.toLowerCase();
+  const score = (name: string): number => {
+    const cand = name.toLowerCase();
+    let prefix = 0;
+    while (
+      prefix < req.length &&
+      prefix < cand.length &&
+      req[prefix] === cand[prefix]
+    ) {
+      prefix++;
+    }
+    const stem = req.replace(/\.docx$/, "");
+    return prefix * 100 + (stem && cand.includes(stem) ? 50 : 0);
+  };
+  return [...candidates]
+    .sort((a, b) => score(b) - score(a) || a.localeCompare(b))
+    .slice(0, NOT_FOUND_SUGGESTION_CAP);
+}
+
 function readFileBytesOrThrow(filePath: string): Buffer {
   try {
     return readFileSync(filePath);
   } catch (err: any) {
     if (err.code === "ENOENT") {
-      // Lean, agent-appropriate error: list sibling .docx files so the model
-      // can self-correct a wrong filename (e.g. a guessed `-processed` suffix)
-      // in one turn, instead of being handed CLI install instructions that are
-      // irrelevant inside an agent loop and pure token waste.
+      // Lean, agent-appropriate error: suggest the CLOSEST sibling .docx
+      // files (capped) so the model can self-correct a wrong filename (e.g.
+      // a guessed `-processed` suffix) in one turn — never the whole
+      // directory listing, and never CLI install instructions.
       let available = "";
       try {
         const dir = dirname(filePath);
         const docs = fs
           .readdirSync(dir)
           .filter((f) => f.toLowerCase().endsWith(".docx"));
-        available = docs.length
-          ? ` available files: [${docs.join(", ")}]`
-          : ` (no .docx files found in ${dir})`;
+        if (docs.length) {
+          const shown = closestFilenames(basename(filePath), docs);
+          available = ` available files: [${shown.join(", ")}]`;
+          if (docs.length > shown.length) {
+            available += ` (+${docs.length - shown.length} more in ${dir})`;
+          }
+        } else {
+          available = ` (no .docx files found in ${dir})`;
+        }
       } catch {
         // Directory unreadable — omit the listing rather than fail.
       }
       // Echo the path AS GIVEN — dropping the directory ("file not found:
       // alice_copy.docx" for qa_sandbox/alice_copy.docx) hid which path was
       // actually tried, and relative paths resolve against the server's cwd,
-      // not the caller's (QA 2026-07-23 F16).
-      throw new Error(
-        `file not found: ${filePath};${available} Provide an absolute path — the server cannot resolve relative paths.`,
-      );
+      // not the caller's (QA 2026-07-23 F16). The absolute-path hint applies
+      // only when the caller actually passed a relative path (QA round 3,
+      // finding 3.3).
+      const hint = isAbsolute(filePath)
+        ? ""
+        : " Provide an absolute path — the server cannot resolve relative paths.";
+      throw new Error(`file not found: ${filePath};${available}${hint}`);
     }
     throw err;
   }
@@ -1118,7 +1155,14 @@ export function formatBatchResult(
   }
 
   if (stats.skipped_details && stats.skipped_details.length > 0) {
-    res += `Skipped Details:\n${stats.skipped_details.join("\n")}`;
+    // Purely informational notes ("… the action itself succeeded") must not
+    // be filed under "Skipped Details" — that header claims work was skipped
+    // when it wasn't (QA round 3, finding 3.4).
+    const allNotes = stats.skipped_details.every((d: string) =>
+      d.trimStart().startsWith("- Note:"),
+    );
+    const header = allNotes ? "Notes:" : "Skipped Details:";
+    res += `${header}\n${stats.skipped_details.join("\n")}`;
   }
   return res.trim();
 }

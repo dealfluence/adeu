@@ -116,10 +116,13 @@ describe("QA round 3, 1.1: accept must not delete the anchored comment", () => {
     ]);
     expect(applied).toBe(1); // setup sanity
 
-    const raw_after = await rawProjection(doc);
-    expect(raw_after, "the accepted text must survive").toContain(
+    // The surviving comment renders as a {==highlight==} over the accepted
+    // text (Python parity), so the plain substring is asserted on the CLEAN
+    // view and the comment on the raw projection.
+    expect(cleanText(doc), "the accepted text must survive").toContain(
       "Dealfluence Oy, a Finnish corporation",
     );
+    const raw_after = await rawProjection(doc);
     // Word semantics (and the Python engine): accepting a change keeps the
     // comment anchored on the surviving text. On current main the anchors
     // are detached and the foreign body is orphaned in word/comments.xml —

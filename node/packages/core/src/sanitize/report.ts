@@ -124,6 +124,11 @@ export class SanitizeReport {
     lines.push(sep);
     if (this.warnings.length > 0) {
       lines.push(`Result: CLEAN WITH WARNINGS (${this.warnings.length} warning${this.warnings.length > 1 ? 's' : ''})`);
+    } else if (this.mode === "keep-markup") {
+      // Nothing is "resolved" in keep-markup mode — the tracked changes and
+      // comments deliberately stay visible (QA round 3, finding 3.5). The
+      // Python report renders a bare CLEAN here for the same reason.
+      lines.push("Result: CLEAN");
     } else {
       lines.push(`Result: CLEAN (${this.tracked_changes_found} changes resolved, ${this.comments_removed} comments removed)`);
     }

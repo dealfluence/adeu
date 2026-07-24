@@ -52,7 +52,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 from adeu.outline import extract_outline
 from adeu.pagination import (
@@ -104,19 +104,20 @@ _STYLE_MARKER_RE = re.compile(r"\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])")
 _PROTECTED_UNDERSCORE_RE = re.compile(r"\{#[^}]+\}|_{3,}")
 
 
-def _emphasized_snippet(prefix: str, match: str, suffix: str) -> str:
+def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
     """
-    Renders `prefix **match** suffix` with the document's own bold/italic
-    projection markers stripped first, so the highlight cannot collide with
-    markers already present — a regex match crossing styled runs used to
-    render as `**The **Supplier** _shall provide**_` (QA 2026-07-19 v8 F-10).
-    Markers are detected over the WHOLE region (a match boundary can cut a
-    marker away from its word-edge context), then each part is rebuilt from
-    the surviving characters. Characters inside `{#anchor}` tokens or literal
-    underscore runs are protected — they are content, not markers (F4b).
+    Renders `region` with every matched span wrapped in `**…**` and the
+    document's own bold/italic projection markers stripped first, so the
+    highlight cannot collide with markers already present — a regex match
+    crossing styled runs used to render as `**The **Supplier** _shall
+    provide**_` (QA 2026-07-19 v8 F-10). Markers are detected over the WHOLE
+    region (a match boundary can cut a marker away from its word-edge
+    context), then each part is rebuilt from the surviving characters.
+    Characters inside `{#anchor}` tokens or literal underscore runs are
+    protected — they are content, not markers (F4b). Accepts MULTIPLE spans
+    so one paragraph with several hits renders as one entry with every hit
+    highlighted (QA round 3, finding 3.10).
     """
-    region = prefix + match + suffix
-    b1, b2 = len(prefix), len(prefix) + len(match)
     keep = [True] * len(region)
     protected = [False] * len(region)
     for m in _PROTECTED_UNDERSCORE_RE.finditer(region):
@@ -127,10 +128,41 @@ def _emphasized_snippet(prefix: str, match: str, suffix: str) -> str:
             continue
         for i in range(m.start(), m.end()):
             keep[i] = False
-    stripped_prefix = "".join(c for i, c in enumerate(region[:b1]) if keep[i])
-    stripped_match = "".join(c for i, c in enumerate(region[b1:b2], start=b1) if keep[i])
-    stripped_suffix = "".join(c for i, c in enumerate(region[b2:], start=b2) if keep[i])
-    return f"{stripped_prefix}**{stripped_match}**{stripped_suffix}"
+
+    def _stripped(a: int, b: int) -> str:
+        return "".join(c for i, c in enumerate(region[a:b], start=a) if keep[i])
+
+    parts: List[str] = []
+    cursor = 0
+    for s, e in sorted(spans):
+        parts.append(_stripped(cursor, s))
+        parts.append(f"**{_stripped(s, e)}**")
+        cursor = e
+    parts.append(_stripped(cursor, len(region)))
+    return "".join(parts)
+
+
+_SNIPPET_MARKUP_PAIRS = (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}"))
+
+
+def _balance_snippet_window(body: str, start: int, end: int) -> int:
+    """
+    Extends a line-sliced snippet window until every CriticMarkup span it
+    opens is closed. {>>…<<} meta bubbles are MULTI-line, so slicing at the
+    line break cut them mid-annotation ("{>>[Chg:1 delete] … (pairs with
+    Chg:2") and agents could not harvest ids/pairings from search results
+    (QA round 3, finding 3.12).
+    """
+    prev_end = -1
+    while prev_end != end:
+        prev_end = end
+        for opener, closer in _SNIPPET_MARKUP_PAIRS:
+            while body.count(opener, start, end) > body.count(closer, start, end):
+                close_at = body.find(closer, end)
+                if close_at == -1:
+                    return end
+                end = close_at + len(closer)
+    return end
 
 
 def render_outline_tree(
@@ -522,10 +554,23 @@ def build_search_response(
     # ---- Render. ----
     ui_parts: list[str] = []
 
+    # Group hits by their containing projection line: one paragraph renders
+    # as ONE entry with every hit emphasized, instead of once per regex
+    # alternation branch with divergent highlights (QA round 3, finding 3.10).
+    line_groups: list[tuple[int, list]] = []
+    groups_by_line: dict[int, list] = {}
+    for m, p_num in filtered:
+        last_nl = body.rfind("\n", 0, m.start())
+        line_start = 0 if last_nl == -1 else last_nl + 1
+        if line_start not in groups_by_line:
+            groups_by_line[line_start] = []
+            line_groups.append((line_start, groups_by_line[line_start]))
+        groups_by_line[line_start].append((m, p_num))
+
     # Cap results to 20 to avoid LLM context overflow
     max_matches = 20
-    is_truncated = len(filtered) > max_matches
-    items_to_render = filtered[:max_matches]
+    is_truncated = len(line_groups) > max_matches
+    items_to_render = line_groups[:max_matches]
 
     if page_filter is None:
         ui_parts.append(
@@ -609,34 +654,44 @@ def build_search_response(
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
     full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
 
-    for m, p_num in items_to_render:
-        m_start, m_end = m.span()
-        matched_str = m.group(0)
+    for snippet_start, group in items_to_render:
+        first_m, p_num = group[0]
 
-        last_nl = body.rfind("\n", 0, m_start)
-        snippet_start = 0 if last_nl == -1 else last_nl + 1
-
-        next_nl = body.find("\n", m_end)
+        last_hit_end = max(m.end() for m, _p in group)
+        next_nl = body.find("\n", last_hit_end)
         snippet_end = len(body) if next_nl == -1 else next_nl
+        # Never cut a snippet inside an open {>>…<<}/{--…--} span (3.12).
+        snippet_end = _balance_snippet_window(body, snippet_start, snippet_end)
 
-        snippet = _emphasized_snippet(
-            body[snippet_start:m_start],
-            matched_str,
-            body[m_end:snippet_end],
-        )
+        region = body[snippet_start:snippet_end]
+        spans = [(m.start() - snippet_start, m.end() - snippet_start) for m, _p in group]
+        snippet = _emphasized_snippet(region, spans)
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 
-        idx = full_index_map[id(m)]
+        idx = full_index_map[id(first_m)]
         ui_parts.extend(["---", f"### Match {idx} (p{p_num})"])
-        if h_path := get_heading(m_start, body):
+        if h_path := get_heading(first_m.start(), body):
             ui_parts.append(f"**Path:** `{h_path}`")
-        ui_parts.extend(
-            [
-                snippet_lines,
-                f"*Occurrences:* This exact phrasing appears {occurrences_map[matched_str]} "
-                f"time{'s' if occurrences_map[matched_str] != 1 else ''} in the document.",
-            ]
-        )
+
+        distinct_strs: list[str] = []
+        for m, _p in group:
+            if m.group(0) not in distinct_strs:
+                distinct_strs.append(m.group(0))
+        if len(distinct_strs) == 1:
+            n = occurrences_map[distinct_strs[0]]
+            occurrence_line = (
+                f"*Occurrences:* This exact phrasing appears {n} time{'s' if n != 1 else ''} in the document."
+            )
+        else:
+            occurrence_line = (
+                "*Occurrences:* "
+                + "; ".join(
+                    f"`{s}` appears {occurrences_map[s]} time{'s' if occurrences_map[s] != 1 else ''}"
+                    for s in distinct_strs
+                )
+                + " in the document."
+            )
+        ui_parts.extend([snippet_lines, occurrence_line])
 
     if regex_downgraded_note:
         ui_parts.insert(0, regex_downgraded_note)

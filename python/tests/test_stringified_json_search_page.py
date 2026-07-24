@@ -203,9 +203,13 @@ def test_search_page_omitted_single_page_no_distribution():
     md = result.structured_content["markdown"]
     assert "Distribution across" not in md
     assert "Found 3 matches" in md
-    # All matches present; index/page tag present.
+    # One paragraph renders as ONE deduped entry with every hit emphasized
+    # (QA round 3, finding 3.10) — the header still reports the raw match
+    # count and the occurrence line the global count.
     assert "### Match 1 (p1)" in md
-    assert "### Match 3 (p1)" in md
+    assert "### Match 3" not in md
+    assert md.count("**needle**") == 3
+    assert "appears 3 times in the document" in md
 
 
 # Case 2: page='all' explicit -> identical behavior to omitting
@@ -454,7 +458,10 @@ def test_search_occurrence_counts_remain_global_under_filter():
     )
     all_md = unfiltered_all.structured_content["markdown"]
     all_pages = [int(p) for p in re.findall(r"### Match \d+ \(p(\d+)\)", all_md)]
-    assert len(all_pages) == 4
+    # 4 raw matches, but the two gamma-needle hits share one paragraph and
+    # dedupe into a single entry (QA round 3, finding 3.10) — 3 entries.
+    assert "Found 4 matches" in all_md
+    assert len(all_pages) == 3
     # alpha-needle is the first match in document order.
     alpha_page = all_pages[0]
 

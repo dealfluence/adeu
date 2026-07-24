@@ -26,6 +26,7 @@ from adeu.utils.docx import (
     split_boundary_whitespace,
 )
 from adeu.utils.safe_regex import user_finditer, user_search
+from adeu.utils.text import escape_critic_tokens
 
 logger = structlog.get_logger(__name__)
 
@@ -826,7 +827,7 @@ class DocumentMapper:
                         header += f" @ {data['date']}"
                     if data["resolved"]:
                         header += "(RESOLVED)"
-                    comment_lines.append(f"{header}: {data['text']}")
+                    comment_lines.append(f"{header}: {escape_critic_tokens(data['text'])}")
                     seen_sigs.add(sig)
 
         return "\n".join(change_lines + comment_lines)
@@ -1223,10 +1224,18 @@ class DocumentMapper:
                     # its last run: falling back to the bare paragraph would
                     # drop the insertion at paragraph start, ahead of the very
                     # redlines/comment ranges that fence off the true position.
+                    # Compare underlying XML elements, not Paragraph proxy
+                    # identity: cell-anchor virtual spans wrap the same <w:p>
+                    # in a fresh Paragraph instance, and the proxy-identity
+                    # check made writes to a non-empty cell land at paragraph
+                    # START, interleaving the cell text (QA round 3, 1.3).
                     real_before = [
                         prev
                         for prev in self.spans
-                        if prev.end <= index and prev.run is not None and prev.paragraph is s.paragraph
+                        if prev.end <= index
+                        and prev.run is not None
+                        and prev.paragraph is not None
+                        and prev.paragraph._element is s.paragraph._element
                     ]
                     if real_before:
                         return real_before[-1].run, real_before[-1].paragraph

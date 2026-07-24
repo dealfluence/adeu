@@ -22,6 +22,7 @@ from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT
 from adeu.models import DeleteTableRow, InsertTableRow
 from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
+from adeu.utils.text import batch_details_header
 
 logger = structlog.get_logger(__name__)
 
@@ -1165,7 +1166,8 @@ if sys.platform == "win32":
                     f"by Word with the active user identity ('{stats['author_overridden_by_word']}')."
                 )
             if stats.get("skipped_details"):
-                res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
+                details = "\n".join(stats["skipped_details"])
+                res += "\n\n" + batch_details_header(stats["skipped_details"]) + "\n" + details
             return res
         except LiveWordUnavailableError:
             # Let the dispatcher decide whether to fall back to disk (it will,

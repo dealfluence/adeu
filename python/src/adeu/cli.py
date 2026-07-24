@@ -20,6 +20,7 @@ from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyTe
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
+from adeu.utils.text import batch_details_header
 
 
 def _get_claude_config_path() -> Path:
@@ -1234,7 +1235,7 @@ def handle_apply(args):
                     print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
 
         if stats.get("skipped_details"):
-            print("\nSkipped Details:", file=sys.stderr)
+            print("\n" + batch_details_header(stats["skipped_details"]), file=sys.stderr)
             for detail in stats["skipped_details"]:
                 print(detail, file=sys.stderr)
 

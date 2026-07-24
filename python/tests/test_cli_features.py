@@ -15,13 +15,19 @@ def get_fixture_path(name: str) -> Path:
     raise FileNotFoundError(f"Could not find fixtures directory for {name}")
 
 
-def test_sandbox_warning_on_read_failure():
+def test_missing_file_error_is_lean():
+    """A plain not-found must state the fact — no sandbox speculation and no
+    CLI-migration essay (QA round 3, finding 3.11). A RELATIVE path still
+    earns the absolute-path hint."""
     with pytest.raises(FileNotFoundError) as exc_info:
         read_file_bytes("definitely_non_existent_file_path_123456.docx")
 
     msg = str(exc_info.value)
-    assert "If you are running in a sandboxed/containerized environment" in msg
-    assert "uv tool install adeu" in msg
+    assert "File not found" in msg
+    assert "sandboxed" not in msg
+    assert "containerized" not in msg
+    assert "uv tool install" not in msg
+    assert "Provide an absolute path" in msg
 
 
 def test_cli_extract_modes(capsys):

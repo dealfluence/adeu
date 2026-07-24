@@ -79,6 +79,19 @@ export async function finalize_document(doc: DocumentObject, options: FinalizeOp
     report.tracked_changes_found = counts[0] + counts[1] + counts[2];
     report.tracked_changes_kept = report.tracked_changes_found;
 
+    // The open comments STAY in the outgoing document — enumerate each one
+    // (text + original author, captured before any author replacement) under
+    // VISIBLE TO COUNTERPARTY, exactly what a reviewer needs to see before
+    // sending (QA round 3, finding 3.6; Python-report parity).
+    const kept = transforms.get_comments_summary(doc);
+    report.comments_kept = kept.open;
+    for (const c of kept.comments) {
+      if (c.resolved) continue;
+      report.kept_comment_lines.push(
+        `"${transforms._truncate(c.text || '', 60)}" (${c.author || 'Unknown'})`,
+      );
+    }
+
     if (options.author) {
       report.add_transform_lines(transforms.replace_comment_authors(doc, options.author));
       report.add_transform_lines(transforms.replace_change_authors(doc, options.author));

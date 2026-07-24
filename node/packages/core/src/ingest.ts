@@ -16,6 +16,7 @@ import {
 import { findChild } from "./docx/dom.js";
 import { build_structural_appendix } from "./domain.js";
 import { extract_comments_data } from "./comments.js";
+import { escape_critic_tokens } from "./utils/text.js";
 
 /** Text-space extent of one projected table row plus its cell texts. */
 export interface RowGeometry {
@@ -700,7 +701,7 @@ function _build_merged_meta_block(
       let header = `[${sig}] ${data.author}`;
       if (data.date) header += ` @ ${data.date}`;
       if (data.resolved) header += `(RESOLVED)`;
-      comment_lines.push(`${header}: ${data.text}`);
+      comment_lines.push(`${header}: ${escape_critic_tokens(data.text)}`);
       seen_sigs.add(sig);
 
       if (children_map[cid]) {

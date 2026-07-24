@@ -28,6 +28,7 @@ from adeu.utils.docx import (
     iter_paragraph_content,
     strip_bom_from_docx_bytes,
 )
+from adeu.utils.text import escape_critic_tokens
 
 logger = structlog.get_logger(__name__)
 
@@ -246,6 +247,15 @@ def _extract_blocks(
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
             p_text = build_paragraph_text(item, comments_map, clean_view, style_cache, default_pstyle)
+            if clean_view and not p_text and _paragraph_mark_is_deleted(item._element):
+                # Accepting a tracked paragraph-mark deletion merges the
+                # paragraph away; when nothing visible survives inside it,
+                # the accepted view must not render an empty container
+                # (QA round 3, finding 2.4).
+                if not is_first_block:
+                    local_cursor -= 2
+                is_first_para = False
+                continue
             full_block = prefix + p_text
             blocks.append(full_block)
             if offset_map is not None:
@@ -696,6 +706,16 @@ def _get_wrappers(active_ins, active_del, active_comments, active_fmt):
     return "", ""
 
 
+def _paragraph_mark_is_deleted(p_element) -> bool:
+    """True when the paragraph's own break is a pending tracked deletion
+    (<w:del> inside pPr/rPr) — accepting it removes the paragraph container."""
+    pPr = p_element.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    rPr = pPr.find(qn("w:rPr"))
+    return rPr is not None and rPr.find(qn("w:del")) is not None
+
+
 def _build_merged_meta_block(states_list, comments_map) -> str:
     """
     Combines metadata from multiple states, removing duplicates.
@@ -724,7 +744,7 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
         if data["date"]:
             header += f" @ {data['date']}"
 
-        comment_lines.append(f"{header}: {data['text']}")
+        comment_lines.append(f"{header}: {escape_critic_tokens(data['text'])}")
         seen_sigs.add(sig)
 
         if cid in children_map:

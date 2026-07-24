@@ -3371,6 +3371,34 @@ class RedlineEngine:
             if re.match(r"^\{#cell:[^}]+\}$", actual_doc_text.strip()):
                 ins_text = current_effective_new_text
                 ins_text = ins_text.replace(actual_doc_text.strip(), "")
+                # A NON-empty cell: the anchor sits after the existing cell
+                # text, so the insertion lands at the END of the cell — and a
+                # new_text that echoes the existing content ("By: /s/ Signer"
+                # for a cell already reading "By: ") must not duplicate it
+                # (QA round 3, finding 1.3).
+                anchor_span = next(
+                    (s for s in active_mapper.spans if s.start <= start_idx < s.end and s.paragraph is not None),
+                    None,
+                )
+                if anchor_span is not None and anchor_span.paragraph is not None and ins_text:
+                    anchor_p_el = anchor_span.paragraph._element
+                    existing_cell_text = "".join(
+                        s.text
+                        for s in active_mapper.spans
+                        if s.end <= start_idx
+                        and s.run is not None
+                        and s.paragraph is not None
+                        and s.paragraph._element is anchor_p_el
+                    )
+                    if existing_cell_text:
+                        for candidate in (existing_cell_text, existing_cell_text.rstrip()):
+                            if candidate and ins_text.startswith(candidate):
+                                ins_text = ins_text[len(candidate) :].lstrip()
+                                break
+                        # Appending after a label ("Nimi" + "Testi") must not
+                        # glue words together (TC 5.1).
+                        if ins_text and not existing_cell_text[-1].isspace() and not ins_text[0].isspace():
+                            ins_text = " " + ins_text
                 if ins_text:
                     sub_mt = ModifyText(type="modify", target_text="", new_text=ins_text, comment=edit.comment)
                     sub_mt._match_start_index = start_idx
@@ -4273,6 +4301,27 @@ class RedlineEngine:
                         suppress_inherited=suppress_emphasis,
                         reuse_id=ins_id,
                     )
+                    if last_p is not None:
+                        # The replacement re-created the content as NEW tracked
+                        # paragraphs (heading-block insertion). If the deletion
+                        # consumed everything visible in the source paragraph,
+                        # the empty container must not survive an accept:
+                        # track-delete its paragraph break too, mirroring
+                        # _apply_paragraph_replace (QA round 3, finding 2.4).
+                        src_p = first_del_element.getparent()
+                        while src_p is not None and src_p.tag != qn("w:p"):
+                            src_p = src_p.getparent()
+                        if src_p is not None and not self._paragraph_has_visible_content(src_p):
+                            src_pPr = src_p.find(qn("w:pPr"))
+                            if src_pPr is None:
+                                src_pPr = create_element("w:pPr")
+                                src_p.insert(0, src_pPr)
+                            src_rPr = src_pPr.find(qn("w:rPr"))
+                            if src_rPr is None:
+                                src_rPr = create_element("w:rPr")
+                                src_pPr.append(src_rPr)
+                            if src_rPr.find(qn("w:del")) is None:
+                                src_rPr.append(self._create_track_change_tag("w:del", reuse_id=del_id))
                     if ins_elem is not None:
                         if parent.tag == qn("w:ins"):
                             # Revising another author's pending insertion: the
@@ -4561,10 +4610,11 @@ class RedlineEngine:
         )
 
     def _existing_change_ids(self) -> List[str]:
-        """Distinct tracked-change ids (w:id on w:ins/w:del) in the main story."""
+        """Distinct tracked-change ids (w:id on w:ins/w:del and format-change
+        elements — all of them actionable) in the main story."""
         ids = {
             n.get(qn("w:id"))
-            for tag in ("w:ins", "w:del")
+            for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS
             for n in self.doc.element.findall(f".//{qn(tag)}")
             if n.get(qn("w:id"))
         }
@@ -4638,20 +4688,50 @@ class RedlineEngine:
             "(it may already have been accepted or rejected, or the id is stale). " + avail + find_hint
         )
 
+    @staticmethod
+    def _expand_group_with_nested(all_ins: set, all_del: set) -> None:
+        """
+        Extends a resolution group with every <w:ins>/<w:del> NESTED inside a
+        group member. Chained edits produce nested revisions (re-deleting text
+        a pending insertion introduced stores the transient <w:del> INSIDE the
+        <w:ins>); resolving the outer element consumes the nested one with it,
+        so its id must be part of the group's bookkeeping — otherwise a batch
+        that enumerates every id from a read hard-fails on the nested member
+        with "no tracked change with that id exists" (QA round 3, finding 2.1).
+        """
+        stack = list(all_ins | all_del)
+        while stack:
+            node = stack.pop()
+            for nested in node.findall(f".//{qn('w:ins')}"):
+                if nested not in all_ins:
+                    all_ins.add(nested)
+                    stack.append(nested)
+            for nested in node.findall(f".//{qn('w:del')}"):
+                if nested not in all_del:
+                    all_del.add(nested)
+                    stack.append(nested)
+
     def _resolution_group_ids(self, target_id: str) -> set:
         """
         All revision ids that resolve as ONE unit with `target_id`: the ids of
         every contiguous same-author <w:ins>/<w:del> sibling of its elements
-        (a replacement's del+ins pair), plus the id itself.
+        (a replacement's del+ins pair), plus nested revisions those elements
+        contain (chained-edit transients), plus the id itself.
         """
         nodes = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
         nodes += [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
         group = {target_id} if nodes else set()
+        group_ins: set = set()
+        group_del: set = set()
         for node in nodes:
+            (group_ins if node.tag == qn("w:ins") else group_del).add(node)
             for paired in self._get_paired_nodes(node):
-                pid = paired.get(qn("w:id"))
-                if pid:
-                    group.add(pid)
+                (group_ins if paired.tag == qn("w:ins") else group_del).add(paired)
+        self._expand_group_with_nested(group_ins, group_del)
+        for member in group_ins | group_del:
+            pid = member.get(qn("w:id"))
+            if pid:
+                group.add(pid)
         return group
 
     def validate_action_pairing(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> List[str]:
@@ -4905,6 +4985,12 @@ class RedlineEngine:
         primary_ins = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
         primary_del = [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
 
+        if not primary_ins and not primary_del:
+            # Format-only tracked changes (w:rPrChange/w:pPrChange) carry ids
+            # the projection advertises; they must be actionable by id too
+            # (QA round 3, finding 2.2).
+            return self._resolve_format_change(target_id, accept=True)
+
         all_ins = set(primary_ins)
         all_del = set(primary_del)
 
@@ -4914,6 +5000,10 @@ class RedlineEngine:
                     all_ins.add(paired)
                 elif paired.tag == qn("w:del"):
                     all_del.add(paired)
+
+        # Chained edits nest revisions (a transient <w:del> inside a pending
+        # <w:ins>); they resolve together with their host (QA round 3, 2.1).
+        self._expand_group_with_nested(all_ins, all_del)
 
         resolved_ids = set()
         for node in all_ins | all_del:
@@ -4967,6 +5057,11 @@ class RedlineEngine:
         primary_ins = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
         primary_del = [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
 
+        if not primary_ins and not primary_del:
+            # Format-only tracked changes: restore the stored original
+            # properties (QA round 3, finding 2.2).
+            return self._resolve_format_change(target_id, accept=False)
+
         all_ins = set(primary_ins)
         all_del = set(primary_del)
 
@@ -4976,6 +5071,10 @@ class RedlineEngine:
                     all_ins.add(paired)
                 elif paired.tag == qn("w:del"):
                     all_del.add(paired)
+
+        # Chained edits nest revisions (a transient <w:del> inside a pending
+        # <w:ins>); they resolve together with their host (QA round 3, 2.1).
+        self._expand_group_with_nested(all_ins, all_del)
 
         resolved_ids = set()
         for node in all_ins | all_del:
@@ -5036,6 +5135,46 @@ class RedlineEngine:
             parent.remove(d)
 
         return resolved_ids
+
+    _FORMAT_CHANGE_TAGS = ("w:rPrChange", "w:pPrChange", "w:sectPrChange")
+
+    def _resolve_format_change(self, target_id: str, accept: bool) -> set:
+        """
+        Accept/reject a FORMAT-only tracked change (<w:rPrChange>,
+        <w:pPrChange>, <w:sectPrChange>) by id. The projection advertises
+        these as "[Chg:N format]", so per-id targeting must work exactly like
+        it does for insertions/deletions (QA round 3, finding 2.2).
+
+        Accept keeps the new formatting: drop the change element recording
+        the original. Reject restores the original: the change element's
+        single child holds the pre-change properties — swap them into the
+        live properties container.
+        """
+        resolved: set = set()
+        for tag in self._FORMAT_CHANGE_TAGS:
+            for change in self.doc.element.findall(f".//{qn(tag)}"):
+                if change.get(qn("w:id")) != target_id:
+                    continue
+                parent = change.getparent()
+                if parent is None:
+                    continue
+                if accept:
+                    parent.remove(change)
+                else:
+                    stored = next(iter(change), None)
+                    parent.remove(change)
+                    for child in list(parent):
+                        # A pilcrow revision (w:ins/w:del inside pPr's rPr) is
+                        # a separate pending change — never wipe it while
+                        # restoring formatting properties.
+                        if child.tag == qn("w:rPr") and any(child.find(qn(t)) is not None for t in ("w:ins", "w:del")):
+                            continue
+                        parent.remove(child)
+                    if stored is not None:
+                        for child in list(stored):
+                            parent.append(deepcopy(child))
+                resolved.add(target_id)
+        return resolved
 
     def _reply_to_comment(self, target_id: str, text: str) -> bool:
         if not self.comments_manager.comments_part:

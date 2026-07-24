@@ -598,7 +598,7 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(stats.removed_comments).toBe(1);
   });
 
-  it("BUG-REPRO: removed_comments does not count comments it deliberately keeps", async () => {
+  it("removed_comments counts every comment accept_all ejects, foreign ones included", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "This is a test document.");
     const engine = new RedlineEngine(doc);
@@ -612,13 +612,15 @@ describe("Resolved Bugs Core Engine Verification", () => {
       },
     ]);
 
-    // A different reviewer now opens the redlined document. The existing
-    // comment is foreign to them, so it keeps its BODY by design (only the
-    // anchor is detached) and must not be reported as removed.
+    // A different reviewer now runs accept-all. The tool contract removes
+    // ALL comments (the comment parts are ejected wholesale), so the count
+    // must say so — reporting 0 while the output document demonstrably has
+    // no comments left is silent data loss in the summary
+    // (QA round 3, finding 3.4).
     const other = new RedlineEngine(doc);
     other.author = "Someone Else";
     const stats = other.accept_all_revisions() as any;
 
-    expect(stats.removed_comments).toBe(0);
+    expect(stats.removed_comments).toBe(1);
   });
 });

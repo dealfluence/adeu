@@ -2,6 +2,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extract_comments_data } from "./comments.js";
+import { escape_critic_tokens } from "./utils/text.js";
 import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-regex.js";
 import {
   _get_style_cache,
@@ -902,7 +903,7 @@ export class DocumentMapper {
           let header = `[${sig}] ${data.author}`;
           if (data.date) header += ` @ ${data.date}`;
           if (data.resolved) header += `(RESOLVED)`;
-          comment_lines.push(`${header}: ${data.text}`);
+          comment_lines.push(`${header}: ${escape_critic_tokens(data.text)}`);
           seen_sigs.add(sig);
         }
       }
@@ -1342,13 +1343,18 @@ export class DocumentMapper {
           // last run: falling back to the bare paragraph would drop the
           // insertion at paragraph start, ahead of the very redlines and
           // comment ranges that fence off the true position (mirrors the
-          // Python mapper).
+          // Python mapper). Compare underlying XML elements, not Paragraph
+          // wrapper identity: cell-anchor virtual spans wrap the same <w:p>
+          // in a fresh Paragraph instance, and the wrapper-identity check
+          // made writes to a non-empty cell land at paragraph START,
+          // interleaving the cell text (QA round 3, finding 1.3).
           for (let j = this.spans.length - 1; j >= 0; j--) {
             const prev = this.spans[j];
             if (
               prev.end <= index &&
               prev.run !== null &&
-              prev.paragraph === para
+              prev.paragraph !== null &&
+              prev.paragraph._element === para._element
             ) {
               return [prev.run, prev.paragraph];
             }

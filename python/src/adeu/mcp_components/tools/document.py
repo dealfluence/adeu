@@ -47,6 +47,7 @@ from adeu.models import (
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.text import batch_details_header
 
 
 def _as_tool_result(res: BuilderResult) -> ToolResult:
@@ -416,7 +417,7 @@ async def _process_document_batch_disk(
                 res += "\n"
 
         if stats.get("skipped_details"):
-            res += "\n\nSkipped Details:\n" + "\n".join(stats["skipped_details"])
+            res += "\n\n" + batch_details_header(stats["skipped_details"]) + "\n" + "\n".join(stats["skipped_details"])
         return res
 
     except Exception as e:

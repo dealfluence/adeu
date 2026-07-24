@@ -16,29 +16,45 @@ MCP_ID_DISCOVERY_HINT = (
 )
 
 
+# At most this many sibling filenames are suggested in a file-not-found
+# error. The full listing of a crowded directory is thousands of tokens of
+# noise; the closest few names are what enable one-turn self-correction
+# (QA round 3, findings 3.3/3.11).
+_NOT_FOUND_SUGGESTION_CAP = 10
+
+
+def _not_found_error(path: str) -> FileNotFoundError:
+    """
+    Lean, agent-appropriate missing-file error: state the fact, suggest the
+    closest sibling .docx files (capped), and mention absolute paths only
+    when the caller actually passed a relative one. No speculation about
+    sandboxes and no CLI-migration essay for a plain ENOENT
+    (QA round 3, finding 3.11).
+    """
+    import difflib
+
+    p = Path(path)
+    listing = ""
+    try:
+        siblings = sorted(f.name for f in p.parent.iterdir() if f.suffix.lower() == ".docx")
+    except OSError:
+        siblings = []
+    if siblings:
+        shown = difflib.get_close_matches(p.name, siblings, n=_NOT_FOUND_SUGGESTION_CAP, cutoff=0.0)
+        listing = f" available files: [{', '.join(shown)}]"
+        more = len(siblings) - len(shown)
+        if more > 0:
+            listing += f" (+{more} more in {p.parent})"
+    hint = ""
+    if not p.is_absolute():
+        hint = " Provide an absolute path — the MCP server cannot resolve relative paths against your workspace."
+    return FileNotFoundError(f"File not found: {path}.{listing}{hint}")
+
+
 def read_file_bytes(path: str) -> BytesIO:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(
-            f"File not found: {path}.\n"
-            "Provide an absolute path — the MCP server cannot resolve relative "
-            "paths against your workspace.\n"
-            "If you are running in a sandboxed/containerized environment\n"
-            "(such as Claude Desktop or another containerized client),\n"
-            "the host application or MCP server may not have direct access to your local workspace files.\n"
-            "You can resolve this by installing and running the local 'adeu' CLI tool\n"
-            "directly within your environment.\n"
-            "Here is how the MCP tools map to their CLI equivalents:\n"
-            f"- read_docx               -> adeu extract {path}\n"
-            f"- process_document_batch  -> adeu apply {path} <changes.json>\n"
-            f"- diff_docx_files         -> adeu diff {path} <modified_path>\n"
-            f"- accept_all_changes      -> adeu accept-all {path}\n\n"
-            "All of these commands accept a --json flag that emits a machine-readable\n"
-            "result on stdout; logs and errors go to stderr.\n"
-            "To run the local tool, install it via:\n"
-            "  uv tool install adeu\n"
-            "and run the mapped CLI command directly in your terminal."
-        )
+        raise _not_found_error(path)
     with open(p, "rb") as f:
         return BytesIO(f.read())
 

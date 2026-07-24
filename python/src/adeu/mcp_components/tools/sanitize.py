@@ -127,7 +127,14 @@ async def sanitize_docx(
             "Sanitization blocked",
             extra={"reason": str(e)},
         )
-        raise ToolError(str(e)) from e
+        # A refused-but-well-understood operation travels on the SAME channel
+        # as a rejected batch: a normal payload describing the refusal, never
+        # a protocol error. Orchestrators branching on the MCP error flag get
+        # one consistent behavior for both refusals (QA round 3, finding 3.1).
+        return {
+            "status": "blocked",
+            "report_text": str(e),
+        }
 
     except Exception as e:
         await ctx.error(

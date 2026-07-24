@@ -1136,16 +1136,17 @@ export class RedlineEngine {
       }
     }
 
-    // Counted as it happens below, not pre-read from the comments part: this
-    // method only deletes the bodies of OUR OWN comments wrapping a resolved
-    // revision (foreign ones keep their body by design), so the document's
-    // comment total would claim removals that never happened.
-    let removed_comments = 0;
+    // accept_all removes EVERY comment (the final pass below ejects the
+    // comment parts wholesale), so the reported count is the number of
+    // comments present at entry — counting only the bodies deleted during
+    // wrapping-cleanup under-reported the removal as 0 while the output
+    // document demonstrably had no comments left (QA round 3, finding 3.4).
+    const removed_comments = this._existing_comment_ids().length;
 
     for (const root_element of parts_to_process) {
       const insNodes = findAllDescendants(root_element, "w:ins");
       for (const ins of insNodes) {
-        removed_comments += this._clean_wrapping_comments(ins);
+        this._clean_wrapping_comments(ins);
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
 
@@ -1193,8 +1194,8 @@ export class RedlineEngine {
             if (has_content) {
               rPr.removeChild(delMark);
             } else {
-              removed_comments += this._clean_wrapping_comments(p);
-              removed_comments += this._delete_comments_in_element(p);
+              this._clean_wrapping_comments(p);
+              this._delete_comments_in_element(p);
               if (p.parentNode) {
                 p.parentNode.removeChild(p);
               }
@@ -1205,8 +1206,8 @@ export class RedlineEngine {
 
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
-        removed_comments += this._clean_wrapping_comments(d);
-        removed_comments += this._delete_comments_in_element(d);
+        this._clean_wrapping_comments(d);
+        this._delete_comments_in_element(d);
         const parent = d.parentNode as Element | null;
         if (parent) {
           if (parent.tagName === "w:trPr") {
@@ -1422,12 +1423,13 @@ export class RedlineEngine {
         }
       }
 
-      // 3. Reject deletions: restore the original text.
+      // 3. Reject deletions: restore the original text. No comment cleanup:
+      //    the deleted text is being RESTORED, so a comment anchored on it
+      //    stays valid (Python-engine parity, QA round 3 finding 1.1).
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
         const parent = d.parentNode as Element | null;
         if (!parent) continue;
-        this._clean_wrapping_comments(d);
         if (parent.tagName === "w:trPr") {
           parent.removeChild(d);
           continue;
@@ -1472,6 +1474,40 @@ export class RedlineEngine {
       }
     } else {
       host_p.removeChild(pPr);
+    }
+  }
+
+  /**
+   * Rejects a run/section format-only tracked change (w:rPrChange /
+   * w:sectPrChange): the change element's single child stores the ORIGINAL
+   * properties — swap them into the live properties container
+   * (QA round 3, finding 2.2).
+   */
+  private _revert_props_change(change: Element): void {
+    const parent = change.parentNode as Element | null;
+    if (!parent) return;
+    const stored = Array.from(change.childNodes).find(
+      (n) => n.nodeType === 1,
+    ) as Element | undefined;
+    parent.removeChild(change);
+    for (const child of Array.from(parent.childNodes)) {
+      if (child.nodeType !== 1) continue;
+      // A pilcrow revision (w:ins/w:del inside pPr's rPr) is a separate
+      // pending change — never wipe it while restoring formatting.
+      const el = child as Element;
+      if (
+        el.tagName === "w:rPr" &&
+        (findChild(el, "w:ins") || findChild(el, "w:del"))
+      ) {
+        continue;
+      }
+      parent.removeChild(child);
+    }
+    if (stored) {
+      for (const child of Array.from(stored.childNodes)) {
+        if (child.nodeType !== 1) continue;
+        parent.appendChild(child.cloneNode(true));
+      }
     }
   }
 
@@ -2450,31 +2486,15 @@ export class RedlineEngine {
 
     insertAfter(ref_run, new_end);
   }
-  /**
-   * Read a comment's author directly from the comments part. Used by
-   * _clean_wrapping_comments to decide whether a wrapping comment belongs to
-   * another author (and must be preserved when its anchored change is
-   * accepted/rejected) or to us (safe to delete). Reads the part rather than
-   * the mapper because the mapper's comments_map is not rebuilt between review
-   * actions, so it can be stale mid-batch. Returns null if not found.
-   */
-  private _get_comment_author(c_id: string): string | null {
-    const part = this.doc.pkg.parts.find(
-      (p) =>
-        p.contentType ===
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
-    );
-    if (!part) return null;
-    const comments = findAllDescendants(part._element, "w:comment");
-    for (const c of comments) {
-      if (c.getAttribute("w:id") === c_id) {
-        return c.getAttribute("w:author");
-      }
-    }
-    return null;
-  }
-  /** Returns how many comment BODIES were actually deleted (see below: only
-   *  our own are; foreign ones keep their body and lose only the anchor). */
+  /** Returns how many comment BODIES were deleted. A comment wrapping a
+   *  change that is being removed loses its anchor AND its body, whoever
+   *  authored it — keeping the body while stripping the anchors leaves an
+   *  orphaned, invisible comment in word/comments.xml, which is silent data
+   *  loss (QA round 3, finding 1.1/3.4; Python-engine parity). Callers that
+   *  must PRESERVE comments (accept of an insertion, reject of a deletion —
+   *  the wrapped text survives) simply do not call this. Deletions are
+   *  counted so apply_review_actions' comments-before/after diff reports
+   *  each removal by id. */
   private _clean_wrapping_comments(element: Element): number {
     let deleted = 0;
     let first_node: Element = element;
@@ -2548,22 +2568,8 @@ export class RedlineEngine {
     for (const s of starts_to_remove) {
       const c_id = s.getAttribute("w:id");
       if (c_id && end_ids.has(c_id)) {
-        // Author-aware preservation. A comment that merely WRAPS the change
-        // being accepted/rejected is a separate annotation — often the
-        // counterparty's note explaining the very edit we are resolving.
-        // Deleting it silently destroys their provenance (and, e.g., fails a
-        // "keep the counterparty's comment" review requirement). So: always
-        // detach the range markers (leaving no orphaned anchor, which lets the
-        // accept/reject proceed cleanly), but only delete the comment BODY when
-        // it is ours. Foreign-authored comment bodies are kept in the comments
-        // part. When the author can't be read we default to preserving, since
-        // deletion is the irreversible, higher-cost mistake.
-        const author = this._get_comment_author(c_id);
-        const is_own = author !== null && author === this.author;
-        if (is_own) {
-          this.comments_manager.deleteComment(c_id);
-          deleted++;
-        }
+        this.comments_manager.deleteComment(c_id);
+        deleted++;
         if (s.parentNode) s.parentNode.removeChild(s);
         for (const e of ends_to_remove) {
           let e_id: string | null = null;
@@ -3479,7 +3485,9 @@ export class RedlineEngine {
               target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
               new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
               comment: (edit as any).comment ?? null,
-              warning: null,
+              // Resolution advisories (edit._warning, e.g. the surviving-\N
+              // backreference guardrail) surface in BOTH outcomes.
+              warning: (edit as any)._warning || null,
               error: null,
               // Filled from the post-apply projections after the loop.
               critic_markup: null,
@@ -3623,15 +3631,17 @@ export class RedlineEngine {
           let clean_text = null;
           // Punctuation-anchor warning is failure-context only: on success the
           // redline preview below already reports the change cleanly.
-          let warning: string | null = null;
+          // Resolution advisories (edit._warning, e.g. the surviving-\N
+          // backreference guardrail) surface in BOTH outcomes.
+          let warning: string | null = (edit as any)._warning || null;
           if (success) {
             const previews = this._build_edit_context_previews(edit);
             critic_markup = previews[0];
             clean_text = previews[1];
           } else {
-            warning = this._check_punctuation_warning(
-              (edit as any).target_text || "",
-            );
+            warning =
+              warning ||
+              this._check_punctuation_warning((edit as any).target_text || "");
           }
           edits_reports.push({
             status: success ? "applied" : "failed",
@@ -3677,6 +3687,38 @@ export class RedlineEngine {
       engine: "node",
       version: "1.18.2",
     };
+  }
+
+  /**
+   * Non-fatal guardrail, mirror image of the Python engine's $N guard
+   * (QA round 3, finding 2.3): JavaScript's String.replace does not expand
+   * Python-style \N or \g<N> backreferences, so a new_text containing "\1"
+   * is written into the document as the literal text "\1" — silently. When
+   * such a token survives substitution verbatim AND the pattern actually
+   * has that capture group (a backreference was plausibly intended), stash
+   * a warning for the edit report. Never a hard reject.
+   */
+  private static _flag_surviving_python_backreference(
+    edit: any,
+    substituted_text: string,
+  ): void {
+    const m = /\\(\d+)|\\g<(\d+)>/.exec(edit.new_text || "");
+    if (!m || !substituted_text.includes(m[0])) return;
+    let group_count = 0;
+    try {
+      // Count capture groups by probing an always-matching alternation.
+      const probe = new RegExp(`(?:${edit.target_text})|`).exec("");
+      group_count = probe ? probe.length - 1 : 0;
+    } catch {
+      return;
+    }
+    const group_num = parseInt(m[1] ?? m[2], 10);
+    if (!(group_num > 0 && group_num <= group_count)) return;
+    edit._warning =
+      `new_text contains '${m[0]}', which JavaScript's replace does not expand — ` +
+      `the literal text '${m[0]}' was written into the document. For a ` +
+      `capture-group backreference use $${group_num} (\\N and \\g<N> are Python ` +
+      `syntax). If you meant literal text, ignore this warning.`;
   }
 
   /**
@@ -4334,7 +4376,7 @@ export class RedlineEngine {
    *  main story. */
   private _existing_change_ids(): string[] {
     const ids = new Set<string>();
-    for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
+    for (const tag of ["w:ins", "w:del", "w:pPrChange", "w:rPrChange", "w:sectPrChange"]) {
       for (const n of findAllDescendants(this.doc.element, tag)) {
         const id = n.getAttribute("w:id");
         if (id) ids.add(id);
@@ -4498,12 +4540,17 @@ export class RedlineEngine {
         (n) => n.getAttribute("w:id") === target_id,
       );
       const all_nodes = [...all_ins, ...all_del];
-      // Tracked paragraph restyles named directly (STYLE_ONLY edits mint a
-      // pPrChange with its own id, QA 2026-07-23 F1a).
-      const direct_ppc = findAllDescendants(
-        this.doc.element,
-        "w:pPrChange",
-      ).filter((n) => n.getAttribute("w:id") === target_id);
+      // Tracked restyles named directly: STYLE_ONLY edits mint a pPrChange
+      // with its own id (QA 2026-07-23 F1a), and Word-authored format-only
+      // changes carry rPrChange/sectPrChange ids the projection advertises
+      // as "[Chg:N format]" — all of them actionable by id
+      // (QA round 3, finding 2.2).
+      const direct_ppc = ["w:pPrChange", "w:rPrChange", "w:sectPrChange"].flatMap(
+        (tag) =>
+          findAllDescendants(this.doc.element, tag).filter(
+            (n) => n.getAttribute("w:id") === target_id,
+          ),
+      );
 
       if (all_nodes.length === 0 && direct_ppc.length === 0) {
         skipped++;
@@ -4562,22 +4609,49 @@ export class RedlineEngine {
           if (pid) group_ids.add(pid);
         }
       }
+      // Chained edits nest revisions (a transient <w:del> inside a pending
+      // <w:ins>); they are consumed together with their host, so their ids
+      // join the group's bookkeeping — otherwise a batch that enumerates
+      // every id from a read hard-fails on the nested member with "no
+      // tracked change with that id exists" (QA round 3, finding 2.1).
+      let group_size = -1;
+      while (group_size !== group_ids.size) {
+        group_size = group_ids.size;
+        for (const tag of ["w:ins", "w:del"]) {
+          for (const el of findAllDescendants(this.doc.element, tag)) {
+            const id = el.getAttribute("w:id");
+            if (!id || !group_ids.has(id)) continue;
+            for (const nestedTag of ["w:ins", "w:del"]) {
+              for (const nested of findAllDescendants(el, nestedTag)) {
+                const nid = nested.getAttribute("w:id");
+                if (nid) group_ids.add(nid);
+              }
+            }
+          }
+        }
+      }
       const group_nodes: Element[] = [];
+      // Insertions first, deletions second — the Python engine's two-pass
+      // order. It is load-bearing for comment preservation: unwrapping the
+      // <w:ins> side first breaks the wrapping-comment adjacency walk, so a
+      // comment spanning the del+ins pair survives an accept (QA round 3,
+      // finding 1.1).
       for (const tag of ["w:ins", "w:del"]) {
         for (const el of findAllDescendants(this.doc.element, tag)) {
           const id = el.getAttribute("w:id");
           if (id && group_ids.has(id)) group_nodes.push(el);
         }
       }
-      // Tracked paragraph restyles resolve with their group (F1a): accept
-      // strips the pPrChange record, reject restores the original pPr.
-      const group_ppc = findAllDescendants(
-        this.doc.element,
-        "w:pPrChange",
-      ).filter((el) => {
-        const id = el.getAttribute("w:id");
-        return id !== null && group_ids.has(id);
-      });
+      // Tracked restyles and format-only changes resolve with their group
+      // (F1a / QA round 3 finding 2.2): accept strips the change record,
+      // reject restores the original properties.
+      const group_ppc = ["w:pPrChange", "w:rPrChange", "w:sectPrChange"].flatMap(
+        (tag) =>
+          findAllDescendants(this.doc.element, tag).filter((el) => {
+            const id = el.getAttribute("w:id");
+            return id !== null && group_ids.has(id);
+          }),
+      );
       const resolved_now = new Set<string>();
       for (const node of [...group_nodes, ...group_ppc]) {
         const rid = node.getAttribute("w:id");
@@ -4609,7 +4683,9 @@ export class RedlineEngine {
 
         if (type === "accept") {
           if (is_ins) {
-            this._clean_wrapping_comments(node);
+            // No comment cleanup on the insertion side: accepting a change
+            // keeps a comment anchored on the surviving text — Word
+            // semantics and Python-engine parity (QA round 3, finding 1.1).
             if (is_trPr) node.parentNode?.removeChild(node);
             else {
               while (node.firstChild)
@@ -4648,7 +4724,9 @@ export class RedlineEngine {
               tr?.parentNode?.removeChild(tr);
             } else node.parentNode?.removeChild(node);
           } else {
-            this._clean_wrapping_comments(node);
+            // No comment cleanup on the deletion side of a reject: the
+            // deleted text is being RESTORED, so a comment anchored on it
+            // stays valid (Python-engine parity, QA round 3 finding 1.1).
             if (is_trPr) node.parentNode?.removeChild(node);
             else {
               const delTexts = Array.from(
@@ -4690,10 +4768,12 @@ export class RedlineEngine {
 
       for (const ppc of group_ppc) {
         if (type === "accept") {
-          // The new style becomes permanent; drop the revision record.
+          // The new style/formatting becomes permanent; drop the record.
           ppc.parentNode?.removeChild(ppc);
-        } else {
+        } else if (ppc.tagName === "w:pPrChange") {
           this._revert_ppr_change(ppc);
+        } else {
+          this._revert_props_change(ppc);
         }
       }
 
@@ -4866,6 +4946,47 @@ export class RedlineEngine {
         let ins_text = current_effective_new_text;
         // Drop a leading/trailing copy of the same anchor token if echoed.
         ins_text = ins_text.split(actual_doc_text.trim()).join("");
+        // A NON-empty cell: the anchor sits after the existing cell text, so
+        // the insertion lands at the END of the cell — and a new_text that
+        // echoes the existing content ("By: /s/ Signer" for a cell already
+        // reading "By: ") must not duplicate it, nor glue words together
+        // (QA round 3, finding 1.3).
+        const anchor_span = active_mapper.spans.find(
+          (s) =>
+            s.start <= start_idx && start_idx < s.end && s.paragraph !== null,
+        );
+        if (anchor_span && ins_text) {
+          const existing_cell_text = active_mapper.spans
+            .filter(
+              (s) =>
+                s.end <= start_idx &&
+                s.run !== null &&
+                s.paragraph !== null &&
+                s.paragraph._element === anchor_span.paragraph!._element,
+            )
+            .map((s) => s.text)
+            .join("");
+          if (existing_cell_text) {
+            for (const candidate of [
+              existing_cell_text,
+              existing_cell_text.replace(/\s+$/, ""),
+            ]) {
+              if (candidate && ins_text.startsWith(candidate)) {
+                ins_text = ins_text
+                  .substring(candidate.length)
+                  .replace(/^\s+/, "");
+                break;
+              }
+            }
+            if (
+              ins_text &&
+              !/\s$/.test(existing_cell_text) &&
+              !/^\s/.test(ins_text)
+            ) {
+              ins_text = " " + ins_text;
+            }
+          }
+        }
         if (ins_text) {
           all_sub_edits.push({
             type: "modify",
@@ -4901,6 +5022,10 @@ export class RedlineEngine {
             current_effective_new_text,
           );
         } catch (e) {}
+        RedlineEngine._flag_surviving_python_backreference(
+          edit,
+          current_effective_new_text,
+        );
       }
 
       // Stash the first occurrence's full match for the report preview, so it

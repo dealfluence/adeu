@@ -6,18 +6,17 @@ import { extract_comments_data } from "./comments.js";
 import { RedlineEngine } from "./engine.js";
 
 /**
- * Regression test for author-aware comment preservation on accept/reject.
+ * Regression test for wrapping-comment handling on accept/reject.
  *
- * Bug: accepting a tracked change whose run is wrapped by a comment caused
- * `_clean_wrapping_comments` to delete that comment unconditionally — even when
- * it belonged to another author. In the playbook-commenting scenario this
- * silently erased the counterparty's ("Supplier's Counsel") annotation the
- * instant their insertion (Chg:2) was accepted, destroying provenance and
- * failing the "keep the counterparty comment" requirement.
+ * Word semantics, matching the Python engine (QA round 3, finding 1.1):
  *
- * Fix: a wrapping comment authored by someone else has its range markers
- * detached (so the accept proceeds with no orphaned anchor) but its BODY is
- * kept in the comments part. Own-authored wrapping comments are still deleted.
+ *  - ACCEPT keeps a wrapping comment — whoever authored it — anchored on the
+ *    surviving text. The earlier author-aware design detached the anchors and
+ *    kept only foreign BODIES, leaving orphaned, invisible comments in
+ *    word/comments.xml (silent data loss in legal review).
+ *  - REJECT of an insertion removes the inserted text, so a comment anchored
+ *    on it goes with it — and the removal is REPORTED by id in the batch
+ *    notes, never silent.
  *
  * The triggering document is built in-memory as a minimal valid .docx so the
  * test doesn't depend on the contents of any golden fixture: a paragraph with a
@@ -135,7 +134,7 @@ describe("author-aware wrapping-comment preservation", () => {
     expect(afterRoundtrip["1"]?.text).toContain("robust protection");
   });
 
-  it("keeps a foreign author's wrapping comment when their change is rejected", async () => {
+  it("rejecting an insertion removes its wrapping comment AND reports the removal", async () => {
     const doc = await buildWrappedInsertionDoc(
       "Supplier's Counsel",
       "Supplier's Counsel",
@@ -147,16 +146,23 @@ describe("author-aware wrapping-comment preservation", () => {
       false,
     );
 
-    // Rejecting removes the inserted TEXT, but the wrapping annotation (a
-    // separate comment) is preserved rather than collaterally deleted.
+    // Rejecting removes the inserted TEXT; a comment anchored on that text
+    // goes with it (Word semantics, Python parity) — keeping the body while
+    // stripping the anchors would leave an orphaned, invisible comment.
     const after = extract_comments_data(doc.pkg);
-    expect(after["1"]?.text).toContain("robust protection");
+    expect(after["1"]).toBeUndefined();
+
+    // Never silently: the batch notes name the removed comment
+    // (QA round 3, finding 3.4).
+    expect(
+      engine.skipped_details.some((d) => /also removed comment Com:1/.test(d)),
+    ).toBe(true);
   });
 
-  it("still deletes our OWN wrapping comment when we accept our own change", async () => {
-    // Control: when the wrapping comment is ours, cleanup is unchanged — it is
-    // removed, matching prior behavior (keeping our own now-resolved note is not
-    // required).
+  it("keeps our OWN wrapping comment when we accept our own change", async () => {
+    // Accept preserves the annotation regardless of author — the note
+    // documents the very change being finalized (Python parity,
+    // QA round 3 finding 1.1).
     const doc = await buildWrappedInsertionDoc(
       "Authority Counsel",
       "Authority Counsel",
@@ -169,6 +175,6 @@ describe("author-aware wrapping-comment preservation", () => {
     );
 
     const after = extract_comments_data(doc.pkg);
-    expect(after["1"]).toBeUndefined();
+    expect(after["1"]?.text).toContain("robust protection");
   });
 });

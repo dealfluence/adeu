@@ -995,11 +995,18 @@ def _coalesce_runs_in_container(container_element, parent_paragraph):
             r2 = Run(nxt, parent_paragraph)
             if not _has_special_content(r1) and not _has_special_content(r2):
                 if _are_runs_identical(r1, r2):
-                    # Find the last text node in the current run to merge into
+                    # Find the trailing text node of the current run to merge
+                    # into. Text may only be concatenated into a node that is
+                    # still the LAST content in document order: a w:tab/w:br
+                    # between two text nodes is rendered content, and merging
+                    # across it reorders the text ("Confidential<TAB>Page"
+                    # became "ConfidentialPage<TAB>", QA round 3 finding 1.2).
                     last_t = None
                     for c in curr:
                         if c.tag in (qn("w:t"), qn("w:delText")):
                             last_t = c
+                        elif c.tag != qn("w:rPr"):
+                            last_t = None
 
                     for child in list(nxt):
                         if child.tag == qn("w:rPr"):
@@ -1014,8 +1021,7 @@ def _coalesce_runs_in_container(container_element, parent_paragraph):
                                 last_t.set(qn("xml:space"), "preserve")
                         else:
                             curr.append(child)
-                            if child.tag in (qn("w:t"), qn("w:delText")):
-                                last_t = child
+                            last_t = child if child.tag in (qn("w:t"), qn("w:delText")) else None
                     container_element.remove(nxt)
                     children.pop(i + 1)
                     continue
