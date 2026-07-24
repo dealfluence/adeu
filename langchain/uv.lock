@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "adeu"
-version = "1.29.0"
+version = "1.30.0"
 source = { editable = "../python" }
 dependencies = [
     { name = "diff-match-patch" },
@@ -790,7 +790,7 @@ wheels = [
 
 [[package]]
 name = "langchain-adeu"
-version = "1.29.0"
+version = "1.30.0"
 source = { editable = "." }
 dependencies = [
     { name = "adeu" },
