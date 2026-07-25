@@ -70,6 +70,23 @@ class BatchValidationError(Exception):
 # lxml instead of a clean per-edit error (QA 2026-07-17 F11).
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
+# Children of a properties container that the corresponding tracked-change
+# record cannot store, and which must therefore survive rejecting it.
+#
+# w:sectPrChange stores a CT_SectPrBase, and per ECMA-376 that type carries no
+# EG_HdrFtrReferences — header/footer references exist only on the live
+# CT_SectPr. Clearing the container wholesale (correct for w:rPrChange, whose
+# stored child is a complete w:rPr) would delete the section's headers and
+# footers with nothing to restore them from. CT_SectPr also sequences
+# EG_HdrFtrReferences ahead of EG_SectPrContents, so leaving these in place
+# keeps the element order valid once the stored properties are appended.
+#
+# Kept byte-for-byte in step with the Node twin
+# (node/packages/core/src/engine.ts PROPS_REVERT_PRESERVED_CHILDREN).
+PROPS_REVERT_PRESERVED_CHILDREN: dict[str, tuple[str, ...]] = {
+    qn("w:sectPr"): (qn("w:headerReference"), qn("w:footerReference")),
+}
+
 
 def describe_illegal_control_chars(text: str) -> Optional[str]:
     """Human-readable listing of XML-illegal control characters in `text`, or None."""
@@ -5202,11 +5219,17 @@ class RedlineEngine:
                 else:
                     stored = next(iter(change), None)
                     parent.remove(change)
+                    preserved = PROPS_REVERT_PRESERVED_CHILDREN.get(parent.tag, ())
                     for child in list(parent):
                         # A pilcrow revision (w:ins/w:del inside pPr's rPr) is
                         # a separate pending change — never wipe it while
                         # restoring formatting properties.
                         if child.tag == qn("w:rPr") and any(child.find(qn(t)) is not None for t in ("w:ins", "w:del")):
+                            continue
+                        # Properties the stored record cannot carry (section
+                        # header/footer references) would be destroyed rather
+                        # than reverted.
+                        if child.tag in preserved:
                             continue
                         parent.remove(child)
                     if stored is not None:

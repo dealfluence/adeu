@@ -217,6 +217,22 @@ const TRANSACTIONAL_NOT_APPLIED_ERROR =
 // (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
+/**
+ * Children of a properties container that the corresponding tracked-change
+ * record cannot store, and which must therefore survive rejecting it.
+ *
+ * w:sectPrChange stores a CT_SectPrBase, and per ECMA-376 that type carries
+ * no EG_HdrFtrReferences — header/footer references exist only on the live
+ * CT_SectPr. Clearing the container wholesale (correct for w:rPrChange, whose
+ * stored child is a complete w:rPr) would delete the section's headers and
+ * footers with nothing to restore them from. CT_SectPr also sequences
+ * EG_HdrFtrReferences ahead of EG_SectPrContents, so leaving these in place
+ * keeps the element order valid once the stored properties are appended.
+ */
+const PROPS_REVERT_PRESERVED_CHILDREN: Record<string, Set<string>> = {
+  "w:sectPr": new Set(["w:headerReference", "w:footerReference"]),
+};
+
 export function describe_illegal_control_chars(text: string): string | null {
   if (!text) return null;
   const found = text.match(XML_ILLEGAL_CHARS_RE);
@@ -1528,6 +1544,7 @@ export class RedlineEngine {
       (n) => n.nodeType === 1,
     ) as Element | undefined;
     parent.removeChild(change);
+    const preserved = PROPS_REVERT_PRESERVED_CHILDREN[parent.tagName];
     for (const child of Array.from(parent.childNodes)) {
       if (child.nodeType !== 1) continue;
       // A pilcrow revision (w:ins/w:del inside pPr's rPr) is a separate
@@ -1539,6 +1556,9 @@ export class RedlineEngine {
       ) {
         continue;
       }
+      // Properties the stored record cannot carry (section header/footer
+      // references) would be destroyed rather than reverted.
+      if (preserved?.has(el.tagName)) continue;
       parent.removeChild(child);
     }
     if (stored) {
