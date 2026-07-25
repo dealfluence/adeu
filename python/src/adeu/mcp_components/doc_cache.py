@@ -200,19 +200,6 @@ class DocProjectionCache:
     def is_cold(self, entry: _Entry, clean_view: bool) -> bool:
         return entry.view(clean_view).base_text is None
 
-    # ---------------------------------------------------------------- priming
-
-    def prime_base_text(self, key: Tuple[str, int, int], clean_view: bool, text: str) -> None:
-        """Adopt an already-computed projection as the cache value for `key`
-        (used after saves: the post-edit in-memory projection IS the output
-        file's projection). The text MUST equal what a fresh parse of the
-        file would produce — callers own that equivalence."""
-        entry = self.entry(key)
-        view = entry.view(clean_view)
-        with entry.lock:
-            if view.base_text is None:
-                view.base_text = text
-
 
 # Module singleton used by the MCP tools.
 doc_cache = DocProjectionCache()
