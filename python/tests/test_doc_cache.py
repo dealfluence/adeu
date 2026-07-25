@@ -8,12 +8,23 @@ and the cache never holds more than MAX_ENTRIES document versions.
 """
 
 import asyncio
+from io import BytesIO
+from pathlib import Path
 
 import pytest
 from docx import Document
 
+from adeu.ingest import _extract_text_from_doc
+from adeu.mcp_components._response_builders import (
+    build_appendix_response,
+    build_full_document_response,
+    build_outline_response,
+    build_paginated_response,
+    build_search_response,
+)
 from adeu.mcp_components.doc_cache import MAX_ENTRIES, DocProjectionCache, doc_cache
-from adeu.mcp_components.tools.document import _read_docx_disk
+from adeu.mcp_components.tools.document import _as_tool_result, _read_docx_disk
+from adeu.utils.docx import strip_bom_from_docx_bytes
 
 
 class MockContext:
@@ -65,6 +76,60 @@ def _payload(result):
     return (result.content, result.structured_content)
 
 
+def _page_num(page):
+    """document.py's page coercion, so the reference targets the same page."""
+    if page is None:
+        return 1
+    s = str(page).strip()
+    if s.isdigit() or (s.startswith(("-", "+")) and s[1:].isdigit()):
+        return int(s)
+    return 1
+
+
+def _cacheless_payload(
+    path,
+    *,
+    clean_view=False,
+    mode="full",
+    page=None,
+    search_query=None,
+    outline_max_level=2,
+    outline_verbose=False,
+):
+    """Reference response built with doc_cache completely out of the picture.
+
+    doc_cache hands the builders precomputed artifacts (pagination_result, and
+    for outline the extracted nodes). Here the builders receive none of them and
+    must derive everything from a freshly parsed document — so this is the only
+    comparison that can catch the cache's artifacts drifting from what the
+    builders compute for themselves. Comparing a cleared cache against a warm
+    one cannot: both sides run the same cache code.
+    """
+    data = strip_bom_from_docx_bytes(Path(path).read_bytes())
+    doc = Document(BytesIO(data))
+    text = _extract_text_from_doc(doc, clean_view=clean_view, include_appendix=(mode == "appendix"))
+
+    if search_query is not None:
+        res = build_search_response(text, search_query, False, False, page, path)
+    elif mode == "appendix":
+        res = build_appendix_response(text, _page_num(page), path)
+    elif mode == "outline":
+        res = build_outline_response(
+            doc,
+            text,
+            path,
+            outline_max_level=outline_max_level,
+            outline_verbose=outline_verbose,
+        )
+    elif page is not None and str(page).strip().lower() == "all":
+        res = build_full_document_response(text, path)
+    else:
+        res = build_paginated_response(text, _page_num(page), path)
+    # Through the same ToolResult wrapper the tool uses, so the comparison is
+    # about content rather than container shape.
+    return _payload(_as_tool_result(res))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -83,10 +148,14 @@ def test_warm_responses_byte_identical_to_cold(structured_docx, kwargs):
     warm = _payload(_read(structured_docx, **kwargs))
     assert warm == cold
 
-    # And a fully cache-less recomputation agrees too.
+    # A cleared cache agrees too (this re-runs the cache's cold path).
     doc_cache.clear()
     fresh = _payload(_read(structured_docx, **kwargs))
     assert fresh == cold
+
+    # And so does a response the builders compute with no cache artifacts at
+    # all — the actual "byte-identical to a cache-less server" contract.
+    assert _cacheless_payload(structured_docx, **kwargs) == cold
 
 
 def test_modes_share_one_projection(structured_docx):
@@ -103,6 +172,24 @@ def test_modes_share_one_projection(structured_docx):
 
     assert warm_outline == cold_outline
     assert warm_search == cold_search
+
+    # Both comparisons above run cache code on both sides, so neither can see
+    # the cache's artifacts drifting from the builders' own computation. Anchor
+    # them to a cache-less reference.
+    assert warm_outline == _cacheless_payload(structured_docx, mode="outline")
+    assert warm_search == _cacheless_payload(structured_docx, search_query="Agreement")
+
+
+@pytest.mark.parametrize("max_level", [1, 2, 6])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_outline_artifacts_match_a_cacheless_build(structured_docx, max_level, verbose):
+    """The outline is the one artifact the cache extracts itself (it needs the
+    paragraph-offset map from its own parse), so it is the most likely to drift
+    from what build_outline_response derives on its own."""
+    warm = _payload(_read(structured_docx, mode="outline", outline_max_level=max_level, outline_verbose=verbose))
+    assert warm == _cacheless_payload(
+        structured_docx, mode="outline", outline_max_level=max_level, outline_verbose=verbose
+    )
 
 
 def test_rewrite_invalidates(structured_docx):
