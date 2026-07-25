@@ -364,12 +364,32 @@ export class DocCache {
         : undefined,
     });
 
-    return await this.buildEntry(key, resolvedPath, doc, notify);
+    const entry = await this.buildEntry(key, resolvedPath, doc, notify);
+
+    // Pin the DOM for the edit path BEFORE the deferred fill: an edit arriving
+    // next takes the slot and (via the registered job) forces the fill to
+    // completion first, so the fill can never read a half-edited document.
+    //
+    // Only the disk-ingest path may do this. primeFromDoc pins its own DOM up
+    // front, and its build job runs INSIDE takeHotDoc's forcing loop — see
+    // buildEntry.
+    this.storeHotDoc(key, doc);
+    this.scheduleCleanFill(entry, doc);
+    return entry;
   }
 
   /**
    * Products of one loaded document: shared by the disk-ingest path and by
    * primeFromDoc (which starts from the in-memory post-edit document).
+   *
+   * Deliberately does NOT pin the DOM or schedule the clean fill — the caller
+   * decides. When primeFromDoc's deferred job runs, it may be running because
+   * takeHotDoc forced it, and takeHotDoc has already cleared the hot slot and
+   * is about to hand this DOM to a mutating consumer. Pinning here would
+   * re-publish a DOM that is about to be edited, and scheduleCleanFill's
+   * registerHotJob would silently no-op (the slot is null), leaving an
+   * unguarded fill that later extracts the half-edited document and stores it
+   * as the clean projection of the PRE-edit version.
    */
   private async buildEntry(
     key: string,
@@ -408,13 +428,6 @@ export class DocCache {
     };
     this.store(entry);
     await n("done", 100);
-
-    // Pin the DOM for the edit path BEFORE the deferred fill: an edit
-    // arriving next takes the slot and (via the registered job) forces the
-    // fill to completion first, so the fill can never read a half-edited
-    // document.
-    this.storeHotDoc(key, doc);
-    this.scheduleCleanFill(entry, doc);
     return entry;
   }
 

@@ -163,4 +163,56 @@ describe("output priming after a batch", () => {
     const reloaded = await DocumentObject.load(readFileSync(out));
     expect(entry.raw_text).toBe(_extractTextFromDoc(reloaded, false, true));
   });
+
+  // The prime build job runs INSIDE takeHotDoc's forcing loop, by which point
+  // takeHotDoc has already cleared the hot slot and is about to hand the DOM to
+  // a mutating consumer. buildEntry must therefore not re-pin the DOM or
+  // schedule a clean fill on it: registerHotJob would silently no-op against
+  // the null slot, leaving an unguarded fill that later extracts the
+  // half-edited document and stores it as the PRE-edit version's clean text.
+  it("a taken primed DOM is not re-pinned, and no fill reads it after the edit", async () => {
+    const cache = new DocCache(3);
+    const src = join(tmp, "repin-src.docx");
+    copyFileSync(FIXTURE, src);
+
+    const doc = await DocumentObject.load(readFileSync(src));
+    const out = join(tmp, "repin-out.docx");
+    writeFileSync(out, await doc.save());
+
+    cache.primeFromDoc(out, doc);
+    expect(await cache.takeHotDoc(out)).toBe(doc);
+
+    // Consume-on-take must be final: the prime build must not have published
+    // this DOM again behind the taker's back.
+    expect(await cache.takeHotDoc(out)).toBeNull();
+
+    // The taker now edits the DOM it owns, exactly as the batch path does.
+    const engine = new RedlineEngine(doc, "HotDoc");
+    const probe = _extractTextFromDoc(doc, false, false) as string;
+    const word = probe.match(/[A-Za-z]{6,}/)![0];
+    const stats = engine.process_batch(
+      [
+        {
+          type: "modify",
+          target_text: word,
+          new_text: word + " (mutated)",
+          match_mode: "first",
+        },
+      ],
+      false,
+    );
+    expect(stats.edits_applied).toBe(1);
+
+    // Outlast the deferred fill's quiet window (QUIET_MS = 400).
+    await new Promise((r) => setTimeout(r, 700));
+
+    // Clean text for the pre-edit version must describe the file on disk, not
+    // the mutated in-memory DOM.
+    const entry = await cache.get(out, readerFor(out), loadDoc);
+    const onDisk = await DocumentObject.load(readFileSync(out));
+    const expected = _extractTextFromDoc(onDisk, true, true) as string;
+    const clean = await cache.ensureCleanText(entry, readerFor(out), loadDoc);
+    expect(clean).toBe(expected);
+    expect(clean).not.toContain("(mutated)");
+  });
 });
