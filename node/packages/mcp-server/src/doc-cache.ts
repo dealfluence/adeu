@@ -226,6 +226,52 @@ export class DocCache {
   }
 
   /**
+   * Drop every cached product for `resolvedPath`, whatever version it was
+   * keyed under.
+   *
+   * `store()` already keeps one live version per path, but only when a NEW
+   * version is stored. That is exactly what a colliding key defeats: when a
+   * rewrite preserves both mtime and size — a size-neutral edit inside one
+   * filesystem timestamp tick — no new entry is ever built, so `get()` keeps
+   * returning the pre-write entry (its `entries` hit-check runs before the
+   * `priming` join). Writers must therefore evict explicitly.
+   *
+   * Entries carry the resolved path, so they are matched exactly, as in
+   * `store()`. The hot/priming/inflight maps are keyed by string only, and
+   * keyFor always emits `${resolvedPath}|…`, so a whole-prefix compare is
+   * exact there — a '|' inside a POSIX filename can neither miss nor
+   * over-match.
+   */
+  private purgePath(resolvedPath: string, opts?: { keepHot?: boolean }): void {
+    const prefix = `${resolvedPath}|`;
+    for (const [key, entry] of [...this.entries]) {
+      if (entry.file_path === resolvedPath) this.entries.delete(key);
+    }
+    for (const key of [...this.priming.keys()]) {
+      if (key.startsWith(prefix)) this.priming.delete(key);
+    }
+    for (const key of [...this.inflight.keys()]) {
+      if (key.startsWith(prefix)) this.inflight.delete(key);
+    }
+    if (!opts?.keepHot && this.hot && this.hot.key.startsWith(prefix)) {
+      this.hot = null;
+      if (this.hotTimer) {
+        clearTimeout(this.hotTimer);
+        this.hotTimer = null;
+      }
+    }
+  }
+
+  /**
+   * Forget everything cached for `file_path`. Callers that write a document
+   * without handing the post-write DOM to primeFromDoc MUST call this, or a
+   * later read can be served the pre-write projection.
+   */
+  public invalidate(file_path: string): void {
+    this.purgePath(resolve(file_path));
+  }
+
+  /**
    * Returns the products for the current version of `file_path`, ingesting
    * at most once per version (single-flight). `readBytes` is called only on
    * a miss and owns the file-not-found error shape; `onProgress` is invoked
@@ -440,6 +486,11 @@ export class DocCache {
     } catch {
       return; // file vanished — nothing to prime
     }
+    // Evict any products cached for an EARLIER version of this path first.
+    // Without this, a rewrite that preserved mtime+size leaves a stale entry
+    // under this same key, and get()'s entries hit-check would return it in
+    // preference to the prime job registered just below.
+    this.purgePath(resolvedPath, { keepHot: true });
     this.storeHotDoc(key, doc);
 
     let forced = false;

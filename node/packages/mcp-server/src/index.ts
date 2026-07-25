@@ -952,6 +952,12 @@ server.registerTool(
 
       fs.mkdirSync(dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, outBuf);
+      // This tool rewrites a document the cache may already hold products
+      // for (output_path defaults next to the input, and may BE the input).
+      // Not priming from `doc` here is deliberate: the prime path's
+      // byte-equality gate is only covered for the batch pipeline, so the
+      // correct-by-construction choice is to make the next read re-parse.
+      docCache.invalidate(outPath);
 
       let text: string;
       if (total === 0) {
@@ -1138,6 +1144,9 @@ server.registerTool(
         const existedBefore = fs.existsSync(outPath);
         fs.mkdirSync(dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, result.outBuffer);
+        // Sanitize/finalize rewrites the package; drop any cached products
+        // for this path so a later read cannot serve the pre-finalize text.
+        docCache.invalidate(outPath);
         const note = overwriteNote(outPath, file_path, existedBefore);
         return {
           content: [

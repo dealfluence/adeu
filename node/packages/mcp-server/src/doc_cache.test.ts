@@ -1,7 +1,7 @@
 // FILE: node/packages/mcp-server/src/doc_cache.test.ts
 // Unit tests for the server-layer projection cache (docs/PERFORMANCE.md §5.1).
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync, utimesSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync, utimesSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DocumentObject, _extractTextFromDoc } from "@adeu/core";
@@ -65,6 +65,72 @@ describe("DocCache", () => {
     const c = await cache.get(p, readerFor(p), loadDoc);
     expect(cache.ingest_count).toBe(3);
     expect(c.raw_text).not.toBe(b.raw_text);
+  });
+
+  // A size-neutral rewrite inside one filesystem timestamp tick produces the
+  // SAME (path, mtime, size) key as the pre-write file, so the stat-derived
+  // key cannot notice it and `store()`'s one-version-per-path eviction never
+  // runs. Tools that write a document must evict explicitly — otherwise a
+  // read-after-write is served the pre-write projection, and a chained edit
+  // takes a pre-write hot DOM and saves it back over the new file.
+  // Whole seconds: st.mtimeMs is fractional on some filesystems while
+  // utimesSync writes integer milliseconds, so only an already-normalized
+  // timestamp can be restored byte-exactly to reproduce a key.
+  const PINNED_MTIME = new Date(1_700_000_000_000);
+  const pinMtime = (p: string) => utimesSync(p, PINNED_MTIME, PINNED_MTIME);
+
+  it("invalidate() drops products even when the stat key is unchanged", async () => {
+    const p = join(tmp, "colliding-key.docx");
+    copyFileSync(FIXTURE, p);
+    pinMtime(p);
+    await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(1);
+
+    // Rewrite with identical size, then restore the same mtime: keyFor() now
+    // yields a key identical to the one already cached.
+    copyFileSync(FIXTURE, p);
+    pinMtime(p);
+    expect(statSync(p).mtimeMs).toBe(PINNED_MTIME.getTime());
+    await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(1); // collision: stale entry still served
+
+    cache.invalidate(p);
+    await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(2);
+  });
+
+  it("invalidate() purges entries cached under EARLIER versions of the path", async () => {
+    const p = join(tmp, "invalidate-versions.docx");
+    copyFileSync(FIXTURE, p);
+    pinMtime(p);
+    const v1 = await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(1);
+
+    copyFileSync(FIXTURE2, p); // different content and size -> different key
+    await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(2);
+
+    cache.invalidate(p);
+
+    // Restore v1 byte-for-byte including its mtime, so keyFor() reproduces
+    // v1's key exactly. It must have been purged, not merely shadowed.
+    copyFileSync(FIXTURE, p);
+    pinMtime(p);
+    const again = await cache.get(p, readerFor(p), loadDoc);
+    expect(cache.ingest_count).toBe(3);
+    expect(again).not.toBe(v1);
+  });
+
+  it("invalidate() releases the hot DOM so a chained edit cannot save stale bytes", async () => {
+    const p = join(tmp, "invalidate-hot.docx");
+    copyFileSync(FIXTURE, p);
+    const doc = await DocumentObject.load(readFileSync(p));
+    cache.restoreHotDoc(p, doc);
+    expect(await cache.takeHotDoc(p)).toBe(doc);
+
+    cache.restoreHotDoc(p, doc);
+    cache.invalidate(p);
+    expect(await cache.takeHotDoc(p)).toBeNull();
   });
 
   it("keeps one live version per path (no stale sibling entries)", async () => {
