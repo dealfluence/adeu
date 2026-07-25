@@ -1454,6 +1454,7 @@ def handle_markup(args):
 
 
 def handle_sanitize(args: argparse.Namespace):
+    _set_json_mode(getattr(args, "json", False))
     from adeu.redline.engine import describe_illegal_control_chars
 
     author_ctrl = describe_illegal_control_chars(args.author or "")
@@ -1529,7 +1530,22 @@ def handle_sanitize(args: argparse.Namespace):
                 if args.report_file:
                     _write_report_file(args.report_file, result.report_text)
 
-            print(f"✅ Sanitized → {output_path}", file=sys.stderr)
+            if getattr(args, "json", False):
+                json_result = {
+                    "status": "ok",
+                    "sanitize_status": result.status,
+                    "input": str(input_path),
+                    "output_path": str(output_path),
+                    "tracked_changes_found": result.tracked_changes_found,
+                    "tracked_changes_accepted": result.tracked_changes_accepted,
+                    "comments_removed": result.comments_removed,
+                    "comments_kept": result.comments_kept,
+                    "metadata_stripped": result.metadata_stripped,
+                    "warnings": result.warnings,
+                }
+                print(json.dumps(json_result))
+            else:
+                print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
         except SanitizeError as e:
             # Block reason goes to stderr BEFORE the report write: if the
@@ -1538,6 +1554,8 @@ def handle_sanitize(args: argparse.Namespace):
             print(str(e), file=sys.stderr)
             if args.report_file:
                 _write_report_file(args.report_file, str(e))
+            if getattr(args, "json", False):
+                print(json.dumps({"error": "invalid_input", "message": str(e)}))
             sys.exit(1)
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
@@ -1631,11 +1649,13 @@ def handle_sanitize(args: argparse.Namespace):
                     status = "clean"
                     if result.warnings:
                         status = f"clean ({len(result.warnings)} warning{'s' if len(result.warnings) > 1 else ''})"
-                    print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
+                    if not getattr(args, "json", False):
+                        print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
 
                 except SanitizeError as e:
                     blocked += 1
-                    print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
+                    if not getattr(args, "json", False):
+                        print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
                     all_reports.append(e)
 
                 except Exception as e:
@@ -1644,17 +1664,18 @@ def handle_sanitize(args: argparse.Namespace):
                     # the staged-file cleanup and leaves document content
                     # behind as .staging.tmp files (QA 2026-07-19 v8 F-02).
                     blocked += 1
-                    if (
-                        "bad zip signature" in str(e)
-                        or "not a zip file" in str(e).lower()
-                        or "not a valid DOCX file" in str(e)
-                    ):
-                        print(
-                            f"  ✗ {input_path.name:<30} — ERROR: not a valid DOCX file (bad zip signature)",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
+                    if not getattr(args, "json", False):
+                        if (
+                            "bad zip signature" in str(e)
+                            or "not a zip file" in str(e).lower()
+                            or "not a valid DOCX file" in str(e)
+                        ):
+                            print(
+                                f"  ✗ {input_path.name:<30} — ERROR: not a valid DOCX file (bad zip signature)",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
 
             if blocked == 0:
                 for staging_path, output_path in staged:
@@ -1678,7 +1699,44 @@ def handle_sanitize(args: argparse.Namespace):
         summary = f"\nBatch Summary: {total} documents processed, {succeeded} succeeded, {blocked} blocked"
         if blocked > 0:
             summary += "\nBatch failed — no outputs were written (the batch is all-or-nothing)."
-        print(summary, file=sys.stderr)
+
+        if getattr(args, "json", False):
+            batch_results: list[dict[str, Any]] = []
+            for r in all_reports:
+                if isinstance(r, SanitizeError):
+                    batch_results.append(
+                        {
+                            "status": "blocked",
+                            "error": str(r),
+                        }
+                    )
+                else:
+                    batch_results.append(
+                        {
+                            "output_path": r.output_path,
+                            "status": r.status,
+                            "tracked_changes_found": r.tracked_changes_found,
+                            "tracked_changes_accepted": r.tracked_changes_accepted,
+                            "comments_removed": r.comments_removed,
+                            "comments_kept": r.comments_kept,
+                            "metadata_stripped": r.metadata_stripped,
+                            "warnings": r.warnings,
+                        }
+                    )
+            json_output = {
+                "status": "ok" if blocked == 0 else "failed",
+                "outdir": str(outdir),
+                "total": total,
+                "succeeded": succeeded,
+                "blocked": blocked,
+                "results": batch_results,
+            }
+            if blocked > 0:
+                json_output["error"] = "batch_failed"
+                json_output["message"] = f"Batch failed: {blocked} of {total} documents blocked"
+            print(json.dumps(json_output))
+        else:
+            print(summary, file=sys.stderr)
 
         # Write reports
         if args.report or args.report_file:
@@ -2018,6 +2076,11 @@ def _main_impl():
         "--report-file",
         type=Path,
         help="Write report to file",
+    )
+    p_sanitize.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit sanitization summary as machine-readable JSON on stdout.",
     )
     p_sanitize.set_defaults(func=handle_sanitize)
 

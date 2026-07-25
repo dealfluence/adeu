@@ -1127,3 +1127,34 @@ def test_post_apply_verification_plain_text_without_heading_prefix(tmp_path, cap
     # 4. Assert that verification passes, return code is 0, and output file is written
     assert code == 0, f"adeu apply failed with code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
     assert out_path.exists(), f"Expected output file {out_path} to be created"
+
+
+def test_cli_sanitize_json_flag(tmp_path, capsys):
+    """
+    Verifies that 'adeu sanitize' accepts the --json flag and emits structured JSON output on stdout.
+    """
+    import json
+
+    import docx
+
+    # 1. Create a minimal test input document
+    input_path = tmp_path / "test_san.docx"
+    output_path = tmp_path / "test_san_clean.docx"
+    doc = docx.Document()
+    doc.add_paragraph("Test document for sanitize JSON output.")
+    doc.save(str(input_path))
+
+    # 2. Invoke adeu sanitize with --json flag
+    code, stdout, stderr = run_cli(
+        ["sanitize", str(input_path), "-o", str(output_path), "--json"],
+        capsys,
+    )
+
+    # 3. Assert success (exit code 0) and that the output document is created
+    assert code == 0, f"adeu sanitize --json failed with code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
+    assert output_path.exists(), f"Expected output document {output_path} to exist"
+
+    # 4. Verify stdout contains valid JSON output
+    data = json.loads(stdout)
+    assert isinstance(data, dict)
+    assert data.get("status") == "ok" or "output_path" in data or "input" in data
