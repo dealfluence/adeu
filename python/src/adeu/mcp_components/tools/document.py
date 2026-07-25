@@ -312,7 +312,12 @@ async def _read_docx_disk(
 
     try:
         if not Path(file_path).exists():
-            # Raises the rich, CLI-mapping FileNotFoundError message.
+            # Called only to raise: doc_cache reads its own bytes, so this
+            # keeps missing-file reporting in one place — shared's lean
+            # FileNotFoundError with close-match sibling suggestions and the
+            # relative-path hint, echoing the path exactly as the caller gave
+            # it (QA round 3, findings 3.11 and F16). The returned buffer is
+            # deliberately discarded.
             read_file_bytes(file_path)
 
         doc_cache.mark_activity()
