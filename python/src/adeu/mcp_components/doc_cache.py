@@ -73,6 +73,7 @@ def _progress(cb: ProgressFn, pct: int, msg: str) -> None:
 class DocProjectionCache:
     def __init__(self, max_entries: int = MAX_ENTRIES):
         self._entries: "OrderedDict[Tuple[str, int, int], _Entry]" = OrderedDict()
+        self._max_entries = max(1, max_entries)
         self._lock = threading.Lock()
         self._last_activity = 0.0
 
@@ -93,7 +94,7 @@ class DocProjectionCache:
                 entry = _Entry(key=key)
                 self._entries[key] = entry
             self._entries.move_to_end(key)
-            while len(self._entries) > MAX_ENTRIES:
+            while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
             return entry
 

@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from docx import Document
 
-from adeu.mcp_components.doc_cache import MAX_ENTRIES, doc_cache
+from adeu.mcp_components.doc_cache import MAX_ENTRIES, DocProjectionCache, doc_cache
 from adeu.mcp_components.tools.document import _read_docx_disk
 
 
@@ -136,6 +136,46 @@ def test_lru_bound(tmp_path):
     for i, p in enumerate(paths):
         res = _read(p, mode="full", page=1)
         assert f"Document number {i}." in res.structured_content["markdown"]
+
+
+def test_constructor_max_entries_is_honored():
+    """entry() used to bound the cache by the module constant, so a
+    caller-supplied cap was accepted and then silently ignored —
+    DocProjectionCache(max_entries=1) still held MAX_ENTRIES versions.
+
+    entry() is pure dict bookkeeping over an opaque key tuple, so this needs
+    no files on disk.
+    """
+    cache = DocProjectionCache(max_entries=1)
+    k1 = ("/doc-a", 1, 10)
+    k2 = ("/doc-b", 2, 20)
+
+    e1 = cache.entry(k1)
+    assert cache.entry(k1) is e1, "same version must reuse its entry"
+
+    cache.entry(k2)
+    assert len(cache._entries) == 1
+    assert k2 in cache._entries
+    assert k1 not in cache._entries, "LRU eviction must respect max_entries=1"
+
+    # The evicted version comes back as a fresh (cold) entry, not the old one.
+    assert cache.entry(k1) is not e1
+
+
+def test_default_max_entries_matches_the_module_constant():
+    cache = DocProjectionCache()
+    for i in range(MAX_ENTRIES + 2):
+        cache.entry((f"/doc-{i}", i, i))
+    assert len(cache._entries) == MAX_ENTRIES
+
+
+def test_max_entries_is_clamped_to_at_least_one():
+    """A zero/negative cap would evict the entry the caller just asked for,
+    turning every lookup into a miss."""
+    cache = DocProjectionCache(max_entries=0)
+    key = ("/doc-a", 1, 10)
+    entry = cache.entry(key)
+    assert cache.entry(key) is entry
 
 
 def test_clean_and_raw_views_are_independent(structured_docx):
