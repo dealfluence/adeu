@@ -5295,6 +5295,14 @@ class RedlineEngine:
 
     # FILE: src/adeu/redline/engine.py
     def accept_all_revisions(self, remove_comments: bool = False) -> dict[str, int]:
+        # This rewrites the tree (and non-main parts), so the load-time
+        # pristine bytes are no longer this engine's state. Flag it BEFORE the
+        # work: a later process_batch would otherwise snapshot
+        # BytesIO(self._pristine_bytes) and a validation rollback would
+        # resurrect every revision accepted here. Set unconditionally rather
+        # than only when a count is non-zero — comment removal and the
+        # non-main parts mutate too.
+        self._mutated_since_load = True
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:
@@ -5499,6 +5507,9 @@ class RedlineEngine:
         insertions/deletions (the common case) is exact. This limitation is
         shared with the Node engine.
         """
+        # See accept_all_revisions: flag before mutating, or a later batch's
+        # rollback restores pre-reject bytes and resurrects the revisions.
+        self._mutated_since_load = True
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:
