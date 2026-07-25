@@ -422,6 +422,37 @@ function decodeEntities(s: string): string {
   });
 }
 
+/**
+ * XML 1.0 §2.11 line-end normalization: literal CRLF and lone CR become LF.
+ *
+ * Must run BEFORE entity expansion. A `&#13;` character reference is exempt
+ * from this pass — escaping it is the only conformant way to carry a real CR
+ * through a document — so decoding first would erase that distinction.
+ *
+ * Skipping this left a literal CR in the projection while Word, lxml and
+ * xmldom all report LF, so the in-memory text was one character longer than
+ * the document's true text and every span offset in that paragraph drifted.
+ * It also split the Node/Python twins, which must agree byte-for-byte.
+ */
+function normalizeLineEnds(s: string): string {
+  if (s.indexOf("\r") < 0) return s;
+  return s.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * XML 1.0 §3.3.3 attribute-value normalization for CDATA-type attributes:
+ * after §2.11, each literal LF or TAB becomes a single space. Character
+ * references are again exempt, so they are decoded afterwards. Matches lxml
+ * and xmldom, both of which read w:v="a&#13;&#10;b" as "a b".
+ */
+function normalizeAttrValue(raw: string): string {
+  const lineEnds = normalizeLineEnds(raw);
+  const flattened = /[\n\t]/.test(lineEnds)
+    ? lineEnds.replace(/[\n\t]/g, " ")
+    : lineEnds;
+  return decodeEntities(flattened);
+}
+
 const WS = new Set([32, 9, 10, 13]);
 
 /**
@@ -448,7 +479,7 @@ export function parseFastXml(s: string): FastDocument {
     }
     if (lt > i && cur !== doc) {
       const raw = s.slice(i, lt);
-      const t = new FastText(decodeEntities(raw));
+      const t = new FastText(decodeEntities(normalizeLineEnds(raw)));
       t.ownerDocument = doc;
       t.parentNode = cur;
       cur.childNodes.push(t);
@@ -497,7 +528,8 @@ export function parseFastXml(s: string): FastDocument {
         const end = s.indexOf("]]>", i + 8);
         if (end < 0) throw new Error("Unterminated CDATA section");
         if (cur !== doc) {
-          const cd = new FastCData(s.slice(i + 8, end));
+          // §2.11 applies to CDATA content too (entities do not).
+          const cd = new FastCData(normalizeLineEnds(s.slice(i + 8, end)));
           cd.ownerDocument = doc;
           cd.parentNode = cur;
           cur.childNodes.push(cd);
@@ -561,7 +593,7 @@ export function parseFastXml(s: string): FastDocument {
       if (q !== 34 && q !== 39) throw new Error("Unquoted attribute value");
       const endQ = s.indexOf(String.fromCharCode(q), k + 1);
       if (endQ < 0) throw new Error("Unterminated attribute value");
-      el.attrs.push([name, decodeEntities(s.slice(k + 1, endQ))]);
+      el.attrs.push([name, normalizeAttrValue(s.slice(k + 1, endQ))]);
       i = endQ + 1;
     }
     if (!selfClosed) cur = el;
@@ -577,8 +609,17 @@ export function parseFastXml(s: string): FastDocument {
 // ---------------------------------------------------------------------------
 
 function escText(s: string): string {
-  if (!/[&<>]/.test(s)) return s;
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (!/[&<>\r]/.test(s)) return s;
+  return (
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      // A literal CR would be normalized to LF by the next parse (§2.11), so
+      // emitting it raw silently rewrites the text. Escaping keeps
+      // parse→serialize→parse idempotent, as lxml does.
+      .replace(/\r/g, "&#13;")
+  );
 }
 function escAttr(s: string): string {
   if (!/[&<>"\t\n\r]/.test(s)) return s;
