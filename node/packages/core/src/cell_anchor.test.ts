@@ -7,6 +7,7 @@ import {
   addNestedTable,
 } from "./test-utils.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
+import { FastNode, parseFastXml } from "./docx/fast-xml.js";
 import { _extractTextFromDoc } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
 import { DocumentObject } from "./docx/bridge.js";
@@ -157,5 +158,55 @@ describe("resolve_cell_anchor cache equivalence", () => {
     const reloaded = await DocumentObject.load(saved);
     const text2 = _extractTextFromDoc(reloaded, false, false) as string;
     expect(text2).toBe(text1);
+  });
+
+  // The wp-index walk must stay linear. fast-xml implements nextSibling as
+  // parentNode.childNodes.indexOf(this), so driving a preorder walk from
+  // sibling pointers is O(paragraphs^2) over a wide w:body — measured ~n^1.96,
+  // extrapolating to ~35s per build on the 45MB document this index exists to
+  // make fast. Asserting the traversal never touches those accessors pins the
+  // mechanism deterministically, where a wall-clock budget would be flaky.
+  it("builds the paragraph index without sibling-pointer traversal", () => {
+    const paras = Array.from(
+      { length: 3000 },
+      (_, i) => `<w:p><w:r><w:t>p${i}</w:t></w:r></w:p>`,
+    ).join("");
+    const doc = parseFastXml(
+      `<w:document xmlns:w="urn:w"><w:body>${paras}` +
+        `<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>`,
+    ) as any;
+    const cell = doc.getElementsByTagName("w:tc")[0];
+
+    const proto = FastNode.prototype as any;
+    const original = {
+      next: Object.getOwnPropertyDescriptor(proto, "nextSibling")!,
+      prev: Object.getOwnPropertyDescriptor(proto, "previousSibling")!,
+    };
+    let siblingReads = 0;
+    try {
+      for (const [key, desc] of [
+        ["nextSibling", original.next],
+        ["previousSibling", original.prev],
+      ] as const) {
+        Object.defineProperty(proto, key, {
+          ...desc,
+          get(this: any) {
+            siblingReads++;
+            return desc.get!.call(this);
+          },
+        });
+      }
+      const { paraId } = resolve_cell_anchor(cell, true);
+      expect(paraId).toBeTruthy();
+    } finally {
+      Object.defineProperty(proto, "nextSibling", original.next);
+      Object.defineProperty(proto, "previousSibling", original.prev);
+    }
+
+    expect(
+      siblingReads,
+      `resolve_cell_anchor made ${siblingReads} O(siblings) nextSibling/` +
+        "previousSibling reads; the paragraph index must walk childNodes arrays",
+    ).toBe(0);
   });
 });

@@ -72,27 +72,42 @@ export function isPartClean(ownerDoc: any): boolean {
   return inc !== null && ownerDoc[CLEAN_INC_KEY] === inc;
 }
 
-/** Preorder walk assigning each w:p its document-order index (matches
- * getElementsByTagName order). */
+/**
+ * Preorder walk assigning each w:p its document-order index (matches
+ * getElementsByTagName order).
+ *
+ * Driven by an explicit cursor stack over childNodes arrays rather than
+ * nextSibling/parentNode pointers. fast-xml implements nextSibling as
+ * parentNode.childNodes.indexOf(this) — O(siblings), not the O(1) linked-list
+ * step xmldom provided — so a pointer walk over a wide w:body was quadratic:
+ * measured 1.6ms / 14.4ms / 223.6ms at 2k / 8k / 32k paragraphs (~n^1.96),
+ * extrapolating to ~35s per build on the 45MB document this index exists to
+ * make fast. Same traversal strategy as FastParent.getElementsByTagName.
+ */
 function buildWpIndexMap(ownerDoc: any): Map<Element, number> {
   const map = new Map<Element, number>();
   const root = ownerDoc.documentElement;
   if (!root) return map;
   let i = 0;
-  let node: any = root;
-  while (node) {
-    if (node.nodeType === 1 && node.tagName === "w:p") {
-      map.set(node, i++);
-    }
-    if (node.firstChild) {
-      node = node.firstChild;
+  if (root.nodeType === 1 && root.tagName === "w:p") map.set(root, i++);
+  // Frames of [node, next-child-cursor]; only elements are pushed, since no
+  // other node type can contain a w:p.
+  const nodes: any[] = [root];
+  const cursors: number[] = [0];
+  while (nodes.length) {
+    const top = nodes.length - 1;
+    const children = nodes[top].childNodes;
+    if (!children || cursors[top] >= children.length) {
+      nodes.pop();
+      cursors.pop();
       continue;
     }
-    while (node && node !== root && !node.nextSibling) {
-      node = node.parentNode;
+    const child = children[cursors[top]++];
+    if (child.nodeType === 1) {
+      if (child.tagName === "w:p") map.set(child, i++);
+      nodes.push(child);
+      cursors.push(0);
     }
-    if (!node || node === root) break;
-    node = node.nextSibling;
   }
   return map;
 }
