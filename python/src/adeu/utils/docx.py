@@ -152,6 +152,23 @@ def is_heading_paragraph(
     return bool(stripped) and stripped == "#" * len(stripped)
 
 
+def paragraph_mark_is_deleted(p_element) -> bool:
+    """True when the paragraph's own break is a pending tracked deletion
+    (<w:del> inside pPr/rPr) — accepting it removes the paragraph container.
+
+    Shared by both Virtual Text twins: ingest._extract_blocks drops such a
+    paragraph from the clean view when nothing visible survives inside it,
+    and DocumentMapper._map_blocks must drop it identically. Keeping one
+    predicate is what keeps the twins byte-identical (see
+    tests/test_twin_projection_parity.py).
+    """
+    pPr = p_element.find(QN_W_PPR)
+    if pPr is None:
+        return False
+    rPr = pPr.find(QN_W_RPR)
+    return rPr is not None and rPr.find(QN_W_DEL) is not None
+
+
 def is_native_heading(
     paragraph: Paragraph,
     style_cache: Optional[dict] = None,

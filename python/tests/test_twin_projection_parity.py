@@ -128,6 +128,81 @@ def test_adjacent_del_elements_coalesce_into_one_block():
             assert "{++replacement++}" in reader
 
 
+# --------------------------------------------------------------------------
+# Deleted paragraph mark, nothing surviving inside (QA round 3, finding 2.4).
+#
+# The reader drops such a paragraph from the clean view (ingest._extract_blocks)
+# because accepting the mark deletion merges the paragraph away. The mapper must
+# drop it identically: it previously counted the paragraph as a block and ran
+# 2 chars ahead per occurrence, and since caller-pinned _match_start_index
+# offsets are bound to clean_mapper (and validate_edits skips pinned edits),
+# every later edit resolved mid-word and applied with no error raised.
+#
+# The run-level w:del case above does NOT cover this — the mark lives in
+# w:pPr/w:rPr, which is what makes the container itself disappear.
+# --------------------------------------------------------------------------
+
+_W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def _deleted_mark_para_xml(*, style: str | None = None, text: str = "removed entirely") -> str:
+    """A paragraph whose pilcrow is a tracked deletion and whose only content
+    is tracked-deleted, so the clean view has nothing left to render."""
+    pstyle = f'<w:pStyle w:val="{style}"/>' if style else ""
+    return (
+        f"<w:p {_W}>"
+        f"<w:pPr>{pstyle}"
+        '<w:rPr><w:del w:id="90" w:author="QA" w:date="2026-07-24T00:00:00Z"/></w:rPr>'
+        "</w:pPr>"
+        '<w:del w:id="91" w:author="QA" w:date="2026-07-24T00:00:00Z">'
+        f"<w:r><w:delText>{text}</w:delText></w:r>"
+        "</w:del>"
+        "</w:p>"
+    )
+
+
+def test_deleted_paragraph_mark_midway_drops_block_and_separator():
+    doc = Document()
+    before = doc.add_paragraph("BEFORE")
+    before._p.addnext(parse_xml(_deleted_mark_para_xml()))
+    doc.add_paragraph("AFTER")
+    data = _roundtrip(doc)
+    for clean, reader in assert_twins_identical(data):
+        if clean:
+            # No empty container and no leftover separator for it.
+            assert reader == "BEFORE\n\nAFTER", reader
+        else:
+            assert "{--removed entirely--}" in reader
+
+
+def test_deleted_paragraph_mark_as_first_block_emits_no_leading_separator():
+    doc = Document()
+    for p in list(doc.paragraphs):
+        p._p.getparent().remove(p._p)
+    doc.element.body.insert(0, parse_xml(_deleted_mark_para_xml()))
+    doc.add_paragraph("AFTER")
+    data = _roundtrip(doc)
+    for clean, reader in assert_twins_identical(data):
+        if clean:
+            assert reader == "AFTER", reader
+            assert not reader.startswith("\n")
+
+
+def test_deleted_heading_mark_drops_its_markdown_prefix_too():
+    """The reader drops the whole `prefix + p_text` block, so the mapper's
+    rollback must also undo the emitted '# ' heading prefix."""
+    doc = Document()
+    before = doc.add_paragraph("BEFORE")
+    before._p.addnext(parse_xml(_deleted_mark_para_xml(style="Heading1", text="Removed Heading")))
+    doc.add_paragraph("AFTER")
+    data = _roundtrip(doc)
+    for clean, reader in assert_twins_identical(data):
+        if clean:
+            assert reader == "BEFORE\n\nAFTER", reader
+            assert "Removed Heading" not in reader
+            assert "#" not in reader
+
+
 def test_empty_header_part_contributes_nothing():
     doc = Document()
     doc.add_paragraph("Body content only.")

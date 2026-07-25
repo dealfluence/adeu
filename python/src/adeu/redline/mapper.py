@@ -23,6 +23,7 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts_with_kind,
     iter_paragraph_content,
+    paragraph_mark_is_deleted,
     split_boundary_whitespace,
 )
 from adeu.utils.safe_regex import user_finditer, user_search
@@ -358,6 +359,9 @@ class DocumentMapper:
                 else:
                     emitted_any_block = True
             elif isinstance(item, Paragraph):
+                spans_mark = len(self.spans)
+                chunks_mark = len(self._text_chunks)
+                offset_mark = current
                 if emitted_any_block:
                     # Attach the newline to the previous paragraph so merges work correctly
                     prev_para = previous_item if isinstance(previous_item, Paragraph) else None
@@ -371,7 +375,25 @@ class DocumentMapper:
                     self._add_virtual_text(prefix, current, item)
                     current += len(prefix)
 
+                content_start = current
                 current = self._map_paragraph_content(item, current, style_cache, default_pstyle)
+                if self.clean_view and current == content_start and paragraph_mark_is_deleted(item._element):
+                    # Twin of the reader's skip in ingest._extract_blocks:
+                    # accepting a tracked paragraph-mark deletion merges the
+                    # paragraph away, so when nothing visible survives inside
+                    # it the accepted view renders no container at all (QA
+                    # round 3, finding 2.4). The reader drops the whole
+                    # `prefix + p_text` block, so the rollback must undo the
+                    # prefix and the separator too — and the paragraph must
+                    # NOT count as a block, or the next separator lands twice.
+                    # Without this the mapper ran 2 chars ahead of the reader
+                    # and caller-pinned _match_start_index offsets (bound to
+                    # clean_mapper) resolved mid-word with no error raised.
+                    del self.spans[spans_mark:]
+                    del self._text_chunks[chunks_mark:]
+                    current = offset_mark
+                    is_first_para = False
+                    continue
                 is_first_para = False
                 emitted_any_block = True
                 previous_item = item
