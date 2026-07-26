@@ -12,7 +12,8 @@ import {
   DocumentChange,
 } from "./models.js";
 import { trim_common_context, generate_edits_from_text } from "./diff.js";
-import { findChild, findAllDescendants, serializeXml } from "./docx/dom.js";
+import { findChild, findAllDescendants, serializeXml, parseXml } from "./docx/dom.js";
+import { isPartClean, markPartClean } from "./docx/cell-anchor.js";
 import { split_structural_appendix, paginate } from "./pagination.js";
 import {
   is_heading_paragraph,
@@ -100,18 +101,36 @@ function safeCloneEdit(val: any, seen: WeakMap<any, any> = new WeakMap()): any {
   return copy;
 }
 
+/**
+ * Transactional snapshot for batch rollback (docs/PERFORMANCE.md §5.2).
+ *
+ * The historical implementation deep-cloned EVERY part's DOM up front —
+ * on a 45 MB document.xml that is a ~2.7M-element clone paid on every
+ * batch, successful or not (the dominant cost of a single-edit batch,
+ * measured at ~10 s). Parts that are still "clean" (DOM reconstructible
+ * from their pristine load-time XML, modulo deterministic anchor stamps —
+ * see cell-anchor.ts markPartClean/isPartClean) skip the clone entirely
+ * and are restored by RE-PARSING part.blob, shifting that cost to the
+ * rare failure path. Parts dirtied by a prior successful batch in the
+ * same engine session (blob stale) still get the deep clone.
+ */
 function takeSnapshot(doc: any): any {
   const parts = [...doc.pkg.parts];
   const unzipped = { ...doc.pkg.unzipped };
   const rels = new Map<any, Map<string, any>>();
   const elements = new Map<any, Element>();
+  const blobRestores = new Set<any>();
   for (const part of parts) {
     rels.set(part, new Map(part.rels));
-    if (part._element) {
+    if (!part._element) continue;
+    const od = part._element.ownerDocument as any;
+    if (od && isPartClean(od) && typeof part.blob === "string") {
+      blobRestores.add(part);
+    } else {
       elements.set(part, part._element.cloneNode(true) as Element);
     }
   }
-  return { parts, unzipped, rels, elements };
+  return { parts, unzipped, rels, elements, blobRestores };
 }
 
 function restoreSnapshot(doc: any, snapshot: any): void {
@@ -124,6 +143,17 @@ function restoreSnapshot(doc: any, snapshot: any): void {
   }
   for (const part of snapshot.parts) {
     part.rels = new Map(snapshot.rels.get(part)!);
+    if (snapshot.blobRestores && snapshot.blobRestores.has(part)) {
+      // Clean at snapshot time: the pristine load-time XML IS the
+      // pre-batch state (anchor stamps are re-derived deterministically by
+      // the next projection). Fresh parse -> fresh Document; stale element
+      // references are invalidated by the mapper/comments-manager rebuilds
+      // every restore caller already performs.
+      const parsed = parseXml(part.blob);
+      markPartClean(parsed);
+      part._element = parsed.documentElement;
+      continue;
+    }
     const originalEl = snapshot.elements.get(part);
     if (originalEl && part._element) {
       const xmlDoc = part._element.ownerDocument;
@@ -186,6 +216,64 @@ const TRANSACTIONAL_NOT_APPLIED_ERROR =
 // silently, so they must be rejected before they reach the DOM
 // (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+
+/**
+ * Children of a properties container that the corresponding tracked-change
+ * record cannot store, and which must therefore survive rejecting it.
+ *
+ * w:sectPrChange stores a CT_SectPrBase, and per ECMA-376 that type carries
+ * no EG_HdrFtrReferences — header/footer references exist only on the live
+ * CT_SectPr. Clearing the container wholesale (correct for w:rPrChange, whose
+ * stored child is a complete w:rPr) would delete the section's headers and
+ * footers with nothing to restore them from. CT_SectPr also sequences
+ * EG_HdrFtrReferences ahead of EG_SectPrContents, so leaving these in place
+ * keeps the element order valid once the stored properties are appended.
+ */
+const PROPS_REVERT_PRESERVED_CHILDREN: Record<string, Set<string>> = {
+  "w:sectPr": new Set(["w:headerReference", "w:footerReference"]),
+};
+
+/**
+ * Revision element tags, in the order the review-action paths consume them.
+ * REVISION_NODE_TAGS is the ins/del pair (structural revisions); PPC_TAGS are
+ * the format-only change records. Both orders are load-bearing: group_nodes
+ * must present insertions before deletions (comment-preservation adjacency,
+ * QA round 3 finding 1.1) and the ppc lists are consumed tag-major.
+ */
+const REVISION_NODE_TAGS = ["w:ins", "w:del"] as const;
+const PPC_TAGS = ["w:pPrChange", "w:rPrChange", "w:sectPrChange"] as const;
+const ALL_REVISION_TAGS: readonly string[] = [
+  ...REVISION_NODE_TAGS,
+  ...PPC_TAGS,
+];
+
+/** One revision element, with its id read once and its nested ins/del
+ *  descendants precomputed for the group closure. */
+interface IndexedRevision {
+  el: Element;
+  id: string | null;
+  /** Proper ins/del descendants, matching getElementsByTagName's
+   *  self-exclusion. */
+  nested: IndexedRevision[];
+}
+
+/**
+ * Every revision element in the main story, bucketed by tag in document order.
+ *
+ * apply_review_actions used to re-scan the whole document for each of these
+ * buckets, ~12 full walks per action (18 getElementsByTagName calls), so a
+ * batch cost O(actions x document). One walk now answers all of them.
+ *
+ * Validity is keyed on the owning document's mutation counter AND its
+ * identity: the counter catches ordinary edits, and the identity catches a
+ * transactional rollback swapping in a freshly parsed document whose counter
+ * restarts low enough to collide.
+ */
+interface RevisionIndex {
+  doc: any;
+  inc: number | null;
+  byTag: Map<string, IndexedRevision[]>;
+}
 
 export function describe_illegal_control_chars(text: string): string | null {
   if (!text) return null;
@@ -383,6 +471,9 @@ export class RedlineEngine {
   public clean_mapper: DocumentMapper | null = null;
   public original_mapper: DocumentMapper | null = null;
   public skipped_details: string[] = [];
+  /** Revision-element index for the review-action paths; self-invalidating on
+   *  the document's mutation counter (see _getRevisionIndex). */
+  private _revisionIndex: RevisionIndex | null = null;
 
   constructor(doc: DocumentObject, author: string = "Adeu AI (TS)") {
     this.doc = doc;
@@ -394,7 +485,15 @@ export class RedlineEngine {
     for (const part of this.doc.pkg.parts) {
       if (part === this.doc.part) {
         if (!part._element.hasAttribute("xmlns:w16du")) {
+          // Deterministic engine artifact, like the cell-anchor stamps:
+          // every ctor re-adds it and save() lazily injects it wherever
+          // "w16du:" appears — so it must not mark the 45MB main part
+          // dirty for the lazy snapshot (it would force the full-body
+          // deep clone back on every batch).
+          const od = part._element.ownerDocument as any;
+          const wasClean = isPartClean(od);
           part._element.setAttribute("xmlns:w16du", w16du_ns);
+          if (wasClean) markPartClean(od);
         }
       }
     }
@@ -1490,6 +1589,7 @@ export class RedlineEngine {
       (n) => n.nodeType === 1,
     ) as Element | undefined;
     parent.removeChild(change);
+    const preserved = PROPS_REVERT_PRESERVED_CHILDREN[parent.tagName];
     for (const child of Array.from(parent.childNodes)) {
       if (child.nodeType !== 1) continue;
       // A pilcrow revision (w:ins/w:del inside pPr's rPr) is a separate
@@ -1501,6 +1601,9 @@ export class RedlineEngine {
       ) {
         continue;
       }
+      // Properties the stored record cannot carry (section header/footer
+      // references) would be destroyed rather than reverted.
+      if (preserved?.has(el.tagName)) continue;
       parent.removeChild(child);
     }
     if (stored) {
@@ -4372,14 +4475,96 @@ export class RedlineEngine {
    * is counted in `already_resolved` instead — never as applied
    * (QA 2026-07-19 ADEU-QA-004).
    */
+  /**
+   * ONE preorder walk collecting every revision element, bucketed by tag in
+   * document order (so each bucket equals what findAllDescendants would have
+   * returned for that tag), with ids read once and ins/del nesting recorded.
+   *
+   * Driven by an explicit cursor stack over childNodes arrays rather than
+   * sibling pointers — fast-xml's nextSibling is an indexOf scan, which would
+   * make the walk itself quadratic (see docx/cell-anchor.ts).
+   */
+  private _buildRevisionIndex(ownerDoc: any, inc: number | null): RevisionIndex {
+    const byTag = new Map<string, IndexedRevision[]>();
+    for (const tag of ALL_REVISION_TAGS) byTag.set(tag, []);
+
+    const root: any = this.doc.element;
+    const nodes: any[] = [root];
+    const cursors: number[] = [0];
+    // Enclosing ins/del entries, with the stack depth each was opened at so
+    // they can be closed when the walk leaves them.
+    const openRevisions: IndexedRevision[] = [];
+    const openAtDepth: number[] = [];
+
+    while (nodes.length) {
+      const top = nodes.length - 1;
+      const children = nodes[top].childNodes;
+      if (!children || cursors[top] >= children.length) {
+        nodes.pop();
+        cursors.pop();
+        while (
+          openAtDepth.length &&
+          openAtDepth[openAtDepth.length - 1] > nodes.length
+        ) {
+          openAtDepth.pop();
+          openRevisions.pop();
+        }
+        continue;
+      }
+      const child = children[cursors[top]++];
+      if (child.nodeType !== 1) continue;
+
+      const bucket = byTag.get(child.tagName);
+      let entry: IndexedRevision | null = null;
+      if (bucket) {
+        entry = { el: child, id: child.getAttribute("w:id"), nested: [] };
+        bucket.push(entry);
+      }
+      const isRevisionNode =
+        child.tagName === "w:ins" || child.tagName === "w:del";
+      if (entry && isRevisionNode) {
+        for (const ancestor of openRevisions) ancestor.nested.push(entry);
+      }
+
+      nodes.push(child);
+      cursors.push(0);
+      if (entry && isRevisionNode) {
+        openRevisions.push(entry);
+        openAtDepth.push(nodes.length);
+      }
+    }
+    return { doc: ownerDoc, inc, byTag };
+  }
+
+  /** Cached revision index, rebuilt when the document changed (or was
+   *  swapped out by a rollback) since the last build. */
+  private _getRevisionIndex(): RevisionIndex {
+    const ownerDoc: any = (this.doc.element as any).ownerDocument;
+    const inc: number | null =
+      typeof ownerDoc?._inc === "number" ? ownerDoc._inc : null;
+    const cached = this._revisionIndex;
+    if (cached && cached.doc === ownerDoc && inc !== null && cached.inc === inc) {
+      return cached;
+    }
+    // inc === null (a DOM without a mutation counter) intentionally rebuilds
+    // every time rather than risking a stale index.
+    const built = this._buildRevisionIndex(ownerDoc, inc);
+    this._revisionIndex = built;
+    return built;
+  }
+
+  /** Revision elements of `tag` in document order, id already read. */
+  private _revisionsByTag(tag: string): IndexedRevision[] {
+    return this._getRevisionIndex().byTag.get(tag) ?? [];
+  }
+
   /** Distinct tracked-change ids (w:id on w:ins/w:del/w:pPrChange) in the
    *  main story. */
   private _existing_change_ids(): string[] {
     const ids = new Set<string>();
-    for (const tag of ["w:ins", "w:del", "w:pPrChange", "w:rPrChange", "w:sectPrChange"]) {
-      for (const n of findAllDescendants(this.doc.element, tag)) {
-        const id = n.getAttribute("w:id");
-        if (id) ids.add(id);
+    for (const tag of ALL_REVISION_TAGS) {
+      for (const n of this._revisionsByTag(tag)) {
+        if (n.id) ids.add(n.id);
       }
     }
     return Array.from(ids).sort((a, b) => {
@@ -4533,23 +4718,25 @@ export class RedlineEngine {
         continue;
       }
 
-      const all_ins = findAllDescendants(this.doc.element, "w:ins").filter(
-        (n) => n.getAttribute("w:id") === target_id,
-      );
-      const all_del = findAllDescendants(this.doc.element, "w:del").filter(
-        (n) => n.getAttribute("w:id") === target_id,
-      );
+      // One document walk backs every lookup below (see _getRevisionIndex);
+      // it is rebuilt only after this batch's own mutations bump the
+      // document's counter, so consecutive non-mutating actions share it.
+      const all_ins = this._revisionsByTag("w:ins")
+        .filter((n) => n.id === target_id)
+        .map((n) => n.el);
+      const all_del = this._revisionsByTag("w:del")
+        .filter((n) => n.id === target_id)
+        .map((n) => n.el);
       const all_nodes = [...all_ins, ...all_del];
       // Tracked restyles named directly: STYLE_ONLY edits mint a pPrChange
       // with its own id (QA 2026-07-23 F1a), and Word-authored format-only
       // changes carry rPrChange/sectPrChange ids the projection advertises
       // as "[Chg:N format]" — all of them actionable by id
       // (QA round 3, finding 2.2).
-      const direct_ppc = ["w:pPrChange", "w:rPrChange", "w:sectPrChange"].flatMap(
-        (tag) =>
-          findAllDescendants(this.doc.element, tag).filter(
-            (n) => n.getAttribute("w:id") === target_id,
-          ),
+      const direct_ppc = PPC_TAGS.flatMap((tag) =>
+        this._revisionsByTag(tag)
+          .filter((n) => n.id === target_id)
+          .map((n) => n.el),
       );
 
       if (all_nodes.length === 0 && direct_ppc.length === 0) {
@@ -4614,19 +4801,22 @@ export class RedlineEngine {
       // join the group's bookkeeping — otherwise a batch that enumerates
       // every id from a read hard-fails on the nested member with "no
       // tracked change with that id exists" (QA round 3, finding 2.1).
+      //
+      // The closure still iterates to a fixed point rather than taking one
+      // pass: an id is shared across every element of a single logical edit,
+      // so newly added ids can match elements ELSEWHERE in the document whose
+      // own nested revisions then join the group. It is now pure in-memory
+      // work over the index — the nested lists were recorded during the walk.
+      const indexedRevisionNodes = REVISION_NODE_TAGS.flatMap((tag) =>
+        this._revisionsByTag(tag),
+      );
       let group_size = -1;
       while (group_size !== group_ids.size) {
         group_size = group_ids.size;
-        for (const tag of ["w:ins", "w:del"]) {
-          for (const el of findAllDescendants(this.doc.element, tag)) {
-            const id = el.getAttribute("w:id");
-            if (!id || !group_ids.has(id)) continue;
-            for (const nestedTag of ["w:ins", "w:del"]) {
-              for (const nested of findAllDescendants(el, nestedTag)) {
-                const nid = nested.getAttribute("w:id");
-                if (nid) group_ids.add(nid);
-              }
-            }
+        for (const entry of indexedRevisionNodes) {
+          if (!entry.id || !group_ids.has(entry.id)) continue;
+          for (const nested of entry.nested) {
+            if (nested.id) group_ids.add(nested.id);
           }
         }
       }
@@ -4636,21 +4826,18 @@ export class RedlineEngine {
       // <w:ins> side first breaks the wrapping-comment adjacency walk, so a
       // comment spanning the del+ins pair survives an accept (QA round 3,
       // finding 1.1).
-      for (const tag of ["w:ins", "w:del"]) {
-        for (const el of findAllDescendants(this.doc.element, tag)) {
-          const id = el.getAttribute("w:id");
-          if (id && group_ids.has(id)) group_nodes.push(el);
+      for (const tag of REVISION_NODE_TAGS) {
+        for (const entry of this._revisionsByTag(tag)) {
+          if (entry.id && group_ids.has(entry.id)) group_nodes.push(entry.el);
         }
       }
       // Tracked restyles and format-only changes resolve with their group
       // (F1a / QA round 3 finding 2.2): accept strips the change record,
       // reject restores the original properties.
-      const group_ppc = ["w:pPrChange", "w:rPrChange", "w:sectPrChange"].flatMap(
-        (tag) =>
-          findAllDescendants(this.doc.element, tag).filter((el) => {
-            const id = el.getAttribute("w:id");
-            return id !== null && group_ids.has(id);
-          }),
+      const group_ppc = PPC_TAGS.flatMap((tag) =>
+        this._revisionsByTag(tag)
+          .filter((entry) => entry.id !== null && group_ids.has(entry.id))
+          .map((entry) => entry.el),
       );
       const resolved_now = new Set<string>();
       for (const node of [...group_nodes, ...group_ppc]) {

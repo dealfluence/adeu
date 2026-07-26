@@ -14,6 +14,7 @@ import {
   iter_paragraph_content,
 } from "./utils/docx.js";
 import { findChild } from "./docx/dom.js";
+import { resolve_cell_anchor } from "./docx/cell-anchor.js";
 import { build_structural_appendix } from "./domain.js";
 import { extract_comments_data } from "./comments.js";
 import { escape_critic_tokens } from "./utils/text.js";
@@ -253,29 +254,15 @@ export function extract_table(
       // value cells are addressable by the engine. Reuses the {#...} bookmark
       // projection (already protected by validate_edit_strings and resolvable
       // via the mapper). We key on the cell's first paragraph w14:paraId, which
-      // Word assigns and keeps stable across reads.
+      // Word assigns and keeps stable across reads. Fallback-id derivation
+      // (and its whole-document index) lives in resolve_cell_anchor — shared
+      // with the mapper twin and cached per Document to avoid the historical
+      // O(empty cells × document size) rescans.
       if (!cleanView) {
-        let firstP = cell._element.getElementsByTagName("w:p")[0] as
-          | Element
-          | undefined;
-        let paraId = firstP ? firstP.getAttribute("w14:paraId") : null;
-        if (!paraId && (!cell_content || cell_content.trim() === "")) {
-          if (!firstP) {
-            const xmlDoc = cell._element.ownerDocument!;
-            firstP = xmlDoc.createElement("w:p");
-            cell._element.appendChild(firstP);
-          }
-          const allPs = Array.from(cell._element.ownerDocument!.getElementsByTagName("w:p"));
-          const index = allPs.indexOf(firstP);
-          let hash = 2166136261;
-          const str = `fallback-paraId-${index}`;
-          for (let i = 0; i < str.length; i++) {
-            hash ^= str.charCodeAt(i);
-            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-          }
-          paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
-          firstP.setAttribute("w14:paraId", paraId);
-        }
+        const { paraId } = resolve_cell_anchor(
+          cell._element,
+          !cell_content || cell_content.trim() === "",
+        );
         if (paraId) {
           const space_pad = cell_content ? " " : "";
           const anchor = `${space_pad}{#cell:${paraId}}`;

@@ -27,7 +27,10 @@ import {
   build_outline_response,
   build_appendix_response,
   build_search_response,
+  render_outline_response,
 } from "./response-builders.js";
+import { docCache } from "./doc-cache.js";
+import type { ProgressFn } from "./doc-cache.js";
 
 import { MARKDOWN_UI_URI, handleServerCliArgs } from "./shared.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
@@ -176,9 +179,10 @@ function overwriteNote(
 async function loadDocxOrThrow(
   buf: Buffer,
   filePath: string,
+  opts?: Parameters<typeof DocumentObject.load>[1],
 ): Promise<DocumentObject> {
   try {
-    return await DocumentObject.load(buf);
+    return await DocumentObject.load(buf, opts);
   } catch (err: any) {
     throw new Error(
       `'${filePath}' is not a valid .docx (Word) document: ${err?.message ?? err}`,
@@ -383,23 +387,67 @@ registerAppTool(
     }),
     _meta: { ui: { resourceUri: MARKDOWN_UI_URI } },
   },
-  async ({
-    reasoning,
-    file_path,
-    clean_view,
-    mode,
-    page,
-    outline_max_level,
-    outline_verbose,
-    search_query,
-    search_regex,
-    search_case_sensitive,
-  }) => {
+  async (
+    {
+      reasoning,
+      file_path,
+      clean_view,
+      mode,
+      page,
+      outline_max_level,
+      outline_verbose,
+      search_query,
+      search_regex,
+      search_case_sensitive,
+    },
+    extra?: any,
+  ) => {
     try {
       void reasoning;
-      const buf = readFileBytesOrThrow(file_path);
+      const readBytes = () => readFileBytesOrThrow(file_path);
+
+      // Progress relay: only when the client supplied a progressToken, and
+      // never allowed to fail the read. Cold ingests of huge documents use
+      // it so the first read shows live work instead of a silent stall.
+      const progressToken = extra?._meta?.progressToken;
+      const onProgress: ProgressFn | undefined =
+        progressToken !== undefined && extra?.sendNotification
+          ? async (message, progress, total) => {
+              try {
+                await extra.sendNotification({
+                  method: "notifications/progress",
+                  params: { progressToken, progress, total, message },
+                });
+              } catch {
+                /* progress is best-effort */
+              }
+            }
+          : undefined;
+
+      // The cache delegates byte-reading and document-loading back to the
+      // boundary helpers so error shapes stay identical to the uncached
+      // handler (lean file-not-found with sibling listing; container errors
+      // diagnosed as invalid .docx per QA 2026-07-23 F19).
+      const loadDoc = (buf: Buffer, opts?: any) =>
+        loadDocxOrThrow(buf, file_path, opts);
+      const getEntry = () =>
+        docCache.get(file_path, readBytes, loadDoc, onProgress);
 
       if (mode === "outline") {
+        if (!clean_view) {
+          const entry = await getEntry();
+          const res = render_outline_response(
+            entry.outline_nodes,
+            entry.raw_bundle.pagination.total_pages,
+            file_path,
+            outline_max_level,
+            outline_verbose,
+          );
+          return res as any;
+        }
+        // clean_view outline: rare combination, needs clean-text offsets the
+        // cache does not keep — served by the historical uncached path.
+        const buf = readBytes();
         const doc = await loadDocxOrThrow(buf, file_path);
         const extract_res = _extractTextFromDoc(
           doc,
@@ -421,8 +469,14 @@ registerAppTool(
         return res as any;
       }
 
-      const readDoc = await loadDocxOrThrow(buf, file_path);
-      const text = _extractTextFromDoc(readDoc, clean_view) as string;
+      const entry = await getEntry();
+      const text = clean_view
+        ? await docCache.ensureCleanText(entry, readBytes, loadDoc)
+        : entry.raw_text;
+      const bundle = clean_view
+        ? await docCache.ensureCleanBundle(entry, readBytes, loadDoc)
+        : entry.raw_bundle;
+
       if (search_query !== undefined && search_query !== null) {
         // In search mode, undefined `page` means "search all document pages".
         const res = build_search_response(
@@ -432,6 +486,7 @@ registerAppTool(
           search_case_sensitive,
           page,
           file_path,
+          bundle,
         );
         return res as any;
       }
@@ -444,7 +499,7 @@ registerAppTool(
         page !== null &&
         String(page).trim().toLowerCase() === "all"
       ) {
-        const res = build_full_document_response(text, file_path);
+        const res = build_full_document_response(text, file_path, bundle);
         return res as any;
       }
       // In non-search mode, `page` defaults to 1 (show document page 1).
@@ -470,10 +525,20 @@ registerAppTool(
         resolvedPage = parsed;
       }
       if (mode === "appendix") {
-        const res = build_appendix_response(text, resolvedPage, file_path);
+        const res = build_appendix_response(
+          text,
+          resolvedPage,
+          file_path,
+          bundle,
+        );
         return res as any;
       }
-      const res = build_paginated_response(text, resolvedPage, file_path);
+      const res = build_paginated_response(
+        text,
+        resolvedPage,
+        file_path,
+        bundle,
+      );
       return res as any;
     } catch (e: any) {
       return {
@@ -761,8 +826,14 @@ server.registerTool(
         }
       }
 
-      const buf = readFileBytesOrThrow(original_docx_path);
-      const doc = await loadDocxOrThrow(buf, original_docx_path);
+      // Hot-DOM reuse (docs/PERFORMANCE.md §5): a read_docx of this same
+      // file version usually preceded this call — take its parse instead of
+      // re-parsing from disk. Consume-on-take: the batch mutates the DOM.
+      let doc = await docCache.takeHotDoc(original_docx_path);
+      if (!doc) {
+        const buf = readFileBytesOrThrow(original_docx_path);
+        doc = await loadDocxOrThrow(buf, original_docx_path);
+      }
       const engine = new RedlineEngine(doc, author_name);
 
       let stats;
@@ -770,6 +841,10 @@ server.registerTool(
         stats = engine.process_batch(sanitizedChanges, dry_run);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
+          // The engine's transactional snapshot restored the DOM to the
+          // exact on-disk state — safe to pin it back for the retry that
+          // typically follows a rejected batch.
+          docCache.restoreHotDoc(original_docx_path, doc);
           return {
             isError: true,
             content: [
@@ -804,6 +879,15 @@ server.registerTool(
           };
         }
         overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
+        // The in-memory document IS the state of the file just written:
+        // adopt it as the output's cache (text products built in the
+        // background; DOM pinned for a chained edit). The agent's
+        // read-after-edit then skips the full re-parse.
+        docCache.primeFromDoc(outPath, doc);
+      } else {
+        // Dry-run: the engine restored the document to the exact on-disk
+        // state — pin it back for the wet run that typically follows.
+        docCache.restoreHotDoc(original_docx_path, doc);
       }
 
       let res = formatBatchResult(stats, outPath, !!dry_run) + overwrite_note;
@@ -868,6 +952,12 @@ server.registerTool(
 
       fs.mkdirSync(dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, outBuf);
+      // This tool rewrites a document the cache may already hold products
+      // for (output_path defaults next to the input, and may BE the input).
+      // Not priming from `doc` here is deliberate: the prime path's
+      // byte-equality gate is only covered for the batch pipeline, so the
+      // correct-by-construction choice is to make the next read re-parse.
+      docCache.invalidate(outPath);
 
       let text: string;
       if (total === 0) {
@@ -1054,6 +1144,9 @@ server.registerTool(
         const existedBefore = fs.existsSync(outPath);
         fs.mkdirSync(dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, result.outBuffer);
+        // Sanitize/finalize rewrites the package; drop any cached products
+        // for this path so a later read cannot serve the pre-finalize text.
+        docCache.invalidate(outPath);
         const note = overwriteNote(outPath, file_path, existedBefore);
         return {
           content: [

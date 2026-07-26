@@ -41,6 +41,15 @@ PREVIEW_CONTEXT_CHARS = 30
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
 if "w16du" not in nsmap:
     nsmap["w16du"] = w16du_ns
+# Register the prefix with lxml's serializer as well: when a tracked-change
+# write sets a w16du:dateUtc attribute on an element with NO in-scope
+# declaration, lxml then auto-declares xmlns:w16du on that element (instead
+# of minting an ns0 prefix). Elements under a root that already declares the
+# prefix keep using the root declaration — for such documents the output is
+# byte-identical. This is what lets __init__ skip the historical eager
+# root-stamp of the main part, which serialized and re-parsed the entire
+# 45 MB part just to add one namespace declaration.
+etree.register_namespace("w16du", w16du_ns)
 
 
 def _empty_bounds() -> List[Optional[int]]:
@@ -60,6 +69,23 @@ class BatchValidationError(Exception):
 # as a raw "All strings must be XML compatible" traceback from deep inside
 # lxml instead of a clean per-edit error (QA 2026-07-17 F11).
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# Children of a properties container that the corresponding tracked-change
+# record cannot store, and which must therefore survive rejecting it.
+#
+# w:sectPrChange stores a CT_SectPrBase, and per ECMA-376 that type carries no
+# EG_HdrFtrReferences — header/footer references exist only on the live
+# CT_SectPr. Clearing the container wholesale (correct for w:rPrChange, whose
+# stored child is a complete w:rPr) would delete the section's headers and
+# footers with nothing to restore them from. CT_SectPr also sequences
+# EG_HdrFtrReferences ahead of EG_SectPrContents, so leaving these in place
+# keeps the element order valid once the stored properties are appended.
+#
+# Kept byte-for-byte in step with the Node twin
+# (node/packages/core/src/engine.ts PROPS_REVERT_PRESERVED_CHILDREN).
+PROPS_REVERT_PRESERVED_CHILDREN: dict[str, tuple[str, ...]] = {
+    qn("w:sectPr"): (qn("w:headerReference"), qn("w:footerReference")),
+}
 
 
 def describe_illegal_control_chars(text: str) -> Optional[str]:
@@ -343,36 +369,29 @@ class RedlineEngine:
         self.id_discovery_hint = id_discovery_hint
         doc_stream.seek(0)
         sanitized_bytes = strip_bom_from_docx_bytes(doc_stream.read())
+        # Pristine load-time bytes + mutation flag power the LAZY pre-batch
+        # snapshot: while nothing has mutated the tree, "snapshot" is these
+        # bytes verbatim — no save_to_stream (full serialize + re-zip) needed.
+        # apply_review_actions / apply_edits flip the flag on first applied
+        # change; __init__ (also the rollback path) resets it.
+        self._pristine_bytes = sanitized_bytes
+        self._mutated_since_load = False
         self.doc = Document(BytesIO(sanitized_bytes))
 
-        w16du_ns_str = 'xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du"'
-
-        # Only the main document part is stamped with the w16du namespace up
-        # front, because that is the only part this engine writes tracked
-        # changes (carrying w16du:dateUtc) to in __init__'s normal flow.
-        # Eagerly stamping headers/footers/footnotes corrupts the invariant
-        # that an UNMODIFIED part stays byte-for-byte untouched (report F9 /
-        # TC5): editing document.xml must not add the w16du namespace to a
-        # header that was never edited. Parts that later receive a tracked
-        # change get the namespace injected at write time as needed.
-        parts_to_inject = [self.doc.part]
-
-        for part in parts_to_inject:
-            if hasattr(part, "_element"):
-                part._adeu_element = part._element  # type: ignore[attr-defined]
-            elif not hasattr(part, "_adeu_element"):
-                part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
-
-            xml_bytes = etree.tostring(part._adeu_element, encoding="utf-8", pretty_print=False)  # type: ignore[attr-defined]
-            xml_str = xml_bytes.decode("utf-8")
-
-            if 'xmlns:w16du="' not in xml_str and "xmlns:w16du='" not in xml_str:
-                xml_str = re.sub(r"(<w:[a-zA-Z0-9_]+ )", r"\1" + w16du_ns_str + " ", xml_str, count=1)
-                part._adeu_element = parse_xml(xml_str.encode("utf-8"))  # type: ignore[attr-defined]
-                if hasattr(part, "_element"):
-                    part._element = part._adeu_element  # type: ignore[attr-defined]
-                    if part == self.doc.part:
-                        self.doc._element = self.doc.part._element
+        # No part is stamped with the w16du namespace up front. Tracked-change
+        # writes (w16du:dateUtc attributes) self-declare the prefix locally on
+        # the element they land on, via the lxml prefix registration at module
+        # scope; documents whose root already declares w16du keep using that
+        # declaration and serialize byte-identically. The historical eager
+        # stamp of the main part serialized + re-parsed the ENTIRE part
+        # (seconds on a 45 MB document.xml) just to add one declaration.
+        # Untouched parts staying byte-for-byte untouched (report F9 / TC5)
+        # is preserved a fortiori — nothing is written anywhere at init.
+        part = self.doc.part
+        if hasattr(part, "_element"):
+            part._adeu_element = part._element  # type: ignore[attr-defined]
+        elif not hasattr(part, "_adeu_element"):
+            part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
 
         self.author = author
         self.timestamp = (
@@ -2010,6 +2029,28 @@ class RedlineEngine:
             active_text = self.mapper.full_text
             target_mapper = self.mapper
 
+            # BUG-23-5: a copy of the target that lives entirely inside a
+            # tracked deletion (<w:del>) is not a live, editable occurrence.
+            # Dropped BEFORE the clean/original fallbacks so a deleted-only
+            # target flows into the inside-a-deletion diagnostic below
+            # instead of resolving against deleted text. (Historically this
+            # filter ran only to disambiguate multi-match targets; a single
+            # deleted-only match usually failed to resolve anyway because
+            # the mapper fragmented styled deletions into separate
+            # {--...--} blocks — with the projection twins aligned, the
+            # coalesced block matches, and this filter is what enforces the
+            # semantics. The apply-time resolver has always filtered these:
+            # see _pre_resolve_heuristic_edit.)
+            if matches:
+                live_matches = []
+                for start, length in matches:
+                    real_spans = [
+                        s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
+                    ]
+                    if not real_spans or any(not s.del_id for s in real_spans):
+                        live_matches.append((start, length))
+                matches = live_matches
+
             # Fallback to Clean View if not found in Raw View (matches heuristic logic)
             if len(matches) == 0:
                 if not self.clean_mapper:
@@ -2043,26 +2084,10 @@ class RedlineEngine:
                                     if auth:
                                         deleted_authors.add(auth)
 
-            # BUG-23-5: a copy of the target that lives entirely inside a tracked
-            # deletion (<w:del>) is not a live, editable occurrence and must not
-            # count toward ambiguity. Drop matches whose overlapping real text is
-            # exclusively deleted. Only applies to the raw mapper (the clean mapper
-            # already omits deleted text).
-            if active_text == self.mapper.full_text and len(matches) > 1:
-                live_matches = []
-                for start, length in matches:
-                    real_spans = [
-                        s
-                        for s in target_mapper.spans
-                        if s.run is not None and s.end > start and s.start < start + length
-                    ]
-                    if not real_spans or any(not s.del_id for s in real_spans):
-                        live_matches.append((start, length))
-                if live_matches:
-                    matches = live_matches
-
             # The structural appendix is not part of the mapper's
             # projection, so all matches are valid document body matches.
+            # (Deleted-only raw matches were already dropped above, before
+            # the clean/original fallbacks ran.)
             valid_matches = matches
 
             if len(valid_matches) == 0:
@@ -2452,9 +2477,16 @@ class RedlineEngine:
         Processes a unified batch of actions and edits safely.
         """
         if dry_run:
-            dry_engine = RedlineEngine(
-                self.save_to_stream(), author=self.author, id_discovery_hint=self.id_discovery_hint
-            )
+            # The dry-run engine only needs bytes EQUAL to this engine's
+            # current state. While nothing has mutated the tree (the normal
+            # case — a fresh engine per MCP call), the pristine load-time
+            # bytes are that state verbatim; save_to_stream (full serialize
+            # + re-zip of every part) is needed only after real mutations.
+            if self._mutated_since_load:
+                source = self.save_to_stream()
+            else:
+                source = BytesIO(self._pristine_bytes)
+            dry_engine = RedlineEngine(source, author=self.author, id_discovery_hint=self.id_discovery_hint)
             return dry_engine._process_batch_internal(changes, dry_run_mode=True)
         else:
             return self._process_batch_internal(changes, dry_run_mode=False)
@@ -2527,7 +2559,20 @@ class RedlineEngine:
             # (QA M1). Validation failures keep the batch transactional: the
             # real run restores the pre-batch snapshot and rejects everything;
             # dry-run reports the identical outcome per edit.
-            pre_batch_snapshot = None if dry_run_mode else self.save_to_stream()
+            #
+            # LAZY SNAPSHOT (docs/Performance.md §5.2 ported): the snapshot
+            # must equal the engine's CURRENT state. Until something mutates
+            # the tree — actions applied earlier in THIS batch, or a previous
+            # batch on this engine instance — the pristine load-time bytes
+            # are that state, and the full save_to_stream serialize+re-zip is
+            # skipped. Rollback re-initializes from whichever bytes were
+            # chosen, so the restore path is unchanged.
+            if dry_run_mode:
+                pre_batch_snapshot = None
+            elif self._mutated_since_load:
+                pre_batch_snapshot = self.save_to_stream()
+            else:
+                pre_batch_snapshot = BytesIO(self._pristine_bytes)
 
             cloned_edits = [deepcopy(e) for e in edits]
 
@@ -2755,6 +2800,13 @@ class RedlineEngine:
 
             body_text, _ = split_structural_appendix(self.mapper.full_text)
             page_offsets = paginate(body_text, "").body_page_offsets
+
+        # Conservative mutation marker for the lazy pre-batch snapshot: an
+        # application ATTEMPT can write to the tree even when the edit is
+        # ultimately counted skipped (partial sub-edit failures roll back via
+        # the batch snapshot, not per-edit). Flag before the first write.
+        if edits:
+            self._mutated_since_load = True
 
         applied = 0
         skipped = 0
@@ -4532,7 +4584,9 @@ class RedlineEngine:
 
         Operates on the live python-docx `_element` so header/footer parts
         (saved natively by Document.save) are covered; the main document
-        part is declared eagerly in __init__ and skipped here.
+        part is skipped here — its tracked-change writes self-declare the
+        prefix locally (lxml prefix registration at module scope), so a
+        root-level injection pass over the 45 MB part is never needed.
         """
         if part == self.doc.part:
             return
@@ -4885,6 +4939,8 @@ class RedlineEngine:
                 self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act))
                 skipped += 1
 
+        if applied:
+            self._mutated_since_load = True
         return applied, skipped, already_resolved
 
     def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
@@ -5163,11 +5219,17 @@ class RedlineEngine:
                 else:
                     stored = next(iter(change), None)
                     parent.remove(change)
+                    preserved = PROPS_REVERT_PRESERVED_CHILDREN.get(parent.tag, ())
                     for child in list(parent):
                         # A pilcrow revision (w:ins/w:del inside pPr's rPr) is
                         # a separate pending change — never wipe it while
                         # restoring formatting properties.
                         if child.tag == qn("w:rPr") and any(child.find(qn(t)) is not None for t in ("w:ins", "w:del")):
+                            continue
+                        # Properties the stored record cannot carry (section
+                        # header/footer references) would be destroyed rather
+                        # than reverted.
+                        if child.tag in preserved:
                             continue
                         parent.remove(child)
                     if stored is not None:
@@ -5233,6 +5295,14 @@ class RedlineEngine:
 
     # FILE: src/adeu/redline/engine.py
     def accept_all_revisions(self, remove_comments: bool = False) -> dict[str, int]:
+        # This rewrites the tree (and non-main parts), so the load-time
+        # pristine bytes are no longer this engine's state. Flag it BEFORE the
+        # work: a later process_batch would otherwise snapshot
+        # BytesIO(self._pristine_bytes) and a validation rollback would
+        # resurrect every revision accepted here. Set unconditionally rather
+        # than only when a count is non-zero — comment removal and the
+        # non-main parts mutate too.
+        self._mutated_since_load = True
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:
@@ -5437,6 +5507,9 @@ class RedlineEngine:
         insertions/deletions (the common case) is exact. This limitation is
         shared with the Node engine.
         """
+        # See accept_all_revisions: flag before mutating, or a later batch's
+        # rollback restores pre-reject bytes and resurrects the revisions.
+        self._mutated_since_load = True
         parts_to_process = [self.doc.element]
 
         for part in self.doc.part.package.parts:

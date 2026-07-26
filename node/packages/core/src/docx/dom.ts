@@ -1,7 +1,7 @@
-import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
+import { parseFastXml, serializeFastXml } from "./fast-xml.js";
 
 /**
- * Simulates docx.oxml.ns.qn. In xmldom, namespaces are preserved in tagName.
+ * Simulates docx.oxml.ns.qn. Namespace prefixes are preserved in tagName.
  */
 export const qn = (name: string) => name;
 
@@ -46,22 +46,24 @@ export function findAllDescendants(
 }
 
 /**
- * Parses raw XML strings into xmldom Documents.
+ * Parses raw XML strings into fast-xml Documents (docs/PERFORMANCE.md
+ * \u00A75.4b \u2014 the spec parser spent ~93% of its time on machinery the engine
+ * never consults; measured 6.70s -> ~0.5s on a 45MB document.xml).
  */
 export function parseXml(xmlString: string): Document {
   // Strip UTF-8 BOM if present
   if (xmlString.startsWith("\uFEFF")) {
     xmlString = xmlString.slice(1);
   }
-  return new DOMParser().parseFromString(xmlString, "text/xml") as unknown as Document;
+  return parseFastXml(xmlString) as unknown as Document;
 }
 
 /**
- * Serializes an xmldom Document or Element back to a string,
+ * Serializes a Document or Element back to a string,
  * enforcing deterministic attribute ordering on the root element.
  */
 export function serializeXml(node: Node): string {
-  let xml = new XMLSerializer().serializeToString(node as any);
+  let xml = serializeFastXml(node as any);
 
   // BUG-11: Deterministic namespace ordering on root elements.
   const rootTagRegex = /<([a-zA-Z0-9_:]+)(\s+[^>]+?)(>|\/>)/;

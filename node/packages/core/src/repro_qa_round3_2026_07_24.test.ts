@@ -373,6 +373,91 @@ describe("QA round 3, 2.2: format-only tracked changes", () => {
   });
 });
 
+// Rejecting a w:sectPrChange must revert the section properties WITHOUT
+// destroying the section's header/footer references. The reject path clears the
+// live container and refills it from the change record's stored child — right
+// for w:rPrChange (stored child is a complete w:rPr), wrong for w:sectPrChange:
+// its stored child is a CT_SectPrBase, which per ECMA-376 cannot carry
+// EG_HdrFtrReferences, so a wholesale clear deleted headers and footers with
+// nothing to restore them from. Only the accept half of 2.2 had coverage.
+describe("QA round 3, 2.2: rejecting a section-properties change", () => {
+  async function docWithSectPrChange() {
+    const doc = await createTestDocument();
+    addParagraph(doc, "body text");
+    const xmlDoc = doc.element.ownerDocument!;
+    const body = doc.element; // DocumentObject.element IS w:body
+
+    const el = (name: string, attrs: Record<string, string> = {}) => {
+      const e = xmlDoc.createElement(name);
+      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+      return e;
+    };
+
+    const sectPr = el("w:sectPr");
+    sectPr.appendChild(el("w:headerReference", { "w:type": "default", "r:id": "rId7" }));
+    sectPr.appendChild(el("w:footerReference", { "w:type": "default", "r:id": "rId8" }));
+    sectPr.appendChild(el("w:pgSz", { "w:w": "12240", "w:h": "15840" }));
+
+    const change = el("w:sectPrChange", {
+      "w:id": "70",
+      "w:author": "QA",
+      "w:date": "2026-07-24T00:00:00Z",
+    });
+    const stored = el("w:sectPr");
+    stored.appendChild(el("w:pgSz", { "w:w": "15840", "w:h": "12240", "w:orient": "landscape" }));
+    change.appendChild(stored);
+    sectPr.appendChild(change);
+    body.appendChild(sectPr);
+    return { doc, sectPr };
+  }
+
+  it("reverts the page size but keeps the header/footer references", async () => {
+    const { doc, sectPr } = await docWithSectPrChange();
+    const engine = new RedlineEngine(doc, "QA");
+    const [applied] = engine.apply_review_actions([
+      { type: "reject", target_id: "Chg:70" },
+    ]);
+    expect(applied).toBe(1);
+
+    const kids = () =>
+      Array.from(sectPr.childNodes)
+        .filter((n) => n.nodeType === 1)
+        .map((n) => (n as Element).tagName);
+
+    expect(
+      findAllDescendants(sectPr, "w:headerReference").length,
+      `rejecting the section-properties change deleted the header reference; sectPr children: ${kids()}`,
+    ).toBe(1);
+    expect(
+      findAllDescendants(sectPr, "w:footerReference").length,
+      `rejecting the section-properties change deleted the footer reference; sectPr children: ${kids()}`,
+    ).toBe(1);
+
+    // The revert itself still happened, and the record is gone.
+    const pgSz = findAllDescendants(sectPr, "w:pgSz")[0];
+    expect(pgSz.getAttribute("w:w")).toBe("15840");
+    expect(pgSz.getAttribute("w:orient")).toBe("landscape");
+    expect(findAllDescendants(sectPr, "w:sectPrChange").length).toBe(0);
+  });
+
+  it("keeps header/footer references ahead of the section contents", async () => {
+    // CT_SectPr sequences EG_HdrFtrReferences before EG_SectPrContents.
+    const { doc, sectPr } = await docWithSectPrChange();
+    const engine = new RedlineEngine(doc, "QA");
+    engine.apply_review_actions([{ type: "reject", target_id: "Chg:70" }]);
+    const tags = Array.from(sectPr.childNodes)
+      .filter((n) => n.nodeType === 1)
+      .map((n) => (n as Element).tagName);
+    const refs = tags.flatMap((t, i) => (t.endsWith("Reference") ? [i] : []));
+    const others = tags.flatMap((t, i) => (t.endsWith("Reference") ? [] : [i]));
+    expect(refs.length && others.length).toBeTruthy();
+    expect(
+      Math.max(...refs) < Math.min(...others),
+      `header/footer refs must sort first: ${tags}`,
+    ).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 2.3: literal \1 backreferences written silently
 // ---------------------------------------------------------------------------

@@ -34,6 +34,14 @@ _CRITIC_TOKENS: Dict[str, str] = {
 # the meta-block syntax. See plan Concern 4.
 _CHG_ID_PATTERN = re.compile(r"\bChg:(\d+)\b")
 
+# Single-pass scanner event stream for _split_on_safe_paragraph_breaks: every
+# CriticMarkup token plus paragraph-break newline runs. At any string position
+# at most ONE alternative can match (opens start '{', each close starts with a
+# distinct char, breaks start '\n'), and re.finditer consumes non-overlapping
+# matches left to right — together this reproduces the historical
+# char-by-char scan exactly (see tests/test_pagination_scanner_equivalence.py).
+_SCAN_TOKEN_RE = re.compile(r"\{\+\+|\{--|\{==|\{>>|\+\+\}|--\}|==\}|<<\}|\n{2,}")
+
 
 @dataclass
 class PageInfo:
@@ -198,61 +206,43 @@ def _tokenize_into_atomic_blocks(markdown_body: str) -> List[Tuple[str, int, boo
 
 def _split_on_safe_paragraph_breaks(text: str) -> List[Tuple[str, int]]:
     """
-    Walks the string tracking CriticMarkup nesting depth. Splits on "\\n\\n" only
+    Tracks CriticMarkup nesting depth across the string. Splits on "\\n\\n" only
     when all wrapper counters are at zero. Collapses runs of >= 2 newlines into a
     single boundary so we don't emit empty blocks.
 
     Returns list of (block_text, start_offset) where start_offset is the position
     of block_text in the original `text`.
+
+    PERF: implemented as one compiled-regex scan over the token event stream.
+    The historical char-by-char walk called str.startswith at (almost) every
+    position — 37 million calls / multiple seconds on a 4.6 MB projection.
+    Equivalence with a verbatim copy of that walk is pinned by
+    tests/test_pagination_scanner_equivalence.py (crafted, randomized, and
+    projection-shaped inputs).
     """
     counters = {close: 0 for close in _CRITIC_TOKENS.values()}
     blocks: List[Tuple[str, int]] = []
     block_start = 0
-    i = 0
     n = len(text)
 
-    while i < n:
-        # Try to match an open token first.
-        matched_open = False
-        for open_tok, close_tok in _CRITIC_TOKENS.items():
-            if text.startswith(open_tok, i):
-                counters[close_tok] += 1
-                i += len(open_tok)
-                matched_open = True
-                break
-        if matched_open:
-            continue
-
-        # Try to match a close token.
-        matched_close = False
-        for close_tok in _CRITIC_TOKENS.values():
-            if text.startswith(close_tok, i):
-                if counters[close_tok] > 0:
-                    counters[close_tok] -= 1
-                # If unbalanced, still consume so we don't loop forever.
-                i += len(close_tok)
-                matched_close = True
-                break
-        if matched_close:
-            continue
-
-        # Check for a paragraph break.
-        if text[i] == "\n" and i + 1 < n and text[i + 1] == "\n":
-            if all(c == 0 for c in counters.values()):
-                # Valid boundary. Emit current block.
-                block_text = text[block_start:i]
-                if block_text:
-                    blocks.append((block_text, block_start))
-
-                # Skip all consecutive newlines (collapse multiple blank lines).
-                j = i
-                while j < n and text[j] == "\n":
-                    j += 1
-                i = j
-                block_start = i
-                continue
-
-        i += 1
+    for m in _SCAN_TOKEN_RE.finditer(text):
+        tok = m.group(0)
+        first_char = tok[0]
+        if first_char == "\n":
+            # Paragraph break: a boundary only at wrapper depth zero. The
+            # greedy \n{2,} match consumes the whole newline run, mirroring
+            # the historical "skip all consecutive newlines" collapse.
+            if not any(counters.values()):
+                if m.start() > block_start:
+                    blocks.append((text[block_start : m.start()], block_start))
+                block_start = m.end()
+        elif first_char == "{":
+            counters[_CRITIC_TOKENS[tok]] += 1
+        else:
+            # Close token. If unbalanced, it is still consumed (the regex
+            # already advanced past it) but never drives a counter negative.
+            if counters[tok] > 0:
+                counters[tok] -= 1
 
     # Flush trailing block.
     if block_start < n:

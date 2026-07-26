@@ -39,12 +39,6 @@ export default defineConfig({
     "process.browser": "false",
     "process.env.NODE_ENV": '"production"',
   },
-  noExternal: [
-    "@adeu/core",
-    "@xmldom/xmldom",
-    "diff-match-patch",
-    "fflate",
-    "xpath",
-  ],
+  noExternal: ["@adeu/core", "diff-match-patch", "fflate"],
   external: ["n8n-workflow"],
 });

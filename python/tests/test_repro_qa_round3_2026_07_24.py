@@ -73,7 +73,8 @@ from io import BytesIO
 
 import pytest
 from docx import Document
-from docx.oxml.ns import qn
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls, qn
 from fastmcp.exceptions import ToolError
 
 from adeu.ingest import extract_text_from_stream
@@ -336,6 +337,79 @@ class TestQA22FormatChangeIds:
             "that id exists' — read and write disagree about what exists "
             f"(applied={applied}, skipped={skipped}):\n" + "\n".join(map(str, engine.skipped_details))
         )
+
+
+class TestSectPrChangeRejectPreservesHeaderFooter:
+    """Rejecting a w:sectPrChange must revert the section properties WITHOUT
+    destroying the section's header/footer references.
+
+    The reject path clears the live properties container and refills it from
+    the change record's stored child. That is right for w:rPrChange (the stored
+    child is a complete w:rPr) but wrong for w:sectPrChange: the stored child is
+    a CT_SectPrBase, which per ECMA-376 cannot carry EG_HdrFtrReferences, so a
+    wholesale clear deleted the headers and footers with nothing to restore
+    them from. Only the accept half of 2.2 had coverage.
+    """
+
+    def _build(self) -> bytes:
+        d = Document()
+        d.add_paragraph("body text")
+        sect = d.sections[0]
+        # Real parts, so the sectPr carries real header/footer references.
+        sect.header.is_linked_to_previous = False
+        sect.header.paragraphs[0].text = "HEADER TEXT"
+        sect.footer.is_linked_to_previous = False
+        sect.footer.paragraphs[0].text = "FOOTER TEXT"
+        change = parse_xml(
+            f'<w:sectPrChange {nsdecls("w")} w:id="70" w:author="QA" w:date="2026-07-24T00:00:00Z">'
+            f'<w:sectPr {nsdecls("w")}><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr>'
+            "</w:sectPrChange>"
+        )
+        sect._sectPr.append(change)
+        buf = BytesIO()
+        d.save(buf)
+        return buf.getvalue()
+
+    def test_reject_reverts_page_size_but_keeps_header_and_footer(self):
+        data = self._build()
+        engine = RedlineEngine(BytesIO(data), author="QA")
+        stats = engine.process_batch([RejectChange(target_id="70")])
+        assert stats["actions_applied"] == 1
+
+        out = Document(BytesIO(engine.save_to_stream().getvalue()))
+        sect_el = out.element.body.find(qn("w:sectPr"))
+
+        assert len(sect_el.findall(qn("w:headerReference"))) == 1, (
+            "rejecting the section-properties change deleted the header reference; "
+            f"sectPr children: {[c.tag.split('}')[-1] for c in sect_el]}"
+        )
+        assert len(sect_el.findall(qn("w:footerReference"))) == 1, (
+            "rejecting the section-properties change deleted the footer reference; "
+            f"sectPr children: {[c.tag.split('}')[-1] for c in sect_el]}"
+        )
+        # The parts themselves must still be reachable, not just the elements.
+        assert out.sections[0].header.paragraphs[0].text == "HEADER TEXT"
+        assert out.sections[0].footer.paragraphs[0].text == "FOOTER TEXT"
+
+        # The revert itself still happened: stored (landscape) values are live.
+        pg_sz = sect_el.find(qn("w:pgSz"))
+        assert pg_sz.get(qn("w:w")) == "15840"
+        assert pg_sz.get(qn("w:orient")) == "landscape"
+        # And the change record is gone.
+        assert sect_el.find(qn("w:sectPrChange")) is None
+
+    def test_header_footer_references_still_precede_section_contents(self):
+        """CT_SectPr sequences EG_HdrFtrReferences before EG_SectPrContents;
+        preserving the references in place must not violate that order."""
+        data = self._build()
+        engine = RedlineEngine(BytesIO(data), author="QA")
+        engine.process_batch([RejectChange(target_id="70")])
+        out = Document(BytesIO(engine.save_to_stream().getvalue()))
+        tags = [c.tag.split("}")[-1] for c in out.element.body.find(qn("w:sectPr"))]
+        refs = [i for i, t in enumerate(tags) if t.endswith("Reference")]
+        others = [i for i, t in enumerate(tags) if not t.endswith("Reference")]
+        assert refs and others, tags
+        assert max(refs) < min(others), f"header/footer refs must sort first: {tags}"
 
 
 # ---------------------------------------------------------------------------

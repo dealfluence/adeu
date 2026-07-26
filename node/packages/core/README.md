@@ -7,7 +7,7 @@
 
 `@adeu/core` is a zero-dependency TypeScript library that allows AI agents and LLMs to safely read and edit Microsoft Word (`.docx`) files. It translates complex OpenXML into token-efficient CriticMarkup (Markdown) and applies AI text edits as native Word Tracked Changes and Comments.
 
-This is the pure TypeScript implementation of the [Adeu Python SDK](https://github.com/dealfluence/adeu), built using `@xmldom/xmldom` and `jszip` to run entirely in Node.js.
+This is the pure TypeScript implementation of the [Adeu Python SDK](https://github.com/dealfluence/adeu), built on a purpose-built OOXML parser and `fflate` to run entirely in Node.js.
 
 ## Installation
 

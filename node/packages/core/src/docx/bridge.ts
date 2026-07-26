@@ -6,6 +6,7 @@ import {
   findAllDescendants,
   serializeXml,
 } from "./dom.js";
+import { markPartClean } from "./cell-anchor.js";
 
 export class Relationship {
   constructor(
@@ -148,9 +149,18 @@ export class DocumentObject {
 
   /**
    * Main entrypoint for loading a DOCX buffer into the DOM wrapper.
+   *
+   * `opts.onPart(done, total)` is an optional progress hook awaited every
+   * `partTickEvery` parsed parts (default 200). Long loads (thousands of
+   * parts) use it to surface progress to MCP clients and to yield the event
+   * loop so those notifications actually flush. Zero overhead when omitted.
    */
   public static async load(
     buffer: Buffer | ArrayBuffer,
+    opts?: {
+      onPart?: (done: number, total: number) => void | Promise<void>;
+      partTickEvery?: number;
+    },
   ): Promise<DocumentObject> {
     const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     const unzipped = unzipSync(u8);
@@ -169,15 +179,34 @@ export class DocumentObject {
     }
 
     // 2. Pre-load all XML parts to allow synchronous traversal later
+    const onPart = opts?.onPart;
+    const tickEvery = Math.max(1, opts?.partTickEvery ?? 200);
+    let totalXmlParts = 0;
+    if (onPart) {
+      for (const path of Object.keys(unzipped)) {
+        if (path.endsWith(".xml") || path.endsWith(".rels")) totalXmlParts++;
+      }
+    }
+    let parsedParts = 0;
     for (const [path, fileData] of Object.entries(unzipped)) {
       if (path.endsWith(".xml") || path.endsWith(".rels")) {
         const text = strFromU8(fileData);
         const doc = parseXml(text);
+        // Freshly parsed DOM == blob by definition: pin the cleanliness
+        // marker the engine's lazy transactional snapshot keys on.
+        markPartClean(doc);
         const cType = contentTypes["/" + path] || "application/xml";
         const part = new Part("/" + path, text, doc.documentElement, cType);
         part.package = pkg;
         pkg.parts.push(part);
+        parsedParts++;
+        if (onPart && parsedParts % tickEvery === 0) {
+          await onPart(parsedParts, totalXmlParts);
+        }
       }
+    }
+    if (onPart && totalXmlParts > 0) {
+      await onPart(totalXmlParts, totalXmlParts);
     }
 
     // 3. Resolve Relationships for the main document
@@ -252,6 +281,14 @@ export class DocumentObject {
           '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xmlStr;
       }
       this.pkg.unzipped[part.partname.substring(1)] = strToU8(xmlStr); // Strip leading slash
+      // Re-baseline: the serialized XML IS the file's new content, so it
+      // becomes the part's pristine state. This keeps the lazy transactional
+      // snapshot cheap ACROSS saves — a later batch on this same in-memory
+      // document (the hot-DOM chained-edit path) sees clean parts again and
+      // rolls back by re-parsing this blob, i.e. exactly to the saved state.
+      part.blob = xmlStr;
+      const od = part._element.ownerDocument;
+      if (od) markPartClean(od);
     }
     return Buffer.from(zipSync(this.pkg.unzipped));
   }
