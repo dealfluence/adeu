@@ -55,6 +55,23 @@ single JSON document and the human-readable progress logs are suppressed.
   the file; the JSON envelope goes to stdout).
 * **`adeu diff --json`** — prints the raw edit array (pre-existing behavior).
 * **`adeu accept-all --json`** — prints `{"status": "ok", "output_path": ...}`.
+* **`adeu sanitize --json`** — prints the `sanitize_docx` MCP tool's payload
+  field-for-field (`status`, `output_path`, `tracked_changes_found`,
+  `tracked_changes_accepted`, `comments_removed`, `comments_kept`,
+  `metadata_stripped`, `warnings`, `report_text`) plus the CLI-only `input`, so
+  one parser serves both surfaces. **`status` here is the document verdict** —
+  `clean`, `clean_with_warnings`, or `blocked` — *not* an invocation outcome:
+  success is the exit code. A refusal (unresolved tracked changes) is a normal
+  payload, `{"status": "blocked", "error": "blocked", "message": <one-line
+  reason>, "report_text": <full report>}`, and exits 1.
+  Batch mode (`--outdir`) wraps them in a CLI-shaped envelope — `status`
+  (`ok`/`failed`, batch-level), `outdir`, `total`, `succeeded`, `blocked`,
+  `results` — where `results` holds one entry per input **in input order**, so
+  `len(results) == total` always holds and every failure (`blocked`,
+  `invalid_docx`, `file_not_found`) is identified by its `input`. A failed
+  batch adds `{"error": "batch_failed", "message": ...}` and writes no outputs.
+  `--json` cannot be combined with `--report-file -` (both target stdout); the
+  report is in `report_text` instead.
 
 ## 4. Strict I/O discipline
 
@@ -83,5 +100,5 @@ adeu accept-all contract_redlined.docx --json         # finalize (optional)
 ```
 
 Regression coverage lives in `python/tests/test_cli_features.py`
-(`test_cli_apply_json*`, `test_cli_accept_all*`,
+(`test_cli_apply_json*`, `test_cli_accept_all*`, `test_cli_sanitize_json*`,
 `test_cli_debug_logs_go_to_stderr_only`).

@@ -77,9 +77,14 @@ uvx adeu sanitize redline.docx -o clean.docx --author "My Firm" --report
 
 # Keep redline markup but redact author metadata:
 uvx adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
+
+# Machine-readable result (same fields as the sanitize_docx MCP tool):
+uvx adeu sanitize redline.docx -o clean.docx --json
 ```
 
 Use `--report` to print a sanitization report — useful for verifying what was removed.
+
+With `--json`, stdout carries the same payload as the `sanitize_docx` MCP tool (`status`, `output_path`, `tracked_changes_found`, `tracked_changes_accepted`, `comments_removed`, `comments_kept`, `metadata_stripped`, `warnings`, `report_text`) plus `input`. `status` is the **document verdict** — `clean`, `clean_with_warnings`, or `blocked` — so check the exit code for success, not `status == "ok"`. A document with unresolved tracked changes is refused with `{"status": "blocked", "error": "blocked", "message": "<one-line reason>", "report_text": "<full report>"}` and exit 1 — re-run with `--accept-all` or `--keep-markup`. Batch mode (`--outdir`) returns `{"status": "ok"|"failed", "outdir", "total", "succeeded", "blocked", "results"}` with one `results` entry per input, in input order, each naming its `input` — so a failed batch tells you exactly which documents failed and why. Batches are all-or-nothing: any failure means no outputs were written. Do not combine `--json` with `--report-file -` (both write to stdout); the report is already in `report_text`.
 
 ### `adeu accept-all` — accept every change and drop every comment
 

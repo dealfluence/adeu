@@ -660,6 +660,174 @@ def test_cli_apply_json_validation_error(tmp_path, capsys):
     assert not out_path.exists()
 
 
+# ---------------------------------------------------------------------------
+# `adeu sanitize --json`
+#
+# The payload deliberately mirrors the `sanitize` MCP tool's field names
+# (mcp_components/tools/sanitize.py) so a single parser serves both surfaces:
+# `status` is the DOCUMENT verdict, never an invocation outcome — success is
+# the exit code. These tests pin that contract.
+# ---------------------------------------------------------------------------
+
+# Field-for-field the MCP tool's payload plus the CLI-only `input`.
+_SANITIZE_JSON_KEYS = {
+    "status",
+    "input",
+    "output_path",
+    "tracked_changes_found",
+    "tracked_changes_accepted",
+    "comments_removed",
+    "comments_kept",
+    "metadata_stripped",
+    "warnings",
+    "report_text",
+}
+
+
+def _run_cli(args, capsys):
+    """Invoke the CLI in-process; returns (exit_code, stdout, stderr).
+
+    Mirrors the helper in test_cli_bug_repro.py — the sanitize --json contract
+    is about exit codes AND stream separation, so every assertion needs all
+    three at once.
+    """
+    from unittest.mock import patch
+
+    from adeu.cli import main
+
+    code = 0
+    with patch.object(sys, "argv", ["adeu"] + [str(a) for a in args]):
+        try:
+            main()
+        except SystemExit as e:
+            code = e.code or 0
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _make_clean_docx(path: Path, text: str = "A clean paragraph.") -> Path:
+    import docx
+
+    doc = docx.Document()
+    doc.add_paragraph(text)
+    doc.save(str(path))
+    return path
+
+
+def test_cli_sanitize_json_single_file(tmp_path, capsys):
+    input_path = _make_clean_docx(tmp_path / "clean.docx")
+    out_path = tmp_path / "clean_sanitized.docx"
+
+    code, stdout, stderr = _run_cli(["sanitize", input_path, "-o", out_path, "--json"], capsys)
+
+    assert code == 0
+    assert out_path.exists()
+    payload = json.loads(stdout)
+    assert set(payload) == _SANITIZE_JSON_KEYS
+    # `status` is the document verdict, NOT "ok".
+    assert payload["status"] in ("clean", "clean_with_warnings")
+    assert payload["input"] == str(input_path)
+    assert payload["output_path"] == str(out_path)
+    assert payload["tracked_changes_found"] == 0
+    assert isinstance(payload["metadata_stripped"], list)
+    assert "Sanitize Report:" in payload["report_text"]
+    # --json suppresses the decorative success line.
+    assert "✅ Sanitized" not in stderr
+
+
+def test_cli_sanitize_json_blocked_document(tmp_path, capsys):
+    """A refusal is a well-understood outcome: `status: "blocked"` plus the
+    report, the same shape the MCP tool returns — not a malformed-input error."""
+    fixture_path = get_fixture_path("dirty_sample.docx")
+    out_path = tmp_path / "blocked.docx"
+
+    code, stdout, stderr = _run_cli(["sanitize", fixture_path, "-o", out_path, "--json"], capsys)
+
+    assert code == 1
+    assert not out_path.exists()
+    payload = json.loads(stdout)
+    assert payload["status"] == "blocked"
+    assert payload["error"] == "blocked"
+    assert payload["input"] == str(fixture_path)
+    # `message` is the one-line reason, not the whole banner-wrapped report.
+    assert "unresolved tracked changes" in payload["message"]
+    assert "\n" not in payload["message"]
+    assert "BLOCKED:" in payload["report_text"]
+    # The human report still reaches stderr.
+    assert "BLOCKED" in stderr
+
+
+def test_cli_sanitize_json_batch_success(tmp_path, capsys):
+    first = _make_clean_docx(tmp_path / "first.docx")
+    second = _make_clean_docx(tmp_path / "second.docx", "Another clean paragraph.")
+    outdir = tmp_path / "out"
+
+    code, stdout, stderr = _run_cli(["sanitize", first, second, "--outdir", outdir, "--json"], capsys)
+
+    assert code == 0
+    payload = json.loads(stdout)
+    assert payload["status"] == "ok"  # batch-level, unlike the per-document verdict
+    assert (payload["total"], payload["succeeded"], payload["blocked"]) == (2, 2, 0)
+    assert [r["input"] for r in payload["results"]] == [str(first), str(second)]
+    assert all(set(r) == _SANITIZE_JSON_KEYS for r in payload["results"])
+    assert (outdir / "first.docx").exists() and (outdir / "second.docx").exists()
+    assert "Batch Summary" not in stderr
+
+
+def test_cli_sanitize_json_batch_identifies_every_failure(tmp_path, capsys):
+    """Regression: under --json a batch failure used to report only a count —
+    the per-file diagnostics were suppressed on stderr and absent from the
+    payload, so automation could not tell WHICH document failed or why."""
+    good = _make_clean_docx(tmp_path / "good.docx")
+    corrupt = tmp_path / "corrupt.docx"
+    corrupt.write_bytes(b"not a zip file at all")
+    missing = tmp_path / "missing.docx"
+    blocked_doc = get_fixture_path("dirty_sample.docx")
+    outdir = tmp_path / "out"
+
+    code, stdout, stderr = _run_cli(
+        ["sanitize", good, corrupt, missing, blocked_doc, "--outdir", outdir, "--json"],
+        capsys,
+    )
+
+    assert code == 1
+    payload = json.loads(stdout)
+    assert payload["status"] == "failed"
+    assert (payload["total"], payload["succeeded"], payload["blocked"]) == (4, 1, 3)
+    assert payload["error"] == "batch_failed"
+
+    # One entry per input, in input order: len(results) == total always holds.
+    results = payload["results"]
+    assert len(results) == payload["total"]
+    assert [r["input"] for r in results] == [str(good), str(corrupt), str(missing), str(blocked_doc)]
+    assert results[0]["status"] in ("clean", "clean_with_warnings")
+    assert (results[1]["status"], results[1]["error"]) == ("error", "invalid_docx")
+    assert (results[2]["status"], results[2]["error"]) == ("error", "file_not_found")
+    assert (results[3]["status"], results[3]["error"]) == ("blocked", "blocked")
+    assert "unresolved tracked changes" in results[3]["message"]
+
+    # Failures stay on stderr too — --json must never DROP a diagnostic.
+    assert "corrupt.docx" in stderr and "missing.docx" in stderr
+    # All-or-nothing: a failed batch writes no outputs and leaves no staging files.
+    assert list(outdir.glob("*")) == []
+
+
+def test_cli_sanitize_json_rejects_report_on_stdout(tmp_path, capsys):
+    """--json and --report-file - both target stdout; interleaving them would
+    break the one-JSON-document-per-invocation contract (cli-agent-spec §4)."""
+    input_path = _make_clean_docx(tmp_path / "clean.docx")
+
+    code, stdout, stderr = _run_cli(
+        ["sanitize", input_path, "-o", tmp_path / "out.docx", "--json", "--report-file", "-"],
+        capsys,
+    )
+
+    assert code == 2
+    assert stdout == ""
+    assert "mutually exclusive" in stderr
+    assert "report_text" in stderr
+
+
 def test_cli_accept_all_workflow(tmp_path, capsys):
     from io import BytesIO
     from unittest.mock import patch

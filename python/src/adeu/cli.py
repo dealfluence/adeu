@@ -1453,8 +1453,23 @@ def handle_markup(args):
     print(stats_line, file=sys.stderr)
 
 
+def _sanitize_block_reason(report_text: str) -> str:
+    """
+    One-line diagnostic for a SanitizeError, for the `message` field of a
+    --json payload. A policy block renders as a full report whose `BLOCKED:`
+    line carries the actionable reason; operational SanitizeErrors (an
+    unwritable output, an incompatible --baseline) are already single-line.
+    The full text always travels alongside in `report_text`.
+    """
+    for line in report_text.splitlines():
+        if line.startswith("BLOCKED: "):
+            return line[len("BLOCKED: ") :]
+    return report_text.strip()
+
+
 def handle_sanitize(args: argparse.Namespace):
-    _set_json_mode(getattr(args, "json", False))
+    json_mode = bool(getattr(args, "json", False))
+    _set_json_mode(json_mode)
     from adeu.redline.engine import describe_illegal_control_chars
 
     author_ctrl = describe_illegal_control_chars(args.author or "")
@@ -1482,6 +1497,17 @@ def handle_sanitize(args: argparse.Namespace):
         print(
             "❌ -o/--output and --outdir are mutually exclusive: -o names a single output file, "
             "--outdir selects batch mode. Pass exactly one of them.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if json_mode and _is_stdout_path(args.report_file):
+        # Both write to stdout, and the report text ahead of the JSON object
+        # breaks the one-JSON-document-per-invocation contract (cli-agent-spec
+        # §4). The payload already carries the report in `report_text`.
+        print(
+            "❌ --json and --report-file - are mutually exclusive: both write to stdout, so the "
+            "report text would corrupt the JSON document. Drop --report-file - and read the "
+            "report from the payload's report_text field.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1530,20 +1556,28 @@ def handle_sanitize(args: argparse.Namespace):
                 if args.report_file:
                     _write_report_file(args.report_file, result.report_text)
 
-            if getattr(args, "json", False):
-                json_result = {
-                    "status": "ok",
-                    "sanitize_status": result.status,
-                    "input": str(input_path),
-                    "output_path": str(output_path),
-                    "tracked_changes_found": result.tracked_changes_found,
-                    "tracked_changes_accepted": result.tracked_changes_accepted,
-                    "comments_removed": result.comments_removed,
-                    "comments_kept": result.comments_kept,
-                    "metadata_stripped": result.metadata_stripped,
-                    "warnings": result.warnings,
-                }
-                print(json.dumps(json_result))
+            if json_mode:
+                # Field-for-field the `sanitize` MCP tool's payload (plus the
+                # CLI-only `input`), so one parser serves both surfaces — the
+                # CLI is the sandboxed stand-in for the tool. `status` is the
+                # DOCUMENT verdict ("clean"/"clean_with_warnings"/"blocked"),
+                # never an invocation outcome: success is the exit code.
+                print(
+                    json.dumps(
+                        {
+                            "status": result.status,
+                            "input": str(input_path),
+                            "output_path": str(output_path),
+                            "tracked_changes_found": result.tracked_changes_found,
+                            "tracked_changes_accepted": result.tracked_changes_accepted,
+                            "comments_removed": result.comments_removed,
+                            "comments_kept": result.comments_kept,
+                            "metadata_stripped": result.metadata_stripped,
+                            "warnings": result.warnings,
+                            "report_text": result.report_text,
+                        }
+                    )
+                )
             else:
                 print(f"✅ Sanitized → {output_path}", file=sys.stderr)
 
@@ -1554,8 +1588,22 @@ def handle_sanitize(args: argparse.Namespace):
             print(str(e), file=sys.stderr)
             if args.report_file:
                 _write_report_file(args.report_file, str(e))
-            if getattr(args, "json", False):
-                print(json.dumps({"error": "invalid_input", "message": str(e)}))
+            if json_mode:
+                # A refusal is a well-understood outcome, not a malformed
+                # input: it travels as `status: "blocked"` + `report_text`,
+                # the same shape the MCP tool returns, alongside the CLI's
+                # {error, message} pair.
+                print(
+                    json.dumps(
+                        {
+                            "status": "blocked",
+                            "input": str(input_path),
+                            "error": "blocked",
+                            "message": _sanitize_block_reason(str(e)),
+                            "report_text": str(e),
+                        }
+                    )
+                )
             sys.exit(1)
         except FileNotFoundError as e:
             _cli_error("file_not_found", str(e))
@@ -1610,6 +1658,10 @@ def handle_sanitize(args: argparse.Namespace):
         # artifacts too: the finally-sweep below guarantees none survive a
         # failed batch, whatever the exit path (QA 2026-07-19 v8 F-02).
         all_reports: list[SanitizeResult | SanitizeError] = []
+        # One --json entry per input, in input order, whatever the outcome:
+        # `len(results) == total` always holds, so automation identifies every
+        # failure (and WHICH document failed) from the payload alone.
+        json_results: List[Dict[str, Any]] = []
         staged: List[tuple[Path, Path]] = []
         blocked = 0
         succeeded = 0
@@ -1619,6 +1671,14 @@ def handle_sanitize(args: argparse.Namespace):
                 if not input_path.exists():
                     print(f"❌ File not found: {input_path}", file=sys.stderr)
                     blocked += 1
+                    json_results.append(
+                        {
+                            "status": "error",
+                            "input": str(input_path),
+                            "error": "file_not_found",
+                            "message": f"File not found: {input_path}",
+                        }
+                    )
                     continue
 
                 output_path = outdir / input_path.name
@@ -1645,18 +1705,42 @@ def handle_sanitize(args: argparse.Namespace):
                     result.output_path = str(output_path)
                     staged.append((staging_path, output_path))
                     all_reports.append(result)
+                    json_results.append(
+                        {
+                            "status": result.status,
+                            "input": str(input_path),
+                            "output_path": result.output_path,
+                            "tracked_changes_found": result.tracked_changes_found,
+                            "tracked_changes_accepted": result.tracked_changes_accepted,
+                            "comments_removed": result.comments_removed,
+                            "comments_kept": result.comments_kept,
+                            "metadata_stripped": result.metadata_stripped,
+                            "warnings": result.warnings,
+                            "report_text": result.report_text,
+                        }
+                    )
                     succeeded += 1
                     status = "clean"
                     if result.warnings:
                         status = f"clean ({len(result.warnings)} warning{'s' if len(result.warnings) > 1 else ''})"
-                    if not getattr(args, "json", False):
+                    # Per-file progress is decorative under --json; per-file
+                    # FAILURES below are not, and stay on stderr either way.
+                    if not json_mode:
                         print(f"  ✓ {input_path.name:<30} — {status}", file=sys.stderr)
 
                 except SanitizeError as e:
                     blocked += 1
-                    if not getattr(args, "json", False):
-                        print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
+                    print(f"  ✗ {input_path.name:<30} — BLOCKED", file=sys.stderr)
                     all_reports.append(e)
+                    json_results.append(
+                        {
+                            "status": "blocked",
+                            "input": str(input_path),
+                            "error": "blocked",
+                            "message": _sanitize_block_reason(str(e)),
+                            "report_text": str(e),
+                        }
+                    )
 
                 except Exception as e:
                     # An invalid input blocks the batch like any other failure;
@@ -1664,18 +1748,23 @@ def handle_sanitize(args: argparse.Namespace):
                     # the staged-file cleanup and leaves document content
                     # behind as .staging.tmp files (QA 2026-07-19 v8 F-02).
                     blocked += 1
-                    if not getattr(args, "json", False):
-                        if (
-                            "bad zip signature" in str(e)
-                            or "not a zip file" in str(e).lower()
-                            or "not a valid DOCX file" in str(e)
-                        ):
-                            print(
-                                f"  ✗ {input_path.name:<30} — ERROR: not a valid DOCX file (bad zip signature)",
-                                file=sys.stderr,
-                            )
-                        else:
-                            print(f"  ✗ {input_path.name:<30} — ERROR: {e}", file=sys.stderr)
+                    if (
+                        "bad zip signature" in str(e)
+                        or "not a zip file" in str(e).lower()
+                        or "not a valid DOCX file" in str(e)
+                    ):
+                        code, message = "invalid_docx", "not a valid DOCX file (bad zip signature)"
+                    else:
+                        code, message = "invalid_input", str(e)
+                    print(f"  ✗ {input_path.name:<30} — ERROR: {message}", file=sys.stderr)
+                    json_results.append(
+                        {
+                            "status": "error",
+                            "input": str(input_path),
+                            "error": code,
+                            "message": message,
+                        }
+                    )
 
             if blocked == 0:
                 for staging_path, output_path in staged:
@@ -1700,36 +1789,18 @@ def handle_sanitize(args: argparse.Namespace):
         if blocked > 0:
             summary += "\nBatch failed — no outputs were written (the batch is all-or-nothing)."
 
-        if getattr(args, "json", False):
-            batch_results: list[dict[str, Any]] = []
-            for r in all_reports:
-                if isinstance(r, SanitizeError):
-                    batch_results.append(
-                        {
-                            "status": "blocked",
-                            "error": str(r),
-                        }
-                    )
-                else:
-                    batch_results.append(
-                        {
-                            "output_path": r.output_path,
-                            "status": r.status,
-                            "tracked_changes_found": r.tracked_changes_found,
-                            "tracked_changes_accepted": r.tracked_changes_accepted,
-                            "comments_removed": r.comments_removed,
-                            "comments_kept": r.comments_kept,
-                            "metadata_stripped": r.metadata_stripped,
-                            "warnings": r.warnings,
-                        }
-                    )
-            json_output = {
+        if json_mode:
+            # Batch has no MCP counterpart, so the envelope is CLI-shaped:
+            # here `status` describes the BATCH ("ok"/"failed"), while each
+            # results[] entry carries the per-document verdict under the MCP
+            # tool's field names.
+            json_output: Dict[str, Any] = {
                 "status": "ok" if blocked == 0 else "failed",
                 "outdir": str(outdir),
                 "total": total,
                 "succeeded": succeeded,
                 "blocked": blocked,
-                "results": batch_results,
+                "results": json_results,
             }
             if blocked > 0:
                 json_output["error"] = "batch_failed"

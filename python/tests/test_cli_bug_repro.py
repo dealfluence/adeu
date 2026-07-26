@@ -1154,7 +1154,11 @@ def test_cli_sanitize_json_flag(tmp_path, capsys):
     assert code == 0, f"adeu sanitize --json failed with code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
     assert output_path.exists(), f"Expected output document {output_path} to exist"
 
-    # 4. Verify stdout contains valid JSON output
+    # 4. stdout carries exactly one JSON document describing the sanitization.
+    #    `status` is the DOCUMENT verdict (mirroring the sanitize_docx MCP
+    #    tool), and the payload names both ends of the operation. Full contract
+    #    coverage lives in test_cli_features.py::test_cli_sanitize_json_*.
     data = json.loads(stdout)
-    assert isinstance(data, dict)
-    assert data.get("status") == "ok" or "output_path" in data or "input" in data
+    assert data["status"] in ("clean", "clean_with_warnings")
+    assert data["input"] == str(input_path)
+    assert data["output_path"] == str(output_path)
