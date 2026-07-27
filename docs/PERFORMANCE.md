@@ -376,19 +376,23 @@ the full regression suite stayed green and the projection goldens
 
 ### 7.3 Known remaining work (Python)
 
-1. **Run-loop fusion (IN PROGRESS — leaf fusion shipped 2026-07-27, see
-   §7.4).** ~9.5 s of cold projection and ~11 s of every mapper (re)build is
-   per-run Python overhead: each run's children are walked ~3×
-   (`process_run_element` events, `get_run_style_markers`, `get_run_text`)
-   plus a python-docx `Run` wrapper per run (568 K on the stress doc).
-   §7.4 fused the last two of those three walks (−19 % projection). The
-   remaining item is the harder one: `process_run_element` already walks
-   every run's children to detect drawings/fields/references, so the fused
-   text+marker computation should happen INSIDE that existing walk and be
-   carried on the yielded item, instead of downstream re-walking. That means
-   changing what `iter_paragraph_content` yields, which the mapper's
-   `TextSpan.run` and the engine depend on for run identity — hence still
-   deferred, and still golden-gated.
+1. **Run-loop fusion (SHIPPED 2026-07-27 in two steps — see §8.2 and §8.3c;
+   the projection is now 6.53 s, down from 8.91 s at the start of that day).**
+   The original diagnosis was right: each run's children were walked ~3×
+   (`process_run_element` events, `get_run_style_markers`, `get_run_text`),
+   plus a python-docx `Run` wrapper per run (560 K on the stress doc).
+   §8.2 fused the two leaf walks into one function (−0.68 s and −1.06 s in two
+   parts); §8.3c then moved that work INTO the event stream's existing child
+   walk, carried on a `ProjectedRun`, removing the second walk entirely
+   (−0.81 s more). Cumulative: projection 8.91 → 6.53 s (−27 %), mapper build
+   13.17 → 10.43 s (−21 %), end-to-end cold read −20 % (A/B).
+
+   What remains in this area is SMALLER than expected and not obviously worth
+   taking: the stream still costs ~3.96 s, which is per-child branch dispatch
+   and per-run object construction. Eliminating the `Run` wrapper caps at
+   ~0.4–0.5 s and would require giving the two twins different item types —
+   precisely the twin divergence that caused the six drift mechanisms in
+   §7.3.3. Measure before attempting; do not size it from a profile.
 2. **Hot-engine slot (§5.4a analog).** Deferred: with the mapper build
    dominating construction, reusing the read's parse saves only ~2.7 s per
    edit; revisit after (1) changes the ratio. Output-file read priming IS
@@ -542,6 +546,64 @@ most sections genuinely HAVE definitions and are yielded anyway; skipping
 container construction for linked-to-previous sections would help almost
 nothing. **Not worth changing twin-shared part-iteration code for 0.8 %** —
 recorded here so it is not re-derived from a profile again.
+
+### 8.3c Run-loop fusion, step 2: text/flags carried by the event stream
+
+`iter_paragraph_content` already walks every run's children (to find drawings,
+fields and references). Both twins then walked each run AGAIN for its text and
+style markers. That second walk is now gone: `process_run_element` accumulates
+the projected text and the bold/italic flags in its existing loop and yields a
+`ProjectedRun`.
+
+Design points worth keeping:
+
+- **Flags, not marker strings.** The stream cannot know `is_heading` (a
+  property of the enclosing paragraph), so it carries booleans and callers
+  apply `markers_from_flags(...)`. Threading `is_heading` into the stream would
+  have created a second code path through twin-shared code.
+- **`ProjectedRun` subclasses `Run`**, so every `isinstance(item, Run)` check
+  and every consumer that treats the item as a python-docx run keeps working;
+  the mapper still stores it in `TextSpan.run`. Both twins reject a bare `Run`
+  loudly rather than silently re-walking, so a bypassed stream cannot quietly
+  break the twin contract.
+- The branches are **duplicated** between `run_text_and_flags` (standalone) and
+  `process_run_element` (inlined — it must `yield` from the same loop, so it
+  cannot delegate without re-walking). `tests/test_run_fusion_equivalence.py`
+  cross-checks every value the stream produces against the standalone walk for
+  26 run shapes × both `is_heading` values. Change both, or neither.
+
+Measured (VVBIG unless noted):
+
+| | before | after |
+|---|---|---|
+| projection | 7.342 s | **6.531 s** (−11 %) |
+| mapper build | 11.364 s | 10.431 s (−8 %) |
+| BIGDOC projection (control) | 0.284 s | 0.269 s (−5 %) |
+| cold read end-to-end, A/B vs parent commit | — | **0.803× (−20 %)** |
+
+The end-to-end A/B was run alternating base/current in one session because
+absolute timings on that machine were inflated ~4× by memory pressure (a VVBIG
+read peaks in the GBs); the ratio is valid even when the absolutes are not.
+Do not compare absolute numbers across sections measured on different days.
+
+**Two estimates in this document were wrong; both corrected here.**
+
+1. §8.3 predicted ~2–3 s from this step. Actual: ~0.8 s on the projection. The
+   error came from a "fused prototype lower bound" probe that omitted the event
+   branches, the `ProjectedRun` construction and the event yielding — it
+   measured *less work*, not *the same work fused*. The honest accounting: the
+   stream went 3.173 → 3.959 s (+0.786 s of in-loop work) while removing
+   1.948 s of second-walk cost, i.e. ~1.16 s net in that area.
+2. **Generators are NOT a cost centre.** Three-layer `yield from` nesting costs
+   **0.060 s for 571,564 items**. "Eliminate the nested generators" was on the
+   roadmap on the strength of a cProfile reading; it is now off it. The
+   remaining ~3.96 s of stream time is per-child branch dispatch plus
+   per-run object construction, not generator machinery.
+
+Method note, twice learned the hard way: size a Python win with a plain loop
+over real data, and make any prototype do ALL the work the real code does.
+cProfile inflated the header/footer estimate ~7× (§8.3b) and a too-simple
+prototype inflated this one ~3×.
 
 ### 8.4 Golden harness (kept this time)
 

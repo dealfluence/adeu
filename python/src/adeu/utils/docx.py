@@ -485,6 +485,34 @@ class DocxEvent(NamedTuple):
     date: Optional[str] = None
 
 
+class ProjectedRun(Run):
+    """A run whose projected text and emphasis flags were computed during the
+    SINGLE child walk `iter_paragraph_content` already performs.
+
+    Why this exists: both Virtual Text twins used to walk every run's children
+    a second time (once for `get_run_text`, effectively again for the style
+    markers) after the event stream had already walked them to find drawings,
+    fields and references. On the VVBIG stress document that second walk cost
+    ~1.95 s of every projection and of every mapper rebuild (559 K runs, of
+    which 97.9 % produce no event at all).
+
+    It SUBCLASSES `Run`, so every existing `isinstance(item, Run)` check and
+    every consumer that treats the item as a python-docx run keeps working
+    unchanged — the extra attributes are purely additive.
+
+    `proj_bold` / `proj_italic` are flags rather than marker strings because
+    the marker form depends on `is_heading`, a property of the enclosing
+    paragraph that the stream does not know. Callers apply
+    `markers_from_flags(proj_bold, proj_italic, native_heading)`.
+    """
+
+    def __init__(self, r, parent, text: str, is_bold: bool, is_italic: bool):
+        super().__init__(r, parent)
+        self.proj_text = text
+        self.proj_bold = is_bold
+        self.proj_italic = is_italic
+
+
 ParagraphItem = Union[Run, DocxEvent]
 
 
@@ -825,10 +853,36 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 c_date = rPrChange.get(QN_W_DATE)
                 yield DocxEvent("fmt_start", c_id, c_auth, c_date)
 
+        # Projected text + emphasis flags are accumulated in THIS loop rather
+        # than by a second walk in each consumer — see ProjectedRun. These
+        # branches must stay identical to utils.docx.run_text_and_flags; the
+        # duplication is pinned by tests/test_run_fusion_equivalence.py.
+        text_parts: list[str] = []
+        is_bold = False
+        is_italic = False
+
         # Iterate children once to handle references, fields, and text
         for child in r_element:
             tag = child.tag
-            if tag == QN_W_DRAWING or tag == QN_W_OBJECT or tag == QN_W_PICT:
+            if tag == QN_W_T or tag == QN_W_DELTEXT:
+                raw = child.text
+                if raw:
+                    # Normalize literal tabs to spaces to match w:tab behavior.
+                    text_parts.append(raw.replace("\t", " ") if "\t" in raw else raw)
+            elif tag == QN_W_RPR:
+                b = child.find(QN_W_B)
+                if b is not None and b.get(QN_W_VAL) not in _OFF_VALS:
+                    is_bold = True
+                i = child.find(QN_W_I)
+                if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
+                    is_italic = True
+            elif tag == QN_W_TAB:
+                text_parts.append(" ")
+            elif tag == QN_W_CR:
+                text_parts.append("\n")
+            elif tag == QN_W_BR:
+                text_parts.append(_PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n")
+            elif tag == QN_W_DRAWING or tag == QN_W_OBJECT or tag == QN_W_PICT:
                 # Read-only graphic marker, rendered as ![alt](docx-image:id);
                 # floating text boxes disclose their text in the alt
                 # (QA 2026-07-18 M5, QA 2026-07-23 customer C4).
@@ -889,9 +943,16 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 if child.text:
                     current_instr += child.text
 
-        # Yield Run (if not hidden)
+        # Yield Run (if not hidden), carrying the text/flags computed above so
+        # consumers need not re-walk the run (see ProjectedRun).
         if not hide_result:
-            yield Run(r_element, paragraph)
+            if not text_parts:
+                text = ""
+            elif len(text_parts) == 1:
+                text = text_parts[0]
+            else:
+                text = "".join(text_parts)
+            yield ProjectedRun(r_element, paragraph, text, is_bold, is_italic)
 
         if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
@@ -995,6 +1056,43 @@ def get_run_text_and_markers(r_element, is_heading: bool) -> tuple[str, str, str
     `list(r_element)` it needs costs what the skipped branches save. Left out
     deliberately.
     """
+    text, is_bold, is_italic = run_text_and_flags(r_element)
+    prefix, suffix = markers_from_flags(is_bold, is_italic, is_heading)
+    return text, prefix, suffix
+
+
+def markers_from_flags(is_bold: bool, is_italic: bool, is_heading: bool) -> tuple[str, str]:
+    """Markdown emphasis markers for a run, from its already-known flags.
+
+    Split out from the run walk so the projection can carry cheap BOOLEANS
+    through the event stream and derive the marker strings at the point of use
+    — the stream cannot know `is_heading`, which is a property of the enclosing
+    paragraph, and threading it in would force a second code path.
+
+    Nesting order: bold outer, italic inner -> **_text_**. Headings suppress
+    bold (the '## ' prefix already carries the emphasis).
+    """
+    prefix = ""
+    suffix = ""
+    if is_bold and not is_heading:
+        prefix = "**"
+        suffix = "**"
+    if is_italic:
+        prefix += "_"
+        suffix = "_" + suffix
+    return prefix, suffix
+
+
+def run_text_and_flags(r_element) -> tuple[str, bool, bool]:
+    """One walk of a run's children -> (text, is_bold, is_italic).
+
+    NOTE: `process_run_element` deliberately INLINES these same branches into
+    its own child loop, because the entire point of that fusion is to walk each
+    run's children exactly once (it must `yield` events from the same loop, so
+    it cannot delegate here without re-walking). That duplication is pinned by
+    tests/test_run_fusion_equivalence.py, which cross-checks every value the
+    event stream produces against this function. Change both, or neither.
+    """
     is_bold = False
     is_italic = False
     parts: list[str] = []
@@ -1020,21 +1118,11 @@ def get_run_text_and_markers(r_element, is_heading: bool) -> tuple[str, str, str
         elif tag == QN_W_CR:
             parts.append("\n")
 
-    # Nesting order: Bold outer, Italic inner -> **_text_**
-    prefix = ""
-    suffix = ""
-    if is_bold and not is_heading:
-        prefix = "**"
-        suffix = "**"
-    if is_italic:
-        prefix += "_"
-        suffix = "_" + suffix
-
     if not parts:
-        return "", prefix, suffix
+        return "", is_bold, is_italic
     if len(parts) == 1:
-        return parts[0], prefix, suffix
-    return "".join(parts), prefix, suffix
+        return parts[0], is_bold, is_italic
+    return "".join(parts), is_bold, is_italic
 
 
 def get_run_text(run: Run) -> str:

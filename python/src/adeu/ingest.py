@@ -2,7 +2,7 @@
 import io
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, cast
 
 import structlog
 from docx import Document
@@ -15,17 +15,17 @@ from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.docx import (
     DocxEvent,
+    ProjectedRun,
     _get_style_cache,
     apply_formatting_to_segments,
     compute_change_pair_map,
     get_paragraph_prefix,
-    get_run_text,
-    get_run_text_and_markers,
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
     iter_document_parts_with_kind,
     iter_paragraph_content,
+    markers_from_flags,
     paragraph_mark_is_deleted,
     strip_bom_from_docx_bytes,
 )
@@ -468,9 +468,18 @@ def build_paragraph_text(
 
     for i, item in enumerate(items):
         if isinstance(item, Run):
-            # Fused: one walk of the run element for text AND style markers
-            # (was get_run_style_markers + get_run_text, two walks per run).
-            text, prefix, suffix = get_run_text_and_markers(item._element, native_heading)
+            # Fully fused: iter_paragraph_content already walked this run's
+            # children once and carried the result, so there is no second walk
+            # here at all — only the (pure) marker derivation.
+            if not isinstance(item, ProjectedRun):
+                # Loud rather than silent: a bare Run means someone produced
+                # items without iter_paragraph_content, and falling back to a
+                # re-walk here would hide that from the twin contract.
+                raise TypeError(
+                    "build_paragraph_text requires ProjectedRun items from iter_paragraph_content; got a bare Run"
+                )
+            text = item.proj_text
+            prefix, suffix = markers_from_flags(item.proj_bold, item.proj_italic, native_heading)
 
             if clean_view and active_del:
                 continue
@@ -556,7 +565,10 @@ def build_paragraph_text(
                         while j < len(items):
                             next_item = items[j]
                             if isinstance(next_item, Run):
-                                if not get_run_text(next_item):
+                                # Carried by the stream; the main loop above
+                                # already rejects bare Runs, so this cast is
+                                # safe and avoids re-walking the run.
+                                if not cast(ProjectedRun, next_item).proj_text:
                                     j += 1
                                     continue
                                 if (

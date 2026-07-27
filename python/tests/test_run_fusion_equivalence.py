@@ -29,6 +29,7 @@ from adeu.utils.docx import (
     get_run_style_markers,
     get_run_text,
     get_run_text_and_markers,
+    markers_from_flags,
 )
 
 # --------------------------------------------------------------------------
@@ -153,6 +154,56 @@ def test_fused_matches_current_public_helpers():
             text, pre, suf = get_run_text_and_markers(run._element, is_heading)
             assert text == get_run_text(run), f"{label}: text drift"
             assert (pre, suf) == get_run_style_markers(run, is_heading), f"{label}: marker drift"
+
+
+def test_stream_carried_values_match_the_standalone_walk():
+    """process_run_element INLINES the text/flag branches so it can walk each
+    run's children once. That duplicates run_text_and_flags, so this pins the
+    two against each other for every run shape — the drift this test exists to
+    catch would silently corrupt both projections.
+    """
+    from adeu.utils.docx import (
+        ProjectedRun,
+        iter_paragraph_content,
+        run_text_and_flags,
+    )
+
+    for label, xml in RUN_XML:
+        run = _make_run(xml)
+        paragraph = run._parent
+        streamed = [i for i in iter_paragraph_content(paragraph) if isinstance(i, ProjectedRun)]
+        # _make_run appends to a fresh paragraph, so exactly one run is present.
+        assert len(streamed) == 1, f"{label}: expected 1 streamed run, got {len(streamed)}"
+        item = streamed[0]
+
+        want_text, want_bold, want_italic = run_text_and_flags(run._element)
+        assert item.proj_text == want_text, f"{label}: stream text {item.proj_text!r} != walk {want_text!r}"
+        assert item.proj_bold == want_bold, f"{label}: bold flag drift"
+        assert item.proj_italic == want_italic, f"{label}: italic flag drift"
+
+        # And the end-to-end composition must still equal the old pair.
+        for is_heading in (False, True):
+            pre, suf = markers_from_flags(item.proj_bold, item.proj_italic, is_heading)
+            assert (item.proj_text, pre, suf) == (
+                old_get_run_text(run),
+                *old_get_run_style_markers(run, is_heading),
+            ), f"{label} (is_heading={is_heading}): stream != pre-fusion originals"
+
+
+def test_projected_run_is_usable_as_a_plain_run():
+    """ProjectedRun subclasses Run so existing isinstance checks and consumers
+    keep working; the mapper stores these in TextSpan.run."""
+    from adeu.utils.docx import ProjectedRun, get_visible_runs
+
+    run = _make_run("<w:r><w:rPr><w:b/></w:rPr><w:t>hello</w:t></w:r>")
+    visible = get_visible_runs(run._parent)
+    assert len(visible) == 1
+    item = visible[0]
+    assert isinstance(item, Run) and isinstance(item, ProjectedRun)
+    # python-docx surface still functional on the subclass.
+    assert item.text == "hello"
+    assert item.bold is True
+    assert item._element is run._element
 
 
 def test_old_reference_is_actually_exercised():
