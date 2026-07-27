@@ -235,6 +235,33 @@ def generate_edits_from_text(
     their inputs contain no CriticMarkup (the engine rejects fabricated
     markup) and their hunk granularity is pinned by round-trip tests.
     """
+    if not original_text and not modified_text:
+        return []
+    if original_text and not modified_text:
+        e = ModifyText(type="modify", target_text=original_text, new_text="", comment="Diff: Text deleted")
+        e._match_start_index = 0
+        return [e]
+    if not original_text and modified_text:
+        e = ModifyText(type="modify", target_text="", new_text=modified_text, comment="Diff: Text inserted")
+        e._match_start_index = 0
+        return [e]
+
+    if len(original_text) > 40 or len(modified_text) > 40:
+        import difflib
+
+        prefix_len, _ = trim_common_context(original_text, modified_text)
+        if prefix_len == 0:
+            sm_words = difflib.SequenceMatcher(None, original_text.split(), modified_text.split())
+            if sm_words.ratio() < 0.35:
+                e = ModifyText(
+                    type="modify",
+                    target_text=original_text,
+                    new_text=modified_text,
+                    comment="Diff: Replacement",
+                )
+                e._match_start_index = 0
+                return [e]
+
     dmp = diff_match_patch()
 
     # 1. Word-Level Tokenization & Encoding
@@ -512,6 +539,26 @@ def make_edits_self_contained(
 
     dropped: set = set()
 
+    def _has_real_content(s: str) -> bool:
+        if not s:
+            return False
+        if "{#" in s:
+            return True
+        cleaned = re.sub(r"[\s*_\~#|]+|\{\-\-|\-\-\}|\{\+\+|\+\+\}|\{>>|<<\}|\{==|==\}", "", s)
+        cleaned = re.sub(r"^\d+\.", "", cleaned)
+        return len(cleaned) > 0
+
+    def _is_valid_candidate(candidate: str, new_full: str, sim_text: str) -> bool:
+        if not candidate:
+            return False
+        if not _has_real_content(candidate):
+            return False
+        if "\n\n" in candidate and candidate.count("\n\n") != new_full.count("\n\n"):
+            non_empty = [p.strip() for p in candidate.split("\n\n") if p.strip()]
+            if len(non_empty) >= 2:
+                return False
+        return sim_text.count(candidate) == 1
+
     def _widen_in(h: _Hunk, h_pos: int, sim_text: str) -> "Tuple[int, int, Optional[_Hunk]]":
         """
         Computes the widened (start, end) for hunk `h` (at index h_pos in
@@ -530,14 +577,7 @@ def make_edits_self_contained(
         if right is not None:
             max_end = min(max_end, right.idx)
 
-        # Pure insertions widen LEFT-ONLY (right expansion only at a hard
-        # left edge): mirrored right context rides AFTER the inserted text in
-        # new_text, and trim_common_context resolves prefixes first — when
-        # the following text begins like the insertion (e.g. the projection's
-        # "1. " list marker), the mirrored suffix is consumed as prefix and
-        # the anchor lands INSIDE the marker, splitting it
-        # (QA 2026-07-19 ADEU-QA-002 A, list-item swap shape).
-        insertion = not h.target
+        insertion = not h.target or not _has_real_content(h.target)
 
         def _extend_right(pos: int) -> int:
             if insertion and pos == h.idx:
@@ -551,7 +591,10 @@ def make_edits_self_contained(
         start, end = h.idx, min(h.end, max_end)
         for _ in range(_MAX_CONTEXT_EXPANSIONS):
             candidate = original_text[start:end]
-            if candidate and sim_text.count(candidate) == 1:
+            prefix = original_text[start : h.idx]
+            suffix = original_text[h.end : end]
+            new_full = f"{prefix}{h.new}{suffix}"
+            if _is_valid_candidate(candidate, new_full, sim_text):
                 return start, end, None
             if start == min_start and end == max_end:
                 break
@@ -563,7 +606,10 @@ def make_edits_self_contained(
                 end = _extend_right(end)
 
         candidate = original_text[start:end]
-        if candidate and sim_text.count(candidate) == 1:
+        prefix = original_text[start : h.idx]
+        suffix = original_text[h.end : end]
+        new_full = f"{prefix}{h.new}{suffix}"
+        if _is_valid_candidate(candidate, new_full, sim_text):
             return start, end, None
 
         # Ambiguous. Prefer coalescing with the closer clamping neighbor.
@@ -1062,12 +1108,12 @@ def generate_structured_edits(
         e for e in edits if isinstance(e, ModifyText) and e._match_start_index is not None and not e._is_table_edit
     ]
     surviving = make_edits_self_contained(text_edits, text_orig, part_ranges=struct_orig.part_ranges)
-    if len(surviving) != len(text_edits):
-        # Coalescing absorbed neighboring hunks; drop the absorbed edit
-        # objects from the outgoing list too.
-        surviving_ids = set(map(id, surviving))
-        absorbed = {id(e) for e in text_edits if id(e) not in surviving_ids}
-        edits = [e for e in edits if id(e) not in absorbed]
+    non_text_edits = [
+        e
+        for e in edits
+        if not (isinstance(e, ModifyText) and e._match_start_index is not None and not e._is_table_edit)
+    ]
+    edits = non_text_edits + list(surviving)
     return edits, warnings
 
 
@@ -1129,7 +1175,8 @@ def _split_cross_paragraph_hunks(edits: List[ModifyText]) -> List[ModifyText]:
             out.append(e)
             continue
         parts = target.split("\n\n")
-        if len(parts) < 2 or not parts[0].strip() or not parts[-1].strip():
+        non_empty = [p.strip() for p in parts if p.strip()]
+        if len(non_empty) < 2:
             # One-sided shapes (separator-carrying deletions/insertions) are
             # the engine's supported merge protocol — leave them intact.
             out.append(e)
@@ -1253,10 +1300,7 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
             # start or end inside " | " separators and land in the wrong
             # cell. Prose pairs (and any block whose counts differ) keep the
             # word-level chunk diff.
-            if (i2 - i1) == (j2 - j1) and any(
-                _is_table_blob(orig_paragraphs[i1 + k]) or _is_table_blob(mod_paragraphs[j1 + k])
-                for k in range(i2 - i1)
-            ):
+            if (i2 - i1) == (j2 - j1):
                 for k in range(i2 - i1):
                     orig_p = orig_paragraphs[i1 + k]
                     mod_p = mod_paragraphs[j1 + k]
@@ -1271,10 +1315,23 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
                     if row_edits is not None:
                         edits.extend(row_edits)
                         continue
-                    pair_edits = generate_edits_from_text(orig_p, mod_p)
-                    for ce in pair_edits:
-                        ce._match_start_index = (ce._match_start_index or 0) + pair_offset
-                        edits.append(ce)
+                    import difflib
+
+                    sm_p = difflib.SequenceMatcher(None, orig_p.split(), mod_p.split())
+                    if sm_p.ratio() < 0.35:
+                        e = ModifyText(
+                            type="modify",
+                            target_text=orig_p,
+                            new_text=mod_p,
+                            comment="Diff: Replacement",
+                        )
+                        e._match_start_index = pair_offset
+                        edits.append(e)
+                    else:
+                        pair_edits = generate_edits_from_text(orig_p, mod_p)
+                        for ce in pair_edits:
+                            ce._match_start_index = (ce._match_start_index or 0) + pair_offset
+                            edits.append(ce)
                 continue
 
             orig_chunk = "\n\n".join(orig_paragraphs[i1:i2])

@@ -132,6 +132,7 @@ class ModifyText(BaseModel):
     _heading_path: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
     _is_table_edit: bool = PrivateAttr(default=False)
+    _has_markdown: bool = PrivateAttr(default=False)
     _original_target_text: Optional[str] = PrivateAttr(default=None)
     # (before, after) document text around the resolved match, snapshotted
     # before the batch mutates the DOM. Consumed by the preview builder.

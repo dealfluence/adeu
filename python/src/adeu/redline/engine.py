@@ -3933,9 +3933,11 @@ class RedlineEngine:
                     )
 
         has_markdown = False
-        if edit.target_text and ("**" in edit.target_text or "_" in edit.target_text):
+        if edit.new_text and ("**" in edit.new_text or "_" in edit.new_text):
             has_markdown = True
         if effective_new_text and ("**" in effective_new_text or "_" in effective_new_text):
+            has_markdown = True
+        if getattr(edit, "_has_markdown", False):
             has_markdown = True
 
         if has_markdown:
@@ -3955,6 +3957,7 @@ class RedlineEngine:
                 proxy_edit._match_start_index = effective_start_idx
                 proxy_edit._internal_op = "COMMENT_ONLY"
                 proxy_edit._active_mapper_ref = active_mapper
+                proxy_edit._has_markdown = True
                 return proxy_edit
 
             proxy_edit = ModifyText(
@@ -3967,6 +3970,7 @@ class RedlineEngine:
             proxy_edit._match_start_index = effective_start_idx
             proxy_edit._internal_op = effective_op
             proxy_edit._active_mapper_ref = active_mapper
+            proxy_edit._has_markdown = True
             return proxy_edit
 
         sub_edits = self._word_diff_sub_edits(
