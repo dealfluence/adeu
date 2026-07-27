@@ -1127,3 +1127,73 @@ def test_post_apply_verification_plain_text_without_heading_prefix(tmp_path, cap
     # 4. Assert that verification passes, return code is 0, and output file is written
     assert code == 0, f"adeu apply failed with code {code}.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
     assert out_path.exists(), f"Expected output file {out_path} to be created"
+
+
+def test_post_apply_verification_failure_edit_reports(tmp_path, capsys):
+    """
+    Verifies that when post-apply verification fails in `adeu apply`, the CLI report
+    and JSON stats accurately state that 0 edits were applied and no edits are falsely
+    logged as applied.
+    """
+    import json
+
+    import docx
+
+    # 1. Create a document with headings and paragraphs
+    doc_path = tmp_path / "doc_basic.docx"
+    doc = docx.Document()
+    doc.add_heading("Master Services Agreement", level=1)
+    doc.add_paragraph("1. Definitions")
+    doc.add_paragraph("1.1 Services means consulting services.")
+    doc.add_paragraph("1.2 Term means 24 months.")
+    doc.add_paragraph("2. Compensation")
+    doc.add_paragraph("2.1 Client shall pay $10,000 USD.")
+    doc.save(str(doc_path))
+
+    # 2. Create a modified text file that omits heading markup (# )
+    txt_path = tmp_path / "modified_text.txt"
+    txt_path.write_text(
+        "Master Services Agreement\n"
+        "1. Definitions\n"
+        "1.1 Services means consulting services.\n"
+        "1.2 Term means 24 months.\n"
+        "2. Compensation\n"
+        "2.1 Client shall pay $15,000 USD.\n",
+        encoding="utf-8",
+    )
+
+    out_path = tmp_path / "output.docx"
+
+    # 3. Run adeu apply (human-readable / stderr mode)
+    code, stdout, stderr = run_cli(
+        ["apply", str(doc_path), str(txt_path), "-o", str(out_path)],
+        capsys,
+    )
+
+    # 4. Assert verification failure and exit code 1
+    assert code == 1, f"Expected non-zero exit code on verification failure, got {code}"
+    assert not out_path.exists(), f"Output file {out_path} should not be written when verification fails"
+    assert "Verification failed" in stderr or "verification failed" in stderr
+
+    # 5. Assert report accuracy: must NOT claim edits were applied
+    assert "Edits: 0 applied" in stderr or "0 applied" in stderr, (
+        f"CLI report should state 0 edits applied when verification fails, got:\n{stderr}"
+    )
+    assert "✅ [applied]" not in stderr, (
+        f"CLI report falsely marked edits as applied on verification failure:\n{stderr}"
+    )
+
+    # 6. Run adeu apply with --json
+    out_json_path = tmp_path / "output_json.docx"
+    code_json, stdout_json, stderr_json = run_cli(
+        ["apply", str(doc_path), str(txt_path), "-o", str(out_json_path), "--json"],
+        capsys,
+    )
+
+    assert code_json == 1
+    assert not out_json_path.exists()
+    stats = json.loads(stdout_json)
+    assert stats.get("verified") is False
+    assert stats.get("edits_applied") == 0, (
+        f"JSON stats edits_applied should be 0 on verification failure, got {stats.get('edits_applied')}"
+    )

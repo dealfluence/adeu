@@ -1202,6 +1202,20 @@ def handle_apply(args):
             )
             stats["verified"] = False
             stats["verification_error"] = verification_error
+
+            # Post-apply verification failed: no output was written to the requested destination.
+            # Re-mark stats and edit reports so they accurately reflect 0 applied edits/actions.
+            stats["edits_skipped"] = stats.get("edits_applied", 0) + stats.get("edits_skipped", 0)
+            stats["edits_applied"] = 0
+            stats["actions_skipped"] = stats.get("actions_applied", 0) + stats.get("actions_skipped", 0)
+            stats["actions_applied"] = 0
+
+            if stats.get("edits"):
+                for report in stats["edits"]:
+                    report["status"] = "failed"
+                    report["error"] = "Not applied: post-apply verification failed."
+                    report["critic_markup"] = None
+                    report["clean_text"] = None
         else:
             stats["verified"] = True
 
