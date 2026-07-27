@@ -73,6 +73,34 @@ def _overwrite_note(target_path: str, input_path: str) -> str:
     return f"\nNote: replaced existing file {target_path}."
 
 
+# read_docx must DECLARE this schema, not just populate structuredContent.
+# The MCP Apps host only forwards `structuredContent` to the UI app when the
+# tool advertises an outputSchema; without one it hands the app a result
+# carrying `content` alone and the markdown viewer has nothing to render
+# (observed in Claude Desktop 2026-07-27: `params=content,isError`).
+# Keep `required` minimal and additionalProperties open — clients validate the
+# payload against this schema and reject the whole call on a mismatch, so an
+# edge path that omits `title` must not fail the read.
+READ_DOCX_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "markdown": {
+            "type": "string",
+            "description": "Document content as Markdown, for display.",
+        },
+        "title": {
+            "type": "string",
+            "description": "Display title (the file name, or 'Search: <file name>').",
+        },
+        "file_path": {
+            "type": "string",
+            "description": "Absolute path of the document that was read.",
+        },
+    },
+    "required": ["markdown"],
+    "additionalProperties": True,
+}
+
 _DOCUMENT_CHANGE_LIST_ADAPTER = TypeAdapter(List[DocumentChange])
 
 _SINGLE_CHANGE_ADAPTER: TypeAdapter[DocumentChange] = TypeAdapter(DocumentChange)
@@ -956,6 +984,7 @@ if sys.platform == "win32":
         description=READ_DOCX_COMMON_DESC + READ_DOCX_WIN32_EXTRA + READ_DOCX_TAIL,
         annotations={"readOnlyHint": True},
         tags={"docx"},
+        output_schema=READ_DOCX_OUTPUT_SCHEMA,
         meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
     )
     async def read_docx(
@@ -1314,6 +1343,7 @@ else:
         description=READ_DOCX_COMMON_DESC + READ_DOCX_TAIL,
         tags={"docx"},
         annotations={"readOnlyHint": True},
+        output_schema=READ_DOCX_OUTPUT_SCHEMA,
         meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
     )
     async def read_docx(

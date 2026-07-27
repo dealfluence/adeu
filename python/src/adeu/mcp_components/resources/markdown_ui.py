@@ -35,10 +35,22 @@ def _get_adeu_svg_content() -> str:
     return ""
 
 
+# The app's <head> pulls Jost/Lora from Google Fonts. Hosts apply a deny-by-default
+# CSP to app resources, so the stylesheet is blocked unless the origins are declared
+# here (confirmed against Claude Desktop: "Loading the stylesheet
+# 'https://fonts.googleapis.com/css2?...' violates ... style-src"). Mirrors UI_CSP in
+# the node server (packages/mcp-server/src/index.ts).
+UI_CSP = {
+    "connectDomains": ["https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+    "resourceDomains": ["https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+}
+
+
 @resource(
     MARKDOWN_UI_URI,
     annotations={"readOnlyHint": True},
     mime_type="text/html;profile=mcp-app",
+    meta={"ui": {"csp": UI_CSP}},
 )
 def markdown_ui_app() -> str:
     """Interactive HTML App for rendering Markdown tool results."""

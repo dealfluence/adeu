@@ -36,6 +36,12 @@
             --text-main: var(--neutral-600);
             --text-heading: var(--brand-navy);
             --bg-blockquote: rgba(232, 192, 161, 0.15);
+            /* Dedicated skeleton stops. Do NOT derive these from --neutral-100
+               and --border-card: in dark mode both resolve to --brand-navy-light,
+               the gradient collapses to one flat colour, and the shimmer sweeps
+               invisibly. */
+            --skeleton-base: var(--neutral-100);
+            --skeleton-sheen: #dcdcdc;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -47,6 +53,8 @@
                 --text-heading: #ffffff;
                 --bg-blockquote: rgba(232, 192, 161, 0.1);
                 --neutral-100: var(--brand-navy-light);
+                --skeleton-base: var(--brand-navy-light);
+                --skeleton-sheen: #3f5559;
             }
         }
 
@@ -350,7 +358,7 @@
         }
 
         .skeleton {
-            background: linear-gradient(90deg, var(--neutral-100) 25%, var(--border-card) 50%, var(--neutral-100) 75%);
+            background: linear-gradient(90deg, var(--skeleton-base) 25%, var(--skeleton-sheen) 50%, var(--skeleton-base) 75%);
             background-size: 200% 100%;
             animation: skeleton 1.5s ease-in-out infinite;
             border-radius: 4px;
@@ -600,6 +608,47 @@
             appDiv.innerHTML = html;
         }
 
+        // Hosts forward `structuredContent` only when the tool declares an
+        // outputSchema, and not every host does even then — Claude Desktop was
+        // observed handing the app `{content, isError}` alone, which used to
+        // blank the viewer. Prefer the structured payload, fall back to the
+        // text content block so a stripped result still renders.
+        const FILE_PATH_BANNER = /^>\s*\*\*File Path:\*\*\s*`([^`]+)`/m;
+
+        function readToolResult(result) {
+            const sc = result.structuredContent || {};
+            if (sc.markdown) {
+                return { markdown: sc.markdown, title: sc.title, file_path: sc.file_path, status: sc.status };
+            }
+
+            const textBlock = (result.content || []).find(
+                (b) => b && b.type === "text" && b.text
+            );
+            if (!textBlock) return { status: sc.status };
+
+            const match = textBlock.text.match(FILE_PATH_BANNER);
+            const filePath = sc.file_path || (match ? match[1] : null);
+            return {
+                markdown: textBlock.text,
+                title: sc.title || (filePath ? filePath.split(/[\\/]/).pop() : null),
+                file_path: filePath,
+                status: sc.status,
+            };
+        }
+
+        function setHidden(hidden) {
+            if (hidden) {
+                document.documentElement.style.display = 'none';
+                window.parent.postMessage({
+                    jsonrpc: "2.0",
+                    method: "ui/notifications/size-changed",
+                    params: { height: 0, width: 0 }
+                }, "*");
+            } else {
+                document.documentElement.style.display = '';
+            }
+        }
+
         function checkCollapsible() {
             const wrapper = document.getElementById('content-wrapper');
             const toggleContainer = document.getElementById('toggle-container');
@@ -689,23 +738,21 @@
                         return;
                     }
 
-                    const result = msg.params;
+                    const result = msg.params || {};
+                    const view = readToolResult(result);
 
-                    // If the state is pending, or no markdown is returned, completely hide the UI
-                    if (!result || !result.structuredContent || result.structuredContent.status === "pending" || !result.structuredContent.markdown) {
-                        document.documentElement.style.display = 'none';
-                        window.parent.postMessage({
-                            jsonrpc: "2.0",
-                            method: "ui/notifications/size-changed",
-                            params: { height: 0, width: 0 }
-                        }, "*");
+                    // If the state is pending, or nothing renderable came back,
+                    // hide the UI. Reversible: a later result can bring it back.
+                    if (view.status === "pending" || !view.markdown) {
+                        setHidden(true);
                         return;
                     }
+                    setHidden(false);
 
                     // Render Markdown
-                    rawMarkdownText = result.structuredContent.markdown;
-                    if (result.structuredContent.file_path) {
-                        currentFilePath = result.structuredContent.file_path;
+                    rawMarkdownText = view.markdown;
+                    if (view.file_path) {
+                        currentFilePath = view.file_path;
                         openBtn.style.display = 'flex';
                     } else {
                         currentFilePath = null;
@@ -714,10 +761,14 @@
                     appDiv.innerHTML = marked.parse(rawMarkdownText);
                     copyBtn.style.display = 'flex';
 
-                    if (result.structuredContent.title) {
-                        navTitle.textContent = result.structuredContent.title;
-                        navTitle.title = result.structuredContent.title;
+                    if (view.title) {
+                        navTitle.textContent = view.title;
+                        navTitle.title = view.title;
                     }
+
+                    // Never rely solely on the ResizeObserver to report height:
+                    // if it does not fire, the host is left with no size at all.
+                    checkCollapsible();
                 }
             } catch (error) {
                 showError("Rendering Engine Error", "An unexpected error occurred.", error.toString() + "\n" + error.stack);
@@ -728,6 +779,11 @@
             checkCollapsible();
         });
         observer.observe(appDiv);
+
+        // The ResizeObserver is not a guaranteed trigger — if it never fires,
+        // the host is left with no height for the frame at all. Report ours
+        // explicitly a few times after boot as a floor.
+        [50, 400, 1500].forEach((ms) => setTimeout(checkCollapsible, ms));
 
         window.parent.postMessage({
             jsonrpc: "2.0",

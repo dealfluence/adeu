@@ -318,6 +318,30 @@ registerAppResource(
 // ==========================================
 // 2. UI-ENABLED TOOLS
 // ==========================================
+
+// read_docx must DECLARE this, not merely populate structuredContent. The MCP
+// Apps host only forwards `structuredContent` to the UI app when the tool
+// advertises an outputSchema; without one it hands the app a result carrying
+// `content` alone and the markdown viewer has nothing to render (observed in
+// Claude Desktop 2026-07-27: `params=content,isError`). Mirrors
+// READ_DOCX_OUTPUT_SCHEMA in python/src/adeu/mcp_components/tools/document.py.
+// Only `markdown` is required, and the object stays loose: clients validate
+// the payload against this schema and reject the whole call on a mismatch, so
+// an edge path that omits `title` must not fail the read.
+const READ_DOCX_OUTPUT_SCHEMA = z
+  .object({
+    markdown: z.string().describe("Document content as Markdown, for display."),
+    title: z
+      .string()
+      .optional()
+      .describe("Display title (the file name, or 'Search: <file name>')."),
+    file_path: z
+      .string()
+      .optional()
+      .describe("Absolute path of the document that was read."),
+  })
+  .loose();
+
 registerAppTool(
   server,
   "read_docx",
@@ -385,6 +409,7 @@ registerAppTool(
         .default(true)
         .describe("Set to false to perform case-insensitive matching."),
     }),
+    outputSchema: READ_DOCX_OUTPUT_SCHEMA,
     _meta: { ui: { resourceUri: MARKDOWN_UI_URI } },
   },
   async (
