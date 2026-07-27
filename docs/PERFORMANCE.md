@@ -385,7 +385,7 @@ the full regression suite stayed green and the projection goldens
    parts); §8.3c then moved that work INTO the event stream's existing child
    walk, carried on a `ProjectedRun`, removing the second walk entirely
    (−0.81 s more). Cumulative: projection 8.91 → 6.53 s (−27 %), mapper build
-   13.17 → 10.43 s (−21 %), end-to-end cold read −20 % (A/B).
+   13.17 → 10.43 s (−21 %), end-to-end cold read −9 % (12.64 → 11.47 s).
 
    What remains in this area is SMALLER than expected and not obviously worth
    taking: the stream still costs ~3.96 s, which is per-child branch dispatch
@@ -579,12 +579,20 @@ Measured (VVBIG unless noted):
 | projection | 7.342 s | **6.531 s** (−11 %) |
 | mapper build | 11.364 s | 10.431 s (−8 %) |
 | BIGDOC projection (control) | 0.284 s | 0.269 s (−5 %) |
-| cold read end-to-end, A/B vs parent commit | — | **0.803× (−20 %)** |
+| cold read end-to-end, A/B vs parent commit | — | **0.955× (−4.5 %)** |
 
-The end-to-end A/B was run alternating base/current in one session because
-absolute timings on that machine were inflated ~4× by memory pressure (a VVBIG
-read peaks in the GBs); the ratio is valid even when the absolutes are not.
-Do not compare absolute numbers across sections measured on different days.
+The end-to-end A/B is run alternating base/current in one session, because
+absolute timings on this machine move with available RAM. Do not compare
+absolute numbers across sections measured on different days.
+
+**A ratio measured under memory pressure is NOT the ratio users see.** The
+first A/B of this change was run with ~3 GB free and reported 0.803×
+(55.6 s → 44.6 s). Re-run with ~5 GB free it is **0.955× (12.16 s → 11.61 s)**,
+which is the representative figure and the one tabulated above. Under paging,
+a change that allocates less wins far more than it does normally — real, but
+not the number to quote. Peak RSS is identical before and after (1429 MB), so
+the fusion neither costs nor saves memory; only the ~4× inflated absolutes
+differed. Check free RAM before trusting any absolute timing here.
 
 **Two estimates in this document were wrong; both corrected here.**
 
@@ -604,6 +612,79 @@ Method note, twice learned the hard way: size a Python win with a plain loop
 over real data, and make any prototype do ALL the work the real code does.
 cProfile inflated the header/footer estimate ~7× (§8.3b) and a too-simple
 prototype inflated this one ~3×.
+
+### 8.3d Current cross-engine numbers (2026-07-27, end of day)
+
+Both engines through their real MCP servers over stdio, same client, same
+timing code, measured back-to-back with ~5 GB free (medians; VVBIG):
+
+| metric | node | python | py/node |
+|---|---|---|---|
+| read COLD (page 1) | 4.95 s | 11.47 s | 2.32× |
+| read WARM page turn | 16 ms | 27 ms | 1.7× |
+| read WARM outline | 3.4 ms | 14 ms | 4.1× |
+| read WARM search | 26 ms | 131 ms | 5.0× |
+| first `clean_view` | 2.13 s | 11.88 s | 5.6× |
+| single-edit batch | 10.50 s | 24.35 s | 2.32× |
+| 10-edit batch (all applied) | ~22 s | ~112 s | ~5.1× |
+
+Peak RSS, measured for the first time (sampled during the call):
+
+| | node | python |
+|---|---|---|
+| cold read | 2293 MB | **1429 MB** |
+| single-edit batch | 3687 MB | not measured |
+| 10-edit batch | **4841 MB** | not measured |
+
+Two things fall out of that:
+
+- **Node uses ~1.6× the memory of Python for a cold read** (2.29 GB vs
+  1.43 GB) — the opposite of the intuition that the Python engine is the
+  memory-hungry one. §7.2's 4.5 GB Python figure is the *dry-run* flow (which
+  builds a second engine), not a read.
+- Node's 10-edit batch peaks at **4.84 GB**, right at the default ~4 GB V8
+  old-space limit. That is the mechanism behind §8.3e's OOM, and it means Node
+  is close to the ceiling on large batches even when they succeed.
+
+Python's in-harness RSS probe returned a nonsense 4 MB: this venv's
+`python.exe` is a launcher stub, so the real interpreter is a CHILD process.
+Sample the whole process tree (the 1429 MB figure above does).
+
+Progress this day, Python end-to-end: cold read 12.64 → 11.47 s (−9 %),
+single edit 27.15 → 24.35 s (−10 %), 10-edit batch ~123 → ~112 s (−9 %). The
+cold-read gap to Node narrowed from 2.66× to 2.32×. No Node code was changed.
+
+Measurement hygiene, learned twice today: this machine's absolute timings
+degrade badly under memory pressure and Node degrades MORE erratically than
+Python (Node cold read ranged 6.8–10.1 s and a single edit 11.7–34.5 s with
+~3 GB free, against 4.91–4.97 s and 10.1–10.6 s with ~5 GB free). Check free
+RAM first; prefer alternating A/B ratios; discard runs whose spread exceeds a
+few percent.
+
+### 8.3e Node OOM on a REJECTED multi-edit batch (open bug)
+
+Reproducible 4/4: `process_document_batch` with 10 `modify` changes on VVBIG
+where at least ONE `target_text` is ambiguous — so the whole batch must be
+rejected — kills the Node server at ~18.7 s with
+`Mark-Compact … 4072.6 (4115.4) MB … allocation failure`. The stdio transport
+closes and the client sees the process vanish instead of an error response.
+
+Key asymmetry: the SUCCESSFUL 10-edit apply path completes in ~22 s within the
+default heap, and `NODE_OPTIONS=--max-old-space-size=8192` rejects cleanly in
+13.9 s. So the excess is specific to the validation-failure / diagnostic path,
+not to applying edits. §8.3d's measurement shows why it is so close to the
+edge: the successful batch already peaks at **4.84 GB** against a ~4 GB default
+old-space, so the ambiguity diagnostics (which embed surrounding-text excerpts
+per occurrence, per edit, over a multi-MB projection) only need to add a little
+to tip it over.
+
+Two separate defects: the memory blow-up itself, and that a failed batch takes
+the server process down instead of returning an MCP error. Profile the reject
+path (`--heap-prof`) rather than guessing at the retention.
+
+Related cross-engine divergence, also unfixed: Node signals batch rejection via
+MCP `isError`, while the Python server returns it as a NORMAL result whose text
+begins "Batch rejected." Clients cannot use one check for both.
 
 ### 8.4 Golden harness (kept this time)
 
