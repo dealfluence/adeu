@@ -1,0 +1,24 @@
+# Golden projection hashes — see python/scripts/golden_projection.py.
+# Regenerate ONLY when a projection change is intended (say so in the commit).
+# sha256  chars  <document>.<view>.txt
+f0715c55dc8363c9ce16ec665db67646a0bb05b4d15ae1f2b63221e576b916c4         225  cells.reader_raw.txt
+f0715c55dc8363c9ce16ec665db67646a0bb05b4d15ae1f2b63221e576b916c4         225  cells.reader_clean.txt
+f0715c55dc8363c9ce16ec665db67646a0bb05b4d15ae1f2b63221e576b916c4         225  cells.reader_appendix.txt
+f0715c55dc8363c9ce16ec665db67646a0bb05b4d15ae1f2b63221e576b916c4         225  cells.mapper_raw.txt
+f0715c55dc8363c9ce16ec665db67646a0bb05b4d15ae1f2b63221e576b916c4         225  cells.mapper_clean.txt
+2e535ec455f626e09d648b29cbf6da328e370afddd6c8b480cd5535ca9f51cdd          68  cells.outline.txt
+91bca6e382829cd4b02e6a92102a067d26d2166c93c38e9f0caf4679a7771df3          92  cells.pagination.txt
+1b176b4c585e3bdb0997306732257104b41ebc50e2f3a1c94c9718c8452b91a8      372760  BIGDOC.reader_raw.txt
+53bcb174cafa9ecd2b3e01f0a9ffad73aa1fd60c7fd59f308182c0a58151f5d7      331088  BIGDOC.reader_clean.txt
+6af18f981cda0c31d676da4c0cc4ba10f9d7225d9e2ee37a751f5a46dc30d2c0      374055  BIGDOC.reader_appendix.txt
+1b176b4c585e3bdb0997306732257104b41ebc50e2f3a1c94c9718c8452b91a8      372760  BIGDOC.mapper_raw.txt
+53bcb174cafa9ecd2b3e01f0a9ffad73aa1fd60c7fd59f308182c0a58151f5d7      331088  BIGDOC.mapper_clean.txt
+77e3faeccc3c53042bb6cc0cce75dc939a9bd01f2742ca9108f1f7bba60398dd       16284  BIGDOC.outline.txt
+4f91b61687ff286636d22a991d7f6b4df0bed4b08eff2d53c0ea702e1216f301        4133  BIGDOC.pagination.txt
+cb5f2b3a1990601de925200b4b5374b6bf9ac0f7b56d091602a87b45e8c2501c     4654987  VVBIG.reader_raw.txt
+cb5f2b3a1990601de925200b4b5374b6bf9ac0f7b56d091602a87b45e8c2501c     4654987  VVBIG.reader_clean.txt
+8e000f7d420395f0c1d8cea1daf0a40359947a6327c31c17559ede2a21108cac     5093657  VVBIG.reader_appendix.txt
+cb5f2b3a1990601de925200b4b5374b6bf9ac0f7b56d091602a87b45e8c2501c     4654987  VVBIG.mapper_raw.txt
+cb5f2b3a1990601de925200b4b5374b6bf9ac0f7b56d091602a87b45e8c2501c     4654987  VVBIG.mapper_clean.txt
+9ff10a8a1b909db70142eb0bc8f93c3d0d707924aa2871bb68306bdfd0770b3b      763182  VVBIG.outline.txt
+699b4778f6ddd04ce231ddb163057e83d43dba38f924903b8be159361f13e7da       14202  VVBIG.pagination.txt

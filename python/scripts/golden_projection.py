@@ -19,8 +19,19 @@ is asserted on every capture, so a run that breaks it fails loudly even
 before the byte-compare.
 
 Usage:
+  python scripts/golden_projection.py verify [manifest]   # vs COMMITTED hashes
   python scripts/golden_projection.py capture <outdir>
   python scripts/golden_projection.py compare <baseline_dir> <new_dir>
+
+`verify` is the durable gate: it compares against the committed
+tests/golden_manifest.txt (hashes only — no multi-MB golden text in git) and
+is what tests/test_projection_goldens.py runs. Use `capture` + `compare` when
+you need to SEE a diff, since those keep the full text side by side.
+
+Regenerating the manifest is an explicit, reviewable act — do it only when a
+projection change is intended, and say so in the commit:
+  python scripts/golden_projection.py capture tmp/g && \
+      cp tmp/g/MANIFEST.txt tests/golden_manifest.txt
 """
 
 from __future__ import annotations
@@ -121,67 +132,128 @@ def render_pagination(pg):
     return "\n".join(lines)
 
 
+def compute_views(name: str, sanitized: bytes, verbose: bool = False) -> dict[str, str]:
+    """Every projection view for one document, plus the invariant assertions.
+
+    Importable, so the pytest gate (tests/test_projection_goldens.py) runs the
+    exact same computation this CLI does — one implementation, no drift.
+    """
+
+    def _t(label, fn):
+        t = time.perf_counter()
+        out = fn()
+        if verbose:
+            print(f"  {label:16s} {time.perf_counter() - t:6.2f}s")
+        return out
+
+    views: dict[str, str] = {}
+    views["reader_raw"] = _t(
+        "reader_raw",
+        lambda: _extract_text_from_doc(Document(io.BytesIO(sanitized)), clean_view=False, include_appendix=False),
+    )
+    views["reader_clean"] = _t(
+        "reader_clean",
+        lambda: _extract_text_from_doc(Document(io.BytesIO(sanitized)), clean_view=True, include_appendix=False),
+    )
+    views["reader_appendix"] = _t(
+        "reader_appendix",
+        lambda: _extract_text_from_doc(Document(io.BytesIO(sanitized)), clean_view=False, include_appendix=True),
+    )
+    views["mapper_raw"] = _t(
+        "mapper_raw",
+        lambda: DocumentMapper(Document(io.BytesIO(sanitized)), clean_view=False).full_text,
+    )
+    views["mapper_clean"] = _t(
+        "mapper_clean",
+        lambda: DocumentMapper(Document(io.BytesIO(sanitized)), clean_view=True).full_text,
+    )
+
+    # Twin contract (§7.3.3) — asserted on EVERY computation, so drift fails
+    # loudly even when hashes are not being compared.
+    assert views["reader_raw"] == views["mapper_raw"], f"{name}: TWIN DRIFT (raw view)"
+    assert views["reader_clean"] == views["mapper_clean"], f"{name}: TWIN DRIFT (clean view)"
+
+    outline_txt, pg, offsets_text = _t("outline+paginate", lambda: render_outline(Document(io.BytesIO(sanitized))))
+    views["outline"] = outline_txt
+    views["pagination"] = render_pagination(pg)
+
+    # Requesting paragraph offsets must not change the projected text.
+    assert offsets_text == views["reader_raw"], f"{name}: reader text differs when paragraph offsets are requested"
+    return views
+
+
+def iter_documents(verbose: bool = False):
+    """Yields (name, sanitized_bytes) for every document available here."""
+    for name, path in DOCS:
+        if path is not None and not path.exists():
+            if verbose:
+                print(f"SKIP {name}: {path} not found")
+            continue
+        yield name, strip_bom_from_docx_bytes(load_bytes(name, path))
+
+
 def capture(outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for name, path in DOCS:
-        if path is not None and not path.exists():
-            print(f"SKIP {name}: {path} not found")
-            continue
-        raw_bytes = load_bytes(name, path)
-        sanitized = strip_bom_from_docx_bytes(raw_bytes)
+    for name, sanitized in iter_documents(verbose=True):
         print(f"\n=== {name} ({len(sanitized) / 1e6:.2f} MB) ===")
-
-        views = {}
-        t = time.perf_counter()
-        views["reader_raw"] = _extract_text_from_doc(
-            Document(io.BytesIO(sanitized)), clean_view=False, include_appendix=False
-        )
-        print(f"  reader_raw       {time.perf_counter() - t:6.2f}s")
-
-        t = time.perf_counter()
-        views["reader_clean"] = _extract_text_from_doc(
-            Document(io.BytesIO(sanitized)), clean_view=True, include_appendix=False
-        )
-        print(f"  reader_clean     {time.perf_counter() - t:6.2f}s")
-
-        t = time.perf_counter()
-        views["reader_appendix"] = _extract_text_from_doc(
-            Document(io.BytesIO(sanitized)), clean_view=False, include_appendix=True
-        )
-        print(f"  reader_appendix  {time.perf_counter() - t:6.2f}s")
-
-        t = time.perf_counter()
-        views["mapper_raw"] = DocumentMapper(Document(io.BytesIO(sanitized)), clean_view=False).full_text
-        print(f"  mapper_raw       {time.perf_counter() - t:6.2f}s")
-
-        t = time.perf_counter()
-        views["mapper_clean"] = DocumentMapper(Document(io.BytesIO(sanitized)), clean_view=True).full_text
-        print(f"  mapper_clean     {time.perf_counter() - t:6.2f}s")
-
-        # Twin contract — must hold on every capture.
-        assert views["reader_raw"] == views["mapper_raw"], f"{name}: TWIN DRIFT (raw view)"
-        assert views["reader_clean"] == views["mapper_clean"], f"{name}: TWIN DRIFT (clean view)"
+        views = compute_views(name, sanitized, verbose=True)
         print("  twin contract    OK (raw + clean byte-identical)")
-
-        t = time.perf_counter()
-        outline_txt, pg, offsets_text = render_outline(Document(io.BytesIO(sanitized)))
-        views["outline"] = outline_txt
-        views["pagination"] = render_pagination(pg)
-        print(f"  outline+paginate {time.perf_counter() - t:6.2f}s")
-
-        # return_paragraph_offsets=True must not change the projected text.
-        assert offsets_text == views["reader_raw"], f"{name}: reader text differs when paragraph offsets are requested"
-
         for view, text in views.items():
-            f = outdir / f"{name}.{view}.txt"
-            f.write_text(text, encoding="utf-8", newline="")
+            (outdir / f"{name}.{view}.txt").write_text(text, encoding="utf-8", newline="")
             sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
             manifest.append(f"{sha}  {len(text):>10}  {name}.{view}.txt")
             print(f"    {view:16s} {len(text):>10} chars  {sha[:16]}")
 
     (outdir / "MANIFEST.txt").write_text("\n".join(manifest) + "\n", encoding="utf-8", newline="")
     print(f"\ncaptured {len(manifest)} views -> {outdir}")
+
+
+def load_manifest(manifest_path: Path) -> dict[str, str]:
+    expected = {}
+    for ln in manifest_path.read_text(encoding="utf-8").splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        sha, _size, fname = ln.split()
+        expected[fname] = sha
+    return expected
+
+
+def verify(manifest_path: Path) -> int:
+    """Recompute every view and compare hashes to a COMMITTED manifest.
+
+    Unlike `compare`, this needs no stored golden text — only hashes — so the
+    baseline is committable (tests/golden_manifest.txt) and the
+    byte-identical claim stays checkable long after capture dirs are deleted.
+    Documents absent from this machine are reported, not failed.
+    """
+    expected = load_manifest(manifest_path)
+    checked = 0
+    failures = []
+    seen = set()
+
+    for name, sanitized in iter_documents(verbose=True):
+        seen.add(name)
+        views = compute_views(name, sanitized)
+        for view, text in views.items():
+            key = f"{name}.{view}.txt"
+            if key not in expected:
+                failures.append(f"{key}: not present in manifest (new view?)")
+                continue
+            got = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            checked += 1
+            if got != expected[key]:
+                failures.append(f"{key}: expected {expected[key][:16]} got {got[:16]} ({len(text)} chars)")
+
+    for name in sorted({k.split(".")[0] for k in expected} - seen):
+        print(f"NOTE: {name} unavailable here; its manifest rows were not checked")
+    for f in failures:
+        print(f"FAIL {f}")
+    print(
+        f"\n{'GOLDENS VERIFIED' if not failures else 'GOLDEN MISMATCH'} "
+        f"({checked} views checked, {len(failures)} failures)"
+    )
+    return 0 if not failures else 1
 
 
 def compare(base: Path, new: Path):
@@ -215,7 +287,13 @@ def compare(base: Path, new: Path):
     return 0 if ok else 1
 
 
+DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "tests" / "golden_manifest.txt"
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "verify":
+        path = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MANIFEST
+        sys.exit(verify(path))
     if sys.argv[1] == "capture":
         capture(Path(sys.argv[2]))
     else:

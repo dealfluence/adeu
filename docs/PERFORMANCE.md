@@ -502,19 +502,76 @@ is.** Full run-loop fusion (§7.3.1) should take the projection to roughly
 further needs incremental projection patching (rebuilding only the touched
 region between sequential edits) — the next frontier for BOTH engines.
 
+### 8.3a Control document — no small-document regression
+
+Optimizing for a 9.3 MB document is only safe if ordinary documents do not
+regress, so both trees were measured in-process (BIGDOC = 0.4 MB control,
+`git worktree` at the parent commit vs HEAD, min-of-N):
+
+| | base (dcf03c1) | after §8.2 (c4ef370) | change |
+|---|---|---|---|
+| BIGDOC projection | 0.388 s | 0.284 s | **−27 %** |
+| BIGDOC mapper build | 0.523 s | 0.422 s | −19 % |
+| VVBIG projection | 8.914 s | 7.342 s | −18 % |
+| VVBIG mapper build | 13.172 s | 11.364 s | −14 % |
+
+The control gained MORE proportionally than the stress document — both fixes
+are per-paragraph/per-run, so the benefit scales with content density rather
+than file size. Over the wire on BIGDOC, Python vs Node: cold read 622 vs
+361 ms (1.72×), warm page turn 15 vs 13 ms, first `clean_view` 568 vs 245 ms,
+single edit 1046 vs 519 ms (2.02×) — i.e. the cross-engine ratio is much
+gentler on ordinary documents than the 2.7×/6× seen on the stress document.
+
+### 8.3b Measured and REJECTED: header/footer reference lookups
+
+cProfile attributed ~0.45 s of the projection to python-docx's
+`get_headerReference`/`get_footerReference` (~25,000 calls, each building and
+compiling a fresh XPath string). That looked like an easy win of the same kind
+§7.1 landed for `doc.settings`. Direct measurement says otherwise:
+
+| | VVBIG (1,883 sections, 3,544 parts) |
+|---|---|
+| `iter_document_parts_with_kind` total | 0.281 s |
+| all `is_linked_to_previous` checks (current path) | **0.067 s** |
+| equivalent direct lxml `sectPr` child scan | 0.008 s (same 3,543 results) |
+
+Maximum available saving is ~0.06 s — **0.8 %** of the projection, not the
+0.45 s cProfile implied (inflated ~7× by per-call overhead, exactly the
+distortion §2 warns about). Also note 3,544 parts come from 1,883 sections, so
+most sections genuinely HAVE definitions and are yielded anyway; skipping
+container construction for linked-to-previous sections would help almost
+nothing. **Not worth changing twin-shared part-iteration code for 0.8 %** —
+recorded here so it is not re-derived from a profile again.
+
 ### 8.4 Golden harness (kept this time)
 
-`python/scripts/golden_projection.py` — `capture <dir>` / `compare <base>
-<new>`. Captures 7 views × 3 documents (cells synthetic fixture, BIGDOC,
-VVBIG): `reader_raw`, `reader_clean`, `reader_appendix`, `mapper_raw`,
-`mapper_clean`, `outline`, `pagination`, with a sha256 manifest. It asserts
-the §7.3.3 twin contract on every capture, mirrors the production outline
-path exactly (`return_paragraph_offsets=True`, as `doc_cache._fill_view`
-does), and checks that requesting offsets does not change the projected text.
-All 21 views stayed byte-identical across both §8.2 changes.
-`tests/test_run_fusion_equivalence.py` pins the fused function against
-VERBATIM copies of both pre-fusion originals over 26 run shapes × both
-`is_heading` values (§3.6's "pin against the old algorithm").
+`python/scripts/golden_projection.py` — `verify [manifest]` / `capture <dir>` /
+`compare <base> <new>`. Captures 7 views × 3 documents (cells synthetic
+fixture, BIGDOC, VVBIG): `reader_raw`, `reader_clean`, `reader_appendix`,
+`mapper_raw`, `mapper_clean`, `outline`, `pagination`. It asserts the §7.3.3
+twin contract on every computation, mirrors the production outline path exactly
+(`return_paragraph_offsets=True`, as `doc_cache._fill_view` does), and checks
+that requesting offsets does not change the projected text. All 21 views
+stayed byte-identical across both §8.2 changes.
+
+**The baseline is now COMMITTED and automatically enforced** — previously the
+evidence lived only in a commit message, so "byte-identical" could not be
+re-checked later:
+
+- `tests/golden_manifest.txt` — sha256 + length per view. Hashes only, so no
+  multi-MB golden text enters git. Regenerating it is a deliberate, reviewable
+  act (`capture` then copy the MANIFEST) and must be called out in the commit.
+- `tests/test_projection_goldens.py` — runs the gate. The `cells` fixture is
+  built in-process so it gates EVERY machine including a fresh clone; BIGDOC
+  runs when present (~2.5 s); VVBIG needs `ADEU_GOLDEN_SLOW=1` (~60 s, kept
+  out of the default ~30 s suite). The gate is verified to actually fail: a
+  doctored hash produces a mismatch and exit 1.
+- `tests/test_run_fusion_equivalence.py` pins the fused function against
+  VERBATIM copies of both pre-fusion originals over 26 run shapes × both
+  `is_heading` values (§3.6's "pin against the old algorithm").
+
+Use `verify` for the pass/fail gate; use `capture` + `compare` when you need
+to SEE a diff, since those keep the full text side by side.
 
 ---
 
