@@ -54,6 +54,7 @@ QN_W_SDTCONTENT = qn("w:sdtContent")
 QN_W_B = qn("w:b")
 QN_W_I = qn("w:i")
 QN_W_VAL = qn("w:val")
+QN_W_TYPE = qn("w:type")
 QN_W_PPR = qn("w:pPr")
 QN_W_PSTYLE = qn("w:pStyle")
 QN_W_OUTLINELVL = qn("w:outlineLvl")
@@ -78,6 +79,13 @@ QN_MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
 # Disclosure cap for text projected out of a floating text box marker — long
 # boxed content is truncated, the marker is a disclosure, not a full view.
 _TEXTBOX_DISCLOSURE_CAP = 300
+
+# Toggle-property "off" values: <w:b w:val="0|false|off"/> means NOT bold.
+# Any other value (including a missing w:val) means the toggle is on.
+_OFF_VALS = ("0", "false", "off")
+# A page break projects as its literal markup so downstream consumers can
+# round-trip it; see get_run_text / get_run_text_and_markers.
+_PAGE_BREAK_TOKEN = '<w:br w:type="page"/>'
 
 
 def _textbox_text(graphic_el) -> str:
@@ -134,22 +142,42 @@ def _graphic_marker_events(child):
             yield DocxEvent("image", "vml", date=alt)
 
 
+def prefix_is_heading(prefix: str) -> bool:
+    """The heading test, expressed over an already-computed paragraph prefix.
+
+    Kept as its own function so the rule lives in exactly ONE place: both
+    Virtual Text twins must agree on what counts as a heading, and callers
+    that already hold the prefix reuse this instead of re-deriving it.
+    """
+    if not prefix:
+        return False
+    stripped = prefix.rstrip()
+    return bool(stripped) and stripped == "#" * len(stripped)
+
+
 def is_heading_paragraph(
     paragraph: Paragraph,
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
+    prefix: Optional[str] = None,
 ) -> bool:
     """
     Returns True iff `paragraph` projects with a Markdown heading prefix
     ('# ' through '###### '). Used by ingest and the mapper to decide
     whether to strip leading whitespace-only runs (which would otherwise
     project as '## \nText' instead of '## Text').
+
+    `prefix` lets a caller that ALREADY computed get_paragraph_prefix for
+    this paragraph pass it in. Both projection twins do exactly that (they
+    need the prefix to emit it), and re-deriving it here cost a second
+    full get_paragraph_prefix per paragraph — 41,190 redundant calls on the
+    VVBIG stress document. Pass the UNDECORATED style prefix: callers that
+    prepend a footnote label ("[^fn-1]: ") must pass the value before
+    decoration, since the heading test is about the paragraph's own style.
     """
-    prefix = get_paragraph_prefix(paragraph, style_cache, default_pstyle)
-    if not prefix:
-        return False
-    stripped = prefix.rstrip()
-    return bool(stripped) and stripped == "#" * len(stripped)
+    if prefix is None:
+        prefix = get_paragraph_prefix(paragraph, style_cache, default_pstyle)
+    return prefix_is_heading(prefix)
 
 
 def paragraph_mark_is_deleted(p_element) -> bool:
@@ -941,6 +969,72 @@ def get_visible_runs(paragraph: Paragraph):
     Filters out dynamic page number fields ({PAGE}, {NUMPAGES}).
     """
     return [item for item in iter_paragraph_content(paragraph) if isinstance(item, Run)]
+
+
+def get_run_text_and_markers(r_element, is_heading: bool) -> tuple[str, str, str]:
+    """Fused per-run projection step: returns (text, prefix, suffix) in ONE
+    pass over the run element's children.
+
+    Exactly equivalent to `get_run_text(run)` paired with
+    `get_run_style_markers(run, is_heading)` — those two walked the run
+    separately (a child loop plus rPr lookups), and both Virtual Text twins
+    called both, once per run. On the VVBIG stress document (560K runs) the
+    pair costs 5.21 us/run against 3.44 us/run fused, i.e. ~1.0 s of every
+    projection and every mapper rebuild.
+
+    Takes the raw lxml element rather than a python-docx `Run`, so callers on
+    the hot path need not construct a wrapper just to read the run.
+
+    Equivalence against the two original functions is pinned for every branch
+    by tests/test_run_fusion_equivalence.py — keep that test passing rather
+    than "fixing" this in isolation, since the twins' byte-identical output
+    is a contract with downstream agents.
+
+    NOTE: a variant adding a fast path for the dominant shape ([rPr, w:t] with
+    no b/i — 95.2% of runs on VVBIG) measured NO faster (3.48 us/run): the
+    `list(r_element)` it needs costs what the skipped branches save. Left out
+    deliberately.
+    """
+    is_bold = False
+    is_italic = False
+    parts: list[str] = []
+
+    for child in r_element:
+        tag = child.tag
+        if tag == QN_W_T or tag == QN_W_DELTEXT:
+            raw = child.text
+            if raw:
+                # Normalize literal tabs to spaces to match w:tab behavior.
+                parts.append(raw.replace("\t", " ") if "\t" in raw else raw)
+        elif tag == QN_W_RPR:
+            b = child.find(QN_W_B)
+            if b is not None and b.get(QN_W_VAL) not in _OFF_VALS:
+                is_bold = True
+            i = child.find(QN_W_I)
+            if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
+                is_italic = True
+        elif tag == QN_W_TAB:
+            parts.append(" ")
+        elif tag == QN_W_BR:
+            parts.append(_PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n")
+        elif tag == QN_W_CR:
+            parts.append("\n")
+
+    # Nesting order: Bold outer, Italic inner -> **_text_**
+    prefix = ""
+    suffix = ""
+    if is_bold and not is_heading:
+        prefix = "**"
+        suffix = "**"
+    if is_italic:
+        prefix += "_"
+        suffix = "_" + suffix
+
+    if not parts:
+        return "", prefix, suffix
+    if len(parts) == 1:
+        return parts[0], prefix, suffix
+    return "".join(parts), prefix, suffix
 
 
 def get_run_text(run: Run) -> str:

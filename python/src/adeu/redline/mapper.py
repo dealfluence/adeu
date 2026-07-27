@@ -16,8 +16,8 @@ from adeu.utils.docx import (
     DocxEvent,
     compute_change_pair_map,
     get_paragraph_prefix,
-    get_run_style_markers,
     get_run_text,
+    get_run_text_and_markers,
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
@@ -368,7 +368,8 @@ class DocumentMapper:
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
-                prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+                style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+                prefix = style_prefix
                 if is_first_para and c_type == "FootnoteItem":
                     prefix = f"[^{container.note_type}-{container.id}]: " + prefix
                 if prefix:
@@ -376,7 +377,14 @@ class DocumentMapper:
                     current += len(prefix)
 
                 content_start = current
-                current = self._map_paragraph_content(item, current, style_cache, default_pstyle)
+                # Undecorated style prefix — see ingest._extract_blocks.
+                current = self._map_paragraph_content(
+                    item,
+                    current,
+                    style_cache,
+                    default_pstyle,
+                    paragraph_prefix=style_prefix,
+                )
                 if self.clean_view and current == content_start and paragraph_mark_is_deleted(item._element):
                     # Twin of the reader's skip in ingest._extract_blocks:
                     # accepting a tracked paragraph-mark deletion merges the
@@ -552,6 +560,7 @@ class DocumentMapper:
         start_offset: int,
         style_cache: Optional[dict] = None,
         default_pstyle: Optional[str] = None,
+        paragraph_prefix: Optional[str] = None,
     ) -> int:
         """
         Maps Runs to Spans, handling Flattened CriticMarkup generation.
@@ -615,7 +624,9 @@ class DocumentMapper:
 
         items = list(iter_paragraph_content(paragraph))
 
-        is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle)
+        # Twin of ingest.build_paragraph_text: reuse the prefix _map_blocks
+        # already computed instead of re-deriving it per paragraph.
+        is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle, prefix=paragraph_prefix)
         native_heading = is_native_heading(paragraph, style_cache, default_pstyle)
         leading_strip_active = is_heading
 
@@ -628,11 +639,11 @@ class DocumentMapper:
                 if self.clean_view and active_del:
                     continue
 
-                prefix, suffix = get_run_style_markers(item, native_heading)
+                # Fused: twin of ingest.build_paragraph_text — one walk of the
+                # run element for text AND style markers.
+                text, prefix, suffix = get_run_text_and_markers(item._element, native_heading)
                 # (kind, text, run, run_offset)
                 run_parts: List[Tuple[str, str, Optional[Run], int]] = []
-
-                text = get_run_text(item)
 
                 if leading_strip_active:
                     if text == "" or text.isspace():

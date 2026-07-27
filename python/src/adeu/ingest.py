@@ -19,8 +19,8 @@ from adeu.utils.docx import (
     apply_formatting_to_segments,
     compute_change_pair_map,
     get_paragraph_prefix,
-    get_run_style_markers,
     get_run_text,
+    get_run_text_and_markers,
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
@@ -244,10 +244,20 @@ def _extract_blocks(
                 if not is_first_block:
                     local_cursor -= 2
         elif isinstance(item, Paragraph):
-            prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+            style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+            prefix = style_prefix
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
-            p_text = build_paragraph_text(item, comments_map, clean_view, style_cache, default_pstyle)
+            # Pass the UNDECORATED style prefix: the heading test is about the
+            # paragraph's own style, not the footnote label.
+            p_text = build_paragraph_text(
+                item,
+                comments_map,
+                clean_view,
+                style_cache,
+                default_pstyle,
+                paragraph_prefix=style_prefix,
+            )
             if clean_view and not p_text and paragraph_mark_is_deleted(item._element):
                 # Accepting a tracked paragraph-mark deletion merges the
                 # paragraph away; when nothing visible survives inside it,
@@ -404,6 +414,7 @@ def build_paragraph_text(
     clean_view: bool = False,
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
+    paragraph_prefix: Optional[str] = None,
 ):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
@@ -448,14 +459,18 @@ def build_paragraph_text(
     # event (e.g. a tracked-change boundary), at which point heading content
     # has effectively begun and stripping must stop. Mid-content breaks
     # (e.g. "Line 1\nLine 2" in a heading) are preserved.
-    is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle)
+    # `paragraph_prefix`, when supplied by _extract_blocks, is the prefix it
+    # already computed for this paragraph — reusing it avoids a second full
+    # get_paragraph_prefix walk per paragraph (see is_heading_paragraph).
+    is_heading = is_heading_paragraph(paragraph, style_cache, default_pstyle, prefix=paragraph_prefix)
     native_heading = is_native_heading(paragraph, style_cache, default_pstyle)
     leading_strip_active = is_heading
 
     for i, item in enumerate(items):
         if isinstance(item, Run):
-            prefix, suffix = get_run_style_markers(item, native_heading)
-            text = get_run_text(item)
+            # Fused: one walk of the run element for text AND style markers
+            # (was get_run_style_markers + get_run_text, two walks per run).
+            text, prefix, suffix = get_run_text_and_markers(item._element, native_heading)
 
             if clean_view and active_del:
                 continue

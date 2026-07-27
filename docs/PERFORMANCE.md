@@ -376,13 +376,19 @@ the full regression suite stayed green and the projection goldens
 
 ### 7.3 Known remaining work (Python)
 
-1. **Run-loop fusion (next frontier).** ~9.5 s of cold projection and ~11 s
-   of every mapper (re)build is per-run Python overhead: each run's children
-   are walked ~3× (`process_run_element` events, `get_run_style_markers`,
-   `get_run_text`) plus a python-docx `Run` wrapper per run (568 K on the
-   stress doc). Fusing these into one pass is the single biggest remaining
-   win (it also cuts the per-edit sequential-rebuild cost) but touches
-   twin-shared rendering code — do it golden-gated, and fix 7.3.3 first.
+1. **Run-loop fusion (IN PROGRESS — leaf fusion shipped 2026-07-27, see
+   §7.4).** ~9.5 s of cold projection and ~11 s of every mapper (re)build is
+   per-run Python overhead: each run's children are walked ~3×
+   (`process_run_element` events, `get_run_style_markers`, `get_run_text`)
+   plus a python-docx `Run` wrapper per run (568 K on the stress doc).
+   §7.4 fused the last two of those three walks (−19 % projection). The
+   remaining item is the harder one: `process_run_element` already walks
+   every run's children to detect drawings/fields/references, so the fused
+   text+marker computation should happen INSIDE that existing walk and be
+   carried on the yielded item, instead of downstream re-walking. That means
+   changing what `iter_paragraph_content` yields, which the mapper's
+   `TextSpan.run` and the engine depend on for run identity — hence still
+   deferred, and still golden-gated.
 2. **Hot-engine slot (§5.4a analog).** Deferred: with the mapper build
    dominating construction, reusing the read's parse saves only ~2.7 s per
    edit; revisit after (1) changes the ratio. Output-file read priming IS
@@ -423,9 +429,98 @@ the full regression suite stayed green and the projection goldens
 
 ---
 
-*The bench harnesses (stage, pipeline, edit benchmarks; golden
-capture/compare; synthetic fixture generator) existed as session-local
-scripts in `node/bench/` and `python/bench/` and were removed after the
-work landed — every headline number they produced is recorded in this
-document. The methodology (§2) is what to reproduce, in either engine,
-before the next round of performance work.*
+## 8. Cross-engine measurement + first fusion step (2026-07-27)
+
+### 8.1 Where the Node/Python gap actually is
+
+Both engines measured on VVBIG through their real MCP servers over stdio
+(one client, identical timing code). Censuses are identical — 559,508 runs,
+41,190 paragraphs, 548,757 `w:t`, 2,682,268 elements, 47.3 MB main part — so
+the stages are directly comparable:
+
+| stage | node | python (before §8.2) | ratio |
+|---|---|---|---|
+| load + XML parse | 1.84–2.30 s | 2.71 s (BOM strip 1.06 + `Document()` 1.65) | ~1.3× |
+| **text projection (raw)** | **0.99 s** | **9.19 s** | **9.3×** |
+| split + paginate | 1.14 s | 0.18 s | **0.16× — Python 6× FASTER** |
+| mapper build (engine ctor) | 1.16 s | ~11.3 s | 9.7× |
+
+The projection alone accounts for essentially the whole end-to-end gap
+(cold read 4.76 s vs 12.64 s). Two conclusions that should steer future work:
+
+- **Load is already near parity** — lxml is C. Don't spend effort there.
+- **Node should port Python's paginator.** Python's regex token scan (§7.1)
+  does in 0.18 s what Node spends 1.14 s on — 24 % of Node's cold read, for
+  a port already proven in the other engine. This is the largest single
+  Node-side win currently known.
+
+The edit-path gap (6× on a 10-edit batch) is the SAME root cause amplified:
+the batch contract rebuilds the projection between sequential edits, so
+marginal per-edit cost ≈ one mapper build (Python 10.6 s/edit measured vs
+Node 1.2 s/edit). A cold read pays the projection once; a 10-edit batch pays
+it ~10 times.
+
+### 8.2 Shipped: prefix reuse + leaf fusion
+
+Both changes are byte-identical by golden proof (below) and live in
+twin-shared code, so each was applied to BOTH twins:
+
+| fix | before | after |
+|---|---|---|
+| `get_paragraph_prefix` computed **twice** per paragraph — once for the emitted prefix, again inside `is_heading_paragraph` (41,190 redundant calls) | 9.19 s | 8.51 s |
+| `get_run_text` + `get_run_style_markers` fused into `get_run_text_and_markers(r_element, is_heading)` — one walk of the run instead of two, and no python-docx `Run` wrapper needed to read a run | 8.51 s | **7.45 s** |
+
+Total projection −19 %. End-to-end on VVBIG: cold read 12.64 → 11.86 s,
+single-edit batch 27.15 → 25.48 s, chained edit 41.31 → 37.23 s. Warm
+(cache-hit) reads are unchanged, as expected — they never re-project.
+
+Measured, not assumed, before committing:
+- The two survivors (`get_run_text`, `get_run_style_markers`) are still used
+  off the hot path (the meta lookahead, outline, sanitize), so they stay.
+- Per-run cost of the pair vs the fused function, over all 560 K runs:
+  **5.21 µs → 3.44 µs**.
+- A variant adding a fast path for the dominant run shape (`[rPr, w:t]` with
+  no `b`/`i` — **95.2 %** of runs) measured **no faster** (3.48 µs/run): the
+  `list(r_element)` it needs costs what the skipped branches save. Left out
+  deliberately; don't re-attempt without measuring.
+- Classifying runs with lxml XPath predicates is a trap: `.//w:r[w:rPr/w:b]`
+  plus the italic equivalent took **2.23 s**, slower than testing inline in
+  the fused loop. Bulk C-level extraction is only worth it for grabbing node
+  sets (compiled `.//w:r` = 0.16 s).
+
+### 8.3 How fast can the Python engine get? (bounded, not aspirational)
+
+A minimal Python loop that only appends each run's text costs 0.64 µs/run
+(0.359 s over 559 K runs) — so raw interpreter dispatch is NOT the ceiling.
+But the fused function, which computes what the projection actually needs, is
+3.44 µs/run, while **Node's entire projection is 1.77 µs/run**. Python's
+irreducible per-run leaf work is therefore ~2× Node's whole per-run budget.
+
+Conclusion: **matching Node is not realistic in CPython + lxml; ~1.3–1.5×
+is.** Full run-loop fusion (§7.3.1) should take the projection to roughly
+6.0–6.5 s and per-edit to ~4 s, i.e. cold read ~9–10 s. Closing the batch gap
+further needs incremental projection patching (rebuilding only the touched
+region between sequential edits) — the next frontier for BOTH engines.
+
+### 8.4 Golden harness (kept this time)
+
+`python/scripts/golden_projection.py` — `capture <dir>` / `compare <base>
+<new>`. Captures 7 views × 3 documents (cells synthetic fixture, BIGDOC,
+VVBIG): `reader_raw`, `reader_clean`, `reader_appendix`, `mapper_raw`,
+`mapper_clean`, `outline`, `pagination`, with a sha256 manifest. It asserts
+the §7.3.3 twin contract on every capture, mirrors the production outline
+path exactly (`return_paragraph_offsets=True`, as `doc_cache._fill_view`
+does), and checks that requesting offsets does not change the projected text.
+All 21 views stayed byte-identical across both §8.2 changes.
+`tests/test_run_fusion_equivalence.py` pins the fused function against
+VERBATIM copies of both pre-fusion originals over 26 run shapes × both
+`is_heading` values (§3.6's "pin against the old algorithm").
+
+---
+
+*The 2026-07-24 bench harnesses (stage, pipeline, edit benchmarks; synthetic
+fixture generator) were session-local scripts in `node/bench/` and
+`python/bench/` and were removed after that work landed — every headline
+number they produced is recorded in this document. The methodology (§2) is
+what to reproduce, in either engine, before the next round of performance
+work. The golden harness described in §8.4 IS committed — use it.*
