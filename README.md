@@ -1,5 +1,7 @@
 # Adeu: Track Changes for the LLM era
 
+[![MCP Toplist](https://mcptoplist.com/badge/ai.adeu%2Fadeu.svg)](https://mcptoplist.com/server/ai.adeu%2Fadeu)
+
 [![GitHub Repo stars](https://img.shields.io/github/stars/dealfluence/adeu?style=social)](https://github.com/dealfluence/adeu)
 [![PyPI version](https://img.shields.io/pypi/v/adeu.svg)](https://pypi.org/project/adeu/)
 [![npm version](https://img.shields.io/npm/v/@adeu/core.svg)](https://www.npmjs.com/package/@adeu/core)
