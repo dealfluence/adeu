@@ -32,7 +32,7 @@ from adeu.utils.text import escape_critic_tokens
 logger = structlog.get_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class TextSpan:
     start: int
     end: int
@@ -58,9 +58,9 @@ class TextSpan:
 
 
 def _append_wrapped_run_part(
-    run_parts: List[Tuple[str, str, Optional[Run], int]],
+    run_parts: List[Tuple[str, str, Optional[Any], int]],
     segment: str,
-    run: Run,
+    run: Any,
     prefix: str,
     suffix: str,
     run_local: int,
@@ -307,14 +307,23 @@ class DocumentMapper:
                 return (prev_i, next_i)
         return None
 
-    def _map_blocks(self, container, offset: int) -> int:
+    def _map_blocks(
+        self,
+        container,
+        offset: int,
+        style_cache: Optional[dict] = None,
+        default_pstyle: Optional[str] = None,
+        part: Any = None,
+    ) -> int:
         current = offset
         c_type = type(container).__name__
 
-        part = getattr(container, "part", container)
+        if part is None:
+            part = getattr(container, "part", container)
         from adeu.utils.docx import _get_style_cache
 
-        style_cache, default_pstyle = _get_style_cache(part)
+        if style_cache is None:
+            style_cache, default_pstyle = _get_style_cache(part)
 
         # Block-join semantics mirror ingest._extract_blocks exactly:
         # "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when
@@ -349,7 +358,7 @@ class DocumentMapper:
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
                 block_start = current
-                current = self._map_blocks(item, current)
+                current = self._map_blocks(item, current, style_cache, default_pstyle)
                 if current == block_start:
                     # Empty footnote entry: the reader drops the block, so
                     # roll back the separator and any zero-width spans.
@@ -368,7 +377,7 @@ class DocumentMapper:
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
-                style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+                style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle, part=part)
                 prefix = style_prefix
                 if is_first_para and c_type == "FootnoteItem":
                     prefix = f"[^{container.note_type}-{container.id}]: " + prefix
@@ -384,6 +393,7 @@ class DocumentMapper:
                     style_cache,
                     default_pstyle,
                     paragraph_prefix=style_prefix,
+                    part=part,
                 )
                 if self.clean_view and current == content_start and paragraph_mark_is_deleted(item._element):
                     # Twin of the reader's skip in ingest._extract_blocks:
@@ -416,7 +426,7 @@ class DocumentMapper:
                     current += 2
 
                 block_start = current
-                current = self._map_table(item, current)
+                current = self._map_table(item, current, style_cache, default_pstyle, part=part)
                 if current == block_start:
                     # Empty table (e.g. every row skipped in this view): the
                     # reader drops the block AND its separator.
@@ -430,13 +440,21 @@ class DocumentMapper:
 
         return current
 
-    def _map_table(self, table: Table, offset: int) -> int:
+    def _map_table(
+        self,
+        table: Any,
+        offset: int,
+        style_cache: Optional[dict] = None,
+        default_pstyle: Optional[str] = None,
+        part: Any = None,
+    ) -> int:
         current = offset
         rows_processed = 0
 
-        for row in table.rows:
+        tbl = table._element if hasattr(table, "_element") else table
+
+        for tr in tbl.iterchildren(qn("w:tr")):
             # Structural Row Tracking
-            tr = row._element
             trPr = tr.find(qn("w:trPr"))
             ins = trPr.find(qn("w:ins")) if trPr is not None else None
             del_node = trPr.find(qn("w:del")) if trPr is not None else None
@@ -461,24 +479,24 @@ class DocumentMapper:
             seen_cells = set()
             cells_processed = 0
 
-            for cell in row.cells:
-                if cell in seen_cells:
+            for tc in tr.iterchildren(qn("w:tc")):
+                if tc in seen_cells:
                     continue
-                seen_cells.add(cell)
+                seen_cells.add(tc)
 
                 if cells_processed > 0:
                     self._add_virtual_text(" | ", current, None)
                     current += 3
 
                 cell_start = current
-                current = self._map_blocks(cell, current)
+                current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part)
 
                 if not self.clean_view and not self.original_view:
-                    first_p_list = cell._element.findall(".//" + qn("w:p"))
+                    first_p_list = tc.findall(".//" + qn("w:p"))
                     firstP = first_p_list[0] if first_p_list else None
                     paraId = firstP.get(qn("w14:paraId")) if firstP is not None else None
                     if paraId and firstP is not None:
-                        cellPara = Paragraph(firstP, cell)
+                        cellPara = Paragraph(firstP, cast(Any, None))
                         self._add_virtual_text("", current, cellPara)
                         if cell_start < current:
                             # Separator only when the projected cell text
@@ -518,10 +536,10 @@ class DocumentMapper:
             if rows_processed == 1:
                 seen_cells_first = set()
                 num_cols = 0
-                for cell in row.cells:
-                    if cell in seen_cells_first:
+                for tc in tr.iterchildren(qn("w:tc")):
+                    if tc in seen_cells_first:
                         continue
-                    seen_cells_first.add(cell)
+                    seen_cells_first.add(tc)
                     num_cols += 1
 
                 if num_cols > 0:
@@ -556,11 +574,12 @@ class DocumentMapper:
 
     def _map_paragraph_content(
         self,
-        paragraph: Paragraph,
+        paragraph: Any,
         start_offset: int,
         style_cache: Optional[dict] = None,
         default_pstyle: Optional[str] = None,
         paragraph_prefix: Optional[str] = None,
+        part: Any = None,
     ) -> int:
         """
         Maps Runs to Spans, handling Flattened CriticMarkup generation.
@@ -581,6 +600,7 @@ class DocumentMapper:
         active_ins: dict[str, DocxEvent] = {}
         active_del: dict[str, DocxEvent] = {}
         active_fmt: dict[str, DocxEvent] = {}
+        cached_state_snapshot: Optional[Tuple] = None
 
         deferred_meta_states: List[Tuple] = []
         current_wrappers = ("", "")
@@ -622,7 +642,7 @@ class DocumentMapper:
                 current += len(e_tok)
             pending_runs = []
 
-        items = list(iter_paragraph_content(paragraph))
+        items = list(iter_paragraph_content(paragraph, part=part))
 
         # Twin of ingest.build_paragraph_text: reuse the prefix _map_blocks
         # already computed instead of re-deriving it per paragraph.
@@ -631,7 +651,7 @@ class DocumentMapper:
         leading_strip_active = is_heading
 
         for i, item in enumerate(items):
-            if isinstance(item, Run):
+            if isinstance(item, ProjectedRun):
                 # Clean view drops deleted runs ENTIRELY, before the heading
                 # leading-whitespace strip — mirroring ingest exactly: a
                 # deleted leading run must leave the strip armed for the runs
@@ -641,14 +661,10 @@ class DocumentMapper:
 
                 # Fully fused: twin of ingest.build_paragraph_text — the stream
                 # already walked this run's children and carried the result.
-                if not isinstance(item, ProjectedRun):
-                    raise TypeError(
-                        "_map_paragraph_content requires ProjectedRun items from iter_paragraph_content; got a bare Run"
-                    )
                 text = item.proj_text
                 prefix, suffix = markers_from_flags(item.proj_bold, item.proj_italic, native_heading)
                 # (kind, text, run, run_offset)
-                run_parts: List[Tuple[str, str, Optional[Run], int]] = []
+                run_parts: List[Tuple[str, str, Optional[Any], int]] = []
 
                 if leading_strip_active:
                     if text == "" or text.isspace():
@@ -747,13 +763,14 @@ class DocumentMapper:
                 if full_seg_text and not self.clean_view and not self.original_view:
                     has_meta = active_ins or active_del or active_ids or active_fmt
                     if has_meta:
-                        state_snapshot = (
-                            active_ins.copy() if active_ins else {},
-                            active_del.copy() if active_del else {},
-                            active_ids.copy() if active_ids else set(),
-                            active_fmt.copy() if active_fmt else {},
-                        )
-                        deferred_meta_states.append(state_snapshot)
+                        if cached_state_snapshot is None:
+                            cached_state_snapshot = (
+                                active_ins.copy() if active_ins else {},
+                                active_del.copy() if active_del else {},
+                                active_ids.copy() if active_ids else set(),
+                                active_fmt.copy() if active_fmt else {},
+                            )
+                        deferred_meta_states.append(cached_state_snapshot)
 
                     should_defer = False
                     has_any_meta = bool(curr_ins_id) or bool(curr_del_id) or bool(active_fmt) or bool(active_ids)
@@ -768,11 +785,9 @@ class DocumentMapper:
 
                         while j < len(items):
                             next_item = items[j]
-                            if isinstance(next_item, Run):
-                                # Carried by the stream; the main loop above
-                                # already rejects bare Runs, so this cast is
-                                # safe and avoids re-walking the run.
-                                if not cast(ProjectedRun, next_item).proj_text:
+                            if isinstance(next_item, ProjectedRun):
+                                # Carried by the stream.
+                                if not next_item.proj_text:
                                     j += 1
                                     continue
                                 if (
@@ -837,6 +852,18 @@ class DocumentMapper:
                     flush_pending_runs()
                     current_wrappers = ("", "")
                     current_style = ("", "")
+
+                if item.type in (
+                    "start",
+                    "end",
+                    "ins_start",
+                    "ins_end",
+                    "del_start",
+                    "del_end",
+                    "fmt_start",
+                    "fmt_end",
+                ):
+                    cached_state_snapshot = None
 
                 if item.type == "start":
                     active_ids.add(item.id)
@@ -1423,16 +1450,20 @@ class DocumentMapper:
                     return None, s.paragraph
         return None, None
 
-    def _split_run_at_index(self, run: Run, split_index: int) -> Tuple[Run, Run]:
-        text = run.text
+    def _split_run_at_index(self, run: Any, split_index: int) -> Tuple[Any, Any]:
+        text = getattr(run, "proj_text", getattr(run, "text", ""))
         left_text = text[:split_index]
         right_text = text[split_index:]
 
         run.text = left_text
         new_r_element = deepcopy(run._element)
         run._element.addnext(new_r_element)
-        new_run = Run(new_r_element, run._parent)
-        new_run.text = right_text
+        if isinstance(run, ProjectedRun):
+            new_run: Any = ProjectedRun(new_r_element, right_text, run.proj_bold, run.proj_italic)
+            new_run.text = right_text
+        else:
+            new_run = Run(new_r_element, run._parent)
+            new_run.text = right_text
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:

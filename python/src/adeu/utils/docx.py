@@ -4,7 +4,8 @@ Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 
 import re
-from typing import Any, Dict, Iterator, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Tuple, Union, cast
 
 import structlog
 from docx.document import Document as DocumentObject
@@ -197,8 +198,17 @@ def paragraph_mark_is_deleted(p_element) -> bool:
     return rPr is not None and rPr.find(QN_W_DEL) is not None
 
 
+def _get_part_safely(obj: Any) -> Any:
+    if obj is None:
+        return None
+    try:
+        return obj.part
+    except Exception:
+        return None
+
+
 def is_native_heading(
-    paragraph: Paragraph,
+    paragraph: Any,
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
 ) -> bool:
@@ -207,8 +217,8 @@ def is_native_heading(
     excluding heuristic headings.
     """
     if style_cache is None:
-        style_cache, default_pstyle = _get_style_cache(paragraph.part)
-    p_el = paragraph._element
+        style_cache, default_pstyle = _get_style_cache(_get_part_safely(paragraph))
+    p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     pPr = p_el.find(QN_W_PPR)
 
     # 1. Outline Level
@@ -280,6 +290,12 @@ def _get_style_cache(part):
     Parses styles.xml natively and builds an O(1) dictionary cache of styles.
     Bypasses the extreme overhead of python-docx's lazy-loading style wrappers.
     """
+    if part is None:
+        return {}, None
+    if hasattr(part, "part"):
+        part = part.part
+    if not hasattr(part, "package"):
+        return {}, None
     pkg = part.package
     if hasattr(pkg, "_adeu_style_cache"):
         return pkg._adeu_style_cache
@@ -407,6 +423,12 @@ def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
     (QA 2026-07-18 M4). Missing part / malformed XML yields an empty cache,
     which projects every list with the bullet marker (the historical default).
     """
+    if part is None:
+        return {}
+    if hasattr(part, "part"):
+        part = part.part
+    if not hasattr(part, "package"):
+        return {}
     pkg = part.package
     if hasattr(pkg, "_adeu_numbering_cache"):
         return pkg._adeu_numbering_cache
@@ -485,7 +507,8 @@ class DocxEvent(NamedTuple):
     date: Optional[str] = None
 
 
-class ProjectedRun(Run):
+@dataclass(slots=True)
+class ProjectedRun:
     """A run whose projected text and emphasis flags were computed during the
     SINGLE child walk `iter_paragraph_content` already performs.
 
@@ -496,24 +519,48 @@ class ProjectedRun(Run):
     ~1.95 s of every projection and of every mapper rebuild (559 K runs, of
     which 97.9 % produce no event at all).
 
-    It SUBCLASSES `Run`, so every existing `isinstance(item, Run)` check and
-    every consumer that treats the item as a python-docx run keeps working
-    unchanged — the extra attributes are purely additive.
-
-    `proj_bold` / `proj_italic` are flags rather than marker strings because
-    the marker form depends on `is_heading`, a property of the enclosing
-    paragraph that the stream does not know. Callers apply
-    `markers_from_flags(proj_bold, proj_italic, native_heading)`.
+    It is a standalone slotted dataclass, avoiding python-docx `Run.__init__`
+    wrapper allocation while exposing `_element`, `proj_text`, `proj_bold`, and
+    `proj_italic` directly (along with `.text`, `.bold`, `.italic`, and `._parent`).
     """
 
-    def __init__(self, r, parent, text: str, is_bold: bool, is_italic: bool):
-        super().__init__(r, parent)
-        self.proj_text = text
-        self.proj_bold = is_bold
-        self.proj_italic = is_italic
+    _element: Any
+    proj_text: str
+    proj_bold: bool
+    proj_italic: bool
+
+    @property
+    def text(self) -> str:
+        return self.proj_text
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self.proj_text = value
+        Run(self._element, cast(Any, None)).text = value
+
+    @property
+    def bold(self) -> bool:
+        return self.proj_bold
+
+    @property
+    def italic(self) -> bool:
+        return self.proj_italic
+
+    @property
+    def _r(self):
+        return self._element
+
+    @property
+    def _parent(self):
+        p = self._element.getparent()
+        while p is not None and p.tag != QN_W_P:
+            p = p.getparent()
+        if p is not None:
+            return Paragraph(p, cast(Any, None))
+        return None
 
 
-ParagraphItem = Union[Run, DocxEvent]
+ParagraphItem = Union[ProjectedRun, DocxEvent]
 
 
 class NotesPart:
@@ -555,18 +602,21 @@ def _is_page_instr(instr: str) -> bool:
 
 
 def get_paragraph_prefix(
-    paragraph: Paragraph,
+    paragraph: Any,
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
+    part: Any = None,
 ) -> str:
     """
     Returns the Markdown prefix for a paragraph based on its style.
     Uses the Fast XML Cache to avoid python-docx performance penalties.
     """
+    if part is None:
+        part = _get_part_safely(paragraph)
     if style_cache is None:
-        style_cache, default_pstyle = _get_style_cache(paragraph.part)
+        style_cache, default_pstyle = _get_style_cache(part)
     cache = style_cache
-    p_el = paragraph._element
+    p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     pPr = p_el.find(QN_W_PPR)
 
     # 1. Check Outline Level on the paragraph itself (Structural Truth)
@@ -637,7 +687,9 @@ def get_paragraph_prefix(
                 list_ilvl = style_info.get("num_ilvl")
     if list_num_id is not None:
         level = list_ilvl if list_ilvl is not None else 0
-        marker = get_list_marker(paragraph.part, list_num_id, level)
+        if part is None:
+            part = _get_part_safely(paragraph)
+        marker = get_list_marker(part, list_num_id, level)
         return ("    " * level) + marker
 
     # 4. Custom heading style name fallback.
@@ -829,11 +881,12 @@ def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     return "\n".join(wrap(p) if p else "" for p in parts)
 
 
-def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
+def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[ParagraphItem]:
     """
     Iterates over the content of a paragraph, yielding both Runs and Comment events.
     This allows reconstruction of text with inline comments using CriticMarkup.
     """
+    doc_part = part if part is not None else _get_part_safely(paragraph)
     # State for complex fields (w:fldChar)
     in_complex_field = False
     current_instr = ""
@@ -952,7 +1005,7 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
                 text = text_parts[0]
             else:
                 text = "".join(text_parts)
-            yield ProjectedRun(r_element, paragraph, text, is_bold, is_italic)
+            yield ProjectedRun(r_element, text, is_bold, is_italic)
 
         if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
@@ -989,9 +1042,10 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
             elif tag == QN_W_HYPERLINK:
                 rId = child.get(QN_R_ID)
                 url = ""
-                if rId and paragraph.part:
+                rels = getattr(doc_part, "rels", None) if doc_part is not None else None
+                if rId and rels is not None:
                     try:
-                        rel = paragraph.part.rels[rId]
+                        rel = rels[rId]
                         if rel.is_external:
                             url = rel.target_ref
                     except KeyError:
@@ -1020,7 +1074,8 @@ def iter_paragraph_content(paragraph: Paragraph) -> Iterator[ParagraphItem]:
             elif tag in (QN_W_SDT, QN_W_SMARTTAG, QN_W_SDTCONTENT):
                 yield from traverse_node(child)
 
-    yield from traverse_node(paragraph._element)
+    p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
+    yield from traverse_node(p_el)
 
 
 def get_visible_runs(paragraph: Paragraph):
@@ -1029,7 +1084,7 @@ def get_visible_runs(paragraph: Paragraph):
     Effectively returns the 'Accepted Changes' view of the runs.
     Filters out dynamic page number fields ({PAGE}, {NUMPAGES}).
     """
-    return [item for item in iter_paragraph_content(paragraph) if isinstance(item, Run)]
+    return [item for item in iter_paragraph_content(paragraph) if isinstance(item, ProjectedRun)]
 
 
 def get_run_text_and_markers(r_element, is_heading: bool) -> tuple[str, str, str]:
@@ -1403,28 +1458,31 @@ def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
         if hasattr(parent, "_element"):
             parent_elm = parent._element
         else:
-            raise ValueError(f"Unsupported parent type for iteration: {type(parent)}")
+            parent_elm = parent
 
-    yield from _iter_block_children(parent_elm, parent)
+    for kind, child_elm in _iter_block_children(parent_elm):
+        if kind == "p":
+            yield Paragraph(child_elm, parent)
+        elif kind == "tbl":
+            yield Table(child_elm, parent)
 
 
-def _iter_block_children(parent_elm, parent):
+def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
     """
-    Yields the block items among `parent_elm`'s children, descending into
-    block-level w:sdt content controls: Word renders w:sdtContent children as
-    ordinary flowed body text, so skipping them silently hides live document
-    content from every view (QA 2026-07-23 customer C4). Recursion covers
-    nested controls; group/repeating sections project their inner blocks.
+    Yields (kind, child_elem) tuples among `parent_elm`'s children, descending
+    into block-level w:sdt content controls.
+    kind is "p" or "tbl".
     """
     for child in parent_elm.iterchildren():
-        if child.tag == qn("w:p"):
-            yield Paragraph(child, parent)
-        elif child.tag == qn("w:tbl"):
-            yield Table(child, parent)
-        elif child.tag == qn("w:sdt"):
+        tag = child.tag
+        if tag == QN_W_P:
+            yield ("p", child)
+        elif tag == qn("w:tbl"):
+            yield ("tbl", child)
+        elif tag == qn("w:sdt"):
             sdt_content = child.find(qn("w:sdtContent"))
             if sdt_content is not None:
-                yield from _iter_block_children(sdt_content, parent)
+                yield from _iter_block_children(sdt_content)
 
 
 def strip_bom_from_docx_bytes(data: bytes) -> bytes:

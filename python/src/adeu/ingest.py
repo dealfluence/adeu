@@ -2,14 +2,13 @@
 import io
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Tuple, cast
+from typing import Any, List, Optional, Tuple
 
 import structlog
 from docx import Document
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
-from docx.text.run import Run
 
 from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
@@ -34,7 +33,7 @@ from adeu.utils.text import escape_critic_tokens
 logger = structlog.get_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class RowGeometry:
     """Text-space extent of one projected table row plus its cell texts."""
 
@@ -43,7 +42,7 @@ class RowGeometry:
     cells: List[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class TableGeometry:
     """Text-space extent of one projected top-level table."""
 
@@ -52,7 +51,7 @@ class TableGeometry:
     rows: List[RowGeometry] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class ExtractStructure:
     """
     Structural map of a projection: which offset ranges belong to which OPC
@@ -180,12 +179,15 @@ def _extract_text_from_doc(
 
 
 def _extract_blocks(
-    container,
-    comments_map,
+    container: Any,
+    comments_map: dict,
     clean_view: bool,
     offset_map: dict | None = None,
     cursor: int = 0,
     table_acc: list | None = None,
+    style_cache: dict | None = None,
+    default_pstyle: str | None = None,
+    part: Any = None,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
@@ -195,10 +197,10 @@ def _extract_blocks(
     Deliberately not forwarded into cells — nested tables stay invisible to
     the structured row-op diff, whose row pairing assumes one flat grid.
     """
-    # Fetch style cache exactly once per container block
-    part = getattr(container, "part", container)
-
-    style_cache, default_pstyle = _get_style_cache(part)
+    if part is None:
+        part = getattr(container, "part", container)
+    if style_cache is None:
+        style_cache, default_pstyle = _get_style_cache(part)
 
     blocks = []
     local_cursor = cursor
@@ -233,6 +235,8 @@ def _extract_blocks(
                 clean_view,
                 offset_map=offset_map,
                 cursor=block_start,
+                style_cache=style_cache,
+                default_pstyle=default_pstyle,
             )
             if fn_text:
                 blocks.append(fn_text)
@@ -244,21 +248,23 @@ def _extract_blocks(
                 if not is_first_block:
                     local_cursor -= 2
         elif isinstance(item, Paragraph):
-            style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle)
+            p_elem = item._element
+            style_prefix = get_paragraph_prefix(p_elem, style_cache, default_pstyle, part=part)
             prefix = style_prefix
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
             # Pass the UNDECORATED style prefix: the heading test is about the
             # paragraph's own style, not the footnote label.
             p_text = build_paragraph_text(
-                item,
+                p_elem,
                 comments_map,
                 clean_view,
                 style_cache,
                 default_pstyle,
                 paragraph_prefix=style_prefix,
+                part=part,
             )
-            if clean_view and not p_text and paragraph_mark_is_deleted(item._element):
+            if clean_view and not p_text and paragraph_mark_is_deleted(p_elem):
                 # Accepting a tracked paragraph-mark deletion merges the
                 # paragraph away; when nothing visible survives inside it,
                 # the accepted view must not render an empty container
@@ -270,24 +276,28 @@ def _extract_blocks(
             full_block = prefix + p_text
             blocks.append(full_block)
             if offset_map is not None:
-                offset_map[id(item._element)] = (
+                offset_map[id(p_elem)] = (
                     block_start,
                     len(full_block),
-                    item._element,
+                    p_elem,
                 )
             local_cursor = block_start + len(full_block)
             is_first_para = False
             is_first_block = False
 
         elif isinstance(item, Table):
+            tbl_elem = item._element
             geometry = TableGeometry(start=block_start, end=block_start) if table_acc is not None else None
             table_text = extract_table(
-                item,
+                tbl_elem,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
                 cursor=block_start,
                 geometry=geometry,
+                style_cache=style_cache,
+                default_pstyle=default_pstyle,
+                part=part,
             )
             if table_text:
                 blocks.append(table_text)
@@ -305,12 +315,15 @@ def _extract_blocks(
 
 
 def extract_table(
-    table: Table,
+    table: Any,
     comments_map,
     clean_view: bool,
     offset_map: dict | None = None,
     cursor: int = 0,
     geometry: "TableGeometry | None" = None,
+    style_cache: dict | None = None,
+    default_pstyle: str | None = None,
+    part: Any = None,
 ) -> str:
     """
     Args:
@@ -322,13 +335,14 @@ def extract_table(
     rows_processed = 0
     local_cursor = cursor
 
-    for row in table.rows:
+    tbl_elem = table._element if hasattr(table, "_element") else table
+
+    for tr in tbl_elem.iterchildren(qn("w:tr")):
         cell_texts: list[str] = []
         seen_cells: set = set()
 
         # Structural Row Tracking — figure out wrapper offsets first so cell
         # offsets land correctly inside the wrapped row text.
-        tr = row._element
         trPr = tr.find(qn("w:trPr"))
         ins = trPr.find(qn("w:ins")) if trPr is not None else None
         del_node = trPr.find(qn("w:del")) if trPr is not None else None
@@ -350,23 +364,26 @@ def extract_table(
         cell_cursor = row_start + wrapper_prefix_len
         first_cell = True
 
-        for cell in row.cells:
-            if cell in seen_cells:
+        for tc in tr.iterchildren(qn("w:tc")):
+            if tc in seen_cells:
                 continue
-            seen_cells.add(cell)
+            seen_cells.add(tc)
 
             if not first_cell:
                 cell_cursor += 3  # " | " between cells
 
             cell_content = _extract_blocks(
-                cell,
+                tc,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
                 cursor=cell_cursor,
+                style_cache=style_cache,
+                default_pstyle=default_pstyle,
+                part=part,
             )
             if not clean_view:
-                first_p_list = cell._element.findall(".//" + qn("w:p"))
+                first_p_list = tc.findall(".//" + qn("w:p"))
                 firstP = first_p_list[0] if first_p_list else None
                 paraId = firstP.get(qn("w14:paraId")) if firstP is not None else None
                 if paraId:
@@ -415,6 +432,7 @@ def build_paragraph_text(
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
     paragraph_prefix: Optional[str] = None,
+    part: Any = None,
 ):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
@@ -450,7 +468,7 @@ def build_paragraph_text(
     # used only to decide whether the next incoming run can elide adjacent markers.
     current_style = ("", "")
 
-    items = list(iter_paragraph_content(paragraph))
+    items = list(iter_paragraph_content(paragraph, part=part))
 
     # Heading-leading-whitespace strip: in heading paragraphs, leading runs
     # whose text is whitespace-only (e.g. a lone <w:br/> or <w:tab/>) are
@@ -467,17 +485,10 @@ def build_paragraph_text(
     leading_strip_active = is_heading
 
     for i, item in enumerate(items):
-        if isinstance(item, Run):
+        if isinstance(item, ProjectedRun):
             # Fully fused: iter_paragraph_content already walked this run's
             # children once and carried the result, so there is no second walk
             # here at all — only the (pure) marker derivation.
-            if not isinstance(item, ProjectedRun):
-                # Loud rather than silent: a bare Run means someone produced
-                # items without iter_paragraph_content, and falling back to a
-                # re-walk here would hide that from the twin contract.
-                raise TypeError(
-                    "build_paragraph_text requires ProjectedRun items from iter_paragraph_content; got a bare Run"
-                )
             text = item.proj_text
             prefix, suffix = markers_from_flags(item.proj_bold, item.proj_italic, native_heading)
 
@@ -564,11 +575,9 @@ def build_paragraph_text(
 
                         while j < len(items):
                             next_item = items[j]
-                            if isinstance(next_item, Run):
-                                # Carried by the stream; the main loop above
-                                # already rejects bare Runs, so this cast is
-                                # safe and avoids re-walking the run.
-                                if not cast(ProjectedRun, next_item).proj_text:
+                            if isinstance(next_item, ProjectedRun):
+                                # Carried by the stream.
+                                if not next_item.proj_text:
                                     j += 1
                                     continue
                                 if (

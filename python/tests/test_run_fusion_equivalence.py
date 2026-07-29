@@ -191,16 +191,16 @@ def test_stream_carried_values_match_the_standalone_walk():
 
 
 def test_projected_run_is_usable_as_a_plain_run():
-    """ProjectedRun subclasses Run so existing isinstance checks and consumers
-    keep working; the mapper stores these in TextSpan.run."""
+    """ProjectedRun is a standalone dataclass carrying projected text and emphasis flags;
+    the mapper stores these in TextSpan.run."""
     from adeu.utils.docx import ProjectedRun, get_visible_runs
 
     run = _make_run("<w:r><w:rPr><w:b/></w:rPr><w:t>hello</w:t></w:r>")
     visible = get_visible_runs(run._parent)
     assert len(visible) == 1
     item = visible[0]
-    assert isinstance(item, Run) and isinstance(item, ProjectedRun)
-    # python-docx surface still functional on the subclass.
+    assert isinstance(item, ProjectedRun)
+    # python-docx surface properties still functional on ProjectedRun.
     assert item.text == "hello"
     assert item.bold is True
     assert item._element is run._element

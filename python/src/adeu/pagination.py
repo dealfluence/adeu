@@ -43,7 +43,7 @@ _CHG_ID_PATTERN = re.compile(r"\bChg:(\d+)\b")
 _SCAN_TOKEN_RE = re.compile(r"\{\+\+|\{--|\{==|\{>>|\+\+\}|--\}|==\}|<<\}|\n{2,}")
 
 
-@dataclass
+@dataclass(slots=True)
 class PageInfo:
     page: int
     total_pages: int
@@ -53,7 +53,7 @@ class PageInfo:
     page_content: str
 
 
-@dataclass
+@dataclass(slots=True)
 class PaginationResult:
     pages: List[PageInfo]
     total_pages: int

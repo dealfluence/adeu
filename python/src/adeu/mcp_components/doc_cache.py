@@ -43,7 +43,7 @@ MAX_ENTRIES = 3
 ProgressFn = Optional[Callable[[int, str], None]]
 
 
-@dataclass
+@dataclass(slots=True)
 class _View:
     """Cached artifacts for one (document version, clean_view) pair."""
 
@@ -53,7 +53,7 @@ class _View:
     outline_nodes: Optional[List[OutlineNode]] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class _Entry:
     key: Tuple[str, int, int]
     raw: _View = field(default_factory=_View)

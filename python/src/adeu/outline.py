@@ -37,7 +37,7 @@ from adeu.utils.docx import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class OutlineNode:
     level: int  # 1–6
     text: str  # heading text, no markdown markers, no CriticMarkup
@@ -53,7 +53,7 @@ class OutlineNode:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _BlockRecord:
     """One walked block item with its projected length and start offset."""
 
