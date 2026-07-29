@@ -859,10 +859,12 @@ def _row_ops_for_table(
     def row_text(r) -> str:
         return " | ".join(r.cells)
 
+    keys_m = ["\x1f".join(r.cells) for r in rows_m]
+
     # Duplicate row texts make text-anchored row operations ambiguous. The
     # engine fails closed with a strict-mode ambiguity error at apply time;
     # tell the user up front so the rejection is not a surprise.
-    if len(set(keys_o)) != len(keys_o):
+    if len(set(keys_o)) != len(keys_o) or len(set(keys_m)) != len(keys_m):
         warnings.append(
             "A table contains rows with identical text; the generated row operations anchor by "
             "row text and may be rejected as ambiguous at apply time. If that happens, apply the "
