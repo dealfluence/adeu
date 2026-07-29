@@ -251,12 +251,20 @@ def test_p3_structured_table_diff_replays_or_fails_loud(paras, tables):
 def _has_texty_hazard(text_orig: str, edits) -> bool:
     """
     True when any generated text anchor occurs more than once in the original
-    projection — the fail-closed ambiguity path documented on the diff.
+    projection or across intermediate inserted edit texts — the fail-closed
+    ambiguity path documented on the diff.
     """
+    accumulated = text_orig
     for e in edits:
         target = getattr(e, "target_text", "") or ""
-        if target and text_orig.count(target) > 1:
+        if target and accumulated.count(target) > 1:
             return True
+        cells = getattr(e, "cells", None)
+        if cells:
+            accumulated += "\n" + " | ".join(cells)
+        new_text = getattr(e, "new_text", None)
+        if new_text:
+            accumulated += "\n" + new_text
     return False
 
 
