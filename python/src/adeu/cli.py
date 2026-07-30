@@ -180,7 +180,8 @@ def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" =
       - a single {"error": code, "message": ...} JSON object on stdout when
         the invocation asked for --json
     Stable codes: file_not_found, invalid_input, invalid_docx,
-    invalid_changes_file, write_failed, unsupported, batch_validation_failed.
+    invalid_changes_file, write_failed, unsupported, batch_validation_failed,
+    missing_dependency.
     """
     print(f"❌ {message}", file=sys.stderr)
     if hint:
@@ -188,6 +189,19 @@ def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" =
     if _JSON_MODE:
         print(json.dumps({"error": code, "message": message}))
     sys.exit(exit_code)
+
+
+def _missing_mcp_extra_and_exit(exc: ImportError) -> None:
+    """
+    The --live Word integration rides on the MCP tool layer, and fastmcp is
+    an optional extra so CLI-only installs stay lean. Turn the raw
+    ImportError into the standard CLI error contract.
+    """
+    _cli_error(
+        "missing_dependency",
+        f"--live requires the optional MCP dependencies (missing module: {exc.name}).",
+        hint="Install them with: pip install 'adeu[mcp]'",
+    )
 
 
 def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
@@ -695,7 +709,10 @@ def handle_extract(args):
     if args.live:
         if sys.platform != "win32":
             _cli_error("unsupported", "--live is only supported on Windows.")
-        from adeu.mcp_components.tools.live_word import _read_active_word_document_core
+        try:
+            from adeu.mcp_components.tools.live_word import _read_active_word_document_core
+        except ImportError as exc:
+            _missing_mcp_extra_and_exit(exc)
 
         text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
     else:
@@ -1064,9 +1081,12 @@ def handle_apply(args):
         if args.live:
             if sys.platform != "win32":
                 _cli_error("unsupported", "--live is only supported on Windows.")
-            from adeu.mcp_components.tools.live_word import (
-                _read_active_word_document_core,
-            )
+            try:
+                from adeu.mcp_components.tools.live_word import (
+                    _read_active_word_document_core,
+                )
+            except ImportError as exc:
+                _missing_mcp_extra_and_exit(exc)
 
             text_orig, _, _ = _read_active_word_document_core(clean_view=False)
         else:
@@ -1109,7 +1129,10 @@ def handle_apply(args):
     if args.live:
         if sys.platform != "win32":
             _cli_error("unsupported", "--live is only supported on Windows.")
-        from adeu.mcp_components.tools.live_word import _process_active_word_batch_core
+        try:
+            from adeu.mcp_components.tools.live_word import _process_active_word_batch_core
+        except ImportError as exc:
+            _missing_mcp_extra_and_exit(exc)
 
         if not args.json:
             print(f"Applying {len(changes)} changes to live Word document...", file=sys.stderr)

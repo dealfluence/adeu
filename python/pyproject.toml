@@ -24,11 +24,19 @@ dependencies = [
     "pydantic>=2.0.0",
     "lxml>=5.0.0",
     "diff-match-patch>=20230430",
-    "fastmcp[apps]>=3.1.1",
     "jinja2>=3.1.6",
     "pywin32; sys_platform == 'win32'",
     "rapidfuzz>=3.14.5",
     "regex>=2024.11.6",
+]
+
+[project.optional-dependencies]
+# The MCP server (adeu-server) and the CLI's --live Word integration need
+# fastmcp. The plain CLI (extract/diff/apply/markup/sanitize) does not — it
+# already avoids importing fastmcp at runtime (see _response_builders.py);
+# this extra keeps its ~20 transitive packages out of CLI-only installs too.
+mcp = [
+    "fastmcp[apps]>=3.1.1",
 ]
 
 [project.urls]
@@ -52,6 +60,10 @@ dev = [
     "hypothesis",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
+    # The test suite exercises the MCP server, so a plain `uv sync` must
+    # bring in the 'mcp' extra's dependency even though runtime installs
+    # keep it optional. Keep this pin in step with the extra above.
+    "fastmcp[apps]>=3.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]

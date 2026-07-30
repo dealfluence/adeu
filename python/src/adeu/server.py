@@ -4,10 +4,18 @@ import sys
 from pathlib import Path
 
 import structlog
-from fastmcp import FastMCP
-from fastmcp.server.providers import FileSystemProvider
-from fastmcp.utilities.types import Image
-from mcp.types import Icon
+
+try:
+    from fastmcp import FastMCP
+    from fastmcp.server.providers import FileSystemProvider
+    from fastmcp.utilities.types import Image
+    from mcp.types import Icon
+except ImportError as _exc:
+    raise SystemExit(
+        "adeu-server requires the MCP server dependencies, which are an "
+        "optional extra. Install them with: pip install 'adeu[mcp]' "
+        f"(missing: {_exc.name})"
+    ) from _exc
 
 from adeu.mcp_components.shared import get_build_info
 
