@@ -72,4 +72,38 @@ describe("MCP Server 2026-07-28 Protocol Integration", () => {
     const sorted = [...names].sort();
     expect(names).toEqual(sorted);
   });
+
+  it("rejects request with unsupported protocol version in _meta with error -32022", async () => {
+    const res = await sendRpc("tools/list", {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "1999-01-01",
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    });
+    expect(res.error).toBeDefined();
+    expect(res.error.code).toBe(-32022);
+    expect(res.error.message).toContain("Unsupported protocol version");
+  });
+
+  it("rejects 2026-07-28 request missing clientCapabilities in _meta with error -32602", async () => {
+    const res = await sendRpc("tools/list", {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      },
+    });
+    expect(res.error).toBeDefined();
+    expect(res.error.code).toBe(-32602);
+    expect(res.error.message).toContain("Missing required _meta parameter");
+  });
+
+  it("preserves legacy initialize handshake for older clients", async () => {
+    const res = await sendRpc("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "legacy-client", version: "1.0.0" },
+    });
+    expect(res.result).toBeDefined();
+    expect(res.result.protocolVersion).toBeDefined();
+    expect(res.result.resultType).toBe("complete");
+  });
 });
