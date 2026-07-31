@@ -1295,8 +1295,12 @@ async function main() {
     return;
   }
   const transport = new StdioServerTransport();
-  attachProtocolAdapter(server, transport, "adeu-redlining-service", packageVersion);
+  // Attach AFTER connect: the SDK's Protocol.connect chains any pre-existing
+  // onmessage handler *inside* its own (sdk/dist/esm/shared/protocol.js:230),
+  // so a pre-connect wrapper cannot stop the SDK from also answering
+  // server/discover (-32601) or a request we already rejected. See task_plan §2.4.
   await server.connect(transport);
+  attachProtocolAdapter(server, transport, "adeu-redlining-service", packageVersion);
   const gitSha = process.env.GIT_SHA || "unknown";
   const buildTs = process.env.BUILD_TIMESTAMP || "unknown";
   console.error(
