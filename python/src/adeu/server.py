@@ -1,11 +1,14 @@
 import argparse
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import structlog
 from fastmcp import FastMCP
 from fastmcp.server.providers import FileSystemProvider
+from fastmcp.server.transforms import Transform
+from fastmcp.tools import Tool
 from fastmcp.utilities.types import Image
 from mcp.types import Icon
 
@@ -66,7 +69,7 @@ logo_path = Path(__file__).parent / "assets" / "logo.png"
 if logo_path.exists():
     try:
         img = Image(path=str(logo_path))
-        server_icons.append(Icon(src=img.to_data_uri(), mimeType="image/png"))
+        server_icons.append(Icon(src=img.to_data_uri(), mime_type="image/png"))
     except Exception as e:
         logging.warning(f"Failed to load server icon: {e}")
 
@@ -76,53 +79,46 @@ provider = FileSystemProvider(root=mcp_dir)
 
 version, git_sha, _ = get_build_info()
 
-# Initialize MCP Server with the provider
+
+class AdeuBuildTag(Transform):
+    """Appends the build stamp to every listed tool description and applies
+    the `--scope` tag filter.
+
+    Replaces the FastMCP 3-era monkeypatching of `provider.list_tools` and
+    `FastMCP.list_tools`; `Transform` is the supported v4 seam for altering
+    how components are presented (spec: Transforms Overview -> Custom
+    Transforms). `list_tools` is a pure function in v4, so tools are copied
+    rather than mutated in place.
+
+    Only `list_tools` is overridden, deliberately: the 3.x code filtered by
+    scope on LISTING only, never on `get_tool`, so a scoped-out tool stayed
+    callable by name. Overriding `get_tool` here would silently tighten
+    that; scope is a presentation hint, not an access control.
+    """
+
+    async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
+        # `requested_scope` is read at call time (module global), because
+        # main() rewrites it after this module is imported.
+        if requested_scope != "all":
+            tools = [t for t in tools if requested_scope in (t.tags or set())]
+        build_tag = f" [Adeu v{version}+{git_sha}]"
+        out: list[Tool] = []
+        for t in tools:
+            desc = t.description
+            if desc and build_tag not in desc:
+                t = t.model_copy(update={"description": desc.strip() + build_tag})
+            out.append(t)
+        return out
+
+
+# Initialize MCP Server with the provider and transforms
 mcp = FastMCP(
     "Adeu Redlining Service",
     version=version,
     icons=server_icons if server_icons else None,
     providers=[provider],
+    transforms=[AdeuBuildTag()],
 )
-
-# Dynamically append the build info to tool descriptions
-orig_list_tools = provider.list_tools
-
-
-async def wrapped_list_tools(*args, **kwargs):
-    tools = await orig_list_tools(*args, **kwargs)
-    build_tag = f" [Adeu v{version}+{git_sha}]"
-    for tool in tools:
-        if hasattr(tool, "description") and tool.description:
-            if build_tag not in tool.description:
-                tool.description = tool.description.strip() + build_tag
-    return tools
-
-
-provider.list_tools = wrapped_list_tools  # type: ignore[method-assign]
-
-orig_mcp_list_tools = mcp.list_tools
-
-
-async def wrapped_mcp_list_tools(*args, **kwargs):
-    tools = await orig_mcp_list_tools(*args, **kwargs)
-    build_tag = f" [Adeu v{version}+{git_sha}]"
-
-    if requested_scope != "all":
-        filtered = []
-        for tool in tools:
-            tags = getattr(tool, "tags", []) or []
-            if requested_scope in tags:
-                filtered.append(tool)
-        tools = filtered
-
-    for tool in tools:
-        if hasattr(tool, "description") and tool.description:
-            if build_tag not in tool.description:
-                tool.description = tool.description.strip() + build_tag
-    return tools
-
-
-mcp.list_tools = wrapped_mcp_list_tools  # type: ignore[method-assign]
 
 
 def main():

@@ -15,15 +15,15 @@ import sys
 def _extract_schema(tool) -> dict:
     """
     FastMCP Tool objects expose their JSON schema under different attribute
-    names across versions (parameters / inputSchema / input_schema / schema).
+    names across versions (parameters / input_schema / inputSchema / schema).
     Probe them in order and return the first dict that has 'properties'.
     """
-    for attr in ("parameters", "inputSchema", "input_schema", "schema"):
+    for attr in ("parameters", "input_schema", "inputSchema", "schema"):
         val = getattr(tool, attr, None)
         if isinstance(val, dict) and "properties" in val:
             return val
     # Fall back: some versions nest it, or expose a model with .model_json_schema()
-    for attr in ("parameters", "inputSchema", "input_schema"):
+    for attr in ("parameters", "input_schema", "inputSchema"):
         val = getattr(tool, attr, None)
         if val is not None and hasattr(val, "model_json_schema"):
             return val.model_json_schema()

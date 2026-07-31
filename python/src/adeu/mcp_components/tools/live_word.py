@@ -9,7 +9,7 @@ import structlog
 from docx import Document as load_document
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from adeu import RedlineEngine
 from adeu.mcp_components._response_builders import (

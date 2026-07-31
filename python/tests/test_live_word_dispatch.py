@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 
 if sys.platform == "win32":
     from fastmcp.exceptions import ToolError
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
 
     from adeu.mcp_components.tools import document as doc_mod
     from adeu.mcp_components.tools.live_word import LiveWordUnavailableError

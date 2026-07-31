@@ -353,7 +353,7 @@ def test_live_word_pure_comment_same_text(active_word_app):
 
 def test_live_word_read_returns_filepath_in_content(active_word_app, tmp_path):
     """Validates that reading without providing a path includes the absolute file path in the content."""
-    from fastmcp.tools.tool import ToolResult
+    from fastmcp.tools import ToolResult
 
     app, doc = active_word_app
     ctx = get_mock_ctx()

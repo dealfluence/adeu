@@ -9,8 +9,7 @@ from typing import Annotated, Any, List, Literal, Optional, Union
 
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
-from fastmcp.tools import tool
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult, tool
 from pydantic import BeforeValidator, Field, TypeAdapter, WithJsonSchema
 
 from adeu.diff import generate_edits_from_text
@@ -221,7 +220,14 @@ class _ProgressRelay:
     def _has_progress_token(ctx: Context) -> bool:
         try:
             rc = ctx.request_context
-            return bool(rc and rc.meta and rc.meta.progressToken is not None)
+            if not rc or not rc.meta:
+                return False
+            if isinstance(rc.meta, dict):
+                return rc.meta.get("progressToken") is not None or rc.meta.get("progress_token") is not None
+            return (
+                getattr(rc.meta, "progressToken", None) is not None
+                or getattr(rc.meta, "progress_token", None) is not None
+            )
         except Exception:
             return False
 

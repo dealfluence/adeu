@@ -1,7 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 
 def run_async(coro):
