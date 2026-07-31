@@ -33,6 +33,7 @@ import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
 
 import { MARKDOWN_UI_URI, handleServerCliArgs } from "./shared.js";
+import { attachProtocolAdapter } from "./protocol-adapter.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
 // (a missing `type` that's unambiguous from the key signature, or a non-canonical
@@ -1294,6 +1295,7 @@ async function main() {
     return;
   }
   const transport = new StdioServerTransport();
+  attachProtocolAdapter(server, transport, "adeu-redlining-service", packageVersion);
   await server.connect(transport);
   const gitSha = process.env.GIT_SHA || "unknown";
   const buildTs = process.env.BUILD_TIMESTAMP || "unknown";
