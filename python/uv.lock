@@ -14,7 +14,7 @@ constraints = [{ name = "fastmcp-slim", specifier = "==4.0.0b1" }]
 
 [[package]]
 name = "adeu"
-version = "1.30.0"
+version = "1.31.0"
 source = { editable = "." }
 dependencies = [
     { name = "diff-match-patch" },
