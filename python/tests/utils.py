@@ -16,6 +16,10 @@ def get_mock_ctx():
 
 def extract_content(res):
     """Extracts markdown from a ToolResult or string."""
-    if isinstance(res, ToolResult):
+    if isinstance(res, ToolResult) and res.structured_content is not None:
         return res.structured_content["markdown"]
     return str(res)
+
+
+def approx_tokens(s: str) -> int:
+    return len(s) // 4
