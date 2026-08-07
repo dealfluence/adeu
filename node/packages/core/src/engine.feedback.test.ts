@@ -3,7 +3,7 @@ import { createTestDocument, addParagraph } from "./test-utils.js";
 import { RedlineEngine } from "./engine.js";
 import { extractTextFromBuffer } from "./ingest.js";
 
-describe("Feedback Layer & Dry Run Verification", () => {
+describe("Feedback Layer Verification", () => {
   it("process_batch returns detailed edit reports", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "The quick brown fox jumps over the lazy dog.");
@@ -47,66 +47,48 @@ describe("Feedback Layer & Dry Run Verification", () => {
     const report = stats.edits[0];
     expect(report.status).toBe("applied");
     expect(report.warning).toBeNull();
-
-    // Same expectation under dry_run.
-    const doc2 = await createTestDocument();
-    addParagraph(doc2, "Refer to sample_term_name in Section 4.");
-    const engine2 = new RedlineEngine(doc2, "Reviewer TS");
-    const dryStats = (engine2 as any).process_batch([
-      { type: "modify", target_text: "sample_term_name", new_text: "validated_term_name" }
-    ], true);
-    const dryReport = dryStats.edits[0];
-    expect(dryReport.status).toBe("applied");
-    expect(dryReport.warning).toBeNull();
   });
 
-  it("punctuation anchor: warns only when match fails", async () => {
-    // When a punctuated anchor fails to match, the warning IS surfaced as
-    // recovery context (the punctuation may be why the match missed).
+  it("punctuation anchor: failed match is rejected transactionally with the target named", async () => {
+    // When a punctuated anchor fails to match, the transactional rejection
+    // names the target so the caller can see what missed.
     const doc = await createTestDocument();
     addParagraph(doc, "Refer to sample_term_name in Section 4.");
     const engine = new RedlineEngine(doc, "Reviewer TS");
 
-    const stats = (engine as any).process_batch([
-      { type: "modify", target_text: "phantom_term-x", new_text: "anything" }
-    ], true);
-
-    const report = stats.edits[0];
-    expect(report.status).toBe("failed");
-    expect(report.warning).not.toBeNull();
-    expect(report.warning.toLowerCase()).toContain("punctuation");
-    expect(report.warning).toContain("phantom_term-x");
+    let thrown: any = null;
+    try {
+      (engine as any).process_batch([
+        { type: "modify", target_text: "phantom_term-x", new_text: "anything" }
+      ]);
+    } catch (e: any) {
+      thrown = e;
+    }
+    expect(thrown).not.toBeNull();
+    expect(thrown.errors.join("\n")).toContain("phantom_term-x");
   });
 
-  it("dry_run does not mutate and reports safely", async () => {
+  it("failed batch does not mutate and reports the failure", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Baseline text.");
     const engine = new RedlineEngine(doc, "Reviewer TS");
 
-    // 1. Valid Dry Run
-    const stats = (engine as any).process_batch([
-      { type: "modify", target_text: "Baseline", new_text: "Modified Preview" }
-    ], true);
+    // An invalid batch throws and rolls back transactionally.
+    let thrown: any = null;
+    try {
+      (engine as any).process_batch([
+        { type: "modify", target_text: "NON_EXISTENT", new_text: "fail" }
+      ]);
+    } catch (e: any) {
+      thrown = e;
+    }
+    expect(thrown).not.toBeNull();
+    expect(thrown.errors.join("\n").toLowerCase()).toContain("not found");
 
-    expect(stats.edits_applied).toBe(1);
-    expect(stats.edits[0].status).toBe("applied");
-    expect(stats.edits[0].clean_text).toContain("Modified Preview");
-
-    // Verify original document remains pristine
+    // Verify original document remains pristine after the rollback.
     const buf = await doc.save();
     const cleanText = await extractTextFromBuffer(buf, true);
-    expect(cleanText).not.toContain("Modified Preview");
     expect(cleanText).toContain("Baseline text");
-
-    // 2. Invalid Dry Run should not throw and instead report the failure safely
-    const statsInvalid = (engine as any).process_batch([
-      { type: "modify", target_text: "NON_EXISTENT", new_text: "fail" }
-    ], true);
-
-    expect(statsInvalid.edits_skipped).toBe(1);
-    expect(statsInvalid.edits[0].status).toBe("failed");
-    expect(statsInvalid.edits[0].error).not.toBeNull();
-    expect(statsInvalid.edits[0].error.toLowerCase()).toContain("not found");
   });
 
   it("preview self-consistency on underscore terms", async () => {

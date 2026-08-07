@@ -8,7 +8,7 @@ Finding index (severity as reported):
   H1  previews garbled / leak internal scaffolding
   H2  plain targets fail across bold/italic run boundaries
   H3  unhandled traceback on filesystem write errors
-  M1  dry-run and real apply disagree on validation results
+  M1  transactional rejection must report exactly what failed
   M2  overlapping edits within a batch are not detected
   M3  insert_row silently drops extra cells
   M4  insert_row report never shows the inserted content
@@ -270,58 +270,45 @@ class TestH1PreviewIntegrity:
         assert "five (5) years" in stats["edits"][2]["clean_text"]
         assert "five (2)" not in stats["edits"][2]["clean_text"]
 
-    def test_dry_run_previews_match_real_previews(self):
-        batch = [
-            ModifyText(target_text="California", new_text="Delaware"),
-            ModifyText(target_text="two (2) years", new_text="five (5) years"),
-        ]
-        dry = RedlineEngine(_make_nda()).process_batch([m.model_copy(deep=True) for m in batch], dry_run=True)
-        wet = RedlineEngine(_make_nda()).process_batch([m.model_copy(deep=True) for m in batch], dry_run=False)
-
-        assert [r["critic_markup"] for r in dry["edits"]] == [r["critic_markup"] for r in wet["edits"]]
-        assert [r["clean_text"] for r in dry["edits"]] == [r["clean_text"] for r in wet["edits"]]
-
 
 # ---------------------------------------------------------------------------
-# M1 — dry-run must report exactly what the real run will do
+# M1 — the transactional rejection must report exactly what failed
 # ---------------------------------------------------------------------------
 
 
-class TestM1DryRunParity:
-    def test_ambiguity_occurrence_counts_agree(self):
+class TestM1TransactionalRejectionReporting:
+    def test_ambiguity_error_carries_occurrence_count(self):
         batch = [
             ModifyText(target_text="party", new_text="side"),  # ambiguous on purpose
             ModifyText(target_text="California", new_text="Delaware"),
         ]
 
-        dry = RedlineEngine(_make_nda()).process_batch([m.model_copy(deep=True) for m in batch], dry_run=True)
-        dry_error = next(r["error"] for r in dry["edits"] if r["error"] and "Ambiguous" in r["error"])
-
         try:
-            RedlineEngine(_make_nda()).process_batch([m.model_copy(deep=True) for m in batch], dry_run=False)
-            raise AssertionError("real run should have rejected the ambiguous batch")
+            RedlineEngine(_make_nda()).process_batch([m.model_copy(deep=True) for m in batch])
+            raise AssertionError("the run should have rejected the ambiguous batch")
         except BatchValidationError as e:
             wet_error = next(err for err in e.errors if "Ambiguous" in err)
 
         import re as _re
 
-        dry_count = _re.search(r"appears (\d+) times", dry_error).group(1)
-        wet_count = _re.search(r"appears (\d+) times", wet_error).group(1)
-        assert dry_count == wet_count
+        assert _re.search(r"appears (\d+) times", wet_error), wet_error
 
-    def test_dry_run_mirrors_transactional_rejection(self):
-        """Real mode rejects the whole batch when any edit fails validation;
-        dry-run must not claim other edits 'applied'."""
+    def test_transactional_rejection_applies_nothing(self):
+        """The batch is rejected whole when any edit fails validation; no edit
+        may survive on the document."""
         batch = [
             ModifyText(target_text="California", new_text="Delaware"),
             ModifyText(target_text="Nonexistent text 123", new_text="x"),
         ]
-        dry = RedlineEngine(_make_nda()).process_batch(batch, dry_run=True)
-        assert dry["edits_applied"] == 0
-        assert dry["edits_skipped"] == 2
-        assert all(r["status"] == "failed" for r in dry["edits"])
-        assert "transactional" in dry["edits"][0]["error"]
-        assert "not found" in dry["edits"][1]["error"].lower()
+        engine = RedlineEngine(_make_nda())
+        with pytest.raises(BatchValidationError) as exc_info:
+            engine.process_batch(batch)
+        joined = "\n".join(exc_info.value.errors)
+        assert "not found" in joined.lower()
+
+        final_text = _clean_text(engine.save_to_stream())
+        assert "California" in final_text
+        assert "Delaware" not in final_text
 
 
 # ---------------------------------------------------------------------------
@@ -352,19 +339,6 @@ class TestM2OverlapAndChaining:
         final_text = _clean_text(engine.save_to_stream())
         assert "two (2) years" in final_text
         assert "three" not in final_text
-
-    def test_dry_run_reports_the_same_rejection(self):
-        batch = [
-            ModifyText(target_text="two (2) years", new_text="three (3) years"),
-            ModifyText(target_text="(2) years", new_text="(4) years"),
-        ]
-        dry = RedlineEngine(_make_nda()).process_batch(batch, dry_run=True)
-        assert dry["edits_applied"] == 0
-        assert dry["edits_skipped"] == 2
-        assert all(r["status"] == "failed" for r in dry["edits"])
-        assert "tracked deletion" in dry["edits"][1]["error"]
-        assert "Batches apply sequentially" in dry["edits"][1]["error"]
-        assert "transactional" in dry["edits"][0]["error"]
 
     def test_chained_batch_targeting_updated_text_applies(self):
         """The sequential-contract way to express the report's overlap example:

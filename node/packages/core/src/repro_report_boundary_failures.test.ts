@@ -22,7 +22,7 @@ describe("Report Bug Reproductions: Boundaries and Active Insertions", () => {
 
     // On the unpatched codebase, this throws a BatchValidationError ("target_text spans a paragraph boundary").
     // We assert that the batch executes successfully to replicate the failure on unpatched environments.
-    const result = engine.process_batch([edit], false);
+    const result = engine.process_batch([edit]);
     expect(result.edits_applied).toBe(1);
     expect(result.edits_skipped).toBe(0);
   });
@@ -62,7 +62,7 @@ describe("Report Bug Reproductions: Boundaries and Active Insertions", () => {
 
     // On the unpatched codebase, this throws a BatchValidationError ("Modification targets an active insertion from another author").
     // We assert that the batch executes successfully to replicate the failure on unpatched environments.
-    const result = engine.process_batch([edit], false);
+    const result = engine.process_batch([edit]);
     expect(result.edits_applied).toBe(1);
     expect(result.edits_skipped).toBe(0);
   });
@@ -93,7 +93,7 @@ describe("Report Bug Reproductions: Boundaries and Active Insertions", () => {
       comment: "flag this clause",
     } as any;
 
-    const result = engine.process_batch([edit], false);
+    const result = engine.process_batch([edit]);
     expect(result.edits_applied).toBe(1);
     expect(result.edits_skipped).toBe(0);
 

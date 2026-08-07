@@ -48,7 +48,7 @@ Every redlining task follows the same shape. Follow it in order:
 3. **Apply as one batch.** Send all edits in a single `process_document_batch` call (MCP) or one `adeu apply` invocation (CLI). Edits apply _sequentially_: each edit evaluates against the document state produced by the edits before it, so dependent edits may be chained — a later edit must target the text as it reads _after_ the earlier edits.
 4. **Verify.** If the user asked for a specific outcome, re-read the modified file with `clean_view=true` (MCP) or `--clean` (CLI) and confirm.
 
-For destructive or finalization operations, run a dry-run first when the tool supports it (`dry_run: true` on `process_document_batch`).
+Batches are transactional: if any edit fails validation, the whole batch is rejected, nothing is written, and the error reports per-edit failures you can correct and resubmit.
 
 ## Critical gotchas
 

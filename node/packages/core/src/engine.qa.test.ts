@@ -84,7 +84,7 @@ describe("QA Report V2: Engine Logic", () => {
       new_text: "Match",
       match_mode: "all"
     } as any;
-    const stats = engine.process_batch([edit], false);
+    const stats = engine.process_batch([edit]);
     
     const report = stats.edits[0];
     expect(report.heading_path).toContain("Heading one");
@@ -118,7 +118,7 @@ describe("QA Report V2: Engine Logic", () => {
       match_mode: "all"
     } as any;
 
-    expect(() => engine.process_batch([edit], false)).toThrow(/targets an active insertion from another author/);
+    expect(() => engine.process_batch([edit])).toThrow(/targets an active insertion from another author/);
   });
 
   it("§5.3.3 Double-sided paragraph merge regex rejection", async () => {
@@ -134,7 +134,7 @@ describe("QA Report V2: Engine Logic", () => {
       regex: true
     } as any;
 
-    expect(() => engine.process_batch([edit], false)).toThrow(/spans a paragraph boundary with body text on both sides/);
+    expect(() => engine.process_batch([edit])).toThrow(/spans a paragraph boundary with body text on both sides/);
   });
 
   it("S1: Transactional rollback blocks all-mode edit overlapping foreign COMMENT_ONLY edit", async () => {
@@ -157,6 +157,6 @@ describe("QA Report V2: Engine Logic", () => {
       match_mode: "all"
     } as any;
 
-    expect(() => engineBob.process_batch([editBob], false)).toThrow(/another author/i);
+    expect(() => engineBob.process_batch([editBob])).toThrow(/another author/i);
   });
 });

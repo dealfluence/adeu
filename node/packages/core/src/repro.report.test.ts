@@ -91,7 +91,7 @@ describe("Webinar Report Bug Reproductions", () => {
       target_text: "written notice within 30 days.",
       new_text: "notice within 15 business days.",
     };
-    expect(() => engine.process_batch([edit as any], false)).toThrow(
+    expect(() => engine.process_batch([edit as any])).toThrow(
       /active insertion from another author/,
     );
   });

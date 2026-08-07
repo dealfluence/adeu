@@ -207,8 +207,8 @@ export class DocCache {
 
   /**
    * Put a DOM back in the slot after an operation that provably left it
-   * equal to the on-disk file (dry-run, or a rolled-back failed batch —
-   * both restore via the engine's transactional snapshot).
+   * equal to the on-disk file (a rolled-back failed batch — restored via
+   * the engine's transactional snapshot).
    */
   public restoreHotDoc(file_path: string, doc: DocumentObject): void {
     try {

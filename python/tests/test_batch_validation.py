@@ -1,4 +1,4 @@
-# FILE: tests/test_dry_run_validation.py
+# FILE: tests/test_batch_validation.py
 import io
 
 from docx import Document
@@ -134,7 +134,7 @@ def test_validation_fuzzy_match_ambiguity():
 def test_multiple_errors_accumulated():
     """
     Scenario: A batch with multiple bad edits.
-    Validates that the dry run is exhaustive and doesn't short-circuit after the first error.
+    Validates that validation is exhaustive and doesn't short-circuit after the first error.
     """
     doc = Document()
     doc.add_paragraph("Duplicate word. Duplicate word.")
@@ -217,8 +217,8 @@ def test_ambiguity_resolved_by_match_mode_all():
     # Validation no longer trips on the ambiguity.
     assert engine.validate_edits([edit]) == []
 
-    # And a dry run confirms every occurrence is targeted.
-    stats = engine.process_batch([edit], dry_run=True)
+    # And a real run confirms every occurrence is targeted.
+    stats = engine.process_batch([edit])
     report = stats["edits"][0]
     assert report.get("match_mode") == "all"
     assert report.get("occurrences_modified", 0) == 2
@@ -246,7 +246,7 @@ def test_ambiguity_resolved_by_match_mode_first():
 
     assert engine.validate_edits([edit]) == []
 
-    stats = engine.process_batch([edit], dry_run=True)
+    stats = engine.process_batch([edit])
     report = stats["edits"][0]
     assert report.get("match_mode") == "first"
     assert report.get("occurrences_modified", 0) == 1

@@ -248,6 +248,8 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
     });
 
     it("honors match_mode:'all' at the live MCP boundary — edits every occurrence (2)", async () => {
+      const outPath = join(tmpdir(), `adeu_schema_gap_all_${Date.now()}.docx`);
+      tempPaths.push(outPath);
       const res = await rpc("tools/call", {
         name: "process_document_batch",
         arguments: {
@@ -262,7 +264,7 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
               match_mode: "all",
             },
           ],
-          dry_run: true,
+          output_path: outPath,
         },
       });
 
@@ -273,6 +275,8 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
     });
 
     it("honors regex:true (with a capture group) at the live MCP boundary", async () => {
+      const outPath = join(tmpdir(), `adeu_schema_gap_regex_${Date.now()}.docx`);
+      tempPaths.push(outPath);
       const res = await rpc("tools/call", {
         name: "process_document_batch",
         arguments: {
@@ -289,7 +293,7 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
               regex: true,
             },
           ],
-          dry_run: true,
+          output_path: outPath,
         },
       });
 

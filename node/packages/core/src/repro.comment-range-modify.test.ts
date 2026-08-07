@@ -151,9 +151,7 @@ describe("Foreign comment-range modify repro — Node engine", () => {
     // There is no <w:ins> anywhere in the document, so refusing this as "an
     // active insertion from another author" is a misclassification.
     const res = engine.process_batch(
-      [{ type: "modify", target_text: "40,000 EUR", new_text: "45,000 EUR" }] as any[],
-      false,
-    );
+      [{ type: "modify", target_text: "40,000 EUR", new_text: "45,000 EUR" }] as any[]);
     expect(res.edits_applied).toBe(1);
     expect(res.edits_skipped).toBe(0);
 
@@ -187,9 +185,7 @@ describe("Foreign comment-range modify repro — Node engine", () => {
           target_text: "the budget is 40,000 EUR",
           new_text: "the budget is 45,000 EUR excluding VAT",
         },
-      ] as any[],
-      false,
-    );
+      ] as any[]);
     expect(res.edits_applied).toBe(1);
     expect(res.edits_skipped).toBe(0);
 
@@ -204,25 +200,6 @@ describe("Foreign comment-range modify repro — Node engine", () => {
     expect(countTag(doc.element, "w:commentReference")).toBe(1);
   });
 
-  it("RED: dry-run reports the edit under a foreign comment as applicable", async () => {
-    // The field report explicitly says the refusal was "confirmed via
-    // dry-run". Desired: dry-run previews the edit as applicable instead of
-    // failing it with the insertion misclassification.
-    const doc = await DocumentObject.load(buildMemoWithColleagueComment());
-    const engine = new RedlineEngine(doc, "Agent");
-
-    const res = engine.process_batch(
-      [{ type: "modify", target_text: "40,000 EUR", new_text: "45,000 EUR" }] as any[],
-      true,
-    );
-    expect(res.edits_applied).toBe(1);
-    expect(res.edits_skipped).toBe(0);
-    expect(res.edits[0].status).toBe("applied");
-    expect(res.edits[0].error || "").not.toContain(
-      "active insertion from another author",
-    );
-  });
-
   // ─────────────────────────────────────────────────────────────────────────
   // GREEN controls — pin the boundary of the fix.
   // ─────────────────────────────────────────────────────────────────────────
@@ -233,9 +210,7 @@ describe("Foreign comment-range modify repro — Node engine", () => {
     const engine = new RedlineEngine(doc, "Colleague");
 
     const res = engine.process_batch(
-      [{ type: "modify", target_text: "40,000 EUR", new_text: "45,000 EUR" }] as any[],
-      false,
-    );
+      [{ type: "modify", target_text: "40,000 EUR", new_text: "45,000 EUR" }] as any[]);
     expect(res.edits_applied).toBe(1);
     expect(res.edits_skipped).toBe(0);
   });
@@ -258,9 +233,7 @@ describe("Foreign comment-range modify repro — Node engine", () => {
     // 'red fox' = foreign inserted 'red' + untracked body ' fox' -> straddle.
     expect(() =>
       engine.process_batch(
-        [{ type: "modify", target_text: "red fox", new_text: "crimson wolf" }] as any[],
-        false,
-      ),
+        [{ type: "modify", target_text: "red fox", new_text: "crimson wolf" }] as any[]),
     ).toThrow(/active insertion from another author/);
   });
 });

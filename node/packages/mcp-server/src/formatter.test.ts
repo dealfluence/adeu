@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { formatBatchResult } from "./index.js";
 
 describe("MCP Server Tool Output Formatter", () => {
-  it("formats a successful dry-run batch result correctly", () => {
+  it("formats a successful batch result correctly", () => {
     const stats = {
       actions_applied: 0,
       actions_skipped: 0,
@@ -26,10 +26,9 @@ describe("MCP Server Tool Output Formatter", () => {
       skipped_details: []
     };
 
-    const res = formatBatchResult(stats, "dummy_processed.docx", true);
+    const res = formatBatchResult(stats, "dummy_processed.docx");
 
-    expect(res).toContain("Dry-run simulation complete.");
-    expect(res).not.toContain("Batch complete. Saved to:");
+    expect(res).toContain("Batch complete. Saved to: dummy_processed.docx");
     expect(res).toContain("Actions: 0 applied");
     expect(res).toContain("Edits: 1 applied");
     expect(res).toContain("Detailed Edit Reports:");
@@ -60,7 +59,7 @@ describe("MCP Server Tool Output Formatter", () => {
       skipped_details: ["- Failed to apply edit targeting: 'NON_EXISTENT...'"]
     };
 
-    const res = formatBatchResult(stats, "dummy_processed.docx", false);
+    const res = formatBatchResult(stats, "dummy_processed.docx");
 
     expect(res).toContain("Batch complete. Saved to: dummy_processed.docx");
     expect(res).toContain("### Edit 1 ❌ [failed]");

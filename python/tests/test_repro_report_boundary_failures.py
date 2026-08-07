@@ -29,7 +29,7 @@ def test_boundary_failure():
 
     # On the unpatched codebase, this throws a BatchValidationError.
     # We assert that the batch executes successfully to replicate the failure on unpatched environments.
-    result = engine.process_batch([edit], dry_run=False)
+    result = engine.process_batch([edit])
     assert result.get("applied", 0) == 1 or result.get("edits_applied", 0) == 1
 
 
@@ -71,7 +71,7 @@ def test_conflict_failure():
 
     # On the unpatched codebase, this throws a BatchValidationError.
     # We assert that the batch executes successfully to replicate the failure on unpatched environments.
-    result = engine.process_batch([edit], dry_run=False)
+    result = engine.process_batch([edit])
     assert result.get("applied", 0) == 1 or result.get("edits_applied", 0) == 1
 
 
@@ -105,7 +105,7 @@ def test_comment_only_on_foreign_insertion_applies_without_crash():
     engine = RedlineEngine(stream, author="Editor")
     edit = ModifyText(target_text="beta", new_text="beta", comment="flag this clause")
 
-    result = engine.process_batch([edit], dry_run=False)
+    result = engine.process_batch([edit])
     assert result["edits_applied"] == 1
     assert result["edits_skipped"] == 0
 

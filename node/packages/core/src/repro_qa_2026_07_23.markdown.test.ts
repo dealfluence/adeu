@@ -14,8 +14,8 @@
  *           plain text in a later edit's preview,
  *       (3) a same-author re-edit of a pending insertion previews as nested
  *           CriticMarkup ({++ inside {++), which is invalid notation.
- *   F7  Dry-run report omits comments entirely — an edit carrying a comment
- *       leaves no trace of it in the dry-run report.
+ *   F7  Batch report omits comments entirely — an edit carrying a comment
+ *       leaves no trace of it in the report.
  *
  * Every test in this file is written test-first: it fails on current main
  * and passes once the finding is fixed.
@@ -294,33 +294,30 @@ describe("F6: batch report previews are faithful", () => {
 });
 
 // ---------------------------------------------------------------------------
-// F7: dry-run report must mention the edit's comment
+// F7: batch report must mention the edit's comment
 // ---------------------------------------------------------------------------
 
-describe("F7: dry-run report carries comments", () => {
-  it("an edit's comment text appears in the dry-run report", async () => {
+describe("F7: batch report carries comments", () => {
+  it("an edit's comment text appears in the batch report", async () => {
     const COMMENT = "Flagged for legal review: payment term doubled.";
     const doc = await createTestDocument();
     addParagraph(doc, "Payment is due in 30 days.");
     const engine = new RedlineEngine(doc, "Editor");
-    const stats = engine.process_batch(
-      [
-        {
-          type: "modify",
-          target_text: "30 days",
-          new_text: "60 days",
-          comment: COMMENT,
-        },
-      ],
-      true, // dry_run
-    );
+    const stats = engine.process_batch([
+      {
+        type: "modify",
+        target_text: "30 days",
+        new_text: "60 days",
+        comment: COMMENT,
+      },
+    ]);
     const report = stats.edits[0];
     expect(report.status).toBe("applied");
-    // Verifying what WILL happen is the whole point of dry-run: the report
-    // must carry the comment (its text, or at minimum that one is attached).
+    // The report is where an agent verifies the comment it wrote: it must
+    // carry the comment (its text, or at minimum that one is attached).
     expect(
       JSON.stringify(stats),
-      "dry-run report contains no trace of the edit's comment",
+      "batch report contains no trace of the edit's comment",
     ).toContain(COMMENT);
   });
 });

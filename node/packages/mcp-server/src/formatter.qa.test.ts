@@ -27,7 +27,7 @@ describe("QA Report V2: Formatter Parity", () => {
       skipped_details: []
     };
 
-    const res = formatBatchResult(stats, "dummy.docx", false);
+    const res = formatBatchResult(stats, "dummy.docx");
 
     // Verify the new §5.4.2 visual format
     expect(res).toContain("### Edit 1 ✅ [applied] (p3, p12)");
@@ -39,7 +39,7 @@ describe("QA Report V2: Formatter Parity", () => {
     expect(res).toContain("> the Governing Body");
   });
 
-  it("R1: Formats dry-run with full enrichment fields identical to real writes", () => {
+  it("R1: Formats results with full enrichment fields", () => {
     const stats = {
       actions_applied: 0,
       actions_skipped: 0,
@@ -63,7 +63,7 @@ describe("QA Report V2: Formatter Parity", () => {
       skipped_details: []
     };
 
-    const res = formatBatchResult(stats, "dummy.docx", true);
+    const res = formatBatchResult(stats, "dummy.docx");
     expect(res).toContain("**Path:** `1. Intro`");
     expect(res).toContain("**Mode:** `all` (1 occurrence modified)");
     expect(res).toContain("(p1)");

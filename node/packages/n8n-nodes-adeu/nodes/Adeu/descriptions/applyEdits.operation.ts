@@ -170,21 +170,7 @@ export const applyEditsDescription: INodeProperties[] = [
     type: "boolean",
     default: true,
     description:
-      "Whether to auto-extract the post-edit document as Markdown (with CriticMarkup) and include it in the outgoing JSON under the 'markdown' field. Useful for feeding the updated state back into a downstream AI Agent for review or further edits. Adds extraction overhead per call. Has no effect when Dry Run is enabled — dry runs do not produce a post-edit buffer; inspect the per-edit 'critic_markup' / 'clean_text' previews on the returned 'edits' array instead.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
-  },
-  {
-    displayName: "Dry Run",
-    name: "dryRun",
-    type: "boolean",
-    default: false,
-    description:
-      "Whether to preview edits without writing them to the document. When true, the engine validates every edit, simulates the application in-memory, and returns a detailed 'edits' report (per-edit status, CriticMarkup context preview, clean text preview, warnings, and errors) — but the document is NOT modified, no redlined binary is produced, and no static-data stash is written. The incoming binary passes through unchanged on the outgoing item. Use as a self-correction primitive: when an anchor's uniqueness or wording is uncertain, dry-run first, inspect each edit's 'critic_markup' preview, then re-call with Dry Run disabled to commit. Default false (commit edits normally). Important: invalid edits in a dry run do NOT throw a BatchValidationError — they return as failed entries in the 'edits' array. Wet runs still throw atomically on the first validation failure.",
+      "Whether to auto-extract the post-edit document as Markdown (with CriticMarkup) and include it in the outgoing JSON under the 'markdown' field. Useful for feeding the updated state back into a downstream AI Agent for review or further edits. Adds extraction overhead per call.",
     displayOptions: {
       show: {
         resource: ["document"],
@@ -211,7 +197,6 @@ export async function executeApplyEdits(
     "returnMarkdown",
     itemIndex,
   ) as boolean;
-  const dryRun = this.getNodeParameter("dryRun", itemIndex, false) as boolean;
   const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
 
   // Resolve the changes array
@@ -273,32 +258,9 @@ export async function executeApplyEdits(
   const engine = new RedlineEngine(doc, author);
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],
-    dryRun,
   );
 
   const incomingBinary = this.getInputData()[itemIndex].binary ?? {};
-
-  // Dry-run short-circuit: the document was not mutated, so there is no
-  // redlined buffer to produce and no static-data stash to write. The
-  // incoming binary passes through unchanged so downstream nodes do not
-  // break if they expected continuity. The per-edit `critic_markup` and
-  // `clean_text` previews on `stats.edits` give the LLM everything it needs
-  // to reason about the would-be result without committing.
-  if (dryRun) {
-    return [
-      {
-        json: {
-          fileName,
-          author,
-          dryRun: true,
-          stats,
-          ...(reasoning !== "" ? { reasoning } : {}),
-        },
-        binary: incomingBinary,
-        pairedItem: { item: itemIndex },
-      },
-    ];
-  }
 
   const outBuffer = await doc.save();
   const outName = buildOutputFileName(fileName, "redlined");
@@ -345,7 +307,6 @@ export async function executeApplyEdits(
       json: {
         fileName: outName,
         author,
-        dryRun: false,
         stats,
         ...(reasoning !== "" ? { reasoning } : {}),
         ...(markdown !== undefined ? { markdown } : {}),

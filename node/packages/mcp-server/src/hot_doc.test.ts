@@ -73,7 +73,7 @@ describe("hot-DOM slot", () => {
     expect(await cache.takeHotDoc(p)).toBeNull();
   });
 
-  it("restoreHotDoc re-pins after a rollback/dry-run", async () => {
+  it("restoreHotDoc re-pins after a rollback", async () => {
     await cache.get(FIXTURE, readerFor(FIXTURE), loadDoc);
     const doc = await cache.takeHotDoc(FIXTURE);
     expect(doc).not.toBeNull();
@@ -104,9 +104,7 @@ describe("output priming after a batch", () => {
           new_text: m![0] + " (primed)",
           match_mode: "first",
         },
-      ],
-      false,
-    );
+      ]);
     expect(stats.edits_applied).toBe(1);
     const out = join(tmp, "prime-out.docx");
     writeFileSync(out, await doc.save());
@@ -144,9 +142,7 @@ describe("output priming after a batch", () => {
           new_text: m![0] + " (chain)",
           match_mode: "first",
         },
-      ],
-      false,
-    );
+      ]);
     expect(stats.edits_applied).toBe(1);
     const out = join(tmp, "chain-out.docx");
     writeFileSync(out, await doc.save());
@@ -198,9 +194,7 @@ describe("output priming after a batch", () => {
           new_text: word + " (mutated)",
           match_mode: "first",
         },
-      ],
-      false,
-    );
+      ]);
     expect(stats.edits_applied).toBe(1);
 
     // Outlast the deferred fill's quiet window (QUIET_MS = 400).

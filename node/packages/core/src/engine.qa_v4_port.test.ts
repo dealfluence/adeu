@@ -200,27 +200,6 @@ describe("H1 — previews are faithful: no scaffolding, no cross-edit bleed", ()
     expect(stats.edits[2].clean_text).not.toContain("five (2)");
   });
 
-  it("dry-run previews match real previews", async () => {
-    const batch = () =>
-      [
-        { type: "modify", target_text: "California", new_text: "Delaware" },
-        {
-          type: "modify",
-          target_text: "two (2) years",
-          new_text: "five (5) years",
-        },
-      ] as any[];
-
-    const dry = new RedlineEngine(await ndaDoc()).process_batch(batch(), true);
-    const wet = new RedlineEngine(await ndaDoc()).process_batch(batch(), false);
-
-    expect(dry.edits.map((r: any) => r.critic_markup)).toEqual(
-      wet.edits.map((r: any) => r.critic_markup),
-    );
-    expect(dry.edits.map((r: any) => r.clean_text)).toEqual(
-      wet.edits.map((r: any) => r.clean_text),
-    );
-  });
 });
 
 describe("M3/M4 — insert_row cell handling and reporting", () => {

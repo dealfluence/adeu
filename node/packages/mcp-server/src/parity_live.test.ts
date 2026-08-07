@@ -139,7 +139,6 @@ describe("Parity Live Server Integration Verification", () => {
             },
           ],
           output_path: outPath,
-          dry_run: true,
         },
       },
       203,
@@ -181,12 +180,12 @@ describe("Parity Live Server Integration Verification", () => {
 
     try {
       const pythonOut = execSync(
-        `"${pythonCli}" apply "${fixturePath}" "${tempJsonPath}" --dry-run --author Ed`,
+        `"${pythonCli}" apply "${fixturePath}" "${tempJsonPath}" --author Ed`,
         {
           encoding: "utf-8",
         },
       );
-      // Should not succeed normally since dry run exits with code 1 on errors, so we catch in the try block
+      // Should not succeed normally since apply exits with code 1 on errors, so we catch in the try block
     } catch (err: any) {
       const pyErrorOutput = err.stdout || err.stderr || "";
       expect(pyErrorOutput).toContain(

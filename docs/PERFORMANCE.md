@@ -278,7 +278,7 @@ Ordered by user-visible value per unit of risk:
    DOM must be forced to completion before the DOM is handed to a
    mutating consumer; (b) primed products must byte-equal a fresh parse
    of the written file (equivalence-gate test); (c) a DOM may go back in
-   the slot after dry-runs and rolled-back batches (state provably equals
+   the slot after rolled-back batches (state provably equals
    the file); (d) save() must RE-BASELINE each part's pristine XML
    (serialized output becomes the new blob + clean marker) or the first
    chained edit pays the full-tree clone again.
@@ -358,7 +358,7 @@ mirror of the Node one) and profiling, not by assuming Node's profile.
 | `mode='outline'` builder | 15.3 s | 1.35 s | Stop re-paginating; cache-backed style resolution (`paragraph.style` rescans the part's 3,547 rels per access — 52 M probes); lxml prefilter + memo for footnote refs (owned ranges overlap); precompute heading flags/levels |
 | Server read path | no cache; sync on event loop | stat-keyed LRU-3 projection cache + `asyncio.to_thread` + progress relay + quiet-period background fills | Port of §5.1 with the same key/values contract (never the tree) |
 | Pre-batch snapshot | full `save_to_stream()` every batch (2.8 s) | pristine load-time bytes while unmutated (~0) | §5.2's lazy-snapshot idea, Python-shaped: the engine keeps its sanitized input bytes; `apply_edits`/`apply_review_actions` flip a mutation flag; rollback re-inits from whichever bytes were chosen |
-| Dry-run | full `save_to_stream()` + second engine (36.6 s) | pristine-fed second engine (25.8 s) | Same mutation flag |
+| Dry-run (historical — mode since removed) | full `save_to_stream()` + second engine (36.6 s) | pristine-fed second engine (25.8 s) | Same mutation flag |
 
 ### 7.2 End-to-end (VVBIG, measured)
 
@@ -367,8 +367,8 @@ mirror of the Node one) and profiling, not by assuming Node's profile.
 | `read_docx` full, cold | 18.1 s | 13.1 s |
 | `read_docx` warm page turn / outline / search | 18.1 s / ~30 s / 18.1 s (all cold, every call) | 3–5 ms / 2.8 ms / 63 ms |
 | Single-edit `process_document_batch` | ~40 s | ~28.5 s (engine 14.9 + batch 11.1 + save 2.5) |
-| Dry-run call | ~55 s | ~40 s |
-| RSS peak (dry-run flow) | 4.9 GB | 4.5 GB (and loads no longer double the archive) |
+| Dry-run call (historical — mode since removed) | ~55 s | ~40 s |
+| RSS peak (dry-run flow; historical) | 4.9 GB | 4.5 GB (and loads no longer double the archive) |
 
 Control document (BIGDOC, 0.4 MB): read path 0.9 s → 0.35 s warm-independent;
 the full regression suite stayed green and the projection goldens
@@ -640,8 +640,8 @@ Two things fall out of that:
 
 - **Node uses ~1.6× the memory of Python for a cold read** (2.29 GB vs
   1.43 GB) — the opposite of the intuition that the Python engine is the
-  memory-hungry one. §7.2's 4.5 GB Python figure is the *dry-run* flow (which
-  builds a second engine), not a read.
+  memory-hungry one. §7.2's 4.5 GB Python figure is the *dry-run* flow (a
+  mode since removed, which built a second engine), not a read.
 - Node's 10-edit batch peaks at **4.84 GB**, right at the default ~4 GB V8
   old-space limit. That is the mechanism behind §8.3e's OOM, and it means Node
   is close to the ceiling on large batches even when they succeed.

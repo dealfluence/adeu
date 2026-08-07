@@ -27,7 +27,7 @@ describe("QA Report V3 Defects Reproductions", () => {
     expect(res.edits_skipped).toBe(0);
   });
 
-  it("TC2: NODE dry-run == real write for an edit inside a foreign insertion [report F2, F3]", async () => {
+  it("TC2: NODE applies an edit inside a foreign insertion [report F2, F3]", async () => {
     const doc = await createTestDocument();
     const xmlDoc = doc.element.ownerDocument!;
 
@@ -54,22 +54,12 @@ describe("QA Report V3 Defects Reproductions", () => {
     const engine = new RedlineEngine(doc, "QA Tester");
 
     // A strict edit fully contained inside a foreign insertion now applies: the
-    // enclosing <w:ins> is split and the change nested. Dry-run and write agree.
-    // (Fresh edit object per call: a dry-run mutates the edit's resolution state.)
-    const resDry = engine.process_batch(
-      [{ type: "modify", target_text: "five (5)", new_text: "seven (7)" } as any],
-      true,
-    );
-    expect(resDry.edits_applied).toBe(1);
-    expect(resDry.edits_skipped).toBe(0);
-    expect(resDry.edits[0].status).toBe("applied");
-
+    // enclosing <w:ins> is split and the change nested.
     const resWet = engine.process_batch(
-      [{ type: "modify", target_text: "five (5)", new_text: "seven (7)" } as any],
-      false,
-    );
+      [{ type: "modify", target_text: "five (5)", new_text: "seven (7)" } as any]);
     expect(resWet.edits_applied).toBe(1);
     expect(resWet.edits_skipped).toBe(0);
+    expect(resWet.edits[0].status).toBe("applied");
   });
 
   it("TC3: Heading targeted by markdown '#' corrupts instead of failing [report F4, F5]", async () => {
@@ -154,37 +144,33 @@ describe("QA Report V3 Defects Reproductions", () => {
 
     const engine = new RedlineEngine(doc);
 
-    // Run in dry_run mode where the bug manifests.
     // Edit 1 succeeds, Edit 2 fails because "Non-existent text" is not found.
-    // On the unpatched codebase, individual validation of edit 2 passes single_errors = validate_edits([edit]),
-    // which hardcodes i = 0 internally. Thus, the error in res.edits[1].error is:
+    // On the unpatched codebase, individual validation of edit 2 passes
+    // single_errors = validate_edits([edit]), which hardcodes i = 0
+    // internally, so the transactional rejection reads
     // "- Edit 1 Failed: Target text not found..." instead of "- Edit 2 Failed: ...".
-    const res = engine.process_batch([
-      {
-        type: "modify",
-        target_text: "First paragraph",
-        new_text: "Updated first paragraph",
-      } as any,
-      {
-        type: "modify",
-        target_text: "Non-existent text",
-        new_text: "Failed update",
-      } as any,
-    ], true);
+    let caught: any = null;
+    try {
+      engine.process_batch([
+        {
+          type: "modify",
+          target_text: "First paragraph",
+          new_text: "Updated first paragraph",
+        } as any,
+        {
+          type: "modify",
+          target_text: "Non-existent text",
+          new_text: "Failed update",
+        } as any,
+      ]);
+    } catch (e: any) {
+      caught = e;
+    }
 
-    // Dry-run mirrors the real run's transactional semantics (QA 2026-07-17
-    // M1 parity): a batch with any invalid edit applies nothing. The valid
-    // edit is reported as blocked by the batch, the invalid one keeps its own
-    // error.
-    expect(res.edits_applied).toBe(0);
-    expect(res.edits_skipped).toBe(2);
-    expect(res.edits[0].status).toBe("failed");
-    expect(res.edits[0].error).toContain("transactional");
-    expect(res.edits[1].status).toBe("failed");
-
+    expect(caught).not.toBeNull();
+    const errorMsg = caught.errors.join("\n");
     // Assert that the error message correctly labels it as Edit 2.
     // The buggy unpatched codebase says "Edit 1 Failed:" inside the error message for Edit 2.
-    const errorMsg = res.edits[1].error;
     expect(errorMsg).toContain("Edit 2 Failed:");
     expect(errorMsg).not.toContain("Edit 1 Failed:");
   });

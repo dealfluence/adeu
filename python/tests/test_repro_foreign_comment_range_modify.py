@@ -144,25 +144,6 @@ def test_modify_entire_foreign_comment_span_applies():
     assert (starts, ends, refs) == (1, 1, 1)
 
 
-def test_dry_run_reports_edit_under_foreign_comment_as_applicable():
-    """
-    The report explicitly says the refusal was 'confirmed via dry-run'.
-    Desired: dry-run previews the edit as applicable instead of failing it
-    with the insertion misclassification.
-    """
-    engine = RedlineEngine(_memo_with_colleague_comment(), author="Agent")
-    res = engine.process_batch(
-        [ModifyText(target_text="40,000 EUR", new_text="45,000 EUR")],
-        dry_run=True,
-    )
-
-    assert res["edits_applied"] == 1
-    assert res["edits_skipped"] == 0
-    report = res["edits"][0]
-    assert report["status"] == "applied", f"Dry-run failed the edit: {report['error']}"
-    assert "active insertion from another author" not in (report["error"] or "")
-
-
 # ────────────────────────────────────────────────────────────────────────────
 # GREEN controls — pin the boundary of the fix.
 # ────────────────────────────────────────────────────────────────────────────

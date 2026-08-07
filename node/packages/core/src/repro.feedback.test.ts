@@ -91,7 +91,7 @@ describe("Field feedback repro — Node engine", () => {
 
     // DESIRED behaviour — RED on current Node (throws "active insertion from
     // another author"), GREEN after the fix.
-    const stats = engine.process_batch(batch, false);
+    const stats = engine.process_batch(batch);
     expect(stats.actions_applied).toBe(1);
     expect(stats.edits_applied).toBe(1);
     expect(stats.edits_skipped).toBe(0);
@@ -110,12 +110,10 @@ describe("Field feedback repro — Node engine", () => {
     );
 
     const engine = new RedlineEngine(doc, "Acme's Counsel");
-    const r1 = engine.process_batch([{ type: "accept", target_id: "Chg:5" }], false);
+    const r1 = engine.process_batch([{ type: "accept", target_id: "Chg:5" }]);
     expect(r1.actions_applied).toBe(1);
     const r2 = engine.process_batch(
-      [{ type: "modify", target_text: "24 months", new_text: "36 months" }],
-      false,
-    );
+      [{ type: "modify", target_text: "24 months", new_text: "36 months" }]);
     expect(r2.edits_applied).toBe(1);
   });
 
@@ -151,9 +149,7 @@ describe("Field feedback repro — Node engine", () => {
     const engine = new RedlineEngine(doc, "Reviewer");
     const sentence = words.join("").trim();
     engine.process_batch(
-      [{ type: "modify", target_text: sentence, new_text: sentence, comment: "Missing value" }],
-      false,
-    );
+      [{ type: "modify", target_text: sentence, new_text: sentence, comment: "Missing value" }]);
 
     expect(countTag(doc.element, "w:commentReference")).toBe(1);
   });

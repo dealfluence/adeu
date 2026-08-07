@@ -24,8 +24,8 @@ and encoded here only where it reproduces:
            later edit's preview (clean-mapper fallback path);
        (3) same-author re-edit of a pending insertion previews as NESTED
            CriticMarkup {++...{++...++}...++}.
-  F7   Dry-run report omits comments entirely (engine report dict AND the
-       rendered process_document_batch dry-run response).
+  F7   Batch report omits comments entirely (engine report dict AND the
+       rendered process_document_batch response).
   F12  (a) sanitize --accept-all headline counts revision MARKS (deliberate
        unit, AI_CONTEXT 2026-07-22) but the report then LISTS fewer change
        items with no reconciliation — a fragmented revision (multi-paragraph
@@ -298,33 +298,31 @@ class TestF6PreviewFidelity:
 
 
 # ---------------------------------------------------------------------------
-# F7. Dry-run report omits comments entirely
+# F7. Batch report omits comments entirely
 # ---------------------------------------------------------------------------
 
 
 COMMENT_TEXT = "Please review this change."
 
 
-class TestF7DryRunOmitsComments:
-    def test_engine_dry_run_report_carries_the_comment(self):
-        """A dry-run batch report is the one place an agent can verify a
-        comment before committing — the report dict must mention it (F7)."""
+class TestF7ReportOmitsComments:
+    def test_engine_report_carries_the_comment(self):
+        """The batch report is where an agent verifies the comment it wrote —
+        the report dict must mention it (F7)."""
         engine = RedlineEngine(doc_stream("The Supplier shall deliver within 10 days."), author="QA")
         stats = engine.process_batch(
             [ModifyText(target_text="10 days", new_text="14 days", comment=COMMENT_TEXT)],
-            dry_run=True,
         )
 
         assert stats["edits"][0]["status"] == "applied"
         assert COMMENT_TEXT in json.dumps(stats), (
-            "the dry-run report contains no trace of the edit's comment — the one thing "
-            "dry-run exists to let you verify before committing. Report dict fields: "
-            + json.dumps(stats["edits"][0], indent=2)
+            "the batch report contains no trace of the edit's comment — the one place "
+            "an agent can verify the comment it wrote. Report dict fields: " + json.dumps(stats["edits"][0], indent=2)
         )
 
-    def test_dry_run_tool_response_mentions_the_comment(self, tmp_path):
-        """The rendered process_document_batch dry-run response must surface
-        the comment text, not silently drop it (F7)."""
+    def test_batch_tool_response_mentions_the_comment(self, tmp_path):
+        """The rendered process_document_batch response must surface the
+        comment text, not silently drop it (F7)."""
         src = build_docx(tmp_path / "f7.docx", "The Supplier shall deliver within 10 days.")
 
         result = asyncio.run(
@@ -334,12 +332,12 @@ class TestF7DryRunOmitsComments:
                 author_name="Reviewer",
                 ctx=MockContext(),
                 changes=[ModifyText(target_text="10 days", new_text="14 days", comment=COMMENT_TEXT)],
-                dry_run=True,
+                output_path=str(tmp_path / "f7_out.docx"),
             )
         )
 
-        assert "Dry-run simulation complete" in result
-        assert COMMENT_TEXT in result, "the dry-run response never mentions the comment the edit carries:\n" + result
+        assert "Batch complete" in result
+        assert COMMENT_TEXT in result, "the batch response never mentions the comment the edit carries:\n" + result
 
 
 # ---------------------------------------------------------------------------

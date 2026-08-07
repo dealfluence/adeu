@@ -208,9 +208,10 @@ class TestAdeuApplyChangesBehavior:
         assert output_path.exists(), f"ainvoke did not write an output file. Result head: {result[:300]}"
         assert "Batch complete" in result
 
-    def test_dry_run_does_not_write_output_file(self, working_docx: Path, output_path: Path) -> None:
-        # dry_run=True should simulate without producing any file on disk,
-        # regardless of whether output_path was supplied.
+    def test_successful_batch_carries_per_edit_preview_reports(self, working_docx: Path, output_path: Path) -> None:
+        # A committed batch must still return the per-edit report payload
+        # (status, target/new text, CriticMarkup or clean-text preview) so
+        # the agent can self-review what landed and plan follow-up edits.
         tool = AdeuApplyChanges()
         tool_call = {
             "name": "adeu_apply_changes",
@@ -226,83 +227,30 @@ class TestAdeuApplyChangesBehavior:
                     }
                 ],
                 "output_path": str(output_path),
-                "dry_run": True,
             },
-            "id": "test-dry-run-1",
+            "id": "test-wet-report-1",
             "type": "tool_call",
         }
         msg = tool.invoke(tool_call)
 
-        # Core contract: no file written even though output_path was provided.
-        assert not output_path.exists(), (
-            "dry_run=True wrote an output file at the requested output_path — the simulation contract was violated."
-        )
-
-        # Source must remain untouched.
-        # (Hash check would be overkill; existence + mtime stability is enough
-        # because the engine never opens the source for write.)
-        assert working_docx.exists()
-
-        # Artifact must surface that this was a dry-run and the simulation
-        # itself succeeded (the edit was a valid one).
         assert msg.artifact["success"] is True
-        assert msg.artifact["dry_run"] is True
-        assert msg.artifact["output_path"] is None
+        assert msg.artifact["output_path"] == str(output_path)
+        assert output_path.exists()
         assert msg.artifact["edits_applied"] == 1
         assert msg.artifact["edits_skipped"] == 0
 
-        # Per-edit reports must be present in the artifact and contain the
-        # preview payload that distinguishes dry-run from a regular call.
+        # Per-edit reports must be present in the artifact with preview
+        # payload the LLM can inspect.
         edits = msg.artifact.get("edits") or []
-        assert edits, "dry_run artifact missing per-edit reports — engine output was dropped on the floor."
+        assert edits, "artifact missing per-edit reports — engine output was dropped on the floor."
         first = edits[0]
         assert first["status"] == "applied"
         assert first["target_text"] == _UNIQUE_TARGET
         assert first["new_text"] == _REPLACEMENT
-        # At least one of the preview fields must be populated — these are
-        # the whole point of dry-run vs. just running the batch and checking
-        # counts.
         assert first.get("critic_markup") or first.get("clean_text"), (
-            "dry_run report has neither critic_markup nor clean_text preview; "
+            "per-edit report has neither critic_markup nor clean_text preview; "
             "the LLM has nothing actionable to inspect."
         )
 
-        # Content should announce the simulation explicitly so the LLM can
-        # branch on the message text alone if it doesn't read the artifact.
-        assert "Dry-run simulation complete" in msg.content
-
-    def test_dry_run_surfaces_failing_edits_without_writing(self, working_docx: Path, output_path: Path) -> None:
-        # When an edit is genuinely unfindable, dry-run should still report
-        # the failure per-edit (it does NOT raise BatchValidationError on
-        # the dry-run path — the engine validates each edit individually).
-        tool = AdeuApplyChanges()
-        msg = tool.invoke(
-            {
-                "name": "adeu_apply_changes",
-                "args": {
-                    "reasoning": "test",
-                    "file_path": str(working_docx),
-                    "author_name": "AI Reviewer",
-                    "changes": [
-                        {
-                            "type": "modify",
-                            "target_text": "PHRASE_NOT_IN_DOCUMENT_xyz123",
-                            "new_text": "anything",
-                        }
-                    ],
-                    "output_path": str(output_path),
-                    "dry_run": True,
-                },
-                "id": "test-dry-run-fail",
-                "type": "tool_call",
-            }
-        )
-        assert not output_path.exists()
-        assert msg.artifact["dry_run"] is True
-        # The engine returns success=True at the batch level but reports the
-        # individual failure in the edits list — that's what makes dry-run
-        # useful as a self-review step (the agent sees granular feedback
-        # instead of an opaque rejection).
-        edits = msg.artifact.get("edits") or []
-        assert edits and edits[0]["status"] == "failed"
-        assert edits[0].get("error")
+        # Content should announce the committed write explicitly.
+        assert "Batch complete" in msg.content

@@ -205,12 +205,6 @@ function sequential_context_hint(applied_so_far: number): string {
   );
 }
 
-// Report placeholder for edits blocked only by OTHER edits' validation
-// failures under the transactional batch contract. Mirrors Python.
-const TRANSACTIONAL_NOT_APPLIED_ERROR =
-  "Not applied: the batch is transactional and other edits failed " +
-  "validation (see their errors). Fix or remove those edits and re-run.";
-
 // Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
 // Word refuses to open a package carrying them, and @xmldom serializes them
 // silently, so they must be rejected before they reach the DOM
@@ -3347,10 +3341,7 @@ export class RedlineEngine {
     return errors;
   }
 
-  public process_batch(
-    changes: DocumentChange[],
-    dry_run: boolean = false,
-  ): any {
+  public process_batch(changes: DocumentChange[]): any {
     // Defensive sanitization: some LLM clients "double-serialize" nested
     // arrays, delivering each element of `changes` as a JSON string instead of
     // a parsed object. Downstream code mutates state trackers (e.g.
@@ -3379,27 +3370,10 @@ export class RedlineEngine {
       }) as DocumentChange[];
     }
 
-    if (dry_run) {
-      const snapshot = takeSnapshot(this.doc);
-      const originalCurrentId = this.current_id;
-      try {
-        return this._process_batch_internal(changes, true);
-      } finally {
-        restoreSnapshot(this.doc, snapshot);
-        this.current_id = originalCurrentId;
-        this.mapper = new DocumentMapper(this.doc);
-        this.comments_manager = new CommentsManager(this.doc);
-        this.clean_mapper = null;
-      }
-    } else {
-      return this._process_batch_internal(changes, false);
-    }
+    return this._process_batch_internal(changes);
   }
 
-  private _process_batch_internal(
-    changes: DocumentChange[],
-    dry_run_mode: boolean = false,
-  ): any {
+  private _process_batch_internal(changes: DocumentChange[]): any {
     // Pre-process edits: strip identical leading heading hashes from target_text and new_text
     for (const c of changes) {
       if (
@@ -3443,32 +3417,20 @@ export class RedlineEngine {
     // the <w:del> inside that <w:ins> (see _apply_single_edit_indexed /
     // _insert_and_split_ins).
 
-    // BUG-7: Unified single-pass validation in wet-run / standard mode.
+    // BUG-7: Unified single-pass validation.
     // The document-aware pairing check runs BEFORE any action mutates the
     // DOM: accept + reject across one replacement's del+ins pair is a
     // contradiction, not two independent operations (ADEU-QA-004).
-    if (!dry_run_mode) {
-      let action_errors =
-        actions.length > 0 ? this.validate_review_actions(actions) : [];
-      if (actions.length > 0 && action_errors.length === 0) {
-        action_errors = this.validate_action_pairing(actions);
-      }
-      const validate_edits_now = edits.length > 0 && action_errors.length > 0;
-      const edit_errors = validate_edits_now ? this.validate_edits(edits) : [];
-      const all_errors = [...action_errors, ...edit_errors];
-      if (all_errors.length > 0) {
-        throw new BatchValidationError(all_errors);
-      }
-    } else {
-      if (actions.length > 0) {
-        let action_errors = this.validate_review_actions(actions);
-        if (action_errors.length === 0) {
-          action_errors = this.validate_action_pairing(actions);
-        }
-        if (action_errors.length > 0) {
-          throw new BatchValidationError(action_errors);
-        }
-      }
+    let action_errors =
+      actions.length > 0 ? this.validate_review_actions(actions) : [];
+    if (actions.length > 0 && action_errors.length === 0) {
+      action_errors = this.validate_action_pairing(actions);
+    }
+    const validate_edits_now = edits.length > 0 && action_errors.length > 0;
+    const edit_errors = validate_edits_now ? this.validate_edits(edits) : [];
+    const all_errors = [...action_errors, ...edit_errors];
+    if (all_errors.length > 0) {
+      throw new BatchValidationError(all_errors);
     }
 
     let applied_actions = 0;
@@ -3529,139 +3491,8 @@ export class RedlineEngine {
           return kb - ka || a.i - b.i;
         });
 
-      if (dry_run_mode) {
-        const reports_by_input: any[] = new Array(edits.length);
-        // Indexes that failed — validation OR apply-stage (QA 2026-07-23 F2:
-        // apply-stage failures reject transactionally too): if any exist,
-        // the real run rejects the whole batch, so the dry-run report must
-        // not claim any edit "applied" (transactional parity with Python).
-        const failed_idx = new Set<number>();
-        const applied_entries: Array<[number, any]> = [];
-        for (const { edit, i } of ordered_edits) {
-          let single_errors: string[];
-          try {
-            single_errors = this.validate_edits([edit], i);
-          } catch (e) {
-            // A pathological user pattern must fail as a clean per-edit
-            // validation error, never a hang or crash (QA 2026-07-17 F5).
-            if (!(e instanceof RegexTimeoutError)) throw e;
-            single_errors = [`- Edit ${i + 1} Failed: ${e.message}`];
-          }
-          if (single_errors.length > 0) {
-            if (applied_edits > 0) {
-              const hint = sequential_context_hint(applied_edits);
-              single_errors = single_errors.map((err) => err + hint);
-            }
-            failed_idx.add(i);
-            skipped_edits++;
-            // Only surface the punctuation-anchor warning when the edit actually
-            // failed. A clean apply already returns the redline preview, so the
-            // warning is pure noise on success — and it misleads agents into
-            // hunting for a "cleaner" anchor that was never needed (e.g. on
-            // placeholders/dates where the punctuation IS the literal target).
-            const warning = this._check_punctuation_warning(
-              (edit as any).target_text || "",
-            );
-            reports_by_input[i] = {
-              status: "failed",
-              type: (edit as any).type || "modify",
-              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
-              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
-              comment: (edit as any).comment ?? null,
-              warning: warning,
-              error: single_errors.join("\n"),
-              critic_markup: null,
-              clean_text: null,
-            };
-            continue;
-          }
-          const res = this.apply_edits([edit], page_offsets);
-          if (
-            (edit as any)._applied_status &&
-            !(edit as any)._any_sub_failure
-          ) {
-            applied_edits++;
-            applied_entries.push([i, edit]);
-            reports_by_input[i] = {
-              status: "applied",
-              type: (edit as any).type || "modify",
-              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
-              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
-              comment: (edit as any).comment ?? null,
-              // Resolution advisories (edit._warning, e.g. the surviving-\N
-              // backreference guardrail) surface in BOTH outcomes.
-              warning: (edit as any)._warning || null,
-              error: null,
-              // Filled from the post-apply projections after the loop.
-              critic_markup: null,
-              clean_text: null,
-              pages: (edit as any)._pages || [],
-              heading_path: (edit as any)._heading_path || "",
-              occurrences_modified: (edit as any)._occurrences_modified || 0,
-              match_mode: (edit as any).match_mode || "strict",
-            };
-            this.mapper = new DocumentMapper(this.doc);
-            this.clean_mapper = null;
-          } else {
-            failed_idx.add(i);
-            skipped_edits++;
-            const error_msg =
-              this.skipped_details.length > 0
-                ? this.skipped_details[this.skipped_details.length - 1]
-                : "Failed to apply edit";
-            const warning = this._check_punctuation_warning(
-              (edit as any).target_text || "",
-            );
-            reports_by_input[i] = {
-              status: "failed",
-              type: (edit as any).type || "modify",
-              target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
-              new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
-              comment: (edit as any).comment ?? null,
-              warning: warning,
-              error: error_msg,
-              critic_markup: null,
-              clean_text: null,
-            };
-          }
-        }
-        if (failed_idx.size === 0) {
-          // Previews slice the ACTUAL post-apply projections (F6). Built
-          // after the loop so pending markup from every batch edit is
-          // visible, mirroring the wet run's report pass.
-          for (const [i, edit] of applied_entries) {
-            const previews = this._build_edit_context_previews(edit);
-            reports_by_input[i].critic_markup = previews[0];
-            reports_by_input[i].clean_text = previews[1];
-          }
-        } else {
-          // Dry-run mirrors the real run's transactional rejection: no edit
-          // will be applied by the real run, so none may be reported as
-          // applied here. Edits that failed keep their own error; edits that
-          // would have applied get the transactional note.
-          applied_edits = 0;
-          skipped_edits = edits.length;
-          for (let i = 0; i < reports_by_input.length; i++) {
-            const report = reports_by_input[i];
-            if (!report || failed_idx.has(i)) continue;
-            if (report.status === "applied") {
-              reports_by_input[i] = {
-                status: "failed",
-                type: report.type || "modify",
-                target_text: report.target_text,
-                new_text: report.new_text,
-                comment: report.comment ?? null,
-                warning: null,
-                error: TRANSACTIONAL_NOT_APPLIED_ERROR,
-                critic_markup: null,
-                clean_text: null,
-              };
-            }
-          }
-        }
-        edits_reports.push(...reports_by_input);
-      } else {
-        // Simulated dry-run sequentially for wet-run validation parity
+      {
+        // Sequential validate-and-apply with transactional rollback.
         const snapshot = takeSnapshot(this.doc);
         const originalCurrentId = this.current_id;
         try {
@@ -3751,9 +3582,9 @@ export class RedlineEngine {
             type: (edit as any).type || "modify",
             target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
             new_text: truncate_middle(RedlineEngine._report_new_text(edit), REPORT_ECHO_CAP),
-            // Every per-edit report carries the edit's comment so a dry-run
-            // (or any report consumer) can verify the annotation that WILL
-            // be attached (QA 2026-07-23 F7).
+            // Every per-edit report carries the edit's comment so any report
+            // consumer can verify the annotation that was attached
+            // (QA 2026-07-23 F7).
             comment: (edit as any).comment ?? null,
             warning: warning,
             error: error_msg,

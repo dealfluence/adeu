@@ -1039,9 +1039,9 @@ class TestIdentityRoundTripProperty:
 
 
 class TestRemainingGaps:
-    def test_pinned_shape_violation_reported_in_dry_run(self):
-        """Dry-run must mirror the wet run's rejection of invalid pinned edits
-        (transactional parity)."""
+    def test_pinned_shape_violation_is_rejected(self):
+        """Invalid pinned edits (raw CriticMarkup in new_text) must be
+        rejected transactionally with a CriticMarkup-naming error."""
         doc = Document()
         doc.add_paragraph("This is a simple contract paragraph for testing.")
         engine = RedlineEngine(_stream(doc))
@@ -1049,11 +1049,9 @@ class TestRemainingGaps:
         edit = ModifyText(target_text="simple", new_text="{++New York++}")
         edit._match_start_index = engine.mapper.full_text.index("simple")
 
-        stats = engine.process_batch([edit], dry_run=True)
-        assert stats["edits_applied"] == 0
-        assert stats["edits_skipped"] == 1
-        assert stats["edits"][0]["status"] == "failed"
-        assert "CriticMarkup" in (stats["edits"][0]["error"] or "")
+        with pytest.raises(BatchValidationError) as exc_info:
+            engine.process_batch([edit])
+        assert "CriticMarkup" in "\n".join(exc_info.value.errors)
 
     def test_keep_markup_sanitize_verifiably_removes_resolved_comments(self, tmp_path):
         """The remove_resolved_comments path shares delete_comment with F3;

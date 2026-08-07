@@ -97,7 +97,7 @@ def test_f9_apply_cp1252_text_changes_must_not_crash(tmp_path, capsys):
     changes_txt = tmp_path / "changes.txt"
     changes_txt.write_bytes(CP1252_TEXT_BYTES)
 
-    exit_code = _run_cli(["apply", str(fixture), str(changes_txt), "--dry-run"])
+    exit_code = _run_cli(["apply", str(fixture), str(changes_txt), "-o", str(tmp_path / "out.docx")])
 
     captured = capsys.readouterr()
     assert exit_code in (0, 1)

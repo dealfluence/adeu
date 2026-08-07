@@ -408,57 +408,6 @@ describe("Test Adeu n8n Node", () => {
       expect((edits[0].occurrences_modified as number) >= 1).toBe(true);
     });
 
-    it("should run in dry-run mode without producing a redlined binary or stashing static data", async () => {
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "applyEdits";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "outputBinaryPropertyName") return "data";
-        if (paramName === "author") return "n8n AI";
-        if (paramName === "editsSource") return "fromInputJson";
-        if (paramName === "editsJsonPath") return "changes";
-        if (paramName === "returnMarkdown") return false;
-        if (paramName === "dryRun") return true;
-        return fallback;
-      });
-
-      const result = await node.execute.call(mockExecuteFunctions);
-
-      expect(result).toHaveLength(1);
-      expect(result[0]).toHaveLength(1);
-
-      const item = result[0][0];
-
-      // Dry-run-specific output shape
-      expect(item.json).toHaveProperty("dryRun", true);
-      expect(item.json).toHaveProperty("stats");
-      expect(item.json).not.toHaveProperty("redlinedBinaryId");
-
-      // Stats must contain the per-edit report shape produced by the engine
-      const stats = item.json.stats as Record<string, unknown>;
-      expect(stats).toHaveProperty("edits");
-      expect(Array.isArray(stats.edits)).toBe(true);
-
-      // Critically: no prepareBinaryData call (no redlined binary produced)
-      expect(
-        mockExecuteFunctions.helpers.prepareBinaryData as ReturnType<
-          typeof vi.fn
-        >,
-      ).not.toHaveBeenCalled();
-
-      // No outgoing binary attached to the new property (the dry-run path
-      // passes through the incoming binary bag unchanged; the input fixture
-      // sets `data` as a fileName-only stub, so we just assert no fresh
-      // prepared binary landed there)
-      const outputBinary = item.binary as Record<string, unknown> | undefined;
-      // The incoming binary stub has `data: { fileName: "contract.docx" }` —
-      // dry-run passes that through verbatim, it should NOT be replaced by
-      // a `prepareBinaryData` mock result.
-      expect(outputBinary?.data).toEqual({ fileName: "contract.docx" });
-    });
-
     it("should repair changes missing type or carrying match_mode synonyms", async () => {
       (
         mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>

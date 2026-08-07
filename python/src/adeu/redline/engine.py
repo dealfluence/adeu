@@ -2458,9 +2458,9 @@ class RedlineEngine:
             # cannot balloon the report/JSON output (QA C2).
             "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
             "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
-            # Every per-edit report carries the edit's comment (dry-run
-            # included) — the report is where an agent verifies the comment
-            # before committing (F7, QA 2026-07-23).
+            # Every per-edit report carries the edit's comment — the report
+            # is where an agent verifies the comment it wrote
+            # (F7, QA 2026-07-23).
             "comment": getattr(edit, "comment", None),
             "warning": warning,
             "error": edit_error_msg,
@@ -2472,24 +2472,11 @@ class RedlineEngine:
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
 
-    def process_batch(self, changes: List[DocumentChange], dry_run: bool = False) -> dict:
+    def process_batch(self, changes: List[DocumentChange]) -> dict:
         """
         Processes a unified batch of actions and edits safely.
         """
-        if dry_run:
-            # The dry-run engine only needs bytes EQUAL to this engine's
-            # current state. While nothing has mutated the tree (the normal
-            # case — a fresh engine per MCP call), the pristine load-time
-            # bytes are that state verbatim; save_to_stream (full serialize
-            # + re-zip of every part) is needed only after real mutations.
-            if self._mutated_since_load:
-                source = self.save_to_stream()
-            else:
-                source = BytesIO(self._pristine_bytes)
-            dry_engine = RedlineEngine(source, author=self.author, id_discovery_hint=self.id_discovery_hint)
-            return dry_engine._process_batch_internal(changes, dry_run_mode=True)
-        else:
-            return self._process_batch_internal(changes, dry_run_mode=False)
+        return self._process_batch_internal(changes)
 
     def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
         page = 1
@@ -2517,7 +2504,7 @@ class RedlineEngine:
                         break
         return " > ".join(path) if path else "", page
 
-    def _process_batch_internal(self, changes: List[DocumentChange], dry_run_mode: bool = False) -> dict:
+    def _process_batch_internal(self, changes: List[DocumentChange]) -> dict:
         """
         Internal execution engine for batches of edits and actions.
         """
@@ -2554,11 +2541,9 @@ class RedlineEngine:
             # Batches apply SEQUENTIALLY: each edit is validated and applied
             # against the document state produced by the edits before it, so a
             # later edit may target text an earlier edit introduced (chaining).
-            # Both modes run this same loop — dry-run on the cloned engine,
-            # real mode on this one — so their reports agree by construction
-            # (QA M1). Validation failures keep the batch transactional: the
-            # real run restores the pre-batch snapshot and rejects everything;
-            # dry-run reports the identical outcome per edit.
+            # Validation failures keep the batch transactional: the run
+            # restores the pre-batch snapshot and rejects everything, with the
+            # per-edit reports carried inside the BatchValidationError details.
             #
             # LAZY SNAPSHOT (docs/Performance.md §5.2 ported): the snapshot
             # must equal the engine's CURRENT state. Until something mutates
@@ -2567,9 +2552,7 @@ class RedlineEngine:
             # are that state, and the full save_to_stream serialize+re-zip is
             # skipped. Rollback re-initializes from whichever bytes were
             # chosen, so the restore path is unchanged.
-            if dry_run_mode:
-                pre_batch_snapshot = None
-            elif self._mutated_since_load:
+            if self._mutated_since_load:
                 pre_batch_snapshot = self.save_to_stream()
             else:
                 pre_batch_snapshot = BytesIO(self._pristine_bytes)
@@ -2591,7 +2574,6 @@ class RedlineEngine:
 
             reports_by_input: List[Optional[dict]] = [None] * len(cloned_edits)
             validation_errors: List[str] = []
-            failed_validation_indices: set = set()
 
             # Caller-pinned edits resolve by position, so the document-context
             # checks (not-found / ambiguity) don't apply to them — but the
@@ -2604,7 +2586,6 @@ class RedlineEngine:
                 shape_errors = validate_edit_strings([e], index_offset=i)
                 if shape_errors:
                     validation_errors.extend(shape_errors)
-                    failed_validation_indices.add(i)
                     skipped_edits += 1
                     reports_by_input[i] = {
                         "status": "failed",
@@ -2650,7 +2631,6 @@ class RedlineEngine:
                         )
                         single_errors = [err + hint for err in single_errors]
                     validation_errors.extend(single_errors)
-                    failed_validation_indices.add(i)
                     skipped_edits += 1
                     # Punctuation-anchor warning is failure-context only; on
                     # success the redline preview reports the change cleanly.
@@ -2678,32 +2658,10 @@ class RedlineEngine:
                 reports_by_input[i] = self._build_edit_report(edit)
 
             if validation_errors:
-                if not dry_run_mode:
-                    # Transactional rejection: undo every edit this batch
-                    # already applied before raising.
-                    self._restore_from_snapshot(pre_batch_snapshot)
-                    raise BatchValidationError(validation_errors)
-                # Dry-run mirrors the rejection: no edit will be applied by the
-                # real run, so none may be reported as applied here.
-                applied_edits = 0
-                skipped_edits = len(cloned_edits)
-                for i, report in enumerate(reports_by_input):
-                    if report is None or i in failed_validation_indices:
-                        continue
-                    reports_by_input[i] = {
-                        "status": "failed",
-                        "type": report.get("type", "modify"),
-                        "target_text": report["target_text"],
-                        "new_text": report["new_text"],
-                        "comment": report.get("comment"),
-                        "warning": None,
-                        "error": (
-                            "Not applied: the batch is transactional and other edits failed "
-                            "validation (see their errors). Fix or remove those edits and re-run."
-                        ),
-                        "critic_markup": None,
-                        "clean_text": None,
-                    }
+                # Transactional rejection: undo every edit this batch
+                # already applied before raising.
+                self._restore_from_snapshot(pre_batch_snapshot)
+                raise BatchValidationError(validation_errors)
 
             edits_reports = [r for r in reports_by_input if r is not None]
 

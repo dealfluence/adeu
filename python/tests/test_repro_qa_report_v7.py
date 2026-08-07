@@ -596,7 +596,7 @@ class TestF12MatchModeValidation:
             json.dumps([{"type": "modify", "target_text": "text", "new_text": "words", "match_mode": "banana"}]),
             encoding="utf-8",
         )
-        code, out, err = run_cli(["apply", src, edits, "--dry-run", "--json"], capsys)
+        code, out, err = run_cli(["apply", src, edits, "--json"], capsys)
         assert code != 0
         payload = json.loads(out)
         assert payload["error"] == "invalid_changes_file"

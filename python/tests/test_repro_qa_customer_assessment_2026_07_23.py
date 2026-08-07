@@ -137,7 +137,7 @@ class TestC1MinimalRequestParity:
         arguments = {
             "reasoning": "minimal well-formed edit request",
             "original_docx_path": str(src),
-            "dry_run": True,
+            "output_path": str(tmp_path / "minimal_out.docx"),
             "changes": [{"type": "modify", "target_text": "lazy dog", "new_text": "sleepy cat"}],
         }
 
@@ -153,9 +153,7 @@ class TestC1MinimalRequestParity:
                 f"client-side schema allows) was rejected at the boundary: {exc}"
             )
         text = "".join(item.text for item in result.content if getattr(item, "type", "") == "text")
-        assert "sleepy cat" in text or "1 applied" in text or "Dry run" in text, (
-            f"minimal batch did not reach the engine: {text[:400]}"
-        )
+        assert "sleepy cat" in text or "1 applied" in text, f"minimal batch did not reach the engine: {text[:400]}"
 
 
 # ────────────────────────────────────────────────────────────────────────────

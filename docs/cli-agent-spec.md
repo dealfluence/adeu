@@ -46,8 +46,7 @@ single JSON document and the human-readable progress logs are suppressed.
   `actions_applied`, `actions_skipped`, `edits_applied`, `edits_skipped`,
   `skipped_details`, `edits` (per-edit reports with `status`, `target_text`,
   `new_text`, `error`, `warning`, CriticMarkup/clean-text previews), `engine`,
-  `version`, plus two CLI-level fields: `output_path` (null on dry runs) and
-  `dry_run`. A batch rejected by validation prints
+  `version`, plus one CLI-level field: `output_path`. A batch rejected by validation prints
   `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
 * **`adeu extract --json`** — prints the MCP machine channel
   (`structured_content`) of the extraction: `{"markdown": ..., "title": ...,

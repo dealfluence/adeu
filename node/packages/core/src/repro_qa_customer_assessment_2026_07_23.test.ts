@@ -63,7 +63,7 @@ describe("C3: comment without replacement text must not delete the sentence", ()
       comment: "Please reconsider this cap.",
     } as any;
 
-    const stats = engine.process_batch([edit], false);
+    const stats = engine.process_batch([edit]);
     expect(stats.edits_applied).toBe(1);
 
     const raw = _extractTextFromDoc(doc, false, false) as string;
@@ -87,7 +87,7 @@ describe("C3: comment without replacement text must not delete the sentence", ()
       comment: "Removed per our call on 2026-07-20.",
     } as any;
 
-    const stats = engine.process_batch([edit], false);
+    const stats = engine.process_batch([edit]);
     expect(stats.edits_applied).toBe(1);
 
     const raw = _extractTextFromDoc(doc, false, false) as string;
@@ -108,7 +108,7 @@ describe("C3: comment without replacement text must not delete the sentence", ()
       comment: "Please reconsider this cap.",
     } as any;
 
-    const stats = engine.process_batch([edit], false);
+    const stats = engine.process_batch([edit]);
     expect(stats.edits_applied).toBe(1);
 
     const raw = _extractTextFromDoc(doc, false, false) as string;
@@ -129,7 +129,7 @@ describe("C3: comment without replacement text must not delete the sentence", ()
 
     let deleted = false;
     try {
-      const stats = engine.process_batch([edit], false);
+      const stats = engine.process_batch([edit]);
       const raw = _extractTextFromDoc(doc, false, false) as string;
       deleted = stats.edits_applied === 1 && raw.includes("{--");
     } catch {

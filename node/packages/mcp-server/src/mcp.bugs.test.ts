@@ -197,7 +197,6 @@ describe("Resolved Bugs MCP Server Verification", () => {
               new_text: "clean document",
             }),
           ],
-          dry_run: true,
         },
       },
       105,
@@ -206,9 +205,7 @@ describe("Resolved Bugs MCP Server Verification", () => {
     // On unpatched code, the tool catches the TypeError and returns it inside a standard MCP error response, causing this test to fail.
     // On patched code, the tool successfully parses and applies the double-serialized JSON strings, returning a successful response.
     expect(res.result.isError).toBeUndefined();
-    expect(res.result.content[0].text).toContain(
-      "Dry-run simulation complete.",
-    );
+    expect(res.result.content[0].text).toContain("Batch complete.");
   });
 
   it("Unparseable String: process_document_batch gracefully rejects raw strings instead of crashing", async () => {
@@ -223,7 +220,6 @@ describe("Resolved Bugs MCP Server Verification", () => {
           changes: [
             "modify document to be clean document", // Raw unparseable string
           ],
-          dry_run: false,
         },
       },
       110,

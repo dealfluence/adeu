@@ -221,7 +221,7 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
       arguments: {
         reasoning: "client-compat repro: schema-following call",
         original_docx_path: plainDocPath,
-        dry_run: true,
+        output_path: join(workDir, "compat_output.docx"),
         changes: [
           { type: "modify", target_text: "lazy dog", new_text: "sleepy cat" },
         ],

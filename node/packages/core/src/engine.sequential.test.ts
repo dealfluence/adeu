@@ -1,8 +1,8 @@
 // Sequential batch semantics — cross-engine parity with the Python engine
-// (QA 2026-07-17 follow-up). Batches apply SEQUENTIALLY in both modes: each
-// edit is validated and applied against the document state produced by the
-// edits before it (chaining), validation failures reject the batch
-// transactionally, and the dry-run report mirrors the real run's outcome.
+// (QA 2026-07-17 follow-up). Batches apply SEQUENTIALLY: each edit is
+// validated and applied against the document state produced by the edits
+// before it (chaining), and validation failures reject the batch
+// transactionally.
 
 import { describe, it, expect } from "vitest";
 import { createTestDocument, addParagraph } from "./test-utils.js";
@@ -33,51 +33,19 @@ async function ndaDoc() {
 }
 
 describe("Sequential batch semantics (Python parity)", () => {
-  it("chained batch applies in BOTH modes with identical stats", async () => {
+  it("chained batch applies with correct stats", async () => {
     const engine = new RedlineEngine(await ndaDoc());
 
-    const resDry = engine.process_batch(chainedBatch(), true);
-    expect(resDry.edits_applied).toBe(2);
-    expect(resDry.edits_skipped).toBe(0);
-    expect(resDry.edits.every((r: any) => r.status === "applied")).toBe(true);
-
-    const resWet = engine.process_batch(chainedBatch(), false);
+    const resWet = engine.process_batch(chainedBatch());
     expect(resWet.edits_applied).toBe(2);
     expect(resWet.edits_skipped).toBe(0);
+    expect(resWet.edits.every((r: any) => r.status === "applied")).toBe(true);
 
     const xml = engine.doc.element.toString();
     expect(xml).toContain("Disclosee");
   });
 
-  it("dry-run mirrors transactional rejection: no edit reported applied when any fails validation", async () => {
-    const engine = new RedlineEngine(await ndaDoc());
-
-    const res = engine.process_batch(
-      [
-        {
-          type: "modify",
-          target_text: "the Recipient",
-          new_text: "Receiving Party",
-        },
-        {
-          type: "modify",
-          target_text: "Nonexistent text 123",
-          new_text: "x",
-        },
-      ] as any[],
-      true,
-    );
-
-    expect(res.edits_applied).toBe(0);
-    expect(res.edits_skipped).toBe(2);
-    expect(res.edits.every((r: any) => r.status === "failed")).toBe(true);
-    expect(res.edits[0].error).toContain("transactional");
-    expect(res.edits[1].error.toLowerCase()).toContain("not found");
-    // Labeled with the edit's true position in the batch.
-    expect(res.edits[1].error).toContain("Edit 2 Failed");
-  });
-
-  it("real run rejects the same batch transactionally and leaves the document untouched", async () => {
+  it("rejects a batch transactionally and leaves the document untouched", async () => {
     const engine = new RedlineEngine(await ndaDoc());
 
     let caught: any = null;
@@ -95,7 +63,6 @@ describe("Sequential batch semantics (Python parity)", () => {
             new_text: "x",
           },
         ] as any[],
-        false,
       );
     } catch (e) {
       caught = e;
@@ -127,7 +94,6 @@ describe("Sequential batch semantics (Python parity)", () => {
             new_text: "it shall maintain",
           },
         ] as any[],
-        false,
       );
     } catch (e) {
       caught = e;

@@ -36,13 +36,11 @@ Returns Adeu's `@@ Word Patch @@` sub-word diff. Not a unified diff.
 
 ```bash
 uvx adeu apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
-# Preview without touching any file:
-uvx adeu apply contract.docx edits.json --dry-run
 # Machine-readable stats on stdout (recommended — parse it to verify your batch):
 uvx adeu apply contract.docx edits.json --json
 ```
 
-With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`, `dry_run`) and human logs are suppressed. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1. Exit code 1 also signals a partially applied batch — check `edits_skipped`.
+With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`) and human logs are suppressed. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1. Exit code 1 also signals a partially applied batch — check `edits_skipped`.
 
 The `edits.json` file is a JSON array. Each entry has a `type` discriminator matching `process_document_batch` (see `references/mcp-tools.md` for the full shape):
 
@@ -108,5 +106,4 @@ For ID-based operations (`accept`, `reject`, `reply`), step 1 and step 2 must be
 
 - **The CLI is Python-only.** Node users don't have a CLI equivalent — they should run the Node MCP server (`@adeu/mcp-server`) instead.
 - The CLI does not expose Live MS Word (Windows COM) integration for reading; `adeu extract --live` / `adeu apply --live` exist on Windows only and require a running Word instance — do not rely on them in sandboxes.
-- `dry_run` maps to `adeu apply --dry-run` (combine with `--json` for a parseable preview report).
 - `mode="outline"` / `mode="appendix"` / search map to `adeu extract --mode outline`, `--mode appendix`, and `--search-query`.

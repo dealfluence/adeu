@@ -167,7 +167,7 @@ describe("QA round 3, 3.4: informational notes header", () => {
       ],
     };
 
-    const res = formatBatchResult(stats, "dummy_processed.docx", false);
+    const res = formatBatchResult(stats, "dummy_processed.docx");
     expect(res).toContain("had no additional effect"); // the note itself stays
     expect(
       res,

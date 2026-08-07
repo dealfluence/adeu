@@ -61,13 +61,14 @@ def test_cli_extract_modes(capsys):
     assert "Appendix" in captured.out
 
 
-def test_cli_apply_dry_run(tmp_path, capsys):
+def test_cli_apply_prints_detailed_reports(tmp_path, capsys):
     from unittest.mock import patch
 
     from adeu.cli import main
 
     fixture_path = get_fixture_path("golden.docx")
     changes_file = tmp_path / "changes.json"
+    out_path = tmp_path / "out.docx"
 
     # Create an edit
     changes_data = [
@@ -80,8 +81,7 @@ def test_cli_apply_dry_run(tmp_path, capsys):
     with open(changes_file, "w") as f:
         json.dump(changes_data, f)
 
-    # Execute adeu apply with --dry-run
-    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "--dry-run"]
+    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "-o", str(out_path)]
 
     with patch.object(sys, "argv", test_args):
         try:
@@ -89,14 +89,12 @@ def test_cli_apply_dry_run(tmp_path, capsys):
         except SystemExit as e:
             assert e.code == 0 or e.code is None
 
-    # Verify no file was created next to golden.docx
-    processed_expected = fixture_path.parent / "golden_processed.docx"
-    assert not processed_expected.exists()
+    assert out_path.exists()
 
     captured = capsys.readouterr()
     # Check that detailed reports are printed to stderr
     err_output = captured.err
-    assert "Dry-run simulation complete." in err_output
+    assert "Batch complete." in err_output
     assert "Actions:" in err_output
     assert "Edits:" in err_output
     assert "Detailed Edit Reports:" in err_output
@@ -252,7 +250,7 @@ def test_cli_corrupt_docx_errors(tmp_path, capsys):
     # Test apply empty.docx
     fake_changes = tmp_path / "changes.json"
     fake_changes.write_text("[]", encoding="utf-8")
-    test_args = ["adeu", "apply", str(empty_docx), str(fake_changes), "--dry-run"]
+    test_args = ["adeu", "apply", str(empty_docx), str(fake_changes)]
     with patch.object(sys, "argv", test_args):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -353,7 +351,7 @@ def test_cli_valid_zip_but_not_docx_errors(tmp_path, capsys):
     # 2. apply
     fake_changes = tmp_path / "changes.json"
     fake_changes.write_text("[]", encoding="utf-8")
-    test_args = ["adeu", "apply", str(fake_docx), str(fake_changes), "--dry-run"]
+    test_args = ["adeu", "apply", str(fake_docx), str(fake_changes)]
     with patch.object(sys, "argv", test_args):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -434,7 +432,7 @@ def test_cli_deeply_malformed_docx_errors(tmp_path, capsys):
     # 2. apply
     fake_changes = tmp_path / "changes.json"
     fake_changes.write_text("[]", encoding="utf-8")
-    test_args = ["adeu", "apply", str(fake2_docx), str(fake_changes), "--dry-run"]
+    test_args = ["adeu", "apply", str(fake2_docx), str(fake_changes)]
     with patch.object(sys, "argv", test_args):
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -595,7 +593,6 @@ def test_cli_apply_json(tmp_path, capsys):
     stats = json.loads(captured.out.strip())
     assert stats["edits_applied"] == 1
     assert stats["edits_skipped"] == 0
-    assert stats["dry_run"] is False
     assert stats["output_path"] == str(out_path)
     assert stats["edits"][0]["status"] == "applied"
     assert out_path.exists()
@@ -605,33 +602,6 @@ def test_cli_apply_json(tmp_path, capsys):
     assert "Applying" not in captured.err
     assert "Batch complete" not in captured.err
     assert "Detailed Edit Reports" not in captured.err
-
-
-def test_cli_apply_json_dry_run(tmp_path, capsys):
-    from unittest.mock import patch
-
-    from adeu.cli import main
-
-    fixture_path = get_fixture_path("golden.docx")
-    changes_file = tmp_path / "changes.json"
-    changes_file.write_text(
-        json.dumps([{"type": "modify", "target_text": "document", "new_text": "modified document"}]),
-        encoding="utf-8",
-    )
-
-    test_args = ["adeu", "apply", str(fixture_path), str(changes_file), "--dry-run", "--json"]
-    with patch.object(sys, "argv", test_args):
-        try:
-            main()
-        except SystemExit as e:
-            assert e.code == 0 or e.code is None
-
-    captured = capsys.readouterr()
-    stats = json.loads(captured.out.strip())
-    assert stats["dry_run"] is True
-    assert stats["output_path"] is None
-    assert stats["edits_applied"] == 1
-    assert not (fixture_path.parent / "golden_redlined.docx").exists()
 
 
 def test_cli_apply_json_validation_error(tmp_path, capsys):

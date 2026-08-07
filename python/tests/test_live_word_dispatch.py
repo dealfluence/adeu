@@ -226,13 +226,11 @@ def test_process_batch_falls_back_to_disk_on_com_unavailable(monkeypatch):
         ctx,
         changes,
         output_path,
-        dry_run=False,
         rejected_notes=None,
     ):
         called["path"] = original_docx_path
         called["author"] = author_name
         called["n_changes"] = len(changes)
-        called["dry_run"] = dry_run
         return "DISK_BATCH_RESULT"
 
     monkeypatch.setattr(doc_mod, "_process_document_batch_disk", _disk)
@@ -250,7 +248,6 @@ def test_process_batch_falls_back_to_disk_on_com_unavailable(monkeypatch):
         assert called["path"] == r"C:\deal\contract.docx"
         assert called["author"] == "Reviewer AI"
         assert called["n_changes"] == 1
-        assert called["dry_run"] is False
         assert "DISK_BATCH_RESULT" in _as_text(res)
 
     run_async(run_test())

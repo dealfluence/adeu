@@ -52,9 +52,6 @@ Apply a JSON array of `DocumentChange` objects (or a modified markdown file) bac
 # Apply a JSON batch of edits to a file
 uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
 
-# Simulate the changes without modifying the file to get a preview report
-uvx adeu apply original.docx edits.json --dry-run
-
 # Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
 uvx adeu apply original.docx edits.json --json
 
@@ -98,7 +95,7 @@ The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
 * **stderr** carries all logs, progress messages, warnings, and errors.
 * **Exit codes**: `0` = full success; `1` = failure or a partially applied batch (check `edits_skipped` in the JSON stats).
 
-`adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` and `dry_run` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
+`adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
 
 ## The Python SDK
 

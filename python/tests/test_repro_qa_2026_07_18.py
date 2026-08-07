@@ -522,7 +522,7 @@ class TestH1AppendixLeak:
             assert "— used " not in joined, f"appendix text leaked into diff: {e}"
             assert "Document Structure" not in joined
 
-    def test_diff_output_passes_dry_run_apply(self, tmp_path, capsys):
+    def test_diff_output_passes_apply(self, tmp_path, capsys):
         """QA regression invariant 1: diff output must be applicable to the original."""
         orig = tmp_path / "a.docx"
         mod = tmp_path / "b.docx"
@@ -534,8 +534,9 @@ class TestH1AppendixLeak:
         edits_file = tmp_path / "edits.json"
         edits_file.write_text(out)
 
-        code, out, err = run_cli(["apply", orig, edits_file, "--dry-run", "--json"], capsys)
-        assert code == 0, f"diff output failed its own dry-run apply: {err} {out}"
+        applied = tmp_path / "applied.docx"
+        code, out, err = run_cli(["apply", orig, edits_file, "-o", applied, "--json"], capsys)
+        assert code == 0, f"diff output failed its own apply: {err} {out}"
         stats = json.loads(out)
         assert stats["edits_skipped"] == 0
 
@@ -1176,11 +1177,11 @@ class TestReviewRegressions:
             assert sorted(t_imgs) == sorted(n_imgs), f"diff emitted an unappliable image edit: {e}"
         assert "image" in err.lower(), "the skipped image difference must be surfaced as a warning"
 
-        # Whatever the diff DID emit must still pass its own dry-run apply.
+        # Whatever the diff DID emit must still pass its own apply.
         edits_file = tmp_path / "edits.json"
         edits_file.write_text(out)
-        code, out, err = run_cli(["apply", orig, edits_file, "--dry-run", "--json"], capsys)
-        assert code == 0, f"diff output failed its own dry-run: {err} {out}"
+        code, out, err = run_cli(["apply", orig, edits_file, "-o", tmp_path / "applied.docx", "--json"], capsys)
+        assert code == 0, f"diff output failed its own apply: {err} {out}"
 
     def test_baseline_fails_closed_on_apply_stage_skips(self, tmp_path, capsys, monkeypatch):
         """Apply-stage skips (no exception) must not produce a partial baseline output."""
@@ -1198,8 +1199,8 @@ class TestReviewRegressions:
 
         real_process_batch = RedlineEngine.process_batch
 
-        def fake_process_batch(self, changes, dry_run=False):
-            stats = real_process_batch(self, changes, dry_run=dry_run)
+        def fake_process_batch(self, changes):
+            stats = real_process_batch(self, changes)
             stats["edits_skipped"] = stats.get("edits_skipped", 0) + 1
             stats.setdefault("skipped_details", []).append("- simulated apply-stage skip")
             return stats

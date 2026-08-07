@@ -150,7 +150,7 @@ class TestQaReportV2Formatting:
 
         engine = RedlineEngine(stream)
         edit = ModifyText(target_text="Find me.", new_text="Found.", match_mode="first")
-        stats = engine.process_batch([edit], dry_run=False)
+        stats = engine.process_batch([edit])
 
         report = stats["edits"][0]
         assert all(isinstance(p, int) for p in report.get("pages", [])), (
@@ -161,9 +161,11 @@ class TestQaReportV2Formatting:
         )
         assert "Section 1" in report.get("heading_path")
 
-    def test_p2_python_dry_run_stats(self):
+    def test_p2_python_batch_stats(self):
         """
-        P2: Python dry-run reports 'Mode: strict (0 occurrences modified)' regardless of mode.
+        P2: Python batch report must carry the edit's actual match_mode and
+        occurrences_modified (historically 'Mode: strict (0 occurrences
+        modified)' regardless of mode).
         """
         from adeu.models import ModifyText
         from adeu.redline.engine import RedlineEngine
@@ -177,11 +179,11 @@ class TestQaReportV2Formatting:
 
         engine = RedlineEngine(stream)
         edit = ModifyText(target_text="Target string.", new_text="Changed.", match_mode="all")
-        stats = engine.process_batch([edit], dry_run=True)
+        stats = engine.process_batch([edit])
 
         report = stats["edits"][0]
-        assert report.get("match_mode") == "all", "P2 Bug: match_mode not correctly passed in dry-run"
-        assert report.get("occurrences_modified", 0) > 0, "P2 Bug: occurrences_modified is 0 in dry-run"
+        assert report.get("match_mode") == "all", "P2 Bug: match_mode not correctly passed in report"
+        assert report.get("occurrences_modified", 0) > 0, "P2 Bug: occurrences_modified is 0 in report"
 
     def test_p4_python_preview_doubled_word_bug(self):
         """
@@ -199,7 +201,7 @@ class TestQaReportV2Formatting:
 
         engine = RedlineEngine(stream)
         edit = ModifyText(target_text="the Board of Directors", new_text="the Supervisory Board", match_mode="all")
-        stats = engine.process_batch([edit], dry_run=True)
+        stats = engine.process_batch([edit])
 
         clean_text = stats["edits"][0].get("clean_text", "")
         assert "the the Supervisory" not in clean_text
@@ -237,7 +239,7 @@ class TestQaReportV2EngineSafety:
         edit = ModifyText(target_text="Match 1. Match 2.", new_text="Replaced", match_mode="all")
 
         with pytest.raises(BatchValidationError) as exc:
-            engine.process_batch([edit], dry_run=False)
+            engine.process_batch([edit])
 
         assert "targets an active insertion from another author" in str(exc.value)
 
@@ -260,7 +262,7 @@ class TestQaReportV2EngineSafety:
         edit = ModifyText(target_text=r"text\.\n\nAfter", new_text="merged", regex=True)
 
         with pytest.raises(BatchValidationError) as exc:
-            engine.process_batch([edit], dry_run=False)
+            engine.process_batch([edit])
 
         assert "spans a paragraph boundary with body text on both sides" in str(exc.value)
 
@@ -284,13 +286,13 @@ class TestQaReportV2EngineSafety:
             new_text="constituting the Board of Directors",
             comment="Alice touches this clause",
         )
-        engine_alice.process_batch([edit_alice], dry_run=False)
+        engine_alice.process_batch([edit_alice])
 
         stream_bob = engine_alice.save_to_stream()
         engine_bob = RedlineEngine(stream_bob, author="Bob")
         edit_bob = ModifyText(target_text="the Board of Directors", new_text="the Supervisory Board", match_mode="all")
 
         with pytest.raises(BatchValidationError) as exc:
-            engine_bob.process_batch([edit_bob], dry_run=False)
+            engine_bob.process_batch([edit_bob])
 
         assert "another author" in str(exc.value)

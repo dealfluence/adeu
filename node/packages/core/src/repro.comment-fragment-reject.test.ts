@@ -44,9 +44,7 @@ async function buildEdited(comment: string | null): Promise<Buffer> {
         new_text: "sixty (60) days'",
         ...(comment ? { comment } : {}),
       } as any,
-    ],
-    false,
-  );
+    ]);
   return await doc.save();
 }
 
@@ -72,7 +70,7 @@ describe("commented modify stays atomic (QA 2026-07-22 bug #1)", () => {
     for (const rid of ids) {
       const doc = await DocumentObject.load(buf);
       const engine = new RedlineEngine(doc, "Reviewer");
-      const res = engine.process_batch([{ type: "reject", target_id: `Chg:${rid}` } as any], false);
+      const res = engine.process_batch([{ type: "reject", target_id: `Chg:${rid}` } as any]);
       expect(res.actions_applied).toBe(1);
 
       const clean = await extractTextFromBuffer(await doc.save(), true);
@@ -90,7 +88,7 @@ describe("commented modify stays atomic (QA 2026-07-22 bug #1)", () => {
 
     const doc = await DocumentObject.load(buf);
     const engine = new RedlineEngine(doc, "Reviewer");
-    const res = engine.process_batch([{ type: "reject", target_id: `Chg:${anId}` } as any], false);
+    const res = engine.process_batch([{ type: "reject", target_id: `Chg:${anId}` } as any]);
 
     expect(res.actions_applied).toBe(1);
     expect(res.actions_skipped).toBe(0);
@@ -114,7 +112,7 @@ describe("invalid action id gives a self-service error (QA 2026-07-22 bug #3)", 
     const doc = await DocumentObject.load(buf);
     const engine = new RedlineEngine(doc, "Reviewer");
     try {
-      engine.process_batch([action], false);
+      engine.process_batch([action]);
     } catch (e) {
       if (e instanceof BatchValidationError) return e.message;
       throw e;

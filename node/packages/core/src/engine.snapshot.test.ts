@@ -47,9 +47,7 @@ describe("lazy transactional snapshot rollback", () => {
             target_text: "THIS TEXT DOES NOT EXIST ANYWHERE",
             new_text: "irrelevant",
           },
-        ],
-        false,
-      ),
+        ]),
     ).toThrow(BatchValidationError);
 
     expect(project(doc)).toBe(before);
@@ -63,9 +61,7 @@ describe("lazy transactional snapshot rollback", () => {
           target_text: "Beta paragraph with obligations to review.",
           new_text: "Beta paragraph with obligations to review carefully.",
         },
-      ],
-      false,
-    );
+      ]);
     expect(stats.edits_applied).toBe(1);
     // Surgical word-diff inserts only the delta ("{++ carefully++}"), so
     // assert on the ACCEPTED view where the sentence reads contiguously.
@@ -85,9 +81,7 @@ describe("lazy transactional snapshot rollback", () => {
           target_text: "Alpha paragraph about the agreement.",
           new_text: "Alpha paragraph about the restated agreement.",
         },
-      ],
-      false,
-    );
+      ]);
     expect(s1.edits_applied).toBe(1);
     const afterBatch1 = project(doc);
     expect(afterBatch1).toContain("restated");
@@ -105,9 +99,7 @@ describe("lazy transactional snapshot rollback", () => {
             target_text: "NO SUCH TARGET IN THE DOCUMENT",
             new_text: "x",
           },
-        ],
-        false,
-      ),
+        ]),
     ).toThrow(BatchValidationError);
 
     // Batch 1's tracked change must survive; batch 2 must be fully undone.
@@ -135,9 +127,7 @@ describe("lazy transactional snapshot rollback", () => {
             target_text: "ABSENT TARGET FOR TRANSACTIONAL FAILURE",
             new_text: "x",
           },
-        ],
-        false,
-      ),
+        ]),
     ).toThrow(BatchValidationError);
 
     expect(project(doc)).toBe(before);
@@ -153,28 +143,24 @@ describe("lazy transactional snapshot rollback", () => {
           new_text: "Beta paragraph with obligations to inspect.",
           comment: "Margin note that forces comments.xml creation",
         },
-      ],
-      false,
-    );
+      ]);
     expect(stats.edits_applied).toBe(1);
   });
 
-  it("dry_run leaves the document byte-identical and re-usable", async () => {
+  it("engine stays re-usable after a rejected batch", async () => {
     const doc = await buildDoc();
     const engine = new RedlineEngine(doc, "Snap");
     const before = project(doc);
 
-    const stats = engine.process_batch(
-      [
+    expect(() =>
+      engine.process_batch([
         {
           type: "modify",
-          target_text: "Gamma closing paragraph.",
-          new_text: "Gamma closing paragraph (dry).",
+          target_text: "ABSENT GAMMA TARGET",
+          new_text: "x",
         },
-      ],
-      true,
-    );
-    expect(stats.edits_applied).toBe(1);
+      ]),
+    ).toThrow(BatchValidationError);
     expect(project(doc)).toBe(before);
 
     const wet = engine.process_batch(
@@ -184,9 +170,7 @@ describe("lazy transactional snapshot rollback", () => {
           target_text: "Gamma closing paragraph.",
           new_text: "Gamma closing paragraph (wet).",
         },
-      ],
-      false,
-    );
+      ]);
     expect(wet.edits_applied).toBe(1);
     expect(project(doc)).toContain("(wet)");
   });
@@ -204,9 +188,7 @@ describe("lazy transactional snapshot rollback", () => {
           target_text: "Alpha paragraph about the agreement.",
           new_text: "Alpha paragraph about the renegotiated agreement.",
         },
-      ],
-      false,
-    );
+      ]);
     expect(s1.edits_applied).toBe(1);
     await doc.save(); // re-baselines blobs
     const afterSave = project(doc);
@@ -221,9 +203,7 @@ describe("lazy transactional snapshot rollback", () => {
             new_text: "Gamma closing paragraph, amended.",
           },
           { type: "modify", target_text: "NOT PRESENT AT ALL", new_text: "x" },
-        ],
-        false,
-      ),
+        ]),
     ).toThrow(BatchValidationError);
 
     expect(project(doc)).toBe(afterSave);
@@ -236,9 +216,7 @@ describe("lazy transactional snapshot rollback", () => {
           target_text: "Gamma closing paragraph.",
           new_text: "Gamma closing paragraph, finalized.",
         },
-      ],
-      false,
-    );
+      ]);
     expect(s3.edits_applied).toBe(1);
   });
 
@@ -255,9 +233,7 @@ describe("lazy transactional snapshot rollback", () => {
             new_text: "Cell content 1",
           },
           { type: "modify", target_text: "MISSING", new_text: "x" },
-        ],
-        false,
-      ),
+        ]),
     ).toThrow(BatchValidationError);
 
     const reloaded = await DocumentObject.load(await doc.save());

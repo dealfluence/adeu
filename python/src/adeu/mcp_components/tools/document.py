@@ -131,7 +131,7 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
 
     Tolerates the same three input shapes as before:
       1. List of already-validated DocumentChange instances (fast path; skips
-         re-validation to preserve engine PrivateAttrs set during a dry-run).
+         re-validation to preserve engine PrivateAttrs set by a prior run).
       2. List of plain dicts.
       3. List of JSON-encoded strings (Gemini quirk).
 
@@ -460,7 +460,6 @@ async def _process_document_batch_disk(
     ctx: Context,
     changes: List[DocumentChange],
     output_path: Optional[str],
-    dry_run: bool = False,
     rejected_notes: Optional[List[str]] = None,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
@@ -512,12 +511,9 @@ async def _process_document_batch_disk(
         engine = RedlineEngine(stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
         try:
-            stats = engine.process_batch(changes, dry_run=dry_run)
+            stats = engine.process_batch(changes)
         except BatchValidationError as e:
             return False, e.errors, "", ""
-
-        if dry_run:
-            return True, stats, "", ""
 
         final_output = output_path
         if not final_output:
@@ -552,7 +548,7 @@ async def _process_document_batch_disk(
         # output's raw projection in the background once the server goes
         # quiet — the follow-up read then hits a warm (or in-flight, via the
         # per-entry lock) cache entry instead of paying a full cold ingest.
-        if not dry_run and final_output_path and (time.perf_counter() - batch_started) >= 4.0:
+        if final_output_path and (time.perf_counter() - batch_started) >= 4.0:
             try:
                 out_key = doc_cache.stat_key(final_output_path)
                 _schedule_background_fill(doc_cache.entry(out_key), clean_view=False)
@@ -560,10 +556,7 @@ async def _process_document_batch_disk(
                 pass
 
         stats = result_data
-        if dry_run:
-            res = rejection_prefix + "Dry-run simulation complete.\n"
-        else:
-            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
+        res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
@@ -591,10 +584,10 @@ async def _process_document_batch_disk(
                 res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
 
                 # An edit's comment must be visible in the rendered report —
-                # dry-run is the one place an agent can verify it before
-                # committing (QA 2026-07-23 F7). The engine supplies the
-                # per-edit `comment` field; .get() keeps this safe to render
-                # even against engine builds that predate the field.
+                # it is where an agent verifies the comment it wrote
+                # (QA 2026-07-23 F7). The engine supplies the per-edit
+                # `comment` field; .get() keeps this safe to render even
+                # against engine builds that predate the field.
                 if report.get("comment"):
                     res += f'**Comment:** "{report["comment"]}"\n'
 
@@ -1156,10 +1149,6 @@ if sys.platform == "win32":
             Optional[str],
             "Optional output path (only used if original_docx_path is provided).",
         ] = None,
-        dry_run: Annotated[
-            bool,
-            "If True, simulates the changes and returns a detailed preview report without modifying any files.",
-        ] = False,
     ) -> str:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
@@ -1175,21 +1164,7 @@ if sys.platform == "win32":
                 "Error: No valid changes to apply. All submitted changes failed validation:\n"
                 + "\n".join(f"- {n}" for n in rejected_notes),
             )
-        if dry_run:
-            if not original_docx_path:
-                return (
-                    "Dry-run simulation is only supported for disk-based files (original_docx_path must be specified)."
-                )
-            res = await _process_document_batch_disk(
-                original_docx_path,
-                author_name,
-                ctx,
-                changes,
-                output_path,
-                dry_run=True,
-                rejected_notes=rejected_notes,
-            )
-        elif not original_docx_path:
+        if not original_docx_path:
             # Edit active document directly. No disk fallback available.
             res = await process_active_word_batch(ctx, changes, author_name, None)
         elif is_document_open_in_word(original_docx_path):
@@ -1208,7 +1183,6 @@ if sys.platform == "win32":
                     ctx,
                     changes,
                     output_path,
-                    dry_run=False,
                     rejected_notes=rejected_notes,
                 )
         else:
@@ -1220,7 +1194,6 @@ if sys.platform == "win32":
                 ctx,
                 changes,
                 output_path,
-                dry_run=False,
                 rejected_notes=rejected_notes,
             )
         return add_timing_if_debug(start_time, res)
@@ -1440,10 +1413,6 @@ else:
             "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
         ] = "Adeu AI",
         output_path: Annotated[Optional[str], "Optional output path."] = None,
-        dry_run: Annotated[
-            bool,
-            "If True, simulates the changes and returns a detailed preview report without modifying any files.",
-        ] = False,
     ) -> str:
         start_time = time.perf_counter()
         del reasoning
@@ -1461,7 +1430,6 @@ else:
             ctx,
             changes,
             output_path,
-            dry_run=dry_run,
             rejected_notes=rejected_notes,
         )
         return add_timing_if_debug(start_time, res)

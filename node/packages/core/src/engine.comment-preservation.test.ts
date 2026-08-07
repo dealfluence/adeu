@@ -116,9 +116,7 @@ describe("author-aware wrapping-comment preservation", () => {
     // We ("Authority Counsel") accept the counterparty's insertion Chg:2.
     const engine = new RedlineEngine(doc, "Authority Counsel");
     engine.process_batch(
-      [{ type: "accept", target_id: "Chg:2" } as any],
-      false,
-    );
+      [{ type: "accept", target_id: "Chg:2" } as any]);
 
     // The counterparty's comment body must survive the accept.
     const after = extract_comments_data(doc.pkg);
@@ -142,9 +140,7 @@ describe("author-aware wrapping-comment preservation", () => {
 
     const engine = new RedlineEngine(doc, "Authority Counsel");
     engine.process_batch(
-      [{ type: "reject", target_id: "Chg:2" } as any],
-      false,
-    );
+      [{ type: "reject", target_id: "Chg:2" } as any]);
 
     // Rejecting removes the inserted TEXT; a comment anchored on that text
     // goes with it (Word semantics, Python parity) — keeping the body while
@@ -170,9 +166,7 @@ describe("author-aware wrapping-comment preservation", () => {
 
     const engine = new RedlineEngine(doc, "Authority Counsel");
     engine.process_batch(
-      [{ type: "accept", target_id: "Chg:2" } as any],
-      false,
-    );
+      [{ type: "accept", target_id: "Chg:2" } as any]);
 
     const after = extract_comments_data(doc.pkg);
     expect(after["1"]?.text).toContain("robust protection");

@@ -28,7 +28,7 @@ export class Adeu implements INodeType {
       "Five operations on the Document resource: " +
       "(1) Extract Markdown — project a .docx into Markdown plus a Semantic Appendix; toggle Clean View to simulate Accept All; pass an optional Page number to fetch only one page of a large document. " +
       "(2) Extract Outline — return a token-cheap structural map (headings with level, page number, paragraph style, has_table, footnote IDs) plus total_pages. Pair with Extract Markdown to navigate large documents. " +
-      "(3) Apply Edits — apply a JSON array of DocumentChange objects as native Word tracked changes; modify edits support match_mode ('strict'|'first'|'all') and regex (boolean); the entire batch is pre-validated atomically and rejected if any single edit is invalid. Supports a Dry Run flag that previews edits without committing them. " +
+      "(3) Apply Edits — apply a JSON array of DocumentChange objects as native Word tracked changes; modify edits support match_mode ('strict'|'first'|'all') and regex (boolean); the entire batch is pre-validated atomically and rejected if any single edit is invalid. " +
       "(4) Generate Diff — produce a @@ Word Patch @@ sub-word level diff between two .docx files. " +
       "(5) Finalize Document — strip metadata, optionally accept all pending markup, and optionally lock the file read-only. " +
       "DocumentChange schema (used by Apply Edits): each object has a 'type' field discriminator. " +

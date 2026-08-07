@@ -1035,9 +1035,6 @@ def handle_apply(args):
             args.changes = args.original
             args.original = None
 
-    if args.live and args.dry_run:
-        _cli_error("unsupported", "Dry-run simulation is only supported for disk-based files.", exit_code=2)
-
     if not args.changes:
         _cli_error("invalid_input", "Must provide changes file.", exit_code=2)
 
@@ -1133,7 +1130,7 @@ def handle_apply(args):
         print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
     engine = _open_redline_engine_or_exit(args.original, author=args.author)
     try:
-        stats = engine.process_batch(changes, dry_run=args.dry_run)
+        stats = engine.process_batch(changes)
     except BatchValidationError as e:
         if args.json:
             print(json.dumps({"error": "batch_validation_failed", "errors": e.errors}))
@@ -1155,7 +1152,7 @@ def handle_apply(args):
     batch_failed = stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0
 
     output_path = None
-    if not args.dry_run and not batch_failed:
+    if not batch_failed:
         output_path = args.output
         if not output_path:
             if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
@@ -1174,7 +1171,7 @@ def handle_apply(args):
     # clearly-marked `.unverified.docx` sibling for inspection instead.
     verification_error = None
     unverified_path = None
-    if verify_against is not None and not args.dry_run and not batch_failed:
+    if verify_against is not None and not batch_failed:
         from adeu.ingest import _extract_text_from_doc
 
         final_clean = _extract_text_from_doc(engine.doc, clean_view=True, include_appendix=False)
@@ -1219,7 +1216,7 @@ def handle_apply(args):
         else:
             stats["verified"] = True
 
-    if not args.dry_run and not batch_failed:
+    if not batch_failed:
         assert output_path is not None
         if verification_error is not None:
             assert unverified_path is not None
@@ -1227,7 +1224,6 @@ def handle_apply(args):
         else:
             _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
 
-    stats["dry_run"] = args.dry_run
     # Exit status is authoritative, but output_path must never point at a
     # file that does not represent success (ADEU-QA-003).
     stats["output_path"] = str(output_path) if output_path and verification_error is None else None
@@ -1237,7 +1233,7 @@ def handle_apply(args):
     if args.json:
         print(json.dumps(stats))
     else:
-        if batch_failed and not args.dry_run:
+        if batch_failed:
             print(
                 "❌ Batch failed — no output was written. Fix the failed edits below and re-run.",
                 file=sys.stderr,
@@ -1248,10 +1244,8 @@ def handle_apply(args):
                 f"   A diagnostic copy (NOT the requested document) was kept at: {unverified_path}",
                 file=sys.stderr,
             )
-        elif not args.dry_run:
-            print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
         else:
-            print("Dry-run simulation complete.", file=sys.stderr)
+            print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
 
         occurrences = stats.get("occurrences_modified", 0)
         occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
@@ -1900,11 +1894,6 @@ def _main_impl():
             "ADEU_AUTHOR environment variable, then the OS username; machine accounts like "
             "'root' fall back to 'Adeu AI'."
         ),
-    )
-    p_apply.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Simulate the changes and return a detailed preview report without modifying any files.",
     )
     p_apply.add_argument(
         "--allow-major-deletions",

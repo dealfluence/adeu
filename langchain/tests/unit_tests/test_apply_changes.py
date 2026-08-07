@@ -77,30 +77,6 @@ class TestAdeuApplyChangesSchema:
         tool = AdeuApplyChanges()
         assert tool.response_format == "content_and_artifact"
 
-    def test_args_schema_has_dry_run_field_with_default_false(self) -> None:
-        # dry_run is optional with default False — existing call sites
-        # that never pass it must continue to perform real writes.
-        schema = AdeuApplyChangesInput.model_json_schema()
-        properties = schema["properties"]
-        assert "dry_run" in properties
-        assert properties["dry_run"].get("default") is False
-        assert "dry_run" not in schema["required"]
-
-    def test_dry_run_field_rejects_non_bool(self) -> None:
-        # Pydantic should refuse strings / ints / None for a bool field.
-        # (Strings like "true" technically coerce; we don't want LLM
-        # ambiguity so confirm the strict-typed path raises.)
-        with pytest.raises(ValueError):
-            AdeuApplyChangesInput.model_validate(
-                {
-                    "reasoning": "test",
-                    "file_path": "/a.docx",
-                    "author_name": "AI",
-                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
-                    "dry_run": "not_a_bool_xyz",
-                }
-            )
-
 
 class TestAdeuApplyChangesValidation:
     def test_rejects_nonexistent_input(self) -> None:

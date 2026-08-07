@@ -31,7 +31,6 @@ Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates
 - `author_name` (str, required) — appears in Track Changes (e.g. `"AI Reviewer"`).
 - `changes` (array, required) — see the discriminated union below.
 - `output_path` (str, optional) — defaults to `<original>_processed.docx`.
-- `dry_run` (bool, default `false`) — simulate without writing. Returns the same report.
 
 ### The `changes` discriminated union
 

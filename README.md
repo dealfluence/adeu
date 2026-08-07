@@ -191,7 +191,7 @@ writeFileSync("MSA_Redlined.docx", outBuffer);
 See the [@adeu/core documentation](https://github.com/dealfluence/adeu/tree/main/node/packages/core#readme) for full installation and usage details.
 
 ### n8n Community Node
-Adeu ships as an [n8n](https://n8n.io) community node (`n8n-nodes-adeu`) for teams who prefer visual workflow automation over code. It exposes the full engine (extract Markdown, apply tracked changes with optional dry-run preview, generate diffs, and finalize documents) as drop-in nodes that work in both deterministic pipelines and AI Agent tool calls.
+Adeu ships as an [n8n](https://n8n.io) community node (`n8n-nodes-adeu`) for teams who prefer visual workflow automation over code. It exposes the full engine (extract Markdown, apply tracked changes, generate diffs, and finalize documents) as drop-in nodes that work in both deterministic pipelines and AI Agent tool calls.
 
 ```bash
 # In n8n: Settings → Community Nodes → Install: n8n-nodes-adeu

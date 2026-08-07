@@ -45,9 +45,7 @@ describe("Canonical nesting + reject round-trips", () => {
     const p = foreignInsDoc(doc);
     const engine = new RedlineEngine(doc, "Reviewer AI");
     const res = engine.process_batch(
-      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any,
-      false,
-    );
+      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any);
     expect(res.edits_applied).toBe(1);
     expect(res.edits_skipped).toBe(0);
 
@@ -76,9 +74,7 @@ describe("Canonical nesting + reject round-trips", () => {
     foreignInsDoc(accDoc);
     const ae = new RedlineEngine(accDoc, "Reviewer AI");
     ae.process_batch(
-      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any,
-      false,
-    );
+      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any);
     ae.accept_all_revisions();
     expect(await cleanText(accDoc)).toContain(
       "The party shall provide email notification within 30 days.",
@@ -88,9 +84,7 @@ describe("Canonical nesting + reject round-trips", () => {
     foreignInsDoc(rejDoc);
     const re = new RedlineEngine(rejDoc, "Reviewer AI");
     re.process_batch(
-      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any,
-      false,
-    );
+      [{ type: "modify", target_text: "written notice", new_text: "email notification" }] as any);
     re.reject_all_revisions();
     const rejected = await cleanText(rejDoc);
     // Reject reverts to the true baseline: the pending insertion vanishes.
@@ -105,9 +99,7 @@ describe("Canonical nesting + reject round-trips", () => {
     const e = new RedlineEngine(doc, "Reviewer AI");
     // A modify that trims to a pure INSERTION inside the foreign <w:ins>.
     const res = e.process_batch(
-      [{ type: "modify", target_text: "written notice", new_text: "written notice please" }] as any,
-      false,
-    );
+      [{ type: "modify", target_text: "written notice", new_text: "written notice please" }] as any);
     expect(res.edits_applied).toBe(1);
     for (const i of Array.from(p.getElementsByTagName("w:ins"))) {
       expect(i.getElementsByTagName("w:ins").length).toBe(0);
@@ -117,9 +109,7 @@ describe("Canonical nesting + reject round-trips", () => {
     foreignInsDoc(ad);
     const ae = new RedlineEngine(ad, "Reviewer AI");
     ae.process_batch(
-      [{ type: "modify", target_text: "written notice", new_text: "written notice please" }] as any,
-      false,
-    );
+      [{ type: "modify", target_text: "written notice", new_text: "written notice please" }] as any);
     ae.accept_all_revisions();
     expect(await cleanText(ad)).toContain(
       "The party shall provide written notice please within 30 days.",
@@ -130,7 +120,7 @@ describe("Canonical nesting + reject round-trips", () => {
     const doc = await createTestDocument();
     addParagraph(doc, "The cat sat.");
     const e = new RedlineEngine(doc, "Z");
-    e.process_batch([{ type: "modify", target_text: "cat", new_text: "dog" }] as any, false);
+    e.process_batch([{ type: "modify", target_text: "cat", new_text: "dog" }] as any);
     e.reject_all_revisions();
     expect(await cleanText(doc)).toContain("The cat sat.");
   });

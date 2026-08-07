@@ -127,15 +127,8 @@ The `modify` edit type now supports two optional fields:
 ]
 ```
 
-#### 🔍 Dry Run Mode (Self-Correction for AI Agents)
-`Apply Edits` accepts an optional `Dry Run` boolean (default `false`). When enabled:
-- Every edit is validated and simulated in-memory.
-- The outgoing JSON contains a `stats.edits` array where each entry includes `status` (`applied` / `failed`), a `critic_markup` preview (~30 chars of surrounding context showing exactly where the change would land), a `clean_text` post-accept preview, a `warning` field (e.g. for punctuation-anchored targets prone to tokenization splits), and an `error` field if validation failed.
-- The document is **not** modified. No redlined `.docx` binary is produced. No `redlinedBinaryId` is stashed in workflow static data. The incoming binary passes through unchanged on the outgoing item, so downstream nodes that expected continuity do not break.
-- **Critical behavioral difference**: in a wet run (`Dry Run=false`), the engine throws a `BatchValidationError` atomically on the first invalid edit. In a dry run, invalid edits return as `failed` entries in the `edits` array instead — making dry-run also useful as a probe for whether an edit will succeed.
-- The downstream `Hydrate Tool Output` node naturally short-circuits during a dry run (no static-data entry to read), so the existing AI Agent pipeline correctly skips the file-write step.
-
-**When the AI should use it**: as a self-correction primitive for uncertain anchors (long quotes, legal terminology, possible duplicate phrases). The agent dry-runs, inspects the `critic_markup` preview, then re-calls with `Dry_Run=false` to commit. The system prompt in the example workflow tells the LLM explicitly to use dry-run sparingly — every dry run is an extra round trip.
+#### 🔍 Transactional Batches (Self-Correction for AI Agents)
+`Apply Edits` is all-or-nothing: if any single edit fails validation (target text not found, ambiguous match, read-only target, overlapping another author's change), the engine throws a `BatchValidationError` atomically and the document is left untouched. The error message names the failing edit and explains why it failed, so an agent can correct just that edit and re-call — no separate preview round trip is needed.
 
 ### 4. Generate Diff
 Produces a sub-word level `@@ Word Patch @@` diff between two versions of a document.
@@ -339,11 +332,6 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 **Return Markdown Output:**
 ```
 ={{ $fromAI('Return_Markdown', `Boolean. When true (default), the tool returns the post-edit document as Markdown with CriticMarkup so you can verify what changed and reason about follow-up edits. Set false only to skip extraction when you are confident no follow-up review is needed.`, 'boolean', true) }}
-```
-
-**Dry Run:**
-```
-={{ $fromAI('Dry_Run', `Boolean. Default false (commit edits to the document). Set true ONLY as a self-correction primitive when you are uncertain that a target_text anchor is unique or matches the source verbatim, OR when you want to preview a complex multi-edit batch before committing. A dry run validates and simulates every edit and returns a per-edit report containing 'status' (applied/failed), 'critic_markup' (a ~30-char CriticMarkup preview showing exactly where the change would land), 'clean_text' (the post-accept preview), 'warning' (punctuation/tokenization hints), and 'error' (if the edit failed) — but the document is NOT modified, no redlined binary is produced, and no static-data stash is written. Invalid edits in a dry run come back as failed entries in the array rather than throwing a BatchValidationError, so dry-run is also how you probe whether an edit will succeed without aborting the batch. After inspecting the preview, re-call with Dry_Run=false to commit. Do NOT default to true — every dry run is an extra round trip that costs the user time and tokens.`, 'boolean', false) }}
 ```
 
 ---

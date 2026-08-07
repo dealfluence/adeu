@@ -157,9 +157,9 @@ def test_reject_all_revisions_marks_the_engine_mutated():
     assert rolled_back == rejected
 
 
-def test_dry_run_after_accept_all_sees_accepted_state():
-    """Dry-run builds its second engine from _pristine_bytes while unmutated,
-    so an unflagged accept_all would make it reason about the wrong document."""
+def test_batch_after_accept_all_sees_accepted_state():
+    """The batch snapshot is built from _pristine_bytes while unmutated, so an
+    unflagged accept_all would make a rollback restore the wrong document."""
     engine = _engine_with_pending_revision()
     engine.accept_all_revisions()
 
@@ -167,20 +167,16 @@ def test_dry_run_after_accept_all_sees_accepted_state():
     # pre-accept bytes it is inside a tracked insertion.
     stats = engine.process_batch(
         [ModifyText(type="modify", target_text="GAMMA", new_text="OMEGA")],
-        dry_run=True,
     )
     assert stats["edits_applied"] == 1
-    assert "OMEGA" not in _document_text(engine)
+    assert "OMEGA" in _document_text(engine)
 
 
-def test_dry_run_on_mutated_engine_sees_current_state():
-    """Dry-run's second engine must be built from CURRENT state: after batch
-    1 introduced ALPHA, a dry-run targeting ALPHA must succeed."""
+def test_batch_on_mutated_engine_sees_current_state():
+    """A follow-up batch must run against CURRENT state: after batch 1
+    introduced ALPHA, a batch targeting ALPHA must succeed."""
     engine = _engine_for(["alpha beta gamma"])
     engine.process_batch([ModifyText(type="modify", target_text="alpha", new_text="ALPHA")])
 
-    stats = engine.process_batch([ModifyText(type="modify", target_text="ALPHA", new_text="OMEGA")], dry_run=True)
+    stats = engine.process_batch([ModifyText(type="modify", target_text="ALPHA", new_text="OMEGA")])
     assert stats["edits_applied"] == 1
-
-    # And the dry-run must not have mutated the real engine.
-    assert "OMEGA" not in engine.mapper.full_text

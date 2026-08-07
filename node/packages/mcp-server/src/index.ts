@@ -718,13 +718,6 @@ server.registerTool(
           "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). Items apply SEQUENTIALLY: each one evaluates against the document state produced by the items before it, so later items may target text an earlier item introduced.",
         ),
       output_path: z.string().optional().describe("Optional output path."),
-      dry_run: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe(
-          "If True, simulates the changes and returns a detailed preview report without modifying any files.",
-        ),
     },
   },
   async ({
@@ -733,7 +726,6 @@ server.registerTool(
     author_name,
     changes,
     output_path,
-    dry_run,
   }) => {
     try {
       void reasoning;
@@ -864,7 +856,7 @@ server.registerTool(
 
       let stats;
       try {
-        stats = engine.process_batch(sanitizedChanges, dry_run);
+        stats = engine.process_batch(sanitizedChanges);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
           // The engine's transactional snapshot restored the DOM to the
@@ -885,38 +877,32 @@ server.registerTool(
       }
 
       let overwrite_note = "";
-      if (!dry_run) {
-        const existedBefore = fs.existsSync(outPath);
-        const outBuf = await doc.save();
-        try {
-          fs.mkdirSync(dirname(outPath), { recursive: true });
-          fs.writeFileSync(outPath, outBuf);
-        } catch (e: any) {
-          // Filesystem failures (name too long, missing directory, perms)
-          // must surface as a clear, actionable error (QA H3 parity).
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Could not write output file '${outPath}': ${e.message}`,
-              },
-            ],
-          };
-        }
-        overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
-        // The in-memory document IS the state of the file just written:
-        // adopt it as the output's cache (text products built in the
-        // background; DOM pinned for a chained edit). The agent's
-        // read-after-edit then skips the full re-parse.
-        docCache.primeFromDoc(outPath, doc);
-      } else {
-        // Dry-run: the engine restored the document to the exact on-disk
-        // state — pin it back for the wet run that typically follows.
-        docCache.restoreHotDoc(original_docx_path, doc);
+      const existedBefore = fs.existsSync(outPath);
+      const outBuf = await doc.save();
+      try {
+        fs.mkdirSync(dirname(outPath), { recursive: true });
+        fs.writeFileSync(outPath, outBuf);
+      } catch (e: any) {
+        // Filesystem failures (name too long, missing directory, perms)
+        // must surface as a clear, actionable error (QA H3 parity).
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Could not write output file '${outPath}': ${e.message}`,
+            },
+          ],
+        };
       }
+      overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
+      // The in-memory document IS the state of the file just written:
+      // adopt it as the output's cache (text products built in the
+      // background; DOM pinned for a chained edit). The agent's
+      // read-after-edit then skips the full re-parse.
+      docCache.primeFromDoc(outPath, doc);
 
-      let res = formatBatchResult(stats, outPath, !!dry_run) + overwrite_note;
+      let res = formatBatchResult(stats, outPath) + overwrite_note;
       if (sanitizedChanges.length === 0) {
         res =
           `⚠️ 0 changes provided — nothing to do. The output is an unmodified copy of the original.\n\n` +
@@ -1202,17 +1188,8 @@ server.registerTool(
 );
 
 // --- Formatter for process_document_batch ---
-export function formatBatchResult(
-  stats: any,
-  outPath: string,
-  dry_run: boolean,
-): string {
-  let res = "";
-  if (dry_run) {
-    res = `Dry-run simulation complete.\n`;
-  } else {
-    res = `Batch complete. Saved to: ${outPath}\n`;
-  }
+export function formatBatchResult(stats: any, outPath: string): string {
+  let res = `Batch complete. Saved to: ${outPath}\n`;
   const total_occurrences = stats.edits
     ? stats.edits.reduce(
         (acc: number, e: any) =>

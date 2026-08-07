@@ -62,67 +62,27 @@ def test_punctuation_anchor_no_warning_on_clean_apply():
     assert edit_report["status"] == "applied"
     assert edit_report["warning"] is None
 
-    # Same expectation under dry_run (validation + simulation path).
-    stream2 = _build_simple_doc("Refer to sample_term_name in Section 4.")
-    engine2 = RedlineEngine(stream2, author="Reviewer AI")
-    dry_stats = engine2.process_batch(
-        [ModifyText(target_text="sample_term_name", new_text="validated_term_name")],
-        dry_run=True,
-    )
-    dry_report = dry_stats["edits"][0]
-    assert dry_report["status"] == "applied"
-    assert dry_report["warning"] is None
-
 
 def test_punctuation_anchor_warns_only_when_match_fails():
     """
     When a punctuated anchor fails to match, the warning IS surfaced as
-    recovery context (the punctuation may be why the match missed).
+    recovery context (the punctuation may be why the match missed). The
+    failed batch is transactional: the error report rides inside the
+    BatchValidationError and nothing is applied.
     """
+    import pytest
+
+    from adeu.redline.engine import BatchValidationError
+
     stream = _build_simple_doc("Refer to sample_term_name in Section 4.")
     engine = RedlineEngine(stream, author="Reviewer AI")
 
     # 'phantom_term-x' is short, space-free, punctuated, and absent from the doc.
-    stats = engine.process_batch(
-        [ModifyText(target_text="phantom_term-x", new_text="anything")],
-        dry_run=True,
-    )
+    with pytest.raises(BatchValidationError) as exc_info:
+        engine.process_batch([ModifyText(target_text="phantom_term-x", new_text="anything")])
 
-    edit_report = stats["edits"][0]
-    assert edit_report["status"] == "failed"
-    assert edit_report["warning"] is not None
-    assert "punctuation" in edit_report["warning"].lower()
-    assert "phantom_term-x" in edit_report["warning"]
-
-
-def test_dry_run_does_not_mutate_and_reports_safely():
-    """
-    Verifies that dry_run=True does not mutate the document
-    and reports validation errors gracefully without raising exceptions.
-    """
-    stream = _build_simple_doc("Baseline text.")
-    engine = RedlineEngine(stream, author="Reviewer AI")
-
-    # 1. Valid Dry Run
-    stats = engine.process_batch([ModifyText(target_text="Baseline", new_text="Modified Preview")], dry_run=True)
-
-    assert stats["edits_applied"] == 1
-    assert stats["edits"][0]["status"] == "applied"
-    assert "Modified Preview" in stats["edits"][0]["clean_text"]
-
-    # Verify original document was NOT mutated
-    out_doc = Document(engine.save_to_stream())
-    para_text = out_doc.paragraphs[0].text
-    assert "Modified Preview" not in para_text
-    assert "Baseline text" in para_text
-
-    # 2. Invalid Dry Run (should report without throwing)
-    stats_invalid = engine.process_batch([ModifyText(target_text="NON_EXISTENT", new_text="fail")], dry_run=True)
-
-    assert stats_invalid["edits_skipped"] == 1
-    assert stats_invalid["edits"][0]["status"] == "failed"
-    assert stats_invalid["edits"][0]["error"] is not None
-    assert "not found" in stats_invalid["edits"][0]["error"].lower()
+    combined = "\n".join(exc_info.value.errors)
+    assert "phantom_term-x" in combined
 
 
 def test_mcp_tool_feedback_formatting():
@@ -154,11 +114,10 @@ def test_mcp_tool_feedback_formatting():
             ctx=ctx,
             changes=changes,
             output_path=None,
-            dry_run=True,
         )
     )
 
-    assert "Dry-run simulation complete." in res
+    assert "Batch complete. Saved to:" in res
     assert "Detailed Edit Reports:" in res
     assert "✅ [applied]" in res
     assert "The {--quick brown--}{++fast red++} fox jumps over" in res
