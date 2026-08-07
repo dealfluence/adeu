@@ -10,13 +10,14 @@ import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, NoReturn, Sequence
 
 from pydantic import TypeAdapter, ValidationError
 
 from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdown
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
+from adeu.pagination import parse_page_arg
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -173,7 +174,7 @@ def _set_json_mode(enabled: bool) -> None:
     _JSON_MODE = bool(enabled)
 
 
-def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" = None) -> None:
+def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" = None) -> NoReturn:
     """
     Terminates the CLI with a consistent error contract:
       - human-readable diagnostics on stderr (always)
@@ -746,37 +747,39 @@ def handle_extract(args):
         # ("--page is ignored" followed by "Invalid --page value", QA
         # 2026-07-19 F-18).
         if args.page is not None and not getattr(args, "search_query", None) and args.mode != "outline":
-            page_str = str(args.page).strip()
-            range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", page_str)
-            if range_match:
+            try:
+                kind, page_val = parse_page_arg(args.page)
+            except ValueError:
+                _cli_error(
+                    "invalid_input",
+                    f"Invalid --page value: '{args.page}'. Provide a positive integer "
+                    "(pages are 1-indexed; 'all' is valid for --mode full and --search-query; or range 'N-M').",
+                    exit_code=2,
+                )
+
+            if kind == "range":
                 if args.mode == "appendix":
                     _cli_error(
                         "invalid_input",
                         "Page range pagination is only supported in 'full' mode, not 'appendix' mode.",
                         exit_code=2,
                     )
+                assert isinstance(page_val, tuple)
                 is_page_range = True
-                range_start = int(range_match.group(1))
-                range_end = int(range_match.group(2))
-            elif page_str.lower() == "all" and args.mode == "full":
-                want_all_pages = True
-            else:
-                try:
-                    page_num = int(page_str)
-                except ValueError:
+                range_start, range_end = page_val
+            elif kind == "all":
+                if args.mode == "full":
+                    want_all_pages = True
+                else:
                     _cli_error(
                         "invalid_input",
                         f"Invalid --page value: '{args.page}'. Provide a positive integer "
                         "(pages are 1-indexed; 'all' is valid for --mode full and --search-query; or range 'N-M').",
                         exit_code=2,
                     )
-                if page_num < 1:
-                    _cli_error(
-                        "invalid_input",
-                        f"Invalid --page value: {page_num}. Pages are 1-indexed positive integers "
-                        "(negative page numbers are not supported).",
-                        exit_code=2,
-                    )
+            else:
+                assert isinstance(page_val, int)
+                page_num = page_val
 
         if getattr(args, "search_query", None):
             if args.page is not None and re.match(r"^(\d+)\s*-\s*(\d+)$", str(args.page).strip()):

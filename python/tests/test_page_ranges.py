@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 from adeu.ingest import extract_text_from_stream
 from adeu.mcp_components._response_builders import BuilderError, build_page_range_response, build_paginated_response
 from adeu.mcp_components.tools.document import read_docx
+from adeu.pagination import parse_page_arg
 from tests.fixtures_synth import build_long_docx
 from tests.utils import approx_tokens, extract_content, get_mock_ctx, run_async
 
@@ -167,3 +168,22 @@ def test_appendix_mode_with_page_range_raises_error(tmp_path: Path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 2
     assert "Page range pagination is only supported in 'full' mode, not 'appendix' mode." in result.stderr
+
+
+def test_parse_page_arg_valid_and_invalid_inputs():
+    # Valid inputs
+    assert parse_page_arg(None) == ("single", 1)
+    assert parse_page_arg(1) == ("single", 1)
+    assert parse_page_arg(5) == ("single", 5)
+    assert parse_page_arg("1") == ("single", 1)
+    assert parse_page_arg(" 3 ") == ("single", 3)
+    assert parse_page_arg("all") == ("all", None)
+    assert parse_page_arg("ALL") == ("all", None)
+    assert parse_page_arg("2-6") == ("range", (2, 6))
+    assert parse_page_arg(" 2 - 6 ") == ("range", (2, 6))
+
+    # Invalid inputs
+    for invalid in [0, -1, "0", "-5", "0-5", "banana", ""]:
+        with pytest.raises(ValueError) as exc_info:
+            parse_page_arg(invalid)
+        assert f"Invalid page parameter: '{invalid}'" in str(exc_info.value)

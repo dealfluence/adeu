@@ -14,11 +14,80 @@ Used by the read_docx MCP tool's pagination mode and indirectly by outline mode
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Literal, Tuple, Union
 
 PAGE_TARGET_CHARS = 19_000
 PAGE_RANGE_MAX_PAGES = 8
 APPENDIX_MARKER = "<!-- READONLY_BOUNDARY_START -->"
+
+_PAGE_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def parse_page_arg(
+    page: Union[int, str, None],
+) -> Tuple[Literal["single", "range", "all"], Union[int, Tuple[int, int], None]]:
+    """
+    Parses and validates a page parameter (`page`).
+
+    Args:
+        page: Page argument supplied as int, str, or None.
+
+    Returns:
+        Tuple of (kind, value):
+          - ("single", int_page_number)
+          - ("range", (start_page, end_page))
+          - ("all", None)
+
+    Raises:
+        ValueError: if page parameter is an invalid string, 0, or negative integer.
+    """
+    if page is None:
+        return ("single", 1)
+
+    if isinstance(page, int):
+        if page < 1:
+            raise ValueError(
+                f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+            )
+        return ("single", page)
+
+    if isinstance(page, str):
+        s_page = page.strip()
+        if not s_page:
+            raise ValueError(
+                f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+            )
+
+        if s_page.lower() == "all":
+            return ("all", None)
+
+        range_match = _PAGE_RANGE_RE.match(s_page)
+        if range_match:
+            start_p = int(range_match.group(1))
+            end_p = int(range_match.group(2))
+            if start_p < 1 or end_p < 1:
+                raise ValueError(
+                    f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+                )
+            return ("range", (start_p, end_p))
+
+        try:
+            val = int(s_page)
+        except ValueError:
+            raise ValueError(
+                f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+            ) from None
+
+        if val < 1:
+            raise ValueError(
+                f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+            )
+        return ("single", val)
+
+    raise ValueError(
+        f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."
+    )
+
 
 # CriticMarkup open-token -> close-token. Order matters in scanning: longer/more-specific
 # tokens are checked first. All four open tokens here are 3 chars, so dict order is fine.

@@ -20,6 +20,7 @@ from adeu.mcp_components._response_builders import (
 )
 from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT
 from adeu.models import DeleteTableRow, InsertTableRow
+from adeu.pagination import parse_page_arg
 from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
 from adeu.utils.text import batch_details_header
@@ -397,62 +398,46 @@ if sys.platform == "win32":
                 elif mode == "appendix":
                     page_num = 1
                     if page is not None:
-                        if isinstance(page, str):
-                            s_page = page.strip()
-                            if re.match(r"^\d+\s*-\s*\d+$", s_page):
-                                raise ToolError(
-                                    "Page range pagination is only supported in 'full' mode, not 'appendix' mode."
-                                )
-                            is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                            if s_page.isdigit() or is_signed:
-                                page_num = int(s_page)
-                            else:
-                                raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
-                        elif isinstance(page, int):
-                            page_num = page
-                        else:
+                        try:
+                            kind, page_val = parse_page_arg(page)
+                        except ValueError as e:
+                            raise ToolError(str(e)) from e
+                        if kind == "range":
+                            raise ToolError(
+                                "Page range pagination is only supported in 'full' mode, not 'appendix' mode."
+                            )
+                        if kind == "all":
                             raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
+                        assert isinstance(page_val, int)
+                        page_num = page_val
                     res = build_appendix_response(final_text, page_num, actual_path)
                 else:
                     # mode == "full"
                     page_num = 1
                     if page is not None:
-                        if isinstance(page, str):
-                            s_page = page.strip()
-                            if s_page.lower() == "all":
-                                from adeu.mcp_components._response_builders import (
-                                    build_full_document_response,
-                                )
+                        try:
+                            kind, page_val = parse_page_arg(page)
+                        except ValueError as e:
+                            raise ToolError(str(e)) from e
 
-                                res = build_full_document_response(final_text, actual_path)
-                            else:
-                                range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", s_page)
-                                if range_match:
-                                    start_p = int(range_match.group(1))
-                                    end_p = int(range_match.group(2))
-                                    from adeu.mcp_components._response_builders import (
-                                        build_page_range_response,
-                                    )
-
-                                    res = build_page_range_response(final_text, start_p, end_p, actual_path)
-                                else:
-                                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                                    if s_page.isdigit() or is_signed:
-                                        page_num = int(s_page)
-                                        res = build_paginated_response(final_text, page_num, actual_path)
-                                    else:
-                                        raise ToolError(
-                                            f"Invalid page parameter: '{page}'. Provide a positive integer, "
-                                            f"page range (e.g. '2-6'), or 'all'."
-                                        )
-                        elif isinstance(page, int):
-                            page_num = page
-                            res = build_paginated_response(final_text, page_num, actual_path)
-                        else:
-                            raise ToolError(
-                                f"Invalid page parameter: '{page}'. Provide a positive integer, "
-                                f"page range (e.g. '2-6'), or 'all'."
+                        if kind == "all":
+                            from adeu.mcp_components._response_builders import (
+                                build_full_document_response,
                             )
+
+                            res = build_full_document_response(final_text, actual_path)
+                        elif kind == "range":
+                            assert isinstance(page_val, tuple)
+                            start_p, end_p = page_val
+                            from adeu.mcp_components._response_builders import (
+                                build_page_range_response,
+                            )
+
+                            res = build_page_range_response(final_text, start_p, end_p, actual_path)
+                        else:
+                            assert isinstance(page_val, int)
+                            page_num = page_val
+                            res = build_paginated_response(final_text, page_num, actual_path)
                     else:
                         res = build_paginated_response(final_text, page_num, actual_path)
             except ToolError:

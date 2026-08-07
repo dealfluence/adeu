@@ -42,6 +42,7 @@ from adeu.models import (
     ReplyComment,
     coerce_stringified_changes,
 )
+from adeu.pagination import parse_page_arg
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
 
@@ -389,21 +390,16 @@ async def _read_docx_disk(
                 await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
                 page_num = 1
                 if page is not None:
-                    if isinstance(page, str):
-                        s_page = page.strip()
-                        if re.match(r"^\d+\s*-\s*\d+$", s_page):
-                            raise ToolError(
-                                "Page range pagination is only supported in 'full' mode, not 'appendix' mode."
-                            )
-                        is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                        if s_page.isdigit() or is_signed:
-                            page_num = int(s_page)
-                        else:
-                            raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
-                    elif isinstance(page, int):
-                        page_num = page
-                    else:
+                    try:
+                        kind, page_val = parse_page_arg(page)
+                    except ValueError as e:
+                        raise ToolError(str(e)) from e
+                    if kind == "range":
+                        raise ToolError("Page range pagination is only supported in 'full' mode, not 'appendix' mode.")
+                    if kind == "all":
                         raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
+                    assert isinstance(page_val, int)
+                    page_num = page_val
                 return _as_tool_result(build_appendix_response(text, page_num, file_path))
 
             if mode == "outline":
@@ -429,38 +425,27 @@ async def _read_docx_disk(
 
             page_num = 1
             if page is not None:
-                if isinstance(page, str):
-                    s_page = page.strip()
-                    if s_page.lower() == "all":
-                        return _as_tool_result(build_full_document_response(text, file_path))
-                    range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", s_page)
-                    if range_match:
-                        start_p = int(range_match.group(1))
-                        end_p = int(range_match.group(2))
-                        return _as_tool_result(
-                            build_page_range_response(
-                                text,
-                                start_p,
-                                end_p,
-                                file_path,
-                                pagination_result=pagination,
-                            )
+                try:
+                    kind, page_val = parse_page_arg(page)
+                except ValueError as e:
+                    raise ToolError(str(e)) from e
+
+                if kind == "all":
+                    return _as_tool_result(build_full_document_response(text, file_path))
+                if kind == "range":
+                    assert isinstance(page_val, tuple)
+                    start_p, end_p = page_val
+                    return _as_tool_result(
+                        build_page_range_response(
+                            text,
+                            start_p,
+                            end_p,
+                            file_path,
+                            pagination_result=pagination,
                         )
-                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                    if s_page.isdigit() or is_signed:
-                        page_num = int(s_page)
-                    else:
-                        raise ToolError(
-                            f"Invalid page parameter: '{page}'. Provide a positive integer, "
-                            f"page range (e.g. '2-6'), or 'all'."
-                        )
-                elif isinstance(page, int):
-                    page_num = page
-                else:
-                    raise ToolError(
-                        f"Invalid page parameter: '{page}'. Provide a positive integer, "
-                        f"page range (e.g. '2-6'), or 'all'."
                     )
+                assert isinstance(page_val, int)
+                page_num = page_val
             return _as_tool_result(build_paginated_response(text, page_num, file_path, pagination_result=pagination))
         finally:
             await relay.finish()
