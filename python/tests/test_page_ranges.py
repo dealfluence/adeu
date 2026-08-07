@@ -95,12 +95,7 @@ def test_cli_range_rejected_with_search_query(tmp_path: Path):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 2
-    assert (
-        "--search-query" in result.stderr
-        or "--search-query" in result.stdout
-        or "search-query" in result.stderr
-        or "search" in result.stderr
-    )
+    assert "Page ranges (e.g. '2-3') are not supported with --search-query." in result.stderr
 
 
 def test_range_token_parity(tmp_path: Path):
