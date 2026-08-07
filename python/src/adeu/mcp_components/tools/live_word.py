@@ -430,13 +430,6 @@ if sys.platform == "win32":
                                 if range_match:
                                     start_p = int(range_match.group(1))
                                     end_p = int(range_match.group(2))
-                                    if start_p < 1 or end_p < 1:
-                                        raise BuilderError("Page numbers in range must be positive integers.")
-                                    if end_p < start_p:
-                                        raise BuilderError(
-                                            f"Invalid page range '{s_page}': "
-                                            f"end page ({end_p}) cannot be less than start page ({start_p})."
-                                        )
                                     from adeu.mcp_components._response_builders import (
                                         build_page_range_response,
                                     )

@@ -758,19 +758,6 @@ def handle_extract(args):
                 is_page_range = True
                 range_start = int(range_match.group(1))
                 range_end = int(range_match.group(2))
-                if range_start < 1 or range_end < 1:
-                    _cli_error(
-                        "invalid_input",
-                        f"Invalid --page range: '{args.page}'. Page numbers must be >= 1.",
-                        exit_code=2,
-                    )
-                if range_end < range_start:
-                    _cli_error(
-                        "invalid_input",
-                        f"Invalid --page range: '{args.page}'. "
-                        f"End page ({range_end}) cannot be less than start page ({range_start}).",
-                        exit_code=2,
-                    )
             elif page_str.lower() == "all" and args.mode == "full":
                 want_all_pages = True
             else:
