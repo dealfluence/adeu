@@ -782,12 +782,17 @@ def handle_extract(args):
                 page_num = page_val
 
         if getattr(args, "search_query", None):
-            if args.page is not None and re.match(r"^(\d+)\s*-\s*(\d+)$", str(args.page).strip()):
-                _cli_error(
-                    "invalid_input",
-                    f"Page ranges (e.g. '{args.page}') are not supported with --search-query.",
-                    exit_code=2,
-                )
+            if args.page is not None:
+                try:
+                    kind, _ = parse_page_arg(args.page)
+                    if kind == "range":
+                        _cli_error(
+                            "invalid_input",
+                            f"Page ranges (e.g. '{args.page}') are not supported with --search-query.",
+                            exit_code=2,
+                        )
+                except ValueError:
+                    pass
             res = build_search_response(
                 text,
                 args.search_query,
