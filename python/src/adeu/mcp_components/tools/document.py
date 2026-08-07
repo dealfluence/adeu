@@ -20,6 +20,7 @@ from adeu.mcp_components._response_builders import (
     build_appendix_response,
     build_full_document_response,
     build_outline_response,
+    build_page_range_response,
     build_paginated_response,
     build_search_response,
 )
@@ -40,7 +41,6 @@ from adeu.models import (
     RejectChange,
     ReplyComment,
     coerce_stringified_changes,
-    const_to_enum,
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
@@ -389,10 +389,21 @@ async def _read_docx_disk(
                 await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
                 page_num = 1
                 if page is not None:
-                    s_page = str(page).strip()
-                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                    if s_page.isdigit() or is_signed:
-                        page_num = int(s_page)
+                    if isinstance(page, str):
+                        s_page = page.strip()
+                        if re.match(r"^\d+\s*-\s*\d+$", s_page):
+                            raise ToolError(
+                                "Page range pagination is only supported in 'full' mode, not 'appendix' mode."
+                            )
+                        is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                        if s_page.isdigit() or is_signed:
+                            page_num = int(s_page)
+                        else:
+                            raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
+                    elif isinstance(page, int):
+                        page_num = page
+                    else:
+                        raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
                 return _as_tool_result(build_appendix_response(text, page_num, file_path))
 
             if mode == "outline":
@@ -416,19 +427,47 @@ async def _read_docx_disk(
             text, pagination = await asyncio.to_thread(doc_cache.get_pagination, entry, clean_view, relay.callback)
             await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
 
-            # In full mode, page='all' returns the entire document without page
-            # chrome — the round-trip artifact for text-based apply/diff
-            # (QA 2026-07-17 F1; mirrors the CLI's --page all). Dispatched before
-            # the isdigit() check below, which would silently render page 1.
-            if page is not None and str(page).strip().lower() == "all":
-                return _as_tool_result(build_full_document_response(text, file_path))
-
             page_num = 1
             if page is not None:
-                s_page = str(page).strip()
-                is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                if s_page.isdigit() or is_signed:
-                    page_num = int(s_page)
+                if isinstance(page, str):
+                    s_page = page.strip()
+                    if s_page.lower() == "all":
+                        return _as_tool_result(build_full_document_response(text, file_path))
+                    range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", s_page)
+                    if range_match:
+                        start_p = int(range_match.group(1))
+                        end_p = int(range_match.group(2))
+                        if start_p < 1 or end_p < 1:
+                            raise BuilderError("Page numbers in range must be positive integers.")
+                        if end_p < start_p:
+                            raise BuilderError(
+                                f"Invalid page range '{s_page}': "
+                                f"end page ({end_p}) cannot be less than start page ({start_p})."
+                            )
+                        return _as_tool_result(
+                            build_page_range_response(
+                                text,
+                                start_p,
+                                end_p,
+                                file_path,
+                                pagination_result=pagination,
+                            )
+                        )
+                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                    if s_page.isdigit() or is_signed:
+                        page_num = int(s_page)
+                    else:
+                        raise ToolError(
+                            f"Invalid page parameter: '{page}'. Provide a positive integer, "
+                            f"page range (e.g. '2-6'), or 'all'."
+                        )
+                elif isinstance(page, int):
+                    page_num = page
+                else:
+                    raise ToolError(
+                        f"Invalid page parameter: '{page}'. Provide a positive integer, "
+                        f"page range (e.g. '2-6'), or 'all'."
+                    )
             return _as_tool_result(build_paginated_response(text, page_num, file_path, pagination_result=pagination))
         finally:
             await relay.finish()
@@ -1007,17 +1046,16 @@ if sys.platform == "win32":
             "consult before editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
-            Optional[Union[int, Literal["all"]]],
+            Optional[Union[int, str]],
             Field(
                 description=(
-                    "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                    "Without `search_query`: 1-indexed document page number or page range "
+                    "(e.g. 1 or '2-6', defaults to 1) "
                     "for mode='full' and mode='appendix'; pass `page='all'` with mode='full' to "
                     "get the ENTIRE document in one response without page banners. With "
                     "`search_query`: restricts matches to that document page (defaults to "
                     "searching all pages; pass `page='all'` to be explicit)."
                 ),
-                # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
-                json_schema_extra=const_to_enum,
             ),
         ] = None,
         outline_max_level: Annotated[
@@ -1344,17 +1382,16 @@ else:
             "editing. The page parameter applies to 'full' and 'appendix'.",
         ] = "full",
         page: Annotated[
-            Optional[Union[int, Literal["all"]]],
+            Optional[Union[int, str]],
             Field(
                 description=(
-                    "Without `search_query`: 1-indexed document page to display (defaults to 1) "
+                    "Without `search_query`: 1-indexed document page number or page range "
+                    "(e.g. 1 or '2-6', defaults to 1) "
                     "for mode='full' and mode='appendix'; pass `page='all'` to get the ENTIRE document in one "
                     "response without page banners. With `search_query`: restricts matches to "
                     "that document page (defaults to searching all pages; pass `page='all'` to "
                     "be explicit)."
                 ),
-                # Render Literal["all"] as enum, not const, for Gemini. See issue #37.
-                json_schema_extra=const_to_enum,
             ),
         ] = None,
         outline_max_level: Annotated[

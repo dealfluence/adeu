@@ -372,12 +372,6 @@ if sys.platform == "win32":
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
-                page_num = 1
-                if page is not None:
-                    s_page = str(page).strip()
-                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                    if s_page.isdigit() or is_signed:
-                        page_num = int(s_page)
                 if search_query is not None:
                     from adeu.mcp_components._response_builders import (
                         build_search_response,
@@ -401,17 +395,73 @@ if sys.platform == "win32":
                         paragraph_offsets=paragraph_offsets,
                     )
                 elif mode == "appendix":
+                    page_num = 1
+                    if page is not None:
+                        if isinstance(page, str):
+                            s_page = page.strip()
+                            if re.match(r"^\d+\s*-\s*\d+$", s_page):
+                                raise ToolError(
+                                    "Page range pagination is only supported in 'full' mode, not 'appendix' mode."
+                                )
+                            is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                            if s_page.isdigit() or is_signed:
+                                page_num = int(s_page)
+                            else:
+                                raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
+                        elif isinstance(page, int):
+                            page_num = page
+                        else:
+                            raise ToolError(f"Invalid page parameter: '{page}'. Provide a positive integer.")
                     res = build_appendix_response(final_text, page_num, actual_path)
-                elif page is not None and str(page).strip().lower() == "all":
-                    # Full-mode page='all' returns the whole document without
-                    # page chrome (QA 2026-07-17 F1 parity with the disk path).
-                    from adeu.mcp_components._response_builders import (
-                        build_full_document_response,
-                    )
-
-                    res = build_full_document_response(final_text, actual_path)
                 else:
-                    res = build_paginated_response(final_text, page_num, actual_path)
+                    # mode == "full"
+                    page_num = 1
+                    if page is not None:
+                        if isinstance(page, str):
+                            s_page = page.strip()
+                            if s_page.lower() == "all":
+                                from adeu.mcp_components._response_builders import (
+                                    build_full_document_response,
+                                )
+
+                                res = build_full_document_response(final_text, actual_path)
+                            else:
+                                range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", s_page)
+                                if range_match:
+                                    start_p = int(range_match.group(1))
+                                    end_p = int(range_match.group(2))
+                                    if start_p < 1 or end_p < 1:
+                                        raise BuilderError("Page numbers in range must be positive integers.")
+                                    if end_p < start_p:
+                                        raise BuilderError(
+                                            f"Invalid page range '{s_page}': "
+                                            f"end page ({end_p}) cannot be less than start page ({start_p})."
+                                        )
+                                    from adeu.mcp_components._response_builders import (
+                                        build_page_range_response,
+                                    )
+
+                                    res = build_page_range_response(final_text, start_p, end_p, actual_path)
+                                else:
+                                    is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
+                                    if s_page.isdigit() or is_signed:
+                                        page_num = int(s_page)
+                                        res = build_paginated_response(final_text, page_num, actual_path)
+                                    else:
+                                        raise ToolError(
+                                            f"Invalid page parameter: '{page}'. Provide a positive integer, "
+                                            f"page range (e.g. '2-6'), or 'all'."
+                                        )
+                        elif isinstance(page, int):
+                            page_num = page
+                            res = build_paginated_response(final_text, page_num, actual_path)
+                        else:
+                            raise ToolError(
+                                f"Invalid page parameter: '{page}'. Provide a positive integer, "
+                                f"page range (e.g. '2-6'), or 'all'."
+                            )
+                    else:
+                        res = build_paginated_response(final_text, page_num, actual_path)
             except ToolError:
                 # Post-extraction errors (e.g. page out of range) propagate as-is —
                 # the document was read successfully; the user's request was bad.

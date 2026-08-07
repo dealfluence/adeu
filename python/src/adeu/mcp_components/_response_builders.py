@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, List, Tuple
 
 from adeu.outline import extract_outline
 from adeu.pagination import (
+    PAGE_RANGE_MAX_PAGES,
     PaginationResult,
     build_appendix_pointer,
     build_page_banner,
@@ -283,6 +284,74 @@ def build_paginated_response(
     ui_markdown = banner + selected.page_content + footer + appendix_pointer
 
     # Prepend the path ONLY for the LLM
+    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+
+    return BuilderResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ui_markdown,
+            "title": Path(file_path).name,
+            "file_path": str(Path(file_path).resolve()),
+        },
+    )
+
+
+def build_page_range_response(
+    text: str,
+    start: int,
+    end: int,
+    file_path: str,
+    is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+) -> BuilderResult:
+    """
+    Returns a range of synthetic pages (from `start` to `end`, 1-indexed),
+    capped at PAGE_RANGE_MAX_PAGES (8).
+
+    Raises BuilderError if `start < 1` or `start > total_pages`.
+    """
+    if start < 1:
+        raise BuilderError(f"Invalid page number {start}: page numbers must be positive integers.")
+    if start > end:
+        raise BuilderError(f"end page ({end}) cannot be less than start page ({start})")
+
+    body, appendix = split_structural_appendix(text)
+    has_appendix = bool(appendix.strip())
+
+    result = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
+    total_pages = result.total_pages
+
+    if start > total_pages:
+        raise BuilderError(f"Page {start} out of range (doc has {total_pages} pages).")
+
+    last = min(end, start + PAGE_RANGE_MAX_PAGES - 1, total_pages)
+
+    page_blocks: List[str] = []
+    for p_num in range(start, last + 1):
+        selected = result.pages[p_num - 1]
+        banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
+        page_blocks.append(f"{banner}{selected.page_content}")
+
+    ui_parts = ["\n\n".join(page_blocks)]
+
+    if last < end and last < total_pages:
+        next_start = last + 1
+        if is_cli:
+            ui_parts.append(
+                f"> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `--page {next_start}-{end}`."
+            )
+        else:
+            ui_parts.append(
+                f'> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `page="{next_start}-{end}"`.'
+            )
+    elif end > total_pages:
+        ui_parts.append(f"> **[range stopped at page {total_pages}: the document has {total_pages} page(s)]**")
+
+    appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
+    if appendix_pointer:
+        ui_parts.append(appendix_pointer.strip())
+
+    ui_markdown = "\n\n".join(ui_parts)
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(

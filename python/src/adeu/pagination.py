@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 PAGE_TARGET_CHARS = 19_000
+PAGE_RANGE_MAX_PAGES = 8
 APPENDIX_MARKER = "<!-- READONLY_BOUNDARY_START -->"
 
 # CriticMarkup open-token -> close-token. Order matters in scanning: longer/more-specific

@@ -738,13 +738,40 @@ def handle_extract(args):
         # never a silent fallback to page 1 (QA L1).
         page_num = 1
         want_all_pages = False
+        is_page_range = False
+        range_start = 1
+        range_end = 1
         # Outline mode has already warned that --page is ignored; validating
         # the ignored value afterwards produced a contradictory message pair
         # ("--page is ignored" followed by "Invalid --page value", QA
         # 2026-07-19 F-18).
         if args.page is not None and not getattr(args, "search_query", None) and args.mode != "outline":
             page_str = str(args.page).strip()
-            if page_str.lower() == "all" and args.mode == "full":
+            range_match = re.match(r"^(\d+)\s*-\s*(\d+)$", page_str)
+            if range_match:
+                if args.mode == "appendix":
+                    _cli_error(
+                        "invalid_input",
+                        "Page range pagination is only supported in 'full' mode, not 'appendix' mode.",
+                        exit_code=2,
+                    )
+                is_page_range = True
+                range_start = int(range_match.group(1))
+                range_end = int(range_match.group(2))
+                if range_start < 1 or range_end < 1:
+                    _cli_error(
+                        "invalid_input",
+                        f"Invalid --page range: '{args.page}'. Page numbers must be >= 1.",
+                        exit_code=2,
+                    )
+                if range_end < range_start:
+                    _cli_error(
+                        "invalid_input",
+                        f"Invalid --page range: '{args.page}'. "
+                        f"End page ({range_end}) cannot be less than start page ({range_start}).",
+                        exit_code=2,
+                    )
+            elif page_str.lower() == "all" and args.mode == "full":
                 want_all_pages = True
             else:
                 try:
@@ -753,7 +780,7 @@ def handle_extract(args):
                     _cli_error(
                         "invalid_input",
                         f"Invalid --page value: '{args.page}'. Provide a positive integer "
-                        "(pages are 1-indexed; 'all' is valid for --mode full and --search-query).",
+                        "(pages are 1-indexed; 'all' is valid for --mode full and --search-query; or range 'N-M').",
                         exit_code=2,
                     )
                 if page_num < 1:
@@ -765,6 +792,12 @@ def handle_extract(args):
                     )
 
         if getattr(args, "search_query", None):
+            if args.page is not None and re.match(r"^(\d+)\s*-\s*(\d+)$", str(args.page).strip()):
+                _cli_error(
+                    "invalid_input",
+                    f"Page ranges (e.g. '{args.page}') are not supported with --search-query.",
+                    exit_code=2,
+                )
             res = build_search_response(
                 text,
                 args.search_query,
@@ -782,6 +815,16 @@ def handle_extract(args):
                 outline_max_level=args.outline_max_level,
                 outline_verbose=args.outline_verbose,
                 paragraph_offsets=paragraph_offsets,
+                is_cli=True,
+            )
+        elif is_page_range:
+            from adeu.mcp_components._response_builders import build_page_range_response
+
+            res = build_page_range_response(
+                text,
+                range_start,
+                range_end,
+                "Active Document" if args.live else str(args.input),
                 is_cli=True,
             )
         elif args.mode == "appendix":
