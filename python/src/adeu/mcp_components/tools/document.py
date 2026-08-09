@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any, List, Literal, Optional, Union
 
@@ -18,6 +19,7 @@ from adeu.mcp_components._response_builders import (
     BuilderError,
     BuilderResult,
     build_appendix_response,
+    build_changes_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -320,6 +322,8 @@ async def _read_docx_disk(
     search_query: Optional[str] = None,
     search_regex: bool = False,
     search_case_sensitive: bool = True,
+    changes_author: Optional[str] = None,
+    changes_offset: int = 0,
 ) -> ToolResult:
     """
     Core logic for reading a DOCX from disk. Dispatches on `mode`.
@@ -382,6 +386,47 @@ async def _read_docx_disk(
                         page,
                         file_path,
                         pagination_result=pagination,
+                    )
+                )
+
+            if mode == "changes":
+                if clean_view:
+                    raise ToolError("--clean-view cannot be used with mode='changes'.")
+                text, pagination = await asyncio.to_thread(
+                    doc_cache.get_pagination, entry, clean_view=False, cb=relay.callback
+                )
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                from adeu.cli import _load_docx_or_exit
+                from adeu.redline.comments import CommentsManager
+
+                try:
+                    doc = await asyncio.to_thread(_load_docx_or_exit, Path(file_path))
+                    comments_data = await asyncio.to_thread(CommentsManager(doc).extract_comments_data)
+                except Exception:
+                    comments_data = None
+
+                try:
+
+                    def _get_change_ids():
+                        with open(file_path, "rb") as f:
+                            eng = RedlineEngine(BytesIO(f.read()), id_discovery_hint=MCP_ID_DISCOVERY_HINT)
+                            return set(eng._existing_change_ids())
+
+                    existing_change_ids = await asyncio.to_thread(_get_change_ids)
+                except Exception:
+                    existing_change_ids = None
+
+                return _as_tool_result(
+                    build_changes_response(
+                        text,
+                        file_path,
+                        comments_data=comments_data,
+                        author_filter=changes_author,
+                        page=page,
+                        offset=changes_offset,
+                        is_cli=False,
+                        pagination_result=pagination,
+                        existing_change_ids=existing_change_ids,
                     )
                 )
 
@@ -1018,10 +1063,10 @@ if sys.platform == "win32":
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix"],
+            Literal["full", "outline", "appendix", "changes"],
             "'full' returns body content (paginated). 'outline' returns a structural "
-            "heading map. 'appendix' returns defined terms, anchors, and diagnostics — "
-            "consult before editing. The page parameter applies to 'full' and 'appendix'.",
+            "heading map. 'appendix' returns defined terms, anchors, and diagnostics. "
+            "'changes' returns a tracked changes & comments ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1051,14 +1096,22 @@ if sys.platform == "win32":
         search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
         search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
+        changes_author: Annotated[
+            Optional[str],
+            "For mode='changes' only: filter tracked changes ledger by author name.",
+        ] = None,
+        changes_offset: Annotated[
+            int,
+            "For mode='changes' only: entry offset for paginating tracked changes ledger.",
+        ] = 0,
     ) -> ToolResult:
         start_time = time.perf_counter()
         del reasoning
-        # Outside of search mode, `page` semantically means "document page" and
-        # defaults to 1. In search mode, `page` is a document-page filter and
-        # `None` means "search all pages" — we leave it as None to let the
+        # Outside of search mode and changes mode, `page` semantically means "document page" and
+        # defaults to 1. In search mode and changes mode, `page` is a document-page filter and
+        # `None` means "search all pages" or "return all changes" — we leave it as None to let the
         # response builder distinguish "omitted" from "explicit 1".
-        if search_query is None and page is None:
+        if search_query is None and mode != "changes" and page is None:
             page = 1
         if not file_path:
             # Read active document directly. No disk fallback available if this fails.
@@ -1073,6 +1126,8 @@ if sys.platform == "win32":
                 search_query=search_query,
                 search_regex=search_regex,
                 search_case_sensitive=search_case_sensitive,
+                changes_author=changes_author,
+                changes_offset=changes_offset,
             )
         else:
             # An explicit file_path means the file on disk is authoritative:
@@ -1096,6 +1151,8 @@ if sys.platform == "win32":
                         search_query=search_query,
                         search_regex=search_regex,
                         search_case_sensitive=search_case_sensitive,
+                        changes_author=changes_author,
+                        changes_offset=changes_offset,
                     )
                 except LiveWordUnavailableError:
                     # The probe reported the file open, but Word/COM turned out to
@@ -1118,6 +1175,8 @@ if sys.platform == "win32":
                         search_query=search_query,
                         search_regex=search_regex,
                         search_case_sensitive=search_case_sensitive,
+                        changes_author=changes_author,
+                        changes_offset=changes_offset,
                     )
             else:
                 res = await _read_docx_disk(
@@ -1131,6 +1190,8 @@ if sys.platform == "win32":
                     search_query=search_query,
                     search_regex=search_regex,
                     search_case_sensitive=search_case_sensitive,
+                    changes_author=changes_author,
+                    changes_offset=changes_offset,
                 )
         return add_timing_if_debug(start_time, res)
 
@@ -1353,11 +1414,11 @@ else:
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix"],
+            Literal["full", "outline", "appendix", "changes"],
             "'full' returns body content (paginated for large docs). 'outline' returns "
             "a structural heading map with page numbers; body content is omitted. "
             "'appendix' returns defined terms, anchors, and diagnostics — consult before "
-            "editing. The page parameter applies to 'full' and 'appendix'.",
+            "editing. 'changes' returns a tracked changes & comments ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1387,10 +1448,18 @@ else:
         search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
         search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
+        changes_author: Annotated[
+            Optional[str],
+            "For mode='changes' only: filter tracked changes ledger by author name.",
+        ] = None,
+        changes_offset: Annotated[
+            int,
+            "For mode='changes' only: entry offset for paginating tracked changes ledger.",
+        ] = 0,
     ) -> ToolResult:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
-        if search_query is None and page is None:
+        if search_query is None and mode != "changes" and page is None:
             page = 1
         res = await _read_docx_disk(
             file_path,
@@ -1403,6 +1472,8 @@ else:
             search_query=search_query,
             search_regex=search_regex,
             search_case_sensitive=search_case_sensitive,
+            changes_author=changes_author,
+            changes_offset=changes_offset,
         )
         return add_timing_if_debug(start_time, res)
 

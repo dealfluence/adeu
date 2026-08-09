@@ -679,10 +679,17 @@ def _warn_ignored_extract_flags(args) -> None:
         # argparse default is 2; only warn when the user explicitly set it.
         if args.outline_max_level != 2:
             print(f"⚠️  --outline-max-level is ignored with --mode {args.mode} (outline mode only).", file=sys.stderr)
+    if args.mode != "changes":
+        if getattr(args, "changes_author", None):
+            print(f"⚠️  --changes-author is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
+        if getattr(args, "changes_offset", 0) != 0:
+            print(f"⚠️  --changes-offset is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
 
 
 def handle_extract(args):
     _set_json_mode(args.json)
+    if args.mode == "changes" and args.clean_view:
+        _cli_error("invalid_input", "--clean-view cannot be combined with --mode changes.", exit_code=2)
     _warn_ignored_extract_flags(args)
     # `-o -` means stdout (QA 2026-07-19 v8 F-05): identical to omitting -o,
     # never a literal file named '-'.
@@ -768,7 +775,7 @@ def handle_extract(args):
                 is_page_range = True
                 range_start, range_end = page_val
             elif kind == "all":
-                if args.mode == "full":
+                if args.mode == "full" or args.mode == "changes":
                     want_all_pages = True
                 else:
                     _cli_error(
@@ -811,6 +818,40 @@ def handle_extract(args):
                 outline_verbose=args.outline_verbose,
                 paragraph_offsets=paragraph_offsets,
                 is_cli=True,
+            )
+        elif args.mode == "changes":
+            from adeu.mcp_components._response_builders import build_changes_response
+            from adeu.redline.comments import CommentsManager
+
+            comments_data = CommentsManager(doc).extract_comments_data() if doc is not None else None
+            existing_change_ids = None
+            if not getattr(args, "live", False) and getattr(args, "input", None):
+                try:
+                    engine = _open_redline_engine_or_exit(Path(args.input))
+                    existing_change_ids = set(engine._existing_change_ids())
+                except Exception:
+                    pass
+            elif getattr(args, "live", False) and doc is not None:
+                try:
+                    from io import BytesIO
+
+                    buf = BytesIO()
+                    doc.save(buf)
+                    buf.seek(0)
+                    engine = RedlineEngine(buf)
+                    existing_change_ids = set(engine._existing_change_ids())
+                except Exception:
+                    pass
+
+            res = build_changes_response(
+                text,
+                "Active Document" if args.live else str(args.input),
+                comments_data=comments_data,
+                author_filter=getattr(args, "changes_author", None),
+                page=args.page,
+                offset=getattr(args, "changes_offset", 0),
+                is_cli=True,
+                existing_change_ids=existing_change_ids,
             )
         elif is_page_range:
             from adeu.mcp_components._response_builders import build_page_range_response
@@ -1814,9 +1855,24 @@ def _main_impl():
     p_extract.add_argument(
         "--mode",
         type=str,
-        choices=["full", "outline", "appendix"],
+        choices=["full", "outline", "appendix", "changes"],
         default="full",
-        help="Extraction mode: 'full' for body text, 'outline' for headings, 'appendix' for defined terms.",
+        help=(
+            "Extraction mode: 'full' for body text, 'outline' for headings, "
+            "'appendix' for defined terms, 'changes' for tracked change ledger."
+        ),
+    )
+    p_extract.add_argument(
+        "--changes-author",
+        type=str,
+        default=None,
+        help="For mode='changes' only: filter tracked changes ledger by author name.",
+    )
+    p_extract.add_argument(
+        "--changes-offset",
+        type=int,
+        default=0,
+        help="For mode='changes' only: entry offset for paginating tracked changes ledger.",
     )
     p_extract.add_argument(
         "--page",

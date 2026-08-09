@@ -50,11 +50,12 @@ appendix text passed AS the body input.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, List, Tuple
 
-from adeu.outline import extract_outline
+from adeu.outline import _offset_to_page, extract_outline
 from adeu.pagination import (
     PAGE_RANGE_MAX_PAGES,
     PaginationResult,
@@ -62,6 +63,7 @@ from adeu.pagination import (
     build_page_banner,
     build_page_footer,
     paginate,
+    parse_page_arg,
     split_structural_appendix,
 )
 from adeu.utils.safe_regex import RegexTimeoutError, user_finditer
@@ -454,6 +456,19 @@ def build_outline_response(
     )
 
 
+@dataclass
+class _LedgerEntry:
+    kind: str  # "chg" or "com"
+    cid: str  # e.g. "12" or "5"
+    change_type: str  # "ins", "del", or "fmt"
+    author: str
+    page: int
+    snippet: str
+    pair_ids: list[str] = field(default_factory=list)
+    reply_to_id: str | None = None
+    position: int = 0
+
+
 def build_search_response(
     text: str,
     search_query: str,
@@ -596,16 +611,7 @@ def build_search_response(
         )
 
     # ---- Assign each match to its document page. ----
-    def _page_for_offset(offset: int) -> int:
-        p_num = 1
-        for j, off in enumerate(page_offsets):
-            if offset >= off:
-                p_num = j + 1
-            else:
-                break
-        return p_num
-
-    matches_with_pages = [(m, _page_for_offset(m.start())) for m in matches]
+    matches_with_pages = [(m, _offset_to_page(m.start(), page_offsets)) for m in matches]
     total_matches = len(matches_with_pages)
 
     # Global occurrence map — never filtered.
@@ -868,6 +874,370 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
         footer = ""
 
     ui_markdown = banner + selected.page_content + footer
+    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+
+    return BuilderResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ui_markdown,
+            "title": Path(file_path).name,
+            "file_path": str(Path(file_path).resolve()),
+        },
+    )
+
+
+def build_changes_response(
+    text: str,
+    file_path: str,
+    comments_data: dict | None = None,
+    author_filter: str | None = None,
+    page: int | str | None = None,
+    offset: int = 0,
+    is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+    existing_change_ids: Iterable[str] | None = None,
+) -> BuilderResult:
+    """
+    Enumerates every tracked change and comment in a DOCX document as a concise
+    ledger (<=18 tokens/change on average).
+    """
+    if offset < 0:
+        offset = 0
+
+    body, _appendix = split_structural_appendix(text)
+    pag_res = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
+    page_offsets = pag_res.body_page_offsets
+    total_pages = pag_res.total_pages
+
+    chg_entries: dict[str, _LedgerEntry] = {}
+    com_entries: dict[str, _LedgerEntry] = {}
+    pair_map: dict[str, list[str]] = defaultdict(list)
+
+    for m in re.finditer(r"\{>>(.*?)<<\}", body, re.DOTALL):
+        b_start = m.start()
+        p_num = _offset_to_page(b_start, page_offsets)
+        bubble_raw = m.group(1).strip()
+
+        pre = body[max(0, b_start - 100000) : b_start]
+        wrappers = list(re.finditer(r"(\{\+\+|\{--|\{==)(.*?)(?:\+\+\}|--\}|==\})", pre, re.DOTALL))
+        all_ins_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{++"]
+        all_del_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{--"]
+        all_fmt_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{=="]
+
+        tag_matches = list(re.finditer(r"\[(Chg|Com):(\w+)(?:\s+(insert|delete|format))?\]", bubble_raw))
+        if not tag_matches:
+            continue
+
+        parsed_items = []
+        for i, tm in enumerate(tag_matches):
+            kind = tm.group(1)
+            cid = tm.group(2)
+            raw_type = tm.group(3)
+            start_pos = tm.end()
+            end_pos = tag_matches[i + 1].start() if i + 1 < len(tag_matches) else len(bubble_raw)
+            rest_text = bubble_raw[start_pos:end_pos].strip()
+            parsed_items.append(
+                {
+                    "kind": kind,
+                    "cid": cid,
+                    "raw_type": raw_type,
+                    "rest": rest_text,
+                }
+            )
+
+        shared_rest = next((item["rest"] for item in reversed(parsed_items) if item["rest"]), "")
+        for item in parsed_items:
+            if not item["rest"]:
+                item["rest"] = shared_rest
+
+        for item in parsed_items:
+            if item["kind"] == "Chg":
+                raw_type = item["raw_type"]
+                if raw_type == "delete":
+                    change_type = "del"
+                elif raw_type == "insert":
+                    change_type = "ins"
+                elif raw_type == "format":
+                    change_type = "fmt"
+                else:
+                    change_type = "del" if all_del_snips else ("fmt" if all_fmt_snips else "ins")
+                item["change_type"] = change_type
+
+        N_del = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "del")
+        N_ins = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "ins")
+        N_fmt = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "fmt")
+
+        bubble_del_snips = all_del_snips[-N_del:] if (N_del > 0 and len(all_del_snips) >= N_del) else all_del_snips
+        bubble_ins_snips = all_ins_snips[-N_ins:] if (N_ins > 0 and len(all_ins_snips) >= N_ins) else all_ins_snips
+        bubble_fmt_snips = all_fmt_snips[-N_fmt:] if (N_fmt > 0 and len(all_fmt_snips) >= N_fmt) else all_fmt_snips
+
+        del_idx = 0
+        ins_idx = 0
+        fmt_idx = 0
+
+        for item in parsed_items:
+            kind = item["kind"]
+            cid = item["cid"]
+            rest = item["rest"]
+
+            if kind == "Chg":
+                change_type = item["change_type"]
+                if change_type == "del":
+                    raw_snip = (
+                        bubble_del_snips[del_idx]
+                        if del_idx < len(bubble_del_snips)
+                        else (bubble_del_snips[-1] if bubble_del_snips else "")
+                    )
+                    del_idx += 1
+                elif change_type == "ins":
+                    raw_snip = (
+                        bubble_ins_snips[ins_idx]
+                        if ins_idx < len(bubble_ins_snips)
+                        else (bubble_ins_snips[-1] if bubble_ins_snips else "")
+                    )
+                    ins_idx += 1
+                elif change_type == "fmt":
+                    raw_snip = (
+                        bubble_fmt_snips[fmt_idx]
+                        if fmt_idx < len(bubble_fmt_snips)
+                        else (bubble_fmt_snips[-1] if bubble_fmt_snips else "")
+                    )
+                    fmt_idx += 1
+                else:
+                    raw_snip = ""
+
+                if not raw_snip:
+                    tag_map = {"del": ("{--", "--}"), "ins": ("{++", "++}"), "fmt": ("{==", "==}")}
+                    open_tag, close_tag = tag_map.get(change_type, ("{--", "--}"))
+                    tag_open = body.rfind(open_tag, 0, b_start)
+                    if tag_open != -1:
+                        tag_close = body.find(close_tag, tag_open, b_start)
+                        if tag_close != -1:
+                            raw_snip = body[tag_open + len(open_tag) : tag_close]
+                        else:
+                            raw_snip = body[tag_open + len(open_tag) : b_start]
+
+                clean_snip = re.sub(r"\s+", " ", raw_snip).strip()
+                if len(clean_snip) > 48:
+                    clean_snip = clean_snip[:45] + "..."
+
+                pair_match = re.search(r"\(pairs\s+(?:with\s+)?((?:Chg:\w+(?:,\s*)?)+)\)", rest)
+                if pair_match:
+                    partner_cids = [m.group(1) for m in re.finditer(r"Chg:(\w+)", pair_match.group(1))]
+                    bubble_cids = [it["cid"] for it in parsed_items if it["kind"] == "Chg"]
+                    if cid in partner_cids:
+                        non_partner_cids = [c for c in bubble_cids if c not in partner_cids]
+                        src_cid = non_partner_cids[0] if non_partner_cids else cid
+                    else:
+                        src_cid = cid
+
+                    for pid in partner_cids:
+                        if pid != src_cid:
+                            if pid not in pair_map[src_cid]:
+                                pair_map[src_cid].append(pid)
+                            if src_cid not in pair_map[pid]:
+                                pair_map[pid].append(src_cid)
+
+                author = re.sub(r"\s*\((?:pairs(?:\s+with)?|reply\s+to)\s+.*?\)", "", rest).strip()
+                author = author or "Unknown"
+
+                if existing_change_ids is not None:
+                    if cid not in existing_change_ids and f"Chg:{cid}" not in existing_change_ids:
+                        continue
+
+                if cid not in chg_entries:
+                    chg_entries[cid] = _LedgerEntry(
+                        kind="chg",
+                        cid=cid,
+                        change_type=change_type,
+                        author=author,
+                        page=p_num,
+                        snippet=clean_snip,
+                        position=b_start,
+                    )
+
+            elif kind == "Com":
+                if comments_data and cid in comments_data:
+                    cdata = comments_data[cid]
+                    author = cdata.get("author") or "Unknown"
+                    raw_comm = cdata.get("text", "")
+                    parent_id = cdata.get("parent_id")
+                else:
+                    author = rest.split("@")[0].split(":")[0].strip() or "Unknown"
+                    raw_comm = rest.split(":", 1)[1].strip() if ":" in rest else ""
+                    parent_id = None
+
+                author = re.sub(r"\s*\((?:pairs(?:\s+with)?|reply\s+to)\s+.*?\)", "", author).strip() or "Unknown"
+
+                clean_comm = re.sub(r"\s+", " ", raw_comm).strip()
+                if len(clean_comm) > 120:
+                    clean_comm = clean_comm[:117] + "..."
+
+                reply_to = (
+                    (str(parent_id) if str(parent_id).startswith("Com:") else f"Com:{parent_id}") if parent_id else None
+                )
+
+                if cid not in com_entries:
+                    com_entries[cid] = _LedgerEntry(
+                        kind="com",
+                        cid=cid,
+                        change_type="",
+                        author=author,
+                        page=p_num,
+                        snippet=clean_comm,
+                        reply_to_id=reply_to,
+                        position=b_start,
+                    )
+
+    if comments_data:
+        for cid, cdata in comments_data.items():
+            str_cid = str(cid).removeprefix("Com:")
+            if str_cid not in com_entries:
+                author = cdata.get("author") or "Unknown"
+                author = re.sub(r"\s*\((?:pairs(?:\s+with)?|reply\s+to)\s+.*?\)", "", author).strip() or "Unknown"
+                raw_comm = cdata.get("text", "")
+                clean_comm = re.sub(r"\s+", " ", raw_comm).strip()
+                if len(clean_comm) > 120:
+                    clean_comm = clean_comm[:117] + "..."
+                parent_id = cdata.get("parent_id")
+                reply_to = (
+                    (str(parent_id) if str(parent_id).startswith("Com:") else f"Com:{parent_id}") if parent_id else None
+                )
+                com_entries[str_cid] = _LedgerEntry(
+                    kind="com",
+                    cid=str_cid,
+                    change_type="",
+                    author=author,
+                    page=1,
+                    snippet=clean_comm,
+                    reply_to_id=reply_to,
+                    position=999999,
+                )
+
+    if existing_change_ids is not None:
+        for raw_id in existing_change_ids:
+            clean_cid = str(raw_id).removeprefix("Chg:")
+            if clean_cid not in chg_entries:
+                chg_entries[clean_cid] = _LedgerEntry(
+                    kind="chg",
+                    cid=clean_cid,
+                    change_type="del",
+                    author="Unknown",
+                    page=1,
+                    snippet="",
+                    position=999999,
+                )
+
+    for cid, e in chg_entries.items():
+        if cid in pair_map:
+            e.pair_ids = pair_map[cid]
+        if existing_change_ids is not None:
+            e.pair_ids = [
+                pid for pid in e.pair_ids if pid in existing_change_ids or f"Chg:{pid}" in existing_change_ids
+            ]
+
+    def _sort_key(e: _LedgerEntry):
+        num_id = int(e.cid) if e.cid.isdigit() else 0
+        return (e.position, e.kind, num_id)
+
+    all_entries = sorted(list(chg_entries.values()) + list(com_entries.values()), key=_sort_key)
+
+    filtered = all_entries
+    if author_filter:
+        af = author_filter.strip().lower()
+        filtered = [e for e in filtered if af in e.author.lower()]
+
+    if page is not None and str(page).lower() != "all":
+        if isinstance(page, tuple):
+            kind, p_val = "range", page
+        else:
+            try:
+                kind, p_val = parse_page_arg(page)
+            except ValueError as err:
+                raise BuilderError(str(err)) from err
+
+        if kind == "range":
+            assert isinstance(p_val, tuple)
+            start_p, end_p = p_val
+            if start_p < 1 or end_p < 1 or start_p > total_pages:
+                raise BuilderError(f"Page {start_p} out of range (doc has {total_pages} pages).")
+            filtered = [e for e in filtered if start_p <= e.page <= end_p]
+        elif kind == "single":
+            assert isinstance(p_val, int)
+            if p_val < 1 or p_val > total_pages:
+                raise BuilderError(f"Page {p_val} out of range (doc has {total_pages} pages).")
+            filtered = [e for e in filtered if e.page == p_val]
+
+    total_changes = sum(1 for e in filtered if e.kind == "chg")
+    total_comments = sum(1 for e in filtered if e.kind == "com")
+
+    dist: dict[int, int] = {}
+    for e in filtered:
+        dist[e.page] = dist.get(e.page, 0) + 1
+
+    dist_str = ", ".join(f"p{p}: {dist[p]}" for p in sorted(dist.keys())) if dist else "none"
+
+    authors = sorted(list({e.author for e in filtered if e.author}))
+    authors_str = ", ".join(authors) if authors else "None"
+
+    header = (
+        f"> **Changes ledger** — {total_changes} change(s), {total_comments} comment(s) across {total_pages} page(s).\n"
+        f"> Distribution — {dist_str}\n"
+        f"> Authors — {authors_str}\n\n"
+    )
+
+    total_entries = len(filtered)
+    slice_entries = filtered[offset : offset + 300]
+
+    lines = []
+    for e in slice_entries:
+        if e.kind == "chg":
+            if e.pair_ids:
+                sorted_pids = sorted(e.pair_ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+                pair_suffix = f"  (pairs {', '.join(f'Chg:{pid}' for pid in sorted_pids)})"
+            else:
+                pair_suffix = ""
+            line = f'Chg:{e.cid}  {e.change_type}  {e.author}  p{e.page}  "{e.snippet}"{pair_suffix}'
+        else:
+            reply_suffix = f"  (reply to {e.reply_to_id})" if e.reply_to_id else ""
+            line = f'Com:{e.cid}  {e.author}  p{e.page}  "{e.snippet}"{reply_suffix}'
+        lines.append(line)
+
+    continuation = ""
+    if offset + 300 < total_entries:
+        next_offset = offset + 300
+        if is_cli:
+            cli_parts = [f"adeu extract {file_path}", "--mode changes"]
+            if author_filter:
+                cli_parts.append(f'--changes-author "{author_filter}"')
+            if page is not None:
+                cli_parts.append(f"--page {page}")
+            cli_parts.append(f"--changes-offset {next_offset}")
+            cmd_str = " ".join(cli_parts)
+            continuation = (
+                f"\n\n> **Showing entries {offset + 1}-{offset + len(slice_entries)} of {total_entries}.** "
+                f"Continue with `{cmd_str}`."
+            )
+        else:
+            mcp_args = []
+            if file_path:
+                mcp_args.append(f'file_path="{file_path}"')
+            mcp_args.append('mode="changes"')
+            if author_filter:
+                mcp_args.append(f'changes_author="{author_filter}"')
+            if page is not None:
+                if isinstance(page, str):
+                    mcp_args.append(f'page="{page}"')
+                else:
+                    mcp_args.append(f"page={page}")
+            mcp_args.append(f"changes_offset={next_offset}")
+            args_str = ", ".join(mcp_args)
+            continuation = (
+                f"\n\n> **Showing entries {offset + 1}-{offset + len(slice_entries)} of {total_entries}.** "
+                f"Continue with `read_docx({args_str})`."
+            )
+
+    ui_markdown = header + "\n".join(lines) + continuation
     llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(

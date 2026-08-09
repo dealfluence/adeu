@@ -338,6 +338,8 @@ if sys.platform == "win32":
         search_query: Optional[str] = None,
         search_regex: bool = False,
         search_case_sensitive: bool = True,
+        changes_author: Optional[str] = None,
+        changes_offset: int = 0,
     ) -> ToolResult:
         await ctx.info(
             f"Extracting live Word document via WordOpenXML "
@@ -385,6 +387,42 @@ if sys.platform == "win32":
                         search_case_sensitive,
                         page,
                         actual_path,
+                    )
+                elif mode == "changes":
+                    if clean_view:
+                        raise ToolError("--clean-view cannot be used with mode='changes'.")
+                    from io import BytesIO
+
+                    from adeu.mcp_components._response_builders import (
+                        build_changes_response,
+                    )
+                    from adeu.redline.comments import CommentsManager
+
+                    try:
+                        comments_data = CommentsManager(py_doc).extract_comments_data()
+                    except Exception:
+                        comments_data = None
+
+                    existing_change_ids = None
+                    if py_doc is not None:
+                        try:
+                            buf = BytesIO()
+                            py_doc.save(buf)
+                            buf.seek(0)
+                            eng = RedlineEngine(buf, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
+                            existing_change_ids = set(eng._existing_change_ids())
+                        except Exception:
+                            pass
+
+                    res = build_changes_response(
+                        final_text,
+                        actual_path,
+                        comments_data=comments_data,
+                        author_filter=changes_author,
+                        page=page,
+                        offset=changes_offset,
+                        is_cli=False,
+                        existing_change_ids=existing_change_ids,
                     )
                 elif mode == "outline":
                     res = build_outline_response(
@@ -1282,6 +1320,8 @@ else:
         search_query: Optional[str] = None,
         search_regex: bool = False,
         search_case_sensitive: bool = True,
+        changes_author: Optional[str] = None,
+        changes_offset: int = 0,
     ) -> ToolResult:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
