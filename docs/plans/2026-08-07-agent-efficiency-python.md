@@ -38,10 +38,10 @@
 
 ### Task 3 — Item B9: Uniform Failure Envelope with Machine-Readable Blame (COMPLETED)
 **Goal.** Both schema and engine validation errors emit `{"error", "failed":[{"index","reason"}], "message"}` with 0-based batch indices.
-**Status.** Completed & Verified.
+**Status.** Completed & Verified (commit `b731172`).
 **Attempt Ledger:**
-- attempt 1: Created payloads.py and regex fallback indexing in engine.py/cli.py -> VERDICT: FAIL (action-not-found defaulted to index 0; MCP dropped schema-invalid changes before engine indexing shifting batch indices; schema errors emitted duplicate failed entries per index; test_schema_failure_envelope_indices did not verify envelope output)
-- attempt 2: Passed batch_idx explicitly to `_action_not_found_error` and `_duplicate_revision_id_error`; mapped `original_indices` in `RedlineEngine.process_batch`; attached `valid_indices` in `_normalize_changes` and combined schema + engine failure indices relative to input array; deduplicated schema failures per index in `_extract_schema_failures`; updated and added assertions in `test_failure_envelope.py` -> VERDICT: PASS
+- attempt 1: Created payloads.py and regex fallback indexing in engine.py/cli.py -> VERDICT: FAIL
+- attempt 2: Passed batch_idx explicitly to action/duplicate-id error generators in engine.py, mapped original indices through document.py to preserve input array relative indexing, grouped schema failures by index in cli.py, updated test_failure_envelope.py -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/payloads.py` (new)
 - `python/src/adeu/redline/engine.py`
@@ -63,8 +63,9 @@
 - `document.py`: `_normalize_changes` returns `rejected_pairs`. Append fenced JSON envelope block to MCP failure strings.
 **Done when.** `uv run pytest tests/test_failure_envelope.py` passes (7 tests).
 
-### Task 4 — Item B1: `--report minimal|standard`
+### Task 4 — Item B1: `--report minimal|standard` (COMPLETED)
 **Goal.** Minimal edit reports omitting echoed input text and duplicate `clean_text` previews in minimal mode (≤40 tokens/applied edit).
+**Status.** Completed & Verified.
 **Files.**
 - `python/src/adeu/payloads.py`
 - `python/src/adeu/cli.py`

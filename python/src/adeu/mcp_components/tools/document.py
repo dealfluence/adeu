@@ -46,7 +46,7 @@ from adeu.models import (
     coerce_stringified_changes,
 )
 from adeu.pagination import parse_page_arg
-from adeu.payloads import failure_envelope
+from adeu.payloads import failure_envelope, shrink_batch_stats
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
 
@@ -666,7 +666,7 @@ async def _process_document_batch_disk(
             except OSError:
                 pass
 
-        stats = result_data
+        stats = shrink_batch_stats(result_data)
         res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
         total_occurrences = sum(

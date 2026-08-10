@@ -1341,8 +1341,13 @@ def handle_apply(args):
     if unverified_path is not None:
         stats["unverified_output_path"] = str(unverified_path)
 
+    if getattr(args, "report", "standard") == "minimal":
+        from adeu.payloads import shrink_batch_stats
+
+        stats = shrink_batch_stats(stats)
+
     if args.json:
-        print(json.dumps(stats))
+        print(json.dumps(stats, ensure_ascii=False))
     else:
         if batch_failed:
             print(
@@ -1373,14 +1378,18 @@ def handle_apply(args):
             for i, report in enumerate(stats["edits"]):
                 status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
                 print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
-                print(f"  Target: '{report['target_text']}'", file=sys.stderr)
+                if report.get("target_text"):
+                    print(f"  Target: '{report['target_text']}'", file=sys.stderr)
                 edit_type = report.get("type", "modify")
-                if edit_type == "insert_row":
-                    print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
+                if report.get("new_text"):
+                    if edit_type == "insert_row":
+                        print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
+                    elif edit_type == "delete_row":
+                        print("  Deleted row", file=sys.stderr)
+                    else:
+                        print(f"  New text: '{report['new_text']}'", file=sys.stderr)
                 elif edit_type == "delete_row":
                     print("  Deleted row", file=sys.stderr)
-                else:
-                    print(f"  New text: '{report['new_text']}'", file=sys.stderr)
                 if report.get("warning"):
                     print(f"  Warning: {report['warning']}", file=sys.stderr)
                 if report.get("error"):
@@ -2033,6 +2042,12 @@ def _main_impl():
             "one-command workflow. This flag never overrides the separate 'page N of M' guard: "
             "a paginated partial extract is refused outright — re-extract with --page all."
         ),
+    )
+    p_apply.add_argument(
+        "--report",
+        choices=["minimal", "standard"],
+        default="standard",
+        help="Report detail level for batch output (default: standard).",
     )
     p_apply.add_argument(
         "--json",
