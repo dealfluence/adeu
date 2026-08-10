@@ -18,6 +18,7 @@ from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdow
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.pagination import parse_page_arg
+from adeu.payloads import failure_envelope
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -174,11 +175,18 @@ def _set_json_mode(enabled: bool) -> None:
     _JSON_MODE = bool(enabled)
 
 
-def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" = None) -> NoReturn:
+def _cli_error(
+    code: str,
+    message: str,
+    exit_code: int = 1,
+    hint: "str | None" = None,
+    failed: "list[tuple[int, str]] | None" = None,
+    errors: "list[str] | None" = None,
+) -> NoReturn:
     """
     Terminates the CLI with a consistent error contract:
       - human-readable diagnostics on stderr (always)
-      - a single {"error": code, "message": ...} JSON object on stdout when
+      - a single {"error": code, "failed": [...], "message": ...} JSON object on stdout when
         the invocation asked for --json
     Stable codes: file_not_found, invalid_input, invalid_docx,
     invalid_changes_file, write_failed, unsupported, batch_validation_failed.
@@ -187,7 +195,8 @@ def _cli_error(code: str, message: str, exit_code: int = 1, hint: "str | None" =
     if hint:
         print(hint, file=sys.stderr)
     if _JSON_MODE:
-        print(json.dumps({"error": code, "message": message}))
+        env = failure_envelope(code, failed or [], message, errors=errors)
+        print(json.dumps(env, ensure_ascii=False))
     sys.exit(exit_code)
 
 
@@ -562,38 +571,53 @@ _CHANGE_TYPE_REFERENCE = (
 )
 
 
+def _extract_schema_failures(exc: "ValidationError") -> tuple[list[tuple[int, str]], str]:
+    failed: list[tuple[int, str]] = []
+    lines: list[str] = []
+    seen: set = set()
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        idx = loc[0] if (loc and isinstance(loc[0], int)) else 0
+        item_no = f"Change #{idx + 1}" if (loc and isinstance(loc[0], int)) else "The batch"
+        err_type = err.get("type", "")
+        if err_type == "union_tag_not_found":
+            reason = "missing the required 'type' field."
+            msg = f"{item_no} is missing the required 'type' field."
+        elif err_type == "union_tag_invalid":
+            tag = err.get("ctx", {}).get("tag", "unknown")
+            reason = f"has an unknown type: '{tag}'."
+            msg = f"{item_no} has an unknown type: '{tag}'."
+        elif err_type == "missing":
+            variant = f" (type '{loc[1]}')" if len(loc) >= 2 else ""
+            field = loc[-1] if len(loc) >= 3 else "a required field"
+            reason = f"missing required field '{field}'."
+            msg = f"{item_no}{variant} is missing required field '{field}'."
+        elif err_type == "list_type" and not loc:
+            reason = "JSON root must be a list of change objects."
+            msg = "The JSON root must be a list of change objects."
+        else:
+            where = ".".join(str(p) for p in loc[1:]) if len(loc) > 1 else ""
+            detail = err.get("msg", "is invalid")
+            reason = f"field {where!r}: {detail}" if where else detail
+            msg = f"{item_no}{f' field {where!r}' if where else ''}: {detail}."
+
+        failed.append((idx, reason))
+        if msg not in seen:
+            seen.add(msg)
+            lines.append(f"  - {msg}")
+
+    prose = "The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
+    return failed, prose
+
+
 def _format_batch_validation_error(exc: "ValidationError") -> str:
     """
     Renders a Pydantic ValidationError on the changes batch as a plain-language
     message. The raw dump leaks discriminated-union internals and a pydantic.dev
     URL without ever naming the valid 'type' values (QA M5).
     """
-    lines: List[str] = []
-    seen: set = set()
-    for err in exc.errors():
-        loc = err.get("loc", ())
-        item_no = f"Change #{loc[0] + 1}" if loc and isinstance(loc[0], int) else "The batch"
-        err_type = err.get("type", "")
-        if err_type == "union_tag_not_found":
-            msg = f"{item_no} is missing the required 'type' field."
-        elif err_type == "union_tag_invalid":
-            tag = err.get("ctx", {}).get("tag", "unknown")
-            msg = f"{item_no} has an unknown type: '{tag}'."
-        elif err_type == "missing":
-            # loc is (index, variant_tag, field_name)
-            variant = f" (type '{loc[1]}')" if len(loc) >= 2 else ""
-            field = loc[-1] if len(loc) >= 3 else "a required field"
-            msg = f"{item_no}{variant} is missing required field '{field}'."
-        elif err_type == "list_type" and not loc:
-            msg = "The JSON root must be a list of change objects."
-        else:
-            where = ".".join(str(p) for p in loc[1:]) if len(loc) > 1 else ""
-            detail = err.get("msg", "is invalid")
-            msg = f"{item_no}{f' field {where!r}' if where else ''}: {detail}."
-        if msg not in seen:
-            seen.add(msg)
-            lines.append(f"  - {msg}")
-    return "The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
+    _, prose = _extract_schema_failures(exc)
+    return prose
 
 
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
@@ -628,7 +652,8 @@ def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     except SystemExit:
         raise
     except ValidationError as e:
-        _cli_error("invalid_changes_file", _format_batch_validation_error(e))
+        failed_pairs, prose_msg = _extract_schema_failures(e)
+        _cli_error("invalid_changes_file", prose_msg, failed=failed_pairs)
         raise AssertionError("unreachable") from None
     except Exception as e:
         _cli_error("invalid_changes_file", f"Error parsing JSON batch: {e}")
@@ -1212,7 +1237,10 @@ def handle_apply(args):
         stats = engine.process_batch(changes)
     except BatchValidationError as e:
         if args.json:
-            print(json.dumps({"error": "batch_validation_failed", "errors": e.errors}))
+            env = failure_envelope(
+                "batch_validation_failed", e.failed, "Batch rejected. Edits failed validation.", errors=e.errors
+            )
+            print(json.dumps(env, ensure_ascii=False))
         else:
             print(
                 f"\n❌ Batch rejected. {len(e.errors)} edits failed validation:\n",

@@ -56,12 +56,31 @@ def _empty_bounds() -> List[Optional[int]]:
     return [None, None]
 
 
+def _extract_failed_indices(errors: List[str]) -> List[Tuple[int, str]]:
+    failed = []
+    pattern = re.compile(r"^-\s*(?:Action|Edit|Note: Action)\s+(\d+)\b", re.IGNORECASE)
+    for err in errors:
+        first_line = err.splitlines()[0] if err else ""
+        m = pattern.search(first_line)
+        if m:
+            idx = int(m.group(1)) - 1
+            parts = err.split("Failed: ", 1)
+            reason = parts[1].strip() if len(parts) > 1 else err.strip()
+            failed.append((idx, reason))
+        else:
+            failed.append((0, err.strip()))
+    return failed
+
+
 class BatchValidationError(Exception):
     """Raised when text edits fail location validation."""
 
-    def __init__(self, errors: List[str]):
+    def __init__(self, errors: List[str], failed: Optional[List[Tuple[int, str]]] = None):
         super().__init__("Batch validation failed:\n" + "\n".join(errors))
         self.errors = errors
+        if failed is None:
+            failed = _extract_failed_indices(errors)
+        self.failed = failed
 
 
 # Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
@@ -100,6 +119,7 @@ def describe_illegal_control_chars(text: str) -> Optional[str]:
 
 def validate_review_action_batch(
     actions: List[Union["AcceptChange", "RejectChange", "ReplyComment"]],
+    indices: Optional[List[int]] = None,
 ) -> List[str]:
     """
     Document-context-free validation of review actions (QA 2026-07-19 v8 F-07):
@@ -122,13 +142,14 @@ def validate_review_action_batch(
     seen_resolutions: dict = {}
     seen_replies: set = set()
     for i, act in enumerate(actions):
+        batch_idx = indices[i] if indices else i
         act_type = getattr(act, "type", "")
         target_id = getattr(act, "target_id", "")
         if act_type == "reply":
             reply_text = (getattr(act, "text", "") or "").strip()
             if not reply_text:
                 errors.append(
-                    f"- Action {i + 1} Failed: reply text for {target_id} is empty or "
+                    f"- Action {batch_idx + 1} Failed: reply text for {target_id} is empty or "
                     "whitespace-only. Word would show a blank comment bubble — provide the "
                     "reply content in 'text'."
                 )
@@ -136,23 +157,24 @@ def validate_review_action_batch(
             reply_key = (target_id, reply_text)
             if reply_key in seen_replies:
                 errors.append(
-                    f"- Action {i + 1} Failed: duplicate reply — this batch already replies to "
+                    f"- Action {batch_idx + 1} Failed: duplicate reply — this batch already replies to "
                     f"{target_id} with the same text. Remove the duplicate action."
                 )
             seen_replies.add(reply_key)
         elif act_type in ("accept", "reject"):
             prior = seen_resolutions.get(target_id)
             if prior is not None:
-                first_idx, first_type = prior
+                first_pos, first_type = prior
+                first_batch_idx = indices[first_pos] if indices else first_pos
                 if first_type == act_type:
                     errors.append(
-                        f"- Action {i + 1} Failed: duplicate action — Action {first_idx + 1} in this "
+                        f"- Action {batch_idx + 1} Failed: duplicate action — Action {first_batch_idx + 1} in this "
                         f"batch already applies '{act_type}' to {target_id}. A change can only be "
                         "resolved once; remove the duplicate action."
                     )
                 else:
                     errors.append(
-                        f"- Action {i + 1} Failed: conflicting actions — Action {first_idx + 1} in "
+                        f"- Action {batch_idx + 1} Failed: conflicting actions — Action {first_batch_idx + 1} in "
                         f"this batch applies '{first_type}' to {target_id}, but this action applies "
                         f"'{act_type}'. Decide the outcome and keep exactly one of them."
                     )
@@ -2509,24 +2531,33 @@ class RedlineEngine:
         Internal execution engine for batches of edits and actions.
         """
         self.skipped_details = []
-        actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
-        edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
+        actions_with_idx = [
+            (i, c) for i, c in enumerate(changes) if isinstance(c, (AcceptChange, RejectChange, ReplyComment))
+        ]
+        edits_with_idx = [
+            (i, c) for i, c in enumerate(changes) if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
+        ]
+
+        actions = [c for _, c in actions_with_idx]
+        action_indices = [i for i, _ in actions_with_idx]
 
         applied_actions, skipped_actions, already_resolved_actions = 0, 0, 0
         if actions:
-            action_shape_errors = validate_review_action_batch(actions)
+            action_shape_errors = validate_review_action_batch(actions, indices=action_indices)
             if action_shape_errors:
                 raise BatchValidationError(action_shape_errors)
             # Document-aware pairing check BEFORE any action mutates the DOM:
             # accept + reject across one replacement's del+ins pair is a
             # contradiction, not two independent operations (ADEU-QA-004).
-            pairing_errors = self.validate_action_pairing(actions)
+            pairing_errors = self.validate_action_pairing(actions, indices=action_indices)
             if pairing_errors:
                 raise BatchValidationError(pairing_errors)
-            applied_actions, skipped_actions, already_resolved_actions = self.apply_review_actions(actions)
+            applied_actions, skipped_actions, already_resolved_actions = self.apply_review_actions(
+                actions, indices=action_indices
+            )
             if skipped_actions > 0:
                 raise BatchValidationError(self.skipped_details)
-            if edits:
+            if edits_with_idx:
                 self.clean_mapper = None
                 self.original_mapper = None
 
@@ -2537,7 +2568,7 @@ class RedlineEngine:
         edits_reports = []
         applied_edits, skipped_edits = 0, 0
 
-        if edits:
+        if edits_with_idx:
             # Batches apply SEQUENTIALLY: each edit is validated and applied
             # against the document state produced by the edits before it, so a
             # later edit may target text an earlier edit introduced (chaining).
@@ -2557,7 +2588,7 @@ class RedlineEngine:
             else:
                 pre_batch_snapshot = BytesIO(self._pristine_bytes)
 
-            cloned_edits = [deepcopy(e) for e in edits]
+            cloned_edits = [(orig_idx, deepcopy(e)) for orig_idx, e in edits_with_idx]
 
             def _pinned_idx(e: Any) -> Optional[int]:
                 if e._resolved_start_idx is not None:
@@ -2569,8 +2600,8 @@ class RedlineEngine:
             # one descending sweep — positions below an applied edit never
             # move — then let text-anchored edits re-resolve sequentially
             # against the mutated text. Mirrors the Node engine's ordering.
-            pinned = [(i, e) for i, e in enumerate(cloned_edits) if _pinned_idx(e) is not None]
-            unpinned = [(i, e) for i, e in enumerate(cloned_edits) if _pinned_idx(e) is None]
+            pinned = [(k, orig_idx, e) for k, (orig_idx, e) in enumerate(cloned_edits) if _pinned_idx(e) is not None]
+            unpinned = [(k, orig_idx, e) for k, (orig_idx, e) in enumerate(cloned_edits) if _pinned_idx(e) is None]
 
             reports_by_input: List[Optional[dict]] = [None] * len(cloned_edits)
             validation_errors: List[str] = []
@@ -2581,13 +2612,13 @@ class RedlineEngine:
             # promises. Without this, the text-diff path writes raw CriticMarkup
             # (including reviewer names and change IDs) into document bodies as
             # prose (QA 2026-07-17 F8).
-            pinned_ok: List[Tuple[int, Any]] = []
-            for i, e in pinned:
-                shape_errors = validate_edit_strings([e], index_offset=i)
+            pinned_ok: List[Tuple[int, int, Any]] = []
+            for k, orig_idx, e in pinned:
+                shape_errors = validate_edit_strings([e], index_offset=orig_idx)
                 if shape_errors:
                     validation_errors.extend(shape_errors)
                     skipped_edits += 1
-                    reports_by_input[i] = {
+                    reports_by_input[k] = {
                         "status": "failed",
                         "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
@@ -2599,26 +2630,26 @@ class RedlineEngine:
                         "clean_text": None,
                     }
                 else:
-                    pinned_ok.append((i, e))
+                    pinned_ok.append((k, orig_idx, e))
 
             if pinned_ok:
-                p_applied, p_skipped = self.apply_edits([e for _, e in pinned_ok], page_offsets=page_offsets)
+                p_applied, p_skipped = self.apply_edits([e for _, _, e in pinned_ok], page_offsets=page_offsets)
                 applied_edits += p_applied
                 skipped_edits += p_skipped
                 # Refresh projections BEFORE building reports so previews can
                 # slice the actual post-apply document state (F6).
                 if p_applied > 0:
                     self._refresh_after_sequential_edit()
-                for i, e in pinned_ok:
-                    reports_by_input[i] = self._build_edit_report(e)
+                for k, _, e in pinned_ok:
+                    reports_by_input[k] = self._build_edit_report(e)
 
-            for i, edit in unpinned:
+            for k, orig_idx, edit in unpinned:
                 try:
-                    single_errors = self.validate_edits([edit], index_offset=i)
+                    single_errors = self.validate_edits([edit], index_offset=orig_idx)
                 except RegexTimeoutError as e:
                     # A pathological user pattern must fail as a clean per-edit
                     # validation error, never a hang or traceback (QA F5).
-                    single_errors = [f"- Edit {i + 1} Failed: {e}"]
+                    single_errors = [f"- Edit {orig_idx + 1} Failed: {e}"]
                 if single_errors:
                     if applied_edits > 0:
                         hint = (
@@ -2635,7 +2666,7 @@ class RedlineEngine:
                     # Punctuation-anchor warning is failure-context only; on
                     # success the redline preview reports the change cleanly.
                     warning = self._check_punctuation_warning(getattr(edit, "target_text", ""))
-                    reports_by_input[i] = {
+                    reports_by_input[k] = {
                         "status": "failed",
                         "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
@@ -2655,7 +2686,7 @@ class RedlineEngine:
                 # preview slices the actual post-apply document state (F6).
                 if e_applied > 0:
                     self._refresh_after_sequential_edit()
-                reports_by_input[i] = self._build_edit_report(edit)
+                reports_by_input[k] = self._build_edit_report(edit)
 
             if validation_errors:
                 # Transactional rejection: undo every edit this batch
@@ -3629,7 +3660,6 @@ class RedlineEngine:
         return sub_edits
 
     def _resolve_single_match(self, edit, start_idx, match_len, active_mapper, actual_doc_text, effective_new_text):
-
         if "](" in actual_doc_text:
             t_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", actual_doc_text))
             n_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", effective_new_text))
@@ -4750,7 +4780,11 @@ class RedlineEngine:
                 group.add(pid)
         return group
 
-    def validate_action_pairing(self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]) -> List[str]:
+    def validate_action_pairing(
+        self,
+        actions: List[Union[AcceptChange, RejectChange, ReplyComment]],
+        indices: Optional[List[int]] = None,
+    ) -> List[str]:
         """
         Document-aware validation (QA 2026-07-19 ADEU-QA-004): a replacement's
         del+ins pair carries two distinct ids but resolves as one unit, so a
@@ -4762,6 +4796,7 @@ class RedlineEngine:
         errors: List[str] = []
         group_first: dict = {}  # member id -> (action_pos, action_type, id named by that action)
         for pos, act in enumerate(actions):
+            batch_idx = indices[pos] if indices else pos
             if not isinstance(act, (AcceptChange, RejectChange)):
                 continue
             raw_id = act.target_id
@@ -4779,9 +4814,10 @@ class RedlineEngine:
                     break
             if conflict is not None:
                 first_pos, first_type, first_id = conflict
+                first_batch_idx = indices[first_pos] if indices else first_pos
                 errors.append(
-                    f"- Action {pos + 1} Failed: conflicting actions on one replacement — Action "
-                    f"{first_pos + 1} applies '{first_type}' to Chg:{first_id}, and Chg:{target_id} is "
+                    f"- Action {batch_idx + 1} Failed: conflicting actions on one replacement — Action "
+                    f"{first_batch_idx + 1} applies '{first_type}' to Chg:{first_id}, and Chg:{target_id} is "
                     "part of the same change (a replacement's contiguous del+ins pair resolves as one "
                     f"unit, so '{first_type}' already decides both sides). Accepting one side and "
                     "rejecting the other is contradictory — decide the outcome and submit exactly one "
@@ -4793,7 +4829,9 @@ class RedlineEngine:
         return errors
 
     def apply_review_actions(
-        self, actions: List[Union[AcceptChange, RejectChange, ReplyComment]]
+        self,
+        actions: List[Union[AcceptChange, RejectChange, ReplyComment]],
+        indices: Optional[List[int]] = None,
     ) -> tuple[int, int, int]:
         """
         Returns (applied, skipped, already_resolved). `applied` counts actions
@@ -4814,6 +4852,7 @@ class RedlineEngine:
         sorted_actions = sorted(enumerate(actions), key=lambda x: 0 if isinstance(x[1], ReplyComment) else 1)
 
         for pos, act in sorted_actions:
+            batch_idx = indices[pos] if indices else pos
             raw_id = act.target_id
             target_id = raw_id
 
@@ -4838,7 +4877,7 @@ class RedlineEngine:
                     # state transition happens — report it accurately.
                     already_resolved += 1
                     self.skipped_details.append(
-                        f"- Note: Action {pos + 1} ('{act.type}' on {raw_id}) had no additional effect — "
+                        f"- Note: Action {batch_idx + 1} ('{act.type}' on {raw_id}) had no additional effect — "
                         "the change was already resolved together with its replacement pair by an "
                         "earlier action in this batch. Counted as already_resolved, not applied."
                     )
@@ -4846,7 +4885,7 @@ class RedlineEngine:
                 # Contradiction. validate_action_pairing rejects this shape
                 # before anything mutates; this guard covers direct callers.
                 self.skipped_details.append(
-                    f"- Action {pos + 1} Failed: contradictory action — '{act.type}' on {raw_id}, but "
+                    f"- Action {batch_idx + 1} Failed: contradictory action — '{act.type}' on {raw_id}, but "
                     f"the change was already resolved as '{prior_type}' together with its replacement "
                     "pair by an earlier action in this batch."
                 )

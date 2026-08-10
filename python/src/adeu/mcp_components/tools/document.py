@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -45,6 +46,7 @@ from adeu.models import (
     coerce_stringified_changes,
 )
 from adeu.pagination import parse_page_arg
+from adeu.payloads import failure_envelope
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
 
@@ -121,7 +123,13 @@ McpBatchChanges = Annotated[
 ]
 
 
-def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
+class RejectedNotes(List[str]):
+    def __init__(self, notes: List[str], pairs: List[tuple[int, str]]):
+        super().__init__(notes)
+        self.pairs = pairs
+
+
+def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], RejectedNotes]:
     """
     Normalize the `changes` argument into a list of validated DocumentChange
     instances, validating each element INDEPENDENTLY so that one malformed
@@ -130,7 +138,7 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
     Returns (valid_changes, rejected_notes):
       - valid_changes: every element that validated, in original order.
       - rejected_notes: human-readable "changes[i]: <reason>" strings for every
-        element that failed, for surfacing back to the model.
+        element that failed, with `.pairs` containing (index, reason) tuples.
 
     Tolerates the same three input shapes as before:
       1. List of already-validated DocumentChange instances (fast path; skips
@@ -151,9 +159,10 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
         # whole-batch rejection.
         try:
             validated = _DOCUMENT_CHANGE_LIST_ADAPTER.validate_python(changes)
-            return validated, []
+            return validated, RejectedNotes([], [])
         except Exception as e:
-            return [], [f"changes: {_summarize_validation_error(e)}"]
+            msg = _summarize_validation_error(e)
+            return [], RejectedNotes([f"changes: {msg}"], [(0, msg)])
 
     # If every element is already a DocumentChange instance, skip revalidation.
     if changes and all(
@@ -170,19 +179,22 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], List[str]]:
         )
         for c in changes
     ):
-        return changes, []  # type: ignore[return-value]
+        return changes, RejectedNotes([], [])  # type: ignore[return-value]
 
     coerced = coerce_stringified_changes(changes)
 
     valid: List[DocumentChange] = []
-    rejected: List[str] = []
+    rejected_notes: List[str] = []
+    rejected_pairs: List[tuple[int, str]] = []
     for i, item in enumerate(coerced):
         try:
             valid.append(_SINGLE_CHANGE_ADAPTER.validate_python(item))
         except Exception as e:
-            rejected.append(f"changes[{i}]: {_summarize_validation_error(e)}")
+            reason = _summarize_validation_error(e)
+            rejected_notes.append(f"changes[{i}]: {reason}")
+            rejected_pairs.append((i, reason))
 
-    return valid, rejected
+    return valid, RejectedNotes(rejected_notes, rejected_pairs)
 
 
 def _summarize_validation_error(exc: Exception) -> str:
@@ -575,7 +587,7 @@ async def _process_document_batch_disk(
         try:
             stats = engine.process_batch(changes)
         except BatchValidationError as e:
-            return False, e.errors, "", ""
+            return False, e, "", ""
 
         final_output = output_path
         if not final_output:
@@ -599,8 +611,23 @@ async def _process_document_batch_disk(
         success, result_data, final_output_path, overwrite_note = await asyncio.to_thread(_run_batch_sync)
 
         if not success:
-            await ctx.error("Batch validation failed", extra={"error_count": len(result_data)})
-            return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(result_data)
+            exc = result_data
+            if isinstance(exc, BatchValidationError):
+                err_list = exc.errors
+                failed_pairs = exc.failed
+            else:
+                err_list = exc if isinstance(exc, list) else [str(exc)]
+                failed_pairs = []
+
+            await ctx.error("Batch validation failed", extra={"error_count": len(err_list)})
+            env = failure_envelope(
+                "batch_validation_failed",
+                failed_pairs,
+                "Batch rejected. Some edits failed validation.",
+                errors=err_list,
+            )
+            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
+            return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(err_list) + json_block
 
         await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
 
@@ -1236,10 +1263,18 @@ if sys.platform == "win32":
         # clients (notably Gemini under load).
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:
+            env = failure_envelope(
+                "invalid_changes_file",
+                getattr(rejected_notes, "pairs", []),
+                "All submitted changes failed validation.",
+                errors=rejected_notes,
+            )
+            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
             return add_timing_if_debug(
                 start_time,
                 "Error: No valid changes to apply. All submitted changes failed validation:\n"
-                + "\n".join(f"- {n}" for n in rejected_notes),
+                + "\n".join(f"- {n}" for n in rejected_notes)
+                + json_block,
             )
         if not original_docx_path:
             # Edit active document directly. No disk fallback available.
@@ -1505,10 +1540,18 @@ else:
         # See win32 branch above for why we re-coerce here.
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:
+            env = failure_envelope(
+                "invalid_changes_file",
+                getattr(rejected_notes, "pairs", []),
+                "All submitted changes failed validation.",
+                errors=rejected_notes,
+            )
+            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
             return add_timing_if_debug(
                 start_time,
                 "Error: No valid changes to apply. All submitted changes failed validation:\n"
-                + "\n".join(f"- {n}" for n in rejected_notes),
+                + "\n".join(f"- {n}" for n in rejected_notes)
+                + json_block,
             )
         res = await _process_document_batch_disk(
             original_docx_path,

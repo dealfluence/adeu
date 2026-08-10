@@ -30,10 +30,27 @@
 
 ### Task 2 — Item A1: `--mode changes` Tracked-Change & Comment Ledger (COMPLETED)
 **Goal.** Enumerate every tracked change and comment in ≤18 tokens/change.
-**Status.** Completed & Verified. Restricted metadata tag parsing to lead bubble headers, prevented Chg tags from adopting trailing Com author text, and updated fallback comment string regex parser to handle ISO timestamps. All 26 tests in `test_changes_ledger.py` pass.
+**Status.** Completed & Verified (commit `990a23b`).
+**Attempt Ledger:**
+- attempt 1: Used newline-anchored regex and bubble_raw[:first_com_start] cutoff -> VERDICT: FAIL
+- attempt 2: Tokenised [Chg:...] and [Com:...] tags in a single pass, used heuristic `_is_header_author_text` -> VERDICT: FAIL
+- attempt 3 (@opus-coder): Used line-start position (`bubble_raw.rfind("\n", 0, tm.start()) + 1`) to classify Chg tag after Com delimiter as header if line-prefix is whitespace-only, deleted `_is_header_author_text` and `prose_words` -> VERDICT: PASS
 
-### Task 3 — Item B9: Uniform Failure Envelope with Machine-Readable Blame
+**Verifier Findings:**
+1. DISCREPANCY `python/src/adeu/mcp_components/_response_builders.py:927`: `com_header_re` anchors headers to `^`/`\n`, so `{>>[Chg:1 delete] Jane Doe [Com:1] Bob Ross @ <iso>: Hello<<}` returns `Chg:1 del "Jane Doe [Com:1] Bob Ross @ 2026-08-07T17:26:34Z: Hello"` and silently drops `Com:1`.
+2. DISCREPANCY `python/src/adeu/mcp_components/_response_builders.py:935`: `chg_section = bubble_raw[:first_com_start]` discards every `Chg` header positioned after a `Com` header: `{>>[Com:1] Bob @ <iso>: note\n[Chg:1 delete] Jane<<}` returns only `Com:1 Bob "note [Chg:1 delete] Jane"`, omitting `Chg:1 del Jane`.
+3. DISCREPANCY `python/src/adeu/mcp_components/_response_builders.py:927`: fallback author group `([^@:\n]+?)` truncates at first `@` or `:`, so `[Com:1] bob@example.com @ <iso>: Hi` yields author `bob` and `[Com:1] Dr: Smith @ <iso>: hi` yields author `Dr`.
+
+**Fix Direction:**
+- Tokenise the bubble once over `\[(Chg|Com):(\w+)...\]` and bound each record by the next token; keep the record's own text as its author/body source.
+- Decide header-vs-prose by position in token stream: tokens at or before the first recognised `Com` header are headers; a `Chg` token appearing after a `Com` header's `:` delimiter is prose only if it is not itself followed by header-shaped author text.
+- Recognise a `Com` header irrespective of preceding newline, keeping ISO-safe delimiter `:(?=\s|\Z)`.
+- Widen author group so it stops at header delimiter, not at first `@`/`:`, then strip trailing `@ <date>` from captured span.
+- DO NOT re-anchor with `(?:^|\n)` plus a `bubble_raw[:first_com_start]` cut, fall back to `rest.split("@")[0].split(":")[0]`, or relax probe-covered assertions.
+
+### Task 3 — Item B9: Uniform Failure Envelope with Machine-Readable Blame (COMPLETED)
 **Goal.** Both schema and engine validation errors emit `{"error", "failed":[{"index","reason"}], "message"}` with 0-based batch indices.
+**Status.** Completed & Verified.
 **Files.**
 - `python/src/adeu/payloads.py` (new)
 - `python/src/adeu/redline/engine.py`
