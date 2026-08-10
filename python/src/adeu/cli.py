@@ -572,7 +572,9 @@ _CHANGE_TYPE_REFERENCE = (
 
 
 def _extract_schema_failures(exc: "ValidationError") -> tuple[list[tuple[int, str]], str]:
-    failed: list[tuple[int, str]] = []
+    from collections import defaultdict
+
+    reasons_by_idx: dict[int, list[str]] = defaultdict(list)
     lines: list[str] = []
     seen: set = set()
     for err in exc.errors():
@@ -601,11 +603,13 @@ def _extract_schema_failures(exc: "ValidationError") -> tuple[list[tuple[int, st
             reason = f"field {where!r}: {detail}" if where else detail
             msg = f"{item_no}{f' field {where!r}' if where else ''}: {detail}."
 
-        failed.append((idx, reason))
+        if reason not in reasons_by_idx[idx]:
+            reasons_by_idx[idx].append(reason)
         if msg not in seen:
             seen.add(msg)
             lines.append(f"  - {msg}")
 
+    failed: list[tuple[int, str]] = [(idx, "; ".join(reasons)) for idx, reasons in reasons_by_idx.items()]
     prose = "The changes file is not a valid edit batch:\n" + "\n".join(lines) + "\n\n" + _CHANGE_TYPE_REFERENCE
     return failed, prose
 

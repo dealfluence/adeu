@@ -124,9 +124,15 @@ McpBatchChanges = Annotated[
 
 
 class RejectedNotes(List[str]):
-    def __init__(self, notes: List[str], pairs: List[tuple[int, str]]):
+    def __init__(
+        self,
+        notes: List[str],
+        pairs: List[tuple[int, str]],
+        valid_indices: Optional[List[int]] = None,
+    ):
         super().__init__(notes)
         self.pairs = pairs
+        self.valid_indices = valid_indices if valid_indices is not None else []
 
 
 def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], RejectedNotes]:
@@ -138,7 +144,8 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], RejectedNote
     Returns (valid_changes, rejected_notes):
       - valid_changes: every element that validated, in original order.
       - rejected_notes: human-readable "changes[i]: <reason>" strings for every
-        element that failed, with `.pairs` containing (index, reason) tuples.
+        element that failed, with `.pairs` containing (index, reason) tuples,
+        and `.valid_indices` containing original 0-based indices of valid_changes.
 
     Tolerates the same three input shapes as before:
       1. List of already-validated DocumentChange instances (fast path; skips
@@ -159,10 +166,10 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], RejectedNote
         # whole-batch rejection.
         try:
             validated = _DOCUMENT_CHANGE_LIST_ADAPTER.validate_python(changes)
-            return validated, RejectedNotes([], [])
+            return validated, RejectedNotes([], [], valid_indices=list(range(len(validated))))
         except Exception as e:
             msg = _summarize_validation_error(e)
-            return [], RejectedNotes([f"changes: {msg}"], [(0, msg)])
+            return [], RejectedNotes([f"changes: {msg}"], [(0, msg)], valid_indices=[])
 
     # If every element is already a DocumentChange instance, skip revalidation.
     if changes and all(
@@ -179,22 +186,24 @@ def _normalize_changes(changes: Any) -> tuple[List[DocumentChange], RejectedNote
         )
         for c in changes
     ):
-        return changes, RejectedNotes([], [])  # type: ignore[return-value]
+        return changes, RejectedNotes([], [], valid_indices=list(range(len(changes))))  # type: ignore[return-value]
 
     coerced = coerce_stringified_changes(changes)
 
     valid: List[DocumentChange] = []
+    valid_indices: List[int] = []
     rejected_notes: List[str] = []
     rejected_pairs: List[tuple[int, str]] = []
     for i, item in enumerate(coerced):
         try:
             valid.append(_SINGLE_CHANGE_ADAPTER.validate_python(item))
+            valid_indices.append(i)
         except Exception as e:
             reason = _summarize_validation_error(e)
             rejected_notes.append(f"changes[{i}]: {reason}")
             rejected_pairs.append((i, reason))
 
-    return valid, RejectedNotes(rejected_notes, rejected_pairs)
+    return valid, RejectedNotes(rejected_notes, rejected_pairs, valid_indices=valid_indices)
 
 
 def _summarize_validation_error(exc: Exception) -> str:
@@ -534,7 +543,7 @@ async def _process_document_batch_disk(
     ctx: Context,
     changes: List[DocumentChange],
     output_path: Optional[str],
-    rejected_notes: Optional[List[str]] = None,
+    rejected_notes: Optional[RejectedNotes] = None,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -584,8 +593,9 @@ async def _process_document_batch_disk(
         stream = read_file_bytes(original_docx_path)
         engine = RedlineEngine(stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
+        valid_indices = getattr(rejected_notes, "valid_indices", None)
         try:
-            stats = engine.process_batch(changes)
+            stats = engine.process_batch(changes, original_indices=valid_indices)
         except BatchValidationError as e:
             return False, e, "", ""
 
@@ -613,11 +623,23 @@ async def _process_document_batch_disk(
         if not success:
             exc = result_data
             if isinstance(exc, BatchValidationError):
-                err_list = exc.errors
-                failed_pairs = exc.failed
+                err_list = list(exc.errors)
+                failed_pairs = list(exc.failed)
             else:
                 err_list = exc if isinstance(exc, list) else [str(exc)]
                 failed_pairs = []
+
+            if rejected_notes and hasattr(rejected_notes, "pairs") and rejected_notes.pairs:
+                seen_indices = {i for i, _ in failed_pairs}
+                for i, reason in rejected_notes.pairs:
+                    if i not in seen_indices:
+                        failed_pairs.append((i, reason))
+                        seen_indices.add(i)
+                failed_pairs.sort(key=lambda x: x[0])
+                rej_notes_list = (
+                    getattr(rejected_notes, "notes", []) if hasattr(rejected_notes, "notes") else list(rejected_notes)
+                )
+                err_list = list(rej_notes_list) + [e for e in err_list if e not in rej_notes_list]
 
             await ctx.error("Batch validation failed", extra={"error_count": len(err_list)})
             env = failure_envelope(

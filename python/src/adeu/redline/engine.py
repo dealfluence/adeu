@@ -2494,11 +2494,11 @@ class RedlineEngine:
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
 
-    def process_batch(self, changes: List[DocumentChange]) -> dict:
+    def process_batch(self, changes: List[DocumentChange], original_indices: Optional[List[int]] = None) -> dict:
         """
         Processes a unified batch of actions and edits safely.
         """
-        return self._process_batch_internal(changes)
+        return self._process_batch_internal(changes, original_indices=original_indices)
 
     def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
         page = 1
@@ -2526,16 +2526,22 @@ class RedlineEngine:
                         break
         return " > ".join(path) if path else "", page
 
-    def _process_batch_internal(self, changes: List[DocumentChange]) -> dict:
+    def _process_batch_internal(
+        self, changes: List[DocumentChange], original_indices: Optional[List[int]] = None
+    ) -> dict:
         """
         Internal execution engine for batches of edits and actions.
         """
         self.skipped_details = []
         actions_with_idx = [
-            (i, c) for i, c in enumerate(changes) if isinstance(c, (AcceptChange, RejectChange, ReplyComment))
+            (original_indices[i] if original_indices else i, c)
+            for i, c in enumerate(changes)
+            if isinstance(c, (AcceptChange, RejectChange, ReplyComment))
         ]
         edits_with_idx = [
-            (i, c) for i, c in enumerate(changes) if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
+            (original_indices[i] if original_indices else i, c)
+            for i, c in enumerate(changes)
+            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
         ]
 
         actions = [c for _, c in actions_with_idx]
@@ -2782,7 +2788,10 @@ class RedlineEngine:
             # COMMENT_ONLY / URL_RETARGET consume no revision ids.
 
     def apply_edits(
-        self, edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]], page_offsets: Optional[List[int]] = None
+        self,
+        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]],
+        page_offsets: Optional[List[int]] = None,
+        index_offset: int = 0,
     ) -> tuple[int, int]:
         if page_offsets is None:
             from adeu.pagination import paginate, split_structural_appendix
@@ -2808,7 +2817,8 @@ class RedlineEngine:
         resolved_edits = []
 
         # Pre-resolve phase: locate all edits against initial clean state
-        for edit in edits:
+        for idx, edit in enumerate(edits):
+            edit_idx = index_offset + idx
             if edit._resolved_start_idx is not None or edit._match_start_index is not None:
                 if edit._resolved_start_idx is None:
                     edit._resolved_start_idx = edit._match_start_index
@@ -2888,7 +2898,7 @@ class RedlineEngine:
                     self.skipped_details.append(f"- Failed to apply structural edit targeting: '{target_snippet}...'")
             else:
                 try:
-                    resolved = self._pre_resolve_heuristic_edit(edit)
+                    resolved = self._pre_resolve_heuristic_edit(edit, index_offset=edit_idx)
                 except RegexTimeoutError as e:
                     # Direct apply_edits callers bypass validate_edits; the
                     # time budget must still fail cleanly here (QA F5).
@@ -3362,7 +3372,9 @@ class RedlineEngine:
         proxy_edit._target_paragraph = target_para  # type: ignore[attr-defined]
         return proxy_edit
 
-    def _pre_resolve_heuristic_edit(self, edit: ModifyText) -> Union[ModifyText, List[ModifyText], None]:
+    def _pre_resolve_heuristic_edit(
+        self, edit: ModifyText, index_offset: int = 0
+    ) -> Union[ModifyText, List[ModifyText], None]:
         if not edit.target_text:
             return None
 
@@ -3480,7 +3492,13 @@ class RedlineEngine:
                 continue
 
             res = self._resolve_single_match(
-                edit, start_idx, match_len, active_mapper, actual_doc_text, current_effective_new_text
+                edit,
+                start_idx,
+                match_len,
+                active_mapper,
+                actual_doc_text,
+                current_effective_new_text,
+                index_offset=index_offset,
             )
             if isinstance(res, list):
                 all_sub_edits.extend(res)
@@ -3659,7 +3677,16 @@ class RedlineEngine:
 
         return sub_edits
 
-    def _resolve_single_match(self, edit, start_idx, match_len, active_mapper, actual_doc_text, effective_new_text):
+    def _resolve_single_match(
+        self,
+        edit,
+        start_idx,
+        match_len,
+        active_mapper,
+        actual_doc_text,
+        effective_new_text,
+        index_offset: int = 0,
+    ):
         if "](" in actual_doc_text:
             t_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", actual_doc_text))
             n_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", effective_new_text))
@@ -3898,7 +3925,7 @@ class RedlineEngine:
                 if before.strip() and after.strip():
                     raise BatchValidationError(
                         [
-                            "- Edit Failed: target_text spans a paragraph "
+                            f"- Edit {index_offset + 1} Failed: target_text spans a paragraph "
                             "boundary with body text on both sides. "
                             "The paragraph break is a structural element, "
                             "not literal text, so it cannot be replaced as "
@@ -3912,7 +3939,7 @@ class RedlineEngine:
                 if before.strip() and after.strip():
                     raise BatchValidationError(
                         [
-                            "- Edit Failed: target_text spans a paragraph "
+                            f"- Edit {index_offset + 1} Failed: target_text spans a paragraph "
                             "boundary with body text on both sides. "
                             "The paragraph break is a structural element, "
                             "not literal text, so it cannot be replaced as a single span "
@@ -4627,7 +4654,9 @@ class RedlineEngine:
         output.seek(0)
         return output
 
-    def _duplicate_revision_id_error(self, target_id: str, action_type: str) -> Optional[str]:
+    def _duplicate_revision_id_error(
+        self, target_id: str, action_type: str, batch_idx: Optional[int] = None
+    ) -> Optional[str]:
         """
         Refuses accept/reject on a w:id shared by revisions from DIFFERENT
         authors. Chg:N identifiers are the raw w:id values; uniqueness is
@@ -4646,8 +4675,9 @@ class RedlineEngine:
         authors = sorted({n.get(qn("w:author")) or "Unknown" for n in nodes})
         if len(authors) <= 1:
             return None
+        prefix = f"- Action {batch_idx + 1} Failed: " if batch_idx is not None else "- Failed to apply action: "
         return (
-            f"- Failed to apply action: {action_type} on Chg:{target_id} is ambiguous. The document "
+            f"{prefix}{action_type} on Chg:{target_id} is ambiguous. The document "
             f"contains {len(nodes)} tracked-change elements sharing w:id={target_id} from different "
             f"authors ({', '.join(authors)}) — duplicate revision IDs produced outside this engine "
             "(e.g. by a document merge or copy-paste). Acting on this ID would resolve all of them "
@@ -4682,7 +4712,7 @@ class RedlineEngine:
             rendered += f", … (+{len(ids) - len(shown)} more)"
         return rendered
 
-    def _action_not_found_error(self, raw_id: str, target_id: str, act) -> str:
+    def _action_not_found_error(self, raw_id: str, target_id: str, act, batch_idx: Optional[int] = None) -> str:
         """
         Self-service diagnostic for accept/reject/reply on an id that resolved
         nothing. The other errors in this engine explain WHY and HOW to recover
@@ -4699,13 +4729,14 @@ class RedlineEngine:
             "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current "
             "change (Chg:) and comment (Com:) ids."
         )
+        prefix = f"- Action {batch_idx + 1} Failed: " if batch_idx is not None else "- Failed to apply action: "
 
         if isinstance(act, ReplyComment):
             # Echo the id the caller passed (normalizing a bare id to Com:N).
             echo = raw_id if has_prefix else f"Com:{target_id}"
             if target_id in change_ids:
                 return (
-                    f"- Failed to apply action: reply on {echo} — Chg:{target_id} is a tracked-change "
+                    f"{prefix}reply on {echo} — Chg:{target_id} is a tracked-change "
                     "id, not a comment. `reply` adds to an existing comment thread (Com:…); to comment "
                     "on a change instead, apply a modify with a `comment`. " + find_hint
                 )
@@ -4714,13 +4745,13 @@ class RedlineEngine:
                 if comment_ids
                 else "This document has no comments to reply to. "
             )
-            return f"- Failed to apply action: reply on {echo} — no comment with that id exists. " + avail + find_hint
+            return f"{prefix}reply on {echo} — no comment with that id exists. " + avail + find_hint
 
         # AcceptChange / RejectChange
         echo = raw_id if has_prefix else f"Chg:{target_id}"
         if target_id in comment_ids:
             return (
-                f"- Failed to apply action: {act.type} on {echo} — Com:{target_id} is a comment id, "
+                f"{prefix}{act.type} on {echo} — Com:{target_id} is a comment id, "
                 f"not a tracked change. accept/reject act on tracked changes (Chg:…); to respond to a "
                 f"comment use `reply`. " + find_hint
             )
@@ -4730,7 +4761,7 @@ class RedlineEngine:
             else "This document has no tracked changes. "
         )
         return (
-            f"- Failed to apply action: {act.type} on {echo} — no tracked change with that id exists "
+            f"{prefix}{act.type} on {echo} — no tracked change with that id exists "
             "(it may already have been accepted or rejected, or the id is stale). " + avail + find_hint
         )
 
@@ -4893,7 +4924,7 @@ class RedlineEngine:
                 continue
 
             if is_change and isinstance(act, (AcceptChange, RejectChange)):
-                dup_error = self._duplicate_revision_id_error(target_id, act.type)
+                dup_error = self._duplicate_revision_id_error(target_id, act.type, batch_idx=batch_idx)
                 if dup_error:
                     self.skipped_details.append(dup_error)
                     skipped += 1
@@ -4937,7 +4968,7 @@ class RedlineEngine:
                             "change. This note is informational — the action itself succeeded."
                         )
             else:
-                self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act))
+                self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act, batch_idx=batch_idx))
                 skipped += 1
 
         if applied:
