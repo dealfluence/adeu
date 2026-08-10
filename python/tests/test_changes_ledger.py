@@ -517,3 +517,46 @@ def test_ledger_parses_author_with_colon():
     com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
     assert len(com_lines) == 1
     assert "Dr: Smith" in com_lines[0]
+
+
+def test_chg_header_after_com_body_with_lowercase_author():
+    text = "Some text {-- deleted --}{>>[Com:1] Bob @ 2026-08-07T17:26:34Z: note\n[Chg:1 delete] jsmith<<}"
+    res = build_changes_response(text, "lower_author_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    chg_lines = [line for line in content.splitlines() if line.startswith("Chg:1")]
+    assert len(com_lines) == 1
+    assert "Bob" in com_lines[0]
+    assert '"note"' in com_lines[0]
+    assert len(chg_lines) == 1
+    assert "del" in chg_lines[0]
+    assert "jsmith" in chg_lines[0]
+    assert '"deleted"' in chg_lines[0]
+
+
+def test_chg_header_after_com_body_with_lowercase_name_particle():
+    text = "Some text {-- deleted --}{>>[Com:1] Bob @ 2026-08-07T17:26:34Z: note\n[Chg:1 delete] de Vries<<}"
+    res = build_changes_response(text, "particle_author_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    chg_lines = [line for line in content.splitlines() if line.startswith("Chg:1")]
+    assert len(com_lines) == 1
+    assert '"note"' in com_lines[0]
+    assert len(chg_lines) == 1
+    assert "del" in chg_lines[0]
+    assert "de Vries" in chg_lines[0]
+    assert '"deleted"' in chg_lines[0]
+
+
+def test_mid_line_chg_mention_stays_in_comment_body():
+    text = (
+        "Some text {++ inserted ++}{>>[Com:1] Bob @ 2026-08-07T17:26:34Z: "
+        "Please see [Chg:4 insert] Section 5 for details<<}"
+    )
+    res = build_changes_response(text, "mid_line_mention_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    assert len(com_lines) == 1
+    assert "Bob" in com_lines[0]
+    assert '"Please see [Chg:4 insert] Section 5 for details"' in com_lines[0]
+    assert not any(line.startswith("Chg:") for line in content.splitlines())

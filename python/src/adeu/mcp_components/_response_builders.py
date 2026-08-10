@@ -886,67 +886,6 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
     )
 
 
-def _is_header_author_text(text: str) -> bool:
-    s = text.strip()
-    if not s:
-        return True
-    if s.startswith("("):
-        return True
-    if s[0] in ".,;!?/\\#":
-        return False
-    first_word = re.split(r"\s+", s)[0]
-    prose_words = {
-        "for",
-        "in",
-        "to",
-        "at",
-        "by",
-        "with",
-        "from",
-        "on",
-        "of",
-        "and",
-        "or",
-        "is",
-        "was",
-        "are",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "the",
-        "a",
-        "an",
-        "this",
-        "that",
-        "these",
-        "those",
-        "details",
-        "below",
-        "above",
-        "see",
-        "please",
-        "check",
-        "refer",
-        "note",
-        "info",
-        "information",
-        "regarding",
-        "about",
-    }
-    if first_word.lower() in prose_words:
-        return False
-    if first_word[0].islower() and "@" not in first_word:
-        return False
-    return True
-
-
 def _parse_com_header(slice_text: str) -> tuple[str, str, int]:
     m1 = re.match(r"^\s*(.*?)\s*@\s*(\d{4}\S*):(?=\s|\Z)\s*(.*)$", slice_text, re.DOTALL)
     if m1:
@@ -1028,13 +967,10 @@ def build_changes_response(
                 if tm.start() <= first_com_delim_pos:
                     header_tokens.append(tm)
                 else:
-                    next_tm_start = len(bubble_raw)
-                    for nxt in tag_matches:
-                        if nxt.start() > tm.start():
-                            next_tm_start = nxt.start()
-                            break
-                    after_chg = bubble_raw[tm.end() : next_tm_start]
-                    if _is_header_author_text(after_chg):
+                    # Inside a comment body a [Chg:N] tag is only a header when it
+                    # opens its own line; mid-line mentions are prose and stay put.
+                    line_start = bubble_raw.rfind("\n", 0, tm.start()) + 1
+                    if not bubble_raw[line_start : tm.start()].strip():
                         header_tokens.append(tm)
 
         if not header_tokens:
