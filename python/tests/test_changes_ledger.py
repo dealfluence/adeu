@@ -483,3 +483,37 @@ def test_fallback_comment_parser_iso_timestamp():
     assert len(com_lines) == 1
     assert "Bob Ross" in com_lines[0]
     assert '"Is it really 17:26:34Z?"' in com_lines[0]
+
+
+def test_ledger_parses_chg_and_com_in_same_bubble_chg_first():
+    text = "Some text {-- deleted --}{>>[Chg:1 delete] Jane Doe [Com:1] Bob Ross @ 2026-08-07T17:26:34Z: Hello<<}"
+    res = build_changes_response(text, "chg_com_test.docx", comments_data=None)
+    content = str(res.content)
+    assert any(line.startswith("Chg:1") for line in content.splitlines())
+    assert any(line.startswith("Com:1") for line in content.splitlines())
+
+
+def test_ledger_parses_chg_and_com_in_same_bubble_com_first():
+    text = "Some text {-- deleted --}{>>[Com:1] Bob @ 2026-08-07T17:26:34Z: note\n[Chg:1 delete] Jane<<}"
+    res = build_changes_response(text, "com_chg_test.docx", comments_data=None)
+    content = str(res.content)
+    assert any(line.startswith("Com:1") for line in content.splitlines())
+    assert any(line.startswith("Chg:1") for line in content.splitlines())
+
+
+def test_ledger_parses_email_author():
+    text = "Some text {== format ==}{>>[Com:1] bob@example.com @ 2026-08-07T17:26:34Z: Hi<<}"
+    res = build_changes_response(text, "email_author_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    assert len(com_lines) == 1
+    assert "bob@example.com" in com_lines[0]
+
+
+def test_ledger_parses_author_with_colon():
+    text = "Some text {== format ==}{>>[Com:1] Dr: Smith @ 2026-08-07T17:26:34Z: hi<<}"
+    res = build_changes_response(text, "colon_author_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    assert len(com_lines) == 1
+    assert "Dr: Smith" in com_lines[0]

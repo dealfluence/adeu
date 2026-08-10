@@ -886,6 +886,86 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
     )
 
 
+def _is_header_author_text(text: str) -> bool:
+    s = text.strip()
+    if not s:
+        return True
+    if s.startswith("("):
+        return True
+    if s[0] in ".,;!?/\\#":
+        return False
+    first_word = re.split(r"\s+", s)[0]
+    prose_words = {
+        "for",
+        "in",
+        "to",
+        "at",
+        "by",
+        "with",
+        "from",
+        "on",
+        "of",
+        "and",
+        "or",
+        "is",
+        "was",
+        "are",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "these",
+        "those",
+        "details",
+        "below",
+        "above",
+        "see",
+        "please",
+        "check",
+        "refer",
+        "note",
+        "info",
+        "information",
+        "regarding",
+        "about",
+    }
+    if first_word.lower() in prose_words:
+        return False
+    if first_word[0].islower() and "@" not in first_word:
+        return False
+    return True
+
+
+def _parse_com_header(slice_text: str) -> tuple[str, str, int]:
+    m1 = re.match(r"^\s*(.*?)\s*@\s*(\d{4}\S*):(?=\s|\Z)\s*(.*)$", slice_text, re.DOTALL)
+    if m1:
+        author = m1.group(1).strip()
+        body = m1.group(3)
+        delim_offset = len(slice_text) - len(body)
+        return author, body, delim_offset
+
+    m2 = re.match(r"^\s*(?:(.*?):(?=\s|\Z)\s*|:\s*)(.*)$", slice_text, re.DOTALL)
+    if m2:
+        raw_author = m2.group(1)
+        body = m2.group(2)
+        delim_offset = len(slice_text) - len(body)
+        author = raw_author.strip() if raw_author else ""
+        return author, body, delim_offset
+
+    return "", slice_text.strip(), -1
+
+
 def build_changes_response(
     text: str,
     file_path: str,
@@ -913,6 +993,8 @@ def build_changes_response(
     com_entries: dict[str, _LedgerEntry] = {}
     pair_map: dict[str, list[str]] = defaultdict(list)
 
+    TAG_RE = re.compile(r"\[(Chg|Com):(\w+)(?:\s+(insert|delete|format))?\]")
+
     for m in re.finditer(r"\{>>(.*?)<<\}", body, re.DOTALL):
         b_start = m.start()
         p_num = _offset_to_page(b_start, page_offsets)
@@ -924,35 +1006,71 @@ def build_changes_response(
         all_del_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{--"]
         all_fmt_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{=="]
 
-        com_header_re = re.compile(r"(?:^|\n)\s*\[Com:(\w+)\]\s*(?:([^@:\n]+?)(?:\s*@\s*(.*?))?:(?=\s|\Z)\s*|:\s*)")
-        com_matches = list(com_header_re.finditer(bubble_raw))
+        tag_matches = list(TAG_RE.finditer(bubble_raw))
+        if not tag_matches:
+            continue
 
-        if com_matches:
-            first_com_start = bubble_raw.find("[Com:", com_matches[0].start())
-        else:
-            first_com_start = len(bubble_raw)
+        first_com_delim_pos = float("inf")
+        for tm in tag_matches:
+            if tm.group(1) == "Com":
+                slice_after = bubble_raw[tm.end() :]
+                _auth, _body, d_off = _parse_com_header(slice_after)
+                if d_off != -1:
+                    first_com_delim_pos = tm.end() + d_off
+                    break
 
-        chg_section = bubble_raw[:first_com_start]
-        chg_matches = list(re.finditer(r"\[Chg:(\w+)(?:\s+(insert|delete|format))?\]", chg_section))
+        header_tokens = []
+        for tm in tag_matches:
+            kind = tm.group(1)
+            if kind == "Com":
+                header_tokens.append(tm)
+            elif kind == "Chg":
+                if tm.start() <= first_com_delim_pos:
+                    header_tokens.append(tm)
+                else:
+                    next_tm_start = len(bubble_raw)
+                    for nxt in tag_matches:
+                        if nxt.start() > tm.start():
+                            next_tm_start = nxt.start()
+                            break
+                    after_chg = bubble_raw[tm.end() : next_tm_start]
+                    if _is_header_author_text(after_chg):
+                        header_tokens.append(tm)
 
-        if not chg_matches and not com_matches:
+        if not header_tokens:
             continue
 
         parsed_chg_items = []
-        for i, tm in enumerate(chg_matches):
-            cid = tm.group(1)
-            raw_type = tm.group(2)
-            start_pos = tm.end()
-            end_pos = chg_matches[i + 1].start() if i + 1 < len(chg_matches) else len(chg_section)
-            rest_text = chg_section[start_pos:end_pos].strip()
-            parsed_chg_items.append(
-                {
-                    "kind": "Chg",
-                    "cid": cid,
-                    "raw_type": raw_type,
-                    "rest": rest_text,
-                }
-            )
+        parsed_com_items = []
+
+        for i, tm in enumerate(header_tokens):
+            kind = tm.group(1)
+            cid = tm.group(2)
+            raw_type = tm.group(3)
+
+            next_start = header_tokens[i + 1].start() if i + 1 < len(header_tokens) else len(bubble_raw)
+            token_slice = bubble_raw[tm.end() : next_start]
+
+            if kind == "Chg":
+                rest_text = token_slice.strip()
+                parsed_chg_items.append(
+                    {
+                        "kind": "Chg",
+                        "cid": cid,
+                        "raw_type": raw_type,
+                        "rest": rest_text,
+                    }
+                )
+            elif kind == "Com":
+                c_author, c_body, _ = _parse_com_header(token_slice)
+                parsed_com_items.append(
+                    {
+                        "kind": "Com",
+                        "cid": cid,
+                        "parsed_author": c_author,
+                        "body_text": c_body.strip(),
+                    }
+                )
 
         shared_chg_rest = next((item["rest"] for item in reversed(parsed_chg_items) if item["rest"]), "")
         for item in parsed_chg_items:
@@ -969,22 +1087,6 @@ def build_changes_response(
             else:
                 change_type = "del" if all_del_snips else ("fmt" if all_fmt_snips else "ins")
             item["change_type"] = change_type
-
-        parsed_com_items = []
-        for i, cm_match in enumerate(com_matches):
-            cid = cm_match.group(1)
-            parsed_author = cm_match.group(2).strip() if cm_match.group(2) else ""
-            body_start = cm_match.end()
-            body_end = com_matches[i + 1].start() if i + 1 < len(com_matches) else len(bubble_raw)
-            body_text = bubble_raw[body_start:body_end].strip()
-            parsed_com_items.append(
-                {
-                    "kind": "Com",
-                    "cid": cid,
-                    "parsed_author": parsed_author,
-                    "body_text": body_text,
-                }
-            )
 
         parsed_items = parsed_chg_items + parsed_com_items
 
