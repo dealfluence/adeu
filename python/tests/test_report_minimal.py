@@ -2,6 +2,8 @@ import io
 import json
 import re
 
+import pytest
+
 from adeu.payloads import shrink_batch_stats
 from tests.utils import approx_tokens, extract_content, get_mock_ctx, run_async
 
@@ -202,6 +204,72 @@ def test_minimal_report_token_budget(tmp_path):
         assert approx_tokens(dumped) <= 40, (
             f"Edit JSON exceeded 40 approx-tokens budget ({len(dumped)} chars): {dumped}"
         )
+
+
+def _fanout_batch(tmp_path, filler, page_breaks=False, occurrences=6):
+    """
+    A real match_mode="all" fan-out over `occurrences` separated paragraphs.
+    `filler` controls the gap between hits, and so whether the engine renders
+    one merged preview window or one window per occurrence joined by
+    separators; `page_breaks` spreads the hits over one page each, which is
+    what makes the report's `pages` list long. Every shape must be budgeted.
+    """
+    from docx import Document
+    from docx.enum.text import WD_BREAK
+
+    from adeu.models import DocumentChange, ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    doc_path = tmp_path / "fanout.docx"
+    doc = Document()
+    doc.add_heading("Article IX Miscellaneous Provisions", level=1)
+    for i in range(occurrences):
+        para = doc.add_paragraph(f"Clause {i + 1}: The Consultant shall deliver the work product.{filler}")
+        if page_breaks:
+            para.add_run().add_break(WD_BREAK.PAGE)
+    doc.save(doc_path)
+
+    engine = RedlineEngine(io.BytesIO(doc_path.read_bytes()), author="Tester")
+    changes: list[DocumentChange] = [
+        ModifyText(
+            type="modify",
+            target_text="Consultant",
+            new_text="Contractor",
+            match_mode="all",
+            comment=None,
+        )
+    ]
+    return engine.process_batch(changes)
+
+
+_SPACED_CLAUSE = (
+    " Such delivery shall be subject to the terms of this Agreement, to any"
+    " schedule agreed between the parties and to applicable law."
+)
+
+
+@pytest.mark.parametrize(
+    ("filler", "page_breaks"),
+    [
+        ("", False),
+        (_SPACED_CLAUSE, False),
+        (_SPACED_CLAUSE, True),
+    ],
+    ids=["merged-window", "separate-windows", "one-page-each"],
+)
+def test_minimal_report_token_budget_multi_occurrence(tmp_path, filler, page_breaks):
+    """
+    A fan-out preview is many context windows, not one: the per-edit budget
+    still holds, and what survives is still valid evidence.
+    """
+    shrunk = shrink_batch_stats(_fanout_batch(tmp_path, filler, page_breaks))
+
+    edit = shrunk["edits"][0]
+    dumped = json.dumps(edit)
+    assert approx_tokens(dumped) <= 40, f"Fan-out edit exceeded 40 approx-tokens budget ({len(dumped)} chars): {dumped}"
+    markup = edit["critic_markup"]
+    _assert_balanced_critic_markup(markup)
+    assert _BUBBLE_RE.search(markup), f"fan-out preview kept no changed span: {markup!r}"
 
 
 def test_minimal_report_keeps_valid_critic_markup(tmp_path):

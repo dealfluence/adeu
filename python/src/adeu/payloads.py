@@ -32,6 +32,11 @@ _UNBUDGETED_FIELDS = ("error", "warning")
 # evidence of anything.
 _MIN_BUBBLE_BODY = 8
 
+# Stands in for document context dropped from a preview. ASCII on purpose:
+# json.dumps escapes a "…" to "\u2026", six characters of budget for one
+# character of meaning.
+_ELISION = "..."
+
 
 def failure_envelope(
     code: str,
@@ -81,23 +86,57 @@ def _clamp_bubble(bubble: str, body_cap: int) -> str:
     return bubble[:_CRITIC_DELIM_LEN] + clamp_text(body, body_cap) + bubble[-_CRITIC_DELIM_LEN:]
 
 
+def _bubble_segments(markup: str) -> List[str]:
+    """
+    A preview's bubbles in document order, each carrying an elision marker in
+    place of the context that separated it from the previous bubble (adjacent
+    bubbles — the {--old--}{++new++} of one occurrence — stay welded together).
+
+    Joining these is what bounds a match_mode="all" fan-out: its preview is up
+    to ten windows of 30-chars-a-side context, joined by separators and
+    interleaved with whole clauses of untouched text. None of that is reachable
+    by clamping bubble bodies, so dropping the outer context alone left such a
+    preview essentially unshrinkable.
+    """
+    segments: List[str] = []
+    prev_end: Optional[int] = None
+    for match in _CRITIC_BUBBLE_RE.finditer(markup):
+        separator = "" if prev_end is None or prev_end == match.start() else _ELISION
+        segments.append(separator + match.group(0))
+        prev_end = match.end()
+    return segments
+
+
 def _shrink_critic_markup(markup: str, cap: int) -> str:
     """
     Bounds a CriticMarkup preview to roughly `cap` characters without ever
-    cutting a bubble open: surrounding context goes first, then each bubble's
-    body is clamped in place. Every {--…--}/{++…++}/{==…==}/{>>…<<} therefore
-    stays balanced — a bare delimiter fragment corrupts the markup for every
-    consumer, including this package's own preview regexes (AI_CONTEXT.md).
+    cutting a bubble open. Context is surrendered first — outside the bubbles,
+    then between them — next the trailing bubbles, counted off in a
+    "(+N more spans)" note so the preview never implies the edit marked up less
+    than it did, and only then are the surviving bodies clamped in place. The
+    first bubble is kept whichever rung is reached, and every
+    {--…--}/{++…++}/{==…==}/{>>…<<} stays balanced: a bare delimiter fragment
+    corrupts the markup for every consumer, including this package's own
+    preview regexes (AI_CONTEXT.md).
     """
     span = _changed_span(markup)
     if len(span) <= cap:
         return span
-    bubbles = _CRITIC_BUBBLE_RE.findall(span)
-    if not bubbles:
+    segments = _bubble_segments(span)
+    if not segments:
         # No markup to protect: a plain-text preview is safe to cut.
         return clamp_text(span, cap)
-    body_cap = max(_MIN_BUBBLE_BODY, cap // len(bubbles) - 2 * _CRITIC_DELIM_LEN)
-    return _CRITIC_BUBBLE_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), span)
+
+    kept = len(segments)
+    shrunk = "".join(segments)
+    while len(shrunk) > cap and kept > 1:
+        kept -= 1
+        shrunk = "".join(segments[:kept]) + f"{_ELISION}(+{len(segments) - kept} more spans)"
+    if len(shrunk) <= cap:
+        return shrunk
+
+    body_cap = max(_MIN_BUBBLE_BODY, cap // kept - 2 * _CRITIC_DELIM_LEN)
+    return _CRITIC_BUBBLE_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), shrunk)
 
 
 def _within_budget(edit: Dict[str, Any]) -> bool:
@@ -118,7 +157,9 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
     says where the edit landed, so the preview's context and then the heading
     path are surrendered before a CriticMarkup bubble is touched. Only when
     even the bare bubbles overrun the budget are their bodies clamped — and
-    then in place, so the markup stays valid.
+    then in place, so the markup stays valid. `pages` itself goes last, and
+    only when the preview is already at its floor: a fan-out across a dozen
+    pages is a page list no preview shrink can pay for.
     """
     if _within_budget(edit):
         return
@@ -146,6 +187,12 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
         while preview_cap > _MIN_BUBBLE_BODY and not _within_budget(edit):
             preview_cap = preview_cap * 4 // 5
             edit["critic_markup"] = _shrink_critic_markup(markup, preview_cap)
+
+    if "pages" in edit and not _within_budget(edit):
+        # Dropped whole, never truncated: a shortened page list would claim the
+        # edit landed on fewer pages than it did, whereas an absent one claims
+        # nothing and `occurrences_modified` still reports the fan-out size.
+        del edit["pages"]
 
 
 def _minimal_edit(edit: Dict[str, Any]) -> Dict[str, Any]:
