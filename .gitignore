@@ -221,6 +221,7 @@ AI_SESSION.md
 # Kilo AI Editor
 .kilo/
 .kilocodeignore
+.worktrees/
 
 # Node / Monorepo
 node_modules/
