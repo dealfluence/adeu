@@ -1378,10 +1378,10 @@ def handle_apply(args):
             for i, report in enumerate(stats["edits"]):
                 status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
                 print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
-                if report.get("target_text"):
+                if "target_text" in report:
                     print(f"  Target: '{report['target_text']}'", file=sys.stderr)
                 edit_type = report.get("type", "modify")
-                if report.get("new_text"):
+                if "new_text" in report:
                     if edit_type == "insert_row":
                         print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
                     elif edit_type == "delete_row":

@@ -1,3 +1,4 @@
+import io
 import json
 
 from adeu.payloads import shrink_batch_stats
@@ -99,52 +100,102 @@ def test_failed_edit_keeps_full_error_and_stub_target():
     assert "clean_text" not in edit
 
 
-def test_minimal_report_token_budget():
-    stats = {
-        "edits": [
-            {
-                "status": "applied",
-                "type": "modify",
-                "target_text": "The quick brown fox jumps over the lazy dog.",
-                "new_text": "The fast brown fox jumps over the lazy dog.",
-                "clean_text": "The fast brown fox jumps over the lazy dog.",
-                "critic_markup": "{--quick--}{++fast++}",
-                "pages": [1],
-                "heading_path": "Introduction",
-                "occurrences_modified": 1,
-                "match_mode": "strict",
-            }
-        ]
-    }
+def test_minimal_report_token_budget(tmp_path):
+    from docx import Document
+
+    from adeu.models import DocumentChange, ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    doc_path = tmp_path / "test_budget.docx"
+    doc = Document()
+    doc.add_heading("Section 1 Intro", level=1)
+    doc.add_paragraph("The quick brown fox jumps over the lazy dog in a very detailed manner.")
+    doc.save(doc_path)
+
+    engine = RedlineEngine(io.BytesIO(doc_path.read_bytes()), author="Tester")
+    changes: list[DocumentChange] = [
+        ModifyText(
+            type="modify",
+            target_text="The quick brown fox jumps over the lazy dog in a very detailed manner.",
+            new_text="The fast reddish fox leaps over the sleeping hound in a concise manner.",
+            comment=None,
+        ),
+        ModifyText(type="modify", target_text="Section 1 Intro", new_text="Overview", comment=None),
+    ]
+    stats = engine.process_batch(changes)
     shrunk = shrink_batch_stats(stats)
-    edit = shrunk["edits"][0]
-    assert approx_tokens(json.dumps(edit)) <= 40
+
+    for edit in shrunk["edits"]:
+        dumped = json.dumps(edit, ensure_ascii=False)
+        assert approx_tokens(dumped) <= 40, (
+            f"Edit JSON exceeded 40 approx-tokens budget ({len(dumped)} chars): {dumped}"
+        )
 
 
-def test_standard_report_is_unchanged():
-    stats = {
-        "engine": "python",
-        "version": "2.0.0",
-        "edits": [
-            {
-                "status": "applied",
-                "type": "modify",
-                "target_text": "old",
-                "new_text": "new",
-                "clean_text": "new",
-                "critic_markup": "{--old--}{++new++}",
-                "pages": [1],
-                "heading_path": "H1",
-                "occurrences_modified": 1,
-                "match_mode": "strict",
-            }
-        ],
-    }
+def test_standard_report_is_unchanged(tmp_path, capsys):
+    import sys
+    from unittest.mock import patch
+
+    from docx import Document
+
+    from adeu.cli import main
+    from adeu.models import DocumentChange, ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    doc_path = tmp_path / "test_std.docx"
+    doc = Document()
+    doc.add_paragraph("The quick brown fox jumps over the lazy dog.")
+    doc.save(doc_path)
+
+    engine = RedlineEngine(io.BytesIO(doc_path.read_bytes()), author="Tester")
+    changes: list[DocumentChange] = [
+        ModifyText(type="modify", target_text="quick", new_text="fast", comment=None),
+        ModifyText(type="modify", target_text="fox", new_text="", comment=None),
+    ]
+    stats = engine.process_batch(changes)
+
     assert stats["engine"] == "python"
-    edit = stats["edits"][0]
-    assert edit["target_text"] == "old"
-    assert edit["new_text"] == "new"
-    assert edit["clean_text"] == "new"
+    edit1 = stats["edits"][0]
+    assert edit1["target_text"] == "quick"
+    assert edit1["new_text"] == "fast"
+    assert "fast" in edit1["clean_text"]
+
+    edit2 = stats["edits"][1]
+    assert edit2["target_text"] == "fox"
+    assert edit2["new_text"] == ""
+    assert isinstance(edit2["clean_text"], str)
+
+    changes_file = tmp_path / "changes.json"
+    out_path = tmp_path / "out.docx"
+    with open(changes_file, "w") as f:
+        json.dump(
+            [
+                {"type": "modify", "target_text": "quick", "new_text": "fast"},
+                {"type": "modify", "target_text": "fox", "new_text": ""},
+            ],
+            f,
+        )
+
+    test_args = [
+        "adeu",
+        "apply",
+        str(doc_path),
+        str(changes_file),
+        "-o",
+        str(out_path),
+        "--report",
+        "standard",
+    ]
+    with patch.object(sys, "argv", test_args):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0 or e.code is None
+
+    captured = capsys.readouterr()
+    err_output = captured.err
+    assert "Target: 'fox'" in err_output
+    assert "New text: ''" in err_output
 
 
 def test_batch_level_keeps_version_drops_engine():
@@ -187,7 +238,7 @@ def test_mcp_default_is_minimal(tmp_path):
     d.save(doc_path)
 
     ctx = get_mock_ctx()
-    changes = [ModifyText(type="modify", target_text="world", new_text="earth")]
+    changes = [ModifyText(type="modify", target_text="world", new_text="earth", comment=None)]
     res = run_async(
         process_document_batch(
             reasoning="test",

@@ -2,6 +2,7 @@
 Payload builders for error envelopes and response formatting.
 """
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -82,11 +83,34 @@ def shrink_batch_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
                 shrunk_e["error"] = err
         else:
             if "critic_markup" in edit and edit["critic_markup"] is not None:
-                shrunk_e["critic_markup"] = edit["critic_markup"]
+                cm = str(edit["critic_markup"])
+                if len(cm) > 35:
+                    tag_idx = -1
+                    for tag in ("{--", "{++", "{==", "{>>"):
+                        idx = cm.find(tag)
+                        if idx != -1 and (tag_idx == -1 or idx < tag_idx):
+                            tag_idx = idx
+                    if tag_idx != -1:
+                        start = max(0, tag_idx - 4)
+                        cm = cm[start : start + 32] + "..."
+                    else:
+                        cm = cm[:32] + "..."
+                shrunk_e["critic_markup"] = cm
 
-        for k in ("pages", "heading_path", "occurrences_modified"):
-            if k in edit and edit[k] is not None:
-                shrunk_e[k] = edit[k]
+        pages = edit.get("pages")
+        if pages:
+            shrunk_e["pages"] = pages
+
+        heading_path = edit.get("heading_path")
+        if heading_path:
+            hp = str(heading_path).strip()
+            if hp:
+                if len(hp) > 30:
+                    hp = hp[:27] + "..."
+                shrunk_e["heading_path"] = hp
+
+        if edit.get("occurrences_modified") is not None:
+            shrunk_e["occurrences_modified"] = edit["occurrences_modified"]
 
         match_mode = edit.get("match_mode")
         if match_mode is not None and match_mode != "strict":
@@ -97,6 +121,15 @@ def shrink_batch_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
 
         if edit.get("warning"):
             shrunk_e["warning"] = edit["warning"]
+
+        if status != "failed":
+            s_json = json.dumps(shrunk_e, ensure_ascii=False)
+            if len(s_json) > 160 and "critic_markup" in shrunk_e:
+                cm = shrunk_e["critic_markup"]
+                if len(cm) > 20:
+                    overage = len(s_json) - 160
+                    new_len = max(8, len(cm) - overage - 3)
+                    shrunk_e["critic_markup"] = cm[:new_len] + "..."
 
         shrunk_edits.append(shrunk_e)
 
