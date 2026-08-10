@@ -46,7 +46,7 @@ from adeu.models import (
     coerce_stringified_changes,
 )
 from adeu.pagination import parse_page_arg
-from adeu.payloads import failure_envelope, shrink_batch_stats
+from adeu.payloads import failure_envelope
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
 
@@ -666,7 +666,7 @@ async def _process_document_batch_disk(
             except OSError:
                 pass
 
-        stats = shrink_batch_stats(result_data)
+        stats = result_data
         res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
         total_occurrences = sum(
@@ -706,10 +706,15 @@ async def _process_document_batch_disk(
                     res += f"*Warning:* {report['warning']}\n"
                 if report.get("error"):
                     res += f"*Error:* {report['error']}\n"
+                # One preview per edit: the clean preview is the CriticMarkup
+                # preview with the same markup resolved, so sending both bills
+                # the agent twice for one span (B1, minimal report). The
+                # CriticMarkup form is the one that carries the evidence, and
+                # it is rendered in full — a shortened preview is not
+                # verification, and a cut through a bubble is not even valid
+                # CriticMarkup.
                 if report.get("critic_markup"):
                     res += f"*Preview (CriticMarkup):*\n> {report['critic_markup']}\n"
-                if report.get("clean_text"):
-                    res += f"*Preview (Clean):*\n> {report['clean_text']}\n"
                 res += "\n"
 
         if stats.get("skipped_details"):

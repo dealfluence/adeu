@@ -25,6 +25,21 @@ def truncate_middle(text: str, cap: int) -> str:
     return f"{text[:head]}… [{omitted:,} chars omitted] …{text[-tail:]}"
 
 
+def clamp_text(text: str, cap: int) -> str:
+    """
+    Hard-caps `text` to at most `cap` characters, marking the elision with an
+    ASCII "...". Use this instead of `truncate_middle` wherever the cap is a
+    real ceiling: `truncate_middle` keeps head AND tail plus a ~25-char
+    "[N chars omitted]" note (with non-ASCII ellipses that a JSON escape
+    triples), so its result routinely runs longer than `cap` — fine for a
+    500-char echo budget, fatal for the minimal report's per-edit token
+    budget.
+    """
+    if len(text) <= cap:
+        return text
+    return text[: max(1, cap - 3)] + "..."
+
+
 def batch_details_header(details) -> str:
     """
     Section header for a batch report's detail lines. Purely informational

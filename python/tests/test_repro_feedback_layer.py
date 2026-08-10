@@ -120,7 +120,7 @@ def test_mcp_tool_feedback_formatting():
     assert "Batch complete. Saved to:" in res
     assert "Detailed Edit Reports:" in res
     assert "✅ [applied]" in res
-    assert "The {--quick brown--}{++fast red" in res
+    assert "The {--quick brown--}{++fast red++} fox jumps over" in res
 
 
 def test_preview_self_consistency():

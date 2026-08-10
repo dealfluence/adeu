@@ -18,7 +18,7 @@ from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdow
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.pagination import parse_page_arg
-from adeu.payloads import failure_envelope
+from adeu.payloads import failure_envelope, shrink_batch_stats
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -1342,12 +1342,10 @@ def handle_apply(args):
         stats["unverified_output_path"] = str(unverified_path)
 
     if getattr(args, "report", "standard") == "minimal":
-        from adeu.payloads import shrink_batch_stats
-
         stats = shrink_batch_stats(stats)
 
     if args.json:
-        print(json.dumps(stats, ensure_ascii=False))
+        print(json.dumps(stats))
     else:
         if batch_failed:
             print(
@@ -1381,15 +1379,14 @@ def handle_apply(args):
                 if "target_text" in report:
                     print(f"  Target: '{report['target_text']}'", file=sys.stderr)
                 edit_type = report.get("type", "modify")
-                if "new_text" in report:
-                    if edit_type == "insert_row":
-                        print(f"  Inserted row: '{report['new_text']}'", file=sys.stderr)
-                    elif edit_type == "delete_row":
-                        print("  Deleted row", file=sys.stderr)
-                    else:
-                        print(f"  New text: '{report['new_text']}'", file=sys.stderr)
-                elif edit_type == "delete_row":
+                if edit_type == "delete_row":
                     print("  Deleted row", file=sys.stderr)
+                elif "new_text" in report:
+                    # Key presence, not truthiness: new_text '' is a legitimate
+                    # deletion and must still be shown. A minimal report omits
+                    # the key entirely (it echoes the caller's own input).
+                    label = "Inserted row" if edit_type == "insert_row" else "New text"
+                    print(f"  {label}: '{report['new_text']}'", file=sys.stderr)
                 if report.get("warning"):
                     print(f"  Warning: {report['warning']}", file=sys.stderr)
                 if report.get("error"):
