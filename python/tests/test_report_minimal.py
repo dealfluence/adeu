@@ -291,6 +291,44 @@ def test_minimal_report_keeps_valid_critic_markup(tmp_path):
     assert "not be liable" in liability, f"the substantive change is gone: {liability!r}"
 
 
+def test_minimal_report_large_echo_cap_modify_text(tmp_path):
+    """
+    Driving real RedlineEngine.process_batch with target_text and new_text > 500 characters
+    (> REPORT_ECHO_CAP). The engine's truncate_middle elision produces an incomplete/unbalanced
+    preview string; minimal edit report output must ensure critic_markup is either omitted
+    or contains fully balanced bubbles passing _assert_balanced_critic_markup.
+    """
+    from docx import Document
+
+    from adeu.models import DocumentChange, ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    doc_path = tmp_path / "large_echo.docx"
+    doc = Document()
+    target_p1 = "Article I General Provisions. " + "The Seller hereby irrevocably agrees to indemnify " * 15
+    new_p1 = "Article I General Provisions. " + "The Purchaser hereby irrevocably agrees to indemnify " * 15
+
+    doc.add_paragraph(target_p1)
+    doc.save(doc_path)
+
+    engine = RedlineEngine(io.BytesIO(doc_path.read_bytes()), author="Tester")
+    changes: list[DocumentChange] = [
+        ModifyText(
+            type="modify",
+            target_text=target_p1,
+            new_text=new_p1,
+            comment=None,
+        )
+    ]
+    raw_stats = engine.process_batch(changes)
+    shrunk = shrink_batch_stats(raw_stats)
+
+    edit = shrunk["edits"][0]
+    assert edit["status"] == "applied"
+    if "critic_markup" in edit:
+        _assert_balanced_critic_markup(edit["critic_markup"])
+
+
 def test_minimal_report_drops_comment_echo(tmp_path):
     """`comment` is caller input; the minimal payload does not echo it back."""
     shrunk = shrink_batch_stats(_legal_batch(tmp_path))

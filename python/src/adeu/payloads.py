@@ -22,6 +22,19 @@ FAILED_TARGET_STUB_CAP = 80
 # ("{--"/"--}", "{++"/"++}", "{=="/"==}", "{>>"/"<<}"), which is what lets a
 # bubble body be clamped in place without disturbing its delimiters.
 _CRITIC_DELIM_LEN = 3
+_CRITIC_DELIMITERS = ("{--", "--}", "{++", "++}", "{==", "==}", "{>>", "<<}")
+
+
+def _has_critic_delimiters(text: str) -> bool:
+    """Whether text contains any CriticMarkup delimiter markers."""
+    return any(delim in text for delim in _CRITIC_DELIMITERS)
+
+
+def _has_orphaned_critic_delimiters(text: str) -> bool:
+    """Whether text contains CriticMarkup delimiter markers outside complete bubbles."""
+    outside = CRITICMARKUP_BLOCK_RE.sub("", text)
+    return _has_critic_delimiters(outside)
+
 
 # The one field exempt from the per-edit budget: a failed edit's error, which
 # the agent must read in full to recover.
@@ -127,10 +140,14 @@ def _shrink_critic_markup(markup: str, cap: int) -> str:
     preview regexes (AI_CONTEXT.md).
     """
     span = _changed_span(markup)
+    if _has_orphaned_critic_delimiters(span):
+        return ""
     if len(span) <= cap:
         return span
     segments = _bubble_segments(span)
     if not segments:
+        if _has_critic_delimiters(span):
+            return ""
         # No markup to protect: a plain-text preview is safe to cut.
         return clamp_text(span, cap)
 
@@ -140,10 +157,11 @@ def _shrink_critic_markup(markup: str, cap: int) -> str:
         kept -= 1
         shrunk = "".join(segments[:kept]) + f"{_ELISION}(+{len(segments) - kept} more spans)"
     if len(shrunk) <= cap:
-        return shrunk
+        return shrunk if not _has_orphaned_critic_delimiters(shrunk) else ""
 
     body_cap = max(_MIN_BUBBLE_BODY, cap // kept - 2 * _CRITIC_DELIM_LEN)
-    return CRITICMARKUP_BLOCK_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), shrunk)
+    res = CRITICMARKUP_BLOCK_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), shrunk)
+    return res if not _has_orphaned_critic_delimiters(res) else ""
 
 
 def _within_budget(edit: Dict[str, Any]) -> bool:
@@ -192,14 +210,18 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
     keeps the promise the shrink makes about markup: what ships is either valid
     CriticMarkup or nothing.
     """
-    if _within_budget(edit):
-        return
-
     markup = edit.get("critic_markup")
     if markup:
-        edit["critic_markup"] = _changed_span(markup)
-        if _within_budget(edit):
-            return
+        span = _changed_span(markup)
+        if _has_orphaned_critic_delimiters(span):
+            del edit["critic_markup"]
+            markup = None
+        else:
+            edit["critic_markup"] = span
+            markup = span
+
+    if _within_budget(edit):
+        return
 
     path = edit.get("heading_path")
     if path and " > " in path:
@@ -218,12 +240,17 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
         if _within_budget(edit):
             return
 
-    if markup:
+    if edit.get("critic_markup"):
+        markup = edit["critic_markup"]
         # Measure the real JSON (escaping included) rather than predicting it.
         preview_cap = len(markup)
         while preview_cap > _MIN_BUBBLE_BODY and not _within_budget(edit):
             preview_cap = preview_cap * 4 // 5
-            edit["critic_markup"] = _shrink_critic_markup(markup, preview_cap)
+            shrunk = _shrink_critic_markup(markup, preview_cap)
+            if not shrunk:
+                del edit["critic_markup"]
+                break
+            edit["critic_markup"] = shrunk
 
     if "pages" in edit and not _within_budget(edit):
         # Dropped whole, never truncated: a shortened page list would claim the

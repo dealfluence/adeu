@@ -63,9 +63,17 @@
 - `document.py`: `_normalize_changes` returns `rejected_pairs`. Append fenced JSON envelope block to MCP failure strings.
 **Done when.** `uv run pytest tests/test_failure_envelope.py` passes (7 tests).
 
-### Task 4 — Item B1: `--report minimal|standard` (COMPLETED)
+### Task 4 — Item B1: `--report minimal|standard` (IN PROGRESS - ESCALATED TO @OPUS-CODER)
 **Goal.** Minimal edit reports omitting echoed input text and duplicate `clean_text` previews in minimal mode (≤40 tokens/applied edit).
-**Status.** Completed & Verified.
+**Status.** In Progress (Failed Verify Cycles: 7, Escalated to @opus-coder).
+**Attempt Ledger:**
+- attempt 1: Added payloads.py shrink_batch_stats, cli --report flag, MCP default minimal -> VERDICT: FAIL
+- attempt 2: Omitted empty heading_path/pages and clamped critic_markup to 35 chars in payloads.py, changed cli.py to check key presence for "new_text" in report, updated test_report_minimal.py to call product code and check real engine output -> VERDICT: FAIL
+- attempt 3 (@opus-coder): Rebuilt shrink_batch_stats in payloads.py to drop all 4 echoes including comment, added balanced CriticMarkup clamp (never slicing inside bubbles), fit budget via fit_to_budget using real JSON token estimation, added clamp_text in utils/text.py, fixed CLI standard mode key presence check, restored test_repro_feedback_layer.py assertion -> VERDICT: FAIL
+- attempt 4 (@opus-coder): Added `_bubble_segments` to collapse inter-bubble gap contexts to short ASCII `...` elision markers, drop trailing bubbles with `(+N more spans)` when needed, and drop `pages` if needed under budget pressure. Added `test_minimal_report_token_budget_multi_occurrence` test. -> VERDICT: FAIL
+- attempt 5 (@opus-coder): Removed `warning` from `_UNBUDGETED_FIELDS` for applied edits, added geometric clamping for `warning`, added fallback `critic_markup` drop in `_fit_to_budget`, added test for regex replacement warning. -> VERDICT: FAIL (untracked repro script left)
+- attempt 6 (@coder): Deleted untracked scratch file `python/repro_warning_budget.py`. -> VERDICT: FAIL (duplicated regex in payloads.py)
+- attempt 7 (@coder): Replaced `_CRITIC_BUBBLE_RE` in `payloads.py` with `CRITICMARKUP_BLOCK_RE` imported from `adeu.diff`. -> VERDICT: FAIL (plain-text fallback on engine-truncated preview string left open bubble)
 **Files.**
 - `python/src/adeu/payloads.py`
 - `python/src/adeu/cli.py`
