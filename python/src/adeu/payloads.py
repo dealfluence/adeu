@@ -3,9 +3,9 @@ Payload builders for error envelopes and response formatting.
 """
 
 import json
-import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from adeu.diff import CRITICMARKUP_BLOCK_RE
 from adeu.utils.text import clamp_text
 
 # Ceiling for one applied edit in a minimal report, in the approx-token unit
@@ -21,7 +21,6 @@ FAILED_TARGET_STUB_CAP = 80
 # The four CriticMarkup bubble forms. Every delimiter is exactly 3 characters
 # ("{--"/"--}", "{++"/"++}", "{=="/"==}", "{>>"/"<<}"), which is what lets a
 # bubble body be clamped in place without disturbing its delimiters.
-_CRITIC_BUBBLE_RE = re.compile(r"\{--.*?--\}|\{\+\+.*?\+\+\}|\{==.*?==\}|\{>>.*?<<\}", re.DOTALL)
 _CRITIC_DELIM_LEN = 3
 
 # The one field exempt from the per-edit budget: a failed edit's error, which
@@ -82,7 +81,7 @@ def _changed_span(markup: str) -> str:
     caller can read from the document, whereas the bubbles ARE the evidence
     that the edit landed as asked.
     """
-    bubbles = list(_CRITIC_BUBBLE_RE.finditer(markup))
+    bubbles = list(CRITICMARKUP_BLOCK_RE.finditer(markup))
     if not bubbles:
         return markup
     return markup[bubbles[0].start() : bubbles[-1].end()]
@@ -108,7 +107,7 @@ def _bubble_segments(markup: str) -> List[str]:
     """
     segments: List[str] = []
     prev_end: Optional[int] = None
-    for match in _CRITIC_BUBBLE_RE.finditer(markup):
+    for match in CRITICMARKUP_BLOCK_RE.finditer(markup):
         separator = "" if prev_end is None or prev_end == match.start() else _ELISION
         segments.append(separator + match.group(0))
         prev_end = match.end()
@@ -144,7 +143,7 @@ def _shrink_critic_markup(markup: str, cap: int) -> str:
         return shrunk
 
     body_cap = max(_MIN_BUBBLE_BODY, cap // kept - 2 * _CRITIC_DELIM_LEN)
-    return _CRITIC_BUBBLE_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), shrunk)
+    return CRITICMARKUP_BLOCK_RE.sub(lambda m: _clamp_bubble(m.group(0), body_cap), shrunk)
 
 
 def _within_budget(edit: Dict[str, Any]) -> bool:
