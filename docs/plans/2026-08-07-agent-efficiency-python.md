@@ -63,9 +63,9 @@
 - `document.py`: `_normalize_changes` returns `rejected_pairs`. Append fenced JSON envelope block to MCP failure strings.
 **Done when.** `uv run pytest tests/test_failure_envelope.py` passes (7 tests).
 
-### Task 4 — Item B1: `--report minimal|standard` (IN PROGRESS - ESCALATED TO @OPUS-CODER)
+### Task 4 — Item B1: `--report minimal|standard` (COMPLETED)
 **Goal.** Minimal edit reports omitting echoed input text and duplicate `clean_text` previews in minimal mode (≤40 tokens/applied edit).
-**Status.** In Progress (Failed Verify Cycles: 7, Escalated to @opus-coder).
+**Status.** Completed & Verified.
 **Attempt Ledger:**
 - attempt 1: Added payloads.py shrink_batch_stats, cli --report flag, MCP default minimal -> VERDICT: FAIL
 - attempt 2: Omitted empty heading_path/pages and clamped critic_markup to 35 chars in payloads.py, changed cli.py to check key presence for "new_text" in report, updated test_report_minimal.py to call product code and check real engine output -> VERDICT: FAIL
@@ -74,6 +74,7 @@
 - attempt 5 (@opus-coder): Removed `warning` from `_UNBUDGETED_FIELDS` for applied edits, added geometric clamping for `warning`, added fallback `critic_markup` drop in `_fit_to_budget`, added test for regex replacement warning. -> VERDICT: FAIL (untracked repro script left)
 - attempt 6 (@coder): Deleted untracked scratch file `python/repro_warning_budget.py`. -> VERDICT: FAIL (duplicated regex in payloads.py)
 - attempt 7 (@coder): Replaced `_CRITIC_BUBBLE_RE` in `payloads.py` with `CRITICMARKUP_BLOCK_RE` imported from `adeu.diff`. -> VERDICT: FAIL (plain-text fallback on engine-truncated preview string left open bubble)
+- attempt 8 (@coder): Added `_has_orphaned_critic_delimiters` check to drop `critic_markup` when engine-truncated preview string contains broken/incomplete CriticMarkup delimiters, added `test_minimal_report_large_echo_cap_modify_text` test. -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/payloads.py`
 - `python/src/adeu/cli.py`
