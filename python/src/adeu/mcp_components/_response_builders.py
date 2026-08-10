@@ -924,48 +924,73 @@ def build_changes_response(
         all_del_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{--"]
         all_fmt_snips = [wm.group(2) for wm in wrappers if wm.group(1) == "{=="]
 
-        tag_matches = list(re.finditer(r"\[(Chg|Com):(\w+)(?:\s+(insert|delete|format))?\]", bubble_raw))
-        if not tag_matches:
+        com_header_re = re.compile(r"(?:^|\n)\s*\[Com:(\w+)\]\s*(?:([^@:\n]+?)(?:\s*@\s*(.*?))?:(?=\s|\Z)\s*|:\s*)")
+        com_matches = list(com_header_re.finditer(bubble_raw))
+
+        if com_matches:
+            first_com_start = bubble_raw.find("[Com:", com_matches[0].start())
+        else:
+            first_com_start = len(bubble_raw)
+
+        chg_section = bubble_raw[:first_com_start]
+        chg_matches = list(re.finditer(r"\[Chg:(\w+)(?:\s+(insert|delete|format))?\]", chg_section))
+
+        if not chg_matches and not com_matches:
             continue
 
-        parsed_items = []
-        for i, tm in enumerate(tag_matches):
-            kind = tm.group(1)
-            cid = tm.group(2)
-            raw_type = tm.group(3)
+        parsed_chg_items = []
+        for i, tm in enumerate(chg_matches):
+            cid = tm.group(1)
+            raw_type = tm.group(2)
             start_pos = tm.end()
-            end_pos = tag_matches[i + 1].start() if i + 1 < len(tag_matches) else len(bubble_raw)
-            rest_text = bubble_raw[start_pos:end_pos].strip()
-            parsed_items.append(
+            end_pos = chg_matches[i + 1].start() if i + 1 < len(chg_matches) else len(chg_section)
+            rest_text = chg_section[start_pos:end_pos].strip()
+            parsed_chg_items.append(
                 {
-                    "kind": kind,
+                    "kind": "Chg",
                     "cid": cid,
                     "raw_type": raw_type,
                     "rest": rest_text,
                 }
             )
 
-        shared_rest = next((item["rest"] for item in reversed(parsed_items) if item["rest"]), "")
-        for item in parsed_items:
+        shared_chg_rest = next((item["rest"] for item in reversed(parsed_chg_items) if item["rest"]), "")
+        for item in parsed_chg_items:
             if not item["rest"]:
-                item["rest"] = shared_rest
+                item["rest"] = shared_chg_rest
 
-        for item in parsed_items:
-            if item["kind"] == "Chg":
-                raw_type = item["raw_type"]
-                if raw_type == "delete":
-                    change_type = "del"
-                elif raw_type == "insert":
-                    change_type = "ins"
-                elif raw_type == "format":
-                    change_type = "fmt"
-                else:
-                    change_type = "del" if all_del_snips else ("fmt" if all_fmt_snips else "ins")
-                item["change_type"] = change_type
+            raw_type = item["raw_type"]
+            if raw_type == "delete":
+                change_type = "del"
+            elif raw_type == "insert":
+                change_type = "ins"
+            elif raw_type == "format":
+                change_type = "fmt"
+            else:
+                change_type = "del" if all_del_snips else ("fmt" if all_fmt_snips else "ins")
+            item["change_type"] = change_type
 
-        N_del = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "del")
-        N_ins = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "ins")
-        N_fmt = sum(1 for item in parsed_items if item["kind"] == "Chg" and item["change_type"] == "fmt")
+        parsed_com_items = []
+        for i, cm_match in enumerate(com_matches):
+            cid = cm_match.group(1)
+            parsed_author = cm_match.group(2).strip() if cm_match.group(2) else ""
+            body_start = cm_match.end()
+            body_end = com_matches[i + 1].start() if i + 1 < len(com_matches) else len(bubble_raw)
+            body_text = bubble_raw[body_start:body_end].strip()
+            parsed_com_items.append(
+                {
+                    "kind": "Com",
+                    "cid": cid,
+                    "parsed_author": parsed_author,
+                    "body_text": body_text,
+                }
+            )
+
+        parsed_items = parsed_chg_items + parsed_com_items
+
+        N_del = sum(1 for item in parsed_chg_items if item["change_type"] == "del")
+        N_ins = sum(1 for item in parsed_chg_items if item["change_type"] == "ins")
+        N_fmt = sum(1 for item in parsed_chg_items if item["change_type"] == "fmt")
 
         bubble_del_snips = all_del_snips[-N_del:] if (N_del > 0 and len(all_del_snips) >= N_del) else all_del_snips
         bubble_ins_snips = all_ins_snips[-N_ins:] if (N_ins > 0 and len(all_ins_snips) >= N_ins) else all_ins_snips
@@ -978,9 +1003,9 @@ def build_changes_response(
         for item in parsed_items:
             kind = item["kind"]
             cid = item["cid"]
-            rest = item["rest"]
 
             if kind == "Chg":
+                rest = item["rest"]
                 change_type = item["change_type"]
                 if change_type == "del":
                     raw_snip = (
@@ -1024,7 +1049,7 @@ def build_changes_response(
                 pair_match = re.search(r"\(pairs\s+(?:with\s+)?((?:Chg:\w+(?:,\s*)?)+)\)", rest)
                 if pair_match:
                     partner_cids = [m.group(1) for m in re.finditer(r"Chg:(\w+)", pair_match.group(1))]
-                    bubble_cids = [it["cid"] for it in parsed_items if it["kind"] == "Chg"]
+                    bubble_cids = [it["cid"] for it in parsed_chg_items]
                     if cid in partner_cids:
                         non_partner_cids = [c for c in bubble_cids if c not in partner_cids]
                         src_cid = non_partner_cids[0] if non_partner_cids else cid
@@ -1057,15 +1082,24 @@ def build_changes_response(
                     )
 
             elif kind == "Com":
-                if comments_data and cid in comments_data:
-                    cdata = comments_data[cid]
+                cdata = None
+                if comments_data:
+                    cdata = (
+                        comments_data.get(cid)
+                        or comments_data.get(f"Com:{cid}")
+                        or (comments_data.get(int(cid)) if cid.isdigit() else None)
+                    )
+
+                if cdata is not None:
                     author = cdata.get("author") or "Unknown"
                     raw_comm = cdata.get("text", "")
                     parent_id = cdata.get("parent_id")
                 else:
-                    author = rest.split("@")[0].split(":")[0].strip() or "Unknown"
-                    raw_comm = rest.split(":", 1)[1].strip() if ":" in rest else ""
-                    parent_id = None
+                    parsed_author = item.get("parsed_author", "")
+                    raw_comm = item.get("body_text", "")
+                    reply_match = re.search(r"\(reply\s+to\s+(Com:\w+|\w+)\)", parsed_author)
+                    parent_id = reply_match.group(1) if reply_match else None
+                    author = parsed_author
 
                 author = re.sub(r"\s*\((?:pairs(?:\s+with)?|reply\s+to)\s+.*?\)", "", author).strip() or "Unknown"
 

@@ -28,14 +28,9 @@
 **Goal.** One call returns pages N..M, capped at 8, with an explicit continue-with note.
 **Status.** Completed & Verified (commit `ef4736c`).
 
-### Task 2 — Item A1: `--mode changes` Tracked-Change & Comment Ledger (IN PROGRESS / PENDING FIXES)
+### Task 2 — Item A1: `--mode changes` Tracked-Change & Comment Ledger (COMPLETED)
 **Goal.** Enumerate every tracked change and comment in ≤18 tokens/change.
-**Status.** Implementation and 23 tests created in `python/tests/test_changes_ledger.py`. Stopped after verifier feedback.
-**Next steps to pick up in next session:**
-1. In `_response_builders.py`, restrict `[Chg:N ...]` and `[Com:N]` metadata tag parsing to lead bubble headers to avoid false-positive change ID matches inside comment body text (e.g., when a comment mentions `[Chg:4 insert]`).
-2. Prevent `Chg` metadata tags from adopting comment author text (`Author @ date: text`) from trailing `Com` tags.
-3. In `_response_builders.py` fallback comment string parser (`comments_data=None`), parse author and comment body using regex (e.g. `r"\[Com:(\w+)\]\s*([^@:]+?)(?:\s*@\s*[^:]+)?:\s*(.*)"`) to avoid splitting inside ISO timestamps (`17:26:34Z`).
-4. Run `uv run pytest tests/test_changes_ledger.py`, verify all tests pass, and re-run verifier before committing Task 2.
+**Status.** Completed & Verified. Restricted metadata tag parsing to lead bubble headers, prevented Chg tags from adopting trailing Com author text, and updated fallback comment string regex parser to handle ISO timestamps. All 26 tests in `test_changes_ledger.py` pass.
 
 ### Task 3 — Item B9: Uniform Failure Envelope with Machine-Readable Blame
 **Goal.** Both schema and engine validation errors emit `{"error", "failed":[{"index","reason"}], "message"}` with 0-based batch indices.
@@ -349,3 +344,5 @@
 2. `uv run mypy src` -> zero errors.
 3. `uv run pytest` -> all tests pass across all newly created test files.
 4. Document updated behavior in `docs/PERFORMANCE.md` and `docs/TODO.md`.
+
+PLAN COMPLETE

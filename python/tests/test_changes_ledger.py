@@ -453,3 +453,33 @@ def test_pair_partner_ids_filtered_against_existing_change_ids():
     content_both = str(res_both.content)
     chg_lines_both = [line for line in content_both.splitlines() if line.startswith("Chg:1")]
     assert "(pairs Chg:2)" in chg_lines_both[0]
+
+
+def test_comment_body_false_positive_chg_id_ignored():
+    text = (
+        "Some text {++ inserted ++}{>>[Com:1] Bob Ross @ 2026-08-07T17:26:34Z: Please see [Chg:4 insert] for details<<}"
+    )
+    res = build_changes_response(text, "fp_test.docx", comments_data=None)
+    content = str(res.content)
+    assert "Com:1" in content
+    assert not any(line.startswith("Chg:4") for line in content.splitlines())
+
+
+def test_chg_tag_does_not_adopt_com_author():
+    text = "Some text {-- deleted --}{>>[Chg:1 delete]\n[Com:1] Bob Ross @ 2026-08-07T17:26:34Z: Hello world<<}"
+    res = build_changes_response(text, "adopt_test.docx", comments_data=None)
+    content = str(res.content)
+    chg_lines = [line for line in content.splitlines() if line.startswith("Chg:1")]
+    assert len(chg_lines) == 1
+    assert "Unknown" in chg_lines[0]
+    assert "Bob Ross" not in chg_lines[0]
+
+
+def test_fallback_comment_parser_iso_timestamp():
+    text = "Some text {== format ==}{>>[Com:1] Bob Ross @ 2026-08-07T17:26:34Z: Is it really 17:26:34Z?<<}"
+    res = build_changes_response(text, "iso_test.docx", comments_data=None)
+    content = str(res.content)
+    com_lines = [line for line in content.splitlines() if line.startswith("Com:1")]
+    assert len(com_lines) == 1
+    assert "Bob Ross" in com_lines[0]
+    assert '"Is it really 17:26:34Z?"' in com_lines[0]
