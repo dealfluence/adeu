@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from adeu.utils.text import clamp_text
 
 # Ceiling for one applied edit in a minimal report, in the approx-token unit
-# used by the report budget tests (len(json) // 4). Errors and engine warnings
-# ride free: an advisory the caller must act on is never truncated, exactly as
-# a failed edit keeps its full error.
+# used by the report budget tests (len(json) // 4). It covers every field of an
+# applied edit, engine advisories included: only a FAILED edit's error rides
+# free, because that edit has no other content to explain itself with.
 MINIMAL_EDIT_TOKEN_BUDGET = 40
 
 # A failed edit echoes just enough of the caller's target_text to identify
@@ -24,13 +24,21 @@ FAILED_TARGET_STUB_CAP = 80
 _CRITIC_BUBBLE_RE = re.compile(r"\{--.*?--\}|\{\+\+.*?\+\+\}|\{==.*?==\}|\{>>.*?<<\}", re.DOTALL)
 _CRITIC_DELIM_LEN = 3
 
-# Fields exempt from the per-edit budget: free prose the agent must read in
-# full to recover from, or act on.
-_UNBUDGETED_FIELDS = ("error", "warning")
+# The one field exempt from the per-edit budget: a failed edit's error, which
+# the agent must read in full to recover.
+_UNBUDGETED_FIELDS = ("error",)
 
 # Smallest bubble body worth emitting — below this the preview stops being
 # evidence of anything.
 _MIN_BUBBLE_BODY = 8
+
+# Smallest warning worth emitting. The engine's advisories lead with the
+# problem and the token that caused it ("new_text contains '$1', …"), so a
+# clamp here still tells the agent what to look at, and it leaves just enough
+# budget for a bounded preview alongside; the remediation sentence that follows
+# is what 40 approx-tokens cannot afford. The full text stays in the standard
+# report.
+_MIN_WARNING_CHARS = 26
 
 # Stands in for document context dropped from a preview. ASCII on purpose:
 # json.dumps escapes a "…" to "\u2026", six characters of budget for one
@@ -149,17 +157,41 @@ def _within_budget(edit: Dict[str, Any]) -> bool:
     return len(json.dumps(budgeted)) // 4 <= MINIMAL_EDIT_TOKEN_BUDGET
 
 
+def _shrink_prose(edit: Dict[str, Any], key: str, value: str, floor: int) -> None:
+    """
+    Clamps one free-prose field of an edit toward `floor` characters, stopping
+    the moment the edit fits. Each step re-clamps the ORIGINAL value at a
+    smaller cap and re-measures the real serialized JSON, so escaping (a single
+    "—" costs six characters of budget as "\\u2014") is accounted for rather
+    than predicted.
+    """
+    cap = len(value)
+    while cap > floor and not _within_budget(edit):
+        cap = max(floor, cap * 4 // 5)
+        edit[key] = clamp_text(value, cap)
+
+
 def _fit_to_budget(edit: Dict[str, Any]) -> None:
     """
     Spends the per-edit budget in priority order, in place.
 
     The engine's verification evidence outranks the locator: `pages` already
     says where the edit landed, so the preview's context and then the heading
-    path are surrendered before a CriticMarkup bubble is touched. Only when
-    even the bare bubbles overrun the budget are their bodies clamped — and
-    then in place, so the markup stays valid. `pages` itself goes last, and
-    only when the preview is already at its floor: a fan-out across a dozen
-    pages is a page list no preview shrink can pay for.
+    path are surrendered before a CriticMarkup bubble is touched. An engine
+    `warning` is clamped next: it is prose about a change the preview shows as
+    markup (a surviving "$1" appears verbatim in the {++…++} bubble), and at
+    ~260 chars the surviving-$N advisory alone is six times the whole budget.
+    It is clamped, never dropped — an edit the caller must re-check may not go
+    unflagged. Only then are the bubble bodies clamped, in place so the markup
+    stays valid, and then `pages`: a fan-out across a dozen pages is a page list
+    no preview shrink can pay for.
+
+    The last resort is the preview itself. A warned fan-out cannot hold bounded
+    bubbles, a span count, counters AND an advisory in 40 approx-tokens, and of
+    those the preview is the one the agent can re-derive (read the document
+    again); an advisory it never saw is gone for good. Dropping it whole also
+    keeps the promise the shrink makes about markup: what ships is either valid
+    CriticMarkup or nothing.
     """
     if _within_budget(edit):
         return
@@ -181,6 +213,12 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
         if _within_budget(edit):
             return
 
+    warning = edit.get("warning")
+    if warning:
+        _shrink_prose(edit, "warning", str(warning), _MIN_WARNING_CHARS)
+        if _within_budget(edit):
+            return
+
     if markup:
         # Measure the real JSON (escaping included) rather than predicting it.
         preview_cap = len(markup)
@@ -193,6 +231,10 @@ def _fit_to_budget(edit: Dict[str, Any]) -> None:
         # edit landed on fewer pages than it did, whereas an absent one claims
         # nothing and `occurrences_modified` still reports the fan-out size.
         del edit["pages"]
+
+    if markup and not _within_budget(edit):
+        # Last rung (see above): a valid preview or none, never a fragment.
+        del edit["critic_markup"]
 
 
 def _minimal_edit(edit: Dict[str, Any]) -> Dict[str, Any]:

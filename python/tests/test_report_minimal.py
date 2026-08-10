@@ -297,10 +297,12 @@ def test_minimal_report_drops_comment_echo(tmp_path):
     assert "comment" not in shrunk["edits"][0]
 
 
-def test_minimal_report_keeps_warning_verbatim():
+def test_minimal_report_keeps_warning_within_budget():
     """
-    Engine advisories are diagnostics, not echoes: they survive in full and
-    are exempt from the per-edit budget (as failed-edit errors are).
+    An engine advisory is kept — the agent must know the edit needs a second
+    look — but it is budgeted like every other field of an applied edit: only
+    a failed edit's `error` rides free (criterion 4). What survives still names
+    the offending token.
     """
     warning = (
         "new_text contains '$1', which Python's re engine does not expand — the literal text "
@@ -319,8 +321,60 @@ def test_minimal_report_keeps_warning_verbatim():
             }
         ]
     }
-    shrunk = shrink_batch_stats(stats)
-    assert shrunk["edits"][0]["warning"] == warning
+    edit = shrink_batch_stats(stats)["edits"][0]
+    dumped = json.dumps(edit)
+    assert approx_tokens(dumped) <= 40, f"Warned edit exceeded 40 approx-tokens budget ({len(dumped)} chars): {dumped}"
+    assert warning.startswith(edit["warning"].rstrip(".")), "the warning was rewritten, not clamped"
+    assert "$1" in edit["warning"], f"the warning no longer names the offending token: {edit['warning']!r}"
+
+
+@pytest.mark.parametrize(
+    ("match_mode", "occurrences"),
+    [("strict", 1), ("all", 6)],
+    ids=["single-occurrence", "fan-out"],
+)
+def test_minimal_report_budgets_regex_backreference_warning(tmp_path, match_mode, occurrences):
+    """
+    A real surviving-$N advisory (the engine's JavaScript-backreference
+    guardrail) is the fattest field an applied edit can carry: ~260 chars of
+    prose, over six times the whole per-edit budget. It is clamped to fit — in
+    both a single-hit edit and a fan-out, whose counters and span-counted
+    preview leave the advisory least room — and what survives still names '$1'.
+    """
+    from docx import Document
+
+    from adeu.models import DocumentChange, ModifyText
+    from adeu.redline.engine import RedlineEngine
+
+    doc_path = tmp_path / "backref.docx"
+    doc = Document()
+    for i in range(occurrences):
+        doc.add_paragraph(f"Clause {i + 1}: The Consultant shall deliver the work product to the Company.")
+    doc.save(str(doc_path))
+
+    engine = RedlineEngine(io.BytesIO(doc_path.read_bytes()), author="Tester")
+    changes: list[DocumentChange] = [
+        ModifyText(
+            type="modify",
+            target_text=r"(Consultant) shall deliver",
+            new_text=r"$1 must deliver",
+            regex=True,
+            match_mode=match_mode,
+            comment=None,
+        )
+    ]
+    stats = engine.process_batch(changes)
+    assert stats["edits"][0].get("warning"), "the engine did not flag the surviving $1 backreference"
+
+    edit = shrink_batch_stats(stats)["edits"][0]
+    dumped = json.dumps(edit)
+    assert approx_tokens(dumped) <= 40, f"Warned edit exceeded 40 approx-tokens budget ({len(dumped)} chars): {dumped}"
+    assert "$1" in edit["warning"], f"the warning no longer names the offending token: {edit['warning']!r}"
+    # Whatever preview survives the budget is still valid CriticMarkup; under
+    # maximum pressure the preview goes whole rather than shipping a fragment.
+    if "critic_markup" in edit:
+        _assert_balanced_critic_markup(edit["critic_markup"])
+        assert _BUBBLE_RE.search(edit["critic_markup"])
 
 
 def test_standard_report_is_unchanged(tmp_path, capsys):
