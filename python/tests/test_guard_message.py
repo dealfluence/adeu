@@ -50,7 +50,7 @@ def test_guard_names_the_accept_action():
     assert '{"type": "accept", "target_id": "Chg:201"}' in msg
 
 
-def test_guard_names_the_narrowing_alternative():
+def test_guard_names_the_narrowing_alternative_for_match_mode_all():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
     edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
@@ -59,35 +59,63 @@ def test_guard_names_the_narrowing_alternative():
         engine.process_batch([edit])
 
     msg = exc_info.value.errors[0]
-    assert "match_mode" in msg
-    assert "strict" in msg
-    assert "first" in msg
+    assert 'or use match_mode="strict" or "first"' in msg
+    assert "scope your edit outside of it" in msg
 
 
-def test_guard_still_names_author_and_ids():
+def test_guard_recommends_scoping_outside_for_strict_straddle():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
-    edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
+    edit = ModifyText(target_text="provide written notice", new_text="provide email notification", match_mode="strict")
 
     with pytest.raises(BatchValidationError) as exc_info:
         engine.process_batch([edit])
 
     msg = exc_info.value.errors[0]
-    assert "Supplier's Counsel" in msg
-    assert "Chg:201" in msg
+    assert '{"type": "accept", "target_id": "Chg:201"}' in msg
+    assert "scope your edit outside of it" in msg
+    assert 'use match_mode="strict"' not in msg
+    assert "use match_mode" not in msg
+
+
+def test_guard_recommends_scoping_outside_for_first_straddle():
+    stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
+    engine = RedlineEngine(stream, author="Reviewer AI")
+    edit = ModifyText(target_text="provide written notice", new_text="provide email notification", match_mode="first")
+
+    with pytest.raises(BatchValidationError) as exc_info:
+        engine.process_batch([edit])
+
+    msg = exc_info.value.errors[0]
+    assert '{"type": "accept", "target_id": "Chg:201"}' in msg
+    assert "scope your edit outside of it" in msg
+    assert "use match_mode" not in msg
 
 
 def test_guard_message_token_budget():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
-    edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
+    edit_all = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
 
-    with pytest.raises(BatchValidationError) as exc_info:
-        engine.process_batch([edit])
+    with pytest.raises(BatchValidationError) as exc_info_all:
+        engine.process_batch([edit_all])
 
-    msg = exc_info.value.errors[0]
-    approx_tokens = len(msg) // 4
-    assert approx_tokens <= 70
+    msg_all = exc_info_all.value.errors[0]
+    approx_tokens_all = len(msg_all) // 4
+    assert approx_tokens_all <= 70
+
+    stream_strict = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
+    engine_strict = RedlineEngine(stream_strict, author="Reviewer AI")
+    edit_strict = ModifyText(
+        target_text="provide written notice", new_text="provide email notification", match_mode="strict"
+    )
+
+    with pytest.raises(BatchValidationError) as exc_info_strict:
+        engine_strict.process_batch([edit_strict])
+
+    msg_strict = exc_info_strict.value.errors[0]
+    approx_tokens_strict = len(msg_strict) // 4
+    assert approx_tokens_strict <= 70
 
 
 def test_strict_edit_inside_foreign_insertion_still_allowed():

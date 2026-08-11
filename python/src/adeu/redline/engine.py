@@ -2321,10 +2321,13 @@ class RedlineEngine:
                         accept_json = (
                             f'{{"type": "accept", "target_id": "{first_target_id}"}}' if first_target_id else ""
                         )
+                        if match_mode in ("strict", "first"):
+                            advice = "or scope your edit outside of it."
+                        else:
+                            advice = 'or use match_mode="strict" or "first", or scope your edit outside of it.'
                         errors.append(
                             f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
-                            f"({', '.join(author_hints)}). Accept first with {accept_json} "
-                            'or use match_mode="strict" or "first".'
+                            f"({', '.join(author_hints)}). Accept first with {accept_json} {advice}"
                         )
                         continue
 
