@@ -595,17 +595,15 @@ class TestQA005SyntheticPageDisclosure:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pipe semantics")
 class TestQA006BrokenPipe:
-    def test_extract_piped_to_early_close_is_quiet(self, tmp_path):
-        src = tmp_path / "big.docx"
+    def _build_big_doc(self, path):
         doc = Document()
         for i in range(2000):
             doc.add_paragraph(f"Paragraph {i} " + ("filler text " * 20))
-        doc.save(str(src))
+        doc.save(str(path))
 
-        script = (
-            "import sys; sys.argv = ['adeu', 'extract', %r, '--page', 'all']; "
-            "from adeu.cli import main; main()" % str(src)
-        )
+    def _pipe_early_close(self, src, *extra_args):
+        argv = ["adeu", "extract", str(src), "--page", "all", *extra_args]
+        script = "import sys; sys.argv = %r; from adeu.cli import main; main()" % (argv,)
         proc = subprocess.Popen(
             [sys.executable, "-c", script],
             stdout=subprocess.PIPE,
@@ -617,7 +615,26 @@ class TestQA006BrokenPipe:
         stderr = proc.stderr.read().decode("utf-8", "replace")
         proc.stderr.close()
         code = proc.wait(timeout=60)
+        return code, stderr
+
+    def test_extract_piped_to_early_close_is_quiet(self, tmp_path):
+        src = tmp_path / "big.docx"
+        self._build_big_doc(src)
+        # --force: the document blows the response budget, and without it the
+        # guard refuses before a single byte reaches the pipe (see the sibling
+        # test). This leg proves the streaming path stays SIGPIPE-quiet.
+        code, stderr = self._pipe_early_close(src, "--force")
 
         assert "Traceback" not in stderr, stderr
         assert "BrokenPipeError" not in stderr, stderr
         assert code in (0, 141), f"expected quiet exit (0) or 128+SIGPIPE (141), got {code}: {stderr}"
+
+    def test_budget_refusal_through_pipe_is_quiet(self, tmp_path):
+        src = tmp_path / "big.docx"
+        self._build_big_doc(src)
+        code, stderr = self._pipe_early_close(src)
+
+        assert "Traceback" not in stderr, stderr
+        assert "BrokenPipeError" not in stderr, stderr
+        assert code == 1, f"expected budget-guard refusal exit (1), got {code}: {stderr}"
+        assert "Refused unbounded full document read" in stderr, stderr
