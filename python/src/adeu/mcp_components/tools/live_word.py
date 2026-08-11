@@ -467,34 +467,19 @@ if sys.platform == "win32":
                             raise ToolError(str(e)) from e
 
                         if kind == "all":
-                            from adeu.payloads import response_budget_limit, whole_doc_guard_message
+                            from adeu.payloads import response_budget_limit
 
                             if not force and len(final_text) > response_budget_limit():
-                                from adeu.mcp_components._response_builders import build_outline_response
-                                from adeu.pagination import paginate, split_structural_appendix
+                                from adeu.mcp_components._response_builders import build_budget_guard_message
 
-                                l1_outline = ""
-                                if py_doc is not None:
-                                    out_res = build_outline_response(
-                                        py_doc,
+                                raise ToolError(
+                                    build_budget_guard_message(
                                         final_text,
                                         actual_path,
-                                        outline_max_level=1,
+                                        doc=py_doc,
                                         paragraph_offsets=paragraph_offsets,
-                                        is_cli=False,
                                     )
-                                    l1_outline = str(out_res.content)
-                                body, app = split_structural_appendix(final_text)
-                                pag_res = paginate(body, app)
-                                page_count = pag_res.total_pages
-                                msg = whole_doc_guard_message(
-                                    total_chars=len(final_text),
-                                    limit=response_budget_limit(),
-                                    file_path=actual_path,
-                                    outline=l1_outline,
-                                    page_count=page_count,
                                 )
-                                raise ToolError(msg)
 
                             from adeu.mcp_components._response_builders import (
                                 build_full_document_response,

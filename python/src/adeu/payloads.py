@@ -400,6 +400,23 @@ def response_budget_limit() -> int:
     return 76000
 
 
+# Ceiling for what a surface actually EMITS for the guard, not for the raw
+# message: the CLI --json envelope is the largest form (envelope chrome plus
+# JSON escaping of every Windows path separator), so a message that fits inside
+# it also fits on stderr and over MCP. 3,100 chars is ~775 approx tokens, held
+# under the 800-token contract with room for the emitting print()'s newline.
+GUARD_EMITTED_MAX_CHARS = 3100
+
+# Longest file path echoed back in a guard message. The caller supplied the
+# path, so the tail (which names the file) is the part worth keeping.
+_GUARD_PATH_MAX_CHARS = 160
+
+
+def _guard_emitted_length(message: str) -> int:
+    """Length of `message` as the CLI emits it under --json: the largest surface form."""
+    return len(json.dumps(failure_envelope("response_budget_exceeded", [], message), ensure_ascii=False))
+
+
 def whole_doc_guard_message(
     total_chars: int,
     limit: int,
@@ -408,14 +425,23 @@ def whole_doc_guard_message(
     page_count: Optional[int] = None,
 ) -> str:
     """
-    Builds a concise (<= 800 approx tokens) refusal message when a whole-document
-    read exceeds the response budget threshold.
+    Builds the refusal message for an oversized unbounded whole-document read.
+
+    `outline` is a rendered L1 heading list (one heading per line), or "" when
+    the document has no L1 headings — no placeholder section is emitted for a
+    document without headings.
+
+    The budget is enforced on the EMITTED response (see GUARD_EMITTED_MAX_CHARS)
+    by dropping whole outline entries from the tail and saying how many were
+    dropped. The prose and the recipe are never sliced, so every flag the
+    message advertises stays complete and runnable.
     """
     est_tokens = total_chars // 4
-    file_info = f" for '{file_path}'" if file_path else ""
+    shown_path = file_path if len(file_path) <= _GUARD_PATH_MAX_CHARS else "..." + file_path[-_GUARD_PATH_MAX_CHARS:]
+    file_info = f" for '{shown_path}'" if shown_path else ""
     page_info = f" ({page_count} pages)" if page_count else ""
 
-    lines = [
+    head = [
         (
             f"Refused unbounded full document read{file_info}{page_info}: "
             f"total size ({total_chars:,} chars, ~{est_tokens:,} tokens) exceeds "
@@ -423,23 +449,22 @@ def whole_doc_guard_message(
         ),
         "",
         "Recipe to read bounded sections:",
-        "  - Read page range: --page 1-5 or page N (MCP page='1-5')",
-        "  - Search query: --search \"query\" (MCP search_query='query')",
-        "  - Document outline: --mode outline (MCP mode='outline')",
-        "  - Tracked changes: --mode changes or diff (MCP mode='changes')",
-        "  - Force full read: --force (MCP force=True)",
+        "  - One page or a page range: --page 3 / --page 1-5 (MCP page=3 / page='1-5')",
+        "  - Find a passage: --search-query \"text\" (MCP search_query='text')",
+        "  - Heading map: --mode outline (MCP mode='outline')",
+        "  - Tracked changes ledger: --mode changes (MCP mode='changes')",
+        "  - Read it all anyway: --force (MCP force=True)",
     ]
 
-    if outline and outline.strip():
-        lines.append("")
-        lines.append("Outline (L1 Headings):")
-        lines.append(outline.strip())
-
-    msg = "\n".join(lines)
-
-    # Enforce maximum character/token budget (<= 3100 chars / 775 approx tokens)
-    if len(msg) > 3100:
-        max_chars = 3100 - 4
-        msg = msg[:max_chars] + "\n..."
-
-    return msg
+    entries = [line for line in outline.splitlines() if line.strip()]
+    kept = list(entries)
+    while True:
+        lines = list(head)
+        if kept:
+            lines += ["", "Outline (L1 Headings):", *kept]
+            if len(kept) < len(entries):
+                lines.append(f"  ({len(entries) - len(kept)} more headings: --mode outline / MCP mode='outline')")
+        msg = "\n".join(lines)
+        if not kept or _guard_emitted_length(msg) <= GUARD_EMITTED_MAX_CHARS:
+            return msg
+        kept.pop()

@@ -185,22 +185,27 @@ def _cli_error(
 ) -> NoReturn:
     """
     Terminates the CLI with a consistent error contract:
-      - human-readable diagnostics on stderr (when --json is NOT enabled)
+      - human-readable diagnostics on stderr (always, except for the response
+        budget guard under --json: see below)
       - a single {"error": code, "failed": [...], "message": ...} JSON object on stdout when
         the invocation asked for --json
     Stable codes: file_not_found, invalid_input, invalid_docx,
-    invalid_changes_file, write_failed, unsupported, batch_validation_failed.
+    invalid_changes_file, write_failed, unsupported, batch_validation_failed,
+    response_budget_exceeded.
     """
     if code in BATCH_ERROR_CODES:
         if BATCH_RECOVERY_PROTOCOL not in message and (not hint or BATCH_RECOVERY_PROTOCOL not in hint):
             hint = f"{hint}\n{BATCH_RECOVERY_PROTOCOL}" if hint else BATCH_RECOVERY_PROTOCOL
-    if _JSON_MODE:
-        env = failure_envelope(code, failed or [], message, errors=errors)
-        print(json.dumps(env, ensure_ascii=False))
-    else:
+    # The budget guard exists to bound what an agent reads; echoing the same
+    # refusal on stderr under --json doubles the very payload it is capping.
+    # Every other code keeps its stderr diagnostics, --json or not.
+    if not (_JSON_MODE and code == "response_budget_exceeded"):
         print(f"❌ {message}", file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
+    if _JSON_MODE:
+        env = failure_envelope(code, failed or [], message, errors=errors)
+        print(json.dumps(env, ensure_ascii=False))
     sys.exit(exit_code)
 
 
@@ -907,35 +912,29 @@ def handle_extract(args):
                 is_cli=True,
             )
         elif want_all_pages:
-            from adeu.payloads import response_budget_limit, whole_doc_guard_message
+            from adeu.payloads import response_budget_limit
 
-            output_path = getattr(args, "output", None)
-            if output_path is None and not getattr(args, "force", False) and len(text) > response_budget_limit():
-                from adeu.mcp_components._response_builders import build_outline_response
-                from adeu.pagination import paginate, split_structural_appendix
+            # -o writes to a file, not into an agent's context window: the
+            # budget guard has nothing to protect there, and `--page all -o`
+            # is the documented round-trip artifact for apply/diff.
+            if (
+                getattr(args, "output", None) is None
+                and not getattr(args, "force", False)
+                and len(text) > response_budget_limit()
+            ):
+                from adeu.mcp_components._response_builders import build_budget_guard_message
 
-                l1_outline = ""
-                if doc is not None:
-                    out_res = build_outline_response(
-                        doc,
+                _cli_error(
+                    "response_budget_exceeded",
+                    build_budget_guard_message(
                         text,
                         "Active Document" if args.live else str(args.input),
-                        outline_max_level=1,
+                        doc=doc,
                         paragraph_offsets=paragraph_offsets,
                         is_cli=True,
-                    )
-                    l1_outline = str(out_res.content)
-                body, app = split_structural_appendix(text)
-                pag_res = paginate(body, app)
-                page_count = pag_res.total_pages
-                msg = whole_doc_guard_message(
-                    total_chars=len(text),
-                    limit=response_budget_limit(),
-                    file_path="Active Document" if args.live else str(args.input),
-                    outline=l1_outline,
-                    page_count=page_count,
+                    ),
+                    exit_code=1,
                 )
-                _cli_error("response_budget_exceeded", msg, exit_code=1)
 
             from adeu.mcp_components._response_builders import build_full_document_response
 

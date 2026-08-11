@@ -629,6 +629,55 @@ def build_outline_response(
     )
 
 
+def build_budget_guard_message(
+    projected_text: str,
+    file_path: str,
+    doc: "DocumentObject | None" = None,
+    outline_nodes: "list | None" = None,
+    pagination_result: "PaginationResult | None" = None,
+    paragraph_offsets: dict | None = None,
+    is_cli: bool = False,
+) -> str:
+    """
+    Builds the whole-document response budget refusal for an oversized unbounded
+    read. Shared by the CLI, the disk MCP path, and the Live Word MCP path so all
+    three refuse with the same page count and the same L1 heading map.
+
+    Page count comes from paginate(body, "") — the same pagination every reader
+    path uses — so the page numbers the refusal advertises are the page numbers
+    `--page N` / `page=N` accept.
+
+    `outline_nodes` / `pagination_result` let a caller that already has them
+    (the projection cache) skip the work. Documents with no L1 heading get no
+    outline section at all, rather than a "(No headings detected)" placeholder.
+    """
+    from adeu.payloads import response_budget_limit, whole_doc_guard_message
+
+    body, _appendix = split_structural_appendix(projected_text)
+    pagination = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
+
+    nodes = outline_nodes
+    if nodes is None and doc is not None:
+        nodes = extract_outline(
+            doc,
+            body,
+            pagination.body_pages,
+            pagination.body_page_offsets,
+            paragraph_offsets=paragraph_offsets,
+        )
+    nodes = nodes or []
+    has_l1 = any(node.level == 1 for node in nodes)
+    outline = render_outline_tree(nodes, max_level=1, is_cli=is_cli, file_path=file_path) if has_l1 else ""
+
+    return whole_doc_guard_message(
+        total_chars=len(projected_text),
+        limit=response_budget_limit(),
+        file_path=file_path,
+        outline=outline,
+        page_count=pagination.total_pages,
+    )
+
+
 @dataclass
 class _LedgerEntry:
     kind: str  # "chg" or "com"

@@ -504,24 +504,22 @@ async def _read_docx_disk(
                     raise ToolError(str(e)) from e
 
                 if kind == "all":
-                    from adeu.payloads import response_budget_limit, whole_doc_guard_message
+                    from adeu.payloads import response_budget_limit
 
                     if not force and len(text) > response_budget_limit():
-                        from adeu.mcp_components._response_builders import render_outline_tree
+                        from adeu.mcp_components._response_builders import build_budget_guard_message
 
-                        _, pagination, nodes = await asyncio.to_thread(
+                        _, _outline_pagination, nodes = await asyncio.to_thread(
                             doc_cache.get_outline, entry, clean_view, relay.callback
                         )
-                        outline_str = render_outline_tree(nodes, max_level=1, is_cli=False, file_path=file_path)
-                        page_count = pagination.total_pages if pagination else None
-                        msg = whole_doc_guard_message(
-                            total_chars=len(text),
-                            limit=response_budget_limit(),
-                            file_path=file_path,
-                            outline=outline_str,
-                            page_count=page_count,
+                        raise ToolError(
+                            build_budget_guard_message(
+                                text,
+                                file_path,
+                                outline_nodes=nodes,
+                                pagination_result=pagination,
+                            )
                         )
-                        raise ToolError(msg)
                     return _as_tool_result(build_full_document_response(text, file_path))
                 if kind == "range":
                     assert isinstance(page_val, tuple)

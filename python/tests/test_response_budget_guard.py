@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastmcp.exceptions import ToolError
 
 from adeu.cli import main
 from adeu.mcp_components.tools.document import read_docx
-from adeu.payloads import response_budget_limit, whole_doc_guard_message
+from adeu.payloads import failure_envelope, response_budget_limit, whole_doc_guard_message
 
 
 class MockContext:
@@ -68,6 +69,85 @@ def test_guard_output_is_under_800_tokens():
     assert approx_tokens <= 775
 
 
+def _emitted_json(msg: str) -> str:
+    """The CLI --json emission of a guard message: the largest surface form."""
+    return json.dumps(failure_envelope("response_budget_exceeded", [], msg), ensure_ascii=False)
+
+
+def _extract_help_text(monkeypatch, capsys) -> str:
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", "--help"])
+    with pytest.raises(SystemExit):
+        main()
+    return capsys.readouterr().out
+
+
+def test_recipe_advertises_only_runnable_extract_flags(monkeypatch, capsys):
+    help_text = _extract_help_text(monkeypatch, capsys)
+    mode_match = re.search(r"--mode \{([^}]+)\}", help_text)
+    assert mode_match, "could not read --mode choices out of `extract --help`"
+    mode_choices = set(mode_match.group(1).split(","))
+
+    msg = whole_doc_guard_message(
+        total_chars=120000,
+        limit=76000,
+        file_path="big_document.docx",
+        outline="# Heading 1 (p1)",
+        page_count=12,
+    )
+
+    advertised = set(re.findall(r"--[a-z][a-z-]*", msg))
+    assert advertised, "guard recipe advertises no CLI flags"
+    for flag in advertised:
+        # Exact option match: "--search" must not be excused by "--search-query".
+        assert re.search(re.escape(flag) + r"(?![\w-])", help_text), f"guard advertises unknown flag {flag}"
+
+    for mode in re.findall(r"--mode ([a-z]+)", msg):
+        assert mode in mode_choices, f"guard advertises unknown --mode {mode}"
+
+
+def test_emitted_response_stays_in_budget_on_long_path_and_outline():
+    long_path = "C:\\Users\\someone\\" + ("a_very_long_directory_name\\" * 8) + "contract_final_v12.docx"
+    entries = [f"# Article {i} — Obligations Of The Parties (p{i})" for i in range(1, 121)]
+
+    msg = whole_doc_guard_message(
+        total_chars=1200000,
+        limit=76000,
+        file_path=long_path,
+        outline="\n".join(entries),
+        page_count=160,
+    )
+
+    assert len(_emitted_json(msg)) // 4 <= 800
+    # The recipe survives trimming, and outline entries are dropped whole —
+    # never sliced mid-line.
+    assert "Recipe to read bounded sections" in msg
+    assert "--force" in msg
+    rendered = [line for line in msg.splitlines() if line.startswith("# ")]
+    assert rendered, "outline was dropped entirely before the budget was reached"
+    assert all(line in entries for line in rendered)
+
+
+def test_outline_section_omitted_when_no_l1_headings(tmp_path: Path, monkeypatch, capsys):
+    doc_path = _create_doc(tmp_path / "no_headings.docx", chars=80000, add_headings=False)
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", str(doc_path), "--page", "all"])
+    with pytest.raises(SystemExit):
+        main()
+    output = capsys.readouterr().err
+    assert "Refused unbounded full document read" in output
+    assert "Outline" not in output
+    assert "No headings" not in output
+
+
+def test_json_stderr_suppression_is_scoped_to_the_guard(tmp_path: Path, monkeypatch, capsys):
+    missing = tmp_path / "nope.docx"
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", str(missing), "--page", "all", "--json"])
+    with pytest.raises(SystemExit):
+        main()
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error"] == "file_not_found"
+    assert "❌" in captured.err
+
+
 def test_cli_output_file_sink_exempt_from_guard(tmp_path: Path, monkeypatch):
     doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
     dump_path = tmp_path / "dump.txt"
@@ -102,6 +182,7 @@ def test_cli_json_mode_no_stderr_duplication_and_bounded(tmp_path: Path, monkeyp
     assert len(captured.out) // 4 <= 800
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Live Word only supported on Windows")
 def test_live_word_guard_and_force(monkeypatch):
     from adeu.mcp_components.tools.live_word import read_active_word_document
 
