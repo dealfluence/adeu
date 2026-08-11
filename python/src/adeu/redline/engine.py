@@ -2321,9 +2321,9 @@ class RedlineEngine:
                         )
                         first_target_id = f"Chg:{sorted_ids[0]}" if sorted_ids else None
                         id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids[:2])
-                        author_hint = f"{named_author} (e.g. {id_hints})" if id_hints else named_author
+                        hint_suffix = f" (e.g. {id_hints})" if id_hints else ""
                         if len(sorted_authors) > 1:
-                            author_hint += f" (+{len(sorted_authors) - 1} more)"
+                            hint_suffix += f" (+{len(sorted_authors) - 1} more)"
                         accept_json = (
                             f'{{"type": "accept", "target_id": "{first_target_id}"}}' if first_target_id else ""
                         )
@@ -2331,10 +2331,16 @@ class RedlineEngine:
                             advice = "or scope your edit outside of it."
                         else:
                             advice = 'or use match_mode="strict" or "first", or scope your edit outside of it.'
-                        errors.append(
-                            f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
-                            f"({author_hint}). Accept first with {accept_json} {advice}"
-                        )
+                        head = f"- Edit {i + 1} Failed: Modification targets an active insertion from another author ("
+                        tail = f"{hint_suffix}). Accept first with {accept_json} {advice}"
+                        # Author names are arbitrary strings (firm and department
+                        # names, not just people), so the name only gets what is
+                        # left of the ~70-token refusal budget (4 chars per token).
+                        # That keeps the message bounded whatever the document says.
+                        author_budget = 70 * 4 - len(head) - len(tail)
+                        if len(named_author) > author_budget:
+                            named_author = named_author[: max(author_budget - 3, 0)] + "..."
+                        errors.append(head + named_author + tail)
                         continue
 
                 # Foreign comment ranges do NOT block deliberate single-occurrence

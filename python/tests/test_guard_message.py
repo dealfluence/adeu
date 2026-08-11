@@ -172,6 +172,25 @@ def test_guard_message_token_budget():
     # The bounded hint must still name one author, one usable ID and the omitted count.
     assert "(+2 more)" in msg_many
 
+    # Author names are arbitrary strings (firm and department names, not just
+    # people), so the hint must stay bounded however verbose the reviewer is.
+    long_author = "Jonathan Alexander Fitzgerald-Montgomery, ACME Legal Dept EMEA"
+    stream_long = _create_doc_with_foreign_ins(author=long_author, ins_id="201")
+    engine_long = RedlineEngine(stream_long, author="Reviewer AI")
+    edit_long = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
+
+    with pytest.raises(BatchValidationError) as exc_info_long:
+        engine_long.process_batch([edit_long])
+
+    msg_long = exc_info_long.value.errors[0]
+    approx_tokens_long = len(msg_long) // 4
+    assert approx_tokens_long <= 70, f"{approx_tokens_long} tokens: {msg_long}"
+    # Still identifies the author, but not verbatim: the name is truncated to fit.
+    assert "Jonathan Alexander Fitzgerald" in msg_long
+    assert long_author not in msg_long
+    assert "..." in msg_long
+    assert '{"type": "accept", "target_id": "Chg:201"}' in msg_long
+
 
 def test_strict_edit_inside_foreign_insertion_still_allowed():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
