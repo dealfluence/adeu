@@ -1,7 +1,6 @@
 import argparse
 import codecs
 import datetime
-import getpass
 import json
 import os
 import platform
@@ -28,6 +27,15 @@ from adeu.payloads import (
 )
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
+from adeu.text_revision import (
+    _CRITICMARKUP_TOKENS,
+    _EXTRACT_HEADER_RE,
+    _normalize_virtual_projection_text,
+    _strip_page_chrome,
+)
+from adeu.text_revision import (
+    get_default_author as _default_author,
+)
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
 from adeu.utils.text import batch_details_header
 
@@ -243,7 +251,6 @@ def _require_input_file(path: Path, exit_code: int = 1) -> None:
 
 
 def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
-    import re
 
     err_str = str(exc)
     reason = "got bad zip signature"
@@ -381,59 +388,6 @@ def _read_docx_text(path: Path, clean_view: bool = False) -> str:
         raise AssertionError("unreachable") from None
 
 
-# The decorative header every extract response starts with (see
-# _response_builders.py). It is presentation, not document content.
-_EXTRACT_HEADER_RE = re.compile(r"^> \*\*File Path:\*\*[^\n]*\n+")
-
-# Pagination chrome emitted by extract around each page (see pagination.py's
-# build_page_banner / build_page_footer / build_appendix_pointer). Like the
-# file-path header, it is presentation — but unlike the header, a banner or
-# footer that names "page N of M" (M > 1) proves the text is only PART of the
-# document, which can never round-trip through apply/diff safely
-# (QA 2026-07-17 F1).
-_PAGE_BANNER_RE = re.compile(r"^> \*\*Page (\d+) of (\d+)\*\*[^\n]*\n+(?:---\n+)?")
-_PAGE_FOOTER_RE = re.compile(r"\n+---\n+> \*\*Continues on page (\d+) of (\d+)\.\*\*[^\n]*\s*$")
-_APPENDIX_POINTER_RE = re.compile(r"\n+---\n+> \*\*Appendix available\.\*\*[^\n]*\s*$")
-
-# CriticMarkup open tokens; their presence in a round-trip text file means the
-# text was extracted in the default markup view (apply/diff compare against
-# the CLEAN view, so markup tokens would be diffed INTO the document as prose).
-_CRITICMARKUP_TOKENS = ("{++", "{--", "{>>", "{==")
-
-# Guardrail for the text-diff path: refuse to silently delete the majority of
-# a document. 2000 chars ≈ one page of prose; above that, losing half the
-# document is almost never intentional. Short documents matter too
-# (QA 2026-07-19 v8 F-12): below the threshold the guard still arms, at a
-# higher 75% floor so that deliberately halving a small draft stays a
-# one-command workflow while near-total truncation requires the explicit flag.
-_MAJOR_DELETION_MIN_ORIGINAL_CHARS = 2000
-_MAJOR_DELETION_RATIO = 0.5
-_MAJOR_DELETION_RATIO_SMALL_DOC = 0.25
-
-
-def _strip_page_chrome(text: str) -> "tuple[str, int | None, int | None]":
-    """
-    Strips extract's page banner/footer/appendix-pointer chrome from a
-    round-trip text file. Returns (stripped_text, page, total_pages);
-    page/total_pages are None when the text carries no multi-page markers.
-    """
-    page = total = None
-    banner = _PAGE_BANNER_RE.match(text)
-    if banner:
-        page, total = int(banner.group(1)), int(banner.group(2))
-        text = text[banner.end() :]
-    # The appendix pointer trails the footer, so strip it first.
-    text = _APPENDIX_POINTER_RE.sub("", text)
-    footer = _PAGE_FOOTER_RE.search(text)
-    if footer:
-        if page is None:
-            page = int(footer.group(1)) - 1
-        if total is None:
-            total = int(footer.group(2))
-        text = text[: footer.start()]
-    return text, page, total
-
-
 def _load_roundtrip_text(path: Path, original: Path, command: str) -> str:
     """
     Loads the modified-text file for the apply/diff text paths, stripping
@@ -542,34 +496,6 @@ def _read_text_file(path: Path) -> str:
     # ingestion so the natural extract → edit → diff/apply round trip never
     # reports the header as a document change (QA 2026-07-16 run 2, F1).
     return _EXTRACT_HEADER_RE.sub("", text, count=1)
-
-
-# OS accounts that identify a machine, not a person. Tracked changes signed
-# "root" or "Administrator" are customer-visible defects in outbound legal
-# documents (QA 2026-07-19 v8 F-11).
-_MACHINE_ACCOUNT_NAMES = {"root", "admin", "administrator", "system", "daemon", "nobody"}
-
-
-def _default_author() -> str:
-    """
-    Resolution order for the tracked-changes author when --author is omitted:
-
-      1. ADEU_AUTHOR environment variable (explicit configuration for
-         noninteractive/agent environments);
-      2. the OS username, unless it names a machine account (root,
-         Administrator, ...) rather than a person;
-      3. the neutral engine default "Adeu AI".
-    """
-    env_author = (os.environ.get("ADEU_AUTHOR") or "").strip()
-    if env_author:
-        return env_author
-    try:
-        user = getpass.getuser()
-    except Exception:
-        return "Adeu AI"
-    if not user or user.strip().lower() in _MACHINE_ACCOUNT_NAMES:
-        return "Adeu AI"
-    return user
 
 
 # One-line usage reference per change type, shown when a batch fails schema
@@ -1174,12 +1100,31 @@ def handle_diff(args):
                 print(line)
 
 
-def _normalize_virtual_projection_text(text: str) -> str:
-    """
-    Normalizes virtual Markdown projection chrome (such as heading prefixes)
-    so post-apply verification evaluates pure text equivalence.
-    """
-    return re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+def _print_detailed_edit_reports(stats: Dict[str, Any]) -> None:
+    if stats.get("edits"):
+        print("\nDetailed Edit Reports:", file=sys.stderr)
+        for i, report in enumerate(stats["edits"]):
+            status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
+            print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
+            if "target_text" in report:
+                print(f"  Target: '{report['target_text']}'", file=sys.stderr)
+            edit_type = report.get("type", "modify")
+            if edit_type == "delete_row":
+                print("  Deleted row", file=sys.stderr)
+            elif "new_text" in report:
+                label = "Inserted row" if edit_type == "insert_row" else "New text"
+                print(f"  {label}: '{report['new_text']}'", file=sys.stderr)
+            if report.get("warning"):
+                print(f"  Warning: {report['warning']}", file=sys.stderr)
+            if report.get("error"):
+                print(f"  Error: {report['error']}", file=sys.stderr)
+            if report.get("critic_markup"):
+                print(
+                    f"  Preview (CriticMarkup): {report['critic_markup']}",
+                    file=sys.stderr,
+                )
+            if report.get("clean_text"):
+                print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
 
 
 def handle_apply(args):
@@ -1247,6 +1192,7 @@ def handle_apply(args):
             if not args.original:
                 _cli_error("invalid_input", "Must provide original file if not using --live", exit_code=2)
             _require_input_file(args.original)
+            _load_docx_or_exit(args.original)
 
             text_mod = _load_roundtrip_text(args.changes, args.original, "apply")
 
@@ -1264,10 +1210,29 @@ def handle_apply(args):
                     allow_major_deletions=args.allow_major_deletions,
                 )
             except TextRevisionVerificationError as e:
+                stats = e.stats
+                if getattr(args, "report", "standard") == "minimal":
+                    stats = shrink_batch_stats(stats)
+
                 if args.json:
-                    env = failure_envelope("verification_failed", [], str(e))
-                    print(json.dumps(env, ensure_ascii=False))
+                    print(json.dumps(stats, ensure_ascii=False))
                 else:
+                    print(
+                        f"❌ Verification failed — no output was written to: {e.output_path}\n"
+                        f"   A diagnostic copy (NOT the requested document) was kept at: {e.unverified_path}",
+                        file=sys.stderr,
+                    )
+                    occurrences = stats.get("occurrences_modified", 0)
+                    occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
+                    already = stats.get("actions_already_resolved", 0)
+                    already_text = f", {already} already resolved (no effect)" if already else ""
+                    print(
+                        f"Actions: {stats['actions_applied']} applied, "
+                        f"{stats['actions_skipped']} skipped{already_text}.\n"
+                        f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
+                        file=sys.stderr,
+                    )
+                    _print_detailed_edit_reports(stats)
                     print(f"\n❌ {e}", file=sys.stderr)
                 sys.exit(1)
             except ValueError as e:
@@ -1290,6 +1255,7 @@ def handle_apply(args):
                     f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
                     file=sys.stderr,
                 )
+                _print_detailed_edit_reports(stats)
             return
 
     if args.live:
@@ -1471,33 +1437,7 @@ def handle_apply(args):
             file=sys.stderr,
         )
 
-        if stats.get("edits"):
-            print("\nDetailed Edit Reports:", file=sys.stderr)
-            for i, report in enumerate(stats["edits"]):
-                status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
-                print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
-                if "target_text" in report:
-                    print(f"  Target: '{report['target_text']}'", file=sys.stderr)
-                edit_type = report.get("type", "modify")
-                if edit_type == "delete_row":
-                    print("  Deleted row", file=sys.stderr)
-                elif "new_text" in report:
-                    # Key presence, not truthiness: new_text '' is a legitimate
-                    # deletion and must still be shown. A minimal report omits
-                    # the key entirely (it echoes the caller's own input).
-                    label = "Inserted row" if edit_type == "insert_row" else "New text"
-                    print(f"  {label}: '{report['new_text']}'", file=sys.stderr)
-                if report.get("warning"):
-                    print(f"  Warning: {report['warning']}", file=sys.stderr)
-                if report.get("error"):
-                    print(f"  Error: {report['error']}", file=sys.stderr)
-                if report.get("critic_markup"):
-                    print(
-                        f"  Preview (CriticMarkup): {report['critic_markup']}",
-                        file=sys.stderr,
-                    )
-                if report.get("clean_text"):
-                    print(f"  Clean text preview: {report['clean_text']}", file=sys.stderr)
+        _print_detailed_edit_reports(stats)
 
         if stats.get("skipped_details"):
             print("\n" + batch_details_header(stats["skipped_details"]), file=sys.stderr)

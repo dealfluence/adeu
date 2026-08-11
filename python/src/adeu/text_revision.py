@@ -102,7 +102,8 @@ def check_major_deletions(
     revised_text: str,
     allow_major_deletions: bool = False,
 ) -> None:
-    """Refuses major deletions (>30% characters or >50 paragraphs) unless allowed."""
+    """Refuses major deletions (>50% chars for >=2000 chars doc, >75% for <2000 chars doc,
+    or >50 paragraphs) unless allowed."""
     if allow_major_deletions:
         return
 
@@ -111,13 +112,15 @@ def check_major_deletions(
 
     if orig_len > 0:
         char_deletion_ratio = (orig_len - rev_len) / orig_len
-        if char_deletion_ratio > 0.30:
+        threshold = 0.50 if orig_len >= 2000 else 0.75
+        if char_deletion_ratio > threshold:
             pct = int(char_deletion_ratio * 100)
+            threshold_pct = int(threshold * 100)
             raise ValueError(
                 f"Revised text is ~{pct}% shorter than the document's clean text "
-                f"({rev_len:,} vs {orig_len:,} characters, threshold is >30% deletion). "
+                f"({rev_len:,} vs {orig_len:,} characters, threshold is >{threshold_pct}% deletion). "
                 "Applying it would delete a major portion of the document. "
-                "If this mass deletion is intentional, pass allow_major_deletions=True."
+                "Pass --allow-major-deletions (or allow_major_deletions=True) to override."
             )
 
     orig_paras = len(original_text.splitlines())
@@ -127,7 +130,7 @@ def check_major_deletions(
         raise ValueError(
             f"Revised text deletes {paras_deleted} paragraphs from the original document "
             "(threshold is >50 paragraphs deleted). "
-            "If this mass deletion is intentional, pass allow_major_deletions=True."
+            "Pass --allow-major-deletions (or allow_major_deletions=True) to override."
         )
 
 
@@ -253,6 +256,7 @@ def apply_text_revision_core(
         )
         stats["verified"] = False
         stats["verification_error"] = full_err
+        stats["error"] = "verification_failed"
         stats["edits_skipped"] = stats.get("edits_applied", 0) + stats.get("edits_skipped", 0)
         stats["edits_applied"] = 0
         stats["actions_skipped"] = stats.get("actions_applied", 0) + stats.get("actions_skipped", 0)
