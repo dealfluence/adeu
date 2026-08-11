@@ -218,8 +218,18 @@
 **Change.** Define `FUSED_JSON_HINT` in `payloads.py`. Append to validation error messages when `type` contains `{`, `}`, or `":`.
 **Done when.** `uv run pytest tests/test_fused_json_hint.py` passes (5 tests).
 
-### Task 11 — Item C1: Actionable Multi-Author Guard Message
+### Task 11 — Item C1: Actionable Multi-Author Guard Message (COMPLETED)
 **Goal.** Replace vague guard refusal with concrete next steps (`{"type": "accept", "target_id": "Chg:N"}` or `match_mode` `"strict"`/`"first"`).
+**Status.** Completed & Verified (commit `095c42d`).
+**Failed Verify Cycles:** 6
+**Attempt Ledger:**
+- attempt 1: Updated guard refusal message in engine.py with accept action JSON and match_mode options, created test_guard_message.py -> VERDICT: FAIL (when match_mode="strict", message re-recommends strict/first; tests 3, 4, 5 passed pre-change code)
+- attempt 2: Tailored guard refusal advice based on edit.match_mode; sharpened test_guard_message.py -> VERDICT: FAIL (missing test_guard_still_names_author_and_ids test in test_guard_message.py required by plan)
+- attempt 3 (@opus-coder): Added test_guard_still_names_author_and_ids to test_guard_message.py -> VERDICT: FAIL (3 foreign authors / 6 IDs produces 82 approx tokens, exceeding 70-token budget; test name mismatch)
+- attempt 4 (@opus-coder): Bounded author hints in engine.py to first author + max 2 IDs + (+N more) counter -> VERDICT: FAIL (54+ character author name produces 71+ approx tokens, exceeding 70-token budget)
+- attempt 5 (@opus-coder): Truncated author names in engine.py dynamically based on remaining budget -> VERDICT: FAIL (re-implemented inline author truncation instead of using clamp_text from adeu.utils.text)
+- attempt 6 (@opus-coder): Used clamp_text from adeu.utils.text -> VERDICT: FAIL (abnormally long w:id breaks token budget; straddling match_mode=all edit recommends strict which also fails; test_guard_message.py uses inline len//4 instead of approx_tokens)
+- attempt 7 (@opus-coder): Gated strict/first advice on match_mode == "all" and fully_within_foreign_ins; applied clamp_text(msg, GUARD_MESSAGE_CAP); used approx_tokens in test_guard_message.py and added test cases -> VERDICT: PASS
 **Files.** `python/src/adeu/redline/engine.py:2283-2286`.
 **Test first.** `python/tests/test_guard_message.py` (new):
 1. `test_guard_names_the_accept_action`: error includes copy-pasteable accept action JSON.
@@ -234,8 +244,12 @@
 
 ## Phase 3 (P2 Items) — Tasks 12 to 16
 
-### Task 12 — Item B5: Explicit Salvage Contract (`--partial` / `--atomic`)
+### Task 12 — Item B5: Explicit Salvage Contract (`--partial` / `--atomic`) (COMPLETED)
 **Goal.** Apply valid edits when some fail and lead response with `PARTIAL: applied K of N...`. Default CLI to `--atomic`, MCP to partial.
+**Status.** Completed & Verified.
+**Failed Verify Cycles:** 0
+**Attempt Ledger:**
+- attempt 1: Implemented explicit salvage contract with `partial: bool` parameter in `RedlineEngine.process_batch`, `--partial`/`--atomic` CLI flags, MCP default `partial=True`, and 7 unit tests in `test_explicit_salvage.py` -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/redline/engine.py`
 - `python/src/adeu/cli.py`

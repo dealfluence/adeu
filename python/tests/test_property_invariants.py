@@ -222,7 +222,7 @@ def test_p2_json_text_roundtrip_is_exact_or_loud(data):
         stats = engine.process_batch(list(changes))
     except BatchValidationError:
         return  # loud, transactional rejection — fail-closed is compliant
-    if stats["edits_skipped"] > 0:
+    if stats["edits_skipped"] > 0 or stats.get("status") == "partial" or bool(stats.get("failed")):
         return  # loud failure: the CLI writes no output for this outcome
 
     final = accept_and_extract(engine)

@@ -1209,6 +1209,10 @@ def handle_apply(args):
                 file=sys.stderr,
             )
     else:
+        if getattr(args, "partial", False):
+            _cli_error(
+                "invalid_input", "--partial is only supported with JSON batch input, not text files.", exit_code=2
+            )
         if not args.json:
             print(f"Calculating diff from text file {args.changes}...", file=sys.stderr)
         if args.live:
@@ -1283,7 +1287,7 @@ def handle_apply(args):
         print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
     engine = _open_redline_engine_or_exit(args.original, author=args.author)
     try:
-        stats = engine.process_batch(changes)
+        stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
     except BatchValidationError as e:
         if args.json:
             env = failure_envelope(
@@ -1301,12 +1305,15 @@ def handle_apply(args):
             print(BATCH_RECOVERY_PROTOCOL, file=sys.stderr)
         sys.exit(1)
 
-    # A batch with ANY skipped action/edit is a failed batch: writing an
-    # output anyway (and calling it "Batch complete") made pipelines treat an
-    # unmodified copy as success (QA 2026-07-18 M2). Validation failures are
-    # already transactional (BatchValidationError above); this covers
-    # apply-stage skips (overlaps, unresolvable anchors).
-    batch_failed = stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0
+    is_partial = (stats.get("status") == "partial" or bool(stats.get("failed"))) and getattr(args, "partial", False)
+    applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+
+    if is_partial and applied_count > 0:
+        batch_failed = False
+    elif getattr(args, "partial", False) and applied_count == 0 and len(changes) > 0:
+        batch_failed = True
+    else:
+        batch_failed = stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0
 
     output_path = None
     if not batch_failed:
@@ -1406,6 +1413,20 @@ def handle_apply(args):
                 file=sys.stderr,
             )
         else:
+            if is_partial:
+                failed_items = stats.get("failed", [])
+                total_c = len(changes)
+                failed_cnt = (
+                    len(failed_items)
+                    if failed_items
+                    else (stats.get("edits_skipped", 0) + stats.get("actions_skipped", 0))
+                )
+                print(
+                    f"PARTIAL: applied {applied_count} of {total_c} changes. {failed_cnt} failed:",
+                    file=sys.stderr,
+                )
+                for item in failed_items:
+                    print(f"  - Change #{item['index'] + 1} Failed: {item['reason']}", file=sys.stderr)
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
 
         occurrences = stats.get("occurrences_modified", 0)
@@ -1456,8 +1477,8 @@ def handle_apply(args):
             print(f"\n❌ {verification_error}", file=sys.stderr)
         sys.exit(1)
 
-    if stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0:
-        sys.exit(1)
+        if (stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0) and not (is_partial and applied_count > 0):
+            sys.exit(1)
 
 
 def handle_accept_all(args: argparse.Namespace):
@@ -2145,6 +2166,16 @@ def _main_impl():
         choices=["minimal", "standard"],
         default="standard",
         help="Report detail level for batch output (default: standard).",
+    )
+    p_apply.add_argument(
+        "--partial",
+        action="store_true",
+        help="Apply valid edits even if some fail (salvage partial batch).",
+    )
+    p_apply.add_argument(
+        "--atomic",
+        action="store_true",
+        help="Reject whole batch if any edit fails (default).",
     )
     p_apply.add_argument(
         "--json",

@@ -2540,11 +2540,16 @@ class RedlineEngine:
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
 
-    def process_batch(self, changes: List[DocumentChange], original_indices: Optional[List[int]] = None) -> dict:
+    def process_batch(
+        self,
+        changes: List[DocumentChange],
+        original_indices: Optional[List[int]] = None,
+        partial: bool = False,
+    ) -> dict:
         """
         Processes a unified batch of actions and edits safely.
         """
-        return self._process_batch_internal(changes, original_indices=original_indices)
+        return self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
 
     def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
         page = 1
@@ -2573,12 +2578,17 @@ class RedlineEngine:
         return " > ".join(path) if path else "", page
 
     def _process_batch_internal(
-        self, changes: List[DocumentChange], original_indices: Optional[List[int]] = None
+        self,
+        changes: List[DocumentChange],
+        original_indices: Optional[List[int]] = None,
+        partial: bool = False,
     ) -> dict:
         """
         Internal execution engine for batches of edits and actions.
         """
         self.skipped_details = []
+        failed_list: List[Tuple[int, str]] = []
+
         actions_with_idx = [
             (original_indices[i] if original_indices else i, c)
             for i, c in enumerate(changes)
@@ -2597,18 +2607,23 @@ class RedlineEngine:
         if actions:
             action_shape_errors = validate_review_action_batch(actions, indices=action_indices)
             if action_shape_errors:
-                raise BatchValidationError(action_shape_errors)
+                failed_list.extend(_extract_failed_indices(action_shape_errors))
+                raise BatchValidationError(action_shape_errors, failed=failed_list)
             # Document-aware pairing check BEFORE any action mutates the DOM:
             # accept + reject across one replacement's del+ins pair is a
             # contradiction, not two independent operations (ADEU-QA-004).
             pairing_errors = self.validate_action_pairing(actions, indices=action_indices)
             if pairing_errors:
-                raise BatchValidationError(pairing_errors)
+                failed_list.extend(_extract_failed_indices(pairing_errors))
+                raise BatchValidationError(pairing_errors, failed=failed_list)
             applied_actions, skipped_actions, already_resolved_actions = self.apply_review_actions(
                 actions, indices=action_indices
             )
             if skipped_actions > 0:
-                raise BatchValidationError(self.skipped_details)
+                skipped_fails = _extract_failed_indices(self.skipped_details)
+                failed_list.extend(skipped_fails)
+                if not partial:
+                    raise BatchValidationError(self.skipped_details, failed=failed_list)
             if edits_with_idx:
                 self.clean_mapper = None
                 self.original_mapper = None
@@ -2670,6 +2685,8 @@ class RedlineEngine:
                 if shape_errors:
                     validation_errors.extend(shape_errors)
                     skipped_edits += 1
+                    err_msg = "\n".join(shape_errors)
+                    failed_list.append((orig_idx, err_msg))
                     reports_by_input[k] = {
                         "status": "failed",
                         "type": getattr(e, "type", "modify"),
@@ -2677,7 +2694,7 @@ class RedlineEngine:
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
                         "comment": getattr(e, "comment", None),
                         "warning": None,
-                        "error": "\n".join(shape_errors),
+                        "error": err_msg,
                         "critic_markup": None,
                         "clean_text": None,
                     }
@@ -2692,8 +2709,11 @@ class RedlineEngine:
                 # slice the actual post-apply document state (F6).
                 if p_applied > 0:
                     self._refresh_after_sequential_edit()
-                for k, _, e in pinned_ok:
-                    reports_by_input[k] = self._build_edit_report(e)
+                for k, orig_idx, e in pinned_ok:
+                    rep = self._build_edit_report(e)
+                    reports_by_input[k] = rep
+                    if rep.get("status") == "failed":
+                        failed_list.append((orig_idx, rep.get("error") or "Failed to apply edit"))
 
             for k, orig_idx, edit in unpinned:
                 try:
@@ -2703,7 +2723,9 @@ class RedlineEngine:
                     # validation error, never a hang or traceback (QA F5).
                     single_errors = [f"- Edit {orig_idx + 1} Failed: {e}"]
                 if single_errors:
-                    if applied_edits > 0:
+                    err_text = "\n".join(single_errors)
+                    failed_list.append((orig_idx, err_text))
+                    if applied_edits > 0 and not partial:
                         hint = (
                             f"\n  Note: {applied_edits} earlier edit(s) in this batch validated "
                             "against the intermediate document state; because this batch failed, it "
@@ -2738,19 +2760,30 @@ class RedlineEngine:
                 # preview slices the actual post-apply document state (F6).
                 if e_applied > 0:
                     self._refresh_after_sequential_edit()
-                reports_by_input[k] = self._build_edit_report(edit)
+                rep = self._build_edit_report(edit)
+                reports_by_input[k] = rep
+                if rep.get("status") == "failed":
+                    failed_list.append((orig_idx, rep.get("error") or "Failed to apply edit"))
 
-            if validation_errors:
+            if not partial and validation_errors:
                 # Transactional rejection: undo every edit this batch
                 # already applied before raising.
                 self._restore_from_snapshot(pre_batch_snapshot)
-                raise BatchValidationError(validation_errors)
+                raise BatchValidationError(
+                    validation_errors,
+                    failed=failed_list,
+                )
 
             edits_reports = [r for r in reports_by_input if r is not None]
 
         from adeu import __version__
 
+        failed_objs = [{"index": idx, "reason": reason, "error": reason} for idx, reason in failed_list]
+        status_str = "partial" if (partial and failed_list) else "ok"
+
         return {
+            "status": status_str,
+            "failed": failed_objs,
             "actions_applied": applied_actions,
             "actions_skipped": skipped_actions,
             # Actions whose target was already resolved by an earlier action

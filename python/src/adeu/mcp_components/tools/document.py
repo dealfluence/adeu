@@ -221,9 +221,11 @@ def _summarize_validation_error(exc: Exception) -> str:
     for err in exc.errors():
         loc = ".".join(str(p) for p in err.get("loc", ()))
         msg = err.get("msg", "invalid")
-        if err.get("type") == "union_tag_invalid":
+        if err.get("type") in ("union_tag_not_found", "union_tag_invalid"):
             tag = err.get("ctx", {}).get("tag", "")
-            if has_fused_json_marker(str(tag)):
+            if not tag:
+                msg = "missing required field 'type'"
+            elif has_fused_json_marker(str(tag)):
                 msg = f"{msg}. {FUSED_JSON_HINT}" if not msg.endswith(".") else f"{msg} {FUSED_JSON_HINT}"
         parts.append(f"{loc}: {msg}" if loc else msg)
     return "; ".join(parts) if parts else str(exc)
@@ -573,6 +575,7 @@ async def _process_document_batch_disk(
     changes: List[DocumentChange],
     output_path: Optional[str],
     rejected_notes: Optional[RejectedNotes] = None,
+    partial: bool = True,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -633,9 +636,31 @@ async def _process_document_batch_disk(
 
         valid_indices = getattr(rejected_notes, "valid_indices", None)
         try:
-            stats = engine.process_batch(changes, original_indices=valid_indices)
+            stats = engine.process_batch(changes, original_indices=valid_indices, partial=partial)
         except BatchValidationError as e:
             return False, e, "", ""
+
+        applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+        engine_failed = list(stats.get("failed", []))
+        schema_failed = getattr(rejected_notes, "pairs", []) if rejected_notes else []
+
+        if applied_count == 0 and (engine_failed or schema_failed):
+            err_list: list[str] = []
+            failed_pairs: list[tuple[int, str]] = []
+            for idx, note in schema_failed:
+                err_list.append(f"changes[{idx}]: {note}")
+                failed_pairs.append((idx, str(note)))
+            for item in engine_failed:
+                err_list.append(item["reason"])
+                failed_pairs.append((item["index"], str(item["reason"])))
+
+            env = failure_envelope(
+                "batch_validation_failed",
+                failed_pairs,
+                "Batch rejected. Some edits failed validation.",
+                errors=err_list,
+            )
+            return False, env, "", ""
 
         final_output = output_path
         if not final_output:
@@ -646,9 +671,6 @@ async def _process_document_batch_disk(
                 final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
         result_stream = engine.save_to_stream()
-        # Disclose overwrites BEFORE writing (QA 2026-07-23 F17): repeated
-        # default-named runs, _processed-stem inputs saving in place, and
-        # output_path == input all silently replaced an existing file.
         overwrite_note = _overwrite_note(final_output, original_docx_path)
         save_stream(result_stream, final_output)
         return True, stats, final_output, overwrite_note
@@ -663,6 +685,10 @@ async def _process_document_batch_disk(
             if isinstance(exc, BatchValidationError):
                 err_list = list(exc.errors)
                 failed_pairs = list(exc.failed)
+            elif isinstance(exc, dict):
+                json_block = f"\n\n```json\n{json.dumps(exc, ensure_ascii=False)}\n```"
+                err_list = exc.get("errors", [exc.get("message", "Batch rejected")])
+                return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(err_list) + json_block
             else:
                 err_list = exc if isinstance(exc, list) else [str(exc)]
                 failed_pairs = []
@@ -705,7 +731,106 @@ async def _process_document_batch_disk(
                 pass
 
         stats = result_data
-        res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
+        applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+        engine_failed = list(stats.get("failed", []))
+        schema_failed = getattr(rejected_notes, "pairs", []) if rejected_notes else []
+
+        is_partial_success = (
+            partial
+            and (bool(schema_failed) or bool(engine_failed) or stats.get("status") == "partial")
+            and applied_count > 0
+        )
+
+        if is_partial_success:
+            combined_fails: list[tuple[int, str]] = []
+            err_list = []
+            for idx, note in schema_failed:
+                combined_fails.append((idx, f"changes[{idx}]: {note}"))
+                err_list.append(f"changes[{idx}]: {note}")
+            for item in engine_failed:
+                combined_fails.append((item["index"], item["reason"]))
+                err_list.append(item["reason"])
+            combined_fails.sort(key=lambda x: x[0])
+
+            max_idx = max([idx for idx, _ in combined_fails] + [0])
+            total_n = max(max_idx + 1, len(changes) + len(schema_failed))
+
+            header = (
+                f"PARTIAL: applied {applied_count} of {total_n} changes. {len(combined_fails)} failed validation:\n\n"
+            )
+            for idx, reason in combined_fails:
+                header += f"- Change #{idx + 1} Failed: {reason}\n"
+
+            total_occurrences = sum(
+                e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
+            )
+            occ_text = (
+                f" ({total_occurrences} occurrences)" if total_occurrences > stats.get("edits_applied", 0) else ""
+            )
+            already = stats.get("actions_already_resolved", 0)
+            already_text = f", {already} already resolved (no effect)" if already else ""
+            acts_app = stats.get("actions_applied", 0)
+            acts_skip = stats.get("actions_skipped", 0)
+            edits_app = stats.get("edits_applied", 0)
+            edits_skip = stats.get("edits_skipped", 0)
+            counts_str = (
+                f"\nActions: {acts_app} applied, {acts_skip} skipped{already_text}.\n"
+                f"Edits: {edits_app} applied{occ_text}, {edits_skip} skipped.\n"
+            )
+
+            env = failure_envelope(
+                "batch_validation_failed",
+                combined_fails,
+                f"PARTIAL: applied {applied_count} of {total_n} changes.",
+                errors=err_list,
+            )
+            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
+
+            return (
+                header + counts_str + f"\nBatch complete. Saved to: {final_output_path}{overwrite_note}\n" + json_block
+            )
+        else:
+            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
+            total_occurrences = sum(
+                e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
+            )
+            occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
+            already = stats.get("actions_already_resolved", 0)
+            already_text = f", {already} already resolved (no effect)" if already else ""
+            res += (
+                f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
+                f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
+            )
+
+            if stats.get("edits"):
+                res += "\nDetailed Edit Reports:\n"
+                for i, report in enumerate(stats["edits"]):
+                    status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
+                    pages_str = ", ".join(f"p{p}" for p in report.get("pages", []))
+                    page_suffix = f" ({pages_str})" if pages_str else ""
+                    res += f"### Edit {i + 1} {status_indicator}{page_suffix}\n"
+                    if report.get("heading_path"):
+                        res += f"**Path:** `{report['heading_path']}`\n"
+
+                    occ = report.get("occurrences_modified", 0)
+                    occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
+                    res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
+
+                    if report.get("comment"):
+                        res += f'**Comment:** "{report["comment"]}"\n'
+
+                    if report.get("warning"):
+                        res += f"*Warning:* {report['warning']}\n"
+                    if report.get("error"):
+                        res += f"*Error:* {report['error']}\n"
+                    if report.get("critic_markup"):
+                        res += f"*Preview (CriticMarkup):*\n> {report['critic_markup']}\n"
+                    res += "\n"
+
+            if stats.get("skipped_details"):
+                res += (
+                    "\n\n" + batch_details_header(stats["skipped_details"]) + "\n" + "\n".join(stats["skipped_details"])
+                )
 
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
@@ -1375,6 +1500,10 @@ if sys.platform == "win32":
             Optional[str],
             "Optional output path (only used if original_docx_path is provided).",
         ] = None,
+        partial: Annotated[
+            bool,
+            "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
+        ] = True,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1415,6 +1544,39 @@ if sys.platform == "win32":
                 res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
             except LiveWordUnavailableError:
                 await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk edit.")
+                if not partial:
+                    res = await _process_document_batch_disk(
+                        original_docx_path,
+                        author_name,
+                        ctx,
+                        changes,
+                        output_path,
+                        rejected_notes=rejected_notes,
+                        partial=partial,
+                    )
+                else:
+                    res = await _process_document_batch_disk(
+                        original_docx_path,
+                        author_name,
+                        ctx,
+                        changes,
+                        output_path,
+                        rejected_notes=rejected_notes,
+                    )
+        else:
+            # Not open in Word (or Word not running): the file on disk is
+            # authoritative — edit it directly. This is also the headless path.
+            if not partial:
+                res = await _process_document_batch_disk(
+                    original_docx_path,
+                    author_name,
+                    ctx,
+                    changes,
+                    output_path,
+                    rejected_notes=rejected_notes,
+                    partial=partial,
+                )
+            else:
                 res = await _process_document_batch_disk(
                     original_docx_path,
                     author_name,
@@ -1423,17 +1585,6 @@ if sys.platform == "win32":
                     output_path,
                     rejected_notes=rejected_notes,
                 )
-        else:
-            # Not open in Word (or Word not running): the file on disk is
-            # authoritative — edit it directly. This is also the headless path.
-            res = await _process_document_batch_disk(
-                original_docx_path,
-                author_name,
-                ctx,
-                changes,
-                output_path,
-                rejected_notes=rejected_notes,
-            )
         return add_timing_if_debug(start_time, res)
 
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") in ("1", "true", "True", "yes"):
@@ -1675,6 +1826,10 @@ else:
             "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
         ] = "Adeu AI",
         output_path: Annotated[Optional[str], "Optional output path."] = None,
+        partial: Annotated[
+            bool,
+            "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
+        ] = True,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1698,12 +1853,23 @@ else:
                 + "\n".join(f"- {n}" for n in rejected_notes)
                 + json_block,
             )
-        res = await _process_document_batch_disk(
-            original_docx_path,
-            author_name,
-            ctx,
-            changes,
-            output_path,
-            rejected_notes=rejected_notes,
-        )
+        if not partial:
+            res = await _process_document_batch_disk(
+                original_docx_path,
+                author_name,
+                ctx,
+                changes,
+                output_path,
+                rejected_notes=rejected_notes,
+                partial=partial,
+            )
+        else:
+            res = await _process_document_batch_disk(
+                original_docx_path,
+                author_name,
+                ctx,
+                changes,
+                output_path,
+                rejected_notes=rejected_notes,
+            )
         return add_timing_if_debug(start_time, res)
