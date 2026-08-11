@@ -1,4 +1,4 @@
-from adeu.diff import generate_edits_from_text
+from adeu.diff import generate_edits_from_text, generate_edits_via_paragraph_alignment
 
 
 def test_start_of_doc_insertion_duplication_bug():
@@ -25,3 +25,22 @@ def test_start_of_doc_insertion_duplication_bug():
     else:
         assert "Contract" in edit.target_text
         assert "Big" in edit.new_text
+
+
+def test_paragraph_alignment_emits_no_empty_hunk():
+    """
+    Regression (P1 pinned round-trip fuzz): when the word-level hunk over a
+    multi-paragraph replace block is exactly "A\\n\\nB\\n\\n" -> "", the
+    cross-paragraph split emitted one deletion per paragraph AND a leftover
+    final piece with an empty target and empty new_text. The engine can only
+    read that as an insertion of nothing, so it fails the edit: one skipped
+    edit for a change that was already fully expressed.
+    """
+    original = "0 0.\n\n0 0 0.\n\n0.\n\n0 0 0 0 0."
+    modified = "0 0.\n\n0 0 0 0 0. 0"
+
+    edits = generate_edits_via_paragraph_alignment(original, modified)
+
+    assert all(e.target_text or e.new_text for e in edits), (
+        f"no-op edit emitted: {[(e.target_text, e.new_text) for e in edits]}"
+    )

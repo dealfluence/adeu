@@ -1194,9 +1194,15 @@ def _split_cross_paragraph_hunks(edits: List[ModifyText]) -> List[ModifyText]:
             deletion._match_start_index = offset
             out.append(deletion)
             offset += len(piece) + 2
-        final = ModifyText(type="modify", target_text=parts[-1], new_text=new, comment=e.comment)
-        final._match_start_index = offset
-        out.append(final)
+        # A hunk that deletes whole paragraphs ("A\n\nB\n\n" -> "") leaves an
+        # EMPTY final piece: the per-paragraph deletions above already express
+        # the whole change. Emitting it anyway hands the engine an edit with
+        # nothing to match and nothing to write - read as an insertion of
+        # nothing, and rightly failed (P1 pinned round-trip fuzz).
+        if parts[-1] or new:
+            final = ModifyText(type="modify", target_text=parts[-1], new_text=new, comment=e.comment)
+            final._match_start_index = offset
+            out.append(final)
     return out
 
 
