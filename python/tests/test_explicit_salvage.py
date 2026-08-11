@@ -109,7 +109,7 @@ def test_cli_default_is_still_atomic(tmp_path, capsys):
     assert doc_path.read_bytes() == initial_bytes
 
 
-def test_cli_mutually_exclusive_salvage_flags(tmp_path):
+def test_cli_mutually_exclusive_salvage_flags(tmp_path, capsys):
     doc_path = _create_sample_docx(tmp_path)
     changes_path = tmp_path / "changes.json"
     changes_path.write_text("[]", encoding="utf-8")
@@ -119,6 +119,12 @@ def test_cli_mutually_exclusive_salvage_flags(tmp_path):
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 2
+
+    # argparse must be the one refusing: exit code 2 alone is not evidence,
+    # since other input errors also exit 2. The rejection has to name the
+    # conflicting flag.
+    captured = capsys.readouterr()
+    assert "not allowed with argument --partial" in captured.err
 
 
 def test_partial_json_failed_indices_are_machine_readable(tmp_path):

@@ -568,6 +568,25 @@ async def _read_docx_disk(
         raise ToolError(f"Error reading file: {str(e)}") from e
 
 
+def _batch_counts_block(stats: Any) -> str:
+    """
+    The Actions/Edits count lines of a batch response. Shared by the partial
+    (salvage) and the whole-batch response paths so both always report the
+    same counts in the same shape.
+    """
+    total_occurrences = sum(
+        e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
+    )
+    occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats.get("edits_applied", 0) else ""
+    already = stats.get("actions_already_resolved", 0)
+    already_text = f", {already} already resolved (no effect)" if already else ""
+    return (
+        f"Actions: {stats.get('actions_applied', 0)} applied, {stats.get('actions_skipped', 0)} "
+        f"skipped{already_text}.\n"
+        f"Edits: {stats.get('edits_applied', 0)} applied{occ_text}, {stats.get('edits_skipped', 0)} skipped.\n"
+    )
+
+
 async def _process_document_batch_disk(
     original_docx_path: str,
     author_name: str,
@@ -761,22 +780,7 @@ async def _process_document_batch_disk(
             for idx, reason in combined_fails:
                 header += f"- Change #{idx + 1} Failed: {reason}\n"
 
-            total_occurrences = sum(
-                e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
-            )
-            occ_text = (
-                f" ({total_occurrences} occurrences)" if total_occurrences > stats.get("edits_applied", 0) else ""
-            )
-            already = stats.get("actions_already_resolved", 0)
-            already_text = f", {already} already resolved (no effect)" if already else ""
-            acts_app = stats.get("actions_applied", 0)
-            acts_skip = stats.get("actions_skipped", 0)
-            edits_app = stats.get("edits_applied", 0)
-            edits_skip = stats.get("edits_skipped", 0)
-            counts_str = (
-                f"\nActions: {acts_app} applied, {acts_skip} skipped{already_text}.\n"
-                f"Edits: {edits_app} applied{occ_text}, {edits_skip} skipped.\n"
-            )
+            counts_str = "\n" + _batch_counts_block(stats)
 
             env = failure_envelope(
                 "batch_validation_failed",
@@ -791,17 +795,7 @@ async def _process_document_batch_disk(
             )
 
         res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
-
-        total_occurrences = sum(
-            e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
-        )
-        occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
-        already = stats.get("actions_already_resolved", 0)
-        already_text = f", {already} already resolved (no effect)" if already else ""
-        res += (
-            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
-            f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
-        )
+        res += _batch_counts_block(stats)
 
         if stats.get("edits"):
             res += "\nDetailed Edit Reports:\n"
@@ -1793,23 +1787,13 @@ else:
                 + "\n".join(f"- {n}" for n in rejected_notes)
                 + json_block,
             )
-        if not partial:
-            res = await _process_document_batch_disk(
-                original_docx_path,
-                author_name,
-                ctx,
-                changes,
-                output_path,
-                rejected_notes=rejected_notes,
-                partial=partial,
-            )
-        else:
-            res = await _process_document_batch_disk(
-                original_docx_path,
-                author_name,
-                ctx,
-                changes,
-                output_path,
-                rejected_notes=rejected_notes,
-            )
+        res = await _process_document_batch_disk(
+            original_docx_path,
+            author_name,
+            ctx,
+            changes,
+            output_path,
+            rejected_notes=rejected_notes,
+            partial=partial,
+        )
         return add_timing_if_debug(start_time, res)
