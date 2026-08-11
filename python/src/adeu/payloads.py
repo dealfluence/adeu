@@ -53,9 +53,8 @@ _MIN_BUBBLE_BODY = 8
 # report.
 _MIN_WARNING_CHARS = 26
 
-# Stands in for document context dropped from a preview. ASCII on purpose:
-# json.dumps escapes a "…" to "\u2026", six characters of budget for one
-# character of meaning.
+# Stands in for document context dropped from a preview. Three dots ASCII
+# indicator for dropped context in elisions.
 _ELISION = "..."
 
 
@@ -202,9 +201,8 @@ def _shrink_prose(edit: Dict[str, Any], key: str, value: str, floor: int) -> Non
     """
     Clamps one free-prose field of an edit toward `floor` characters, stopping
     the moment the edit fits. Each step re-clamps the ORIGINAL value at a
-    smaller cap and re-measures the real serialized JSON, so escaping (a single
-    "—" costs six characters of budget as "\\u2014") is accounted for rather
-    than predicted.
+    smaller cap and re-measures the real serialized JSON (with `ensure_ascii=False`),
+    so actual serialized JSON size is accounted for rather than predicted.
     """
     cap = len(value)
     while cap > floor and not _within_budget(edit):

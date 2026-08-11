@@ -92,7 +92,7 @@ def test_error_envelope_preserves_unicode(tmp_path, capsys):
         "argv",
         [
             "adeu",
-            "apply",
+            "markup",
             str(docx_path),
             str(edits_path),
             "--json",
@@ -108,7 +108,7 @@ def test_error_envelope_preserves_unicode(tmp_path, capsys):
     assert r"\u2019" not in out
     assert r"\u2014" not in out
     data = json.loads(out)
-    assert "error" in data
+    assert data["error"] == "batch_validation_failed"
 
 
 def test_no_escaped_sequences_anywhere(tmp_path, capsys):

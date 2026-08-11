@@ -187,9 +187,11 @@
 **Change.** Set `reasoning: Optional[str] = ""` and move `reasoning` to the end of parameter list across all MCP tools.
 **Done when.** `uv run pytest tests/test_mcp_reasoning_optional.py` passes (5 tests).
 
-### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON (COMPLETED)
+### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON
 **Goal.** Output literal UTF-8 in JSON outputs instead of `\u2019` escapes.
-**Status.** Completed & Verified.
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Passed ensure_ascii=False to json.dumps in cli.py, payloads.py, created test_json_unicode.py -> VERDICT: FAIL (test_error_envelope_preserves_unicode didn't fail on pre-change code; stale comments in payloads.py)
 **Files.** `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`, `python/src/adeu/redline/engine.py`.
 **Test first.** `python/tests/test_json_unicode.py` (new):
 1. `test_extract_json_preserves_unicode`: literal smart quotes and dashes in JSON output.
