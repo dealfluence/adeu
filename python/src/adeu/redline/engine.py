@@ -4345,8 +4345,6 @@ class RedlineEngine:
                     first_del_element = del_elem
                 last_del_element = del_elem
 
-            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
-
             if first_del_element is not None and last_del_element is not None and edit.new_text:
                 parent = last_del_element.getparent()
                 if parent is not None:
@@ -4455,6 +4453,16 @@ class RedlineEngine:
                                 else last_del_element,
                                 edit.comment,
                             )
+
+            # Row-deletion inference runs AFTER the replacement text is in the
+            # tree. Evaluating it earlier saw every run in the row wrapped in
+            # <w:del> — a whole-cell replacement then stamped w:trPr/w:del and
+            # accept_all_revisions silently dropped the entire <w:tr>, taking
+            # the inserted text with it (BUG_adeu_accept_all_table_row_loss).
+            # A row only counts as deleted when no active run survives the
+            # complete edit, e.g. a replacement spanning several rows whose new
+            # text lands in the first one.
+            self._mark_fully_deleted_rows_in_range(del_elems, virtual_spans, start_idx, length, active_mapper, del_id)
 
         # PHASE 2: OOXML Paragraph Merge Protocol
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION):
@@ -4573,6 +4581,27 @@ class RedlineEngine:
                         continue
                     return True
         return False
+
+    def _is_last_paragraph_in_cell(self, p_elem) -> bool:
+        """
+        True when p_elem is the only <w:p> left inside its containing table
+        cell — the floor for paragraph removal.
+
+        ECMA-376 requires every <w:tc> to hold at least one block-level
+        element, and Word treats a cell with none as a corrupt document. So
+        accepting or rejecting a paragraph mark must never remove a cell's
+        last paragraph; the marker is stripped instead, leaving the cell
+        empty but valid (BUG_adeu_accept_all_table_row_loss).
+
+        Paragraphs outside a table are unaffected: the body may legitimately
+        end up with none.
+        """
+        cell = p_elem.getparent()
+        while cell is not None and cell.tag != qn("w:tc"):
+            cell = cell.getparent()
+        if cell is None:
+            return False
+        return len(cell.findall(f".//{qn('w:p')}")) <= 1
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
         curr = run._element
@@ -5132,7 +5161,12 @@ class RedlineEngine:
                 grandparent = parent.getparent()
                 if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
                     p_el = grandparent.getparent()
-                    if p_el is not None and p_el.tag == qn("w:p") and not self._paragraph_has_visible_content(p_el):
+                    if (
+                        p_el is not None
+                        and p_el.tag == qn("w:p")
+                        and not self._paragraph_has_visible_content(p_el)
+                        and not self._is_last_paragraph_in_cell(p_el)
+                    ):
                         body = p_el.getparent()
                         if body is not None:
                             body.remove(p_el)
@@ -5190,7 +5224,7 @@ class RedlineEngine:
             grandparent = parent.getparent()
             if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
                 p_el = grandparent.getparent()
-                if p_el is not None and p_el.tag == qn("w:p"):
+                if p_el is not None and p_el.tag == qn("w:p") and not self._is_last_paragraph_in_cell(p_el):
                     body = p_el.getparent()
                     if body is not None:
                         body.remove(p_el)
@@ -5418,7 +5452,7 @@ class RedlineEngine:
                             if has_content:
                                 break
 
-                        if has_content:
+                        if has_content or self._is_last_paragraph_in_cell(p):
                             rPr.remove(del_mark)
                         else:
                             self._clean_wrapping_comments(p, preserve_comments=False)

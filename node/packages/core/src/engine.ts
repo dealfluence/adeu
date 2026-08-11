@@ -1284,7 +1284,7 @@ export class RedlineEngine {
                 break;
               }
             }
-            if (has_content) {
+            if (has_content || this._is_last_paragraph_in_cell(p)) {
               rPr.removeChild(delMark);
             } else {
               this._clean_wrapping_comments(p);
@@ -4109,6 +4109,28 @@ export class RedlineEngine {
       }
     }
     return false;
+  }
+
+  /**
+   * True when p_elem is the only <w:p> left inside its containing table cell
+   * — the floor for paragraph removal.
+   *
+   * ECMA-376 requires every <w:tc> to hold at least one block-level element,
+   * and Word treats a cell with none as a corrupt document. So accepting or
+   * rejecting a paragraph mark must never remove a cell's last paragraph; the
+   * marker is stripped instead, leaving the cell empty but valid
+   * (BUG_adeu_accept_all_table_row_loss).
+   *
+   * Paragraphs outside a table are unaffected: the body may legitimately end
+   * up with none.
+   */
+  private _is_last_paragraph_in_cell(p_elem: Element): boolean {
+    let cell = p_elem.parentNode as Element | null;
+    while (cell && cell.tagName !== "w:tc") {
+      cell = cell.parentNode as Element | null;
+    }
+    if (!cell) return false;
+    return findAllDescendants(cell, "w:p").length <= 1;
   }
 
   /**

@@ -8,6 +8,7 @@ import {
   addNestedTable,
 } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
+import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import {
@@ -295,5 +296,82 @@ describe("Table Interop & Engine (Node.js Port)", () => {
     expect(stats.edits).toHaveLength(2);
     expect(stats.edits[0].type).toBe("insert_row");
     expect(stats.edits[1].type).toBe("delete_row");
+  });
+
+  // BUG_adeu_accept_all_table_row_loss — Python-engine parity.
+  // Accepting a change that empties a table cell must not leave the <w:tc>
+  // without a <w:p>: ECMA-376 requires at least one block-level element per
+  // cell and Word reports a document with an empty <w:tc/> as corrupt.
+  it("accept_all keeps the last paragraph of an emptied cell", async () => {
+    const doc = await createTestDocument();
+    const tbl = addTable(doc, 1, 2);
+    setCellText(tbl, 0, 0, "ALPHA");
+    setCellText(tbl, 0, 1, "KEEP");
+    addParagraph(doc, "tail paragraph");
+
+    const buf = await doc.save();
+    const midDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(midDoc);
+
+    // Deleting all of cell 0's text empties it, but the sibling cell keeps
+    // content so the row survives — the cell needs an empty paragraph.
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "ALPHA", new_text: "" } as ModifyText,
+    ]);
+    expect(stats.edits_applied).toBe(1);
+
+    const tracked = await midDoc.save();
+    const acceptDoc = await DocumentObject.load(tracked);
+    const acceptEngine = new RedlineEngine(acceptDoc);
+    (acceptEngine as any).accept_all_revisions();
+
+    const finalDoc = await DocumentObject.load(await acceptDoc.save());
+    const cells = findAllDescendants((finalDoc as any).element, "w:tc");
+    expect(cells.length).toBe(2);
+    for (const cell of cells) {
+      expect(findAllDescendants(cell, "w:p").length).toBeGreaterThanOrEqual(1);
+    }
+
+    const clean_text = await extractTextFromBuffer(await acceptDoc.save(), true);
+    expect(clean_text).toContain("KEEP");
+    expect(clean_text).not.toContain("ALPHA");
+  });
+
+  // BUG_adeu_accept_all_table_row_loss — the Python engine stamped a spurious
+  // w:trPr/w:del when a replacement covered a cell's whole text, and
+  // accept_all_revisions then dropped the row. Node never had the row
+  // inference; this pins the behaviour so the two engines stay in step.
+  it("accept_all keeps the row when a replacement covers a whole cell", async () => {
+    const doc = await createTestDocument();
+    const tbl = addTable(doc, 2, 1);
+    setCellText(tbl, 0, 0, "ALPHA");
+    setCellText(tbl, 1, 0, "BETA");
+    addParagraph(doc, "tail paragraph");
+
+    const buf = await doc.save();
+    const midDoc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(midDoc);
+    engine.process_batch([
+      { type: "modify", target_text: "ALPHA", new_text: "GAMMA" } as ModifyText,
+    ]);
+
+    const tracked = await midDoc.save();
+    const trackedDoc = await DocumentObject.load(tracked);
+    for (const row of findAllDescendants((trackedDoc as any).element, "w:tr")) {
+      const trPr = findChild(row, "w:trPr");
+      expect(trPr && findChild(trPr, "w:del")).toBeFalsy();
+    }
+
+    const acceptEngine = new RedlineEngine(trackedDoc);
+    (acceptEngine as any).accept_all_revisions();
+    const finalBuf = await trackedDoc.save();
+
+    const finalDoc = await DocumentObject.load(finalBuf);
+    expect(findAllDescendants((finalDoc as any).element, "w:tr").length).toBe(2);
+
+    const clean_text = await extractTextFromBuffer(finalBuf, true);
+    expect(clean_text).toContain("GAMMA");
+    expect(clean_text).toContain("BETA");
+    expect(clean_text).not.toContain("ALPHA");
   });
 });
