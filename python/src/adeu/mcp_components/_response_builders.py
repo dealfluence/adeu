@@ -397,7 +397,7 @@ def render_outline_tree(
     return "\n".join(lines)
 
 
-def build_full_document_response(text: str, file_path: str) -> BuilderResult:
+def build_full_document_response(text: str, file_path: str, no_chrome: bool = False) -> BuilderResult:
     """
     Returns the ENTIRE document body in one response, with no page banner,
     continuation footer, or appendix pointer.
@@ -409,7 +409,7 @@ def build_full_document_response(text: str, file_path: str) -> BuilderResult:
     """
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
     return BuilderResult(
         content=llm_content,
         structured_content={
@@ -426,6 +426,7 @@ def build_paginated_response(
     file_path: str,
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
+    no_chrome: bool = False,
 ) -> BuilderResult:
     """
     Splits projected Markdown into pages and returns the requested page.
@@ -452,14 +453,19 @@ def build_paginated_response(
 
     selected = result.pages[page - 1]
 
-    # Build the original UI markdown
-    banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
-    footer = build_page_footer(selected.page, selected.total_pages, selected.has_next, file_path, is_cli=is_cli)
-    appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
-    ui_markdown = banner + selected.page_content + footer + appendix_pointer
+    if no_chrome:
+        page_marker = f"[p{selected.page}/{selected.total_pages}]\n\n" if selected.total_pages > 1 else ""
+        ui_markdown = f"{page_marker}{selected.page_content}"
+        llm_content = ui_markdown
+    else:
+        # Build the original UI markdown
+        banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
+        footer = build_page_footer(selected.page, selected.total_pages, selected.has_next, file_path, is_cli=is_cli)
+        appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
+        ui_markdown = banner + selected.page_content + footer + appendix_pointer
 
-    # Prepend the path ONLY for the LLM
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+        # Prepend the path ONLY for the LLM
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(
         content=llm_content,
@@ -478,6 +484,7 @@ def build_page_range_response(
     file_path: str,
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
+    no_chrome: bool = False,
 ) -> BuilderResult:
     """
     Returns a range of synthetic pages (from `start` to `end`, 1-indexed),
@@ -504,30 +511,34 @@ def build_page_range_response(
     page_blocks: List[str] = []
     for p_num in range(start, last + 1):
         selected = result.pages[p_num - 1]
-        banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
+        if no_chrome:
+            banner = f"[p{selected.page}/{selected.total_pages}]\n\n" if selected.total_pages > 1 else ""
+        else:
+            banner = build_page_banner(selected.page, selected.total_pages, file_path, is_cli=is_cli)
         page_blocks.append(f"{banner}{selected.page_content}")
 
     ui_parts = ["\n\n".join(page_blocks)]
 
-    if last < end and last < total_pages:
-        next_start = last + 1
-        if is_cli:
-            ui_parts.append(
-                f"> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `--page {next_start}-{end}`."
-            )
-        else:
-            ui_parts.append(
-                f'> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `page="{next_start}-{end}"`.'
-            )
-    elif end > total_pages:
-        ui_parts.append(f"> **[range stopped at page {total_pages}: the document has {total_pages} page(s)]**")
+    if not no_chrome:
+        if last < end and last < total_pages:
+            next_start = last + 1
+            if is_cli:
+                ui_parts.append(
+                    f"> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `--page {next_start}-{end}`."
+                )
+            else:
+                ui_parts.append(
+                    f'> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `page="{next_start}-{end}"`.'
+                )
+        elif end > total_pages:
+            ui_parts.append(f"> **[range stopped at page {total_pages}: the document has {total_pages} page(s)]**")
 
-    appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
-    if appendix_pointer:
-        ui_parts.append(appendix_pointer.strip())
+        appendix_pointer = build_appendix_pointer(file_path, has_appendix, is_cli=is_cli)
+        if appendix_pointer:
+            ui_parts.append(appendix_pointer.strip())
 
     ui_markdown = "\n\n".join(ui_parts)
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(
         content=llm_content,
@@ -549,6 +560,7 @@ def build_outline_response(
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
     outline_nodes: "list | None" = None,
+    no_chrome: bool = False,
 ) -> BuilderResult:
     """
     Returns a structural map of headings as a Markdown tree.
@@ -607,17 +619,21 @@ def build_outline_response(
     else:
         read_hint = "Call `read_docx` with `mode='full'` and `page=N` to read a section."
 
-    # Build the original UI markdown
-    header = (
-        f"> **Outline view** — showing {visible_count} of {len(nodes)} headings "
-        f"(L1-L{outline_max_level}{deeper_hint}) across "
-        f"{pagination_result.total_pages} page(s). "
-        f"{read_hint}\n\n"
-        f"---\n\n"
-    )
-    ui_markdown = header + rendered
-    # Prepend the path ONLY for the LLM
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    if no_chrome:
+        ui_markdown = rendered
+        llm_content = ui_markdown
+    else:
+        # Build the original UI markdown
+        header = (
+            f"> **Outline view** — showing {visible_count} of {len(nodes)} headings "
+            f"(L1-L{outline_max_level}{deeper_hint}) across "
+            f"{pagination_result.total_pages} page(s). "
+            f"{read_hint}\n\n"
+            f"---\n\n"
+        )
+        ui_markdown = header + rendered
+        # Prepend the path ONLY for the LLM
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(
         content=llm_content,
@@ -703,6 +719,7 @@ def build_search_response(
     max_matches: int = 20,
     match_offset: int = 0,
     full_paragraph: bool = False,
+    no_chrome: bool = False,
 ) -> BuilderResult:
     """
     Filters projected Markdown to exact substring or regex matches.
@@ -1141,14 +1158,14 @@ def build_search_response(
         match_lines.extend([snippet_lines, occurrence_line])
         return "\n\n".join(match_lines)
 
-    content_prefix = f"> **File Path:** `{file_path}`\n\n"
+    content_prefix = "" if no_chrome else f"> **File Path:** `{file_path}`\n\n"
 
     def compose(hits: list, radius: int | None, budget_note: str) -> str:
-        parts = build_header(len(hits))
+        parts = [] if no_chrome else build_header(len(hits))
         parts.extend(render_entry(line_start, group, radius) for line_start, group in group_by_line(hits))
-        if budget_note:
+        if budget_note and not no_chrome:
             parts.append(budget_note)
-        if regex_downgraded_note:
+        if regex_downgraded_note and not no_chrome:
             parts.insert(0, regex_downgraded_note)
         return "\n\n".join(part for part in parts if part)
 
@@ -1223,7 +1240,13 @@ def build_search_response(
     )
 
 
-def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool = False) -> BuilderResult:
+def build_appendix_response(
+    text: str,
+    page: int,
+    file_path: str,
+    is_cli: bool = False,
+    no_chrome: bool = False,
+) -> BuilderResult:
     """
     Returns the structural appendix (defined terms, anchors, diagnostics) for
     the document, paginated. The appendix is treated AS the body for pagination
@@ -1244,7 +1267,7 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
             "This document has no structural appendix "
             "(no defined terms, named anchors, or diagnostics detected)."
         )
-        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+        llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
         return BuilderResult(
             content=llm_content,
             structured_content={
@@ -1262,36 +1285,41 @@ def build_appendix_response(text: str, page: int, file_path: str, is_cli: bool =
 
     selected = result.pages[page - 1]
 
-    # Build the appendix-specific banner. Reusing _build_page_banner would emit
-    # generic "Page N of M" wording; the agent benefits from knowing it's
-    # looking at the appendix, not body.
-    if selected.total_pages > 1:
-        banner = (
-            f"> **Appendix page {selected.page} of {selected.total_pages}** — "
-            f"structural metadata for this document.\n\n---\n\n"
-        )
-        if is_cli:
-            cmd = f"adeu extract {file_path} --mode appendix --page {selected.page + 1}"
-            footer = (
-                (
-                    f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} "
-                    f"of {selected.total_pages}.** Run `{cmd}` for the next page."
-                )
-                if selected.has_next
-                else ""
-            )
-        else:
-            footer = (
-                (f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} of {selected.total_pages}.**")
-                if selected.has_next
-                else ""
-            )
+    if no_chrome:
+        page_marker = f"[p{selected.page}/{selected.total_pages}]\n\n" if selected.total_pages > 1 else ""
+        ui_markdown = f"{page_marker}{selected.page_content}"
+        llm_content = ui_markdown
     else:
-        banner = "> **Appendix** — structural metadata for this document.\n\n---\n\n"
-        footer = ""
+        # Build the appendix-specific banner. Reusing _build_page_banner would emit
+        # generic "Page N of M" wording; the agent benefits from knowing it's
+        # looking at the appendix, not body.
+        if selected.total_pages > 1:
+            banner = (
+                f"> **Appendix page {selected.page} of {selected.total_pages}** — "
+                f"structural metadata for this document.\n\n---\n\n"
+            )
+            if is_cli:
+                cmd = f"adeu extract {file_path} --mode appendix --page {selected.page + 1}"
+                footer = (
+                    (
+                        f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} "
+                        f"of {selected.total_pages}.** Run `{cmd}` for the next page."
+                    )
+                    if selected.has_next
+                    else ""
+                )
+            else:
+                footer = (
+                    (f"\n\n---\n\n> **Continues on appendix page {selected.page + 1} of {selected.total_pages}.**")
+                    if selected.has_next
+                    else ""
+                )
+        else:
+            banner = "> **Appendix** — structural metadata for this document.\n\n---\n\n"
+            footer = ""
 
-    ui_markdown = banner + selected.page_content + footer
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+        ui_markdown = banner + selected.page_content + footer
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(
         content=llm_content,
@@ -1332,6 +1360,7 @@ def build_changes_response(
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
     existing_change_ids: Iterable[str] | None = None,
+    no_chrome: bool = False,
 ) -> BuilderResult:
     """
     Enumerates every tracked change and comment in a DOCX document as a concise
@@ -1726,8 +1755,12 @@ def build_changes_response(
                 f"Continue with `read_docx({args_str})`."
             )
 
-    ui_markdown = header + "\n".join(lines) + continuation
-    llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    if no_chrome:
+        ui_markdown = "\n".join(lines)
+        llm_content = ui_markdown
+    else:
+        ui_markdown = header + "\n".join(lines) + continuation
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
     return BuilderResult(
         content=llm_content,

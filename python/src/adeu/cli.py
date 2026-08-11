@@ -835,6 +835,8 @@ def handle_extract(args):
                 assert isinstance(page_val, int)
                 page_num = page_val
 
+        no_chrome = getattr(args, "no_chrome", False)
+
         if getattr(args, "search_query", None):
             if args.page is not None:
                 try:
@@ -858,6 +860,7 @@ def handle_extract(args):
                 max_matches=getattr(args, "max_matches", 20),
                 match_offset=getattr(args, "match_offset", 0),
                 full_paragraph=getattr(args, "full_paragraph", False),
+                no_chrome=no_chrome,
             )
         elif args.mode == "outline":
             res = build_outline_response(
@@ -868,6 +871,7 @@ def handle_extract(args):
                 outline_verbose=args.outline_verbose,
                 paragraph_offsets=paragraph_offsets,
                 is_cli=True,
+                no_chrome=no_chrome,
             )
         elif args.mode == "changes":
             from adeu.mcp_components._response_builders import build_changes_response
@@ -902,6 +906,7 @@ def handle_extract(args):
                 offset=getattr(args, "changes_offset", 0),
                 is_cli=True,
                 existing_change_ids=existing_change_ids,
+                no_chrome=no_chrome,
             )
         elif is_page_range:
             from adeu.mcp_components._response_builders import build_page_range_response
@@ -912,6 +917,7 @@ def handle_extract(args):
                 range_end,
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
+                no_chrome=no_chrome,
             )
         elif args.mode == "appendix":
             res = build_appendix_response(
@@ -919,6 +925,7 @@ def handle_extract(args):
                 page_num,
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
+                no_chrome=no_chrome,
             )
         elif want_all_pages:
             from adeu.payloads import response_budget_limit
@@ -950,6 +957,7 @@ def handle_extract(args):
             res = build_full_document_response(
                 text,
                 "Active Document" if args.live else str(args.input),
+                no_chrome=no_chrome,
             )
         else:
             res = build_paginated_response(
@@ -957,6 +965,7 @@ def handle_extract(args):
                 page_num,
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
+                no_chrome=no_chrome,
             )
 
         if isinstance(res.content, list):
@@ -2085,6 +2094,11 @@ def _main_impl():
         "--json",
         action="store_true",
         help="Emit the extraction result as a machine-readable JSON object on stdout.",
+    )
+    p_extract.add_argument(
+        "--no-chrome",
+        action="store_true",
+        help="Strip navigation prose, banners, footers, and appendix pointers from extract output.",
     )
     p_extract.set_defaults(func=handle_extract)
 
