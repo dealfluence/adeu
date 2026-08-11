@@ -1256,6 +1256,7 @@ def handle_apply(args):
             for err in e.errors:
                 print(err, file=sys.stderr)
                 print("", file=sys.stderr)
+            print(BATCH_RECOVERY_PROTOCOL, file=sys.stderr)
         sys.exit(1)
 
     # A batch with ANY skipped action/edit is a failed batch: writing an
@@ -1355,6 +1356,7 @@ def handle_apply(args):
                 "❌ Batch failed — no output was written. Fix the failed edits below and re-run.",
                 file=sys.stderr,
             )
+            print(BATCH_RECOVERY_PROTOCOL, file=sys.stderr)
         elif verification_error is not None:
             print(
                 f"❌ Verification failed — no output was written to: {output_path}\n"
@@ -1519,22 +1521,22 @@ def handle_markup(args):
         # stay off stderr, matching apply's JSON contract (QA 2026-07-19
         # v8 F-08).
         if _JSON_MODE:
-            print(
-                json.dumps(
-                    {
-                        "error": "batch_validation_failed",
-                        "message": "\n".join(r["error"] for r in failed if r.get("error")),
-                        "applied": len(applied),
-                        "failed": len(failed),
-                    }
-                )
+            failed_tuples = [(r.get("index", i), r.get("error", "")) for i, r in enumerate(failed)]
+            err_list = [r["error"] for r in failed if r.get("error")]
+            env = failure_envelope(
+                "batch_validation_failed",
+                failed_tuples,
+                f"{len(failed)} edit(s) failed validation.",
+                errors=err_list,
             )
+            print(json.dumps(env, ensure_ascii=False))
         else:
             print(f"\n❌ {len(failed)} edit(s) failed — no markup was written:\n", file=sys.stderr)
             for r in failed:
                 print(r["error"], file=sys.stderr)
                 print("", file=sys.stderr)
             print(stats_line, file=sys.stderr)
+            print(BATCH_RECOVERY_PROTOCOL, file=sys.stderr)
         sys.exit(1)
 
     # `-o -` streams the CriticMarkup to stdout (QA 2026-07-19 v8 F-05);

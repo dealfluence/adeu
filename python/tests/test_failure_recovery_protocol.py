@@ -1,12 +1,14 @@
 import json
 import re
+import sys
 from io import BytesIO
 from typing import List
+from unittest.mock import patch
 
 import pytest
 from docx import Document
 
-from adeu.cli import _load_batch_from_json, _set_json_mode
+from adeu.cli import main
 from adeu.mcp_components.tools.document import process_document_batch
 from adeu.models import DocumentChange, ModifyText
 from adeu.payloads import BATCH_RECOVERY_PROTOCOL, failure_envelope
@@ -24,7 +26,7 @@ def _create_simple_docx() -> BytesIO:
     return stream
 
 
-def test_cli_batch_failure_carries_protocol(tmp_path, capsys):
+def test_cli_batch_failure_carries_protocol_json(tmp_path, capsys):
     doc_path = tmp_path / "test.docx"
     doc_path.write_bytes(_create_simple_docx().getvalue())
 
@@ -35,24 +37,43 @@ def test_cli_batch_failure_carries_protocol(tmp_path, capsys):
     p = tmp_path / "changes.json"
     p.write_text(json.dumps(batch_json), encoding="utf-8")
 
-    _set_json_mode(True)
-    try:
-        changes = _load_batch_from_json(p)
-        engine = RedlineEngine(BytesIO(doc_path.read_bytes()), author="TestAuthor")
-        with pytest.raises(BatchValidationError) as exc_info:
-            engine.process_batch(changes)
-        env = failure_envelope(
-            "batch_validation_failed",
-            exc_info.value.failed,
-            "Batch rejected. Edits failed validation.",
-            errors=exc_info.value.errors,
-        )
-        assert BATCH_RECOVERY_PROTOCOL in env["message"]
-    finally:
-        _set_json_mode(False)
+    test_args = ["adeu", "apply", str(doc_path), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "batch_validation_failed"
+    assert BATCH_RECOVERY_PROTOCOL in data["message"]
 
 
-def test_cli_schema_failure_carries_protocol(tmp_path, capsys):
+def test_cli_batch_failure_carries_protocol_human(tmp_path, capsys):
+    doc_path = tmp_path / "test.docx"
+    doc_path.write_bytes(_create_simple_docx().getvalue())
+
+    batch_json = [
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
+        {"type": "modify", "target_text": "Non-existent target", "new_text": "Fail."},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "apply", str(doc_path), str(p)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert BATCH_RECOVERY_PROTOCOL in captured.err
+
+
+def test_cli_schema_failure_carries_protocol_json(tmp_path, capsys):
+    doc_path = tmp_path / "test.docx"
+    doc_path.write_bytes(_create_simple_docx().getvalue())
+
     batch_json = [
         {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
         {"type": "modify"},  # Schema error: missing target_text & new_text
@@ -60,17 +81,81 @@ def test_cli_schema_failure_carries_protocol(tmp_path, capsys):
     p = tmp_path / "changes.json"
     p.write_text(json.dumps(batch_json), encoding="utf-8")
 
-    _set_json_mode(True)
-    try:
+    test_args = ["adeu", "apply", str(doc_path), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
         with pytest.raises(SystemExit) as exc_info:
-            _load_batch_from_json(p)
+            main()
         assert exc_info.value.code == 1
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["error"] == "invalid_changes_file"
-        assert BATCH_RECOVERY_PROTOCOL in data["message"]
-    finally:
-        _set_json_mode(False)
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "invalid_changes_file"
+    assert BATCH_RECOVERY_PROTOCOL in data["message"]
+
+
+def test_cli_schema_failure_carries_protocol_human(tmp_path, capsys):
+    doc_path = tmp_path / "test.docx"
+    doc_path.write_bytes(_create_simple_docx().getvalue())
+
+    batch_json = [
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
+        {"type": "modify"},  # Schema error: missing target_text & new_text
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "apply", str(doc_path), str(p)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert BATCH_RECOVERY_PROTOCOL in captured.err
+
+
+def test_cli_markup_batch_failure_carries_protocol_json(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    batch_json = [
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
+        {"type": "modify", "target_text": "Non-existent target", "new_text": "Fail."},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "batch_validation_failed"
+    assert BATCH_RECOVERY_PROTOCOL in data["message"]
+
+
+def test_cli_markup_batch_failure_carries_protocol_human(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    batch_json = [
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
+        {"type": "modify", "target_text": "Non-existent target", "new_text": "Fail."},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert BATCH_RECOVERY_PROTOCOL in captured.err
 
 
 @pytest.mark.anyio
