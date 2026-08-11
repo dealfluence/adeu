@@ -111,6 +111,18 @@ def test_diff_json_round_trips_through_apply(tmp_path, capsys):
     )
     assert code_diff == 0, stderr_diff
 
+    # Assert compaction properties before applying
+    json_str = edits_json_path.read_text(encoding="utf-8").strip()
+    assert "\n" not in json_str, f"JSON output should be unindented on one line, got:\n{json_str}"
+    assert "Diff:" not in json_str, f"Boilerplate 'Diff:' comment should be omitted, got:\n{json_str}"
+
+    data = json.loads(json_str)
+    assert isinstance(data, list)
+    assert len(data) > 0
+    for edit in data:
+        assert "match_mode" not in edit, f"Default match_mode should be omitted in {edit}"
+        assert "regex" not in edit, f"Default regex should be omitted in {edit}"
+
     out_docx_path = tmp_path / "applied.docx"
     code_apply, stdout_apply, stderr_apply = run_cli(
         ["apply", str(orig_path), str(edits_json_path), "-o", str(out_docx_path)], capsys
@@ -130,11 +142,13 @@ def test_diff_json_preserves_a_meaningful_comment(tmp_path, capsys):
     orig_path = tmp_path / "orig.docx"
     doc1 = docx.Document()
     doc1.add_paragraph("Original paragraph.")
+    doc1.add_paragraph("Second paragraph.")
     doc1.save(str(orig_path))
 
     mod_path = tmp_path / "mod.docx"
     doc2 = docx.Document()
     doc2.add_paragraph("Modified paragraph.")
+    doc2.add_paragraph("Second modified paragraph.")
     doc2.save(str(mod_path))
 
     custom_edit = ModifyText(
@@ -143,10 +157,22 @@ def test_diff_json_preserves_a_meaningful_comment(tmp_path, capsys):
         new_text="Modified paragraph.",
         comment="Reviewed by Legal Team",
     )
+    boilerplate_edit = ModifyText(
+        type="modify",
+        target_text="Second paragraph.",
+        new_text="Second modified paragraph.",
+        comment="Diff: replaced 'Second paragraph.' with 'Second modified paragraph.'",
+    )
 
-    with patch("adeu.diff.generate_structured_edits", return_value=([custom_edit], [])):
+    with patch("adeu.diff.generate_structured_edits", return_value=([custom_edit, boilerplate_edit], [])):
         code, stdout, stderr = run_cli(["diff", str(orig_path), str(mod_path), "--json"], capsys)
         assert code == 0, stderr
-        data = json.loads(stdout.strip())
-        assert len(data) == 1
+
+        json_str = stdout.strip()
+        assert "\n" not in json_str, f"JSON output should be unindented on one line, got:\n{json_str}"
+        assert "Diff:" not in json_str, f"Boilerplate 'Diff:' comment should be stripped, got:\n{json_str}"
+
+        data = json.loads(json_str)
+        assert len(data) == 2
         assert data[0].get("comment") == "Reviewed by Legal Team"
+        assert "comment" not in data[1]
