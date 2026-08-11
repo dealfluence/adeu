@@ -160,6 +160,25 @@ def test_partial_rejected_for_text_file_input(tmp_path, capsys):
     assert "--partial is only supported with JSON batch input" in captured.err
 
 
+def test_partial_rejected_for_live_word_input(tmp_path, capsys):
+    # Live Word applies edit-by-edit through COM and has no salvage path, so
+    # --partial must be refused up front rather than silently ignored.
+    changes_path = tmp_path / "changes.json"
+    changes_path.write_text(
+        json.dumps([{"type": "modify", "target_text": "quick brown", "new_text": "fast blue"}]),
+        encoding="utf-8",
+    )
+
+    test_args = ["adeu", "apply", "--live", str(changes_path), "--partial"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+
+    captured = capsys.readouterr()
+    assert "--partial is not supported" in captured.err
+
+
 def test_pairing_contradiction_still_rejects_whole_batch_under_partial(tmp_path):
     doc_path = _create_sample_docx(tmp_path)
     stream = io.BytesIO(doc_path.read_bytes())

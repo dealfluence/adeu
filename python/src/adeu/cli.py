@@ -1183,6 +1183,12 @@ def handle_apply(args):
         )
 
     if args.live:
+        # Live Word applies each edit through COM with no partial-batch
+        # bookkeeping, so --partial cannot be honoured here. Refuse it up
+        # front instead of silently ignoring the flag, mirroring how
+        # text-file input rejects it below.
+        if getattr(args, "partial", False):
+            _cli_error("invalid_input", "--partial is not supported for live Word mode", exit_code=2)
         if args.changes is None and args.original is not None:
             # Shift positional arguments if only one is provided
             args.changes = args.original
