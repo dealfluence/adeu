@@ -27,8 +27,7 @@ def test_default_cap_is_twenty_and_reports_total():
         file_path="doc.docx",
     )
     md = res.structured_content["markdown"]
-    assert "50" in md
-    assert "20" in md
+    assert "(50 total, 20 shown)" in md
     assert md.count("### Match ") == 20
 
 
@@ -93,7 +92,99 @@ def test_offset_past_end_is_not_an_error():
         match_offset=100,
     )
     md = res.structured_content["markdown"]
-    assert "no matches in this window" in md.lower() or "no matches" in md.lower()
+    assert "no matches in this window (match_offset=100, total matches=10)" in md.lower()
+
+
+def test_multi_hit_paragraph_snippet_gap_elision():
+    prefix = "A" * 300
+    middle = "M" * 1000
+    suffix = "Z" * 300
+    text = f"{prefix} Supplier clause one {middle} Supplier clause two {suffix}"
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+    assert " ... " in md
+    assert "M" * 500 not in md
+    assert "**Supplier** clause one" in md
+    assert "**Supplier** clause two" in md
+
+
+def test_per_hit_match_limiting():
+    text = "Supplier one. Supplier two. Supplier three. Supplier four. Supplier five."
+
+    # Window 1: max_matches=2, offset=0 -> hits 1, 2
+    res1 = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=2,
+        match_offset=0,
+    )
+    md1 = res1.structured_content["markdown"]
+    assert "(5 total, 2 shown)" in md1
+    assert "match_offset=2" in md1
+    assert "**Supplier** one" in md1
+    assert "**Supplier** two" in md1
+    assert "**Supplier** three" not in md1
+
+    # Window 2: max_matches=2, offset=2 -> hits 3, 4
+    res2 = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=2,
+        match_offset=2,
+    )
+    md2 = res2.structured_content["markdown"]
+    assert "(5 total, 2 shown)" in md2
+    assert "match_offset=4" in md2
+    assert "**Supplier** three" in md2
+    assert "**Supplier** four" in md2
+    assert "**Supplier** one" not in md2
+    assert "**Supplier** five" not in md2
+
+    # Window 3: max_matches=2, offset=4 -> hit 5
+    res3 = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=2,
+        match_offset=4,
+    )
+    md3 = res3.structured_content["markdown"]
+    assert "(5 total, 1 shown)" in md3
+    assert "**Supplier** five" in md3
+    assert "**Supplier** four" not in md3
+
+    # Past end: offset=10
+    res4 = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=2,
+        match_offset=10,
+    )
+    md4 = res4.structured_content["markdown"]
+    assert "(match_offset=10, total matches=5)" in md4
 
 
 def test_snippet_clamped_to_120_chars_each_side():

@@ -668,22 +668,9 @@ def build_search_response(
     # ---- Render. ----
     ui_parts: list[str] = []
 
-    # Group hits by their containing projection line: one paragraph renders
-    # as ONE entry with every hit emphasized, instead of once per regex
-    # alternation branch with divergent highlights (QA round 3, finding 3.10).
-    line_groups: list[tuple[int, list]] = []
-    groups_by_line: dict[int, list] = {}
-    for m, p_num in filtered:
-        last_nl = body.rfind("\n", 0, m.start())
-        line_start = 0 if last_nl == -1 else last_nl + 1
-        if line_start not in groups_by_line:
-            groups_by_line[line_start] = []
-            line_groups.append((line_start, groups_by_line[line_start]))
-        groups_by_line[line_start].append((m, p_num))
+    total_filtered = len(filtered)
 
-    total_entries = len(line_groups)
-
-    if match_offset >= total_entries:
+    if match_offset >= total_filtered:
         if page_filter is None:
             ui_parts.append(
                 f"> **Search Results** — Found {total_matches} match"
@@ -691,7 +678,7 @@ def build_search_response(
                 f"in `{Path(file_path).name}`."
             )
         else:
-            shown = len(filtered)
+            shown = total_filtered
             ui_parts.append(
                 f"> **Search Results** — Found {shown} match"
                 f"{'es' if shown != 1 else ''} on document page {page_filter} "
@@ -699,7 +686,7 @@ def build_search_response(
                 f"({total_matches} total in document)."
             )
         ui_parts.append(
-            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_entries})."
+            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
         )
         if regex_downgraded_note:
             ui_parts.insert(0, regex_downgraded_note)
@@ -713,17 +700,17 @@ def build_search_response(
             },
         )
 
-    items_to_render = line_groups[match_offset : match_offset + max_matches]
-    num_rendered = len(items_to_render)
+    selected_matches = filtered[match_offset : match_offset + max_matches]
+    num_rendered = len(selected_matches)
     next_offset = match_offset + num_rendered
-    has_more = next_offset < total_entries
+    has_more = next_offset < total_filtered
 
     if page_filter is None:
-        if total_entries > num_rendered or match_offset > 0:
+        if total_filtered > num_rendered or match_offset > 0:
             ui_parts.append(
                 f"> **Search Results** — Found {total_matches} match"
                 f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
-                f"in `{Path(file_path).name}` ({total_entries} total, {num_rendered} shown)."
+                f"in `{Path(file_path).name}` ({total_matches} total, {num_rendered} shown)."
             )
         else:
             ui_parts.append(
@@ -747,8 +734,8 @@ def build_search_response(
                     f"Continue with `match_offset={next_offset}`."
                 )
     else:
-        shown = len(filtered)
-        if total_entries > num_rendered or match_offset > 0:
+        shown = total_filtered
+        if total_filtered > num_rendered or match_offset > 0:
             ui_parts.append(
                 f"> **Search Results** — Found {shown} match"
                 f"{'es' if shown != 1 else ''} on document page {page_filter} "
@@ -827,7 +814,20 @@ def build_search_response(
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
     full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
 
-    for line_start, group in items_to_render:
+    # Group hits by their containing projection line: one paragraph renders
+    # as ONE entry with every hit emphasized, instead of once per regex
+    # alternation branch with divergent highlights (QA round 3, finding 3.10).
+    line_groups: list[tuple[int, list]] = []
+    groups_by_line: dict[int, list] = {}
+    for m, p_num in selected_matches:
+        last_nl = body.rfind("\n", 0, m.start())
+        line_start = 0 if last_nl == -1 else last_nl + 1
+        if line_start not in groups_by_line:
+            groups_by_line[line_start] = []
+            line_groups.append((line_start, groups_by_line[line_start]))
+        groups_by_line[line_start].append((m, p_num))
+
+    for line_start, group in line_groups:
         first_m, p_num = group[0]
 
         last_m_end = max(m.end() for m, _p in group)
@@ -837,23 +837,56 @@ def build_search_response(
         if full_paragraph:
             win_start = line_start
             win_end = line_end
-            has_left_trim = False
-            has_right_trim = False
+            region = body[win_start:win_end]
+            spans = [(m.start() - win_start, m.end() - win_start) for m, _p in group]
+            snippet = _emphasized_snippet(region, spans)
         else:
-            first_m_start = min(m.start() for m, _p in group)
-            desired_start = max(line_start, first_m_start - 120)
-            desired_end = min(line_end, last_m_end + 120)
-            win_start, win_end = _balance_snippet_window(body, desired_start, desired_end, line_start=line_start)
-            has_left_trim = win_start > line_start
-            has_right_trim = win_end < line_end
+            raw_intervals = [(max(line_start, m.start() - 120), min(line_end, m.end() + 120)) for m, _p in group]
+            raw_intervals.sort(key=lambda x: x[0])
 
-        region = body[win_start:win_end]
-        spans = [(m.start() - win_start, m.end() - win_start) for m, _p in group]
-        snippet = _emphasized_snippet(region, spans)
-        if has_left_trim:
-            snippet = "..." + snippet
-        if has_right_trim:
-            snippet = snippet + "..."
+            merged_intervals: list[tuple[int, int]] = []
+            for s_pos, e_pos in raw_intervals:
+                if not merged_intervals:
+                    merged_intervals.append((s_pos, e_pos))
+                else:
+                    prev_s, prev_e = merged_intervals[-1]
+                    if s_pos <= prev_e:
+                        merged_intervals[-1] = (prev_s, max(prev_e, e_pos))
+                    else:
+                        merged_intervals.append((s_pos, e_pos))
+
+            balanced_intervals: list[tuple[int, int]] = []
+            for s_pos, e_pos in merged_intervals:
+                bs, be = _balance_snippet_window(body, s_pos, e_pos, line_start=line_start)
+                balanced_intervals.append((bs, be))
+
+            final_intervals: list[tuple[int, int]] = []
+            for s_pos, e_pos in balanced_intervals:
+                if not final_intervals:
+                    final_intervals.append((s_pos, e_pos))
+                else:
+                    prev_s, prev_e = final_intervals[-1]
+                    if s_pos <= prev_e:
+                        final_intervals[-1] = (prev_s, max(prev_e, e_pos))
+                    else:
+                        final_intervals.append((s_pos, e_pos))
+
+            has_left_trim = final_intervals[0][0] > line_start
+            has_right_trim = final_intervals[-1][1] < line_end
+
+            seg_snippets: list[str] = []
+            for s_pos, e_pos in final_intervals:
+                region = body[s_pos:e_pos]
+                spans = [
+                    (m.start() - s_pos, m.end() - s_pos) for m, _p in group if s_pos <= m.start() and m.end() <= e_pos
+                ]
+                seg_snippets.append(_emphasized_snippet(region, spans))
+
+            snippet = " ... ".join(seg_snippets)
+            if has_left_trim:
+                snippet = "..." + snippet
+            if has_right_trim:
+                snippet = snippet + "..."
 
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 
