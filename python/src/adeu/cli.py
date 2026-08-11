@@ -1465,7 +1465,8 @@ def handle_markup(args):
     # markup renders the batch as two filtered subsets (text edits, row ops),
     # so a subset position is NOT the position the caller submitted. Keep each
     # item's batch index alongside it: that index is what every failure report
-    # must name (QA: a row op failing at batch index 1 was reported as 0).
+    # AND its human prose must name (QA: a row op failing at batch index 1 was
+    # reported as 0; a text edit at batch index 1 was named "Edit 1").
     edit_items = [(i, c) for i, c in enumerate(changes) if isinstance(c, ModifyText)]
     row_items = [(i, c) for i, c in enumerate(changes) if isinstance(c, (InsertTableRow, DeleteTableRow))]
     edits = [c for _, c in edit_items]
@@ -1493,7 +1494,10 @@ def handle_markup(args):
     # containing raw CriticMarkup tags ({++..++}, {>>..<<}) passes straight
     # into the rendered output, where a downstream CriticMarkup consumer would
     # parse user data as structural markup (QA L3).
-    shape_errors = validate_edit_strings(list(edits))
+    # Validated one edit at a time so `index_offset` can carry each edit's
+    # BATCH position: numbering a filtered subset from 1 would name an edit the
+    # caller never submitted there.
+    shape_errors = [err for i, c in edit_items for err in validate_edit_strings([c], index_offset=i)]
     if shape_errors:
         _cli_error(
             "batch_validation_failed",
@@ -1507,11 +1511,8 @@ def handle_markup(args):
         include_index=args.index,
         highlight_only=args.highlight,
         edit_reports=edit_reports,
+        indices=[i for i, _ in edit_items],
     )
-    # apply_edits_to_markdown numbers its reports by position in the subset it
-    # was handed; restate them as batch positions.
-    for report in edit_reports:
-        report["index"] = edit_items[report["index"]][0]
 
     # Structural row operations render into the same preview: deleted rows
     # wrapped in {--…--}, inserted rows as {++…++} lines beside their anchor.

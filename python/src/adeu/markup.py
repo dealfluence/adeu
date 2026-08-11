@@ -500,6 +500,7 @@ def apply_edits_to_markdown(
     include_index: bool = False,
     highlight_only: bool = False,
     edit_reports: Optional[List[Dict[str, Any]]] = None,
+    indices: Optional[List[int]] = None,
 ) -> str:
     """
     Applies edits to Markdown text and returns CriticMarkup-annotated output.
@@ -513,13 +514,25 @@ def apply_edits_to_markdown(
     When `edit_reports` is provided, one dict per input edit is appended:
     {"index": 0-based input position, "status": "applied"|"failed",
      "error": str|None, "occurrences": int}.
+
+    `indices` maps position `n` in `edits` to that edit's position in the
+    caller's ORIGINAL batch, for callers that hand over a filtered subset (the
+    `markup` CLI splits a batch into text edits and row ops). Both the report
+    "index" and the human prose ("- Edit N Failed: …") then name the batch
+    position — the only number a caller can act on. Without it the two would
+    disagree, sending an agent to re-read the wrong edit.
     """
     if not edits:
         return markdown_text
 
+    def _batch_index(idx: int) -> int:
+        return indices[idx] if indices is not None else idx
+
     def _report(idx: int, status: str, error: Optional[str] = None, occurrences: int = 0):
         if edit_reports is not None:
-            edit_reports.append({"index": idx, "status": status, "error": error, "occurrences": occurrences})
+            edit_reports.append(
+                {"index": _batch_index(idx), "status": status, "error": error, "occurrences": occurrences}
+            )
 
     # Step 1: Find match positions for each edit
     matched_edits: List[Tuple[int, int, str, ModifyText, int]] = []
@@ -529,10 +542,12 @@ def apply_edits_to_markdown(
         target = edit.target_text or ""
         match_mode = getattr(edit, "match_mode", "strict") or "strict"
         is_regex = bool(getattr(edit, "regex", False))
+        # 1-based number of this edit in the caller's batch, for every message.
+        display_num = _batch_index(idx) + 1
 
         if not target:
             msg = (
-                f"- Edit {idx + 1} Failed: target_text is empty. Pure insertions are expressed as a "
+                f"- Edit {display_num} Failed: target_text is empty. Pure insertions are expressed as a "
                 "replacement: put the text immediately around the insertion point in target_text and "
                 "repeat it (plus the new text) in new_text."
             )
@@ -544,14 +559,14 @@ def apply_edits_to_markdown(
         try:
             spans = _find_all_matches_in_text(markdown_text, target, is_regex=is_regex)
         except RegexTimeoutError as e:
-            msg = f"- Edit {idx + 1} Failed: {e}"
+            msg = f"- Edit {display_num} Failed: {e}"
             logger.warning(msg)
             failed_indices.add(idx)
             _report(idx, "failed", msg)
             continue
 
         if not spans:
-            msg = f'- Edit {idx + 1} Failed: Target text not found in document:\n  "{target[:80]}"'
+            msg = f'- Edit {display_num} Failed: Target text not found in document:\n  "{target[:80]}"'
             logger.warning(msg)
             failed_indices.add(idx)
             _report(idx, "failed", msg)
@@ -559,7 +574,7 @@ def apply_edits_to_markdown(
 
         if len(spans) > 1 and match_mode == "strict":
             msg = format_ambiguity_error(
-                edit_index=idx + 1,
+                edit_index=display_num,
                 target_text=target,
                 haystack=markdown_text,
                 match_positions=spans,
@@ -585,11 +600,11 @@ def apply_edits_to_markdown(
         for occ_start, occ_end in occupied_ranges:
             if start < occ_end and end > occ_start:
                 overlaps = True
-                msg = f"- Edit {orig_idx + 1} Failed: overlaps with a previously matched edit."
+                msg = f"- Edit {_batch_index(orig_idx) + 1} Failed: overlaps with a previously matched edit."
                 logger.warning(msg)
                 if edit_reports is not None:
                     for r in edit_reports:
-                        if r["index"] == orig_idx:
+                        if r["index"] == _batch_index(orig_idx):
                             r["status"] = "failed"
                             r["error"] = msg
                             r["occurrences"] = 0

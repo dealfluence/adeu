@@ -207,6 +207,55 @@ def test_cli_markup_edit_failure_reports_batch_index_after_row_op(tmp_path, caps
     assert [f["index"] for f in data["failed"]] == [1]
 
 
+def test_cli_markup_edit_failure_prose_names_batch_index(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    # Same batch as above, read in human mode: the prose an agent acts on must
+    # name the SAME edit the --json `failed` list names. "Edit 1" here would
+    # point at the delete_row the caller submitted at batch index 0.
+    batch_json = [
+        {"type": "delete_row", "target_text": "Paragraph 1."},
+        {"type": "modify", "target_text": "Non-existent target", "new_text": "Fail."},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "- Edit 2 Failed: Target text not found" in captured.err
+    assert "Edit 1 Failed" not in captured.err
+
+
+def test_cli_markup_shape_error_prose_names_batch_index(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    # Shape validation runs over the same filtered text-edit subset, so it has
+    # to number by batch position too.
+    batch_json = [
+        {"type": "delete_row", "target_text": "Paragraph 1."},
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "{++Manual markup++}"},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p)]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "- Edit 2 Failed: Do not manually write CriticMarkup tags" in captured.err
+    assert "Edit 1 Failed" not in captured.err
+
+
 def test_cli_non_batch_failure_omits_protocol(tmp_path, capsys):
     # A missing input file is not a rejected batch: it has no failing edit to
     # split out, so the recovery protocol would be advice nobody can act on.
