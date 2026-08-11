@@ -148,12 +148,16 @@ async def test_mcp_failure_carries_envelope(tmp_path):
         async def error(self, *a, **kw):
             pass
 
+    # partial=False: the envelope is the REJECTED-batch payload. Under the
+    # default salvage mode this batch would apply edit 1 and save, and a saved
+    # output must not be reported with a "nothing was written" envelope.
     result = await process_document_batch(
         reasoning="Testing failure envelope",
         original_docx_path=str(doc_path),
         author_name="Tester",
         ctx=FakeContext(),  # type: ignore
         changes=changes,
+        partial=False,
     )
 
     assert "```json" in result

@@ -299,12 +299,16 @@ async def test_mcp_batch_failure_carries_protocol(tmp_path):
         async def error(self, *a, **kw):
             pass
 
+    # partial=False: the protocol opens with "Nothing was written", so it
+    # belongs to a rejected batch only. Salvage mode saves the valid edits,
+    # and that response must not claim nothing was written.
     result = await process_document_batch(
         reasoning="Testing protocol presence",
         original_docx_path=str(doc_path),
         author_name="Tester",
         ctx=FakeContext(),  # type: ignore
         changes=changes,
+        partial=False,
     )
 
     assert BATCH_RECOVERY_PROTOCOL in result
@@ -347,12 +351,16 @@ async def test_failure_payload_size_budget(tmp_path):
         async def error(self, *a, **kw):
             pass
 
+    # partial=False: this budget caps a REJECTION payload (one failure list,
+    # no per-edit reports). A salvage response is a success report for the 19
+    # applied edits and is sized by that, not by this cap.
     result = await process_document_batch(
         reasoning="Testing failure payload token budget",
         original_docx_path=str(doc_path),
         author_name="Tester",
         ctx=FakeContext(),  # type: ignore
         changes=changes,
+        partial=False,
     )
 
     assert approx_tokens(result) <= 500

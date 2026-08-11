@@ -195,8 +195,17 @@ def test_mcp_defaults_to_partial_and_reports_schema_rejects_in_one_list(tmp_path
     )
     res_text = extract_content(res)
     assert res_text.startswith("PARTIAL: applied 1 of 3")
-    assert "missing type field" in res_text or "missing required field 'type'" in res_text
+    assert "Unable to extract tag using discriminator 'type'" in res_text
     assert "nonexistent text" in res_text or "Target text not found" in res_text
+
+    # A partial success WROTE a file, so it must not carry the batch recovery
+    # protocol's "Nothing was written" — the two statements contradict. It
+    # reports like any other success: the saved path plus one report section.
+    expected_out = doc_path.parent / f"{doc_path.stem}_processed.docx"
+    assert "Nothing was written" not in res_text
+    assert str(expected_out) in res_text
+    assert expected_out.exists()
+    assert res_text.count("Detailed Edit Reports:") == 1
 
 
 def test_partial_failure_payload_within_token_budget(tmp_path):

@@ -221,11 +221,9 @@ def _summarize_validation_error(exc: Exception) -> str:
     for err in exc.errors():
         loc = ".".join(str(p) for p in err.get("loc", ()))
         msg = err.get("msg", "invalid")
-        if err.get("type") in ("union_tag_not_found", "union_tag_invalid"):
+        if err.get("type") == "union_tag_invalid":
             tag = err.get("ctx", {}).get("tag", "")
-            if not tag:
-                msg = "missing required field 'type'"
-            elif has_fused_json_marker(str(tag)):
+            if has_fused_json_marker(str(tag)):
                 msg = f"{msg}. {FUSED_JSON_HINT}" if not msg.endswith(".") else f"{msg} {FUSED_JSON_HINT}"
         parts.append(f"{loc}: {msg}" if loc else msg)
     return "; ".join(parts) if parts else str(exc)
@@ -568,25 +566,6 @@ async def _read_docx_disk(
         raise ToolError(f"Error reading file: {str(e)}") from e
 
 
-def _batch_counts_block(stats: Any) -> str:
-    """
-    The Actions/Edits count lines of a batch response. Shared by the partial
-    (salvage) and the whole-batch response paths so both always report the
-    same counts in the same shape.
-    """
-    total_occurrences = sum(
-        e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
-    )
-    occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats.get("edits_applied", 0) else ""
-    already = stats.get("actions_already_resolved", 0)
-    already_text = f", {already} already resolved (no effect)" if already else ""
-    return (
-        f"Actions: {stats.get('actions_applied', 0)} applied, {stats.get('actions_skipped', 0)} "
-        f"skipped{already_text}.\n"
-        f"Edits: {stats.get('edits_applied', 0)} applied{occ_text}, {stats.get('edits_skipped', 0)} skipped.\n"
-    )
-
-
 async def _process_document_batch_disk(
     original_docx_path: str,
     author_name: str,
@@ -690,6 +669,9 @@ async def _process_document_batch_disk(
                 final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
 
         result_stream = engine.save_to_stream()
+        # Disclose overwrites BEFORE writing (QA 2026-07-23 F17): repeated
+        # default-named runs, _processed-stem inputs saving in place, and
+        # output_path == input all silently replaced an existing file.
         overwrite_note = _overwrite_note(final_output, original_docx_path)
         save_stream(result_stream, final_output)
         return True, stats, final_output, overwrite_note
@@ -760,42 +742,43 @@ async def _process_document_batch_disk(
             and applied_count > 0
         )
 
+        # Partial success is a SUCCESS response with the failures hoisted to
+        # the top — never a failure envelope. A batch envelope carries
+        # BATCH_RECOVERY_PROTOCOL ("Nothing was written"), which contradicts
+        # the saved output path printed in the same response.
+        partial_header = ""
         if is_partial_success:
             combined_fails: list[tuple[int, str]] = []
-            err_list = []
             for idx, note in schema_failed:
                 combined_fails.append((idx, f"changes[{idx}]: {note}"))
-                err_list.append(f"changes[{idx}]: {note}")
             for item in engine_failed:
                 combined_fails.append((item["index"], item["reason"]))
-                err_list.append(item["reason"])
             combined_fails.sort(key=lambda x: x[0])
 
             max_idx = max([idx for idx, _ in combined_fails] + [0])
             total_n = max(max_idx + 1, len(changes) + len(schema_failed))
 
-            header = (
+            partial_header = (
                 f"PARTIAL: applied {applied_count} of {total_n} changes. {len(combined_fails)} failed validation:\n\n"
             )
             for idx, reason in combined_fails:
-                header += f"- Change #{idx + 1} Failed: {reason}\n"
+                partial_header += f"- Change #{idx + 1} Failed: {reason}\n"
+            partial_header += "\n"
 
-            counts_str = "\n" + _batch_counts_block(stats)
+        # The partial header already lists the schema rejections, so it
+        # replaces (never stacks with) the rejection preamble.
+        res = (partial_header or rejection_prefix) + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
-            env = failure_envelope(
-                "batch_validation_failed",
-                combined_fails,
-                f"PARTIAL: applied {applied_count} of {total_n} changes.",
-                errors=err_list,
-            )
-            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
-
-            return (
-                header + counts_str + f"\nBatch complete. Saved to: {final_output_path}{overwrite_note}\n" + json_block
-            )
-
-        res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
-        res += _batch_counts_block(stats)
+        total_occurrences = sum(
+            e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
+        )
+        occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
+        already = stats.get("actions_already_resolved", 0)
+        already_text = f", {already} already resolved (no effect)" if already else ""
+        res += (
+            f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
+            f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
+        )
 
         if stats.get("edits"):
             res += "\nDetailed Edit Reports:\n"
