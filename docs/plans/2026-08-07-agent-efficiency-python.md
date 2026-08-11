@@ -271,10 +271,11 @@
 
 ### Task 13 — Item A4: `--no-chrome` Extract Flag
 **Goal.** Strip navigation prose, banners, footers, and appendix pointers from extract output.
-**Failed Verify Cycles:** 2 (Escalated to @opus-coder: trigger (a) second failed cycle)
+**Failed Verify Cycles:** 3 (opus-coder cycle 1)
 **Attempt Ledger:**
 - attempt 1: Added no_chrome parameter across response builders and --no-chrome CLI flag, created test_no_chrome.py -> VERDICT: FAIL (File Path header and navigation prose still emitted under no_chrome in search zero matches, page filter with no hits, window offset past total, and deep outline level)
 - attempt 2: Suppressed File Path headers and navigation prose in build_search_response and render_outline_tree -> VERDICT: FAIL (build_changes_response with no_chrome=True on zero changes/comments returned empty string "")
+- attempt 3 (@opus-coder): Emitted bare summary line in build_changes_response when no_chrome=True -> VERDICT: FAIL (regex_downgraded_note was dropped under no_chrome in compose() when hits existed)
 **Files.**
 - `python/src/adeu/mcp_components/_response_builders.py`
 - `python/src/adeu/cli.py`

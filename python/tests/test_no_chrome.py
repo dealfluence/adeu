@@ -198,6 +198,35 @@ def test_no_chrome_search_offset_past_total(tmp_path: Path):
     assert "No matches in this window" in content
 
 
+def test_no_chrome_search_keeps_regex_downgrade_note_with_hits(tmp_path: Path):
+    """`no_chrome` strips chrome, not the notice that the query lost its regex semantics."""
+    doc_path = tmp_path / "test_search_bad_regex.docx"
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("The deposit is [USD 2500 and the rent is [USD 1200 per month.")
+    doc.save(str(doc_path))
+
+    text = _extract_text_from_doc(Document(str(doc_path)))
+    assert isinstance(text, str)
+
+    res = build_search_response(
+        text,
+        search_query="[USD",
+        search_regex=True,
+        search_case_sensitive=False,
+        page=None,
+        file_path=str(doc_path),
+        no_chrome=True,
+    )
+
+    content = str(res.content)
+    assert "**File Path:**" not in content
+    assert "**Search Results**" not in content
+    assert "not a valid regular expression" in content
+    assert "### Match 1" in content
+
+
 def test_no_chrome_deep_outline_level(tmp_path: Path):
     doc_path = tmp_path / "test_outline_deep.docx"
     from docx import Document

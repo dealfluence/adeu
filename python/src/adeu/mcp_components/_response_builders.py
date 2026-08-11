@@ -1192,7 +1192,11 @@ def build_search_response(
         parts.extend(render_entry(line_start, group, radius) for line_start, group in group_by_line(hits))
         if budget_note and not no_chrome:
             parts.append(budget_note)
-        if regex_downgraded_note and not no_chrome:
+        # The downgrade note survives `no_chrome`: it reports that the query
+        # was searched with DIFFERENT semantics than asked for, so suppressing
+        # it would make the hit list read as regex matches. Query semantics are
+        # not chrome — the zero-match and window-note paths keep it too.
+        if regex_downgraded_note:
             parts.insert(0, regex_downgraded_note)
         return "\n\n".join(part for part in parts if part)
 
