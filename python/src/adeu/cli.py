@@ -1130,8 +1130,13 @@ def handle_diff(args):
         edits = make_edits_self_contained(text_edits, text_orig)
 
     if args.json:
-        output_data = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
-        json_output = json.dumps(output_data, indent=2, ensure_ascii=False)
+        output_data = []
+        for edit in edits:
+            d = edit.model_dump(exclude_defaults=True)
+            if "comment" in d and isinstance(d["comment"], str) and d["comment"].startswith("Diff:"):
+                del d["comment"]
+            output_data.append({"type": edit.type, **d})
+        json_output = json.dumps(output_data, separators=(",", ":"), ensure_ascii=False)
         if getattr(args, "output", None):
             _write_output_or_exit(args.output, json_output)
             print(f"Diff JSON saved to {args.output}", file=sys.stderr)
