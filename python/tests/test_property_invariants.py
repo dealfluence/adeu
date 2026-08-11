@@ -22,6 +22,14 @@ generated families:
       sanitized package, whatever characters the values contain.
   P5  trim_common_context structural invariants: the trimmed prefix/suffix
       are genuinely common, never overlap, and re-compose both strings.
+  P6  Typographic restoration is semantics-preserving: restoring the
+      document's own quote characters into a caller's new_text never changes
+      the text modulo that normalization, and is idempotent. This is what
+      makes the matcher and the writer forgive the SAME set of characters
+      (BUG_comment_threading_anchoring_and_typography.md B4).
+  P7  durableId range: every `w16cid:durableId` Adeu mints is a positive
+      signed 32-bit integer, because Word parses it as one and silently
+      unanchors the comment when it is negative (B3).
 
 Alphabets deliberately exclude Markdown/CriticMarkup metacharacters
 (#, *, _, |, [], {}, ^) — text containing those exercises separately
@@ -48,8 +56,15 @@ from adeu.diff import (
 )
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.models import BatchChanges
+from adeu.redline.comments import CommentsManager
 from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.mapper import DocumentMapper
 from adeu.sanitize.core import sanitize_docx
+from adeu.utils.text import (
+    SMART_QUOTE_MAP,
+    normalize_smart_quotes,
+    restore_document_typography,
+)
 
 # Profiles ("default": 25 examples, "hunt": 300) are registered in
 # tests/conftest.py so --hypothesis-profile resolves at configure time.
@@ -376,3 +391,78 @@ def test_p5_trim_common_context_invariants(target, new):
         assert target[:prefix_len] == new[:prefix_len], "trimmed prefix is not common"
     if suffix_len:
         assert target[-suffix_len:] == new[-suffix_len:], "trimmed suffix is not common"
+
+
+# ---------------------------------------------------------------------------
+# P6 — typographic restoration is semantics-preserving
+# ---------------------------------------------------------------------------
+
+typo_text_st = st.text(
+    alphabet="abcdef .,'\"\u2018\u2019\u201c\u201d\n0123456789",
+    min_size=0,
+    max_size=40,
+)
+
+
+@given(doc_text=typo_text_st, new_text=typo_text_st)
+@settings(max_examples=300, deadline=None)
+def test_p6_restore_document_typography_preserves_semantics(doc_text, new_text):
+    """
+    The repair may only ever swap typographic VARIANTS. Whatever it returns must
+    be indistinguishable from the caller's own new_text once quotes are folded —
+    otherwise "preserve the document's characters" would have quietly changed
+    what the caller asked to write.
+    """
+    restored = restore_document_typography(doc_text, new_text)
+
+    assert normalize_smart_quotes(restored) == normalize_smart_quotes(new_text), (
+        f"restoration changed the text beyond quote typography: {doc_text!r} + {new_text!r} -> {restored!r}"
+    )
+    assert len(restored) == len(new_text), "restoration is length-preserving by construction"
+    # Idempotent: restoring an already-restored string is a no-op.
+    assert restore_document_typography(doc_text, restored) == restored
+
+
+@given(doc_text=typo_text_st)
+@settings(max_examples=200, deadline=None)
+def test_p6_typography_only_difference_is_a_no_op(doc_text):
+    """
+    "If target and new differ only by normalised punctuation, the correct number
+    of tracked changes is zero": feeding back the straightened document text
+    must reproduce the document verbatim.
+    """
+    straightened = normalize_smart_quotes(doc_text)
+    assert restore_document_typography(doc_text, straightened) == doc_text
+
+
+def test_p6_writer_forgives_exactly_what_the_matcher_forgives():
+    """
+    Structural invariant, not a data check: the WRITER's normalization table
+    must be the SAME table the MATCHER uses. B4 was precisely this asymmetry —
+    the matcher folded curly quotes to find an occurrence and the writer then
+    wrote the caller's straight ones back. Extending one side alone silently
+    reintroduces the defect for the newly-forgiven characters.
+    """
+    probe = "".join(SMART_QUOTE_MAP) + "".join(SMART_QUOTE_MAP.values()) + "abc \u2013\u2014\u2026"
+    mapper_view = DocumentMapper._replace_smart_quotes(None, probe)  # type: ignore[arg-type]
+    assert normalize_smart_quotes(probe) == mapper_view, (
+        "DocumentMapper._replace_smart_quotes and utils.text.normalize_smart_quotes "
+        "disagree; the writer would not restore a character the matcher forgave"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P7 — durableId stays a positive signed int32
+# ---------------------------------------------------------------------------
+
+
+@given(count=st.integers(min_value=1, max_value=64))
+@settings(max_examples=25, deadline=None)
+def test_p7_durable_ids_are_positive_signed_int32(count):
+    manager = CommentsManager(Document())
+    for _ in range(count):
+        value = manager._generate_durable_id()
+        assert len(value) == 8 and int(value, 16) <= 0x7FFFFFFF, (
+            f"durableId {value} is negative when read as a signed 32-bit integer, which is how "
+            "Word reads w16cid:durableId — the comment opens anchored to nothing"
+        )

@@ -60,14 +60,22 @@ uvx adeu apply edits.json --live
 ```
 
 ### Accepting All Changes
-Accept every tracked change and remove all comments in one operation, producing a finalized clean document. Mirrors the `accept_all_changes` MCP tool.
+Accept every tracked change in one operation, producing a finalized clean document. Mirrors the `accept_all_changes` MCP tool — including its default.
+
+**Comment removal is ON by default** (`--remove-comments`): the output is meant to be distributable, and comments are internal review notes that must not travel to a counterparty. Use `--no-remove-comments` when the review conversation is still live.
 ```bash
-# Writes contract_clean.docx next to the input
+# Writes contract_clean.docx next to the input; comments are DELETED
 uvx adeu accept-all contract.docx
+
+# Accept the tracked changes but keep the comments
+uvx adeu accept-all contract.docx --no-remove-comments
 
 # Explicit output path, machine-readable result on stdout
 uvx adeu accept-all contract.docx -o final.docx --json
 ```
+Every deleted comment is reported by id and author (`removed_comment_details` under `--json`). A comment whose anchored text an accepted deletion consumes is removed either way — Word does the same.
+
+> The library API is the other way round: `RedlineEngine.accept_all_revisions()` defaults to `remove_comments=False`, because an SDK caller composing their own pipeline should not lose annotations implicitly.
 
 ### Sanitization
 Strip sensitive metadata, hidden text, and author names before external distribution.

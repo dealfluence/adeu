@@ -664,7 +664,9 @@ def test_cli_accept_all_workflow(tmp_path, capsys):
     capsys.readouterr()
     assert redlined_path.exists()
 
-    # 2. Accept all — default output mirrors the MCP tool (<stem>_clean.docx)
+    # 2. Accept all — default output mirrors the MCP tool (<stem>_clean.docx),
+    # and so does its default: comment removal is ON unless
+    # --no-remove-comments says otherwise.
     test_args = ["adeu", "accept-all", str(redlined_path), "--json"]
     with patch.object(sys, "argv", test_args):
         try:

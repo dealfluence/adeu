@@ -72,9 +72,13 @@ Each entry must include a `type` field. The other fields depend on `type`.
 
 ## `accept_all_changes`
 
-Accept every tracked change and remove every comment in one shot. Produces a clean finalized document.
+Accept every tracked change in one shot. Produces a finalized clean document.
 
-**Parameters:** `docx_path` (required), `output_path` (optional, defaults to `<original>_clean.docx`).
+**Parameters:** `docx_path` (required), `output_path` (optional, defaults to `<original>_clean.docx`), `remove_comments` (bool, **default `true`**).
+
+`remove_comments` defaults to **true**: the output is meant to be distributable and comments are internal review notes that must not reach a counterparty. This is destructive — it deletes other people's comments too. Pass `remove_comments=false` when the review conversation is still live and the user only wants the redlines resolved.
+
+The response reports how many comments were deleted and names each one with its author. **Read that line and tell the user** — they may not realise accepting changes also cleared the reviewer's notes. A comment whose anchored text an accepted deletion consumes is removed either way (Word behaves the same).
 
 ## `diff_docx_files`
 

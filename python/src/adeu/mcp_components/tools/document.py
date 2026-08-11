@@ -958,10 +958,17 @@ def _create_diff_output(original_path: str, modified_path: str, text_orig: str, 
 
 @tool(
     description=(
-        "Accepts all tracked changes and removes all comments in a single operation, "
-        "producing a finalized clean document. "
-        "Use this when a document review is entirely complete and you want to clear all redlines. "
-        "For selective acceptance/rejection of specific changes, use `process_document_batch` instead."
+        "Accepts every tracked change in the document, producing a finalized clean document. "
+        "Use this when a document review is entirely complete. "
+        "For selective acceptance/rejection of specific changes, use `process_document_batch` instead. "
+        "\n\n"
+        "remove_comments (boolean, DEFAULT TRUE): also delete every comment. The default is TRUE "
+        "because this tool's purpose is a distributable clean document, and comments are internal "
+        "review notes that must not travel to a counterparty. Pass remove_comments=false to accept "
+        "the tracked changes while KEEPING the comments — use that when the review conversation is "
+        "still live. Either way the response reports how many comments were deleted and names each "
+        "one with its author, and comments whose anchored text an accepted deletion consumes are "
+        "removed regardless, exactly as Word does."
     ),
     tags={"docx"},
     annotations={"destructiveHint": True},
@@ -970,6 +977,11 @@ async def accept_all_changes(
     docx_path: Annotated[str, "Absolute path to the DOCX file."],
     ctx: Context,
     output_path: Annotated[Optional[str], "Optional output path."] = None,
+    remove_comments: Annotated[
+        bool,
+        "Also delete every comment in the document. Defaults to True (finalized clean document); "
+        "pass false to keep comments while accepting the tracked changes.",
+    ] = True,
     reasoning: Annotated[
         Optional[str],
         "Why do I need to accept all changes in this document? State this reason before any other parameter.",
@@ -982,8 +994,18 @@ async def accept_all_changes(
         stream = read_file_bytes(docx_path)
         engine = RedlineEngine(stream, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
-        await ctx.debug("Engine loaded, executing accept_all_revisions()")
-        counts = engine.accept_all_revisions(remove_comments=True)
+        # This surface DELIBERATELY defaults to True while the library API
+        # defaults to False: `accept_all_changes` exists to produce a
+        # distributable clean document, and shipping a counterparty a file that
+        # still carries internal review notes is the more expensive failure
+        # (QA_ISSUES_DISCOVERED #10, "Confidentiality risk"). What
+        # BUG_comment_threading_anchoring_and_typography.md B2 correctly
+        # objected to was that the inversion was SILENT and unavoidable — the
+        # caller now has an explicit parameter, the published description states
+        # the default, and every deleted comment is named with its author.
+        await ctx.debug(f"Engine loaded, executing accept_all_revisions(remove_comments={remove_comments})")
+        counts = engine.accept_all_revisions(remove_comments=remove_comments)
+        removed_comment_notes = list(engine.removed_comment_notes)
 
         if not output_path:
             p = Path(docx_path)
@@ -1000,7 +1022,9 @@ async def accept_all_changes(
 
         # A no-op must be reported as one (QA 2026-07-23 F18), and comment
         # removal is destructive review-content cleanup that the response
-        # must disclose, never perform silently (F12).
+        # must disclose, never perform silently (F12) — naming each comment AND
+        # its author, because a comment the caller did not write is somebody
+        # else's work product (B2).
         if accepted_ins + accepted_del + accepted_fmt + removed_comments == 0:
             res = (
                 "No tracked changes or comments to accept — the document is "
@@ -1013,8 +1037,17 @@ async def accept_all_changes(
                 f"Deletions accepted: {accepted_del}\n"
                 f"Formatting changes accepted: {accepted_fmt}\n"
                 f"Comments removed: {removed_comments}"
-                f"{overwrite_note}"
             )
+            if removed_comment_notes:
+                res += "\nComments deleted: " + ", ".join(removed_comment_notes)
+                if not remove_comments:
+                    res += (
+                        "\nNote: these comments were anchored to text an accepted deletion "
+                        "consumed, so Word removes them too. Nothing else was deleted."
+                    )
+            elif not remove_comments:
+                res += "\nComments kept (remove_comments=false)."
+            res += overwrite_note
         return add_timing_if_debug(start_time, res)
     except Exception as e:
         await ctx.error(

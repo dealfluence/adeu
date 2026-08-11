@@ -393,10 +393,10 @@ class TestF12FinalizationReports:
             )
 
     def test_accept_all_changes_tool_discloses_comment_removal(self, tmp_path):
-        """accept_all_changes deletes every comment body (remove_comments=True)
-        yet its response never mentions comments — silent destruction of review
-        content (F12). The sanitize report already discloses this; the tool
-        response must too."""
+        """accept_all_changes deletes every comment body (remove_comments
+        defaults to True) yet its response never mentions comments — silent
+        destruction of review content (F12). The sanitize report already
+        discloses this; the tool response must too."""
         engine = RedlineEngine(doc_stream("Clause with a comment target."), author="Alice")
         engine.process_batch(
             [

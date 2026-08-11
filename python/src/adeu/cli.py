@@ -1453,14 +1453,27 @@ def handle_apply(args):
 
 def handle_accept_all(args: argparse.Namespace):
     """
-    Accepts all tracked changes and removes all comments, producing a
-    finalized clean document. Mirrors the `accept_all_changes` MCP tool.
+    Accepts all tracked changes and (by default) removes all comments,
+    producing a finalized clean document. Mirrors the `accept_all_changes` MCP
+    tool — including its default.
+
+    The default DELIBERATELY differs from the library API
+    (`accept_all_revisions(remove_comments=False)`): this command produces a
+    distributable artifact, and shipping a counterparty a file that still
+    carries internal review notes is the more expensive failure
+    (QA_ISSUES_DISCOVERED #10). What
+    BUG_comment_threading_anchoring_and_typography.md B2 correctly objected to
+    was that the inversion was SILENT and unavoidable — `--no-remove-comments`
+    now exists, `--help` states the default, and every deleted comment is
+    reported by id and author.
     """
     _set_json_mode(args.json)
     _require_docx_output(args.output)
     engine = _open_redline_engine_or_exit(args.input)
 
-    stats = engine.accept_all_revisions(remove_comments=True)
+    remove_comments = getattr(args, "remove_comments", True)
+    stats = engine.accept_all_revisions(remove_comments=remove_comments)
+    removed_comment_notes = list(engine.removed_comment_notes)
 
     output_path = args.output
     if not output_path:
@@ -1477,10 +1490,17 @@ def handle_accept_all(args: argparse.Namespace):
             "accepted_deletions": stats.get("accepted_deletions", 0),
             "accepted_formatting": stats.get("accepted_formatting", 0),
             "removed_comments": stats.get("removed_comments", 0),
+            "removed_comment_details": removed_comment_notes,
         }
         print(json.dumps(result))
     else:
         print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
+        if removed_comment_notes:
+            # Deleting somebody else's review note is never a footnote.
+            print(
+                "⚠️  Comments deleted: " + ", ".join(removed_comment_notes),
+                file=sys.stderr,
+            )
 
 
 def handle_markup(args):
@@ -2134,6 +2154,19 @@ def _main_impl():
         "--output",
         type=Path,
         help="Output DOCX path (default: <input>_clean.docx)",
+    )
+    p_accept.add_argument(
+        "--remove-comments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Also delete every comment (DEFAULT: enabled). This command produces a "
+            "distributable clean document, and comments are internal review notes that must "
+            "not travel to a counterparty. Use --no-remove-comments to accept the tracked "
+            "changes while KEEPING the comments. Either way, a comment whose anchored text an "
+            "accepted deletion consumes is removed (Word does the same) and every deleted "
+            "comment is reported by id and author."
+        ),
     )
     p_accept.add_argument(
         "--json",

@@ -1,7 +1,11 @@
 import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { DocumentMapper, TextSpan } from "./mapper.js";
-import { CommentsManager, extract_comments_data } from "./comments.js";
+import {
+  CommentsManager,
+  CommentThreadingError,
+  extract_comments_data,
+} from "./comments.js";
 import {
   ModifyText,
   InsertTableRow,
@@ -26,6 +30,7 @@ import { format_ambiguity_error } from "./markup.js";
 import {
   PREVIEW_TEXT_CAP,
   REPORT_ECHO_CAP,
+  restore_matched_typography,
   truncate_middle,
 } from "./utils/text.js";
 import { RegexTimeoutError } from "./utils/safe-regex.js";
@@ -465,6 +470,10 @@ export class RedlineEngine {
   public clean_mapper: DocumentMapper | null = null;
   public original_mapper: DocumentMapper | null = null;
   public skipped_details: string[] = [];
+  /** Comment removals accept_all_revisions actually performed, attributed to
+   *  their authors ("Com:1 (by Sarah Chen)") — see B2 in
+   *  BUG_comment_threading_anchoring_and_typography.md. */
+  public removed_comment_notes: string[] = [];
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
   private _revisionIndex: RevisionIndex | null = null;
@@ -1202,7 +1211,19 @@ export class RedlineEngine {
     return [path.join(" > "), page];
   }
 
-  public accept_all_revisions() {
+  /**
+   * Accepts every tracked change.
+   *
+   * `remove_comments` defaults to FALSE, matching the Python engine's signature:
+   * comments are annotations, not revisions, and this call used to eject every
+   * one of them unconditionally with no way to opt out. A caller asking to
+   * "accept all changes" then also got "delete the reviewer's comments"
+   * (BUG_comment_threading_anchoring_and_typography.md B2). Comments whose
+   * anchored text an accepted DELETION consumes are still removed either way —
+   * Word does the same — and `removed_comments` counts exactly the bodies this
+   * call deleted, with `removed_comment_notes` naming each one and its author.
+   */
+  public accept_all_revisions(remove_comments: boolean = false) {
     const parts_to_process: Element[] = [this.doc.element];
 
     for (const part of this.doc.pkg.parts) {
@@ -1229,12 +1250,14 @@ export class RedlineEngine {
       }
     }
 
-    // accept_all removes EVERY comment (the final pass below ejects the
-    // comment parts wholesale), so the reported count is the number of
-    // comments present at entry — counting only the bodies deleted during
-    // wrapping-cleanup under-reported the removal as 0 while the output
-    // document demonstrably had no comments left (QA round 3, finding 3.4).
-    const removed_comments = this._existing_comment_ids().length;
+    // Snapshot the comment ids AND authors so the count below reflects what
+    // this call actually deleted (QA round 3, finding 3.4 fixed the opposite
+    // failure: counting only wrapping-cleanup deletions reported 0 while the
+    // output had no comments left). Attribution is what makes a removal
+    // impossible to mistake for engine bookkeeping (B2).
+    const comment_authors_before = this._comment_authors();
+    const comments_before = new Set(Object.keys(comment_authors_before));
+    this.removed_comment_notes = [];
 
     for (const root_element of parts_to_process) {
       const insNodes = findAllDescendants(root_element, "w:ins");
@@ -1322,32 +1345,35 @@ export class RedlineEngine {
       }
     }
 
-    // Final pass: completely eject all comments, anchors, and parts
-    for (const root_element of parts_to_process) {
-      for (const tag of ["w:commentRangeStart", "w:commentRangeEnd"]) {
-        for (const el of findAllDescendants(root_element, tag)) {
-          el.parentNode?.removeChild(el);
+    // Final pass: completely eject all comments, anchors, and parts — only when
+    // the caller actually asked for it (B2).
+    if (remove_comments) {
+      for (const root_element of parts_to_process) {
+        for (const tag of ["w:commentRangeStart", "w:commentRangeEnd"]) {
+          for (const el of findAllDescendants(root_element, tag)) {
+            el.parentNode?.removeChild(el);
+          }
         }
-      }
 
-      const refs = findAllDescendants(root_element, "w:commentReference");
-      for (const ref of refs) {
-        const parent = ref.parentNode as Element | null;
-        if (parent) {
-          if (parent.tagName === "w:r" || parent.tagName.endsWith(":r")) {
-            const nonRprChildren = Array.from(parent.childNodes).filter(
-              (c) =>
-                c.nodeType === 1 &&
-                (c as Element).tagName !== "w:rPr" &&
-                (c as Element).tagName !== "rPr",
-            );
-            if (nonRprChildren.length <= 1) {
-              parent.parentNode?.removeChild(parent);
+        const refs = findAllDescendants(root_element, "w:commentReference");
+        for (const ref of refs) {
+          const parent = ref.parentNode as Element | null;
+          if (parent) {
+            if (parent.tagName === "w:r" || parent.tagName.endsWith(":r")) {
+              const nonRprChildren = Array.from(parent.childNodes).filter(
+                (c) =>
+                  c.nodeType === 1 &&
+                  (c as Element).tagName !== "w:rPr" &&
+                  (c as Element).tagName !== "rPr",
+              );
+              if (nonRprChildren.length <= 1) {
+                parent.parentNode?.removeChild(parent);
+              } else {
+                parent.removeChild(ref);
+              }
             } else {
               parent.removeChild(ref);
             }
-          } else {
-            parent.removeChild(ref);
           }
         }
       }
@@ -1356,7 +1382,7 @@ export class RedlineEngine {
     const pkg = this.doc.pkg;
     const comment_partnames = new Set<string>();
     for (const part of pkg.parts) {
-      if (part.partname.toLowerCase().includes("comments")) {
+      if (remove_comments && part.partname.toLowerCase().includes("comments")) {
         comment_partnames.add(part.partname);
         const withSlash = part.partname.startsWith("/")
           ? part.partname
@@ -1428,11 +1454,26 @@ export class RedlineEngine {
       }
     }
 
+    // Books that match the document: when remove_comments ejected the parts the
+    // "after" set is empty, so this still equals the total; when it did not, it
+    // counts exactly the anchors this call consumed (B2).
+    const after = new Set(this._existing_comment_ids());
+    const removed_ids = Array.from(comments_before)
+      .filter((cid) => !after.has(cid))
+      .sort((a, b) => {
+        const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+        const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+        return na - nb || a.localeCompare(b);
+      });
+    this.removed_comment_notes = removed_ids.map(
+      (cid) => `Com:${cid} (by ${comment_authors_before[cid] ?? "Unknown"})`,
+    );
+
     return {
       accepted_insertions,
       accepted_deletions,
       accepted_formatting,
-      removed_comments,
+      removed_comments: removed_ids.length,
     };
   }
 
@@ -4442,6 +4483,44 @@ export class RedlineEngine {
     });
   }
 
+  /**
+   * comment id -> author, for attributing a removal to a human. Callers that
+   * also need the id SET derive it from `Object.keys` rather than calling
+   * `_existing_comment_ids` as well: each call re-parses the comments part.
+   */
+  private _comment_authors(): Record<string, string> {
+    const out: Record<string, string> = {};
+    try {
+      for (const [cid, data] of Object.entries(extract_comments_data(this.doc.pkg))) {
+        out[cid] = (data as any)?.author || "Unknown";
+      }
+    } catch {
+      /* a package without comments has no authors to report */
+    }
+    return out;
+  }
+
+  /**
+   * Renders removed comments WITH their authors: an anonymous "removed comment
+   * Com:1" reads like the engine's own bookkeeping, which is exactly how the
+   * reported run rationalised destroying the reviewer's comment as success (B2).
+   * "comment Com:1 (by Sarah Chen)" cannot be misread.
+   */
+  private static _describe_removed_comments(
+    removed: string[],
+    authors: Record<string, string>,
+  ): string {
+    const ids = [...removed].sort((a, b) => {
+      const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+      const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+      return na - nb || a.localeCompare(b);
+    });
+    const rendered = ids
+      .map((cid) => (authors[cid] ? `Com:${cid} (by ${authors[cid]})` : `Com:${cid}`))
+      .join(", ");
+    return `${ids.length === 1 ? "comment" : "comments"} ${rendered}`;
+  }
+
   private static _format_id_list(ids: string[], prefix: string, limit = 20): string {
     const shown = ids.slice(0, limit);
     let rendered = shown.map((i) => `${prefix}${i}`).join(", ");
@@ -4534,11 +4613,35 @@ export class RedlineEngine {
       const type = action.type;
       if (type === "reply") {
         const cid = action.target_id.replace("Com:", "");
-        const new_id = this.comments_manager.addComment(
-          this.author,
-          action.text,
-          cid,
-        );
+        if (!this._existing_comment_ids().includes(cid)) {
+          skipped++;
+          this.skipped_details.push(
+            this._action_not_found_error(
+              action.target_id,
+              "reply",
+              `- Action ${pos + 1} Failed:`,
+            ),
+          );
+          continue;
+        }
+        let new_id: string;
+        try {
+          new_id = this.comments_manager.addComment(this.author, action.text, cid);
+        } catch (e) {
+          if (e instanceof CommentThreadingError) {
+            // A reply that cannot be threaded must NOT be written as a new
+            // top-level comment. The old path wrote it anyway and reported
+            // success, so the agent believed it had answered the reviewer, saw
+            // a stray comment instead, retried, and made the document worse
+            // (BUG_comment_threading_anchoring_and_typography.md B1).
+            skipped++;
+            this.skipped_details.push(
+              `- Action ${pos + 1} Failed: reply on ${action.target_id} — ${e.message}`,
+            );
+            continue;
+          }
+          throw e;
+        }
         this._anchor_reply_comment(cid, new_id);
         applied++;
         continue;
@@ -4699,10 +4802,13 @@ export class RedlineEngine {
       }
 
       // Accept/reject can delete a comment as a side effect when the comment's
-      // anchor falls inside the resolved change. Snapshot the comment ids first
-      // so a removal is reported explicitly instead of happening silently under
-      // "1 applied" (QA 2026-07-22 bug #1).
-      const comments_before = new Set(this._existing_comment_ids());
+      // anchor falls inside the resolved change. Snapshot the comment ids AND
+      // their authors first so a removal is reported explicitly — and
+      // attributed — instead of happening silently under "1 applied"
+      // (QA 2026-07-22 bug #1; authorship added for B2: "never silently delete
+      // a comment authored by someone other than the caller").
+      const comment_authors_before = this._comment_authors();
+      const comments_before = new Set(Object.keys(comment_authors_before));
 
       // Paragraphs whose INSERTED paragraph mark was rejected: the paragraph
       // break never existed, so each merges back into the paragraph before it
@@ -4826,16 +4932,9 @@ export class RedlineEngine {
         const after = new Set(this._existing_comment_ids());
         const removed = Array.from(comments_before).filter((c) => !after.has(c));
         if (removed.length > 0) {
-          const removed_list = removed
-            .sort((a, b) => {
-              const na = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
-              const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
-              return na - nb || a.localeCompare(b);
-            })
-            .map((c) => `Com:${c}`)
-            .join(", ");
           this.skipped_details.push(
-            `- Note: ${type} on ${action.target_id} also removed comment ${removed_list} ` +
+            `- Note: ${type} on ${action.target_id} also removed ` +
+              `${RedlineEngine._describe_removed_comments(removed, comment_authors_before)} ` +
               `(including any reply thread) because its anchor was inside the resolved change. ` +
               `This note is informational — the action itself succeeded.`,
           );
@@ -5067,6 +5166,20 @@ export class RedlineEngine {
           current_effective_new_text,
         );
       }
+
+      // The matcher forgave a typographic mismatch to find this occurrence (an
+      // LLM writes "parties' Master", the document reads "parties’ Master"), so
+      // the writer must forgive the same one: otherwise the caller's straight
+      // quotes are written back verbatim and every untargeted curly character
+      // becomes a real tracked change on a provision nobody touched (B4,
+      // BUG_comment_threading_anchoring_and_typography.md). Keyed on the MATCH
+      // being typography-forgiving — a caller who quotes the document's own
+      // characters and asks for different ones still gets the change.
+      current_effective_new_text = restore_matched_typography(
+        actual_doc_text,
+        edit.target_text,
+        current_effective_new_text,
+      );
 
       // Stash the first occurrence's full match for the report preview, so it
       // can show the complete logical change rather than only the first

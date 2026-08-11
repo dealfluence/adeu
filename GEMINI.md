@@ -28,7 +28,10 @@ Applies a list of edits to a DOCX. Edits apply **sequentially** — each one eva
 Always call `read_docx` immediately before any `accept`/`reject`/`reply` — IDs shift between document states.
 
 ### `accept_all_changes`
-Accepts all tracked changes and removes all comments in one operation. Use only when review is fully complete.
+Accepts every tracked change in one operation, producing a finalized clean document. Use only when review is fully complete.
+
+- `remove_comments` (bool, **default `true`**) — also deletes every comment, because the output is meant to be distributable and comments are internal review notes. Pass `remove_comments=false` to accept the tracked changes while keeping the comments.
+- Either way the response reports how many comments were deleted and names each one with its author. A comment whose anchored text an accepted deletion consumes is removed regardless, exactly as Word does.
 
 ## Recommended Workflow
 

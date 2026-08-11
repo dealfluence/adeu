@@ -85,7 +85,11 @@ Use `--report` to print a sanitization report — useful for verifying what was 
 uvx adeu accept-all redline.docx -o final.docx
 # Default output is <input>_clean.docx; --json prints {"status": "ok", "output_path": ...}
 uvx adeu accept-all redline.docx --json
+# Accept the tracked changes but KEEP the comments (review still live)
+uvx adeu accept-all redline.docx --no-remove-comments
 ```
+
+Comment removal is **on by default** — the output is meant to be distributable. Every deleted comment is reported by id and author (`removed_comment_details` under `--json`); surface that to the user. Comments whose anchored text an accepted deletion consumes are removed either way.
 
 ## Workflow on the CLI path
 

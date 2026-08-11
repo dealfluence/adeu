@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 from copy import deepcopy
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import lxml.etree as etree
 import structlog
@@ -26,11 +26,17 @@ from adeu.models import (
     ReplyComment,
 )
 from adeu.pagination import paginate, split_structural_appendix
-from adeu.redline.comments import CommentsManager
+from adeu.redline.comments import CommentsManager, CommentThreadingError
 from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
 from adeu.utils.safe_regex import RegexTimeoutError
-from adeu.utils.text import PREVIEW_TEXT_CAP, REPORT_ECHO_CAP, truncate_middle
+from adeu.utils.text import (
+    PREVIEW_TEXT_CAP,
+    REPORT_ECHO_CAP,
+    has_smart_quotes,
+    restore_document_typography,
+    truncate_middle,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -426,6 +432,13 @@ class RedlineEngine:
         self.original_mapper: Optional[DocumentMapper] = None
         self.skipped_details: List[str] = []
         self._bullet_num_id: Optional[str] = None
+        # Set by _reply_to_comment when a reply's parent could not be threaded,
+        # so apply_review_actions reports the real reason instead of the
+        # misleading "no comment with that id exists" (B1).
+        self._reply_threading_error: Optional[str] = None
+        # Comment removals accept_all_revisions actually performed, attributed
+        # to their authors (B2).
+        self.removed_comment_notes: List[str] = []
 
     def _check_punctuation_warning(self, target_text: str) -> Optional[str]:
         """Return a hint when a short, single-token anchor contains punctuation
@@ -3372,6 +3385,34 @@ class RedlineEngine:
         proxy_edit._target_paragraph = target_para  # type: ignore[attr-defined]
         return proxy_edit
 
+    @staticmethod
+    def _restore_matched_typography(actual_doc_text: str, caller_target: str, new_text: str) -> str:
+        """
+        Undoes the typographic drift a forgiving MATCH introduces into a
+        literal WRITE (BUG_comment_threading_anchoring_and_typography.md B4).
+
+        `DocumentMapper` matches a target with straight quotes against a
+        document with curly ones — deliberately, because that is how LLMs
+        normalize typography. The apply path then word-diffs the document's
+        real slice against the caller's `new_text`, so each forgiven character
+        became a genuine `w:del`/`w:ins` pair in text the caller never
+        targeted. Restore the document's characters wherever the caller changed
+        nothing.
+
+        The guard is the asymmetry itself: only when the document slice carries
+        smart typography that the caller's own target does NOT is the match
+        known to have been forgiving. A caller quoting the document's real
+        characters (`“Confidential”` → `"Confidential"`) is asking for the
+        change and still gets it.
+        """
+        if not new_text or not actual_doc_text:
+            return new_text
+        if not has_smart_quotes(actual_doc_text):
+            return new_text
+        if has_smart_quotes(caller_target or ""):
+            return new_text
+        return restore_document_typography(actual_doc_text, new_text)
+
     def _pre_resolve_heuristic_edit(
         self, edit: ModifyText, index_offset: int = 0
     ) -> Union[ModifyText, List[ModifyText], None]:
@@ -3473,6 +3514,18 @@ class RedlineEngine:
                     pass
                 else:
                     self._flag_surviving_js_backreference(edit, current_effective_new_text)
+
+            # The matcher forgave a typographic mismatch to find this
+            # occurrence (an LLM writes "parties' Master", the document reads
+            # "parties’ Master"), so the writer must forgive the same one:
+            # otherwise the caller's straight quotes are written back verbatim
+            # and every untargeted curly character becomes a real tracked
+            # change on a provision nobody touched (B4). Keyed on the MATCH
+            # being typography-forgiving — a caller who quotes the document's
+            # own characters and asks for different ones still gets the change.
+            current_effective_new_text = self._restore_matched_typography(
+                actual_doc_text, edit.target_text, current_effective_new_text
+            )
 
             # Stash the first occurrence's full match for the report preview,
             # so it can show the complete logical change rather than only the
@@ -4733,6 +4786,33 @@ class RedlineEngine:
             ids = []
         return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
 
+    def _comment_authors(self) -> Dict[str, str]:
+        """
+        comment id -> author, for attributing a removal to a human. Callers that
+        also need the id SET derive it from `.keys()` rather than calling
+        `_existing_comment_ids` as well: each call re-parses the comments part.
+        """
+        try:
+            return {
+                cid: (data.get("author") or "Unknown")
+                for cid, data in self.comments_manager.extract_comments_data().items()
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _describe_removed_comments(removed: Iterable[str], authors: Dict[str, str]) -> str:
+        """
+        Renders removed comments WITH their authors: an anonymous "removed
+        comment Com:1" reads like the engine's own bookkeeping, which is exactly
+        how the reported run rationalised destroying the reviewer's comment as
+        success (B2). "comment Com:1 (by Sarah Chen)" cannot be misread.
+        """
+        ids = sorted(removed, key=lambda x: (int(x) if x.isdigit() else 0, x))
+        rendered = ", ".join(f"Com:{cid} (by {authors[cid]})" if cid in authors else f"Com:{cid}" for cid in ids)
+        noun = "comment" if len(ids) == 1 else "comments"
+        return f"{noun} {rendered}"
+
     @staticmethod
     def _format_id_list(ids: List[str], prefix: str, limit: int = 20) -> str:
         shown = ids[:limit]
@@ -4964,11 +5044,17 @@ class RedlineEngine:
 
             # Accept/reject can delete a comment as a side effect when the
             # comment's anchor falls inside the resolved change. Snapshot the
-            # comment ids first so a removal is reported explicitly instead of
-            # happening silently under "1 applied" (QA 2026-07-22 bug #1).
+            # comment ids AND their authors first so a removal is reported
+            # explicitly — and attributed — instead of happening silently under
+            # "1 applied" (QA 2026-07-22 bug #1; authorship added for
+            # BUG_comment_threading_anchoring_and_typography.md B2: "never
+            # silently delete a comment authored by someone other than the
+            # caller").
             comments_before: set = set()
+            comment_authors: Dict[str, str] = {}
             if isinstance(act, (AcceptChange, RejectChange)) and is_change:
-                comments_before = set(self._existing_comment_ids())
+                comment_authors = self._comment_authors()
+                comments_before = set(comment_authors)
 
             if isinstance(act, AcceptChange):
                 if is_change:
@@ -4980,6 +5066,7 @@ class RedlineEngine:
                     success = bool(resolved_now)
             elif isinstance(act, ReplyComment):
                 if is_comment:
+                    self._reply_threading_error = None
                     success = self._reply_to_comment(target_id, getattr(act, "text", ""))
 
             if success:
@@ -4990,12 +5077,21 @@ class RedlineEngine:
                 if comments_before:
                     removed = comments_before - set(self._existing_comment_ids())
                     if removed:
-                        removed_list = ", ".join(f"Com:{c}" for c in sorted(removed))
                         self.skipped_details.append(
-                            f"- Note: {act.type} on {raw_id} also removed comment {removed_list} "
+                            f"- Note: {act.type} on {raw_id} also removed "
+                            f"{self._describe_removed_comments(removed, comment_authors)} "
                             "(including any reply thread) because its anchor was inside the resolved "
                             "change. This note is informational — the action itself succeeded."
                         )
+            elif isinstance(act, ReplyComment) and self._reply_threading_error:
+                # The parent comment exists but the reply could not be threaded
+                # onto it. Naming the id kind here would be a lie ("no comment
+                # with that id exists"); the caller needs the real reason (B1).
+                self.skipped_details.append(
+                    f"- Action {batch_idx + 1} Failed: reply on {raw_id} — {self._reply_threading_error}"
+                )
+                self._reply_threading_error = None
+                skipped += 1
             else:
                 self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act, batch_idx=batch_idx))
                 skipped += 1
@@ -5312,7 +5408,17 @@ class RedlineEngine:
         if target_id not in existing_comments:
             return False
 
-        new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
+        try:
+            new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
+        except CommentThreadingError as exc:
+            # A reply that cannot be threaded must NOT be written as a new
+            # top-level comment. The old path wrote it anyway and reported
+            # success, so the agent believed it had answered the reviewer, saw
+            # a stray comment instead, retried, and made the document worse
+            # (BUG_comment_threading_anchoring_and_typography.md B1).
+            logger.warning("Refusing to write an unthreadable reply", target_id=target_id, error=str(exc))
+            self._reply_threading_error = str(exc)
+            return False
 
         self._anchor_reply_comment(target_id, new_comment_id)
         return True
@@ -5403,13 +5509,16 @@ class RedlineEngine:
             for tag in ("w:rPrChange", "w:pPrChange", "w:sectPrChange"):
                 accepted_formatting += len(root_element.findall(f".//{qn(tag)}"))
 
-        # Only claim comments were removed when they actually are.
-        removed_comments = 0
-        if remove_comments:
-            try:
-                removed_comments = len(self.comments_manager.extract_comments_data())
-            except Exception:
-                removed_comments = 0
+        # Only claim comments were removed when they actually are — and count
+        # EVERY body this call deletes, not just the ones a `remove_comments`
+        # request asked for. Accepting a deletion whose range carries a comment
+        # anchor removes that comment (Word behaves the same), so hard-coding 0
+        # for remove_comments=False reported "nothing happened" while a human's
+        # comment was gone — the silent data loss that let the reported run be
+        # rationalised as a success (B2).
+        comment_authors_before = self._comment_authors()
+        comments_before = set(comment_authors_before)
+        self.removed_comment_notes = []
 
         for root_element in parts_to_process:
             for ins in root_element.findall(f".//{qn('w:ins')}"):
@@ -5534,11 +5643,22 @@ class RedlineEngine:
                 elif hasattr(pkg, "parts") and isinstance(pkg.parts, list):
                     pkg.parts[:] = [p for p in pkg.parts if p.partname not in comment_partnames]
 
+        # Books that match the document: when remove_comments ejected the parts
+        # the "after" set is empty, so this still equals the total; when it did
+        # not, it counts exactly the anchors this call consumed. Each removal is
+        # attributed so no caller can mistake a human's comment for engine
+        # bookkeeping (B2).
+        removed_ids = comments_before - set(self._existing_comment_ids())
+        self.removed_comment_notes = [
+            f"Com:{cid} (by {comment_authors_before.get(cid, 'Unknown')})"
+            for cid in sorted(removed_ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+        ]
+
         return {
             "accepted_insertions": accepted_insertions,
             "accepted_deletions": accepted_deletions,
             "accepted_formatting": accepted_formatting,
-            "removed_comments": removed_comments,
+            "removed_comments": len(removed_ids),
         }
 
     def reject_all_revisions(self):

@@ -24,6 +24,22 @@ const RT = {
   EXTENSIBLE: 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible'
 };
 
+/**
+ * Raised when a reply cannot be threaded onto its parent comment.
+ *
+ * A `reply` that quietly becomes a new top-level thread is worse than a failed
+ * call: apply_review_actions reports success, the agent believes it answered
+ * the reviewer, and it keeps acting on a success it never got
+ * (BUG_comment_threading_anchoring_and_typography.md B1). So threading is
+ * resolved BEFORE any XML is written, and an unresolvable parent is loud.
+ */
+export class CommentThreadingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CommentThreadingError';
+  }
+}
+
 export class CommentsManager {
   private _commentsPart: Part | null = null;
   private _extendedPart: Part | null = null;
@@ -165,14 +181,52 @@ export class CommentsManager {
     return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
   }
 
+  /**
+   * `w16cid:durableId` is schema-typed `ST_LongHexNumber`, but Word parses it
+   * as a SIGNED 32-bit integer. With the high bit set the value is negative,
+   * Word fails to bind the comment and silently collapses its anchor to a
+   * zero-length point: right author, right text, right date, highlight simply
+   * absent — no error, no repair prompt, nothing wrong in the XML
+   * (BUG_comment_threading_anchoring_and_typography.md B3, Word-verified via
+   * `Comment.Scope`). Word's own durable ids are always high-bit clear, so
+   * mask to 31 bits.
+   *
+   * Deliberately separate from `_generateHexId`: `paraId` and `rsid` are opaque
+   * 32-bit tokens with no such constraint, and narrowing the shared helper
+   * would halve their space for no reason.
+   */
+  private _generateDurableId(): string {
+    return Math.floor(Math.random() * 0x80000000)
+      .toString(16)
+      .toUpperCase()
+      .padStart(8, '0');
+  }
+
   private _getInitials(author: string): string {
     if (!author) return '';
     return author.split(' ').filter(Boolean).map(p => p[0]).join('').toUpperCase();
   }
 
+  /**
+   * True when the package already carries a comments part (loaded or not).
+   *
+   * Read paths must use this guard instead of testing the raw backing field
+   * `_commentsPart`: on a fresh manager that field is null until the lazy
+   * `commentsPart` getter populates it, so guarding on it silently no-ops even
+   * though the document HAS comments (Python's _has_comments_part, QA
+   * 2026-07-17 F3 — the Node twin kept the stale field check). Checking the
+   * package keeps the other guarantee: a document with no comments part never
+   * has one created as a side effect of a read.
+   */
+  private _hasCommentsPart(): boolean {
+    return (
+      this._commentsPart !== null || this._getExistingPartByType(CT.COMMENTS) !== null
+    );
+  }
+
   private _findParaIdForComment(commentId: string): string | null {
-    if (!this._commentsPart) return null;
-    for (const c of findAllDescendants(this._commentsPart._element, 'w:comment')) {
+    if (!this._hasCommentsPart()) return null;
+    for (const c of findAllDescendants(this.commentsPart._element, 'w:comment')) {
       if (c.getAttribute('w:id') === commentId) {
         for (const p of findAllDescendants(c, 'w:p')) {
           const pid = p.getAttribute('w14:paraId');
@@ -199,7 +253,121 @@ export class CommentsManager {
     return directParaId;
   }
 
+  /**
+   * Gives an existing comment a modern paragraph identity so a reply can thread
+   * onto it, returning that paraId (null if the comment does not exist, or has
+   * no paragraph to identify).
+   *
+   * A comment written by pre-2013 Word — or by any generator that skips the
+   * modern-comments extensions — has no `w14:paraId`, so `_findThreadRootParaId`
+   * resolves nothing and `w15:paraIdParent` never gets written: the "reply"
+   * silently becomes a second top-level thread (B1). Minting the missing
+   * identity is the repair; it is idempotent and leaves the comment's body,
+   * author and date untouched.
+   *
+   * The paraId is registered in commentsExtended AND commentsIds together: Word
+   * consults both, and a paraId present in one but not the other drops the
+   * comment out of the modern-comments path entirely.
+   */
+  private _adoptIntoModernComments(commentId: string): string | null {
+    if (!this._hasCommentsPart()) return null;
+
+    let commentEl: Element | null = null;
+    for (const c of findAllDescendants(this.commentsPart._element, 'w:comment')) {
+      if (c.getAttribute('w:id') === commentId) {
+        commentEl = c;
+        break;
+      }
+    }
+    if (!commentEl) return null;
+
+    const paragraphs = findAllDescendants(commentEl, 'w:p');
+    if (paragraphs.length === 0) return null;
+
+    let paraId: string | null = null;
+    for (const p of paragraphs) {
+      const pid = p.getAttribute('w14:paraId');
+      if (pid) {
+        paraId = pid;
+        break;
+      }
+    }
+    if (!paraId) {
+      paraId = this._generateHexId();
+      paragraphs[0].setAttribute('w14:paraId', paraId);
+    }
+
+    const hasChild = (part: Part, attr: string): boolean => {
+      for (let i = 0; i < part._element.childNodes.length; i++) {
+        const child = part._element.childNodes[i] as Element;
+        if (child.nodeType === 1 && child.getAttribute(attr) === paraId) return true;
+      }
+      return false;
+    };
+
+    if (!hasChild(this.extendedPart, 'w15:paraId')) {
+      // Thread ROOT: no w15:paraIdParent.
+      const exDoc = this.extendedPart._element.ownerDocument!;
+      const commentEx = exDoc.createElement('w15:commentEx');
+      commentEx.setAttribute('w15:paraId', paraId);
+      commentEx.setAttribute('w15:done', '0');
+      this.extendedPart._element.appendChild(commentEx);
+    }
+
+    if (!hasChild(this.idsPart, 'w16cid:paraId')) {
+      const idsDoc = this.idsPart._element.ownerDocument!;
+      const commentIdEl = idsDoc.createElement('w16cid:commentId');
+      commentIdEl.setAttribute('w16cid:paraId', paraId);
+      commentIdEl.setAttribute('w16cid:durableId', this._generateDurableId());
+      this.idsPart._element.appendChild(commentIdEl);
+    }
+
+    return paraId;
+  }
+
+  /**
+   * The paraId a reply to `parentId` must point at, repairing a parent that
+   * predates modern comments. Null means threading is impossible and the caller
+   * must fail loudly rather than mint a top-level comment.
+   *
+   * The root lookup runs FIRST so a reply-to-a-reply still flattens onto the
+   * thread root (modern Word's model). The adoption pass then runs
+   * unconditionally — it is idempotent, and it also backfills a parent that HAS
+   * a w14:paraId but is missing from commentsExtended / commentsIds: Word
+   * consults both, so a paraIdParent pointing at an unregistered paragraph
+   * drops the reply out of its thread just as surely as a missing attribute
+   * would.
+   */
+  public resolveThreadParentParaId(parentId: string): string | null {
+    const rootParaId = this._findThreadRootParaId(parentId);
+    const adoptedParaId = this._adoptIntoModernComments(parentId);
+    return rootParaId ?? adoptedParaId;
+  }
+
   public addComment(author: string, text: string, parentId: string | null = null): string {
+    // Snapshot the modern-comments state BEFORE resolving threading: the legacy
+    // `w15:p` fallback below keys on whether the document was already on the
+    // modern path, and repairing a legacy parent may create the
+    // commentsExtended part as a side effect.
+    const extPartExisted = this._getExistingPartByType(CT.EXTENDED) !== null;
+
+    // Resolve threading BEFORE writing anything. A reply whose parent cannot be
+    // resolved used to be written anyway, minus its w15:paraIdParent — i.e. as
+    // a brand-new top-level thread, reported as applied (B1). Throwing here
+    // leaves the document untouched.
+    let parentParaId: string | null = null;
+    if (parentId !== null && parentId !== undefined) {
+      parentParaId = this.resolveThreadParentParaId(parentId);
+      if (!parentParaId) {
+        throw new CommentThreadingError(
+          `Cannot thread a reply onto comment Com:${parentId}: the comment has no resolvable ` +
+            `paragraph identity (w14:paraId) in word/comments.xml, so Word would render the ` +
+            `reply as a separate top-level comment instead of a reply. Refusing to create an ` +
+            `unthreaded comment.`,
+        );
+      }
+    }
+
     const commentId = this.nextId.toString();
     this.nextId++;
     const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -213,8 +381,7 @@ export class CommentsManager {
     const initials = this._getInitials(author);
     if (initials) comment.setAttribute('w:initials', initials);
 
-    const extPart = this._getExistingPartByType(CT.EXTENDED);
-    if (parentId && !extPart) {
+    if (parentId && !extPartExisted) {
       comment.setAttribute('w15:p', parentId);
     }
 
@@ -253,7 +420,10 @@ export class CommentsManager {
     this.commentsPart._element.appendChild(comment);
 
     if (this.extendedPart) {
-      const parentParaId = parentId ? this._findThreadRootParaId(parentId) : null;
+      // parentParaId was resolved (and any legacy parent repaired) at the top of
+      // this method, so it is either a real thread root or the call already
+      // threw. Never re-resolve here: silently falling back to null is exactly
+      // how a reply became a thread root (B1).
       const exDoc = this.extendedPart._element.ownerDocument!;
       const commentEx = exDoc.createElement('w15:commentEx');
       commentEx.setAttribute('w15:paraId', paraId);
@@ -266,7 +436,7 @@ export class CommentsManager {
       const idsDoc = this.idsPart._element.ownerDocument!;
       const commentIdEl = idsDoc.createElement('w16cid:commentId');
       commentIdEl.setAttribute('w16cid:paraId', paraId);
-      commentIdEl.setAttribute('w16cid:durableId', this._generateHexId());
+      commentIdEl.setAttribute('w16cid:durableId', this._generateDurableId());
       this.idsPart._element.appendChild(commentIdEl);
     }
 

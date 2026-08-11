@@ -76,6 +76,13 @@ def test_whitespace_fuzzy_match():
 def test_smart_quote_match():
     """
     Scenario: Doc has smart quotes, user uses straight quotes.
+
+    The match must succeed (that is the point of the smart-quote-insensitive
+    matcher) AND the document must keep its own typography: the caller changed
+    Hello -> Hi, not “ -> ". Writing the caller's straight quotes back turned
+    every forgiven character into a real tracked change on text nobody targeted
+    (BUG_comment_threading_anchoring_and_typography.md B4), so the minimal
+    redline is a single Hello/Hi pair inside the document's curly quotes.
     """
     doc = Document()
     p = doc.add_paragraph()
@@ -95,6 +102,9 @@ def test_smart_quote_match():
     res_stream = engine.save_to_stream()
     text = extract_text_from_stream(res_stream)
 
-    # Should replace the smart quoted version
-    assert "{--“Hello”--}" in text
-    assert '{++"Hi"++}' in text
+    assert "{--Hello--}" in text
+    assert "{++Hi++}" in text
+    # The document's curly quotes survive, unredlined and unstraightened.
+    assert text.startswith("“")
+    assert text.endswith("”")
+    assert '"' not in text

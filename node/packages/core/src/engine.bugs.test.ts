@@ -519,8 +519,12 @@ describe("Resolved Bugs Core Engine Verification", () => {
     expect(original_xml).toContain("w:commentRangeStart");
     expect(original_xml).toContain("w:commentReference");
 
-    // Accept all
-    engine.accept_all_revisions();
+    // Accept all, explicitly requesting comment removal. Removing review
+    // content is a caller CHOICE, never a side effect of accepting revisions
+    // (BUG_comment_threading_anchoring_and_typography.md B2); what this test
+    // pins is that when removal IS requested the ejection is complete — no
+    // registered-but-empty comment parts left behind.
+    engine.accept_all_revisions(true);
 
     // Verify comment removal
     const final_xml = doc.element.toString();

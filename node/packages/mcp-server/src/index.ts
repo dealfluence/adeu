@@ -922,7 +922,14 @@ server.registerTool(
   "accept_all_changes",
   {
     description:
-      "Accepts all tracked changes and removes all comments in a single operation.",
+      "Accepts every tracked change in the document, producing a finalized clean document.\n\n" +
+      "remove_comments (boolean, DEFAULT TRUE): also delete every comment. The default is " +
+      "TRUE because this tool's purpose is a distributable clean document, and comments are " +
+      "internal review notes that must not travel to a counterparty. Pass " +
+      "remove_comments=false to accept the tracked changes while KEEPING the comments — use " +
+      "that when the review conversation is still live. Either way the response reports how " +
+      "many comments were deleted and names each one with its author, and comments whose " +
+      "anchored text an accepted deletion consumes are removed regardless, exactly as Word does.",
     inputSchema: {
       reasoning: z
         .string()
@@ -931,9 +938,16 @@ server.registerTool(
         ),
       docx_path: z.string().describe("Absolute path to the DOCX file."),
       output_path: z.string().optional().describe("Optional output path."),
+      remove_comments: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Also delete every comment in the document. Defaults to true (finalized clean " +
+            "document); pass false to keep comments while accepting the tracked changes.",
+        ),
     },
   },
-  async ({ reasoning, docx_path, output_path }) => {
+  async ({ reasoning, docx_path, output_path, remove_comments }) => {
     try {
       void reasoning;
       let outPath = output_path;
@@ -952,7 +966,18 @@ server.registerTool(
       // "Accept-All Counts Are Revision MARKS"): a no-op must say so instead
       // of claiming "Accepted all changes" over an already-clean document
       // (QA 2026-07-23 F18).
-      const counts = engine.accept_all_revisions();
+      //
+      // This surface DELIBERATELY defaults to true while the library API
+      // defaults to false: accept_all_changes exists to produce a distributable
+      // clean document, and shipping a counterparty a file that still carries
+      // internal review notes is the more expensive failure
+      // (QA_ISSUES_DISCOVERED #10, "Confidentiality risk"). What
+      // BUG_comment_threading_anchoring_and_typography.md B2 correctly objected
+      // to was that the inversion was SILENT and unavoidable — the caller now
+      // has an explicit parameter, the published description states the
+      // default, and every deleted comment is named with its author.
+      const counts = engine.accept_all_revisions(remove_comments !== false);
+      const removedCommentNotes = [...engine.removed_comment_notes];
       const total =
         counts.accepted_insertions +
         counts.accepted_deletions +
@@ -981,7 +1006,19 @@ server.registerTool(
           `${counts.accepted_deletions} deletion(s), ` +
           `${counts.accepted_formatting} formatting change(s).`;
         if (counts.removed_comments > 0) {
+          // Deleting review content is disclosed WITH attribution: a comment the
+          // caller did not write is somebody else's work product (B2).
           text += `\nComments removed: ${counts.removed_comments}.`;
+          if (removedCommentNotes.length > 0) {
+            text += `\nComments deleted: ${removedCommentNotes.join(", ")}`;
+            if (remove_comments === false) {
+              text +=
+                `\nNote: these comments were anchored to text an accepted deletion ` +
+                `consumed, so Word removes them too. Nothing else was deleted.`;
+            }
+          }
+        } else if (remove_comments === false) {
+          text += `\nComments kept (remove_comments=false).`;
         }
       }
       text += overwriteNote(outPath, docx_path, existedBefore);

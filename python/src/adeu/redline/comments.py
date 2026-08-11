@@ -38,6 +38,18 @@ if "w16se" not in nsmap:
     nsmap["w16se"] = "http://schemas.microsoft.com/office/word/2015/wordml/symex"
 
 
+class CommentThreadingError(Exception):
+    """
+    Raised when a reply cannot be threaded onto its parent comment.
+
+    A `reply` that quietly becomes a new top-level thread is worse than a
+    failed call: `apply_review_actions` reports success, the agent believes it
+    answered the reviewer, and it keeps acting on a success it never got
+    (BUG_comment_threading_anchoring_and_typography.md B1). So threading is
+    resolved BEFORE any XML is written, and an unresolvable parent is loud.
+    """
+
+
 class CommentsManager:
     """
     Manages the 'word/comments.xml' part of the DOCX package.
@@ -319,7 +331,21 @@ class CommentsManager:
         return f"{random.randint(0, 0xFFFFFFFF):08X}"
 
     def _generate_durable_id(self) -> str:
-        return f"{random.randint(0, 0xFFFFFFFF):08X}"
+        """
+        `w16cid:durableId` is schema-typed `ST_LongHexNumber`, but Word parses
+        it as a SIGNED 32-bit integer. With the high bit set the value is
+        negative, Word fails to bind the comment and silently collapses its
+        anchor to a zero-length point: right author, right text, right date,
+        highlight simply absent — no error, no repair prompt, nothing wrong in
+        the XML (BUG_comment_threading_anchoring_and_typography.md B3,
+        Word-verified via `Comment.Scope`). Word's own durable ids are always
+        high-bit clear, so mask to 31 bits.
+
+        Deliberately a dedicated generator: `paraId` and `rsid` are opaque
+        32-bit tokens with no such constraint, and narrowing the shared helper
+        would halve their space for no reason.
+        """
+        return f"{random.randint(0, 0x7FFFFFFF):08X}"
 
     def _generate_rsid(self) -> str:
         return f"{random.randint(0, 0xFFFFFFFF):08X}"
@@ -376,6 +402,79 @@ class CommentsManager:
                     return parent
         return direct_para_id
 
+    def _adopt_into_modern_comments(self, comment_id: str) -> Optional[str]:
+        """
+        Gives an existing comment a modern paragraph identity so a reply can
+        thread onto it, and returns that paraId (None if the comment does not
+        exist at all).
+
+        A comment written by pre-2013 Word — or by any generator that skips the
+        modern-comments extensions — has no `w14:paraId`, so
+        `_find_thread_root_para_id` resolves nothing and `w15:paraIdParent`
+        never gets written: the "reply" silently becomes a second top-level
+        thread (B1). Minting the missing identity is the repair; it is
+        idempotent and leaves the comment's body, author and date untouched.
+
+        The paraId is registered in commentsExtended AND commentsIds together:
+        Word consults both, and a paraId present in one but not the other drops
+        the comment out of the modern-comments path entirely.
+        """
+        if not self._has_comments_part():
+            return None
+
+        comment_el = None
+        for c in self.comments_part.element.findall(qn("w:comment")):
+            if c.get(qn("w:id")) == str(comment_id):
+                comment_el = c
+                break
+        if comment_el is None:
+            return None
+
+        paragraphs = comment_el.findall(qn("w:p"))
+        if not paragraphs:
+            return None
+
+        para_id = next((p.get(qn("w14:paraId")) for p in paragraphs if p.get(qn("w14:paraId"))), None)
+        if not para_id:
+            para_id = self._generate_para_id()
+            paragraphs[0].set(qn("w14:paraId"), para_id)
+            logger.info(
+                "Minted a modern paraId for a legacy comment so a reply can thread onto it",
+                comment_id=str(comment_id),
+                para_id=para_id,
+            )
+
+        if self.extended_part is not None and not any(
+            child.get(qn("w15:paraId")) == para_id for child in self.extended_part.element
+        ):
+            # Thread ROOT: no w15:paraIdParent.
+            self._add_to_extended_part(para_id, None)
+
+        if self.ids_part is not None and not any(
+            child.get(qn("w16cid:paraId")) == para_id for child in self.ids_part.element
+        ):
+            self._add_to_ids_part(para_id)
+
+        return para_id
+
+    def resolve_thread_parent_para_id(self, parent_id: str) -> Optional[str]:
+        """
+        The paraId a reply to `parent_id` must point at, repairing a parent that
+        predates modern comments. None means threading is impossible and the
+        caller must fail loudly rather than mint a top-level comment.
+
+        The root lookup runs FIRST so a reply-to-a-reply still flattens onto the
+        thread root (modern Word's model). The adoption pass then runs
+        unconditionally — it is idempotent, and it also backfills a parent that
+        HAS a w14:paraId but is missing from commentsExtended / commentsIds:
+        Word consults both, so a paraIdParent pointing at an unregistered
+        paragraph drops the reply out of its thread just as surely as a missing
+        attribute would.
+        """
+        root_para_id = self._find_thread_root_para_id(str(parent_id))
+        adopted_para_id = self._adopt_into_modern_comments(str(parent_id))
+        return root_para_id or adopted_para_id
+
     def _add_to_extended_part(self, para_id: str, parent_para_id: Optional[str]):
         if not self.extended_part:
             return
@@ -410,6 +509,33 @@ class CommentsManager:
 
     def add_comment(self, author: str, text: str, parent_id: Optional[str] = None) -> str:
         logger.info("Adding comment", author=author, parent_id=parent_id)
+
+        # Snapshot the modern-comments state BEFORE resolving threading: the
+        # legacy `w15:p` fallback below keys on whether the document was
+        # already on the modern path, and repairing a legacy parent may create
+        # the commentsExtended part as a side effect.
+        ext_part_existed = (
+            self._get_existing_part_by_type(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+            )
+            is not None
+        )
+
+        # Resolve threading BEFORE writing anything. A reply whose parent
+        # cannot be resolved used to be written anyway, minus its
+        # w15:paraIdParent — i.e. as a brand-new top-level thread, reported as
+        # applied (B1). Failing here leaves the document untouched.
+        parent_para_id: Optional[str] = None
+        if parent_id is not None:
+            parent_para_id = self.resolve_thread_parent_para_id(str(parent_id))
+            if not parent_para_id:
+                raise CommentThreadingError(
+                    f"Cannot thread a reply onto comment Com:{parent_id}: the comment has no "
+                    "resolvable paragraph identity (w14:paraId) in word/comments.xml, so Word "
+                    "would render the reply as a separate top-level comment instead of a reply. "
+                    "Refusing to create an unthreaded comment."
+                )
+
         comment_id = str(self.next_id)
         self.next_id += 1
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -427,10 +553,7 @@ class CommentsManager:
         # We only add this if we are NOT using modern comments (extended_part),
         # as modern Word relies on the extended part, and providing both might cause conflicts.
         # Only add if Modern Comments (extended) are NOT in use to avoid conflicts.
-        ext_part = self._get_existing_part_by_type(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
-        )
-        if parent_id and not ext_part:
+        if parent_id and not ext_part_existed:
             comment.set(qn("w15:p"), str(parent_id))
 
         para_id = self._generate_para_id()
@@ -469,9 +592,10 @@ class CommentsManager:
         self.comments_part.element.append(comment)
 
         if self.extended_part:
-            parent_para_id = None
-            if parent_id:
-                parent_para_id = self._find_thread_root_para_id(parent_id)
+            # parent_para_id was resolved (and any legacy parent repaired) at
+            # the top of this method, so it is either a real thread root or the
+            # call already raised. Never re-resolve here: silently falling back
+            # to None is exactly how a reply became a thread root (B1).
             self._add_to_extended_part(para_id, parent_para_id)
 
         if self.ids_part:
