@@ -18,7 +18,7 @@ from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdow
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.pagination import parse_page_arg
-from adeu.payloads import failure_envelope, shrink_batch_stats
+from adeu.payloads import BATCH_RECOVERY_PROTOCOL, failure_envelope, shrink_batch_stats
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -191,6 +191,9 @@ def _cli_error(
     Stable codes: file_not_found, invalid_input, invalid_docx,
     invalid_changes_file, write_failed, unsupported, batch_validation_failed.
     """
+    if code in ("invalid_changes_file", "batch_validation_failed"):
+        if BATCH_RECOVERY_PROTOCOL not in message and (not hint or BATCH_RECOVERY_PROTOCOL not in hint):
+            hint = f"{hint}\n{BATCH_RECOVERY_PROTOCOL}" if hint else BATCH_RECOVERY_PROTOCOL
     print(f"❌ {message}", file=sys.stderr)
     if hint:
         print(hint, file=sys.stderr)

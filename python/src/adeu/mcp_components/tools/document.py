@@ -46,7 +46,7 @@ from adeu.models import (
     coerce_stringified_changes,
 )
 from adeu.pagination import parse_page_arg
-from adeu.payloads import failure_envelope
+from adeu.payloads import BATCH_RECOVERY_PROTOCOL, failure_envelope
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.text import batch_details_header
 
@@ -575,8 +575,16 @@ async def _process_document_batch_disk(
     if not changes:
         await ctx.warning("Batch processing rejected: No actions or edits provided.")
         if rejected_notes:
-            return "Error: No valid changes to apply. All submitted changes failed validation:\n" + "\n".join(
-                f"- {n}" for n in rejected_notes
+            env = failure_envelope(
+                "invalid_changes_file",
+                getattr(rejected_notes, "pairs", []),
+                "All submitted changes failed validation.",
+                errors=rejected_notes,
+            )
+            json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
+            return (
+                "Error: No valid changes to apply. All submitted changes failed validation. "
+                f"{BATCH_RECOVERY_PROTOCOL}:\n" + "\n".join(f"- {n}" for n in rejected_notes) + json_block
             )
         return "Error: No changes provided."
 
@@ -649,7 +657,11 @@ async def _process_document_batch_disk(
                 errors=err_list,
             )
             json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
-            return "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(err_list) + json_block
+            return (
+                f"Batch rejected. Some edits failed validation. {BATCH_RECOVERY_PROTOCOL}:\n\n"
+                + "\n\n".join(err_list)
+                + json_block
+            )
 
         await ctx.info("Batch process complete and saved", extra={"output_path": final_output_path})
 
@@ -1299,9 +1311,8 @@ if sys.platform == "win32":
             json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
             return add_timing_if_debug(
                 start_time,
-                "Error: No valid changes to apply. All submitted changes failed validation:\n"
-                + "\n".join(f"- {n}" for n in rejected_notes)
-                + json_block,
+                "Error: No valid changes to apply. All submitted changes failed validation. "
+                f"{BATCH_RECOVERY_PROTOCOL}:\n" + "\n".join(f"- {n}" for n in rejected_notes) + json_block,
             )
         if not original_docx_path:
             # Edit active document directly. No disk fallback available.
@@ -1576,9 +1587,8 @@ else:
             json_block = f"\n\n```json\n{json.dumps(env, ensure_ascii=False)}\n```"
             return add_timing_if_debug(
                 start_time,
-                "Error: No valid changes to apply. All submitted changes failed validation:\n"
-                + "\n".join(f"- {n}" for n in rejected_notes)
-                + json_block,
+                "Error: No valid changes to apply. All submitted changes failed validation. "
+                f"{BATCH_RECOVERY_PROTOCOL}:\n" + "\n".join(f"- {n}" for n in rejected_notes) + json_block,
             )
         res = await _process_document_batch_disk(
             original_docx_path,

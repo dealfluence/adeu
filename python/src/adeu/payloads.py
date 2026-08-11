@@ -58,6 +58,12 @@ _MIN_WARNING_CHARS = 26
 _ELISION = "..."
 
 
+# Concise guidance appended to batch failure outputs instructing two-call split recovery.
+BATCH_RECOVERY_PROTOCOL = (
+    "Split recovery protocol: split batch into two half-batches and resubmit each separately to isolate failing edits."
+)
+
+
 def failure_envelope(
     code: str,
     failed: List[Tuple[int, str]],
@@ -77,6 +83,8 @@ def failure_envelope(
         Dict with keys "error", "failed", and "message" (and optionally "errors").
     """
     clean_message = " ".join(line.strip() for line in message.splitlines() if line.strip())
+    if BATCH_RECOVERY_PROTOCOL not in clean_message:
+        clean_message = f"{clean_message} {BATCH_RECOVERY_PROTOCOL}" if clean_message else BATCH_RECOVERY_PROTOCOL
     res: Dict[str, Any] = {
         "error": code,
         "failed": [{"index": i, "reason": r} for i, r in failed],
