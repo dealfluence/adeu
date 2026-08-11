@@ -33,6 +33,7 @@ from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import (
     PREVIEW_TEXT_CAP,
     REPORT_ECHO_CAP,
+    clamp_text,
     has_smart_quotes,
     restore_document_typography,
     truncate_middle,
@@ -2338,9 +2339,7 @@ class RedlineEngine:
                         # left of the ~70-token refusal budget (4 chars per token).
                         # That keeps the message bounded whatever the document says.
                         author_budget = 70 * 4 - len(head) - len(tail)
-                        if len(named_author) > author_budget:
-                            named_author = named_author[: max(author_budget - 3, 0)] + "..."
-                        errors.append(head + named_author + tail)
+                        errors.append(head + clamp_text(named_author, author_budget) + tail)
                         continue
 
                 # Foreign comment ranges do NOT block deliberate single-occurrence
