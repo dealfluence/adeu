@@ -38,6 +38,34 @@ def _create_doc_with_foreign_ins(author: str = "Supplier's Counsel", ins_id: str
     return stream
 
 
+def _create_doc_with_many_foreign_ins() -> io.BytesIO:
+    """A paragraph whose target text is covered by 6 insertions from 3 foreign authors."""
+    doc = Document()
+    p = doc.add_paragraph()
+    p_el = p._element
+
+    authors = ["Supplier's Counsel", "Regulatory Reviewer", "Buyer's Counsel"]
+    words = ["alpha ", "beta ", "gamma ", "delta ", "epsilon ", "zeta"]
+
+    for idx, word in enumerate(words):
+        ins = OxmlElement("w:ins")
+        ins.set(qn("w:id"), str(201 + idx))
+        ins.set(qn("w:author"), authors[idx % len(authors)])
+        ins.set(qn("w:date"), "2026-06-30T08:00:00Z")
+
+        r = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.text = word
+        r.append(t)
+        ins.append(r)
+        p_el.append(ins)
+
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    return stream
+
+
 def test_guard_names_the_accept_action():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
@@ -50,7 +78,7 @@ def test_guard_names_the_accept_action():
     assert '{"type": "accept", "target_id": "Chg:201"}' in msg
 
 
-def test_guard_names_the_narrowing_alternative_for_match_mode_all():
+def test_guard_names_the_narrowing_alternative():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
     edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
@@ -130,6 +158,19 @@ def test_guard_message_token_budget():
     msg_strict = exc_info_strict.value.errors[0]
     approx_tokens_strict = len(msg_strict) // 4
     assert approx_tokens_strict <= 70
+
+    stream_many = _create_doc_with_many_foreign_ins()
+    engine_many = RedlineEngine(stream_many, author="Reviewer AI")
+    edit_many = ModifyText(target_text="alpha beta gamma delta epsilon zeta", new_text="one two", match_mode="all")
+
+    with pytest.raises(BatchValidationError) as exc_info_many:
+        engine_many.process_batch([edit_many])
+
+    msg_many = exc_info_many.value.errors[0]
+    approx_tokens_many = len(msg_many) // 4
+    assert approx_tokens_many <= 70, f"{approx_tokens_many} tokens: {msg_many}"
+    # The bounded hint must still name one author, one usable ID and the omitted count.
+    assert "(+2 more)" in msg_many
 
 
 def test_strict_edit_inside_foreign_insertion_still_allowed():

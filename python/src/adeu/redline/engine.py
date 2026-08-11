@@ -2310,14 +2310,20 @@ class RedlineEngine:
                     # overlaps that straddle the insertion boundary.
                     fully_within_foreign_ins = not has_non_foreign_real_text
                     if not (match_mode in ("strict", "first") and fully_within_foreign_ins):
-                        author_hints = []
-                        first_target_id = None
-                        for auth in sorted(ins_authors_to_ids.keys()):
-                            sorted_ids = sorted(ins_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
-                            if first_target_id is None and sorted_ids:
-                                first_target_id = f"Chg:{sorted_ids[0]}"
-                            id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids)
-                            author_hints.append(f"{auth} (e.g. {id_hints})" if id_hints else auth)
+                        # Keep the hint bounded: naming every author and every id
+                        # makes the refusal grow without limit, blowing the message
+                        # token budget. One author with up to two ids is enough to
+                        # act on; the rest are summarised as a count.
+                        sorted_authors = sorted(ins_authors_to_ids.keys())
+                        named_author = sorted_authors[0]
+                        sorted_ids = sorted(
+                            ins_authors_to_ids[named_author], key=lambda x: int(x) if x.isdigit() else 0
+                        )
+                        first_target_id = f"Chg:{sorted_ids[0]}" if sorted_ids else None
+                        id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids[:2])
+                        author_hint = f"{named_author} (e.g. {id_hints})" if id_hints else named_author
+                        if len(sorted_authors) > 1:
+                            author_hint += f" (+{len(sorted_authors) - 1} more)"
                         accept_json = (
                             f'{{"type": "accept", "target_id": "{first_target_id}"}}' if first_target_id else ""
                         )
@@ -2327,7 +2333,7 @@ class RedlineEngine:
                             advice = 'or use match_mode="strict" or "first", or scope your edit outside of it.'
                         errors.append(
                             f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
-                            f"({', '.join(author_hints)}). Accept first with {accept_json} {advice}"
+                            f"({author_hint}). Accept first with {accept_json} {advice}"
                         )
                         continue
 
