@@ -143,8 +143,14 @@
 - Wire `--max-matches`, `--match-offset`, `--full-paragraph` in `cli.py` and `document.py`.
 **Done when.** `uv run pytest tests/test_search_paging.py` passes (10 tests).
 
-### Task 7 — Item A3: Whole-Document Response Budget Guard
+### Task 7 — Item A3: Whole-Document Response Budget Guard (COMPLETED)
 **Goal.** Refuse unbounded `page="all"` reads > 76k chars with a ≤800-token recipe and outline.
+**Status.** Completed & Verified (commit `7eeb483`).
+**Attempt Ledger:**
+- attempt 1: Implemented response budget guard in payloads.py, cli.py, document.py, live_word.py. -> VERDICT: FAIL
+- attempt 2: Exempted file sink -o output in cli.py, passed page_count in CLI and live_word, suppressed duplicate prose to stderr in --json mode. -> VERDICT: FAIL
+- attempt 3 (@opus-coder): Measured budget on emitted --json envelope, valid CLI flags in recipe, scoped stderr suppression. -> VERDICT: FAIL
+- attempt 4 (@opus-coder): Fixed empty no-op edit bug in diff.py _split_cross_paragraph_hunks. -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/payloads.py`
 - `python/src/adeu/cli.py`
@@ -166,8 +172,9 @@
 - `document.py`: trigger guard in `_read_docx_disk` when `page == "all"`.
 **Done when.** `uv run pytest tests/test_response_budget_guard.py` passes (9 tests).
 
-### Task 8 — Item E1: `reasoning` Parameter Becomes Optional
+### Task 8 — Item E1: `reasoning` Parameter Becomes Optional (COMPLETED)
 **Goal.** Make `reasoning` optional across all MCP tools without losing reason-first description.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/mcp_components/tools/document.py`, `sanitize.py`.
 **Test first.** `python/tests/test_mcp_reasoning_optional.py` (new):
 1. `test_reasoning_not_in_required`: `"reasoning"` not in tool schema `required[]`.

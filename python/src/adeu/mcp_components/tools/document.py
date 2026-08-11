@@ -769,14 +769,14 @@ async def _process_document_batch_disk(
     annotations={"readOnlyHint": True},
 )
 async def diff_docx_files(
-    reasoning: Annotated[
-        str,
-        "Why do I need to diff these two documents? State this reason before any other parameter.",
-    ],
     original_path: Annotated[str, "Path to the base document."],
     modified_path: Annotated[str, "Path to the new document."],
     ctx: Context,
     compare_clean: Annotated[bool, "If True, compares 'Accepted' state. If False, compares raw text."] = True,
+    reasoning: Annotated[
+        Optional[str],
+        "Why do I need to diff these two documents? State this reason before any other parameter.",
+    ] = "",
 ) -> str:
     start_time = time.perf_counter()
     del reasoning
@@ -967,13 +967,13 @@ def _create_diff_output(original_path: str, modified_path: str, text_orig: str, 
     annotations={"destructiveHint": True},
 )
 async def accept_all_changes(
-    reasoning: Annotated[
-        str,
-        "Why do I need to accept all changes in this document? State this reason before any other parameter.",
-    ],
     docx_path: Annotated[str, "Absolute path to the DOCX file."],
     ctx: Context,
     output_path: Annotated[Optional[str], "Optional output path."] = None,
+    reasoning: Annotated[
+        Optional[str],
+        "Why do I need to accept all changes in this document? State this reason before any other parameter.",
+    ] = "",
 ) -> str:
     start_time = time.perf_counter()
     del reasoning  # reason-first UX; not used by the tool.
@@ -1030,12 +1030,12 @@ async def accept_all_changes(
     annotations={"openWorldHint": True},
 )
 async def open_local_file(
-    reasoning: Annotated[
-        str,
-        "Why do I need to open this file in its native app? State this reason before any other parameter.",
-    ],
     file_path: Annotated[str, "Absolute path to the file to open."],
     ctx: Context,
+    reasoning: Annotated[
+        Optional[str],
+        "Why do I need to open this file in its native app? State this reason before any other parameter.",
+    ] = "",
 ) -> str:
     start_time = time.perf_counter()
     del reasoning  # reason-first UX; not used by the tool.
@@ -1135,10 +1135,6 @@ if sys.platform == "win32":
         meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
     )
     async def read_docx(
-        reasoning: Annotated[
-            str,
-            "Why do I need to read this docx document? State this reason before any other parameter.",
-        ],
         ctx: Context,
         file_path: Annotated[
             Optional[str],
@@ -1206,6 +1202,10 @@ if sys.platform == "win32":
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        reasoning: Annotated[
+            Optional[str],
+            "Why do I need to read this docx document? State this reason before any other parameter.",
+        ] = "",
     ) -> ToolResult:
         start_time = time.perf_counter()
         del reasoning
@@ -1319,19 +1319,11 @@ if sys.platform == "win32":
         annotations={"destructiveHint": True},
     )
     async def process_document_batch(
-        reasoning: Annotated[
-            str,
-            "Why do I need to apply these changes to the document? State this reason before any other parameter.",
-        ],
         ctx: Context,
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ],
-        # Defaulted, not required: real MCP clients drop primitive-typed
-        # entries from required[] anyway, so schema-following models
-        # legitimately omit author_name (QA 2026-07-23 customer C1, mirroring
-        # the Node F3 client-compat fix). The default matches the engine's own.
         author_name: Annotated[
             str,
             "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
@@ -1344,6 +1336,10 @@ if sys.platform == "win32":
             Optional[str],
             "Optional output path (only used if original_docx_path is provided).",
         ] = None,
+        reasoning: Annotated[
+            Optional[str],
+            "Why do I need to apply these changes to the document? State this reason before any other parameter.",
+        ] = "",
     ) -> str:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
@@ -1412,13 +1408,13 @@ if sys.platform == "win32":
             annotations={"readOnlyHint": True},
         )
         async def debug_xml_diff(
-            reasoning: Annotated[
-                str,
-                "Why do I need this structural XML diff? State this reason before any other parameter.",
-            ],
             file_a: Annotated[str, "Absolute path to the first/baseline DOCX file."],
             file_b: Annotated[str, "Absolute path to the second/modified DOCX file."],
             ctx: Context,
+            reasoning: Annotated[
+                Optional[str],
+                "Why do I need this structural XML diff? State this reason before any other parameter.",
+            ] = "",
         ) -> str:
             start_time = time.perf_counter()
             del reasoning  # reason-first UX; not used by the tool.
@@ -1482,13 +1478,13 @@ if sys.platform == "win32":
             ),
         )
         async def open_word_document(
-            reasoning: Annotated[
-                str,
-                "Why do I need to open this document in Word? State this reason before any other parameter.",
-            ],
-            ctx: Context,
             file_path: Annotated[str, "Absolute path to the DOCX file to open in Word."],
+            ctx: Context,
             visible: Annotated[bool, "Whether to make the Word application window visible."] = True,
+            reasoning: Annotated[
+                Optional[str],
+                "Why do I need to open this document in Word? State this reason before any other parameter.",
+            ] = "",
         ) -> str:
             start_time = time.perf_counter()
             del reasoning  # reason-first UX; not used by the tool.
@@ -1499,16 +1495,16 @@ if sys.platform == "win32":
             description="Saves the currently active Microsoft Word document to disk. Optionally closes it after saving."
         )
         async def save_active_word_document(
-            reasoning: Annotated[
-                str,
-                "Why do I need to save the active document? State this reason before any other parameter.",
-            ],
             ctx: Context,
             output_path: Annotated[
                 Optional[str],
                 "Optional absolute path to 'Save As'. If omitted, overwrites the current file.",
             ] = None,
             close: Annotated[bool, "Whether to close the document in Word after saving."] = False,
+            reasoning: Annotated[
+                Optional[str],
+                "Why do I need to save the active document? State this reason before any other parameter.",
+            ] = "",
         ) -> str:
             start_time = time.perf_counter()
             del reasoning  # reason-first UX; not used by the tool.
@@ -1529,10 +1525,6 @@ else:
         meta={"ui": {"resourceUri": MARKDOWN_UI_URI}},
     )
     async def read_docx(
-        reasoning: Annotated[
-            str,
-            "Why do I need to read this docx document? State this reason before any other parameter.",
-        ],
         file_path: Annotated[str, "Absolute path to the DOCX file."],
         ctx: Context,
         clean_view: Annotated[
@@ -1598,6 +1590,10 @@ else:
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        reasoning: Annotated[
+            Optional[str],
+            "Why do I need to read this docx document? State this reason before any other parameter.",
+        ] = "",
     ) -> ToolResult:
         start_time = time.perf_counter()
         del reasoning  # reason-first UX; not used by the tool.
@@ -1629,22 +1625,21 @@ else:
         annotations={"destructiveHint": True},
     )
     async def process_document_batch(
-        reasoning: Annotated[
-            str,
-            "Why do I need to apply these changes to the document? State this reason before any other parameter.",
-        ],
         original_docx_path: Annotated[str, "Absolute path to the source file."],
         ctx: Context,
         changes: Annotated[
             McpBatchChanges,
             "List of changes to apply. Each change must specify 'type'.",
         ],
-        # Defaulted, not required — see the win32 registration above.
         author_name: Annotated[
             str,
             "Name to appear in Track Changes (e.g., 'Reviewer AI'). Defaults to 'Adeu AI' when omitted.",
         ] = "Adeu AI",
         output_path: Annotated[Optional[str], "Optional output path."] = None,
+        reasoning: Annotated[
+            Optional[str],
+            "Why do I need to apply these changes to the document? State this reason before any other parameter.",
+        ] = "",
     ) -> str:
         start_time = time.perf_counter()
         del reasoning
