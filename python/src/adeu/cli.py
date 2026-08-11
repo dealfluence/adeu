@@ -1246,39 +1246,51 @@ def handle_apply(args):
         else:
             if not args.original:
                 _cli_error("invalid_input", "Must provide original file if not using --live", exit_code=2)
-            doc = _load_docx_or_exit(args.original)
-
-            from adeu.ingest import _extract_text_from_doc
-
-            # Canonical baseline for text-file input: the CLEAN (accepted)
-            # view. Extract with --clean-view (and --page all on multi-page
-            # documents) to produce a file this path can round-trip.
-            text_orig = _extract_text_from_doc(doc, clean_view=True, include_appendix=False)
+            _require_input_file(args.original)
 
             text_mod = _load_roundtrip_text(args.changes, args.original, "apply")
 
-            guard_ratio = (
-                _MAJOR_DELETION_RATIO
-                if len(text_orig) >= _MAJOR_DELETION_MIN_ORIGINAL_CHARS
-                else _MAJOR_DELETION_RATIO_SMALL_DOC
+            from adeu.text_revision import (
+                TextRevisionVerificationError,
+                apply_text_revision_core,
             )
-            if not args.allow_major_deletions and len(text_orig) > 0 and len(text_mod) < guard_ratio * len(text_orig):
-                pct = 100 - int(100 * len(text_mod) / len(text_orig))
-                print(
-                    f"❌ '{args.changes.name}' is ~{pct}% shorter than the document's clean text "
-                    f"({len(text_mod):,} vs {len(text_orig):,} characters). Applying it would "
-                    "delete the majority of the document as tracked deletions.\n"
-                    "   If the file is a partial extract, re-extract the ENTIRE document with "
-                    "`--page all --clean-view` and edit that.\n"
-                    "   If the mass deletion is intentional, re-run with --allow-major-deletions.",
-                    file=sys.stderr,
+
+            try:
+                stats, out_path = apply_text_revision_core(
+                    file_path=args.original,
+                    revised_text=text_mod,
+                    output_path=args.output,
+                    author=args.author,
+                    allow_major_deletions=args.allow_major_deletions,
                 )
+            except TextRevisionVerificationError as e:
+                if args.json:
+                    env = failure_envelope("verification_failed", [], str(e))
+                    print(json.dumps(env, ensure_ascii=False))
+                else:
+                    print(f"\n❌ {e}", file=sys.stderr)
+                sys.exit(1)
+            except ValueError as e:
+                print(f"❌ {e}", file=sys.stderr)
                 sys.exit(1)
 
-            from adeu.diff import generate_edits_via_paragraph_alignment
+            if getattr(args, "report", "standard") == "minimal":
+                stats = shrink_batch_stats(stats)
 
-            changes.extend(generate_edits_via_paragraph_alignment(text_orig, text_mod))
-            verify_against = text_mod
+            if args.json:
+                print(json.dumps(stats, ensure_ascii=False))
+            else:
+                print(f"Batch complete. Saved to: {out_path}", file=sys.stderr)
+                occurrences = stats.get("occurrences_modified", 0)
+                occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
+                already = stats.get("actions_already_resolved", 0)
+                already_text = f", {already} already resolved (no effect)" if already else ""
+                print(
+                    f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
+                    f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
+                    file=sys.stderr,
+                )
+            return
 
     if args.live:
         if sys.platform != "win32":
@@ -1335,7 +1347,7 @@ def handle_apply(args):
     else:
         batch_failed = stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0
 
-    output_path = None
+    output_path: "Path | None" = None
     if not batch_failed:
         output_path = args.output
         if not output_path:

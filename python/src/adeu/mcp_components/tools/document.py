@@ -1126,6 +1126,72 @@ async def accept_all_changes(
 
 
 @tool(
+    description=(
+        "Applies whole-text revised text to a DOCX document by computing a diff and generating tracked changes. "
+        "Includes a clean-text verification gate to ensure the applied document matches the supplied text."
+    ),
+    tags={"docx"},
+    annotations={"destructiveHint": True},
+)
+async def apply_text_revision(
+    file_path: Annotated[str, "Absolute path to the source DOCX file."],
+    revised_text: Annotated[str, "The complete revised clean text of the document."],
+    ctx: Context,
+    output_path: Annotated[Optional[str], "Optional output path for the modified DOCX."] = None,
+    author: Annotated[Optional[str], "Author name for Track Changes."] = None,
+    allow_major_deletions: Annotated[
+        bool, "Allow major deletions (>30% of characters or >50 paragraphs deleted)."
+    ] = False,
+    reasoning: Annotated[
+        Optional[str],
+        "Why do I need to apply this text revision? State this reason before any other parameter.",
+    ] = "",
+) -> str:
+    start_time = time.perf_counter()
+    del reasoning  # reason-first UX; not used by the tool.
+    await ctx.info(f"Applying text revision to document: {Path(file_path).name}")
+
+    from adeu.text_revision import (
+        TextRevisionVerificationError,
+        apply_text_revision_core,
+    )
+
+    try:
+        stats, out_path = await asyncio.to_thread(
+            apply_text_revision_core,
+            file_path,
+            revised_text,
+            output_path,
+            author,
+            allow_major_deletions,
+        )
+        applied_count = stats.get("edits_applied", 0)
+        res = f"Text revision complete. Saved to: {out_path}\nEdits: {applied_count} applied."
+        return add_timing_if_debug(start_time, res)
+    except TextRevisionVerificationError as e:
+        await ctx.error(
+            "Text revision verification failed",
+            extra={
+                "unverified_path": str(e.unverified_path),
+                "output_path": str(e.output_path),
+            },
+        )
+        raise ToolError(str(e)) from e
+    except (ValueError, FileNotFoundError) as e:
+        await ctx.error(
+            "Failed to apply text revision",
+            extra={"error": str(e), "file_path": file_path},
+        )
+        raise ToolError(str(e)) from e
+    except Exception as e:
+        await ctx.error(
+            "Failed to apply text revision",
+            extra={"error": str(e), "file_path": file_path},
+        )
+        raise ToolError(f"Error applying text revision: {str(e)}") from e
+
+
+@tool(
     description="Opens a local file in its native desktop application (e.g., Microsoft Word for DOCX files).",
     tags={"docx"},
     annotations={"openWorldHint": True},
