@@ -70,6 +70,17 @@ BATCH_RECOVERY_PROTOCOL = (
     "Copy target_text verbatim from a fresh read of the CURRENT file, not from another tool's view of it."
 )
 
+# Hint appended when model serializes JSON object/array markers into the 'type' field (Item B7).
+FUSED_JSON_HINT = "This looks like two edits fused during generation — resubmit this edit alone, correctly formed."
+
+
+def has_fused_json_marker(text: str) -> bool:
+    """Whether an invalid type string contains markers indicating fused JSON ({, }, or \":\")."""
+    if not isinstance(text, str):
+        return False
+    return any(marker in text for marker in ("{", "}", '":'))
+
+
 # The only failures the recovery protocol can help with: a rejected BATCH. A
 # missing file, an unreadable DOCX or a failed write has no failing edit to
 # split out, so the protocol would be advice the caller cannot act on.

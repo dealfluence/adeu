@@ -18,7 +18,14 @@ from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdow
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.pagination import parse_page_arg
-from adeu.payloads import BATCH_ERROR_CODES, BATCH_RECOVERY_PROTOCOL, failure_envelope, shrink_batch_stats
+from adeu.payloads import (
+    BATCH_ERROR_CODES,
+    BATCH_RECOVERY_PROTOCOL,
+    FUSED_JSON_HINT,
+    failure_envelope,
+    has_fused_json_marker,
+    shrink_batch_stats,
+)
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -597,7 +604,9 @@ def _extract_schema_failures(exc: "ValidationError") -> tuple[list[tuple[int, st
         elif err_type == "union_tag_invalid":
             tag = err.get("ctx", {}).get("tag", "unknown")
             reason = f"has an unknown type: '{tag}'."
-            msg = f"{item_no} has an unknown type: '{tag}'."
+            if has_fused_json_marker(str(tag)):
+                reason = f"has an unknown type: '{tag}'. {FUSED_JSON_HINT}"
+            msg = f"{item_no} {reason}"
         elif err_type == "missing":
             variant = f" (type '{loc[1]}')" if len(loc) >= 2 else ""
             field = loc[-1] if len(loc) >= 3 else "a required field"

@@ -187,13 +187,14 @@
 **Change.** Set `reasoning: Optional[str] = ""` and move `reasoning` to the end of parameter list across all MCP tools.
 **Done when.** `uv run pytest tests/test_mcp_reasoning_optional.py` passes (5 tests).
 
-### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON
+### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON (COMPLETED)
 **Goal.** Output literal UTF-8 in JSON outputs instead of `\u2019` escapes.
+**Status.** Completed & Verified (commit `e5f66c4`).
 **Failed Verify Cycles:** 2 (Escalated to @opus-coder: trigger (a) second failed cycle, trigger (b) same finding in two verdicts)
 **Attempt Ledger:**
 - attempt 1: Passed ensure_ascii=False to json.dumps in cli.py, payloads.py, created test_json_unicode.py -> VERDICT: FAIL (test_error_envelope_preserves_unicode didn't fail on pre-change code; stale comments in payloads.py)
 - attempt 2: Updated test_error_envelope_preserves_unicode to target adeu markup --json error envelope output; updated comments in payloads.py -> VERDICT: FAIL (test_error_envelope_preserves_unicode still passed on pre-change code because all CLI error envelope emitters were already ensure_ascii=False at base)
-- attempt 3 (@opus-coder): Replaced test_error_envelope_preserves_unicode with test_markup_json_success_preserves_unicode, targeting the `markup -o - --json` SUCCESS envelope (cli.py:1618) — a payload path that genuinely changed in Task 9. All 5 tests now fail against `6b01a1c~1`.
+- attempt 3 (@opus-coder): Replaced test_error_envelope_preserves_unicode with test_markup_json_success_preserves_unicode targeting adeu markup ... -o - --json success output (cli.py:1618), where ensure_ascii=False was newly enabled by Task 9. Verified all 5 tests fail when reverted to 6b01a1c~1 base -> VERDICT: PASS
 **Files.** `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`, `python/src/adeu/redline/engine.py`.
 **Test first.** `python/tests/test_json_unicode.py` (new):
 1. `test_extract_json_preserves_unicode`: literal smart quotes and dashes in JSON output.
@@ -204,8 +205,9 @@
 **Change.** Pass `ensure_ascii=False` to all `json.dumps()` calls.
 **Done when.** `uv run pytest tests/test_json_unicode.py` passes (5 tests).
 
-### Task 10 — Item B7: Name the Fused-JSON Failure Mode
+### Task 10 — Item B7: Name the Fused-JSON Failure Mode (COMPLETED)
 **Goal.** Append specific fused-JSON hint when model serializes JSON object into `type` field.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/payloads.py`, `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`.
 **Test first.** `python/tests/test_fused_json_hint.py` (new):
 1. `test_cli_fused_tag_gets_specific_hint`: fused JSON element receives fused hint on CLI.

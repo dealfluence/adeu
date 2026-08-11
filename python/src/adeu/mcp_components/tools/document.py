@@ -213,12 +213,18 @@ def _summarize_validation_error(exc: Exception) -> str:
     """
     from pydantic import ValidationError
 
+    from adeu.payloads import FUSED_JSON_HINT, has_fused_json_marker
+
     if not isinstance(exc, ValidationError):
         return str(exc)
     parts: List[str] = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err.get("loc", ()))
         msg = err.get("msg", "invalid")
+        if err.get("type") == "union_tag_invalid":
+            tag = err.get("ctx", {}).get("tag", "")
+            if has_fused_json_marker(str(tag)):
+                msg = f"{msg}. {FUSED_JSON_HINT}" if not msg.endswith(".") else f"{msg} {FUSED_JSON_HINT}"
         parts.append(f"{loc}: {msg}" if loc else msg)
     return "; ".join(parts) if parts else str(exc)
 
