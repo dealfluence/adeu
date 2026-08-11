@@ -151,10 +151,44 @@ def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
 # ratio the test suite measures with). SNIPPET_RADIUS_LADDER is the descending
 # set of per-hit context radii the renderer tries, widest first: 120 chars is
 # the documented clamp, the rest are fallbacks for documents whose paragraphs
-# are long enough that 20 full-width snippets would not fit the budget.
+# are long enough that 20 full-width snippets would not fit the budget. The
+# ladder does NOT bottom out at 0: a `...**Supplier**...` snippet costs chrome
+# to tell the agent only what it already typed, so 16 chars each side is the
+# floor and the budget pass drops trailing entries instead.
 SEARCH_TOKENS_PER_MATCH = 60
 CHARS_PER_TOKEN = 4
-SNIPPET_RADIUS_LADDER = (120, 60, 30, 12, 0)
+SNIPPET_RADIUS_LADDER = (120, 60, 30, 16)
+
+# `max_matches * 60` is an allowance for match CONTENT, but a response also
+# carries chrome that no radius can shrink. Measured on a 50-hit document at
+# max_matches=1: the `> **File Path:**` line 7 tokens, the results header 23,
+# the cross-page distribution summary 33, the continuation note 20 and the
+# trim note 15 — ~110 fixed, plus ~22 per entry for the `---` rule, the
+# `### Match N (pX)` heading, the `**Path:**` breadcrumb and the
+# `*Occurrences:*` line, and ~13 for a floor-radius snippet. So one entry
+# costs ~140 tokens no matter how hard the snippet is squeezed, and a budget
+# of `1 * 60` was unreachable at ANY radius: every rung of the ladder
+# "failed", the response shipped a context-free `...**hit**...`, and at
+# max_matches=2..3 entries the caller had explicitly asked for were dropped
+# (QA finding 1). Sizing from chrome + a minimum snippet per entry keeps
+# every requested entry payable, and leaves the max_matches=5 and 20 ceilings
+# at the content-derived 300 and 1200 they already were.
+SEARCH_FIXED_CHROME_TOKENS = 120
+SEARCH_ENTRY_CHROME_TOKENS = 22
+SEARCH_MIN_SNIPPET_TOKENS = 13
+
+
+def search_budget_tokens(max_matches: int) -> int:
+    """
+    Approximate-token ceiling for a search response rendering `max_matches`
+    entries. Never below the fixed chrome plus a usable snippet per entry, so
+    small pages stay renderable instead of degenerating to context-free hits.
+    """
+    return max(
+        max_matches * SEARCH_TOKENS_PER_MATCH,
+        SEARCH_FIXED_CHROME_TOKENS + max_matches * (SEARCH_ENTRY_CHROME_TOKENS + SEARCH_MIN_SNIPPET_TOKENS),
+    )
+
 
 _SNIPPET_MARKUP_PAIRS = (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}"))
 _SNIPPET_CLOSER_OF = dict(_SNIPPET_MARKUP_PAIRS)
@@ -162,7 +196,7 @@ _SNIPPET_OPENER_OF = {closer: opener for opener, closer in _SNIPPET_MARKUP_PAIRS
 _SNIPPET_MARKUP_TOKEN_RE = re.compile("|".join(re.escape(t) for t in (*_SNIPPET_CLOSER_OF, *_SNIPPET_OPENER_OF)))
 
 
-def _balance_snippet_window(body: str, start: int, end: int, line_start: int = 0) -> tuple[int, int]:
+def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
     """
     Extends a snippet window until every CriticMarkup span it overlaps is
     whole. {>>…<<} meta bubbles are MULTI-line and a clamped window cuts spans
@@ -172,10 +206,19 @@ def _balance_snippet_window(body: str, start: int, end: int, line_start: int = 0
     Delimiters are walked IN ORDER with a depth counter per pair, never
     counted: a window holding one stray `--}` on the left and one stray `{--`
     on the right balances arithmetically while reading `l1--}…{--del` (QA
-    finding 1). A closer seen at depth 0 belongs to a span that opened before
-    `start`, so `start` moves back to that opener; a pair still open when the
-    scan reaches `end` pushes `end` forward to its closer. Each step strictly
-    widens the window, so the loop terminates.
+    round 4, finding 1). A closer seen at depth 0 belongs to a span that
+    opened before `start`, so `start` moves back to that opener; a pair still
+    open when the scan reaches `end` pushes `end` forward to its closer. Each
+    step strictly widens the window, so the loop terminates.
+
+    The backward search for a missing opener spans the WHOLE body, not the
+    hit's own projection line: a bubble is multi-line by nature, so a hit
+    sitting after the closer on the bubble's second line has its opener on an
+    earlier line, and a line-bounded search left the stray `<<}` in the
+    snippet — the exact construct this function exists for (QA finding 2).
+    Widening past a line break is safe: the snippet renderer quotes each line
+    it spans, and the response budget drops trailing entries if the wider
+    window costs too much.
     """
     while True:
         depth = dict.fromkeys(_SNIPPET_CLOSER_OF, 0)
@@ -189,7 +232,7 @@ def _balance_snippet_window(body: str, start: int, end: int, line_start: int = 0
             opener = _SNIPPET_OPENER_OF[token]
             if depth[opener]:
                 depth[opener] -= 1
-            elif (prev_opener := body.rfind(opener, line_start, start)) != -1:
+            elif (prev_opener := body.rfind(opener, 0, start)) != -1:
                 start = prev_opener
                 widened = True
                 break
@@ -882,9 +925,7 @@ def build_search_response(
             windows = [(max(line_start, m.start() - radius), min(line_end, m.end() + radius)) for m, _p in group]
             # Balance AFTER merging (a widened window can swallow its
             # neighbour) and merge again, so no two segments overlap.
-            intervals = _merge_spans(
-                [_balance_snippet_window(body, s, e, line_start=line_start) for s, e in _merge_spans(windows)]
-            )
+            intervals = _merge_spans([_balance_snippet_window(body, s, e) for s, e in _merge_spans(windows)])
 
         segments: list[str] = []
         for s_pos, e_pos in intervals:
@@ -892,11 +933,18 @@ def build_search_response(
             segments.append(_emphasized_snippet(body[s_pos:e_pos], spans))
 
         # " ... " marks elided interior text between distant hits; the outer
-        # "..." marks context trimmed off the paragraph's head/tail.
+        # "..." marks context trimmed off the head/tail. The head/tail marks
+        # are measured against the line each EDGE landed on, not the hit's
+        # line: balancing an unterminated bubble can pull the window onto an
+        # earlier line, and comparing against the hit's line then silently
+        # dropped the "..." for text elided on that earlier line.
         snippet = " ... ".join(segments)
-        if intervals[0][0] > line_start:
+        first_line_start = body.rfind("\n", 0, intervals[0][0]) + 1
+        last_nl_after = body.find("\n", intervals[-1][1])
+        last_line_end = len(body) if last_nl_after == -1 else last_nl_after
+        if intervals[0][0] > first_line_start:
             snippet = "..." + snippet
-        if intervals[-1][1] < line_end:
+        if intervals[-1][1] < last_line_end:
             snippet = snippet + "..."
 
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
@@ -946,7 +994,13 @@ def build_search_response(
     # not, drop trailing entries (the caller reaches them with match_offset)
     # rather than emit an oversized response. `full_paragraph` is an explicit
     # opt-out: the caller asked for whole paragraphs and gets them.
-    budget_chars = max_matches * SEARCH_TOKENS_PER_MATCH * CHARS_PER_TOKEN
+    #
+    # The ceiling includes the response's fixed chrome (see
+    # search_budget_tokens): on `max_matches=1` or `2` the header and entry
+    # scaffolding alone outweigh `max_matches * 60`, so a purely content-sized
+    # budget was unreachable and every radius "failed" down to a context-free
+    # `...**hit**...` (QA finding 1).
+    budget_chars = search_budget_tokens(max_matches) * CHARS_PER_TOKEN
 
     def fits(markdown: str) -> bool:
         return len(content_prefix) + len(markdown) <= budget_chars
@@ -962,8 +1016,7 @@ def build_search_response(
             ui_markdown = compose(
                 line_groups,
                 radius,
-                f"> **Note:** Snippets trimmed to ±{radius} characters around each hit "
-                f"to keep this response within its size budget.",
+                f"> **Note:** Snippets trimmed to ±{radius} chars to fit the response size budget.",
             )
         kept = list(line_groups)
         while not fits(ui_markdown) and len(kept) > 1:
@@ -971,8 +1024,8 @@ def build_search_response(
             ui_markdown = compose(
                 kept,
                 radius,
-                f"> **Note:** Snippets trimmed to ±{radius} characters and trailing matches dropped "
-                f"to keep this response within its size budget — continue from the `match_offset` above.",
+                f"> **Note:** Snippets trimmed to ±{radius} chars and trailing matches dropped "
+                f"to fit the response size budget — continue from the `match_offset` above.",
             )
 
     return BuilderResult(

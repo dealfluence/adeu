@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from adeu.cli import main
-from adeu.mcp_components._response_builders import build_search_response
+from adeu.mcp_components._response_builders import build_search_response, search_budget_tokens
 from tests.utils import approx_tokens
 
 
@@ -291,11 +291,100 @@ def test_clamped_snippet_markup_balanced_in_order_not_by_count():
         file_path="doc.docx",
     )
     md = res.structured_content["markdown"]
+    # Clamping MUST have happened, or this test proves nothing: an unclamped
+    # render returns the whole paragraph, whose markup is trivially balanced,
+    # so the ordered-scan assertion below would pass without exercising the
+    # balancer at all (QA finding 3).
+    assert "..." in md
+    assert "P" * 90 not in md
+    assert "S" * 90 not in md
+
     _assert_markup_terminated_in_order(md)
     assert "{--del1--}" in md
     assert "{--del2--}" in md
     assert "l1--}" not in md.replace("{--del1--}", "")
     assert "{--de" not in md.replace("{--del1--}", "").replace("{--del2--}", "")
+
+
+def test_multiline_bubble_opening_before_the_hit_line_is_balanced():
+    # The `{>>…<<}` bubble OPENS on line 1 and closes on line 2, with the hit
+    # after the closer on line 2. Searching for the missing opener only within
+    # the hit's own projection line could never find it, so the snippet
+    # shipped an unopened `<<}` — in the one construct (multi-line bubbles)
+    # the balancer exists for (QA finding 2).
+    text = (
+        "Intro paragraph with a bubble {>>[Chg:1 delete] comment bubble\n"
+        "continues on the next line<<} " + "K" * 30 + " Supplier target clause " + "L" * 200
+    )
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+    _assert_markup_terminated_in_order(md)
+    # The whole bubble is present, both halves of it, so an agent can still
+    # read the `[Chg:1 delete]` id out of the search result.
+    assert "{>>[Chg:1 delete] comment bubble" in md
+    assert "continues on the next line<<}" in md
+    # Widening onto the previous line still elides that line's head, and the
+    # "..." marker must say so rather than imply the paragraph starts there.
+    assert "Intro paragraph" not in md
+    assert "...{>>" in md
+
+
+def test_small_page_budget_accounts_for_fixed_chrome_and_keeps_context():
+    # `max_matches * 60` budgets match CONTENT, but a 1- or 2-match page pays
+    # the same fixed header/entry chrome as a 20-match one, and that chrome
+    # alone exceeds `max_matches * 60`. Sized against content only, no rung of
+    # the radius ladder could ever fit and the response degenerated to a
+    # context-free `...**Supplier**...` (QA finding 1).
+    text = _make_haystack(50)
+    for max_matches in (1, 2):
+        res = build_search_response(
+            text,
+            search_query="Supplier",
+            search_regex=False,
+            search_case_sensitive=True,
+            page=None,
+            file_path="doc.docx",
+            max_matches=max_matches,
+        )
+        md = res.structured_content["markdown"]
+        assert md.count("### Match ") == max_matches
+        assert approx_tokens(str(res.content)) <= search_budget_tokens(max_matches)
+        assert "> ...**Supplier**...\n" not in md
+        assert "**Supplier** contract target" in md
+
+
+def test_small_page_budget_on_long_paragraphs_keeps_every_requested_match():
+    # Same budget, but paragraphs long enough that the ladder really has to
+    # narrow: every entry the caller asked for must still render with usable
+    # context on both sides, never a bare highlighted hit.
+    text = "\n\n".join("a" * 2000 + f" Supplier target {i} " + "b" * 2000 for i in range(50))
+    for max_matches in (1, 2, 3):
+        res = build_search_response(
+            text,
+            search_query="Supplier",
+            search_regex=False,
+            search_case_sensitive=True,
+            page=None,
+            file_path="doc.docx",
+            max_matches=max_matches,
+        )
+        md = res.structured_content["markdown"]
+        assert md.count("### Match ") == max_matches
+        assert approx_tokens(str(res.content)) <= search_budget_tokens(max_matches)
+        assert "> ...**Supplier**...\n" not in md
+        # The radius floor is >= 16 chars, so context survives on BOTH sides:
+        # the `a` padding to the left, and past " target 0 " into the `b`
+        # padding on the right.
+        assert "a" * 12 in md
+        assert "**Supplier** target 0 b" in md
 
 
 def test_continue_note_names_next_offset():
