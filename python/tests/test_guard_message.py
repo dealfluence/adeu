@@ -7,6 +7,7 @@ from docx.oxml.ns import qn
 
 from adeu.models import ModifyText
 from adeu.redline.engine import BatchValidationError, RedlineEngine
+from tests.utils import approx_tokens
 
 
 def _create_doc_with_foreign_ins(author: str = "Supplier's Counsel", ins_id: str = "201") -> io.BytesIO:
@@ -143,8 +144,7 @@ def test_guard_message_token_budget():
         engine.process_batch([edit_all])
 
     msg_all = exc_info_all.value.errors[0]
-    approx_tokens_all = len(msg_all) // 4
-    assert approx_tokens_all <= 70
+    assert approx_tokens(msg_all) <= 70
 
     stream_strict = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine_strict = RedlineEngine(stream_strict, author="Reviewer AI")
@@ -156,8 +156,7 @@ def test_guard_message_token_budget():
         engine_strict.process_batch([edit_strict])
 
     msg_strict = exc_info_strict.value.errors[0]
-    approx_tokens_strict = len(msg_strict) // 4
-    assert approx_tokens_strict <= 70
+    assert approx_tokens(msg_strict) <= 70
 
     stream_many = _create_doc_with_many_foreign_ins()
     engine_many = RedlineEngine(stream_many, author="Reviewer AI")
@@ -167,8 +166,7 @@ def test_guard_message_token_budget():
         engine_many.process_batch([edit_many])
 
     msg_many = exc_info_many.value.errors[0]
-    approx_tokens_many = len(msg_many) // 4
-    assert approx_tokens_many <= 70, f"{approx_tokens_many} tokens: {msg_many}"
+    assert approx_tokens(msg_many) <= 70, f"{approx_tokens(msg_many)} tokens: {msg_many}"
     # The bounded hint must still name one author, one usable ID and the omitted count.
     assert "(+2 more)" in msg_many
 
@@ -183,13 +181,41 @@ def test_guard_message_token_budget():
         engine_long.process_batch([edit_long])
 
     msg_long = exc_info_long.value.errors[0]
-    approx_tokens_long = len(msg_long) // 4
-    assert approx_tokens_long <= 70, f"{approx_tokens_long} tokens: {msg_long}"
+    assert approx_tokens(msg_long) <= 70, f"{approx_tokens(msg_long)} tokens: {msg_long}"
     # Still identifies the author, but not verbatim: the name is truncated to fit.
     assert "Jonathan Alexander Fitzgerald" in msg_long
     assert long_author not in msg_long
     assert "..." in msg_long
     assert '{"type": "accept", "target_id": "Chg:201"}' in msg_long
+
+
+@pytest.mark.parametrize("ins_id", ["12345678901234567890", "A" * 40])
+def test_guard_message_token_budget_with_long_change_id(ins_id: str):
+    """w:id is document-supplied: a 20-digit or 40-char id must not blow the budget."""
+    stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id=ins_id)
+    engine = RedlineEngine(stream, author="Reviewer AI")
+    edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
+
+    with pytest.raises(BatchValidationError) as exc_info:
+        engine.process_batch([edit])
+
+    msg = exc_info.value.errors[0]
+    assert approx_tokens(msg) <= 70, f"{approx_tokens(msg)} tokens: {msg}"
+
+
+def test_guard_does_not_offer_strict_for_straddling_all_edit():
+    """A match_mode="all" target straddling the insertion boundary fails under strict too."""
+    stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
+    engine = RedlineEngine(stream, author="Reviewer AI")
+    edit = ModifyText(target_text="provide written notice", new_text="provide email notification", match_mode="all")
+
+    with pytest.raises(BatchValidationError) as exc_info:
+        engine.process_batch([edit])
+
+    msg = exc_info.value.errors[0]
+    assert '{"type": "accept", "target_id": "Chg:201"}' in msg
+    assert "scope your edit outside of it" in msg
+    assert "use match_mode" not in msg
 
 
 def test_strict_edit_inside_foreign_insertion_still_allowed():

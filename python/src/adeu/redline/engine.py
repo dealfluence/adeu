@@ -44,6 +44,10 @@ logger = structlog.get_logger(__name__)
 # Width of the surrounding-document window shown in redline previews.
 PREVIEW_CONTEXT_CHARS = 30
 
+# Character ceiling for the multi-author guard refusal, i.e. the ~70-token
+# budget at the 4-chars-per-token estimate the message budget tests use.
+GUARD_MESSAGE_CAP = 70 * 4
+
 # Register w16du namespace for dateUtc
 w16du_ns = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
 if "w16du" not in nsmap:
@@ -2328,18 +2332,26 @@ class RedlineEngine:
                         accept_json = (
                             f'{{"type": "accept", "target_id": "{first_target_id}"}}' if first_target_id else ""
                         )
-                        if match_mode in ("strict", "first"):
-                            advice = "or scope your edit outside of it."
-                        else:
+                        # Narrowing to one occurrence only helps when the target
+                        # sits wholly inside the insertion: on a straddle,
+                        # strict/first are refused here too, so offering them
+                        # would send the caller round the same loop.
+                        if match_mode == "all" and fully_within_foreign_ins:
                             advice = 'or use match_mode="strict" or "first", or scope your edit outside of it.'
+                        else:
+                            advice = "or scope your edit outside of it."
                         head = f"- Edit {i + 1} Failed: Modification targets an active insertion from another author ("
                         tail = f"{hint_suffix}). Accept first with {accept_json} {advice}"
                         # Author names are arbitrary strings (firm and department
                         # names, not just people), so the name only gets what is
-                        # left of the ~70-token refusal budget (4 chars per token).
-                        # That keeps the message bounded whatever the document says.
-                        author_budget = 70 * 4 - len(head) - len(tail)
-                        errors.append(head + clamp_text(named_author, author_budget) + tail)
+                        # left of the refusal budget. That keeps the message
+                        # bounded whatever the document says.
+                        author_budget = GUARD_MESSAGE_CAP - len(head) - len(tail)
+                        msg = head + clamp_text(named_author, author_budget) + tail
+                        # w:id values are document-supplied too, and a long one
+                        # blows the budget through head+tail alone (leaving no
+                        # author budget to give back), so clamp the whole message.
+                        errors.append(clamp_text(msg, GUARD_MESSAGE_CAP))
                         continue
 
                 # Foreign comment ranges do NOT block deliberate single-occurrence
