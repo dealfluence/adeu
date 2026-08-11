@@ -178,15 +178,27 @@ SEARCH_ENTRY_CHROME_TOKENS = 22
 SEARCH_MIN_SNIPPET_TOKENS = 13
 
 
-def search_budget_tokens(max_matches: int) -> int:
+def search_budget_tokens(max_matches: int, rendered_count: int | None = None) -> int:
     """
-    Approximate-token ceiling for a search response rendering `max_matches`
-    entries. Never below the fixed chrome plus a usable snippet per entry, so
-    small pages stay renderable instead of degenerating to context-free hits.
+    Approximate-token ceiling for a search response that was ASKED for
+    `max_matches` hits and actually rendered `rendered_count` of them
+    (defaults to all of them). Never below the fixed chrome plus a usable
+    snippet per rendered hit, so small pages stay renderable instead of
+    degenerating to context-free hits.
+
+    The chrome term is sized on hits RENDERED, not hits requested: it exists
+    to keep every requested hit payable, so once the budget pass starts
+    dropping hits it must stop granting per-hit allowance for hits that are
+    no longer in the response. Because `rendered_count <= max_matches`, the
+    result never exceeds `search_budget_tokens(max_matches)` — the ceiling the
+    caller's `max_matches` promises.
     """
+    if max_matches < 1:
+        return SEARCH_FIXED_CHROME_TOKENS
+    rendered = max_matches if rendered_count is None else min(max_matches, max(rendered_count, 0))
     return max(
         max_matches * SEARCH_TOKENS_PER_MATCH,
-        SEARCH_FIXED_CHROME_TOKENS + max_matches * (SEARCH_ENTRY_CHROME_TOKENS + SEARCH_MIN_SNIPPET_TOKENS),
+        SEARCH_FIXED_CHROME_TOKENS + rendered * (SEARCH_ENTRY_CHROME_TOKENS + SEARCH_MIN_SNIPPET_TOKENS),
     )
 
 
@@ -248,6 +260,75 @@ def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
 
         if not widened:
             return start, end
+
+
+_TRAILING_BUBBLE_RE = re.compile(r"\{>>\s*(\[[^\]\n]{0,80}\])(.*?)<<\}", re.DOTALL)
+
+
+def _trailing_bubble_header(body: str, at: int) -> str:
+    """
+    The meta bubble the projection writes immediately after a deletion's or
+    insertion's closer, reduced to its `[Chg:N …]` header — the id an agent
+    needs to accept or reject the change it is looking at. The bubble's prose
+    (author, date, pairings) is elided with `...` rather than reproduced,
+    because this is re-attached to a snippet that was clamped for size in the
+    first place. Empty when no bubble follows.
+    """
+    if not (m := _TRAILING_BUBBLE_RE.match(body, at)):
+        return ""
+    return "{>>" + m.group(1) + (" ..." if m.group(2).strip() else "") + "<<}"
+
+
+def _enclosing_snippet_markup(body: str, start: int, end: int) -> tuple[str, str]:
+    """
+    Returns the ``(prefix, suffix)`` CriticMarkup tags a snippet window needs
+    because it sits STRICTLY INSIDE spans that open before it and close after
+    it.
+
+    `_balance_snippet_window` only sees delimiters WITHIN the window, so a
+    window cut out of the middle of a long deletion contains no delimiters at
+    all, is declared balanced, and ships deleted text as live prose — the agent
+    reads a clause the document no longer has and cannot see the `[Chg:N]` id
+    it would need to accept or reject it (QA finding 2). The window is not
+    widened to the span's own edges: a 4000-char deletion would then defeat
+    clamping entirely. Only the tags are re-attached, so the snippet reads
+    `{--…deleted…--}` and the ordered-balance invariant still holds.
+
+    Spans are emitted outermost-first in the prefix and innermost-first in the
+    suffix, so nesting stays well-formed. A `{>>` bubble carries its
+    `[Chg:N …]` header into the prefix (that id is the only reason to show a
+    bubble at all); a deletion or insertion carries the id-bearing bubble the
+    projection writes immediately after its closer (`{--…--}{>>[Chg:7 delete]
+    Author<<}`, ingest.py) into the suffix, because the tag alone says "this
+    was deleted" without saying WHICH change deleted it. A pair whose closer is
+    missing from the rest of the body is skipped rather than have a closer
+    invented for it.
+    """
+    open_spans: list[tuple[int, str, str]] = []
+    for opener, closer in _SNIPPET_MARKUP_PAIRS:
+        pair_re = re.compile(f"{re.escape(opener)}|{re.escape(closer)}")
+        stack: list[int] = []
+        for tok in pair_re.finditer(body, 0, start):
+            if tok.group(0) == opener:
+                stack.append(tok.start())
+            elif stack:
+                stack.pop()
+        if not stack or (closer_at := body.find(closer, end)) == -1:
+            continue
+        open_at = stack[-1]
+        prefix, suffix = opener, closer
+        if opener == "{>>":
+            if header := re.match(r"\[[^\]\n]{0,80}\]", body[open_at + len(opener) : start]):
+                prefix += header.group(0)
+        else:
+            suffix += _trailing_bubble_header(body, closer_at + len(closer))
+        open_spans.append((open_at, prefix, suffix))
+
+    open_spans.sort()
+    return (
+        "".join(prefix for _pos, prefix, _suffix in open_spans),
+        "".join(suffix for _pos, _prefix, suffix in reversed(open_spans)),
+    )
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -589,9 +670,15 @@ def build_search_response(
 
     Occurrence counts (the "appears X times" line under each match) are always
     computed from the FULL match set, never filtered.
+
+    `max_matches < 1` renders NO match entries — just the counts header and a
+    note naming the knob to raise. It is never rewritten to the default 20.
     """
-    if max_matches < 1:
-        max_matches = 20
+    # `max_matches < 1` is honoured as the zero it says, not silently rewritten
+    # to the default 20: a caller (or a tool wrapper computing a remaining
+    # budget) that asks for 0 matches and is handed 20 full snippets gets a
+    # payload it never asked for (QA finding 3). The response still reports the
+    # totals and names the knob to raise.
     if match_offset < 0:
         match_offset = 0
 
@@ -754,7 +841,14 @@ def build_search_response(
     # ---- Render. ----
     total_filtered = len(filtered)
 
-    if match_offset >= total_filtered:
+    def window_note_response(note: str) -> BuilderResult:
+        """
+        A counts header plus one explanatory note and NO match entries, for
+        every reason the requested window renders nothing: `match_offset` past
+        the last match, `max_matches` below 1, or a size budget that cannot
+        pay for even one snippet. The totals are still reported so the caller
+        knows the query itself matched.
+        """
         ui_parts: list[str] = []
         if page_filter is None:
             ui_parts.append(
@@ -763,26 +857,35 @@ def build_search_response(
                 f"in `{Path(file_path).name}`."
             )
         else:
-            shown = total_filtered
             ui_parts.append(
-                f"> **Search Results** — Found {shown} match"
-                f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                f"> **Search Results** — Found {total_filtered} match"
+                f"{'es' if total_filtered != 1 else ''} on document page {page_filter} "
                 f"for query `{search_query}` in `{Path(file_path).name}` "
                 f"({total_matches} total in document)."
             )
-        ui_parts.append(
-            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
-        )
+        ui_parts.append(note)
         if regex_downgraded_note:
             ui_parts.insert(0, regex_downgraded_note)
-        ui_markdown = "\n\n".join(part for part in ui_parts if part)
+        note_markdown = "\n\n".join(part for part in ui_parts if part)
         return BuilderResult(
-            content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+            content=f"> **File Path:** `{file_path}`\n\n{note_markdown}",
             structured_content={
-                "markdown": ui_markdown,
+                "markdown": note_markdown,
                 "title": f"Search: {Path(file_path).name}",
                 "file_path": str(Path(file_path).resolve()),
             },
+        )
+
+    if max_matches < 1:
+        knob = "`--max-matches N`" if is_cli else "`max_matches=N`"
+        return window_note_response(
+            f"> **Note:** No matches shown (max_matches={max_matches}, total matches={total_filtered}). "
+            f"Pass {knob} with N >= 1 to see match snippets."
+        )
+
+    if match_offset >= total_filtered:
+        return window_note_response(
+            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
         )
 
     selected_matches = filtered[match_offset : match_offset + max_matches]
@@ -892,18 +995,25 @@ def build_search_response(
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
     full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
 
-    # Group hits by their containing projection line: one paragraph renders
-    # as ONE entry with every hit emphasized, instead of once per regex
-    # alternation branch with divergent highlights (QA round 3, finding 3.10).
-    line_groups: list[tuple[int, list]] = []
-    groups_by_line: dict[int, list] = {}
-    for m, p_num in selected_matches:
-        last_nl = body.rfind("\n", 0, m.start())
-        line_start = 0 if last_nl == -1 else last_nl + 1
-        if line_start not in groups_by_line:
-            groups_by_line[line_start] = []
-            line_groups.append((line_start, groups_by_line[line_start]))
-        groups_by_line[line_start].append((m, p_num))
+    def group_by_line(hits: list) -> list[tuple[int, list]]:
+        """
+        Groups hits by their containing projection line: one paragraph renders
+        as ONE entry with every hit emphasized, instead of once per regex
+        alternation branch with divergent highlights (QA round 3, finding
+        3.10). Called on every budget attempt, because the unit the budget
+        pass drops is the HIT, not the entry — dropping the tail of a hit list
+        both shortens the last entry and, once its last hit goes, removes it.
+        """
+        groups: list[tuple[int, list]] = []
+        by_line: dict[int, list] = {}
+        for m, p_num in hits:
+            last_nl = body.rfind("\n", 0, m.start())
+            line_start = 0 if last_nl == -1 else last_nl + 1
+            if line_start not in by_line:
+                by_line[line_start] = []
+                groups.append((line_start, by_line[line_start]))
+            by_line[line_start].append((m, p_num))
+        return groups
 
     def render_entry(line_start: int, group: list, radius: int | None) -> str:
         """
@@ -930,7 +1040,14 @@ def build_search_response(
         segments: list[str] = []
         for s_pos, e_pos in intervals:
             spans = [(m.start() - s_pos, m.end() - s_pos) for m, _p in group if s_pos <= m.start() and m.end() <= e_pos]
-            segments.append(_emphasized_snippet(body[s_pos:e_pos], spans))
+            # Re-attach the tags of any span this window sits strictly inside
+            # (QA finding 2): a window cut out of the middle of a deletion
+            # holds no delimiters at all, so without this the deleted clause
+            # reads as live prose. The tags are added OUTSIDE
+            # _emphasized_snippet, whose job is stripping the document's own
+            # bold/italic markers from the region's characters.
+            open_tags, close_tags = _enclosing_snippet_markup(body, s_pos, e_pos)
+            segments.append(open_tags + _emphasized_snippet(body[s_pos:e_pos], spans) + close_tags)
 
         # " ... " marks elided interior text between distant hits; the outer
         # "..." marks context trimmed off the head/tail. The head/tail marks
@@ -977,9 +1094,9 @@ def build_search_response(
 
     content_prefix = f"> **File Path:** `{file_path}`\n\n"
 
-    def compose(groups: list[tuple[int, list]], radius: int | None, budget_note: str) -> str:
-        parts = build_header(sum(len(g) for _ls, g in groups))
-        parts.extend(render_entry(line_start, group, radius) for line_start, group in groups)
+    def compose(hits: list, radius: int | None, budget_note: str) -> str:
+        parts = build_header(len(hits))
+        parts.extend(render_entry(line_start, group, radius) for line_start, group in group_by_line(hits))
         if budget_note:
             parts.append(budget_note)
         if regex_downgraded_note:
@@ -991,36 +1108,55 @@ def build_search_response(
     # paragraphs blow the ~60-tokens-per-match ceiling this response is sized
     # against even though each snippet is individually clamped. Render at the
     # widest radius that fits the whole payload; if even the narrowest does
-    # not, drop trailing entries (the caller reaches them with match_offset)
+    # not, drop trailing HITS (the caller reaches them with match_offset)
     # rather than emit an oversized response. `full_paragraph` is an explicit
     # opt-out: the caller asked for whole paragraphs and gets them.
+    #
+    # The unit dropped is the HIT, never the entry. Trimming entries could not
+    # enforce the budget at all when the hits share ONE projection line — 20
+    # edits or 20 table cells in one paragraph are one entry, so an
+    # entry-dropping pass had nothing to drop and shipped ~1800 tokens against
+    # a 1200 ceiling — and the radius ladder cannot rescue that case either,
+    # because a balanced window is at least as wide as the CriticMarkup spans
+    # it must keep whole, however small the radius (QA finding 1). Dropping the
+    # tail of the hit list shortens the last entry hit by hit (its trailing
+    # "..." says text was elided) and removes the entry once its last hit goes,
+    # so `build_header` keeps reporting a truthful "N shown" and a
+    # `match_offset` that resumes exactly where the response stopped. When not
+    # even one hit fits, the response says so instead of overshooting.
     #
     # The ceiling includes the response's fixed chrome (see
     # search_budget_tokens): on `max_matches=1` or `2` the header and entry
     # scaffolding alone outweigh `max_matches * 60`, so a purely content-sized
     # budget was unreachable and every radius "failed" down to a context-free
-    # `...**hit**...` (QA finding 1).
-    budget_chars = search_budget_tokens(max_matches) * CHARS_PER_TOKEN
-
-    def fits(markdown: str) -> bool:
+    # `...**hit**...` (QA round 4, finding 1).
+    def fits(markdown: str, rendered_count: int) -> bool:
+        budget_chars = search_budget_tokens(max_matches, rendered_count) * CHARS_PER_TOKEN
         return len(content_prefix) + len(markdown) <= budget_chars
 
     if full_paragraph:
-        ui_markdown = compose(line_groups, None, "")
+        ui_markdown = compose(selected_matches, None, "")
     else:
         radius = SNIPPET_RADIUS_LADDER[0]
-        ui_markdown = compose(line_groups, radius, "")
+        ui_markdown = compose(selected_matches, radius, "")
         for radius in SNIPPET_RADIUS_LADDER[1:]:
-            if fits(ui_markdown):
+            if fits(ui_markdown, len(selected_matches)):
                 break
             ui_markdown = compose(
-                line_groups,
+                selected_matches,
                 radius,
                 f"> **Note:** Snippets trimmed to ±{radius} chars to fit the response size budget.",
             )
-        kept = list(line_groups)
-        while not fits(ui_markdown) and len(kept) > 1:
+        kept = list(selected_matches)
+        while kept and not fits(ui_markdown, len(kept)):
             kept.pop()
+            if not kept:
+                opt_out = "`--full-paragraph`" if is_cli else "`full_paragraph=true`"
+                return window_note_response(
+                    f"> **Note:** No matches shown in this window: not even one ±{radius}-char snippet fits "
+                    f"the response size budget (max_matches={max_matches}, total matches={total_filtered}). "
+                    f"Raise `max_matches`, or pass {opt_out} to read the matching paragraph in full."
+                )
             ui_markdown = compose(
                 kept,
                 radius,

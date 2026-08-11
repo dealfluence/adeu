@@ -387,6 +387,151 @@ def test_small_page_budget_on_long_paragraphs_keeps_every_requested_match():
         assert "**Supplier** target 0 b" in md
 
 
+_STRUCK_CLAUSE = (
+    "which the parties agreed to strike in full during the second round of review "
+    "after counsel raised concerns about its scope, its enforceability, and the "
+    "indemnity it silently imported from the master agreement"
+)
+
+
+def _single_line_redline(count: int = 20) -> str:
+    # ONE projection line carrying `count` tracked deletions — a table row, or a
+    # heavily redlined clause. Every hit lands on the same line, so the whole
+    # page is a SINGLE match entry, and every hit's window must stay wide
+    # enough to keep its own `{--…--}` whole however small the radius.
+    return "Row: " + " ".join(
+        f"cell {i} {{--old value {i} {_STRUCK_CLAUSE}--}}{{>>[Chg:{i} delete] A. Reviewer<<}}" for i in range(count)
+    )
+
+
+def test_single_projection_line_with_twenty_hits_obeys_the_budget():
+    # All 20 hits share ONE projection line, so there is ONE entry: a budget
+    # pass that drops trailing ENTRIES has nothing to drop, and the radius
+    # ladder cannot help either because each window must stay wide enough to
+    # keep its `{--…--}{++…++}{>>…<<}` markup whole. Only dropping trailing
+    # HITS enforces the ceiling here (QA round 5, finding 1).
+    text = _single_line_redline(20)
+
+    res = build_search_response(
+        text,
+        search_query="old value",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=20,
+    )
+    md = res.structured_content["markdown"]
+
+    assert approx_tokens(str(res.content)) <= search_budget_tokens(20)
+    # One projection line is one entry, and hits — not the entry — were cut.
+    assert md.count("### Match ") == 1
+    assert "trailing matches dropped" in md
+    shown_match = re.search(r"\(\d+ total, (\d+) shown\)", md)
+    assert shown_match, f"header does not report a shown count: {md[:300]!r}"
+    shown = int(shown_match.group(1))
+    assert 0 < shown < 20
+    # The continuation offset resumes exactly where the response stopped, and
+    # the elision marker says text after the last rendered hit was dropped.
+    assert f"match_offset={shown}" in md
+    assert md.rstrip().count("...") >= 1
+    _assert_markup_terminated_in_order(md)
+
+
+def test_snippet_inside_enclosing_deletion_keeps_its_tags_and_change_id():
+    # The hit sits 400 chars deep inside a deletion, so a ±120 window contains
+    # NO CriticMarkup delimiters at all: nothing to balance, and the deleted
+    # clause used to render as live prose an agent would quote back as current
+    # text, with no `[Chg:N]` id to accept or reject (QA round 5, finding 2).
+    text = (
+        "{--"
+        + "D" * 400
+        + " Supplier obligations clause "
+        + "E" * 400
+        + "--}{>>[Chg:7 delete] Reviewer removed the supplier clause<<}"
+    )
+
+    res = build_search_response(
+        text,
+        search_query="Supplier obligations",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+
+    assert "..." in md  # clamped, or this test proves nothing
+    assert "D" * 300 not in md
+    assert "{--" in md
+    assert "--}" in md
+    assert "[Chg:7 delete]" in md
+    _assert_markup_terminated_in_order(md)
+
+
+def test_snippet_inside_enclosing_comment_bubble_keeps_the_bubble_tags():
+    # Same defect, comment-bubble flavour: the window is strictly inside a long
+    # `{>>…<<}` bubble, whose `[Com:3]` header is the only thing telling the
+    # agent this is commentary and not document text.
+    text = "Body text before. {>>[Com:3 note] " + "c" * 300 + " Supplier remark " + "d" * 300 + "<<} Body text after."
+
+    res = build_search_response(
+        text,
+        search_query="Supplier remark",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+
+    assert "..." in md
+    assert "c" * 250 not in md
+    assert "{>>[Com:3 note]" in md
+    assert "<<}" in md
+    _assert_markup_terminated_in_order(md)
+
+
+def test_max_matches_below_one_shows_no_entries():
+    # `max_matches=0` used to be rewritten to the default 20, handing back a
+    # payload the caller explicitly did not ask for (QA round 5, finding 3).
+    text = _make_haystack(10)
+    for max_matches in (0, -5):
+        res = build_search_response(
+            text,
+            search_query="Supplier",
+            search_regex=False,
+            search_case_sensitive=True,
+            page=None,
+            file_path="doc.docx",
+            max_matches=max_matches,
+        )
+        md = res.structured_content["markdown"]
+        assert md.count("### Match ") == 0
+        assert f"max_matches={max_matches}" in md
+        assert "total matches=10" in md
+        assert "max_matches=N" in md  # names the knob to raise
+        # The query itself still reports its totals.
+        assert "Found 10 matches" in md
+
+
+def test_max_matches_below_one_names_the_cli_flag():
+    text = _make_haystack(3)
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=0,
+        is_cli=True,
+    )
+    md = res.structured_content["markdown"]
+    assert md.count("### Match ") == 0
+    assert "--max-matches N" in md
+
+
 def test_continue_note_names_next_offset():
     text = _make_haystack(50)
     cli_res = build_search_response(
