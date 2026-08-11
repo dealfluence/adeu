@@ -1477,8 +1477,8 @@ def handle_apply(args):
             print(f"\n❌ {verification_error}", file=sys.stderr)
         sys.exit(1)
 
-        if (stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0) and not (is_partial and applied_count > 0):
-            sys.exit(1)
+    if (stats["actions_skipped"] > 0 or stats["edits_skipped"] > 0) and not (is_partial and applied_count > 0):
+        sys.exit(1)
 
 
 def handle_accept_all(args: argparse.Namespace):
@@ -2167,12 +2167,13 @@ def _main_impl():
         default="standard",
         help="Report detail level for batch output (default: standard).",
     )
-    p_apply.add_argument(
+    salvage_group = p_apply.add_mutually_exclusive_group()
+    salvage_group.add_argument(
         "--partial",
         action="store_true",
         help="Apply valid edits even if some fail (salvage partial batch).",
     )
-    p_apply.add_argument(
+    salvage_group.add_argument(
         "--atomic",
         action="store_true",
         help="Reject whole batch if any edit fails (default).",

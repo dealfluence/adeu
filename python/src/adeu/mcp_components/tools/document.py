@@ -789,48 +789,8 @@ async def _process_document_batch_disk(
             return (
                 header + counts_str + f"\nBatch complete. Saved to: {final_output_path}{overwrite_note}\n" + json_block
             )
-        else:
-            res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
-            total_occurrences = sum(
-                e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
-            )
-            occ_text = f" ({total_occurrences} occurrences)" if total_occurrences > stats["edits_applied"] else ""
-            already = stats.get("actions_already_resolved", 0)
-            already_text = f", {already} already resolved (no effect)" if already else ""
-            res += (
-                f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
-                f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
-            )
 
-            if stats.get("edits"):
-                res += "\nDetailed Edit Reports:\n"
-                for i, report in enumerate(stats["edits"]):
-                    status_indicator = "✅ [applied]" if report["status"] == "applied" else "❌ [failed]"
-                    pages_str = ", ".join(f"p{p}" for p in report.get("pages", []))
-                    page_suffix = f" ({pages_str})" if pages_str else ""
-                    res += f"### Edit {i + 1} {status_indicator}{page_suffix}\n"
-                    if report.get("heading_path"):
-                        res += f"**Path:** `{report['heading_path']}`\n"
-
-                    occ = report.get("occurrences_modified", 0)
-                    occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
-                    res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
-
-                    if report.get("comment"):
-                        res += f'**Comment:** "{report["comment"]}"\n'
-
-                    if report.get("warning"):
-                        res += f"*Warning:* {report['warning']}\n"
-                    if report.get("error"):
-                        res += f"*Error:* {report['error']}\n"
-                    if report.get("critic_markup"):
-                        res += f"*Preview (CriticMarkup):*\n> {report['critic_markup']}\n"
-                    res += "\n"
-
-            if stats.get("skipped_details"):
-                res += (
-                    "\n\n" + batch_details_header(stats["skipped_details"]) + "\n" + "\n".join(stats["skipped_details"])
-                )
+        res = rejection_prefix + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
@@ -1544,29 +1504,6 @@ if sys.platform == "win32":
                 res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
             except LiveWordUnavailableError:
                 await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk edit.")
-                if not partial:
-                    res = await _process_document_batch_disk(
-                        original_docx_path,
-                        author_name,
-                        ctx,
-                        changes,
-                        output_path,
-                        rejected_notes=rejected_notes,
-                        partial=partial,
-                    )
-                else:
-                    res = await _process_document_batch_disk(
-                        original_docx_path,
-                        author_name,
-                        ctx,
-                        changes,
-                        output_path,
-                        rejected_notes=rejected_notes,
-                    )
-        else:
-            # Not open in Word (or Word not running): the file on disk is
-            # authoritative — edit it directly. This is also the headless path.
-            if not partial:
                 res = await _process_document_batch_disk(
                     original_docx_path,
                     author_name,
@@ -1576,15 +1513,18 @@ if sys.platform == "win32":
                     rejected_notes=rejected_notes,
                     partial=partial,
                 )
-            else:
-                res = await _process_document_batch_disk(
-                    original_docx_path,
-                    author_name,
-                    ctx,
-                    changes,
-                    output_path,
-                    rejected_notes=rejected_notes,
-                )
+        else:
+            # Not open in Word (or Word not running): the file on disk is
+            # authoritative — edit it directly. This is also the headless path.
+            res = await _process_document_batch_disk(
+                original_docx_path,
+                author_name,
+                ctx,
+                changes,
+                output_path,
+                rejected_notes=rejected_notes,
+                partial=partial,
+            )
         return add_timing_if_debug(start_time, res)
 
     if os.getenv("ADEU_ENABLE_TEST_TOOLS") in ("1", "true", "True", "yes"):

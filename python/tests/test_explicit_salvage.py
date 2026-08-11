@@ -55,9 +55,37 @@ def test_cli_partial_lands_valid_edits_and_leads_with_failures(tmp_path, capsys)
     assert "fast blue" in text
 
 
-def test_cli_default_is_still_atomic(tmp_path, capsys):
+def test_cli_partial_all_edits_fail_exits_1(tmp_path, capsys):
     doc_path = _create_sample_docx(tmp_path)
     out_path = tmp_path / "out.docx"
+    changes_path = tmp_path / "changes.json"
+
+    changes_path.write_text(
+        json.dumps(
+            [
+                {"type": "modify", "target_text": "nonexistent text 1", "new_text": "replacement 1"},
+                {"type": "modify", "target_text": "nonexistent text 2", "new_text": "replacement 2"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    test_args = ["adeu", "apply", str(doc_path), str(changes_path), "-o", str(out_path), "--partial"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    assert "Batch failed — no output was written" in captured.err
+    assert not out_path.exists()
+
+
+def test_cli_default_is_still_atomic(tmp_path, capsys):
+    doc_path = _create_sample_docx(tmp_path)
+    initial_bytes = doc_path.read_bytes()
+    out_path = tmp_path / "out.docx"
+    default_redlined = tmp_path / f"{doc_path.stem}_redlined.docx"
     changes_path = tmp_path / "changes.json"
 
     changes_path.write_text(
@@ -77,6 +105,20 @@ def test_cli_default_is_still_atomic(tmp_path, capsys):
         assert exc_info.value.code == 1
 
     assert not out_path.exists()
+    assert not default_redlined.exists()
+    assert doc_path.read_bytes() == initial_bytes
+
+
+def test_cli_mutually_exclusive_salvage_flags(tmp_path):
+    doc_path = _create_sample_docx(tmp_path)
+    changes_path = tmp_path / "changes.json"
+    changes_path.write_text("[]", encoding="utf-8")
+
+    test_args = ["adeu", "apply", str(doc_path), str(changes_path), "--partial", "--atomic"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
 
 
 def test_partial_json_failed_indices_are_machine_readable(tmp_path):

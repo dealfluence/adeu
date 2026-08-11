@@ -227,6 +227,7 @@ def test_process_batch_falls_back_to_disk_on_com_unavailable(monkeypatch):
         changes,
         output_path,
         rejected_notes=None,
+        partial=True,
     ):
         called["path"] = original_docx_path
         called["author"] = author_name
