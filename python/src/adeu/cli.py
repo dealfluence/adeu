@@ -132,7 +132,7 @@ def handle_init(args: argparse.Namespace):
             "args": ["--from", package_ref, "adeu-server", "--scope", args.scope],
         }
 
-    new_content = json.dumps(data, indent=2)
+    new_content = json.dumps(data, indent=2, ensure_ascii=False)
 
     # No-op detection: re-running init with an unchanged result must neither
     # rewrite the config nor pile up .bak files (QA 2026-07-18 L5).
@@ -965,7 +965,7 @@ def handle_extract(args):
         _cli_error("invalid_input", f"Error: {e}", exit_code=2 if isinstance(e, BuilderError) else 1)
         raise AssertionError("unreachable") from None
 
-    json_output = json.dumps(res.structured_content or {}) if args.json else None
+    json_output = json.dumps(res.structured_content or {}, ensure_ascii=False) if args.json else None
 
     if args.output:
         # -o redirects the PRIMARY payload: the JSON object under --json, the
@@ -1113,7 +1113,7 @@ def handle_diff(args):
 
     if args.json:
         output_data = [edit.model_dump(exclude={"_match_start_index"}) for edit in edits]
-        json_output = json.dumps(output_data, indent=2)
+        json_output = json.dumps(output_data, indent=2, ensure_ascii=False)
         if getattr(args, "output", None):
             _write_output_or_exit(args.output, json_output)
             print(f"Diff JSON saved to {args.output}", file=sys.stderr)
@@ -1256,7 +1256,7 @@ def handle_apply(args):
             print(f"Applying {len(changes)} changes to live Word document...", file=sys.stderr)
         stats = _process_active_word_batch_core(changes, args.author)
         if args.json:
-            print(json.dumps(stats))
+            print(json.dumps(stats, ensure_ascii=False))
         else:
             print(
                 f"✅ Live Word Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}",
@@ -1382,7 +1382,7 @@ def handle_apply(args):
         stats = shrink_batch_stats(stats)
 
     if args.json:
-        print(json.dumps(stats))
+        print(json.dumps(stats, ensure_ascii=False))
     else:
         if batch_failed:
             print(
@@ -1492,7 +1492,7 @@ def handle_accept_all(args: argparse.Namespace):
             "removed_comments": stats.get("removed_comments", 0),
             "removed_comment_details": removed_comment_notes,
         }
-        print(json.dumps(result))
+        print(json.dumps(result, ensure_ascii=False))
     else:
         print(f"✅ Accepted all changes. Saved to: {output_path}", file=sys.stderr)
         if removed_comment_notes:
@@ -1635,7 +1635,7 @@ def handle_markup(args):
         }
         if to_stdout:
             json_result["content"] = result
-        print(json.dumps(json_result))
+        print(json.dumps(json_result, ensure_ascii=False))
         # --json promises machine-clean streams: no decorative success/stats
         # lines on stderr (QA 2026-07-19 v8 F-08).
         return

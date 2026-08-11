@@ -195,7 +195,7 @@ def _within_budget(edit: Dict[str, Any]) -> bool:
     serialized edit, ignoring the fields exempt from the budget.
     """
     budgeted = {k: v for k, v in edit.items() if k not in _UNBUDGETED_FIELDS}
-    return len(json.dumps(budgeted)) // 4 <= MINIMAL_EDIT_TOKEN_BUDGET
+    return len(json.dumps(budgeted, ensure_ascii=False)) // 4 <= MINIMAL_EDIT_TOKEN_BUDGET
 
 
 def _shrink_prose(edit: Dict[str, Any], key: str, value: str, floor: int) -> None:

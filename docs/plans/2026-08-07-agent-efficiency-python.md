@@ -96,8 +96,9 @@
 - `document.py`: default MCP batch responses to minimal report format.
 **Done when.** `uv run pytest tests/test_report_minimal.py` passes (9 tests).
 
-### Task 5 — Item B2: Failure Payloads Teach Split-Recovery Protocol
+### Task 5 — Item B2: Failure Payloads Teach Split-Recovery Protocol (COMPLETED)
 **Goal.** Append two-call split recovery protocol instruction to all batch failures.
+**Status.** Completed & Verified (commits `49932c8`, `468cd15`, `d956962`, `7efc221`).
 **Files.**
 - `python/src/adeu/payloads.py`
 - `python/src/adeu/cli.py`
@@ -119,8 +120,9 @@
 
 ## Phase 2 (P1 Items) — Tasks 6 to 11
 
-### Task 6 — Item A2: Search Flags (`--max-matches`, `--match-offset`, Snippet Clamping)
+### Task 6 — Item A2: Search Flags (`--max-matches`, `--match-offset`, Snippet Clamping) (COMPLETED)
 **Goal.** Paged search results with snippets clamped to ±120 chars around hits.
+**Status.** Completed & Verified (commits `6dfb8d8`, `734a488`, `d51d1a5`, `34f0e54`, `021580e`).
 **Files.**
 - `python/src/adeu/mcp_components/_response_builders.py`
 - `python/src/adeu/cli.py`
@@ -185,8 +187,9 @@
 **Change.** Set `reasoning: Optional[str] = ""` and move `reasoning` to the end of parameter list across all MCP tools.
 **Done when.** `uv run pytest tests/test_mcp_reasoning_optional.py` passes (5 tests).
 
-### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON
+### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON (COMPLETED)
 **Goal.** Output literal UTF-8 in JSON outputs instead of `\u2019` escapes.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`, `python/src/adeu/redline/engine.py`.
 **Test first.** `python/tests/test_json_unicode.py` (new):
 1. `test_extract_json_preserves_unicode`: literal smart quotes and dashes in JSON output.
