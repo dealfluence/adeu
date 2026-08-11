@@ -3,6 +3,7 @@ Payload builders for error envelopes and response formatting.
 """
 
 import json
+import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from adeu.diff import CRITICMARKUP_BLOCK_RE
@@ -383,3 +384,62 @@ def shrink_batch_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
     if "skipped_details" in stats:
         res["skipped_details"] = _dedupe_skipped(stats["skipped_details"], edit_errors)
     return res
+
+
+def response_budget_limit() -> int:
+    """
+    Returns the maximum allowed response character count for unbounded whole-document reads.
+    Defaults to 76,000 characters (~19,000 tokens), overridable via ADEU_MAX_RESPONSE_CHARS.
+    """
+    val = os.getenv("ADEU_MAX_RESPONSE_CHARS")
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return 76000
+
+
+def whole_doc_guard_message(
+    total_chars: int,
+    limit: int,
+    file_path: str = "",
+    outline: str = "",
+    page_count: Optional[int] = None,
+) -> str:
+    """
+    Builds a concise (<= 800 approx tokens) refusal message when a whole-document
+    read exceeds the response budget threshold.
+    """
+    est_tokens = total_chars // 4
+    file_info = f" for '{file_path}'" if file_path else ""
+    page_info = f" ({page_count} pages)" if page_count else ""
+
+    lines = [
+        (
+            f"Refused unbounded full document read{file_info}{page_info}: "
+            f"total size ({total_chars:,} chars, ~{est_tokens:,} tokens) exceeds "
+            f"response budget limit ({limit:,} chars)."
+        ),
+        "",
+        "Recipe to read bounded sections:",
+        "  - Read page range: --page 1-5 or page N (MCP page='1-5')",
+        "  - Search query: --search \"query\" (MCP search_query='query')",
+        "  - Document outline: --mode outline (MCP mode='outline')",
+        "  - Tracked changes: --mode changes or diff (MCP mode='changes')",
+        "  - Force full read: --force (MCP force=True)",
+    ]
+
+    if outline and outline.strip():
+        lines.append("")
+        lines.append("Outline (L1 Headings):")
+        lines.append(outline.strip())
+
+    msg = "\n".join(lines)
+
+    # Enforce maximum token budget (<= 800 approx tokens = 3200 chars)
+    if len(msg) // 4 > 800:
+        max_chars = 800 * 4 - 20
+        msg = msg[:max_chars] + "\n..."
+
+    return msg

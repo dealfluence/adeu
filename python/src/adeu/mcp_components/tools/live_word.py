@@ -15,7 +15,6 @@ from adeu import RedlineEngine
 from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
-    build_outline_response,
     build_paginated_response,
 )
 from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT
@@ -333,6 +332,7 @@ if sys.platform == "win32":
         file_path: Optional[str] = None,
         mode: str = "full",
         page: Optional[int | str] = None,
+        force: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: Optional[str] = None,
@@ -431,6 +431,8 @@ if sys.platform == "win32":
                         existing_change_ids=existing_change_ids,
                     )
                 elif mode == "outline":
+                    from adeu.mcp_components._response_builders import build_outline_response
+
                     res = build_outline_response(
                         py_doc,
                         final_text,
@@ -465,6 +467,30 @@ if sys.platform == "win32":
                             raise ToolError(str(e)) from e
 
                         if kind == "all":
+                            from adeu.payloads import response_budget_limit, whole_doc_guard_message
+
+                            if not force and len(final_text) > response_budget_limit():
+                                from adeu.mcp_components._response_builders import build_outline_response
+
+                                l1_outline = ""
+                                if py_doc is not None:
+                                    out_res = build_outline_response(
+                                        py_doc,
+                                        final_text,
+                                        actual_path,
+                                        outline_max_level=1,
+                                        paragraph_offsets=paragraph_offsets,
+                                        is_cli=False,
+                                    )
+                                    l1_outline = str(out_res.content)
+                                msg = whole_doc_guard_message(
+                                    total_chars=len(final_text),
+                                    limit=response_budget_limit(),
+                                    file_path=actual_path,
+                                    outline=l1_outline,
+                                )
+                                raise ToolError(msg)
+
                             from adeu.mcp_components._response_builders import (
                                 build_full_document_response,
                             )
@@ -1321,6 +1347,7 @@ else:
         file_path: Optional[str] = None,
         mode: str = "full",
         page: Optional[int | str] = None,
+        force: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: Optional[str] = None,

@@ -338,6 +338,7 @@ async def _read_docx_disk(
     clean_view: bool,
     mode: str = "full",
     page: Optional[Union[int, str]] = None,
+    force: bool = False,
     outline_max_level: int = 2,
     outline_verbose: bool = False,
     search_query: Optional[str] = None,
@@ -503,6 +504,24 @@ async def _read_docx_disk(
                     raise ToolError(str(e)) from e
 
                 if kind == "all":
+                    from adeu.payloads import response_budget_limit, whole_doc_guard_message
+
+                    if not force and len(text) > response_budget_limit():
+                        from adeu.mcp_components._response_builders import render_outline_tree
+
+                        _, pagination, nodes = await asyncio.to_thread(
+                            doc_cache.get_outline, entry, clean_view, relay.callback
+                        )
+                        outline_str = render_outline_tree(nodes, max_level=1, is_cli=False, file_path=file_path)
+                        page_count = pagination.total_pages if pagination else None
+                        msg = whole_doc_guard_message(
+                            total_chars=len(text),
+                            limit=response_budget_limit(),
+                            file_path=file_path,
+                            outline=outline_str,
+                            page_count=page_count,
+                        )
+                        raise ToolError(msg)
                     return _as_tool_result(build_full_document_response(text, file_path))
                 if kind == "range":
                     assert isinstance(page_val, tuple)
@@ -1150,6 +1169,10 @@ if sys.platform == "win32":
                 ),
             ),
         ] = None,
+        force: Annotated[
+            bool,
+            "If True, overrides response budget limit and returns full document text even if oversized.",
+        ] = False,
         outline_max_level: Annotated[
             int,
             "For mode='outline' only: only show headings at this level or shallower (1-6). "
@@ -1202,6 +1225,7 @@ if sys.platform == "win32":
                 None,
                 mode=mode,
                 page=page,
+                force=force,
                 outline_max_level=outline_max_level,
                 outline_verbose=outline_verbose,
                 search_query=search_query,
@@ -1230,6 +1254,7 @@ if sys.platform == "win32":
                         file_path,
                         mode=mode,
                         page=page,
+                        force=force,
                         outline_max_level=outline_max_level,
                         outline_verbose=outline_verbose,
                         search_query=search_query,
@@ -1257,6 +1282,7 @@ if sys.platform == "win32":
                         clean_view,
                         mode,
                         page,
+                        force=force,
                         outline_max_level=outline_max_level,
                         outline_verbose=outline_verbose,
                         search_query=search_query,
@@ -1275,6 +1301,7 @@ if sys.platform == "win32":
                     clean_view,
                     mode,
                     page,
+                    force=force,
                     outline_max_level=outline_max_level,
                     outline_verbose=outline_verbose,
                     search_query=search_query,
@@ -1534,6 +1561,10 @@ else:
                 ),
             ),
         ] = None,
+        force: Annotated[
+            bool,
+            "If True, overrides response budget limit and returns full document text even if oversized.",
+        ] = False,
         outline_max_level: Annotated[
             int,
             "For mode='outline' only: only show headings at this level or shallower (1-6). "
@@ -1580,6 +1611,7 @@ else:
             clean_view,
             mode,
             page,
+            force=force,
             outline_max_level=outline_max_level,
             outline_verbose=outline_verbose,
             search_query=search_query,
