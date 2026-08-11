@@ -345,6 +345,9 @@ async def _read_docx_disk(
     search_case_sensitive: bool = True,
     changes_author: Optional[str] = None,
     changes_offset: int = 0,
+    max_matches: int = 20,
+    match_offset: int = 0,
+    full_paragraph: bool = False,
 ) -> ToolResult:
     """
     Core logic for reading a DOCX from disk. Dispatches on `mode`.
@@ -407,6 +410,9 @@ async def _read_docx_disk(
                         page,
                         file_path,
                         pagination_result=pagination,
+                        max_matches=max_matches,
+                        match_offset=match_offset,
+                        full_paragraph=full_paragraph,
                     )
                 )
 
@@ -1159,6 +1165,18 @@ if sys.platform == "win32":
         search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
         search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
+        max_matches: Annotated[
+            int,
+            "For search queries: maximum number of search matches to return (default 20).",
+        ] = 20,
+        match_offset: Annotated[
+            int,
+            "For search queries: 0-based match offset to start search results from for pagination (default 0).",
+        ] = 0,
+        full_paragraph: Annotated[
+            bool,
+            "For search queries: return full paragraph for search matches instead of clamping snippets to ±120 chars.",
+        ] = False,
         changes_author: Annotated[
             Optional[str],
             "For mode='changes' only: filter tracked changes ledger by author name.",
@@ -1191,6 +1209,9 @@ if sys.platform == "win32":
                 search_case_sensitive=search_case_sensitive,
                 changes_author=changes_author,
                 changes_offset=changes_offset,
+                max_matches=max_matches,
+                match_offset=match_offset,
+                full_paragraph=full_paragraph,
             )
         else:
             # An explicit file_path means the file on disk is authoritative:
@@ -1216,6 +1237,9 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        max_matches=max_matches,
+                        match_offset=match_offset,
+                        full_paragraph=full_paragraph,
                     )
                 except LiveWordUnavailableError:
                     # The probe reported the file open, but Word/COM turned out to
@@ -1240,6 +1264,9 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        max_matches=max_matches,
+                        match_offset=match_offset,
+                        full_paragraph=full_paragraph,
                     )
             else:
                 res = await _read_docx_disk(
@@ -1255,6 +1282,9 @@ if sys.platform == "win32":
                     search_case_sensitive=search_case_sensitive,
                     changes_author=changes_author,
                     changes_offset=changes_offset,
+                    max_matches=max_matches,
+                    match_offset=match_offset,
+                    full_paragraph=full_paragraph,
                 )
         return add_timing_if_debug(start_time, res)
 
@@ -1519,6 +1549,18 @@ else:
         search_query: Annotated[Optional[str], "The substring or regex pattern to search for."] = None,
         search_regex: Annotated[bool, "Set to true to interpret search_query as a regular expression."] = False,
         search_case_sensitive: Annotated[bool, "Set to false to perform case-insensitive matching."] = True,
+        max_matches: Annotated[
+            int,
+            "For search queries: maximum number of search matches to return (default 20).",
+        ] = 20,
+        match_offset: Annotated[
+            int,
+            "For search queries: 0-based match offset to start search results from for pagination (default 0).",
+        ] = 0,
+        full_paragraph: Annotated[
+            bool,
+            "For search queries: return full paragraph for search matches instead of clamping snippets to ±120 chars.",
+        ] = False,
         changes_author: Annotated[
             Optional[str],
             "For mode='changes' only: filter tracked changes ledger by author name.",
@@ -1545,6 +1587,9 @@ else:
             search_case_sensitive=search_case_sensitive,
             changes_author=changes_author,
             changes_offset=changes_offset,
+            max_matches=max_matches,
+            match_offset=match_offset,
+            full_paragraph=full_paragraph,
         )
         return add_timing_if_debug(start_time, res)
 

@@ -840,6 +840,9 @@ def handle_extract(args):
                 args.page,
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
+                max_matches=getattr(args, "max_matches", 20),
+                match_offset=getattr(args, "match_offset", 0),
+                full_paragraph=getattr(args, "full_paragraph", False),
             )
         elif args.mode == "outline":
             res = build_outline_response(
@@ -1951,6 +1954,23 @@ def _main_impl():
         "--search-case-insensitive",
         action="store_true",
         help="Perform case-insensitive matching.",
+    )
+    p_extract.add_argument(
+        "--max-matches",
+        type=int,
+        default=20,
+        help="Maximum number of search matches to return (default 20).",
+    )
+    p_extract.add_argument(
+        "--match-offset",
+        type=int,
+        default=0,
+        help="0-based match offset to start search results from for pagination (default 0).",
+    )
+    p_extract.add_argument(
+        "--full-paragraph",
+        action="store_true",
+        help="Return full paragraph for search matches instead of clamping snippets to ±120 chars.",
     )
 
     def _outline_level(value: str) -> int:

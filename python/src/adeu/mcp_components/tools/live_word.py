@@ -340,6 +340,9 @@ if sys.platform == "win32":
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        max_matches: int = 20,
+        match_offset: int = 0,
+        full_paragraph: bool = False,
     ) -> ToolResult:
         await ctx.info(
             f"Extracting live Word document via WordOpenXML "
@@ -387,6 +390,9 @@ if sys.platform == "win32":
                         search_case_sensitive,
                         page,
                         actual_path,
+                        max_matches=max_matches,
+                        match_offset=match_offset,
+                        full_paragraph=full_paragraph,
                     )
                 elif mode == "changes":
                     if clean_view:
@@ -1322,6 +1328,9 @@ else:
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        max_matches: int = 20,
+        match_offset: int = 0,
+        full_paragraph: bool = False,
     ) -> ToolResult:
         raise NotImplementedError("Live Word is only supported on Windows.")
 

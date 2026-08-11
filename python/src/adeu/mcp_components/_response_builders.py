@@ -149,24 +149,30 @@ def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
 _SNIPPET_MARKUP_PAIRS = (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}"))
 
 
-def _balance_snippet_window(body: str, start: int, end: int) -> int:
+def _balance_snippet_window(body: str, start: int, end: int, line_start: int = 0) -> tuple[int, int]:
     """
     Extends a line-sliced snippet window until every CriticMarkup span it
-    opens is closed. {>>…<<} meta bubbles are MULTI-line, so slicing at the
-    line break cut them mid-annotation ("{>>[Chg:1 delete] … (pairs with
-    Chg:2") and agents could not harvest ids/pairings from search results
-    (QA round 3, finding 3.12).
+    opens or closes is balanced.
     """
-    prev_end = -1
-    while prev_end != end:
-        prev_end = end
+    prev_start, prev_end = -1, -1
+    while (prev_start, prev_end) != (start, end):
+        prev_start, prev_end = start, end
+
+        for opener, closer in _SNIPPET_MARKUP_PAIRS:
+            while body.count(closer, start, end) > body.count(opener, start, end):
+                prev_opener = body.rfind(opener, line_start, start)
+                if prev_opener == -1:
+                    break
+                start = prev_opener
+
         for opener, closer in _SNIPPET_MARKUP_PAIRS:
             while body.count(opener, start, end) > body.count(closer, start, end):
-                close_at = body.find(closer, end)
-                if close_at == -1:
-                    return end
-                end = close_at + len(closer)
-    return end
+                next_closer = body.find(closer, end)
+                if next_closer == -1:
+                    break
+                end = next_closer + len(closer)
+
+    return start, end
 
 
 def render_outline_tree(
@@ -478,6 +484,9 @@ def build_search_response(
     file_path: str,
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
+    max_matches: int = 20,
+    match_offset: int = 0,
+    full_paragraph: bool = False,
 ) -> BuilderResult:
     """
     Filters projected Markdown to exact substring or regex matches.
@@ -495,6 +504,11 @@ def build_search_response(
     Occurrence counts (the "appears X times" line under each match) are always
     computed from the FULL match set, never filtered.
     """
+    if max_matches < 1:
+        max_matches = 20
+    if match_offset < 0:
+        match_offset = 0
+
     body, _ = split_structural_appendix(text)
     flags = 0 if search_case_sensitive else re.IGNORECASE
 
@@ -667,34 +681,87 @@ def build_search_response(
             line_groups.append((line_start, groups_by_line[line_start]))
         groups_by_line[line_start].append((m, p_num))
 
-    # Cap results to 20 to avoid LLM context overflow
-    max_matches = 20
-    is_truncated = len(line_groups) > max_matches
-    items_to_render = line_groups[:max_matches]
+    total_entries = len(line_groups)
+
+    if match_offset >= total_entries:
+        if page_filter is None:
+            ui_parts.append(
+                f"> **Search Results** — Found {total_matches} match"
+                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                f"in `{Path(file_path).name}`."
+            )
+        else:
+            shown = len(filtered)
+            ui_parts.append(
+                f"> **Search Results** — Found {shown} match"
+                f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                f"for query `{search_query}` in `{Path(file_path).name}` "
+                f"({total_matches} total in document)."
+            )
+        ui_parts.append(
+            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_entries})."
+        )
+        if regex_downgraded_note:
+            ui_parts.insert(0, regex_downgraded_note)
+        ui_markdown = "\n\n".join(part for part in ui_parts if part)
+        return BuilderResult(
+            content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+            structured_content={
+                "markdown": ui_markdown,
+                "title": f"Search: {Path(file_path).name}",
+                "file_path": str(Path(file_path).resolve()),
+            },
+        )
+
+    items_to_render = line_groups[match_offset : match_offset + max_matches]
+    num_rendered = len(items_to_render)
+    next_offset = match_offset + num_rendered
+    has_more = next_offset < total_entries
 
     if page_filter is None:
-        ui_parts.append(
-            f"> **Search Results** — Found {total_matches} match"
-            f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
-            f"in `{Path(file_path).name}`."
-        )
+        if total_entries > num_rendered or match_offset > 0:
+            ui_parts.append(
+                f"> **Search Results** — Found {total_matches} match"
+                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                f"in `{Path(file_path).name}` ({total_entries} total, {num_rendered} shown)."
+            )
+        else:
+            ui_parts.append(
+                f"> **Search Results** — Found {total_matches} match"
+                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                f"in `{Path(file_path).name}`."
+            )
         # Distribution summary only when matches span >1 document page.
         if len(pages_with_hits) > 1:
             dist_str = ", ".join(f"p{p}: {page_distribution[p]}" for p in pages_with_hits)
             ui_parts.append(f"> Distribution across {len(pages_with_hits)} document pages — {dist_str}")
-        if is_truncated:
-            ui_parts.append(
-                f"> **Note:** Only the first {max_matches} matches are shown here to prevent LLM context overflow. "
-                f"Narrow your search query or specify a `page` filter to see other matches."
-            )
+        if has_more:
+            if is_cli:
+                ui_parts.append(
+                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
+                    f"Continue with `--match-offset {next_offset}`."
+                )
+            else:
+                ui_parts.append(
+                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
+                    f"Continue with `match_offset={next_offset}`."
+                )
     else:
         shown = len(filtered)
-        ui_parts.append(
-            f"> **Search Results** — Found {shown} match"
-            f"{'es' if shown != 1 else ''} on document page {page_filter} "
-            f"for query `{search_query}` in `{Path(file_path).name}` "
-            f"({total_matches} total in document)."
-        )
+        if total_entries > num_rendered or match_offset > 0:
+            ui_parts.append(
+                f"> **Search Results** — Found {shown} match"
+                f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                f"for query `{search_query}` in `{Path(file_path).name}` "
+                f"({total_matches} total in document, {num_rendered} shown)."
+            )
+        else:
+            ui_parts.append(
+                f"> **Search Results** — Found {shown} match"
+                f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                f"for query `{search_query}` in `{Path(file_path).name}` "
+                f"({total_matches} total in document)."
+            )
         other_pages = [p for p in pages_with_hits if p != page_filter]
         if other_pages:
             other_pages_str = ", ".join(str(p) for p in other_pages)
@@ -703,11 +770,17 @@ def build_search_response(
                 f"{'s' if len(other_pages) != 1 else ''} {other_pages_str} — "
                 f"omit `page` or pass `page='all'` to see them."
             )
-        if is_truncated:
-            ui_parts.append(
-                f"> **Note:** Only the first {max_matches} matches are shown here to prevent LLM context overflow. "
-                f"Narrow your search query or specify a `page` filter to see other matches."
-            )
+        if has_more:
+            if is_cli:
+                ui_parts.append(
+                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
+                    f"Continue with `--match-offset {next_offset}`."
+                )
+            else:
+                ui_parts.append(
+                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
+                    f"Continue with `match_offset={next_offset}`."
+                )
 
     def clean_breadcrumb(raw: str) -> str:
         # Breadcrumbs render CLEAN-view heading text: a heading carrying a
@@ -754,24 +827,40 @@ def build_search_response(
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
     full_index_map = {id(m): i + 1 for i, (m, _p) in enumerate(matches_with_pages)}
 
-    for snippet_start, group in items_to_render:
+    for line_start, group in items_to_render:
         first_m, p_num = group[0]
 
-        last_hit_end = max(m.end() for m, _p in group)
-        next_nl = body.find("\n", last_hit_end)
-        snippet_end = len(body) if next_nl == -1 else next_nl
-        # Never cut a snippet inside an open {>>…<<}/{--…--} span (3.12).
-        snippet_end = _balance_snippet_window(body, snippet_start, snippet_end)
+        last_m_end = max(m.end() for m, _p in group)
+        next_nl = body.find("\n", last_m_end)
+        line_end = len(body) if next_nl == -1 else next_nl
 
-        region = body[snippet_start:snippet_end]
-        spans = [(m.start() - snippet_start, m.end() - snippet_start) for m, _p in group]
+        if full_paragraph:
+            win_start = line_start
+            win_end = line_end
+            has_left_trim = False
+            has_right_trim = False
+        else:
+            first_m_start = min(m.start() for m, _p in group)
+            desired_start = max(line_start, first_m_start - 120)
+            desired_end = min(line_end, last_m_end + 120)
+            win_start, win_end = _balance_snippet_window(body, desired_start, desired_end, line_start=line_start)
+            has_left_trim = win_start > line_start
+            has_right_trim = win_end < line_end
+
+        region = body[win_start:win_end]
+        spans = [(m.start() - win_start, m.end() - win_start) for m, _p in group]
         snippet = _emphasized_snippet(region, spans)
+        if has_left_trim:
+            snippet = "..." + snippet
+        if has_right_trim:
+            snippet = snippet + "..."
+
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 
         idx = full_index_map[id(first_m)]
-        ui_parts.extend(["---", f"### Match {idx} (p{p_num})"])
+        match_lines = ["---", f"### Match {idx} (p{p_num})"]
         if h_path := get_heading(first_m.start(), body):
-            ui_parts.append(f"**Path:** `{h_path}`")
+            match_lines.append(f"**Path:** `{h_path}`")
 
         distinct_strs: list[str] = []
         for m, _p in group:
@@ -791,7 +880,8 @@ def build_search_response(
                 )
                 + " in the document."
             )
-        ui_parts.extend([snippet_lines, occurrence_line])
+        match_lines.extend([snippet_lines, occurrence_line])
+        ui_parts.append("\n".join(match_lines))
 
     if regex_downgraded_note:
         ui_parts.insert(0, regex_downgraded_note)
