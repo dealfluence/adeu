@@ -18,7 +18,7 @@ from adeu.markup import apply_edits_to_markdown, apply_structural_ops_to_markdow
 from adeu.mcp_components.shared import get_build_info
 from adeu.models import DeleteTableRow, DocumentChange, InsertTableRow, ModifyText, StrictBatchChanges
 from adeu.pagination import parse_page_arg
-from adeu.payloads import BATCH_RECOVERY_PROTOCOL, failure_envelope, shrink_batch_stats
+from adeu.payloads import BATCH_ERROR_CODES, BATCH_RECOVERY_PROTOCOL, failure_envelope, shrink_batch_stats
 from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
@@ -191,7 +191,7 @@ def _cli_error(
     Stable codes: file_not_found, invalid_input, invalid_docx,
     invalid_changes_file, write_failed, unsupported, batch_validation_failed.
     """
-    if code in ("invalid_changes_file", "batch_validation_failed"):
+    if code in BATCH_ERROR_CODES:
         if BATCH_RECOVERY_PROTOCOL not in message and (not hint or BATCH_RECOVERY_PROTOCOL not in hint):
             hint = f"{hint}\n{BATCH_RECOVERY_PROTOCOL}" if hint else BATCH_RECOVERY_PROTOCOL
     print(f"❌ {message}", file=sys.stderr)
@@ -1462,8 +1462,14 @@ def handle_markup(args):
         _cli_error("file_not_found", f"Edits file not found: {args.edits}")
 
     changes = _load_batch_from_json(args.edits)
-    edits = [c for c in changes if isinstance(c, ModifyText)]
-    row_ops = [c for c in changes if isinstance(c, (InsertTableRow, DeleteTableRow))]
+    # markup renders the batch as two filtered subsets (text edits, row ops),
+    # so a subset position is NOT the position the caller submitted. Keep each
+    # item's batch index alongside it: that index is what every failure report
+    # must name (QA: a row op failing at batch index 1 was reported as 0).
+    edit_items = [(i, c) for i, c in enumerate(changes) if isinstance(c, ModifyText)]
+    row_items = [(i, c) for i, c in enumerate(changes) if isinstance(c, (InsertTableRow, DeleteTableRow))]
+    edits = [c for _, c in edit_items]
+    row_ops = [c for _, c in row_items]
     ignored = [c for c in changes if not isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
 
     if ignored:
@@ -1502,10 +1508,14 @@ def handle_markup(args):
         highlight_only=args.highlight,
         edit_reports=edit_reports,
     )
+    # apply_edits_to_markdown numbers its reports by position in the subset it
+    # was handed; restate them as batch positions.
+    for report in edit_reports:
+        report["index"] = edit_items[report["index"]][0]
 
     # Structural row operations render into the same preview: deleted rows
     # wrapped in {--…--}, inserted rows as {++…++} lines beside their anchor.
-    result = apply_structural_ops_to_markdown(result, row_ops, edit_reports)
+    result = apply_structural_ops_to_markdown(result, row_ops, edit_reports, indices=[i for i, _ in row_items])
 
     failed = [r for r in edit_reports if r["status"] == "failed"]
     applied = [r for r in edit_reports if r["status"] == "applied"]
@@ -1521,7 +1531,7 @@ def handle_markup(args):
         # stay off stderr, matching apply's JSON contract (QA 2026-07-19
         # v8 F-08).
         if _JSON_MODE:
-            failed_tuples = [(r.get("index", i), r.get("error", "")) for i, r in enumerate(failed)]
+            failed_tuples = [(r["index"], r.get("error", "")) for r in failed]
             err_list = [r["error"] for r in failed if r.get("error")]
             env = failure_envelope(
                 "batch_validation_failed",

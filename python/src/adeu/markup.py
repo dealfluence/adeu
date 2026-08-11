@@ -661,6 +661,7 @@ def apply_structural_ops_to_markdown(
     markdown_text: str,
     ops: List[Any],
     edit_reports: Optional[List[Dict[str, Any]]] = None,
+    indices: Optional[List[int]] = None,
 ) -> str:
     """
     Renders structured table-row operations (insert_row / delete_row) into a
@@ -674,14 +675,20 @@ def apply_structural_ops_to_markdown(
     edit in the same batch modified finds the {--old--}{++new++} line.
     Match semantics are strict — exactly one line must match, and both the
     not-found and ambiguous cases report as failed.
+
+    When `edit_reports` is provided, one dict per op is appended, carrying an
+    "index": `indices[n]` for op `n` when given — the op's position in the
+    caller's ORIGINAL changes batch, which is the only index a caller can act
+    on, since `ops` is a filtered subset of that batch.
     """
     lines = markdown_text.split("\n")
 
-    def _record(op: Any, status: str, error: Optional[str] = None) -> None:
+    def _record(pos: int, op: Any, status: str, error: Optional[str] = None) -> None:
         if edit_reports is not None:
             new_text = " | ".join(op.cells) if getattr(op, "cells", None) is not None else ""
             edit_reports.append(
                 {
+                    "index": indices[pos] if indices is not None else pos,
                     "status": status,
                     "target_text": op.target_text,
                     "new_text": new_text,
@@ -689,11 +696,12 @@ def apply_structural_ops_to_markdown(
                 }
             )
 
-    for op in ops:
+    for pos, op in enumerate(ops):
         anchor = (op.target_text or "").strip()
         matches = [i for i, line in enumerate(lines) if anchor and anchor in _clean_reading_of_line(line)]
         if len(matches) == 0:
             _record(
+                pos,
                 op,
                 "failed",
                 f"- Row operation failed: no table row line contains '{anchor}'. Structural "
@@ -702,6 +710,7 @@ def apply_structural_ops_to_markdown(
             continue
         if len(matches) > 1:
             _record(
+                pos,
                 op,
                 "failed",
                 f"- Row operation failed: {len(matches)} lines contain '{anchor}' — the anchor is "
@@ -718,6 +727,6 @@ def apply_structural_ops_to_markdown(
                 lines.insert(i, new_line)
             else:
                 lines.insert(i + 1, new_line)
-        _record(op, "applied")
+        _record(pos, op, "applied")
 
     return "\n".join(lines)

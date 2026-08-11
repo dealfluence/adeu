@@ -158,6 +158,75 @@ def test_cli_markup_batch_failure_carries_protocol_human(tmp_path, capsys):
     assert BATCH_RECOVERY_PROTOCOL in captured.err
 
 
+def test_cli_markup_structural_failure_reports_batch_index(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    # Batch index 1 is a row operation whose anchor does not exist.
+    batch_json = [
+        {"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."},
+        {"type": "delete_row", "target_text": "No such row anywhere"},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "batch_validation_failed"
+    assert [f["index"] for f in data["failed"]] == [1]
+
+
+def test_cli_markup_edit_failure_reports_batch_index_after_row_op(tmp_path, capsys):
+    md_path = tmp_path / "test.md"
+    md_path.write_text("Paragraph 0.\nParagraph 1.\n", encoding="utf-8")
+
+    # The failing edit sits at batch index 1, but it is the FIRST text edit —
+    # markup sees the text edits and the row ops as two filtered subsets.
+    batch_json = [
+        {"type": "delete_row", "target_text": "Paragraph 1."},
+        {"type": "modify", "target_text": "Non-existent target", "new_text": "Fail."},
+    ]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "markup", str(md_path), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "batch_validation_failed"
+    assert [f["index"] for f in data["failed"]] == [1]
+
+
+def test_cli_non_batch_failure_omits_protocol(tmp_path, capsys):
+    # A missing input file is not a rejected batch: it has no failing edit to
+    # split out, so the recovery protocol would be advice nobody can act on.
+    batch_json = [{"type": "modify", "target_text": "Paragraph 0.", "new_text": "Updated 0."}]
+    p = tmp_path / "changes.json"
+    p.write_text(json.dumps(batch_json), encoding="utf-8")
+
+    test_args = ["adeu", "apply", str(tmp_path / "missing.docx"), str(p), "--json"]
+    with patch.object(sys, "argv", test_args):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["error"] == "file_not_found"
+    assert BATCH_RECOVERY_PROTOCOL not in data["message"]
+    assert BATCH_RECOVERY_PROTOCOL not in captured.err
+
+
 @pytest.mark.anyio
 async def test_mcp_batch_failure_carries_protocol(tmp_path):
     doc_path = tmp_path / "test.docx"
@@ -195,6 +264,12 @@ async def test_mcp_batch_failure_carries_protocol(tmp_path):
 def test_envelope_message_carries_protocol():
     env = failure_envelope("batch_validation_failed", [(0, "Reason 0")], "Batch failed.")
     assert env["message"].endswith(BATCH_RECOVERY_PROTOCOL)
+
+
+@pytest.mark.parametrize("code", ["file_not_found", "invalid_input", "invalid_docx", "write_failed", "unsupported"])
+def test_envelope_omits_protocol_for_non_batch_codes(code):
+    env = failure_envelope(code, [], "Something else went wrong.")
+    assert BATCH_RECOVERY_PROTOCOL not in env["message"]
 
 
 @pytest.mark.anyio

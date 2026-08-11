@@ -58,10 +58,22 @@ _MIN_WARNING_CHARS = 26
 _ELISION = "..."
 
 
-# Concise guidance appended to batch failure outputs instructing two-call split recovery.
+# The two-call recovery every batch failure teaches (spec B2). A batch is
+# transactional, so the reflex — resubmit the whole batch — repeats every edit
+# that already validated; splitting the failures out is what converges.
+# The re-read sentence names no command on purpose: this text also travels
+# inside MCP responses, where a CLI-ism is advice the caller cannot run
+# (QA 2026-07-23 F11).
 BATCH_RECOVERY_PROTOCOL = (
-    "Split recovery protocol: split batch into two half-batches and resubmit each separately to isolate failing edits."
+    "Nothing was written. Recover in two calls: (1) re-apply this batch WITHOUT the failing edit(s); "
+    "(2) fix the failing edit(s) in a separate small batch. "
+    "Copy target_text verbatim from a fresh read of the CURRENT file, not from another tool's view of it."
 )
+
+# The only failures the recovery protocol can help with: a rejected BATCH. A
+# missing file, an unreadable DOCX or a failed write has no failing edit to
+# split out, so the protocol would be advice the caller cannot act on.
+BATCH_ERROR_CODES = frozenset({"invalid_changes_file", "batch_validation_failed"})
 
 
 def failure_envelope(
@@ -73,6 +85,9 @@ def failure_envelope(
     """
     Builds a uniform machine-readable failure envelope.
 
+    A batch code (see BATCH_ERROR_CODES) additionally carries
+    BATCH_RECOVERY_PROTOCOL at the end of "message".
+
     Args:
         code: Stable error code string (e.g. "invalid_changes_file", "batch_validation_failed").
         failed: List of (0-based_batch_index, reason_string) tuples.
@@ -83,7 +98,7 @@ def failure_envelope(
         Dict with keys "error", "failed", and "message" (and optionally "errors").
     """
     clean_message = " ".join(line.strip() for line in message.splitlines() if line.strip())
-    if BATCH_RECOVERY_PROTOCOL not in clean_message:
+    if code in BATCH_ERROR_CODES and BATCH_RECOVERY_PROTOCOL not in clean_message:
         clean_message = f"{clean_message} {BATCH_RECOVERY_PROTOCOL}" if clean_message else BATCH_RECOVERY_PROTOCOL
     res: Dict[str, Any] = {
         "error": code,
