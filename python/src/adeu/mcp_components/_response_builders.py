@@ -146,33 +146,76 @@ def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+# Search-response size budget. A search response is sized at ~60 tokens per
+# requested match; tokens are estimated at 4 characters each (the same crude
+# ratio the test suite measures with). SNIPPET_RADIUS_LADDER is the descending
+# set of per-hit context radii the renderer tries, widest first: 120 chars is
+# the documented clamp, the rest are fallbacks for documents whose paragraphs
+# are long enough that 20 full-width snippets would not fit the budget.
+SEARCH_TOKENS_PER_MATCH = 60
+CHARS_PER_TOKEN = 4
+SNIPPET_RADIUS_LADDER = (120, 60, 30, 12, 0)
+
 _SNIPPET_MARKUP_PAIRS = (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}"))
+_SNIPPET_CLOSER_OF = dict(_SNIPPET_MARKUP_PAIRS)
+_SNIPPET_OPENER_OF = {closer: opener for opener, closer in _SNIPPET_MARKUP_PAIRS}
+_SNIPPET_MARKUP_TOKEN_RE = re.compile("|".join(re.escape(t) for t in (*_SNIPPET_CLOSER_OF, *_SNIPPET_OPENER_OF)))
 
 
 def _balance_snippet_window(body: str, start: int, end: int, line_start: int = 0) -> tuple[int, int]:
     """
-    Extends a line-sliced snippet window until every CriticMarkup span it
-    opens or closes is balanced.
+    Extends a snippet window until every CriticMarkup span it overlaps is
+    whole. {>>…<<} meta bubbles are MULTI-line and a clamped window cuts spans
+    on BOTH edges, so agents could not harvest ids/pairings from search
+    results (QA round 3, finding 3.12).
+
+    Delimiters are walked IN ORDER with a depth counter per pair, never
+    counted: a window holding one stray `--}` on the left and one stray `{--`
+    on the right balances arithmetically while reading `l1--}…{--del` (QA
+    finding 1). A closer seen at depth 0 belongs to a span that opened before
+    `start`, so `start` moves back to that opener; a pair still open when the
+    scan reaches `end` pushes `end` forward to its closer. Each step strictly
+    widens the window, so the loop terminates.
     """
-    prev_start, prev_end = -1, -1
-    while (prev_start, prev_end) != (start, end):
-        prev_start, prev_end = start, end
+    while True:
+        depth = dict.fromkeys(_SNIPPET_CLOSER_OF, 0)
+        widened = False
 
-        for opener, closer in _SNIPPET_MARKUP_PAIRS:
-            while body.count(closer, start, end) > body.count(opener, start, end):
-                prev_opener = body.rfind(opener, line_start, start)
-                if prev_opener == -1:
-                    break
+        for tok in _SNIPPET_MARKUP_TOKEN_RE.finditer(body, start, end):
+            token = tok.group(0)
+            if token in _SNIPPET_CLOSER_OF:
+                depth[token] += 1
+                continue
+            opener = _SNIPPET_OPENER_OF[token]
+            if depth[opener]:
+                depth[opener] -= 1
+            elif (prev_opener := body.rfind(opener, line_start, start)) != -1:
                 start = prev_opener
+                widened = True
+                break
 
-        for opener, closer in _SNIPPET_MARKUP_PAIRS:
-            while body.count(opener, start, end) > body.count(closer, start, end):
-                next_closer = body.find(closer, end)
-                if next_closer == -1:
-                    break
-                end = next_closer + len(closer)
+        if widened:
+            continue
 
-    return start, end
+        for opener, unclosed in depth.items():
+            if unclosed and (next_closer := body.find(_SNIPPET_CLOSER_OF[opener], end)) != -1:
+                end = next_closer + len(_SNIPPET_CLOSER_OF[opener])
+                widened = True
+                break
+
+        if not widened:
+            return start, end
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merges overlapping/touching (start, end) spans, sorted by start."""
+    merged: list[tuple[int, int]] = []
+    for span_start, span_end in sorted(spans):
+        if merged and span_start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], span_end))
+        else:
+            merged.append((span_start, span_end))
+    return merged
 
 
 def render_outline_tree(
@@ -666,11 +709,10 @@ def build_search_response(
             )
 
     # ---- Render. ----
-    ui_parts: list[str] = []
-
     total_filtered = len(filtered)
 
     if match_offset >= total_filtered:
+        ui_parts: list[str] = []
         if page_filter is None:
             ui_parts.append(
                 f"> **Search Results** — Found {total_matches} match"
@@ -701,73 +743,66 @@ def build_search_response(
         )
 
     selected_matches = filtered[match_offset : match_offset + max_matches]
-    num_rendered = len(selected_matches)
-    next_offset = match_offset + num_rendered
-    has_more = next_offset < total_filtered
 
-    if page_filter is None:
-        if total_filtered > num_rendered or match_offset > 0:
-            ui_parts.append(
-                f"> **Search Results** — Found {total_matches} match"
-                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
-                f"in `{Path(file_path).name}` ({total_matches} total, {num_rendered} shown)."
-            )
-        else:
-            ui_parts.append(
-                f"> **Search Results** — Found {total_matches} match"
-                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
-                f"in `{Path(file_path).name}`."
-            )
-        # Distribution summary only when matches span >1 document page.
-        if len(pages_with_hits) > 1:
-            dist_str = ", ".join(f"p{p}: {page_distribution[p]}" for p in pages_with_hits)
-            ui_parts.append(f"> Distribution across {len(pages_with_hits)} document pages — {dist_str}")
-        if has_more:
-            if is_cli:
-                ui_parts.append(
-                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
-                    f"Continue with `--match-offset {next_offset}`."
+    def build_header(num_rendered: int) -> list[str]:
+        """
+        Header, distribution, and continuation notes for a response that
+        renders `num_rendered` of the filtered matches. Built from the final
+        count so the "N shown" figure and the `match_offset` to continue from
+        stay truthful when the budget pass drops trailing entries.
+        """
+        head: list[str] = []
+        next_offset = match_offset + num_rendered
+        has_more = next_offset < total_filtered
+
+        if page_filter is None:
+            if total_filtered > num_rendered or match_offset > 0:
+                head.append(
+                    f"> **Search Results** — Found {total_matches} match"
+                    f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                    f"in `{Path(file_path).name}` ({total_matches} total, {num_rendered} shown)."
                 )
             else:
-                ui_parts.append(
-                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
-                    f"Continue with `match_offset={next_offset}`."
+                head.append(
+                    f"> **Search Results** — Found {total_matches} match"
+                    f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                    f"in `{Path(file_path).name}`."
                 )
-    else:
-        shown = total_filtered
-        if total_filtered > num_rendered or match_offset > 0:
-            ui_parts.append(
-                f"> **Search Results** — Found {shown} match"
-                f"{'es' if shown != 1 else ''} on document page {page_filter} "
-                f"for query `{search_query}` in `{Path(file_path).name}` "
-                f"({total_matches} total in document, {num_rendered} shown)."
-            )
+            # Distribution summary only when matches span >1 document page.
+            if len(pages_with_hits) > 1:
+                dist_str = ", ".join(f"p{p}: {page_distribution[p]}" for p in pages_with_hits)
+                head.append(f"> Distribution across {len(pages_with_hits)} document pages — {dist_str}")
         else:
-            ui_parts.append(
-                f"> **Search Results** — Found {shown} match"
-                f"{'es' if shown != 1 else ''} on document page {page_filter} "
-                f"for query `{search_query}` in `{Path(file_path).name}` "
-                f"({total_matches} total in document)."
-            )
-        other_pages = [p for p in pages_with_hits if p != page_filter]
-        if other_pages:
-            other_pages_str = ", ".join(str(p) for p in other_pages)
-            ui_parts.append(
-                f"> Additional matches exist on page"
-                f"{'s' if len(other_pages) != 1 else ''} {other_pages_str} — "
-                f"omit `page` or pass `page='all'` to see them."
-            )
-        if has_more:
-            if is_cli:
-                ui_parts.append(
-                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
-                    f"Continue with `--match-offset {next_offset}`."
+            shown = total_filtered
+            if total_filtered > num_rendered or match_offset > 0:
+                head.append(
+                    f"> **Search Results** — Found {shown} match"
+                    f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                    f"for query `{search_query}` in `{Path(file_path).name}` "
+                    f"({total_matches} total in document, {num_rendered} shown)."
                 )
             else:
-                ui_parts.append(
-                    f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). "
-                    f"Continue with `match_offset={next_offset}`."
+                head.append(
+                    f"> **Search Results** — Found {shown} match"
+                    f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                    f"for query `{search_query}` in `{Path(file_path).name}` "
+                    f"({total_matches} total in document)."
                 )
+            other_pages = [p for p in pages_with_hits if p != page_filter]
+            if other_pages:
+                other_pages_str = ", ".join(str(p) for p in other_pages)
+                head.append(
+                    f"> Additional matches exist on page"
+                    f"{'s' if len(other_pages) != 1 else ''} {other_pages_str} — "
+                    f"omit `page` or pass `page='all'` to see them."
+                )
+
+        if has_more:
+            knob = f"`--match-offset {next_offset}`" if is_cli else f"`match_offset={next_offset}`"
+            head.append(
+                f"> **Note:** Only {num_rendered} matches shown (max_matches={max_matches}). Continue with {knob}."
+            )
+        return head
 
     def clean_breadcrumb(raw: str) -> str:
         # Breadcrumbs render CLEAN-view heading text: a heading carrying a
@@ -827,66 +862,42 @@ def build_search_response(
             line_groups.append((line_start, groups_by_line[line_start]))
         groups_by_line[line_start].append((m, p_num))
 
-    for line_start, group in line_groups:
+    def render_entry(line_start: int, group: list, radius: int | None) -> str:
+        """
+        Renders one paragraph's hits as a single match entry. `radius` is the
+        context kept on each side of every hit; None renders the whole
+        paragraph (`full_paragraph`). Blocks are joined with blank lines
+        because each one is its own Markdown block — a bare "\\n" glued the
+        heading, snippet, and occurrence line into one paragraph (QA finding 3).
+        """
         first_m, p_num = group[0]
 
         last_m_end = max(m.end() for m, _p in group)
         next_nl = body.find("\n", last_m_end)
         line_end = len(body) if next_nl == -1 else next_nl
 
-        if full_paragraph:
-            win_start = line_start
-            win_end = line_end
-            region = body[win_start:win_end]
-            spans = [(m.start() - win_start, m.end() - win_start) for m, _p in group]
-            snippet = _emphasized_snippet(region, spans)
+        if radius is None:
+            intervals = [(line_start, line_end)]
         else:
-            raw_intervals = [(max(line_start, m.start() - 120), min(line_end, m.end() + 120)) for m, _p in group]
-            raw_intervals.sort(key=lambda x: x[0])
+            windows = [(max(line_start, m.start() - radius), min(line_end, m.end() + radius)) for m, _p in group]
+            # Balance AFTER merging (a widened window can swallow its
+            # neighbour) and merge again, so no two segments overlap.
+            intervals = _merge_spans(
+                [_balance_snippet_window(body, s, e, line_start=line_start) for s, e in _merge_spans(windows)]
+            )
 
-            merged_intervals: list[tuple[int, int]] = []
-            for s_pos, e_pos in raw_intervals:
-                if not merged_intervals:
-                    merged_intervals.append((s_pos, e_pos))
-                else:
-                    prev_s, prev_e = merged_intervals[-1]
-                    if s_pos <= prev_e:
-                        merged_intervals[-1] = (prev_s, max(prev_e, e_pos))
-                    else:
-                        merged_intervals.append((s_pos, e_pos))
+        segments: list[str] = []
+        for s_pos, e_pos in intervals:
+            spans = [(m.start() - s_pos, m.end() - s_pos) for m, _p in group if s_pos <= m.start() and m.end() <= e_pos]
+            segments.append(_emphasized_snippet(body[s_pos:e_pos], spans))
 
-            balanced_intervals: list[tuple[int, int]] = []
-            for s_pos, e_pos in merged_intervals:
-                bs, be = _balance_snippet_window(body, s_pos, e_pos, line_start=line_start)
-                balanced_intervals.append((bs, be))
-
-            final_intervals: list[tuple[int, int]] = []
-            for s_pos, e_pos in balanced_intervals:
-                if not final_intervals:
-                    final_intervals.append((s_pos, e_pos))
-                else:
-                    prev_s, prev_e = final_intervals[-1]
-                    if s_pos <= prev_e:
-                        final_intervals[-1] = (prev_s, max(prev_e, e_pos))
-                    else:
-                        final_intervals.append((s_pos, e_pos))
-
-            has_left_trim = final_intervals[0][0] > line_start
-            has_right_trim = final_intervals[-1][1] < line_end
-
-            seg_snippets: list[str] = []
-            for s_pos, e_pos in final_intervals:
-                region = body[s_pos:e_pos]
-                spans = [
-                    (m.start() - s_pos, m.end() - s_pos) for m, _p in group if s_pos <= m.start() and m.end() <= e_pos
-                ]
-                seg_snippets.append(_emphasized_snippet(region, spans))
-
-            snippet = " ... ".join(seg_snippets)
-            if has_left_trim:
-                snippet = "..." + snippet
-            if has_right_trim:
-                snippet = snippet + "..."
+        # " ... " marks elided interior text between distant hits; the outer
+        # "..." marks context trimmed off the paragraph's head/tail.
+        snippet = " ... ".join(segments)
+        if intervals[0][0] > line_start:
+            snippet = "..." + snippet
+        if intervals[-1][1] < line_end:
+            snippet = snippet + "..."
 
         snippet_lines = "\n".join(f"> {line}" for line in snippet.split("\n") if line.strip())
 
@@ -914,13 +925,58 @@ def build_search_response(
                 + " in the document."
             )
         match_lines.extend([snippet_lines, occurrence_line])
-        ui_parts.append("\n".join(match_lines))
+        return "\n\n".join(match_lines)
 
-    if regex_downgraded_note:
-        ui_parts.insert(0, regex_downgraded_note)
-    ui_markdown = "\n\n".join(part for part in ui_parts if part)
+    content_prefix = f"> **File Path:** `{file_path}`\n\n"
+
+    def compose(groups: list[tuple[int, list]], radius: int | None, budget_note: str) -> str:
+        parts = build_header(sum(len(g) for _ls, g in groups))
+        parts.extend(render_entry(line_start, group, radius) for line_start, group in groups)
+        if budget_note:
+            parts.append(budget_note)
+        if regex_downgraded_note:
+            parts.insert(0, regex_downgraded_note)
+        return "\n\n".join(part for part in parts if part)
+
+    # ---- Response size budget (QA finding 2). ----
+    # A ±120 window is up to 240 chars of context PER HIT, so 20 hits in long
+    # paragraphs blow the ~60-tokens-per-match ceiling this response is sized
+    # against even though each snippet is individually clamped. Render at the
+    # widest radius that fits the whole payload; if even the narrowest does
+    # not, drop trailing entries (the caller reaches them with match_offset)
+    # rather than emit an oversized response. `full_paragraph` is an explicit
+    # opt-out: the caller asked for whole paragraphs and gets them.
+    budget_chars = max_matches * SEARCH_TOKENS_PER_MATCH * CHARS_PER_TOKEN
+
+    def fits(markdown: str) -> bool:
+        return len(content_prefix) + len(markdown) <= budget_chars
+
+    if full_paragraph:
+        ui_markdown = compose(line_groups, None, "")
+    else:
+        radius = SNIPPET_RADIUS_LADDER[0]
+        ui_markdown = compose(line_groups, radius, "")
+        for radius in SNIPPET_RADIUS_LADDER[1:]:
+            if fits(ui_markdown):
+                break
+            ui_markdown = compose(
+                line_groups,
+                radius,
+                f"> **Note:** Snippets trimmed to ±{radius} characters around each hit "
+                f"to keep this response within its size budget.",
+            )
+        kept = list(line_groups)
+        while not fits(ui_markdown) and len(kept) > 1:
+            kept.pop()
+            ui_markdown = compose(
+                kept,
+                radius,
+                f"> **Note:** Snippets trimmed to ±{radius} characters and trailing matches dropped "
+                f"to keep this response within its size budget — continue from the `match_offset` above.",
+            )
+
     return BuilderResult(
-        content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+        content=content_prefix + ui_markdown,
         structured_content={
             "markdown": ui_markdown,
             "title": f"Search: {Path(file_path).name}",

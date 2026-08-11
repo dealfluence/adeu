@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -228,6 +229,34 @@ def test_full_paragraph_opt_out():
     assert "B" * 200 in md
 
 
+_MARKUP_PAIRS = (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}"))
+
+
+def _assert_markup_terminated_in_order(md: str) -> None:
+    """
+    Walks CriticMarkup delimiters in document order: a closer may never appear
+    before its opener, and nothing may still be open at the end. Counting
+    delimiters per pair is NOT enough — one stray closer on the left plus one
+    stray opener on the right balances arithmetically while reading
+    `l1--}` … `{--del`.
+    """
+    token_re = re.compile("|".join(re.escape(t) for pair in _MARKUP_PAIRS for t in pair))
+    closer_of = dict(_MARKUP_PAIRS)
+    opener_of = {closer: opener for opener, closer in _MARKUP_PAIRS}
+    depth = dict.fromkeys(closer_of, 0)
+    for tok in token_re.finditer(md):
+        token = tok.group(0)
+        if token in closer_of:
+            depth[token] += 1
+        else:
+            opener = opener_of[token]
+            assert depth[opener] > 0, (
+                f"closer `{token}` at {tok.start()} has no open `{opener}`: {md[tok.start() - 20 : tok.end() + 20]!r}"
+            )
+            depth[opener] -= 1
+    assert not any(depth.values()), f"unterminated CriticMarkup: {depth}"
+
+
 def test_clamped_snippet_never_leaves_markup_unterminated():
     # CriticMarkup span placed around 150 chars from match
     prefix = "X" * 100 + " {>>[Chg:1 delete] long comment bubble text<<} " + "Y" * 50
@@ -243,10 +272,30 @@ def test_clamped_snippet_never_leaves_markup_unterminated():
         file_path="doc.docx",
         full_paragraph=False,
     )
+    _assert_markup_terminated_in_order(res.structured_content["markdown"])
+
+
+def test_clamped_snippet_markup_balanced_in_order_not_by_count():
+    # Both window edges land INSIDE a deletion span: the left edge cuts
+    # `{--del1--}` after its opener, the right edge cuts `{--del2--}` after
+    # its opener. Delimiter counts match (one `--}`, one `{--`) while the text
+    # is nonsense, so only an ordered scan catches it.
+    text = "P" * 100 + "{--del1--}" + "Q" * 115 + "Supplier" + "R" * 114 + "{--del2--}" + "S" * 100
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
     md = res.structured_content["markdown"]
-    # Check that CriticMarkup openers and closers in snippet are balanced
-    for opener, closer in (("{>>", "<<}"), ("{--", "--}"), ("{++", "++}"), ("{==", "==}")):
-        assert md.count(opener) == md.count(closer)
+    _assert_markup_terminated_in_order(md)
+    assert "{--del1--}" in md
+    assert "{--del2--}" in md
+    assert "l1--}" not in md.replace("{--del1--}", "")
+    assert "{--de" not in md.replace("{--del1--}", "").replace("{--del2--}", "")
 
 
 def test_continue_note_names_next_offset():
@@ -294,6 +343,79 @@ def test_search_token_budget():
     )
     content = str(res.content)
     assert approx_tokens(content) <= 20 * 60
+
+
+def test_search_token_budget_with_long_paragraphs():
+    # 50 paragraphs of 4000+ chars each: a ±120 window per hit is ~240 chars
+    # of context, and 20 of those plus per-entry chrome overshoots the budget
+    # unless the renderer accounts for the WHOLE response.
+    text = "\n\n".join("a" * 2000 + f" Supplier target {i} " + "b" * 2000 for i in range(50))
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+    assert approx_tokens(str(res.content)) <= 20 * 60
+    assert md.count("### Match ") == 20
+    assert "**Supplier**" in md
+
+
+def test_search_token_budget_with_many_hits_in_one_paragraph():
+    # One paragraph, 25 hits separated by 300 chars: every hit window is its own
+    # elided segment inside a SINGLE entry, so the budget must be enforced
+    # across segments too, not per entry.
+    text = ("z" * 300).join(["Supplier"] * 25)
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+    assert approx_tokens(md) <= 20 * 60
+    assert "**Supplier**" in md
+
+
+def test_small_max_matches_still_shows_every_requested_match():
+    # Budget scales with max_matches, so a narrow page must trim snippets
+    # rather than silently drop entries the caller explicitly asked for.
+    text = "\n\n".join("a" * 2000 + f" Supplier target {i} " + "b" * 2000 for i in range(50))
+
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+        max_matches=5,
+    )
+    md = res.structured_content["markdown"]
+    assert md.count("### Match ") == 5
+    assert approx_tokens(str(res.content)) <= 5 * 60
+
+
+def test_match_entry_blocks_keep_blank_line_separators():
+    text = _make_haystack(3)
+    res = build_search_response(
+        text,
+        search_query="Supplier",
+        search_regex=False,
+        search_case_sensitive=True,
+        page=None,
+        file_path="doc.docx",
+    )
+    md = res.structured_content["markdown"]
+    assert "---\n\n### Match 1 (p1)\n\n**Path:** `Heading 1`\n\n> " in md
+    assert "\n\n*Occurrences:*" in md
 
 
 def test_cli_search_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch):
