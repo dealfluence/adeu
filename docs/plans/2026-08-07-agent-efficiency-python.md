@@ -189,14 +189,16 @@
 
 ### Task 9 — Item B6: `ensure_ascii=False` for Agent-Facing JSON
 **Goal.** Output literal UTF-8 in JSON outputs instead of `\u2019` escapes.
-**Failed Verify Cycles:** 1
+**Failed Verify Cycles:** 2 (Escalated to @opus-coder: trigger (a) second failed cycle, trigger (b) same finding in two verdicts)
 **Attempt Ledger:**
 - attempt 1: Passed ensure_ascii=False to json.dumps in cli.py, payloads.py, created test_json_unicode.py -> VERDICT: FAIL (test_error_envelope_preserves_unicode didn't fail on pre-change code; stale comments in payloads.py)
+- attempt 2: Updated test_error_envelope_preserves_unicode to target adeu markup --json error envelope output; updated comments in payloads.py -> VERDICT: FAIL (test_error_envelope_preserves_unicode still passed on pre-change code because all CLI error envelope emitters were already ensure_ascii=False at base)
+- attempt 3 (@opus-coder): Replaced test_error_envelope_preserves_unicode with test_markup_json_success_preserves_unicode, targeting the `markup -o - --json` SUCCESS envelope (cli.py:1618) — a payload path that genuinely changed in Task 9. All 5 tests now fail against `6b01a1c~1`.
 **Files.** `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`, `python/src/adeu/redline/engine.py`.
 **Test first.** `python/tests/test_json_unicode.py` (new):
 1. `test_extract_json_preserves_unicode`: literal smart quotes and dashes in JSON output.
 2. `test_apply_stats_json_preserves_unicode`: curly quotes preserved in apply stats JSON.
-3. `test_error_envelope_preserves_unicode`: unicode characters preserved in error envelopes.
+3. `test_markup_json_success_preserves_unicode`: unicode preserved in the markup success envelope's embedded `content`.
 4. `test_no_escaped_sequences_anywhere`: `"\\u"` absent in stdout across subcommands.
 5. `test_output_is_utf8_decodable`: stdout decodes as valid UTF-8.
 **Change.** Pass `ensure_ascii=False` to all `json.dumps()` calls.

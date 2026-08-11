@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from docx import Document
 
 from adeu.cli import main
@@ -72,19 +71,21 @@ def test_apply_stats_json_preserves_unicode(tmp_path, capsys):
     assert data["edits_applied"] == 1
 
 
-def test_error_envelope_preserves_unicode(tmp_path, capsys):
-    doc_text = "Some text."
-    docx_path = make_docx_with_text(tmp_path / "test_err.docx", doc_text)
+def test_markup_json_success_preserves_unicode(tmp_path, capsys):
+    # The markup success envelope carries the whole CriticMarkup preview inside
+    # `content` under `-o -`, so it is the largest agent-facing JSON surface:
+    # escaping there costs six characters per punctuation mark of the document.
+    doc_text = "The Agreement’s ‘Initial Term’ — 12 months — applies."
+    docx_path = make_docx_with_text(tmp_path / "test_markup_ok.docx", doc_text)
 
-    # Supply an edit with target text that won't match, including smart quotes in error
     edits = [
         {
             "type": "modify",
-            "target_text": "Missing ‘curly’ target text — not found",
-            "new_text": "replacement",
+            "target_text": "12 months",
+            "new_text": "twenty‑four (24) months — per §3.1 “Extension”",
         }
     ]
-    edits_path = tmp_path / "edits_err.json"
+    edits_path = tmp_path / "edits_ok.json"
     edits_path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
 
     with patch.object(
@@ -95,20 +96,21 @@ def test_error_envelope_preserves_unicode(tmp_path, capsys):
             "markup",
             str(docx_path),
             str(edits_path),
+            "-o",
+            "-",
             "--json",
         ],
     ):
-        with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code != 0
+        main()
 
     out = capsys.readouterr().out
-    assert "Missing ‘curly’ target text — not found" in out
-    assert r"\u2018" not in out
-    assert r"\u2019" not in out
-    assert r"\u2014" not in out
+    assert "twenty‑four (24) months — per §3.1 “Extension”" in out
+    assert "The Agreement’s ‘Initial Term’" in out
+    assert r"\u" not in out
     data = json.loads(out)
-    assert data["error"] == "batch_validation_failed"
+    assert data["status"] == "ok"
+    assert data["failed"] == 0
+    assert "{++twenty‑four (24) months — per §3.1 “Extension”++}" in data["content"]
 
 
 def test_no_escaped_sequences_anywhere(tmp_path, capsys):
