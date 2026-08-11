@@ -2311,13 +2311,20 @@ class RedlineEngine:
                     fully_within_foreign_ins = not has_non_foreign_real_text
                     if not (match_mode in ("strict", "first") and fully_within_foreign_ins):
                         author_hints = []
+                        first_target_id = None
                         for auth in sorted(ins_authors_to_ids.keys()):
                             sorted_ids = sorted(ins_authors_to_ids[auth], key=lambda x: int(x) if x.isdigit() else 0)
+                            if first_target_id is None and sorted_ids:
+                                first_target_id = f"Chg:{sorted_ids[0]}"
                             id_hints = ", ".join(f"Chg:{cid}" for cid in sorted_ids)
                             author_hints.append(f"{auth} (e.g. {id_hints})" if id_hints else auth)
+                        accept_json = (
+                            f'{{"type": "accept", "target_id": "{first_target_id}"}}' if first_target_id else ""
+                        )
                         errors.append(
                             f"- Edit {i + 1} Failed: Modification targets an active insertion from another author "
-                            f"({', '.join(author_hints)}). Accept that change first or scope your edit outside of it."
+                            f"({', '.join(author_hints)}). Accept first with {accept_json} "
+                            'or use match_mode="strict" or "first".'
                         )
                         continue
 
