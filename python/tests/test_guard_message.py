@@ -63,6 +63,20 @@ def test_guard_names_the_narrowing_alternative_for_match_mode_all():
     assert "scope your edit outside of it" in msg
 
 
+def test_guard_still_names_author_and_ids():
+    """author name and change IDs preserved by the actionable rewrite (holds pre- and post-change)."""
+    stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
+    engine = RedlineEngine(stream, author="Reviewer AI")
+    edit = ModifyText(target_text="written notice", new_text="email notification", match_mode="all")
+
+    with pytest.raises(BatchValidationError) as exc_info:
+        engine.process_batch([edit])
+
+    msg = exc_info.value.errors[0]
+    assert "Supplier's Counsel" in msg
+    assert "(e.g. Chg:201)" in msg
+
+
 def test_guard_recommends_scoping_outside_for_strict_straddle():
     stream = _create_doc_with_foreign_ins(author="Supplier's Counsel", ins_id="201")
     engine = RedlineEngine(stream, author="Reviewer AI")
