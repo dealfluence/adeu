@@ -4,7 +4,9 @@ from pathlib import Path
 from adeu.cli import handle_extract
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
+    build_outline_response,
     build_paginated_response,
+    build_search_response,
 )
 from tests.fixtures_synth import build_long_docx
 from tests.utils import approx_tokens
@@ -134,3 +136,85 @@ def test_no_chrome_composes_with_json(tmp_path: Path, capsys):
     assert "**File Path:**" not in md
     assert "(synthetic page" not in md
     assert md.startswith("[p1/3]\n\n")
+
+
+def test_no_chrome_search_zero_matches(tmp_path: Path):
+    doc_path = tmp_path / "test_search_zero.docx"
+    build_long_docx(doc_path, pages=1)
+
+    from docx import Document
+
+    doc = Document(str(doc_path))
+    text = _extract_text_from_doc(doc)
+    assert isinstance(text, str)
+
+    res = build_search_response(
+        text,
+        search_query="nonexistent_xyz_query",
+        search_regex=False,
+        search_case_sensitive=False,
+        page=None,
+        file_path=str(doc_path),
+        no_chrome=True,
+    )
+
+    content = str(res.content)
+    assert "**File Path:**" not in content
+    assert "**Search Results**" not in content
+    assert "Verify your search spelling" not in content
+    assert "No matches found" in content
+
+
+def test_no_chrome_search_offset_past_total(tmp_path: Path):
+    doc_path = tmp_path / "test_search_offset.docx"
+    build_long_docx(doc_path, pages=1)
+
+    from docx import Document
+
+    doc = Document(str(doc_path))
+    text = _extract_text_from_doc(doc)
+    assert isinstance(text, str)
+
+    res = build_search_response(
+        text,
+        search_query="Section",
+        search_regex=False,
+        search_case_sensitive=False,
+        page=None,
+        file_path=str(doc_path),
+        match_offset=100,
+        no_chrome=True,
+    )
+
+    content = str(res.content)
+    assert "**File Path:**" not in content
+    assert "**Search Results**" not in content
+    assert "No matches in this window" in content
+
+
+def test_no_chrome_deep_outline_level(tmp_path: Path):
+    doc_path = tmp_path / "test_outline_deep.docx"
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading("Deep Heading", level=3)
+    doc.save(str(doc_path))
+
+    doc_obj = Document(str(doc_path))
+    text = _extract_text_from_doc(doc_obj)
+    assert isinstance(text, str)
+
+    res = build_outline_response(
+        doc_obj,
+        projected_text=text,
+        file_path=str(doc_path),
+        outline_max_level=1,
+        no_chrome=True,
+    )
+
+    content = str(res.content)
+    assert "**File Path:**" not in content
+    assert "Run `adeu extract" not in content
+    assert "Call read_docx" not in content
+    assert str(doc_path) not in content
+    assert "No headings at level <=" in content

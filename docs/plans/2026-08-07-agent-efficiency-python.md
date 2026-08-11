@@ -271,6 +271,9 @@
 
 ### Task 13 — Item A4: `--no-chrome` Extract Flag
 **Goal.** Strip navigation prose, banners, footers, and appendix pointers from extract output.
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Added no_chrome parameter across response builders and --no-chrome CLI flag, created test_no_chrome.py -> VERDICT: FAIL (File Path header and navigation prose still emitted under no_chrome in search zero matches, page filter with no hits, window offset past total, and deep outline level)
 **Files.**
 - `python/src/adeu/mcp_components/_response_builders.py`
 - `python/src/adeu/cli.py`

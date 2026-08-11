@@ -348,6 +348,7 @@ def render_outline_tree(
     verbose: bool = False,
     is_cli: bool = False,
     file_path: str = "document.docx",
+    no_chrome: bool = False,
 ) -> str:
     """
     Renders a flat list of OutlineNode objects as a Markdown tree.
@@ -368,6 +369,10 @@ def render_outline_tree(
     visible = [n for n in nodes if n.level <= max_level]
 
     if not visible:
+        if no_chrome:
+            return (
+                f"# (No headings at level <= {max_level})\n\nDocument has {len(nodes)} headings, all at deeper levels."
+            )
         if is_cli:
             hint = f"Run `adeu extract {file_path} --mode outline --outline-max-level N` (up to 6) to see them."
         else:
@@ -608,6 +613,7 @@ def build_outline_response(
         verbose=outline_verbose,
         is_cli=is_cli,
         file_path=file_path,
+        no_chrome=no_chrome,
     )
 
     visible_count = sum(1 for n in nodes if n.level <= outline_max_level)
@@ -848,14 +854,18 @@ def build_search_response(
                 "Verify your search spelling, or try setting `search_case_sensitive` to false "
                 "or enabling `search_regex` if you used pattern wildcards."
             )
-        ui_markdown = (
-            f"> **Search Results** — No matches found for query `{search_query}` in `{Path(file_path).name}`.\n\n"
-            + retry_hint
-        )
+        if no_chrome:
+            ui_markdown = f"No matches found for query `{search_query}`."
+        else:
+            ui_markdown = (
+                f"> **Search Results** — No matches found for query `{search_query}` in `{Path(file_path).name}`.\n\n"
+                + retry_hint
+            )
         if regex_downgraded_note:
             ui_markdown = f"{regex_downgraded_note}\n\n{ui_markdown}"
+        llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
         return BuilderResult(
-            content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+            content=llm_content,
             structured_content={
                 "markdown": ui_markdown,
                 "title": f"Search: {Path(file_path).name}",
@@ -887,16 +897,23 @@ def build_search_response(
         # `page=N` valid but has no hits, query exists elsewhere.
         if not filtered:
             other_pages_str = ", ".join(str(p) for p in pages_with_hits)
-            ui_markdown = (
-                f"> **Search Results** — No matches on document page {page_filter} "
-                f"for query `{search_query}` in `{Path(file_path).name}`.\n\n"
-                f"The query DOES appear elsewhere ({total_matches} match"
-                f"{'es' if total_matches != 1 else ''} on page"
-                f"{'s' if len(pages_with_hits) != 1 else ''} {other_pages_str}). "
-                f"Omit `page` or pass `page='all'` to see them."
-            )
+            if no_chrome:
+                ui_markdown = (
+                    f"No matches on document page {page_filter} for query `{search_query}`. "
+                    f"Query appears on page(s) {other_pages_str}."
+                )
+            else:
+                ui_markdown = (
+                    f"> **Search Results** — No matches on document page {page_filter} "
+                    f"for query `{search_query}` in `{Path(file_path).name}`.\n\n"
+                    f"The query DOES appear elsewhere ({total_matches} match"
+                    f"{'es' if total_matches != 1 else ''} on page"
+                    f"{'s' if len(pages_with_hits) != 1 else ''} {other_pages_str}). "
+                    f"Omit `page` or pass `page='all'` to see them."
+                )
+            llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
             return BuilderResult(
-                content=f"> **File Path:** `{file_path}`\n\n{ui_markdown}",
+                content=llm_content,
                 structured_content={
                     "markdown": ui_markdown,
                     "title": f"Search: {Path(file_path).name}",
@@ -916,25 +933,27 @@ def build_search_response(
         knows the query itself matched.
         """
         ui_parts: list[str] = []
-        if page_filter is None:
-            ui_parts.append(
-                f"> **Search Results** — Found {total_matches} match"
-                f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
-                f"in `{Path(file_path).name}`."
-            )
-        else:
-            ui_parts.append(
-                f"> **Search Results** — Found {total_filtered} match"
-                f"{'es' if total_filtered != 1 else ''} on document page {page_filter} "
-                f"for query `{search_query}` in `{Path(file_path).name}` "
-                f"({total_matches} total in document)."
-            )
+        if not no_chrome:
+            if page_filter is None:
+                ui_parts.append(
+                    f"> **Search Results** — Found {total_matches} match"
+                    f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
+                    f"in `{Path(file_path).name}`."
+                )
+            else:
+                ui_parts.append(
+                    f"> **Search Results** — Found {total_filtered} match"
+                    f"{'es' if total_filtered != 1 else ''} on document page {page_filter} "
+                    f"for query `{search_query}` in `{Path(file_path).name}` "
+                    f"({total_matches} total in document)."
+                )
         ui_parts.append(note)
         if regex_downgraded_note:
             ui_parts.insert(0, regex_downgraded_note)
         note_markdown = "\n\n".join(part for part in ui_parts if part)
+        llm_content = note_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{note_markdown}"
         return BuilderResult(
-            content=f"> **File Path:** `{file_path}`\n\n{note_markdown}",
+            content=llm_content,
             structured_content={
                 "markdown": note_markdown,
                 "title": f"Search: {Path(file_path).name}",
@@ -944,15 +963,23 @@ def build_search_response(
 
     if max_matches < 1:
         knob = "`--max-matches N`" if is_cli else "`max_matches=N`"
-        return window_note_response(
-            f"> **Note:** No matches shown (max_matches={max_matches}, total matches={total_filtered}). "
-            f"Pass {knob} with N >= 1 to see match snippets."
-        )
+        if no_chrome:
+            note_str = f"No matches shown (max_matches={max_matches}, total matches={total_filtered})."
+        else:
+            note_str = (
+                f"> **Note:** No matches shown (max_matches={max_matches}, total matches={total_filtered}). "
+                f"Pass {knob} with N >= 1 to see match snippets."
+            )
+        return window_note_response(note_str)
 
     if match_offset >= total_filtered:
-        return window_note_response(
-            f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
-        )
+        if no_chrome:
+            note_str = f"No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
+        else:
+            note_str = (
+                f"> **Note:** No matches in this window (match_offset={match_offset}, total matches={total_filtered})."
+            )
+        return window_note_response(note_str)
 
     selected_matches = filtered[match_offset : match_offset + max_matches]
 
@@ -1218,11 +1245,18 @@ def build_search_response(
             kept.pop()
             if not kept:
                 opt_out = "`--full-paragraph`" if is_cli else "`full_paragraph=true`"
-                return window_note_response(
-                    f"> **Note:** No matches shown in this window: not even one ±{radius}-char snippet fits "
-                    f"the response size budget (max_matches={max_matches}, total matches={total_filtered}). "
-                    f"Raise `max_matches`, or pass {opt_out} to read the matching paragraph in full."
-                )
+                if no_chrome:
+                    note_str = (
+                        f"No matches shown in this window: not even one ±{radius}-char snippet fits "
+                        f"the response size budget (max_matches={max_matches}, total matches={total_filtered})."
+                    )
+                else:
+                    note_str = (
+                        f"> **Note:** No matches shown in this window: not even one ±{radius}-char snippet fits "
+                        f"the response size budget (max_matches={max_matches}, total matches={total_filtered}). "
+                        f"Raise `max_matches`, or pass {opt_out} to read the matching paragraph in full."
+                    )
+                return window_note_response(note_str)
             ui_markdown = compose(
                 kept,
                 radius,
