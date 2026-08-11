@@ -1,13 +1,19 @@
 import json
+import re
+from io import BytesIO
 from pathlib import Path
 
 from adeu.cli import handle_extract
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
+    build_changes_response,
     build_outline_response,
     build_paginated_response,
     build_search_response,
 )
+from adeu.models import ModifyText
+from adeu.redline.comments import CommentsManager
+from adeu.redline.engine import RedlineEngine
 from tests.fixtures_synth import build_long_docx
 from tests.utils import approx_tokens
 
@@ -218,3 +224,98 @@ def test_no_chrome_deep_outline_level(tmp_path: Path):
     assert "Call read_docx" not in content
     assert str(doc_path) not in content
     assert "No headings at level <=" in content
+
+
+def _get_doc_text(docx_path: Path) -> str:
+    from docx import Document
+
+    res = _extract_text_from_doc(Document(str(docx_path)), clean_view=False)
+    if isinstance(res, tuple):
+        return str(res[0])
+    return str(res)
+
+
+def _build_clean_docx(path: Path) -> Path:
+    """A document with body text but no tracked changes and no comments."""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("The quick brown fox jumps over the lazy dog.")
+    doc.save(str(path))
+    return path
+
+
+def _build_tracked_docx(path: Path) -> Path:
+    """A document carrying tracked changes authored by `Jane Doe`."""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("The quick brown fox jumps over the lazy dog.")
+    base_path = path.parent / "tracked_base.docx"
+    doc.save(str(base_path))
+
+    with open(base_path, "rb") as f:
+        engine = RedlineEngine(BytesIO(f.read()), author="Jane Doe")
+    engine.process_batch([ModifyText(target_text="fox", new_text="cat")])
+
+    with open(path, "wb") as f:
+        f.write(engine.save_to_stream().getvalue())
+    return path
+
+
+def test_no_chrome_changes_clean_document_states_zero_counts(tmp_path: Path):
+    doc_path = _build_clean_docx(tmp_path / "clean.docx")
+    text = _get_doc_text(doc_path)
+
+    res = build_changes_response(text, str(doc_path), is_cli=True, no_chrome=True)
+
+    content = str(res.content)
+    assert content == "0 change(s), 0 comment(s)"
+    assert (res.structured_content or {})["markdown"] == "0 change(s), 0 comment(s)"
+    assert "**File Path:**" not in content
+    assert "**Changes ledger**" not in content
+
+
+def test_no_chrome_changes_cli_clean_document_prints_zero_counts(tmp_path: Path, capsys):
+    doc_path = _build_clean_docx(tmp_path / "clean_cli.docx")
+
+    args = _Args(input=doc_path, mode="changes", no_chrome=True)
+    handle_extract(args)
+
+    assert capsys.readouterr().out.strip() == "0 change(s), 0 comment(s)"
+
+
+def test_no_chrome_changes_unmatched_author_filter_states_zero_counts(tmp_path: Path):
+    from docx import Document
+
+    doc_path = _build_tracked_docx(tmp_path / "tracked.docx")
+    text = _get_doc_text(doc_path)
+    comments_data = CommentsManager(Document(str(doc_path))).extract_comments_data()
+
+    matched = build_changes_response(
+        text,
+        str(doc_path),
+        comments_data=comments_data,
+        author_filter="Jane Doe",
+        no_chrome=True,
+    )
+    assert "Chg:" in str(matched.content)
+
+    res = build_changes_response(
+        text,
+        str(doc_path),
+        comments_data=comments_data,
+        author_filter="No Such Author",
+        no_chrome=True,
+    )
+    assert str(res.content) == "0 change(s), 0 comment(s)"
+
+
+def test_no_chrome_changes_offset_past_last_entry_keeps_counts(tmp_path: Path):
+    doc_path = _build_tracked_docx(tmp_path / "tracked_offset.docx")
+    text = _get_doc_text(doc_path)
+
+    res = build_changes_response(text, str(doc_path), offset=500, no_chrome=True)
+
+    content = str(res.content)
+    assert re.fullmatch(r"[1-9]\d* change\(s\), \d+ comment\(s\)", content), content

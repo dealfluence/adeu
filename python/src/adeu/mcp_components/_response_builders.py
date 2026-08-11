@@ -1790,7 +1790,12 @@ def build_changes_response(
             )
 
     if no_chrome:
-        ui_markdown = "\n".join(lines)
+        # The ledger lines ARE the payload here, so chrome-stripping normally
+        # leaves them alone. With nothing to list (clean document, a filter
+        # matching no entry, or an offset past the last one) the counts are the
+        # only answer there is: emit them as a bare line, never an empty
+        # response (QA 2026-08-12: `--mode changes --no-chrome` returned "").
+        ui_markdown = "\n".join(lines) or f"{total_changes} change(s), {total_comments} comment(s)"
         llm_content = ui_markdown
     else:
         ui_markdown = header + "\n".join(lines) + continuation
