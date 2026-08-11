@@ -185,7 +185,7 @@ def _cli_error(
 ) -> NoReturn:
     """
     Terminates the CLI with a consistent error contract:
-      - human-readable diagnostics on stderr (always)
+      - human-readable diagnostics on stderr (when --json is NOT enabled)
       - a single {"error": code, "failed": [...], "message": ...} JSON object on stdout when
         the invocation asked for --json
     Stable codes: file_not_found, invalid_input, invalid_docx,
@@ -194,12 +194,13 @@ def _cli_error(
     if code in BATCH_ERROR_CODES:
         if BATCH_RECOVERY_PROTOCOL not in message and (not hint or BATCH_RECOVERY_PROTOCOL not in hint):
             hint = f"{hint}\n{BATCH_RECOVERY_PROTOCOL}" if hint else BATCH_RECOVERY_PROTOCOL
-    print(f"❌ {message}", file=sys.stderr)
-    if hint:
-        print(hint, file=sys.stderr)
     if _JSON_MODE:
         env = failure_envelope(code, failed or [], message, errors=errors)
         print(json.dumps(env, ensure_ascii=False))
+    else:
+        print(f"❌ {message}", file=sys.stderr)
+        if hint:
+            print(hint, file=sys.stderr)
     sys.exit(exit_code)
 
 
@@ -908,8 +909,10 @@ def handle_extract(args):
         elif want_all_pages:
             from adeu.payloads import response_budget_limit, whole_doc_guard_message
 
-            if not getattr(args, "force", False) and len(text) > response_budget_limit():
+            output_path = getattr(args, "output", None)
+            if output_path is None and not getattr(args, "force", False) and len(text) > response_budget_limit():
                 from adeu.mcp_components._response_builders import build_outline_response
+                from adeu.pagination import paginate, split_structural_appendix
 
                 l1_outline = ""
                 if doc is not None:
@@ -922,11 +925,15 @@ def handle_extract(args):
                         is_cli=True,
                     )
                     l1_outline = str(out_res.content)
+                body, app = split_structural_appendix(text)
+                pag_res = paginate(body, app)
+                page_count = pag_res.total_pages
                 msg = whole_doc_guard_message(
                     total_chars=len(text),
                     limit=response_budget_limit(),
                     file_path="Active Document" if args.live else str(args.input),
                     outline=l1_outline,
+                    page_count=page_count,
                 )
                 _cli_error("response_budget_exceeded", msg, exit_code=1)
 

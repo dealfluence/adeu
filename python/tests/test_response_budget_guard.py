@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -62,8 +63,68 @@ def test_guard_output_is_under_800_tokens():
         outline="# Heading 1 (p1)\n# Heading 2 (p5)\n# Heading 3 (p10)",
         page_count=12,
     )
+    assert len(msg) <= 3100
     approx_tokens = len(msg) // 4
-    assert approx_tokens <= 800
+    assert approx_tokens <= 775
+
+
+def test_cli_output_file_sink_exempt_from_guard(tmp_path: Path, monkeypatch):
+    doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
+    dump_path = tmp_path / "dump.txt"
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", str(doc_path), "--page", "all", "-o", str(dump_path)])
+    main()
+    assert dump_path.exists()
+    content = dump_path.read_text(encoding="utf-8")
+    assert "Paragraph chunk 0" in content
+
+
+def test_cli_refusal_includes_page_count(tmp_path: Path, monkeypatch, capsys):
+    doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", str(doc_path), "--page", "all"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "pages)" in output
+
+
+def test_cli_json_mode_no_stderr_duplication_and_bounded(tmp_path: Path, monkeypatch, capsys):
+    doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
+    monkeypatch.setattr(sys, "argv", ["adeu", "extract", str(doc_path), "--page", "all", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = json.loads(captured.out)
+    assert data.get("error") == "response_budget_exceeded"
+    assert len(captured.out) // 4 <= 800
+
+
+def test_live_word_guard_and_force(monkeypatch):
+    from adeu.mcp_components.tools.live_word import read_active_word_document
+
+    big_text = "x" * 80000
+    doc = docx.Document()
+    doc.add_paragraph(big_text)
+
+    def mock_core(clean_view=False, file_path=None, include_appendix=False, return_paragraph_offsets=False):
+        if return_paragraph_offsets:
+            return big_text, "Active Document", doc, {}
+        return big_text, "Active Document", doc
+
+    monkeypatch.setattr("adeu.mcp_components.tools.live_word._read_active_word_document_core", mock_core)
+    ctx = MockContext()
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(read_active_word_document(ctx=ctx, page="all", force=False))
+    err_msg = str(exc_info.value)
+    assert "Refused unbounded full document read" in err_msg
+
+    res = asyncio.run(read_active_word_document(ctx=ctx, page="all", force=True))
+    assert res is not None
+    assert big_text in str(res.content)
 
 
 def test_guard_includes_outline():

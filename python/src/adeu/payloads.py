@@ -437,9 +437,9 @@ def whole_doc_guard_message(
 
     msg = "\n".join(lines)
 
-    # Enforce maximum token budget (<= 800 approx tokens = 3200 chars)
-    if len(msg) // 4 > 800:
-        max_chars = 800 * 4 - 20
+    # Enforce maximum character/token budget (<= 3100 chars / 775 approx tokens)
+    if len(msg) > 3100:
+        max_chars = 3100 - 4
         msg = msg[:max_chars] + "\n..."
 
     return msg

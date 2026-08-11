@@ -471,6 +471,7 @@ if sys.platform == "win32":
 
                             if not force and len(final_text) > response_budget_limit():
                                 from adeu.mcp_components._response_builders import build_outline_response
+                                from adeu.pagination import paginate, split_structural_appendix
 
                                 l1_outline = ""
                                 if py_doc is not None:
@@ -483,11 +484,15 @@ if sys.platform == "win32":
                                         is_cli=False,
                                     )
                                     l1_outline = str(out_res.content)
+                                body, app = split_structural_appendix(final_text)
+                                pag_res = paginate(body, app)
+                                page_count = pag_res.total_pages
                                 msg = whole_doc_guard_message(
                                     total_chars=len(final_text),
                                     limit=response_budget_limit(),
                                     file_path=actual_path,
                                     outline=l1_outline,
+                                    page_count=page_count,
                                 )
                                 raise ToolError(msg)
 
