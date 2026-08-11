@@ -33,6 +33,10 @@ _APPENDIX_POINTER_RE = re.compile(r"\n+---\n+> \*\*Appendix available\.\*\*[^\n]
 
 _MACHINE_ACCOUNT_NAMES = {"root", "admin", "administrator", "system", "daemon", "nobody"}
 
+# Documents at or above this many characters use the 50% deletion budget;
+# shorter ones use the higher 75% floor (see check_major_deletions).
+_MAJOR_DELETION_MIN_ORIGINAL_CHARS = 2000
+
 
 class TextRevisionError(Exception):
     """Base exception for text revision errors."""
@@ -101,37 +105,44 @@ def check_major_deletions(
     original_text: str,
     revised_text: str,
     allow_major_deletions: bool = False,
+    source_name: Optional[str] = None,
 ) -> None:
-    """Refuses major deletions (>50% chars for >=2000 chars doc, >75% for <2000 chars doc,
-    or >50 paragraphs) unless allowed."""
+    """
+    Refuses to silently delete the majority of a document. 2000 chars ≈ one
+    page of prose; above that, losing half the document is almost never
+    intentional. Short documents matter too (QA 2026-07-19 v8 F-12): below the
+    threshold the guard still arms, at a higher 75% floor so that deliberately
+    halving a small draft stays a one-command workflow while near-total
+    truncation requires the explicit flag.
+
+    The budget is measured in CHARACTERS only: a document made of many short
+    paragraphs legitimately loses dozens of them in an ordinary edit.
+    `source_name` names the revised text's origin (the CLI's text file) in the
+    refusal message when there is one.
+    """
     if allow_major_deletions:
         return
 
     orig_len = len(original_text)
     rev_len = len(revised_text)
+    if orig_len == 0:
+        return
 
-    if orig_len > 0:
-        char_deletion_ratio = (orig_len - rev_len) / orig_len
-        threshold = 0.50 if orig_len >= 2000 else 0.75
-        if char_deletion_ratio > threshold:
-            pct = int(char_deletion_ratio * 100)
-            threshold_pct = int(threshold * 100)
-            raise ValueError(
-                f"Revised text is ~{pct}% shorter than the document's clean text "
-                f"({rev_len:,} vs {orig_len:,} characters, threshold is >{threshold_pct}% deletion). "
-                "Applying it would delete a major portion of the document. "
-                "Pass --allow-major-deletions (or allow_major_deletions=True) to override."
-            )
+    char_deletion_ratio = (orig_len - rev_len) / orig_len
+    threshold = 0.50 if orig_len >= _MAJOR_DELETION_MIN_ORIGINAL_CHARS else 0.75
+    if char_deletion_ratio <= threshold:
+        return
 
-    orig_paras = len(original_text.splitlines())
-    rev_paras = len(revised_text.splitlines())
-    paras_deleted = orig_paras - rev_paras
-    if paras_deleted > 50:
-        raise ValueError(
-            f"Revised text deletes {paras_deleted} paragraphs from the original document "
-            "(threshold is >50 paragraphs deleted). "
-            "Pass --allow-major-deletions (or allow_major_deletions=True) to override."
-        )
+    subject = f"'{source_name}'" if source_name else "The revised text"
+    raise ValueError(
+        f"{subject} is ~{int(char_deletion_ratio * 100)}% shorter than the document's clean text "
+        f"({rev_len:,} vs {orig_len:,} characters, threshold is >{int(threshold * 100)}% deletion). "
+        "Applying it would delete the majority of the document as tracked deletions.\n"
+        "   If the text is a partial extract, re-extract the ENTIRE document with "
+        "`--page all --clean-view` and edit that.\n"
+        "   If the mass deletion is intentional, re-run with --allow-major-deletions "
+        "(over MCP: allow_major_deletions=True)."
+    )
 
 
 def _extract_clean_text_from_doc(doc: Any) -> str:

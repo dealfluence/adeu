@@ -30,8 +30,10 @@ from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.text_revision import (
     _CRITICMARKUP_TOKENS,
     _EXTRACT_HEADER_RE,
-    _normalize_virtual_projection_text,
+    _extract_clean_text_from_doc,
     _strip_page_chrome,
+    check_major_deletions,
+    verify_clean_text,
 )
 from adeu.text_revision import (
     get_default_author as _default_author,
@@ -1191,72 +1193,30 @@ def handle_apply(args):
         else:
             if not args.original:
                 _cli_error("invalid_input", "Must provide original file if not using --live", exit_code=2)
-            _require_input_file(args.original)
-            _load_docx_or_exit(args.original)
+            doc = _load_docx_or_exit(args.original)
+
+            # Canonical baseline for text-file input: the CLEAN (accepted)
+            # view. Extract with --clean-view (and --page all on multi-page
+            # documents) to produce a file this path can round-trip.
+            text_orig = _extract_clean_text_from_doc(doc)
 
             text_mod = _load_roundtrip_text(args.changes, args.original, "apply")
 
-            from adeu.text_revision import (
-                TextRevisionVerificationError,
-                apply_text_revision_core,
-            )
-
             try:
-                stats, out_path = apply_text_revision_core(
-                    file_path=args.original,
-                    revised_text=text_mod,
-                    output_path=args.output,
-                    author=args.author,
+                check_major_deletions(
+                    text_orig,
+                    text_mod,
                     allow_major_deletions=args.allow_major_deletions,
+                    source_name=args.changes.name,
                 )
-            except TextRevisionVerificationError as e:
-                stats = e.stats
-                if getattr(args, "report", "standard") == "minimal":
-                    stats = shrink_batch_stats(stats)
-
-                if args.json:
-                    print(json.dumps(stats, ensure_ascii=False))
-                else:
-                    print(
-                        f"❌ Verification failed — no output was written to: {e.output_path}\n"
-                        f"   A diagnostic copy (NOT the requested document) was kept at: {e.unverified_path}",
-                        file=sys.stderr,
-                    )
-                    occurrences = stats.get("occurrences_modified", 0)
-                    occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
-                    already = stats.get("actions_already_resolved", 0)
-                    already_text = f", {already} already resolved (no effect)" if already else ""
-                    print(
-                        f"Actions: {stats['actions_applied']} applied, "
-                        f"{stats['actions_skipped']} skipped{already_text}.\n"
-                        f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
-                        file=sys.stderr,
-                    )
-                    _print_detailed_edit_reports(stats)
-                    print(f"\n❌ {e}", file=sys.stderr)
-                sys.exit(1)
             except ValueError as e:
                 print(f"❌ {e}", file=sys.stderr)
                 sys.exit(1)
 
-            if getattr(args, "report", "standard") == "minimal":
-                stats = shrink_batch_stats(stats)
+            from adeu.diff import generate_edits_via_paragraph_alignment
 
-            if args.json:
-                print(json.dumps(stats, ensure_ascii=False))
-            else:
-                print(f"Batch complete. Saved to: {out_path}", file=sys.stderr)
-                occurrences = stats.get("occurrences_modified", 0)
-                occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
-                already = stats.get("actions_already_resolved", 0)
-                already_text = f", {already} already resolved (no effect)" if already else ""
-                print(
-                    f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
-                    f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.",
-                    file=sys.stderr,
-                )
-                _print_detailed_edit_reports(stats)
-            return
+            changes.extend(generate_edits_via_paragraph_alignment(text_orig, text_mod))
+            verify_against = text_mod
 
     if args.live:
         if sys.platform != "win32":
@@ -1334,29 +1294,13 @@ def handle_apply(args):
     verification_error = None
     unverified_path = None
     if verify_against is not None and not batch_failed:
-        from adeu.ingest import _extract_text_from_doc
+        verified, divergence = verify_clean_text(engine.doc, verify_against)
 
-        final_clean = _extract_text_from_doc(engine.doc, clean_view=True, include_appendix=False)
-        expected = verify_against.strip()
-        actual = final_clean.strip()
-
-        actual_norm = _normalize_virtual_projection_text(actual)
-        expected_norm = _normalize_virtual_projection_text(expected)
-
-        if actual_norm != expected_norm:
-            div = next(
-                (k for k, (a, b) in enumerate(zip(actual_norm, expected_norm, strict=False)) if a != b),
-                min(len(actual_norm), len(expected_norm)),
-            )
+        if not verified:
             assert output_path is not None
             unverified_path = output_path.with_name(f"{output_path.stem}.unverified.docx")
             verification_error = (
-                "Post-apply verification failed: the applied document's clean text does not match "
-                f"the supplied text (first divergence at character {div}: "
-                f"applied reads {actual_norm[div : div + 40]!r}, supplied text reads "
-                f"{expected_norm[div : div + 40]!r}). The document structure could not fully realize "
-                "the requested text (e.g. headings or table cells cannot be deleted via text "
-                f"replacement). Nothing was written to '{output_path}'; a diagnostic copy was "
+                f"{divergence} Nothing was written to '{output_path}'; a diagnostic copy was "
                 f"kept at '{unverified_path}' — it is NOT the requested document."
             )
             stats["verified"] = False

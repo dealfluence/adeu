@@ -1140,7 +1140,8 @@ async def apply_text_revision(
     output_path: Annotated[Optional[str], "Optional output path for the modified DOCX."] = None,
     author: Annotated[Optional[str], "Author name for Track Changes."] = None,
     allow_major_deletions: Annotated[
-        bool, "Allow major deletions (>30% of characters or >50 paragraphs deleted)."
+        bool,
+        "Allow deleting >50% of characters (>75% for documents under 2000 characters).",
     ] = False,
     reasoning: Annotated[
         Optional[str],
