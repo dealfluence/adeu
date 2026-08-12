@@ -451,6 +451,24 @@ registerAppTool(
         .boolean()
         .default(true)
         .describe("Set to false to perform case-insensitive matching."),
+      max_matches: z.coerce
+        .number()
+        .default(20)
+        .describe(
+          "For search queries: maximum number of search matches to return (default 20).",
+        ),
+      match_offset: z.coerce
+        .number()
+        .default(0)
+        .describe(
+          "For search queries: 0-based match offset to start search results from for pagination (default 0).",
+        ),
+      full_paragraph: z
+        .boolean()
+        .default(false)
+        .describe(
+          "For search queries: return full paragraph for search matches instead of clamping snippets to ±120 chars.",
+        ),
     }),
     outputSchema: READ_DOCX_OUTPUT_SCHEMA,
     _meta: { ui: { resourceUri: MARKDOWN_UI_URI } },
@@ -467,6 +485,9 @@ registerAppTool(
       search_query,
       search_regex,
       search_case_sensitive,
+      max_matches,
+      match_offset,
+      full_paragraph,
       changes_author,
       changes_offset,
     },
@@ -557,6 +578,7 @@ registerAppTool(
           page,
           file_path,
           bundle,
+          { max_matches, match_offset, full_paragraph },
         );
         return res as any;
       }

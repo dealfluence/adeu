@@ -109,44 +109,237 @@ export function emphasizedSnippetSpans(
   return parts.join("");
 }
 
+// Search-response size budget. A search response is sized at ~60 tokens per
+// requested match; tokens are estimated at 4 characters each (the same crude
+// ratio the test suite measures with). SNIPPET_RADIUS_LADDER is the descending
+// set of per-hit context radii the renderer tries, widest first: 120 chars is
+// the documented clamp, the rest are fallbacks for documents whose paragraphs
+// are long enough that 20 full-width snippets would not fit the budget. The
+// ladder does NOT bottom out at 0: a `...**Supplier**...` snippet costs chrome
+// to tell the agent only what it already typed, so 16 chars each side is the
+// floor and the budget pass drops trailing entries instead.
+export const SEARCH_TOKENS_PER_MATCH = 60;
+export const CHARS_PER_TOKEN = 4;
+export const SNIPPET_RADIUS_LADDER = [120, 60, 30, 16];
+
+// `max_matches * 60` is an allowance for match CONTENT, but a response also
+// carries chrome that no radius can shrink (the file-path line, the results
+// header, the distribution summary, the continuation and trim notes — ~110
+// fixed, plus ~22 per entry for the rule, heading, breadcrumb and occurrence
+// line, and ~13 for a floor-radius snippet). Sizing from chrome + a minimum
+// snippet per entry keeps every requested entry payable on a 1- or 2-match
+// page, where a purely content-sized budget was unreachable at ANY radius.
+export const SEARCH_FIXED_CHROME_TOKENS = 120;
+export const SEARCH_ENTRY_CHROME_TOKENS = 22;
+export const SEARCH_MIN_SNIPPET_TOKENS = 13;
+
+/**
+ * Approximate-token ceiling for a search response that was ASKED for
+ * `max_matches` hits and actually rendered `rendered_count` of them (defaults
+ * to all of them). The chrome term is sized on hits RENDERED, not requested:
+ * once the budget pass starts dropping hits it must stop granting per-hit
+ * allowance for hits no longer in the response. Mirrors Python's
+ * search_budget_tokens (_response_builders.py:181-202).
+ */
+export function search_budget_tokens(
+  max_matches: number,
+  rendered_count?: number,
+): number {
+  if (max_matches < 1) return SEARCH_FIXED_CHROME_TOKENS;
+  const rendered =
+    rendered_count === undefined
+      ? max_matches
+      : Math.min(max_matches, Math.max(rendered_count, 0));
+  return Math.max(
+    max_matches * SEARCH_TOKENS_PER_MATCH,
+    SEARCH_FIXED_CHROME_TOKENS +
+      rendered * (SEARCH_ENTRY_CHROME_TOKENS + SEARCH_MIN_SNIPPET_TOKENS),
+  );
+}
+
 const SNIPPET_MARKUP_PAIRS: Array<[string, string]> = [
   ["{>>", "<<}"],
   ["{--", "--}"],
   ["{++", "++}"],
   ["{==", "==}"],
 ];
+const SNIPPET_CLOSER_OF: Record<string, string> =
+  Object.fromEntries(SNIPPET_MARKUP_PAIRS);
+const SNIPPET_OPENER_OF: Record<string, string> = Object.fromEntries(
+  SNIPPET_MARKUP_PAIRS.map(([opener, closer]) => [closer, opener]),
+);
+const SNIPPET_MARKUP_TOKEN_SRC = [
+  ...Object.keys(SNIPPET_CLOSER_OF),
+  ...Object.keys(SNIPPET_OPENER_OF),
+]
+  .map((t) => escapeRegExp(t))
+  .join("|");
 
-function countIn(haystack: string, needle: string): number {
-  let count = 0;
-  let at = haystack.indexOf(needle);
-  while (at !== -1) {
-    count++;
-    at = haystack.indexOf(needle, at + needle.length);
-  }
-  return count;
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Extends a line-sliced snippet window until every CriticMarkup span it
- * opens is closed. {>>…<<} meta bubbles are MULTI-line, so slicing at the
- * line break cut them mid-annotation and agents could not harvest
+ * Extends a snippet window until every CriticMarkup span it overlaps is whole,
+ * returning the widened `[start, end]`. {>>…<<} meta bubbles are MULTI-line
+ * and a clamped window cuts spans on BOTH edges, so agents could not harvest
  * ids/pairings from search results (QA round 3, finding 3.12).
+ *
+ * Delimiters are walked IN ORDER with a depth counter per pair, never counted:
+ * a window holding one stray `--}` on the left and one stray `{--` on the
+ * right balances arithmetically while reading `l1--}…{--del` (QA round 4,
+ * finding 1). A closer seen at depth 0 belongs to a span that opened before
+ * `start`, so `start` moves back to that opener; a pair still open when the
+ * scan reaches `end` pushes `end` forward to its closer. Each step strictly
+ * widens the window, so the loop terminates.
+ *
+ * Mirrors Python's _balance_snippet_window. NOTE the backward search:
+ * Python's `body.rfind(opener, 0, start)` requires the opener to fit ENTIRELY
+ * before `start`, while JS `lastIndexOf`'s second argument is the START of the
+ * match — hence the `start - opener.length` bound, and the negative guard
+ * (`lastIndexOf(x, -1)` searches at index 0 instead of failing).
  */
-function balanceSnippetWindow(body: string, start: number, end: number): number {
-  let prev_end = -1;
-  while (prev_end !== end) {
-    prev_end = end;
-    for (const [opener, closer] of SNIPPET_MARKUP_PAIRS) {
-      let window = body.substring(start, end);
-      while (countIn(window, opener) > countIn(window, closer)) {
-        const close_at = body.indexOf(closer, end);
-        if (close_at === -1) return end;
-        end = close_at + closer.length;
-        window = body.substring(start, end);
+export function balanceSnippetWindow(
+  body: string,
+  start: number,
+  end: number,
+): [number, number] {
+  for (;;) {
+    const depth: Record<string, number> = {};
+    for (const opener of Object.keys(SNIPPET_CLOSER_OF)) depth[opener] = 0;
+    let widened = false;
+
+    const token_re = new RegExp(SNIPPET_MARKUP_TOKEN_SRC, "g");
+    token_re.lastIndex = start;
+    let tok: RegExpExecArray | null;
+    while ((tok = token_re.exec(body)) !== null) {
+      // Python's finditer(body, start, end) cannot match past `end`; tokens
+      // are all 3 chars, so anything straddling the edge ends the scan.
+      if (tok.index + tok[0].length > end) break;
+      const token = tok[0];
+      if (token in SNIPPET_CLOSER_OF) {
+        depth[token] += 1;
+        continue;
+      }
+      const opener = SNIPPET_OPENER_OF[token];
+      if (depth[opener]) {
+        depth[opener] -= 1;
+        continue;
+      }
+      const search_from = start - opener.length;
+      const prev_opener =
+        search_from < 0 ? -1 : body.lastIndexOf(opener, search_from);
+      if (prev_opener !== -1) {
+        start = prev_opener;
+        widened = true;
+        break;
       }
     }
+
+    if (widened) continue;
+
+    for (const opener of Object.keys(depth)) {
+      if (!depth[opener]) continue;
+      const closer = SNIPPET_CLOSER_OF[opener];
+      const next_closer = body.indexOf(closer, end);
+      if (next_closer !== -1) {
+        end = next_closer + closer.length;
+        widened = true;
+        break;
+      }
+    }
+
+    if (!widened) return [start, end];
   }
-  return end;
+}
+
+const TRAILING_BUBBLE_RE = /\{>>\s*(\[[^\]\n]{0,80}\])([\s\S]*?)<<\}/y;
+
+/**
+ * The meta bubble the projection writes immediately after a deletion's or
+ * insertion's closer, reduced to its `[Chg:N …]` header — the id an agent
+ * needs to accept or reject the change it is looking at. The bubble's prose is
+ * elided with `...` rather than reproduced, because this is re-attached to a
+ * snippet that was clamped for size in the first place. Empty when no bubble
+ * follows. Mirrors Python's _trailing_bubble_header.
+ */
+function trailingBubbleHeader(body: string, at: number): string {
+  TRAILING_BUBBLE_RE.lastIndex = at;
+  const m = TRAILING_BUBBLE_RE.exec(body);
+  if (!m) return "";
+  return "{>>" + m[1] + (m[2].trim() ? " ..." : "") + "<<}";
+}
+
+/**
+ * The `(prefix, suffix)` CriticMarkup tags a snippet window needs because it
+ * sits STRICTLY INSIDE spans that open before it and close after it.
+ *
+ * balanceSnippetWindow only sees delimiters WITHIN the window, so a window cut
+ * out of the middle of a long deletion contains no delimiters at all, is
+ * declared balanced, and ships deleted text as live prose. The window is not
+ * widened to the span's own edges (a 4000-char deletion would defeat clamping
+ * entirely) — only the tags are re-attached. A `{>>` bubble carries its
+ * `[Chg:N …]` header into the prefix; a deletion or insertion carries the
+ * id-bearing bubble that follows its closer into the suffix. Mirrors Python's
+ * _enclosing_snippet_markup.
+ */
+function enclosingSnippetMarkup(
+  body: string,
+  start: number,
+  end: number,
+): [string, string] {
+  const open_spans: Array<[number, string, string]> = [];
+  for (const [opener, closer] of SNIPPET_MARKUP_PAIRS) {
+    const pair_re = new RegExp(
+      `${escapeRegExp(opener)}|${escapeRegExp(closer)}`,
+      "g",
+    );
+    const stack: number[] = [];
+    let tok: RegExpExecArray | null;
+    while ((tok = pair_re.exec(body)) !== null) {
+      if (tok.index + tok[0].length > start) break;
+      if (tok[0] === opener) stack.push(tok.index);
+      else if (stack.length) stack.pop();
+    }
+    if (!stack.length) continue;
+    const closer_at = body.indexOf(closer, end);
+    if (closer_at === -1) continue;
+    const open_at = stack[stack.length - 1];
+    let prefix = opener;
+    let suffix = closer;
+    if (opener === "{>>") {
+      const header = /^\[[^\]\n]{0,80}\]/.exec(
+        body.slice(open_at + opener.length, start),
+      );
+      if (header) prefix += header[0];
+    } else {
+      suffix += trailingBubbleHeader(body, closer_at + closer.length);
+    }
+    open_spans.push([open_at, prefix, suffix]);
+  }
+
+  open_spans.sort((a, b) => a[0] - b[0]);
+  return [
+    open_spans.map(([, prefix]) => prefix).join(""),
+    open_spans
+      .slice()
+      .reverse()
+      .map(([, , suffix]) => suffix)
+      .join(""),
+  ];
+}
+
+/** Merges overlapping/touching [start, end) spans, sorted by start. */
+function mergeSpans(spans: Array<[number, number]>): Array<[number, number]> {
+  const merged: Array<[number, number]> = [];
+  for (const [span_start, span_end] of [...spans].sort(
+    (a, b) => a[0] - b[0] || a[1] - b[1],
+  )) {
+    const last = merged[merged.length - 1];
+    if (last && span_start <= last[1]) last[1] = Math.max(last[1], span_end);
+    else merged.push([span_start, span_end]);
+  }
+  return merged;
 }
 
 function _build_appendix_pointer(has_appendix: boolean): string {
@@ -450,6 +643,38 @@ export function build_appendix_response(
   };
 }
 
+/** One hit, carrying its document page and its GLOBAL 1-based match index. */
+interface SearchHit {
+  text: string;
+  start: number;
+  end: number;
+  page: number;
+  index: number;
+}
+
+/**
+ * Filters projected Markdown to exact substring or regex matches.
+ *
+ * `page` semantics:
+ *   - undefined/null or "all" (case-insensitive): ALL matches across the whole
+ *     document. When matches span >1 document page, include a one-line
+ *     distribution summary.
+ *   - positive int N: only matches whose offset falls within document page N.
+ *     If N has zero hits but the query exists elsewhere, emit a helpful
+ *     empty-result pointer (not an error). If N exceeds the document's total
+ *     pages, throw.
+ *   - anything else (0, negative, a range string, a non-"all" string): throw.
+ *
+ * Occurrence counts (the "appears X times" line under each match) are always
+ * computed from the FULL match set, never filtered.
+ *
+ * `max_matches < 1` renders NO match entries — just the counts header and a
+ * note naming the knob to raise. It is never rewritten to the default 20.
+ *
+ * Port of Python's build_search_response (_response_builders.py:716-1278); the
+ * `is_cli` strict-regex branch is not ported — the MCP path always downgrades
+ * an uncompilable pattern to a literal search with a note.
+ */
 export function build_search_response(
   text: string,
   search_query: string,
@@ -458,86 +683,74 @@ export function build_search_response(
   page: number | string | undefined,
   file_path: string,
   bundle?: ProjectionBundle,
+  opts?: {
+    max_matches?: number;
+    match_offset?: number;
+    full_paragraph?: boolean;
+    no_chrome?: boolean;
+  },
 ): ToolResult {
+  // `max_matches < 1` is honoured as the zero it says, not silently rewritten
+  // to the default 20: a caller (or a tool wrapper computing a remaining
+  // budget) that asks for 0 matches and is handed 20 full snippets gets a
+  // payload it never asked for (QA round 5, finding 3).
+  const max_matches = opts?.max_matches ?? 20;
+  const full_paragraph = opts?.full_paragraph ?? false;
+  const no_chrome = opts?.no_chrome ?? false;
+  let match_offset = opts?.match_offset ?? 0;
+  if (match_offset < 0) match_offset = 0;
+
   const body = bundle ? bundle.body : split_structural_appendix(text)[0];
-  const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const flags = search_case_sensitive ? "g" : "gi";
+
+  const literalMatches = (): Array<{ start: number; end: number }> =>
+    Array.from(
+      body.matchAll(new RegExp(escapeRegExp(search_query), flags)),
+      (m) => ({ start: m.index!, end: m.index! + m[0].length }),
+    );
 
   // When the caller asked for a regex but supplied something the engine can't
   // compile (e.g. an unterminated character class `\[`, or an inline-flag group
   // `(?i)...` that JS RegExp rejects), do NOT hard-error and burn the turn.
   // Downgrade to a literal search of the raw string and tell the model, so it
-  // can either accept the literal hits or fix its pattern — instead of retrying
-  // the same broken regex.
+  // can either accept the literal hits or fix its pattern. Patterns that blow
+  // the matching time budget (catastrophic backtracking, QA 2026-07-17 F5) get
+  // the same treatment — for a read-only search, degraded results beat a hung
+  // event loop.
   let regexDowngradedNote = "";
-  let regex: RegExp;
+  let rawMatches: Array<{ start: number; end: number }>;
   let isUserRegex = false;
   if (search_regex) {
     try {
-      regex = new RegExp(search_query, flags);
+      new RegExp(search_query, flags);
       isUserRegex = true;
     } catch (e: any) {
       regexDowngradedNote =
         `> **Note:** \`${search_query}\` is not a valid regular expression ` +
         `(${e.message}), so it was searched as literal text instead. ` +
         `If you meant a regex, fix the pattern; if you meant literal text, set \`search_regex\` to false.`;
-      regex = new RegExp(escapeRegExp(search_query), flags);
     }
-  } else {
-    regex = new RegExp(escapeRegExp(search_query), flags);
   }
-
-  // Patterns that blow the matching time budget (catastrophic backtracking,
-  // QA 2026-07-17 F5) get the same literal downgrade as invalid patterns —
-  // for a read-only search, degraded results beat a hung event loop.
-  let allMatches: Array<{ 0: string; index?: number }>;
   if (isUserRegex) {
     try {
-      allMatches = userFindAllMatches(search_query, body, flags).map((m) => ({
-        0: body.slice(m.start, m.end),
-        index: m.start,
-      }));
+      rawMatches = userFindAllMatches(search_query, body, flags);
     } catch (e: any) {
       if (!(e instanceof RegexTimeoutError)) throw e;
       regexDowngradedNote =
         `> **Note:** \`${search_query}\` was searched as literal text instead of as ` +
         `a regular expression: ${e.message}`;
-      allMatches = Array.from(body.matchAll(new RegExp(escapeRegExp(search_query), flags)));
+      rawMatches = literalMatches();
     }
   } else {
-    allMatches = Array.from(body.matchAll(regex));
+    rawMatches = literalMatches();
   }
 
-  // Compute document pagination once — needed for both annotation and filtering.
+  // Pagination is needed for both filter mode and the distribution summary,
+  // even when there are no matches (to validate `page` is in range).
   const pag_res = bundle ? bundle.pagination : paginate(body, "");
   const page_offsets = pag_res.body_page_offsets;
   const total_doc_pages = pag_res.total_pages;
 
-  // Resolve `page` parameter to either "all" or a concrete document-page number.
-  // Undefined → "all" (search across the whole document).
-  // "all" (case-insensitive) → "all".
-  // A positive integer N → filter matches to document page N.
-  // Anything else → hard error.
-  let filter_doc_page: number | null = null; // null means "all"
-  if (page !== undefined && page !== null) {
-    const pageStr = String(page).toLowerCase();
-    if (pageStr !== "all") {
-      const parsed = parseInt(pageStr, 10);
-      if (isNaN(parsed) || parsed < 1) {
-        throw new Error(
-          `Invalid page value: \`${page}\`. Pass a positive integer to restrict the search to that document page, omit \`page\` to search all pages, or pass \`page='all'\` explicitly.`,
-        );
-      }
-      if (parsed > total_doc_pages) {
-        throw new Error(
-          `Document page ${parsed} is out of range — the document has ${total_doc_pages} page(s). In search mode, \`page\` filters matches to a specific document page; omit it or pass \`page='all'\` to search the whole document.`,
-        );
-      }
-      filter_doc_page = parsed;
-    }
-  }
-
-  // Helper: which document page does an offset live on?
   const pageOfOffset = (offset: number): number => {
     let p = 1;
     for (let j = 0; j < page_offsets.length; j++) {
@@ -547,177 +760,355 @@ export function build_search_response(
     return p;
   };
 
-  // Apply the filter (if any), but keep a record of all pages that had hits
-  // so we can show a useful summary even when filtered.
-  const pagesWithHits = new Set<number>();
-  for (const m of allMatches) {
-    pagesWithHits.add(pageOfOffset(m.index!));
+  // ---- Resolve `page` into either null (= all) or a 1-indexed int. ----
+  // Python reprs the offending value (`'2-4'` for a string, `0` for an int);
+  // the two spellings tell an agent whether its argument arrived as a string.
+  const shownPage = typeof page === "string" ? `'${page}'` : String(page);
+  const badPage = (omitted_hint: string): Error =>
+    new Error(
+      `Invalid page value: ${shownPage}. In search mode, \`page\` must be ` +
+        `${omitted_hint}, \`'all'\`, or a positive integer document page number.`,
+    );
+  let page_filter: number | null = null;
+  if (page !== undefined && page !== null) {
+    if (typeof page === "string") {
+      if (page.toLowerCase() !== "all") {
+        // Allow numeric strings ("3"); reject anything else — including a
+        // range like "2-4", which `parseInt` would silently read as 2.
+        if (!/^[+-]?\d+$/.test(page.trim())) throw badPage("omitted (search all pages)");
+        page_filter = parseInt(page.trim(), 10);
+        if (page_filter < 1) throw badPage("omitted");
+      }
+    } else if (typeof page === "number" && Number.isInteger(page)) {
+      if (page < 1) throw badPage("omitted");
+      page_filter = page;
+    } else {
+      throw badPage("omitted");
+    }
   }
 
-  const matches =
-    filter_doc_page === null
-      ? allMatches
-      : allMatches.filter((m) => pageOfOffset(m.index!) === filter_doc_page);
+  if (page_filter !== null && page_filter > total_doc_pages) {
+    throw new Error(
+      `Document page ${page_filter} is out of range — the document has ` +
+        `${total_doc_pages} page(s). In search mode, \`page\` filters matches ` +
+        `by document page; omit \`page\` (or pass \`page='all'\`) to search ` +
+        `across the whole document.`,
+    );
+  }
 
-  // --- Empty result ---
-  if (matches.length === 0) {
-    let body_msg: string;
-    if (filter_doc_page !== null) {
-      if (allMatches.length === 0) {
-        body_msg = `> **Search Results** — No matches found for query \`${search_query}\` in \`${basename(file_path)}\`.\n\nVerify your search spelling, or try setting \`search_case_sensitive\` to false or enabling \`search_regex\` if you used pattern wildcards.`;
-      } else {
-        const hitPages = Array.from(pagesWithHits).sort((a, b) => a - b);
-        body_msg = `> **Search Results** — No matches for \`${search_query}\` on document page ${filter_doc_page}.\n\nThe query DOES appear elsewhere in the document (${allMatches.length} match${allMatches.length !== 1 ? "es" : ""} on page${hitPages.length !== 1 ? "s" : ""} ${hitPages.join(", ")}). Omit \`page\` or pass \`page='all'\` to see them.`;
+  const title = `Search: ${basename(file_path)}`;
+  const wrap = (ui_markdown: string): ToolResult => ({
+    content: [
+      {
+        type: "text",
+        text: no_chrome
+          ? ui_markdown
+          : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`,
+      },
+    ],
+    structuredContent: {
+      markdown: ui_markdown,
+      title,
+      file_path: resolve(file_path),
+    },
+  });
+
+  // ---- No matches anywhere. ----
+  if (rawMatches.length === 0) {
+    let ui_markdown = no_chrome
+      ? `No matches found for query \`${search_query}\`.`
+      : `> **Search Results** — No matches found for query \`${search_query}\` in \`${basename(file_path)}\`.\n\n` +
+        "Verify your search spelling, or try setting `search_case_sensitive` to false " +
+        "or enabling `search_regex` if you used pattern wildcards.";
+    if (regexDowngradedNote)
+      ui_markdown = `${regexDowngradedNote}\n\n${ui_markdown}`;
+    return wrap(ui_markdown);
+  }
+
+  // ---- Assign each match to its document page. ----
+  const all_hits: SearchHit[] = rawMatches.map((m, i) => ({
+    text: body.slice(m.start, m.end),
+    start: m.start,
+    end: m.end,
+    page: pageOfOffset(m.start),
+    index: i + 1,
+  }));
+  const total_matches = all_hits.length;
+
+  // Global occurrence map and page distribution — never filtered.
+  const occurrences_map: Record<string, number> = {};
+  const page_distribution = new Map<number, number>();
+  for (const hit of all_hits) {
+    occurrences_map[hit.text] = (occurrences_map[hit.text] || 0) + 1;
+    page_distribution.set(hit.page, (page_distribution.get(hit.page) || 0) + 1);
+  }
+  const pages_with_hits = Array.from(page_distribution.keys()).sort(
+    (a, b) => a - b,
+  );
+
+  // ---- Apply filter. ----
+  const filtered =
+    page_filter === null
+      ? all_hits
+      : all_hits.filter((hit) => hit.page === page_filter);
+
+  // `page=N` valid but has no hits, query exists elsewhere.
+  if (page_filter !== null && filtered.length === 0) {
+    const other_pages_str = pages_with_hits.join(", ");
+    const ui_markdown = no_chrome
+      ? `No matches on document page ${page_filter} for query \`${search_query}\`. ` +
+        `Query appears on page(s) ${other_pages_str}.`
+      : `> **Search Results** — No matches on document page ${page_filter} ` +
+        `for query \`${search_query}\` in \`${basename(file_path)}\`.\n\n` +
+        `The query DOES appear elsewhere (${total_matches} match` +
+        `${total_matches !== 1 ? "es" : ""} on page` +
+        `${pages_with_hits.length !== 1 ? "s" : ""} ${other_pages_str}). ` +
+        "Omit `page` or pass `page='all'` to see them.";
+    return wrap(ui_markdown);
+  }
+
+  // ---- Render. ----
+  const total_filtered = filtered.length;
+
+  /**
+   * A counts header plus one explanatory note and NO match entries, for every
+   * reason the requested window renders nothing: `match_offset` past the last
+   * match, `max_matches` below 1, or a size budget that cannot pay for even
+   * one snippet. The totals are still reported so the caller knows the query
+   * itself matched.
+   */
+  const window_note_response = (note: string): ToolResult => {
+    const ui_parts: string[] = [];
+    if (!no_chrome) {
+      ui_parts.push(
+        page_filter === null
+          ? `> **Search Results** — Found ${total_matches} match` +
+              `${total_matches !== 1 ? "es" : ""} for query \`${search_query}\` ` +
+              `in \`${basename(file_path)}\`.`
+          : `> **Search Results** — Found ${total_filtered} match` +
+              `${total_filtered !== 1 ? "es" : ""} on document page ${page_filter} ` +
+              `for query \`${search_query}\` in \`${basename(file_path)}\` ` +
+              `(${total_matches} total in document).`,
+      );
+    }
+    ui_parts.push(note);
+    if (regexDowngradedNote) ui_parts.unshift(regexDowngradedNote);
+    return wrap(ui_parts.filter((part) => part).join("\n\n"));
+  };
+
+  if (max_matches < 1) {
+    return window_note_response(
+      no_chrome
+        ? `No matches shown (max_matches=${max_matches}, total matches=${total_filtered}).`
+        : `> **Note:** No matches shown (max_matches=${max_matches}, total matches=${total_filtered}). ` +
+            "Pass `max_matches=N` with N >= 1 to see match snippets.",
+    );
+  }
+
+  if (match_offset >= total_filtered) {
+    return window_note_response(
+      no_chrome
+        ? `No matches in this window (match_offset=${match_offset}, total matches=${total_filtered}).`
+        : `> **Note:** No matches in this window (match_offset=${match_offset}, total matches=${total_filtered}).`,
+    );
+  }
+
+  const selected_matches = filtered.slice(
+    match_offset,
+    match_offset + max_matches,
+  );
+
+  /**
+   * Header, distribution, and continuation notes for a response that renders
+   * `num_rendered` of the filtered matches. Built from the final count so the
+   * "N shown" figure and the `match_offset` to continue from stay truthful
+   * when the budget pass drops trailing entries.
+   */
+  function build_header(num_rendered: number): string[] {
+    const head: string[] = [];
+    const next_offset = match_offset + num_rendered;
+    const has_more = next_offset < total_filtered;
+
+    if (page_filter === null) {
+      const found =
+        `> **Search Results** — Found ${total_matches} match` +
+        `${total_matches !== 1 ? "es" : ""} for query \`${search_query}\` ` +
+        `in \`${basename(file_path)}\``;
+      head.push(
+        total_filtered > num_rendered || match_offset > 0
+          ? `${found} (${total_matches} total, ${num_rendered} shown).`
+          : `${found}.`,
+      );
+      // Distribution summary only when matches span >1 document page.
+      if (pages_with_hits.length > 1) {
+        const dist_str = pages_with_hits
+          .map((p) => `p${p}: ${page_distribution.get(p)}`)
+          .join(", ");
+        head.push(
+          `> Distribution across ${pages_with_hits.length} document pages — ${dist_str}`,
+        );
       }
     } else {
-      body_msg = `> **Search Results** — No matches found for query \`${search_query}\` in \`${basename(file_path)}\`.\n\nVerify your search spelling, or try setting \`search_case_sensitive\` to false or enabling \`search_regex\` if you used pattern wildcards.`;
-    }
-    if (regexDowngradedNote) body_msg = `${regexDowngradedNote}\n\n${body_msg}`;
-    const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${body_msg}`;
-    return {
-      content: [{ type: "text", text: llm_content }],
-      structuredContent: {
-        markdown: body_msg,
-        title: `Search: ${basename(file_path)}`,
-        file_path: resolve(file_path),
-      },
-    };
-  }
-
-  // --- Build the response ---
-  const ui_parts: string[] = [];
-
-  if (filter_doc_page !== null) {
-    ui_parts.push(
-      `> **Search Results** — Found ${matches.length} match${matches.length !== 1 ? "es" : ""} for \`${search_query}\` on document page ${filter_doc_page} of ${total_doc_pages} in \`${basename(file_path)}\`.`,
-    );
-    const otherPages = Array.from(pagesWithHits)
-      .filter((p) => p !== filter_doc_page)
-      .sort((a, b) => a - b);
-    if (otherPages.length > 0) {
-      ui_parts.push(
-        `> Additional matches exist on page${otherPages.length !== 1 ? "s" : ""} ${otherPages.join(", ")} — omit \`page\` or pass \`page='all'\` to see them.`,
+      const found =
+        `> **Search Results** — Found ${total_filtered} match` +
+        `${total_filtered !== 1 ? "es" : ""} on document page ${page_filter} ` +
+        `for query \`${search_query}\` in \`${basename(file_path)}\` ` +
+        `(${total_matches} total in document`;
+      head.push(
+        total_filtered > num_rendered || match_offset > 0
+          ? `${found}, ${num_rendered} shown).`
+          : `${found}).`,
       );
-    }
-  } else {
-    ui_parts.push(
-      `> **Search Results** — Found ${matches.length} match${matches.length !== 1 ? "es" : ""} for \`${search_query}\` in \`${basename(file_path)}\`.`,
-    );
-    if (total_doc_pages > 1) {
-      // Build a per-page hit distribution: "p1: 3, p3: 1, p7: 12"
-      const counts = new Map<number, number>();
-      for (const m of allMatches) {
-        const p = pageOfOffset(m.index!);
-        counts.set(p, (counts.get(p) || 0) + 1);
+      const other_pages = pages_with_hits.filter((p) => p !== page_filter);
+      if (other_pages.length) {
+        head.push(
+          `> Additional matches exist on page` +
+            `${other_pages.length !== 1 ? "s" : ""} ${other_pages.join(", ")} — ` +
+            "omit `page` or pass `page='all'` to see them.",
+        );
       }
-      const distribution = Array.from(counts.entries())
-        .sort((a, b) => a[0] - b[0])
-        .map(([p, n]) => `p${p}: ${n}`)
-        .join(", ");
-      ui_parts.push(
-        `> Distribution across ${total_doc_pages} document pages — ${distribution}. Pass \`page=N\` to filter to a specific document page.`,
+    }
+
+    if (has_more) {
+      head.push(
+        `> **Note:** Only ${num_rendered} matches shown (max_matches=${max_matches}). ` +
+          `Continue with \`match_offset=${next_offset}\`.`,
       );
     }
+    return head;
   }
 
-  // Per-match occurrence counts use the FULL match set, not the filtered one —
-  // this gives the LLM accurate global counts even when filtering.
-  const occurrences_map: Record<string, number> = {};
-  for (const m of allMatches) {
-    const matched_str = m[0];
-    occurrences_map[matched_str] = (occurrences_map[matched_str] || 0) + 1;
-  }
-
-  // Group hits by their containing projection line: one paragraph renders as
-  // ONE entry with every hit emphasized, instead of once per regex
-  // alternation branch with divergent highlights (QA round 3, finding 3.10).
-  const line_groups: Array<[number, Array<{ 0: string; index?: number }>]> = [];
-  const groups_by_line = new Map<number, Array<{ 0: string; index?: number }>>();
-  for (const m of matches) {
-    const m_start = m.index!;
-    const lastNL = m_start <= 0 ? -1 : body.lastIndexOf("\n", m_start - 1);
-    const line_start = lastNL === -1 ? 0 : lastNL + 1;
-    let group = groups_by_line.get(line_start);
-    if (!group) {
-      group = [];
-      groups_by_line.set(line_start, group);
-      line_groups.push([line_start, group]);
-    }
-    group.push(m);
-  }
-
-  const max_matches = 20;
-  const is_truncated = line_groups.length > max_matches;
-  const items_to_render = line_groups.slice(0, max_matches);
-
-  if (is_truncated) {
-    ui_parts.push(
-      `> **Note:** Only the first ${max_matches} matches are shown here to prevent LLM context overflow. ` +
-      `Narrow your search query or specify a \`page\` filter to see other matches.`
-    );
+  // Breadcrumbs render CLEAN-view heading text: a heading carrying a pending
+  // tracked change must not leak raw CriticMarkup into the Path line (QA
+  // 2026-07-23 F22b). Deletions vanish, insertions/highlights unwrap to their
+  // text, meta bubbles drop. Because we operate on ONE line of the projection,
+  // a multi-line `{>>…<<}` bubble can be clipped by the line break — drop the
+  // unterminated tail too, then sweep any leftover delimiter fragments.
+  function clean_breadcrumb(raw: string): string {
+    return raw
+      .replace(/\{--.*?--\}/g, "")
+      .replace(/\{\+\+(.*?)\+\+\}/g, "$1")
+      .replace(/\{==(.*?)==\}/g, "$1")
+      .replace(/\{>>.*?<<\}/g, "")
+      .replace(/\{(?:>>|--).*$/g, "")
+      .replace(/\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}/g, "")
+      .replace(/\*\*|__|[*_]/g, "")
+      .replace(/\{#[^}]+\}/g, "")
+      .trim();
   }
 
   function get_heading(idx: number, txt: string): string {
-    const txtBefore = txt.substring(0, idx);
-    const lines = txtBefore.split("\n");
     const path: string[] = [];
     let current_level = 999;
-
+    // Scan through the END of the line containing the match: slicing at the
+    // match offset cuts the line in half, so a hit INSIDE a heading reported a
+    // truncated path ("Master" for a match on "Services" in "# Master Services
+    // Agreement", QA 2026-07-19 F-17).
+    const nl = txt.indexOf("\n", idx);
+    const line_end = nl === -1 ? txt.length : nl;
+    const lines = txt.slice(0, line_end).split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i];
-      const m = line.match(/^(#{1,6})\s+(.*)/);
-      if (m) {
-        const level = m[1].length;
-        if (level < current_level) {
-          // Clean-view semantics for the breadcrumb (QA 2026-07-23 F22b):
-          // a heading carrying a pending tracked change must not leak raw
-          // CriticMarkup into the Path. Deletions and comment bubbles are
-          // dropped, insertions/highlights unwrap to their text. Because a
-          // bubble's meta block spans lines, its opener can sit on this line
-          // with the closer beyond it — the unclosed forms run to line end,
-          // and orphaned closers from an opener on an earlier line are
-          // stripped too.
-          let cleanHeading = m[2]
-            .replace(/\{--[\s\S]*?(?:--\}|$)/g, "")
-            .replace(/\{>>[\s\S]*?(?:<<\}|$)/g, "")
-            .replace(/\{\+\+([\s\S]*?)(?:\+\+\}|$)/g, "$1")
-            .replace(/\{==([\s\S]*?)(?:==\}|$)/g, "$1")
-            .replace(/\+\+\}|--\}|==\}|<<\}/g, "")
-            .replace(/\*\*|__|[*_]/g, "")
-            .replace(/\{#[^}]+\}/g, "")
-            .trim();
-          if (cleanHeading.length > 80) {
-            cleanHeading = cleanHeading.substring(0, 80) + "...";
-          }
-          path.unshift(cleanHeading);
-          current_level = level;
-          if (level === 1) break;
-        }
-      }
+      const m = lines[i].match(/^(#{1,6})\s+(.*)/);
+      if (!m) continue;
+      const level = m[1].length;
+      if (level >= current_level) continue;
+      let clean_heading = clean_breadcrumb(m[2]);
+      if (clean_heading.length > 80)
+        clean_heading = clean_heading.slice(0, 80) + "...";
+      path.unshift(clean_heading);
+      current_level = level;
+      if (level === 1) break;
     }
     return path.join(" > ");
   }
 
-  let i = 1;
-  for (const [snippet_start, group] of items_to_render) {
+  /**
+   * Groups hits by their containing projection line: one paragraph renders as
+   * ONE entry with every hit emphasized, instead of once per regex alternation
+   * branch with divergent highlights (QA round 3, finding 3.10). Called on
+   * every budget attempt, because the unit the budget pass drops is the HIT,
+   * not the entry.
+   */
+  function group_by_line(hits: SearchHit[]): Array<[number, SearchHit[]]> {
+    const groups: Array<[number, SearchHit[]]> = [];
+    const by_line = new Map<number, SearchHit[]>();
+    for (const hit of hits) {
+      const last_nl = hit.start <= 0 ? -1 : body.lastIndexOf("\n", hit.start - 1);
+      const line_start = last_nl === -1 ? 0 : last_nl + 1;
+      let group = by_line.get(line_start);
+      if (!group) {
+        group = [];
+        by_line.set(line_start, group);
+        groups.push([line_start, group]);
+      }
+      group.push(hit);
+    }
+    return groups;
+  }
+
+  /**
+   * Renders one paragraph's hits as a single match entry. `radius` is the
+   * context kept on each side of every hit; null renders the whole paragraph
+   * (`full_paragraph`). Blocks are joined with blank lines because each one is
+   * its own Markdown block.
+   */
+  function render_entry(
+    line_start: number,
+    group: SearchHit[],
+    radius: number | null,
+  ): string {
     const first = group[0];
-    const first_start = first.index!;
-    const p_num = pageOfOffset(first_start);
+    const last_hit_end = Math.max(...group.map((hit) => hit.end));
+    const next_nl = body.indexOf("\n", last_hit_end);
+    const line_end = next_nl === -1 ? body.length : next_nl;
 
-    const last_hit_end = Math.max(
-      ...group.map((m) => m.index! + m[0].length),
-    );
-    const nextNL = body.indexOf("\n", last_hit_end);
-    let snippet_end = nextNL === -1 ? body.length : nextNL;
-    // Never cut a snippet inside an open {>>…<<}/{--…--} span (3.12).
-    snippet_end = balanceSnippetWindow(body, snippet_start, snippet_end);
+    let intervals: Array<[number, number]>;
+    if (radius === null) {
+      intervals = [[line_start, line_end]];
+    } else {
+      const windows: Array<[number, number]> = group.map((hit) => [
+        Math.max(line_start, hit.start - radius),
+        Math.min(line_end, hit.end + radius),
+      ]);
+      // Balance AFTER merging (a widened window can swallow its neighbour) and
+      // merge again, so no two segments overlap.
+      intervals = mergeSpans(
+        mergeSpans(windows).map(([s, e]) => balanceSnippetWindow(body, s, e)),
+      );
+    }
 
-    const region = body.substring(snippet_start, snippet_end);
-    const spans: Array<[number, number]> = group.map((m) => [
-      m.index! - snippet_start,
-      m.index! - snippet_start + m[0].length,
-    ]);
-    const snippet = emphasizedSnippetSpans(region, spans);
+    const segments: string[] = [];
+    for (const [s_pos, e_pos] of intervals) {
+      const spans: Array<[number, number]> = group
+        .filter((hit) => s_pos <= hit.start && hit.end <= e_pos)
+        .map((hit) => [hit.start - s_pos, hit.end - s_pos]);
+      // Re-attach the tags of any span this window sits strictly inside (QA
+      // round 5, finding 2): a window cut out of the middle of a deletion holds
+      // no delimiters at all, so without this the deleted clause reads as live
+      // prose. The tags are added OUTSIDE emphasizedSnippetSpans, whose job is
+      // stripping the document's own bold/italic markers.
+      const [open_tags, close_tags] = enclosingSnippetMarkup(body, s_pos, e_pos);
+      segments.push(
+        open_tags +
+          emphasizedSnippetSpans(body.slice(s_pos, e_pos), spans) +
+          close_tags,
+      );
+    }
+
+    // " ... " marks elided interior text between distant hits; the outer "..."
+    // marks context trimmed off the head/tail, measured against the line each
+    // EDGE landed on (balancing an unterminated bubble can pull the window onto
+    // an earlier line).
+    let snippet = segments.join(" ... ");
+    const window_start = intervals[0][0];
+    const window_end = intervals[intervals.length - 1][1];
+    const nl_before =
+      window_start <= 0 ? -1 : body.lastIndexOf("\n", window_start - 1);
+    const first_line_start = nl_before + 1;
+    const nl_after = body.indexOf("\n", window_end);
+    const last_line_end = nl_after === -1 ? body.length : nl_after;
+    if (window_start > first_line_start) snippet = "..." + snippet;
+    if (window_end < last_line_end) snippet = snippet + "...";
 
     const snippet_lines = snippet
       .split("\n")
@@ -725,49 +1116,105 @@ export function build_search_response(
       .map((line) => `> ${line}`)
       .join("\n");
 
-    ui_parts.push("---");
-    ui_parts.push(`### Match ${i} (p${p_num})`);
-
-    const h_path = get_heading(first_start, body);
-    if (h_path) {
-      ui_parts.push(`**Path:** \`${h_path}\``);
-    }
+    const match_lines = ["---", `### Match ${first.index} (p${first.page})`];
+    const h_path = get_heading(first.start, body);
+    if (h_path) match_lines.push(`**Path:** \`${h_path}\``);
 
     const distinct_strs: string[] = [];
-    for (const m of group) {
-      if (!distinct_strs.includes(m[0])) distinct_strs.push(m[0]);
-    }
+    for (const hit of group)
+      if (!distinct_strs.includes(hit.text)) distinct_strs.push(hit.text);
     let occurrence_line: string;
     if (distinct_strs.length === 1) {
-      const count = occurrences_map[distinct_strs[0]];
-      occurrence_line = `*Occurrences:* This exact phrasing appears ${count} time${count !== 1 ? "s" : ""} in the document.`;
+      const n = occurrences_map[distinct_strs[0]];
+      occurrence_line = `*Occurrences:* This exact phrasing appears ${n} time${n !== 1 ? "s" : ""} in the document.`;
     } else {
       occurrence_line =
         "*Occurrences:* " +
         distinct_strs
           .map((s) => {
-            const count = occurrences_map[s];
-            return `\`${s}\` appears ${count} time${count !== 1 ? "s" : ""}`;
+            const n = occurrences_map[s];
+            return `\`${s}\` appears ${n} time${n !== 1 ? "s" : ""}`;
           })
           .join("; ") +
         " in the document.";
     }
-    ui_parts.push(snippet_lines);
-    ui_parts.push(occurrence_line);
-
-    i++;
+    match_lines.push(snippet_lines, occurrence_line);
+    return match_lines.join("\n\n");
   }
 
-  if (regexDowngradedNote) ui_parts.unshift(regexDowngradedNote);
-  const ui_markdown = ui_parts.join("\n\n");
-  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  const content_prefix = no_chrome
+    ? ""
+    : `> **File Path:** \`${resolve(file_path)}\`\n\n`;
 
-  return {
-    content: [{ type: "text", text: llm_content }],
-    structuredContent: {
-      markdown: ui_markdown,
-      title: `Search: ${basename(file_path)}`,
-      file_path: resolve(file_path),
-    },
-  };
+  function compose(
+    hits: SearchHit[],
+    radius: number | null,
+    budget_note: string,
+  ): string {
+    const parts: string[] = no_chrome ? [] : build_header(hits.length);
+    for (const [line_start, group] of group_by_line(hits))
+      parts.push(render_entry(line_start, group, radius));
+    if (budget_note && !no_chrome) parts.push(budget_note);
+    // The downgrade note survives `no_chrome`: it reports that the query was
+    // searched with DIFFERENT semantics than asked for, so suppressing it would
+    // make the hit list read as regex matches.
+    if (regexDowngradedNote) parts.unshift(regexDowngradedNote);
+    return parts.filter((part) => part).join("\n\n");
+  }
+
+  // ---- Response size budget (QA round 5, finding 2). ----
+  // A ±120 window is up to 240 chars of context PER HIT, so 20 hits in long
+  // paragraphs blow the ceiling this response is sized against even though each
+  // snippet is individually clamped. Render at the widest radius that fits the
+  // whole payload; if even the narrowest does not, drop trailing HITS (the
+  // caller reaches them with match_offset) rather than emit an oversized
+  // response. `full_paragraph` is an explicit opt-out.
+  //
+  // The unit dropped is the HIT, never the entry: when 20 hits share ONE
+  // projection line there is a single entry, so an entry-dropping pass has
+  // nothing to drop — and the radius ladder cannot rescue that case either,
+  // because a balanced window is at least as wide as the CriticMarkup spans it
+  // must keep whole, however small the radius (QA round 5, finding 1).
+  const fits = (markdown: string, rendered_count: number): boolean =>
+    content_prefix.length + markdown.length <=
+    search_budget_tokens(max_matches, rendered_count) * CHARS_PER_TOKEN;
+
+  let ui_markdown: string;
+  if (full_paragraph) {
+    ui_markdown = compose(selected_matches, null, "");
+  } else {
+    let radius = SNIPPET_RADIUS_LADDER[0];
+    ui_markdown = compose(selected_matches, radius, "");
+    for (const rung of SNIPPET_RADIUS_LADDER.slice(1)) {
+      radius = rung;
+      if (fits(ui_markdown, selected_matches.length)) break;
+      ui_markdown = compose(
+        selected_matches,
+        radius,
+        `> **Note:** Snippets trimmed to ±${radius} chars to fit the response size budget.`,
+      );
+    }
+    const kept = [...selected_matches];
+    while (kept.length && !fits(ui_markdown, kept.length)) {
+      kept.pop();
+      if (!kept.length) {
+        return window_note_response(
+          no_chrome
+            ? `No matches shown in this window: not even one ±${radius}-char snippet fits ` +
+                `the response size budget (max_matches=${max_matches}, total matches=${total_filtered}).`
+            : `> **Note:** No matches shown in this window: not even one ±${radius}-char snippet fits ` +
+                `the response size budget (max_matches=${max_matches}, total matches=${total_filtered}). ` +
+                "Raise `max_matches`, or pass `full_paragraph=true` to read the matching paragraph in full.",
+        );
+      }
+      ui_markdown = compose(
+        kept,
+        radius,
+        `> **Note:** Snippets trimmed to ±${radius} chars and trailing matches dropped ` +
+          "to fit the response size budget — continue from the `match_offset` above.",
+      );
+    }
+  }
+
+  return wrap(ui_markdown);
 }

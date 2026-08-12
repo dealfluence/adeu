@@ -83,7 +83,10 @@ describe("build_search_response — page-as-document-filter semantics", () => {
     expect(text).toContain("Found 5 matches");
     expect(text).toContain("Distribution across");
     expect(text).toMatch(/p\d+: \d+/);
-    expect(text).toContain("Pass `page=N` to filter");
+    // Parity with Python (_response_builders.py:1010-1013): the line counts
+    // the pages that HAVE hits and ends at the counts — the `Pass page=N`
+    // tail the Node builder used to append is not in the authority.
+    expect(text).toMatch(/> Distribution across \d+ document pages — p\d+: \d+/);
   });
 
   it("page=N as document-page filter: only returns matches on that page", () => {
@@ -172,7 +175,7 @@ describe("build_search_response — page-as-document-filter semantics", () => {
     const text = res.content[0].text;
 
     expect(text).toContain(
-      `No matches for \`TARGET_PHRASE\` on document page ${emptyPage}`,
+      `No matches on document page ${emptyPage} for query \`TARGET_PHRASE\``,
     );
     expect(text).toContain("The query DOES appear elsewhere");
     expect(text).toContain("Omit `page` or pass `page='all'`");
