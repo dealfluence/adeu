@@ -725,7 +725,7 @@ export const CHANGE_ITEM_SCHEMA = z
       .string()
       .optional()
       .describe(
-        "modify / accept / reject: attach a margin comment to the change (no manual CriticMarkup).",
+        "modify: attach a margin comment to the edited text. accept / reject: record the rationale as a margin comment anchored where the change was resolved (reported as Com:N).",
       ),
     match_mode: z
       .enum(["strict", "first", "all"])

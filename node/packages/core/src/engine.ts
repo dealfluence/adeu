@@ -1783,16 +1783,20 @@ export class RedlineEngine {
    * start_element and end_element must both be direct children of parent_element
    * and start_element must come before (or equal) end_element in document order.
    * Ported from Python `RedlineEngine._attach_comment`.
+   *
+   * Returns the id of the comment it created, or null when nothing was written
+   * (empty text, a missing element, an anchor outside the main story). Callers
+   * that only want the side effect can keep ignoring it.
    */
   private _attach_comment(
     parent_element: Element,
     start_element: Element,
     end_element: Element,
     text: string,
-  ) {
-    if (!text) return;
-    if (!parent_element || !start_element || !end_element) return;
-    if (this._skip_comment_outside_main_story(parent_element, text)) return;
+  ): string | null {
+    if (!text) return null;
+    if (!parent_element || !start_element || !end_element) return null;
+    if (this._skip_comment_outside_main_story(parent_element, text)) return null;
 
     const comment_id = this.comments_manager.addComment(this.author, text);
     const xmlDoc = parent_element.ownerDocument!;
@@ -1828,6 +1832,7 @@ export class RedlineEngine {
       parent_element.appendChild(range_end);
       parent_element.appendChild(ref_run);
     }
+    return comment_id;
   }
 
   /**
@@ -5247,6 +5252,20 @@ export class RedlineEngine {
           .filter((entry) => entry.id !== null && group_ids.has(entry.id))
           .map((entry) => entry.el),
       );
+      // The paragraph that holds the change, captured BEFORE resolving it:
+      // afterwards the change element is gone (reject unwraps or deletes it),
+      // and with it the only path back to its host (same upward walk as
+      // _column_count_at). Used to anchor an accept/reject rationale below.
+      const host_p = (() => {
+        let curr: Node | null = all_nodes[0] ?? direct_ppc[0] ?? null;
+        while (curr) {
+          if (curr.nodeType === 1 && (curr as Element).tagName === "w:p")
+            return curr as Element;
+          curr = curr.parentNode;
+        }
+        return null;
+      })();
+
       const resolved_now = new Set<string>();
       for (const node of [...group_nodes, ...group_ppc]) {
         const rid = node.getAttribute("w:id");
@@ -5389,6 +5408,40 @@ export class RedlineEngine {
               `${RedlineEngine._describe_removed_comments(removed, comment_authors_before)} ` +
               `(including any reply thread) because its anchor was inside the resolved change. ` +
               `This note is informational — the action itself succeeded.`,
+          );
+        }
+      }
+
+      // B4 (docs/improvement_spec.md §4): Node leads here; the Python mirror is required before release.
+      // The rationale for an accept/reject is a margin comment, not a field the
+      // engine swallows. The text it is about may have just been deleted, so it
+      // lands on the nearest surviving run of the host paragraph — and on
+      // nothing at all if there is none. Both outcomes are `- Note:` lines: the
+      // resolution itself succeeded either way, and the counters keep meaning
+      // what they say (spec §10).
+      if (action.comment && String(action.comment).trim()) {
+        const pos_label = gidx(pos) + 1;
+        const anchor = host_p
+          ? ((Array.from(host_p.childNodes).find(
+              (n) => (n as Element).tagName === "w:r",
+            ) as Element | undefined) ?? null)
+          : null;
+        if (host_p && anchor) {
+          const cid = this._attach_comment(
+            host_p,
+            anchor,
+            anchor,
+            String(action.comment),
+          );
+          if (cid) {
+            this.skipped_details.push(
+              `- Note: Action ${pos_label} ('${type}' on ${action.target_id}) — rationale recorded as Com:${cid}.`,
+            );
+          }
+        } else {
+          this.skipped_details.push(
+            `- Note: Action ${pos_label} ('${type}' on ${action.target_id}) — the rationale could not be anchored ` +
+              `(the resolved text left no surviving run); the ${type} itself succeeded.`,
           );
         }
       }
