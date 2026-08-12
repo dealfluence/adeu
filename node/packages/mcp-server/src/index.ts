@@ -229,7 +229,7 @@ const READ_DOCX_TAIL =
 // the row-op fields (`cells` etc.) must be named in prose because clients
 // strip the typed item schema to {} in transit (QA F10).
 const PROCESS_BATCH_COMMON_DESC =
-  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated and applied against the document state produced by the changes before it, so a later change may target text an earlier one introduced. Any validation failure rejects the whole batch transactionally — nothing is applied.\n\n";
+  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated against the state produced by the changes before it, so a later change may target text an earlier one introduced. Valid changes still apply when others fail (salvage default): the response LEADS with `PARTIAL: applied K of N` and lists every change that did NOT land — resubmit only those. Pass partial=false for all-or-nothing.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
   "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', the default) — add surrounding context, or set `match_mode`:'first'/'all'. Set `regex`:true to treat `target_text` as a regex (capture groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split; empty `new_text` deletes. Never write CriticMarkup ({++, {--, {>>) manually — use the `comment` field.\n   • EMPTY CELLS: a blank table cell has no text to match; `read_docx` renders every cell with a trailing `{#cell:<id>}` anchor — set `target_text` to that exact anchor and put the value in `new_text`. The pipes are display separators, not editable text.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row': add a table row — `target_text` anchors on an existing row's text, `cells` holds the new row's cell values (strings, left to right), `position` is 'above'/'below' (default below). 'delete_row': remove the row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between document states — always call `read_docx` immediately before accept/reject/reply; never reuse ids from earlier turns. `{#cell:<id>}` anchors are stable across reads and edits, but finalize_document/sanitize regenerates them — re-read after finalizing.\n\n`author_name` sets Track Changes attribution; it defaults to 'Adeu AI (TS)' when omitted.";
 
@@ -800,6 +800,15 @@ server.registerTool(
           "Ordered list of changes to apply. Each item is an object carrying a `type` discriminator plus that type's fields (see the per-field docs and the tool description). Items apply SEQUENTIALLY: each one evaluates against the document state produced by the items before it, so later items may target text an earlier item introduced.",
         ),
       output_path: z.string().optional().describe("Optional output path."),
+      // Salvage is the default (B5, parity with tools/document.py:1511-1514):
+      // losing the changes that were right because one was wrong costs the
+      // agent a whole round trip. The response leads with what did not land.
+      partial: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Whether to apply valid edits when some fail (salvage mode). Defaults to true.",
+        ),
     },
   },
   async ({
@@ -808,6 +817,7 @@ server.registerTool(
     author_name,
     changes,
     output_path,
+    partial,
   }) => {
     try {
       void reasoning;
@@ -949,7 +959,7 @@ server.registerTool(
 
       let stats;
       try {
-        stats = engine.process_batch(sanitizedChanges);
+        stats = engine.process_batch(sanitizedChanges, undefined, partial);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
           // Pin the DOM back for the retry that typically follows a rejected
@@ -987,6 +997,37 @@ server.registerTool(
         throw e;
       }
 
+      // Salvage that salvaged nothing is a REJECTION, not a partial success:
+      // checked before the save so no output file is produced and no response
+      // claims one (tools/document.py:645-661). The hot doc is deliberately
+      // NOT restored here — unlike the transactional path above, salvage takes
+      // no snapshot, so this DOM may carry a failed edit's partial mutations.
+      const applied_count =
+        (stats.edits_applied || 0) + (stats.actions_applied || 0);
+      const engine_failed: Array<{ index: number; reason: string }> =
+        stats.failed || [];
+      if (applied_count === 0 && engine_failed.length > 0) {
+        const env = failure_envelope(
+          "batch_validation_failed",
+          engine_failed.map((f) => [f.index, f.reason] as [number, string]),
+          "Batch rejected. Some edits failed validation.",
+          engine_failed.map((f) => f.reason),
+        );
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `Batch rejected. Some edits failed validation:\n\n${engine_failed
+                  .map((f) => f.reason)
+                  .join("\n\n")}` +
+                `\n\n\`\`\`json\n${JSON.stringify(env)}\n\`\`\``,
+            },
+          ],
+        };
+      }
+
       let overwrite_note = "";
       const existedBefore = fs.existsSync(outPath);
       const outBuf = await doc.save();
@@ -1013,7 +1054,24 @@ server.registerTool(
       // read-after-edit then skips the full re-parse.
       docCache.primeFromDoc(outPath, doc);
 
-      let res = formatBatchResult(stats, outPath) + overwrite_note;
+      // A partial success is a SUCCESS response with the failures hoisted to
+      // the top — never a failure envelope, whose recovery protocol ("Nothing
+      // was written") would contradict the saved path in the same response
+      // (tools/document.py:739-766).
+      let partial_header = "";
+      if (partial && engine_failed.length > 0 && applied_count > 0) {
+        const fails = [...engine_failed].sort((a, b) => a.index - b.index);
+        const max_idx = fails.reduce((m, f) => Math.max(m, f.index), 0);
+        const total_n = Math.max(max_idx + 1, sanitizedChanges.length);
+        partial_header = `PARTIAL: applied ${applied_count} of ${total_n} changes. ${fails.length} failed validation:\n\n`;
+        for (const f of fails) {
+          partial_header += `- Change #${f.index + 1} Failed: ${f.reason}\n`;
+        }
+        partial_header += "\n";
+      }
+
+      let res =
+        partial_header + formatBatchResult(stats, outPath) + overwrite_note;
       if (sanitizedChanges.length === 0) {
         res =
           `⚠️ 0 changes provided — nothing to do. The output is an unmodified copy of the original.\n\n` +

@@ -3366,7 +3366,11 @@ export class RedlineEngine {
    * caller's `changes` array, so every "- Action N" names the item the caller
    * actually submitted. Omitted (direct callers): the array's own positions.
    */
-  public validate_review_actions(actions: any[], indices?: number[]): string[] {
+  public validate_review_actions(
+    actions: any[],
+    indices?: number[],
+    shape_only = false,
+  ): string[] {
     const errors: string[] = [];
     const gidx = (pos: number) => (indices ? indices[pos] : pos);
 
@@ -3422,6 +3426,13 @@ export class RedlineEngine {
       }
     }
     if (errors.length > 0) return errors;
+
+    // `shape_only`: skip the document-context (id-exists) pass. Salvage mode
+    // needs a stale id to be a SKIPPED action, not a fatal batch error, and
+    // apply_review_actions already reports it that way with the same message
+    // — which is exactly how Python splits the two (validate_review_action_batch
+    // is shape-only; not-found surfaces inside apply, engine.py:2691,5246).
+    if (shape_only) return errors;
 
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i];
@@ -3585,7 +3596,6 @@ export class RedlineEngine {
     original_indices?: number[],
     partial: boolean = false,
   ): any {
-    void partial; // wired in the explicit-salvage contract (B5)
     // A fresh verdict per batch: a rejection that never mutated anything (a
     // validation failure before the first apply) is a verified rollback too.
     this.rollback_verified = true;
@@ -3647,7 +3657,7 @@ export class RedlineEngine {
     // contradiction, not two independent operations (ADEU-QA-004).
     let action_errors =
       actions.length > 0
-        ? this.validate_review_actions(actions, action_indices)
+        ? this.validate_review_actions(actions, action_indices, partial)
         : [];
     if (actions.length > 0 && action_errors.length === 0) {
       action_errors = this.validate_action_pairing(actions, action_indices);
@@ -3704,15 +3714,21 @@ export class RedlineEngine {
         already_resolved_actions = res[2];
         if (skipped_actions > 0) {
           failed_list.push(...extract_failed_indices(this.skipped_details));
-          throw new BatchValidationError(this.skipped_details, failed_list);
+          // Salvage mode keeps the skips as reported failures and carries on
+          // with the edits (engine.py:2705-2709).
+          if (!partial) {
+            throw new BatchValidationError(this.skipped_details, failed_list);
+          }
         }
       } catch (err) {
-        // An action can also fail at APPLY time (a reply whose parent cannot
-        // be threaded, a w:id shared across authors) — long after validation
-        // passed and after earlier actions in the batch already applied.
-        this._restore_batch_snapshot(snapshot, originalCurrentId);
-        this._verify_rollback(pre_batch_fingerprint);
-        throw err;
+        if (!partial) {
+          // An action can also fail at APPLY time (a reply whose parent cannot
+          // be threaded, a w:id shared across authors) — long after validation
+          // passed and after earlier actions in the batch already applied.
+          this._restore_batch_snapshot(snapshot, originalCurrentId);
+          this._verify_rollback(pre_batch_fingerprint);
+          throw err;
+        }
       }
       if (applied_actions > 0) {
         this.mapper["_build_map"]();
@@ -3777,12 +3793,23 @@ export class RedlineEngine {
               single_errors = [`- Edit ${orig_idx + 1} Failed: ${e.message}`];
             }
             if (single_errors.length > 0) {
-              failed_list.push([orig_idx, single_errors.join("\n")]);
-              if (applied_so_far > 0) {
+              const reason = single_errors.join("\n");
+              failed_list.push([orig_idx, reason]);
+              // The rollback hint is transactional-mode context: in salvage
+              // mode nothing is rolled back, so it would be a lie
+              // (engine.py:2811).
+              if (applied_so_far > 0 && !partial) {
                 const hint = sequential_context_hint(applied_so_far);
                 single_errors = single_errors.map((err) => err + hint);
               }
               sequential_errors.push(...single_errors);
+              // Salvage mode reaches the per-edit report builder below, which
+              // reads the reason off the edit itself. A raw non-object change
+              // cannot carry it (assigning to a string primitive throws under
+              // ESM strict mode) — its reason already travels in `failed`.
+              if (edit && typeof edit === "object") {
+                (edit as any)._error_msg = reason;
+              }
             } else {
               this.apply_edits([edit], page_offsets);
               if (
@@ -3802,16 +3829,30 @@ export class RedlineEngine {
                 let msg =
                   (edit as any)._error_msg ||
                   `- Edit ${orig_idx + 1} Failed: Failed to apply edit.`;
+                if (edit && typeof edit === "object") {
+                  (edit as any)._error_msg = msg;
+                }
                 failed_list.push([orig_idx, msg]);
-                if (applied_so_far > 0) {
+                if (applied_so_far > 0 && !partial) {
                   msg += sequential_context_hint(applied_so_far);
                 }
                 sequential_errors.push(msg);
-                break;
+                if (!partial) break;
+                // Salvage mode continues, so the projections must describe the
+                // document as it actually reads now: a sub-edit failure can
+                // have mutated the tree before giving up, and the next edit
+                // validates against that state.
+                if ((edit as any)._applied_status) {
+                  this.mapper = new DocumentMapper(this.doc);
+                  this.clean_mapper = null;
+                }
               }
             }
           }
-          if (sequential_errors.length > 0) {
+          // Transactional rejection is the strict mode's contract only: with
+          // partial the applied edits stay applied and every failure travels
+          // in `failed` / the per-edit reports (engine.py:2851-2858).
+          if (!partial && sequential_errors.length > 0) {
             throw new BatchValidationError(sequential_errors, failed_list);
           }
         } catch (err) {
@@ -3880,9 +3921,10 @@ export class RedlineEngine {
 
     return {
       // Uniform outcome keys (B9): a caller reads `status` and `failed`
-      // without knowing which bucket a failure came from. `status` becomes
-      // "partial" with the explicit-salvage contract (B5); engine.py:2864-2869.
-      status: "ok",
+      // without knowing which bucket a failure came from. Only salvage mode
+      // can report "partial" — strict mode throws instead (B5);
+      // engine.py:2864-2869.
+      status: partial && failed_list.length > 0 ? "partial" : "ok",
       failed: failed_list.map(([index, reason]) => ({
         index,
         reason,
@@ -5099,7 +5141,15 @@ export class RedlineEngine {
       if (all_nodes.length === 0 && direct_ppc.length === 0) {
         skipped++;
         this.skipped_details.push(
-          this._action_not_found_error(action.target_id, type),
+          // Indexed lead, as the reply branch above and Python
+          // (engine.py:5246) already do: the failure envelope reads the
+          // caller's index back out of this prose, and an unnumbered skip is
+          // blamed on change #1.
+          this._action_not_found_error(
+            action.target_id,
+            type,
+            `- Action ${gidx(pos) + 1} Failed:`,
+          ),
         );
         continue;
       }

@@ -256,6 +256,22 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       expect(description).toContain("regex");
     });
 
+    // B5: the description used to promise "nothing is applied" on any
+    // failure, which the salvage default makes a lie. The replacement prose
+    // has to fit the SAME ~2048-char client truncation budget, or the
+    // guidance it replaces is invisible anyway.
+    it("documents the salvage default and still fits the 2048-char client budget", () => {
+      const description: string = getTool("process_document_batch").description;
+      expect(description).toContain("PARTIAL: applied K of N");
+      expect(description).toContain("partial=false");
+      expect(description).not.toContain("rejects the whole batch transactionally");
+      expect(
+        description.length,
+        `process_document_batch description is ${description.length} chars — ` +
+          "clients truncate at ~2048 and the tail never reaches the model",
+      ).toBeLessThan(2048);
+    });
+
     it("honors match_mode:'all' at the live MCP boundary — edits every occurrence (2)", async () => {
       const outPath = join(tmpdir(), `adeu_schema_gap_all_${Date.now()}.docx`);
       tempPaths.push(outPath);

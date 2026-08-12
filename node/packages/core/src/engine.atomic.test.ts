@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createTestDocument, addParagraph } from './test-utils.js';
 import { DocumentObject } from './docx/bridge.js';
 import { extractTextFromBuffer } from './ingest.js';
-import { RedlineEngine } from './engine.js';
+import { RedlineEngine, BatchValidationError } from './engine.js';
 import { ModifyText, AcceptChange } from './models.js';
 
 describe('Atomic Batch Pipeline (Node.js Port)', () => {
@@ -58,5 +58,40 @@ describe('Atomic Batch Pipeline (Node.js Port)', () => {
     // The third paragraph should have the new tracked change anchored perfectly
     expect(final_text).toContain("{--Third--}");
     expect(final_text).toContain("{++3rd++}");
+  });
+
+  // The explicit-salvage contract (B5) added `partial`; strict mode is still
+  // the library default and still all-or-nothing — see engine.partial.test.ts
+  // for the salvage half.
+  it('rolls back every applied edit when a later one fails (partial: false)', async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "First paragraph.");
+    addParagraph(doc, "Second paragraph.");
+
+    const engine = new RedlineEngine(doc, "Strict");
+    const before = doc.element.toString();
+
+    let err: BatchValidationError | null = null;
+    try {
+      engine.process_batch(
+        [
+          { type: 'modify', target_text: "First", new_text: "1st" },
+          { type: 'modify', target_text: "absent phrase", new_text: "x" },
+        ] as ModifyText[],
+        undefined,
+        false,
+      );
+    } catch (e) {
+      err = e as BatchValidationError;
+    }
+
+    expect(err).toBeInstanceOf(BatchValidationError);
+    expect(err!.failed.map(([i]) => i)).toEqual([1]);
+    // The rollback hint belongs to this mode: something WAS applied and then
+    // undone, and the caller has to know its target may now read stale.
+    expect(err!.errors.join("\n")).toContain(
+      "it was rolled back and nothing was saved",
+    );
+    expect(doc.element.toString()).toBe(before);
   });
 });

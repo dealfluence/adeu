@@ -92,6 +92,7 @@ describe("BUG 2026-08-12 - a rejected batch must not leave its reply in the hot 
         original_docx_path: inputPath,
         author_name: AGENT,
         changes,
+        partial: false,
       },
     });
   }
@@ -248,6 +249,7 @@ describe("BUG 2026-08-12 - a rejected batch must not leave its reply in the hot 
           original_docx_path: secondInput,
           author_name: AGENT,
           changes,
+          partial: false,
         },
       });
 
