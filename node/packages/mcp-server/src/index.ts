@@ -688,7 +688,14 @@ registerAppTool(
           // the view it is refusing — so clean_view gets the CLEAN heading map,
           // not the raw one (whose page numbers and CriticMarkup-bearing
           // heading text describe a different projection).
-          if (!force && text.length > response_budget_limit()) {
+          //
+          // Measured on the string this path RETURNS — bundle.body, what
+          // build_full_document_response emits — not on `text`, which on the
+          // raw view carries the structural appendix nobody asked for here.
+          // Python's mode='full' text is projected with include_appendix=False
+          // (doc_cache.py:159-164), so measuring `text` refused documents whose
+          // body fits the budget while Python served them.
+          if (!force && bundle.body.length > response_budget_limit()) {
             const nodes = clean_view
               ? await docCache.ensureCleanOutline(entry, readBytes, loadDoc)
               : entry.outline_nodes;
@@ -698,7 +705,7 @@ registerAppTool(
                 {
                   type: "text",
                   text: build_budget_guard_message(
-                    text,
+                    bundle.body,
                     file_path,
                     nodes,
                     bundle,

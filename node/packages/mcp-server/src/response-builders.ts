@@ -456,8 +456,11 @@ export function build_full_document_response(
  *
  * The page count comes from the SAME pagination every reader path uses, so the
  * page numbers the refusal advertises are the page numbers `page=N` accepts.
- * The total is measured on `projected_text`, not on the split body — Python
- * measures the same string (`:695`), so both engines report the same size.
+ * The total is measured on `projected_text` (`:695` measures it too), so the
+ * caller decides what is counted by choosing what it passes. Callers pass the
+ * string the refused read WOULD have returned — `bundle.body`, the structural
+ * appendix excluded — which is what Python's mode='full' text already is
+ * (doc_cache.py projects it with include_appendix=False).
  *
  * `nodes` are the cached outline nodes OF THE VIEW being refused (the clean
  * view has its own — DocCache.ensureCleanOutline). Documents with no L1
