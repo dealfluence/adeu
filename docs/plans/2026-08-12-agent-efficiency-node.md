@@ -175,10 +175,12 @@ reversible and flagged in the receipt.
 # Phase 0 â€” Foundations (must land first; every later task depends on them)
 
 ## Task 0 â€” Shared primitives in `@adeu/core`
-- **Status**: IN_PROGRESS
-- **Failed Verify Cycles**: 1
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 2
 - **Attempt Ledger**:
   - attempt 1: implement shared primitives in core -> FAIL (double trailing newline in node/packages/core/src/primitives.test.ts)
+  - attempt 2: fix trailing newline in primitives.test.ts -> FAIL (missing trailing newline in node/packages/core/src/pagination.ts)
+  - attempt 3: ensure trailing newline in pagination.ts -> PASS
 
 - **Goal**: give the later tasks the four primitives Python's implementations are
   built on: `clamp_text`, `parse_page_arg` + `PAGE_RANGE_MAX_PAGES`,
@@ -287,6 +289,12 @@ reversible and flagged in the receipt.
     `_offset_to_page`'s privacy).
 
 ## Task 1 â€” `core/src/payloads.ts`: failure envelope, recovery protocol, budget guard, minimal report
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 2
+- **Attempt Ledger**:
+  - attempt 1: port payloads module with failure envelope and budget guard -> FAIL (env variable ADEU_MAX_RESPONSE_CHARS parsing discrepancy with Python int() for digit-group underscores like "1_000")
+  - attempt 2: support digit underscores in ADEU_MAX_RESPONSE_CHARS parsing -> FAIL (truthiness of empty pages: [] array, deduplication key for non-string skipped_details, and line splitting regex for Unicode line breaks)
+  - attempt 3: align payloads truthiness, deduplication, and line splitting with Python -> PASS
 
 - **Goal**: port `python/src/adeu/payloads.py` (479 lines) to TypeScript so
   B9/B2/B7/B1/A3 all draw their strings and budgets from one shared module.
@@ -405,6 +413,11 @@ reversible and flagged in the receipt.
   - `cd node && npm run test` â€” zero failures.
 
 ## Task 2 â€” Conformance fixtures, golden capture, and the token-budget harness (spec Â§8.3)
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: add conformance fixtures, golden capture script, and test harness -> FAIL (conformance harness file_path banner normalization discrepancy on Windows where resolve('/fixtures/<name>.docx') prepends drive letter e.g. D:\fixtures\...)
+  - attempt 2: normalize path banners for cross-platform golden comparison -> PASS
 
 - **Goal**: create the shared fixture set and the golden files that every later
   task asserts against, so "identical to Python" is a runnable test rather than a
@@ -517,6 +530,7 @@ reversible and flagged in the receipt.
 # Phase 1 â€” P0 (spec Â§9: the turn-killers and the correctness gaps)
 
 ## Task 3 â€” A6: native page ranges (`page: "2-6"`)
+- **Status**: COMPLETED
 
 - **Goal**: one call returns up to 8 synthetic pages, with Python's exact
   banners, cap note and early-stop note.

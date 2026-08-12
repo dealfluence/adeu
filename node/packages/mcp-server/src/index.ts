@@ -18,11 +18,14 @@ import {
   create_word_patch_diff,
   collect_media_difference_warnings,
   finalize_document,
+  parse_page_arg,
+  PageArgKind,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
 
 import {
   build_paginated_response,
+  build_page_range_response,
   build_full_document_response,
   build_outline_response,
   build_appendix_response,
@@ -213,7 +216,7 @@ const READ_DOCX_COMMON_DESC =
 // drop optional-parameter descriptions in transit, so the tool description is
 // the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
 const READ_DOCX_TAIL =
-  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n\n`page`: a positive integer (1-indexed, default 1) or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
+  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
 // BUDGET: real MCP clients truncate tool descriptions at ~2048 chars — the
 // tail (wherever it falls) is invisible to the model. COMMON + OPERATIONS +
@@ -516,41 +519,47 @@ registerAppTool(
         );
         return res as any;
       }
-      // In full mode, page='all' returns the entire document without page
-      // chrome — the round-trip artifact for text-based apply/diff
-      // (QA 2026-07-17 F1 parity with the Python CLI's --page all).
-      if (
-        mode === "full" &&
-        page !== undefined &&
-        page !== null &&
-        String(page).trim().toLowerCase() === "all"
-      ) {
-        const res = build_full_document_response(text, file_path, bundle);
-        return res as any;
+
+      let pageKind: PageArgKind = "single";
+      let pageVal: number | [number, number] | null = 1;
+      try {
+        [pageKind, pageVal] = parse_page_arg(page);
+      } catch (e: any) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: e.message,
+            },
+          ],
+        };
       }
-      // In non-search mode, `page` defaults to 1 (show document page 1).
-      // Non-numeric values must error, not silently fall back to page 1
-      // (QA L1 parity with the Python CLI).
-      let resolvedPage = 1;
-      if (page !== undefined && page !== null) {
-        const parsed =
-          typeof page === "number" ? page : parseInt(String(page).trim(), 10);
-        if (!Number.isFinite(parsed)) {
+
+      if (mode === "appendix") {
+        if (pageKind === "range") {
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text:
-                  `Invalid page value: '${page}'. Provide a positive integer ` +
-                  `(pages are 1-indexed; 'all' is valid for mode='full' and together with search_query).`,
+                text: "Page range pagination is only supported in 'full' mode, not 'appendix' mode.",
               },
             ],
           };
         }
-        resolvedPage = parsed;
-      }
-      if (mode === "appendix") {
+        if (pageKind === "all") {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Invalid page parameter: '${page}'. Provide a positive integer.`,
+              },
+            ],
+          };
+        }
+        const resolvedPage = pageVal as number;
         const res = build_appendix_response(
           text,
           resolvedPage,
@@ -559,6 +568,26 @@ registerAppTool(
         );
         return res as any;
       }
+
+      if (mode === "full") {
+        if (pageKind === "all") {
+          const res = build_full_document_response(text, file_path, bundle);
+          return res as any;
+        }
+        if (pageKind === "range") {
+          const [startP, endP] = pageVal as [number, number];
+          const res = build_page_range_response(
+            text,
+            startP,
+            endP,
+            file_path,
+            bundle,
+          );
+          return res as any;
+        }
+      }
+
+      const resolvedPage = pageVal as number;
       const res = build_paginated_response(
         text,
         resolvedPage,

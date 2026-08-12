@@ -273,7 +273,7 @@ describe("Resolved Bugs MCP Server Verification", () => {
     expect(res.error).toBeUndefined();
     expect(res.result).toBeDefined();
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toContain("Page -1 out of range");
+    expect(res.result.content[0].text).toContain("Invalid page parameter: '-1'");
   });
 
   it("creates non-existent output parent directory when saving batch results", async () => {

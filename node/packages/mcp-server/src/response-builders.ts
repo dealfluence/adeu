@@ -7,6 +7,7 @@ import {
   OutlineNode,
   RegexTimeoutError,
   userFindAllMatches,
+  PAGE_RANGE_MAX_PAGES,
 } from "@adeu/core";
 
 export interface ToolResult {
@@ -257,6 +258,55 @@ export function build_paginated_response(
       file_path: resolve(file_path),
       title: basename(file_path),
     },
+  };
+}
+
+export function build_page_range_response(
+  text: string,
+  start: number,
+  end: number,
+  file_path: string,
+  bundle?: ProjectionBundle,
+  no_chrome: boolean = false,
+): ToolResult {
+  if (start < 1)
+    throw new Error(`Invalid page number ${start}: page numbers must be positive integers.`);
+  if (start > end)
+    throw new Error(`end page (${end}) cannot be less than start page (${start})`);
+  const [body, appendix] = bundle ? [bundle.body, bundle.appendix] : split_structural_appendix(text);
+  const has_appendix = Boolean(appendix.trim());
+  const result = bundle ? bundle.pagination : paginate(body, "");
+  const total_pages = result.total_pages;
+  if (start > total_pages)
+    throw new Error(`Page ${start} out of range (doc has ${total_pages} pages).`);
+  const last = Math.min(end, start + PAGE_RANGE_MAX_PAGES - 1, total_pages);
+  const page_blocks: string[] = [];
+  for (let p = start; p <= last; p++) {
+    const selected = result.pages[p - 1];
+    const banner = no_chrome
+      ? (selected.total_pages > 1 ? `[p${selected.page}/${selected.total_pages}]\n\n` : "")
+      : _build_page_banner(selected.page, selected.total_pages);
+    page_blocks.push(`${banner}${selected.page_content}`);
+  }
+  const ui_parts: string[] = [page_blocks.join("\n\n")];
+  if (!no_chrome) {
+    if (last < end && last < total_pages) {
+      ui_parts.push(
+        `> **Range capped at ${PAGE_RANGE_MAX_PAGES} pages.** Continue with \`page="${last + 1}-${end}"\`.`,
+      );
+    } else if (end > total_pages) {
+      ui_parts.push(
+        `> **[range stopped at page ${total_pages}: the document has ${total_pages} page(s)]**`,
+      );
+    }
+    const pointer = _build_appendix_pointer(has_appendix);
+    if (pointer) ui_parts.push(pointer.trim());
+  }
+  const ui_markdown = ui_parts.join("\n\n");
+  const llm_content = no_chrome ? ui_markdown : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  return {
+    content: [{ type: "text", text: llm_content }],
+    structuredContent: { markdown: ui_markdown, file_path: resolve(file_path), title: basename(file_path) },
   };
 }
 

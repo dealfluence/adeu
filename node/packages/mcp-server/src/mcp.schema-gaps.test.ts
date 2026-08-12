@@ -50,6 +50,7 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
   let diffOrig: string;
   let diffMod: string;
   let finalizeInput: string;
+  let multiPageFixture: string;
 
   const getTool = (name: string) => allTools.find((t) => t.name === name);
 
@@ -175,6 +176,14 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       "Second clause stays.",
     ]);
     finalizeInput = await buildDoc(["Some content to finalize."]);
+
+    const filler =
+      "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.";
+    const multiParas: string[] = [];
+    for (let i = 0; i < 200; i++) {
+      multiParas.push(`Paragraph ${i + 1}: ${filler}`);
+    }
+    multiPageFixture = await buildDoc(multiParas);
   });
 
   afterAll(() => {
@@ -304,9 +313,9 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
   });
 
   // ======================================================================
-  // read_docx — build stamp appears exactly once
+  // read_docx — build stamp & discoverable page ranges
   // ======================================================================
-  describe("read_docx: build stamp appears exactly once", () => {
+  describe("read_docx: build stamp & discoverable page ranges", () => {
     it("stamps the build tag once — UI tools are no longer double-wrapped", () => {
       const readDocx = getTool("read_docx");
       expect(readDocx, "read_docx must be advertised").toBeDefined();
@@ -319,6 +328,30 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
         getTool("process_document_batch").description.match(BUILD_STAMP_RE) ??
         [];
       expect(pdbStamps.length).toBe(1);
+    });
+
+    it("advertises page range support ('2-6') in tool description and stays under 2048 chars", () => {
+      const readDocx = getTool("read_docx");
+      expect(readDocx, "read_docx must be advertised").toBeDefined();
+      expect(readDocx.description).toContain("'2-6'");
+      expect(readDocx.description.length).toBeLessThan(2048);
+    });
+
+    it("returns two page banners when called with page: '2-3' at live MCP boundary", async () => {
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: multiPageFixture,
+          page: "2-3",
+        },
+      });
+
+      const text: string = res.result.content[0].text;
+      expect(res.result.isError).toBeFalsy();
+      expect(text).toContain("Page 2 of");
+      expect(text).toContain("Page 3 of");
+      expect(text).not.toContain("Page 1 of");
     });
   });
 
