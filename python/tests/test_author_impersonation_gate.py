@@ -153,12 +153,13 @@ def _create_docx_with_notes_revision(author: str, part: str = "footnotes") -> io
     )
 
 
-def _create_docx_with_people_part(author: str) -> io.BytesIO:
+def _create_docx_with_people_part(author: str, part_name: str = "word/people.xml") -> io.BytesIO:
     """Builds a clean docx carrying Word's persona registry for `author`.
 
-    `word/people.xml` is metadata: Word keeps `w15:person` entries around long
-    after the matching revisions were accepted, so its `w:author` attributes
-    say nothing about pending revisions.
+    The persona registry is metadata: Word keeps `w15:person` entries around
+    long after the matching revisions were accepted, so its `w:author`
+    attributes say nothing about pending revisions. Its part name is not fixed
+    (`word/people.xml`, `word/people1.xml`, ...); the content type is.
     """
     people_xml = (
         '<w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" '
@@ -170,7 +171,7 @@ def _create_docx_with_people_part(author: str) -> io.BytesIO:
 
     return _splice_part(
         _create_clean_docx_stream().getvalue(),
-        "word/people.xml",
+        part_name,
         "application/vnd.ms-word.people+xml",
         "http://schemas.microsoft.com/office/2011/relationships/people",
         people_xml,
@@ -280,12 +281,13 @@ def test_no_warning_on_a_clean_document():
     assert stats.get("author_impersonation_warning") is None
 
 
-def test_no_warning_when_only_the_persona_registry_names_the_author():
-    # Clean document whose only mention of "Zed" is the word/people.xml persona registry
-    doc_stream = _create_docx_with_people_part("Zed")
+@pytest.mark.parametrize("part_name", ["word/people.xml", "word/people1.xml"])
+def test_no_warning_when_only_the_persona_registry_names_the_author(part_name):
+    # Clean document whose only mention of "Zed" is the persona registry part
+    doc_stream = _create_docx_with_people_part("Zed", part_name=part_name)
 
     engine = RedlineEngine(doc_stream, author="Zed")
-    assert "Zed" not in engine.get_pending_revision_authors()
+    assert "Zed" not in engine.get_pending_revision_authors(), f"{part_name} was scanned as a pending revision"
 
     edit = ModifyText(target_text="baseline text", new_text="updated text")
     stats = engine.process_batch([edit])

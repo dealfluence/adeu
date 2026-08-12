@@ -2593,9 +2593,11 @@ class RedlineEngine:
         so ``//*[@w:author]`` raises ``XPathEvalError`` on them, while
         ``BaseOxmlElement.xpath()`` accepts no ``namespaces`` argument.
 
-        ``word/people.xml`` is skipped: its ``w15:person`` entries are Word's
-        persona registry, which survives accepting every revision, so its
-        ``w:author`` attributes are metadata rather than pending revisions.
+        Word's persona registry is skipped: its ``w15:person`` entries survive
+        accepting every revision, so its ``w:author`` attributes are metadata
+        rather than pending revisions. It is matched on the
+        ``application/vnd.ms-word.people+xml`` content type, because its part
+        name is not fixed (``word/people.xml``, ``word/people1.xml``, ...).
         """
         authors: set[str] = set()
         author_attr = qn("w:author")
@@ -2628,7 +2630,10 @@ class RedlineEngine:
             # which also sees edits not yet serialized to its blob.
             if part is self.doc.part or not str(part.content_type).endswith("+xml"):
                 continue
-            if str(part.partname).lower().endswith("/people.xml"):
+            # Persona registry: identified by its content type, since Word does
+            # not fix its part name (`people.xml`, `people1.xml`, ...).
+            partname = str(part.partname).lower()
+            if str(part.content_type) == "application/vnd.ms-word.people+xml" or "people" in partname:
                 continue
             try:
                 root = parse_xml(part.blob)
