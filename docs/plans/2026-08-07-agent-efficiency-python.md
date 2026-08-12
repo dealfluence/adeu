@@ -410,8 +410,15 @@
 **Change.** Implement `disk_cache.py` using JSON storage keyed by path stat triple + `__version__`. Integrate into `cli.py` extract flow.
 **Done when.** `uv run pytest tests/test_disk_projection_cache.py` passes (5 tests).
 
-### Task 21 — Item D2: `adeu serve` (JSON-Lines Daemon)
+### Task 21 — Item D2: `adeu serve` (JSON-Lines Daemon) (COMPLETED)
 **Goal.** Keep single process alive with warm `doc_cache` for high-volume stdin/stdout JSON-lines callers.
+**Status.** Completed & Verified (commit `d6a3393`).
+**Failed Verify Cycles:** 3 (opus-coder cycle 2)
+**Attempt Ledger:**
+- attempt 1: Created serve.py and registered serve subparser in cli.py -> VERDICT: FAIL (_write_output_or_exit raised SystemExit killing the daemon; response budget guard omitted; 0-applied batch wrote file; CLI subcommand invocation untested)
+- attempt 2: Caught (Exception, SystemExit) in serve.py; added budget guard; updated apply -> VERDICT: FAIL (mode="changes" page="all" blocked by budget guard; empty changes [] batch returned error instead of saving copy; stringified SystemExit returned "Error: 1")
+- attempt 3 (@opus-coder): Captured structured CLI error payloads via take_last_cli_error(); removed budget guard from mode="changes"; made empty changes [] batch save unmodified copy -> VERDICT: FAIL (apply output path ending in .txt was not checked via _require_docx_output; mode="outline" re-parsed DOCX despite cached outline_nodes)
+- attempt 4 (@opus-coder): Called _require_docx_output in _handle_apply_command; passed doc=None when outline_nodes are cached; used cli.py helpers directly -> VERDICT: PASS
 **Files.** `python/src/adeu/serve.py` (new), `python/src/adeu/cli.py`.
 **Test first.** `python/tests/test_serve_daemon.py` (new):
 1. `test_ping_and_extract_over_one_session`: ping and extract commands over single daemon session.

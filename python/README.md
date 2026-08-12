@@ -32,6 +32,9 @@ uvx adeu extract contract.docx -o output.md
 # Extract only the structural heading outline
 uvx adeu extract contract.docx --mode outline
 
+# Strip navigation prose and headers for raw token efficiency
+uvx adeu extract contract.docx --no-chrome
+
 # Windows Only: Extract text from the actively open Word document
 uvx adeu extract --live
 ```
@@ -54,6 +57,12 @@ uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
 
 # Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
 uvx adeu apply original.docx edits.json --json
+
+# Partial salvage mode: apply valid edits while reporting failing edits
+uvx adeu apply original.docx edits.json --partial
+
+# Terse error context: produce compact error messages
+uvx adeu apply original.docx edits.json --terse-errors
 
 # Windows Only: Apply edits directly to the live, open Word canvas
 uvx adeu apply edits.json --live
@@ -85,6 +94,12 @@ uvx adeu sanitize contract.docx --accept-all -o clean.docx
 
 # Keep your redlines/comments, but anonymize the author and strip metadata
 uvx adeu sanitize redline.docx --keep-markup --author "My Firm"
+```
+
+### JSON-Lines Daemon (`adeu serve`)
+For high-throughput local agent drivers or CI harnesses, run `adeu serve` to maintain a warm process and document cache over stdin/stdout JSON-Lines:
+```bash
+uv run adeu serve
 ```
 
 ### Agentic / Headless Usage (the CLI as an API)
@@ -206,3 +221,12 @@ When developing inside the `python/` directory, please note the following invari
 * **Surgical Mode**: The `RedlineEngine` never performs global document normalization on load or save. This strict behavior prevents the silent destruction of unrelated metadata (like `<w:proofErr>`) and minimizes XML diff noise.
 * **COM Teardown**: In `live_word.py` and its associated tests, we intentionally omit `pythoncom.CoUninitialize()` and `app.Quit()` during teardown. FastMCP and `pytest` hold proxies unpredictably: forcing teardown causes fatal RPC Access Violations (`0x800706be`). We let the OS handle the apartment lifecycle.
 * **Testing Asserts**: Native `python-docx` `Paragraph.text` properties silently ignore text inside `<w:ins>` tags. When writing tests to verify redlines, strictly use `extract_text_from_stream(clean_view=True)` to accurately evaluate the accepted text state.
+
+## Environment Variables
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `ADEU_DOC_CACHE_ENTRIES` | Capacity for in-memory parsed document LRU cache | `5` |
+| `ADEU_NO_CACHE` | Set to `1` or `true` to disable disk-level projection caching | `0` |
+| `ADEU_CACHE_DIR` | Custom storage directory for disk projection cache | OS cache dir |
+| `ADEU_AUTHOR` | Fallback author name for tracked changes when unspecified | `AI Copilot` |

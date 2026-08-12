@@ -137,6 +137,12 @@ adeu diff v1.docx v2.docx
 # Apply edits to the DOCX
 adeu apply contract.docx edits.json --author "Review Bot"
 
+# Apply valid edits in salvage mode while reporting failing edits
+adeu apply contract.docx edits.json --partial
+
+# High-throughput JSON-Lines daemon
+adeu serve
+
 # Scrub author metadata and internal trackers
 adeu sanitize redline.docx -o clean.docx --keep-markup --author "My Firm" --report
 ```
