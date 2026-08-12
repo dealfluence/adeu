@@ -104,7 +104,7 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
     expect(res).toContain("Batch complete. Saved to: output.docx\n\n*Warning:* Caller identity 'Alice' does not match session author 'Bob'\nActions: 0 applied");
   });
 
-  it("token budget for 10 applied edits with 200-char previews (measured: 57 tokens/edit)", () => {
+  it("token budget for 10 applied edits with 200-char previews (measured: 47 tokens/edit)", () => {
     const preview100 = `{--${"A".repeat(50)}--}{++${"B".repeat(50)}++}`;
     const edits = Array.from({ length: 10 }, (_, i) => ({
       status: "applied",
@@ -112,7 +112,8 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
       match_mode: "strict",
       occurrences_modified: 1,
       pages: [i + 1],
-      critic_markup: preview100
+      critic_markup: preview100,
+      clean_text: "Clean text preview that should not appear"
     }));
     const rawStats = {
       version: "2.2.0",
@@ -123,9 +124,15 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
       edits
     };
     const stats = shrink_batch_stats(rawStats);
+
     const res = formatBatchResult(stats, "output.docx");
     const tokensPerEdit = Math.round(approxTokens(res) / 10);
+    expect(tokensPerEdit).toBe(47);
     expect(tokensPerEdit).toBeLessThanOrEqual(60);
+
+    const resRaw = formatBatchResult(rawStats, "output.docx");
+    expect(resRaw).not.toContain("*Preview (Clean):*");
+    expect(resRaw).not.toContain("Clean text preview that should not appear");
   });
 
   it("stats.version is a non-empty string and is not '1.18.2'", async () => {
@@ -137,3 +144,4 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
     expect(stats.version).not.toBe("1.18.2");
   });
 });
+

@@ -1137,6 +1137,9 @@ reversible and flagged in the receipt.
 
 ## Task 8 — B1/E2: minimal report rendering (drop the duplicate preview, add the comment)
 - **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: implement minimal batch report rendering -> FAIL (formatter.qa.test.ts missing trailing newline at EOF, report-minimal.test.ts test name misstated measured token budget as 57 instead of 47)
 
 - **Goal**: the MCP batch report stops echoing the caller's input and stops
   billing twice for one span, matching Python's MCP renderer.
