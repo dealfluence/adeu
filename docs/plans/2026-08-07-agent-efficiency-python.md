@@ -371,8 +371,9 @@
 **Change.** Add `author_impersonation_warning` property to `RedlineEngine`. Include in batch stats and CLI/MCP response summaries.
 **Done when.** `uv run pytest tests/test_author_impersonation_gate.py` passes (4 tests).
 
-### Task 18 — Item B8: Error-Size Budget Knobs (`--terse-errors`)
+### Task 18 — Item B8: Error-Size Budget Knobs (`--terse-errors`) (COMPLETED)
 **Goal.** Optional flag to reduce ambiguity examples (2 max, ±25 chars context) and listed stale IDs (8 max).
+**Status.** Completed & Verified (commit `75e875b`).
 **Files.** `python/src/adeu/markup.py`, `python/src/adeu/redline/engine.py`, `python/src/adeu/cli.py`.
 **Test first.** `python/tests/test_terse_errors.py` (new):
 1. `test_terse_ambiguity_error_is_much_smaller`: terse ambiguity error size ≤ 150 tokens.
@@ -381,8 +382,9 @@
 **Change.** Add `terse` parameter to `format_ambiguity_error` and `terse_errors` to `RedlineEngine`. Add `--terse-errors` to `adeu apply`.
 **Done when.** `uv run pytest tests/test_terse_errors.py` passes (3 tests).
 
-### Task 19 — Item D3: Env-Tunable Doc-Cache LRU
+### Task 19 — Item D3: Env-Tunable Doc-Cache LRU (COMPLETED)
 **Goal.** Allow configuring `doc_cache` capacity via `ADEU_DOC_CACHE_ENTRIES`.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/mcp_components/doc_cache.py`.
 **Test first.** Append to `python/tests/test_doc_cache.py`:
 1. `test_lru_size_is_env_tunable`: `ADEU_DOC_CACHE_ENTRIES="7"` sets cache capacity to 7.

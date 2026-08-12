@@ -22,7 +22,7 @@ from adeu.mcp_components._response_builders import (
     build_paginated_response,
     build_search_response,
 )
-from adeu.mcp_components.doc_cache import MAX_ENTRIES, DocProjectionCache, doc_cache
+from adeu.mcp_components.doc_cache import MAX_ENTRIES, DocProjectionCache, doc_cache, get_doc_cache_capacity
 from adeu.mcp_components.tools.document import _as_tool_result, _read_docx_disk
 from adeu.utils.docx import strip_bom_from_docx_bytes
 
@@ -277,3 +277,14 @@ def test_clean_and_raw_views_are_independent(structured_docx):
     entry = doc_cache.entry(key)
     assert entry.raw.base_text is not None
     assert entry.clean.base_text is not None
+
+
+def test_lru_size_is_env_tunable(monkeypatch):
+    monkeypatch.setenv("ADEU_DOC_CACHE_ENTRIES", "7")
+    assert get_doc_cache_capacity() == 7
+
+
+def test_lru_size_falls_back_on_garbage_and_zero(monkeypatch):
+    for bad_val in ["abc", "0", "-2"]:
+        monkeypatch.setenv("ADEU_DOC_CACHE_ENTRIES", bad_val)
+        assert get_doc_cache_capacity() == 3

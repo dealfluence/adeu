@@ -40,6 +40,19 @@ from adeu.utils.docx import strip_bom_from_docx_bytes
 
 MAX_ENTRIES = 3
 
+
+def get_doc_cache_capacity() -> int:
+    env_val = os.getenv("ADEU_DOC_CACHE_ENTRIES")
+    if env_val is not None:
+        try:
+            val = int(env_val)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return MAX_ENTRIES
+
+
 ProgressFn = Optional[Callable[[int, str], None]]
 
 
@@ -71,7 +84,9 @@ def _progress(cb: ProgressFn, pct: int, msg: str) -> None:
 
 
 class DocProjectionCache:
-    def __init__(self, max_entries: int = MAX_ENTRIES):
+    def __init__(self, max_entries: Optional[int] = None):
+        if max_entries is None:
+            max_entries = get_doc_cache_capacity()
         self._entries: "OrderedDict[Tuple[str, int, int], _Entry]" = OrderedDict()
         self._max_entries = max(1, max_entries)
         self._lock = threading.Lock()
