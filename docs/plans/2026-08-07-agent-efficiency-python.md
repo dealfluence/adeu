@@ -328,13 +328,14 @@
 **Change.** Extract shared text revision helpers into `text_revision.py`. Register `apply_text_revision` tool on MCP.
 **Done when.** `uv run pytest tests/test_mcp_apply_text_revision.py` passes (5 tests).
 
-### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints
+### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints (COMPLETED)
 **Goal.** Offer sibling file suggestions on CLI missing-file errors and point ID discovery hints at `--mode changes`.
-**Failed Verify Cycles:** 2 (Escalated to @opus-coder: trigger (a) second failed cycle)
+**Status.** Completed & Verified (commit `d394d43`).
+**Failed Verify Cycles:** 2
 **Attempt Ledger:**
 - attempt 1: Added suggest_sibling_docx to utils/docx.py, updated CLI missing file handler and ID hints -> VERDICT: FAIL (suggest_sibling_docx in utils/docx.py duplicated sibling matching in mcp_components/shared.py)
 - attempt 2: Made suggest_sibling_docx in utils/docx.py single source of truth accepting limit and path -> VERDICT: FAIL (_not_found_error lost the (+N more in <dir>) suffix when total siblings exceeded cap)
-- attempt 3 (@opus-coder): Made suggest_sibling_docx return (capped_names, total_sibling_count) so shared._not_found_error can restore the "(+N more in <dir>)" suffix; added tests for the cap suffix, its absence when nothing is withheld, and delegation to utils.docx
+- attempt 3 (@opus-coder): Updated suggest_sibling_docx to return tuple[list[str], int]; updated shared.py _not_found_error to append (+N more in <dir>) suffix when total exceeds cap -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/utils/docx.py`
 - `python/src/adeu/mcp_components/shared.py`
@@ -353,8 +354,9 @@
 
 ## Phase 4 (P3 Items) — Tasks 17 to 21
 
-### Task 17 — Item C2: Gate Author-Name Bypass
+### Task 17 — Item C2: Gate Author-Name Bypass (COMPLETED)
 **Goal.** Emit warning when acting author matches an author with pending revisions in the document.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/redline/engine.py`, `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`.
 **Test first.** `python/tests/test_author_impersonation_gate.py` (new):
 1. `test_warning_when_acting_author_impersonates_a_pending_author`: warning emitted on author name match.

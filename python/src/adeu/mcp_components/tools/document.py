@@ -769,6 +769,10 @@ async def _process_document_batch_disk(
         # replaces (never stacks with) the rejection preamble.
         res = (partial_header or rejection_prefix) + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
+        if stats.get("author_impersonation_warning"):
+            await ctx.warning(stats["author_impersonation_warning"])
+            res += f"\n*Warning:* {stats['author_impersonation_warning']}\n"
+
         total_occurrences = sum(
             e.get("occurrences_modified", 1) for e in stats.get("edits", []) if e.get("status") == "applied"
         )

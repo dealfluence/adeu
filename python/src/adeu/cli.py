@@ -1368,6 +1368,8 @@ def handle_apply(args):
                 for item in failed_items:
                     print(f"  - Change #{item['index'] + 1} Failed: {item['reason']}", file=sys.stderr)
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+            if stats.get("author_impersonation_warning"):
+                print(f"⚠️  {stats['author_impersonation_warning']}", file=sys.stderr)
 
         occurrences = stats.get("occurrences_modified", 0)
         occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""

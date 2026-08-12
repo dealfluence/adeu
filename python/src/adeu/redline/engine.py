@@ -2577,6 +2577,61 @@ class RedlineEngine:
                         break
         return " > ".join(path) if path else "", page
 
+    def get_pending_revision_authors(self) -> set[str]:
+        """Collects author names from all pending revisions (<w:ins>, <w:del>, property changes) and comments."""
+        authors: set[str] = set()
+
+        for el in self.doc.element.xpath("//*[@w:author]"):
+            tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if tag in ("ins", "del", "rPrChange", "pPrChange", "sectPrChange", "tcPrChange", "trPrChange", "comment"):
+                author = el.get(qn("w:author"))
+                if author:
+                    authors.add(author)
+
+        try:
+            comments_data = self.comments_manager.extract_comments_data()
+            for c_info in comments_data.values():
+                c_author = c_info.get("author")
+                if c_author and c_author != "Unknown":
+                    authors.add(c_author)
+        except Exception:
+            pass
+
+        try:
+            package = getattr(self.doc.part, "package", None)
+            if package:
+                for part in package.parts:
+                    if part.content_type in (
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+                    ):
+                        try:
+                            part_xml = parse_xml(part.blob)
+                            for el in part_xml.xpath("//*[@w:author]"):
+                                tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+                                if tag in (
+                                    "ins",
+                                    "del",
+                                    "rPrChange",
+                                    "pPrChange",
+                                    "sectPrChange",
+                                    "tcPrChange",
+                                    "trPrChange",
+                                    "comment",
+                                ):
+                                    author = el.get(qn("w:author"))
+                                    if author:
+                                        authors.add(author)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        return authors
+
     def _process_batch_internal(
         self,
         changes: List[DocumentChange],
@@ -2586,6 +2641,13 @@ class RedlineEngine:
         """
         Internal execution engine for batches of edits and actions.
         """
+        pending_authors = self.get_pending_revision_authors()
+        author_impersonation_warning = None
+        if self.author and self.author in pending_authors:
+            author_impersonation_warning = (
+                f"[!] Warning: acting author '{self.author}' matches an author with pending revisions in this document."
+            )
+
         self.skipped_details = []
         failed_list: List[Tuple[int, str]] = []
 
@@ -2800,6 +2862,7 @@ class RedlineEngine:
             "occurrences_modified": sum((r.get("occurrences_modified") or 0) for r in edits_reports),
             "skipped_details": self.skipped_details,
             "edits": edits_reports,
+            "author_impersonation_warning": author_impersonation_warning,
             "engine": "python",
             "version": __version__,
         }
