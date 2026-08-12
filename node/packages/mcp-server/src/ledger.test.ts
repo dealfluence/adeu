@@ -327,3 +327,82 @@ describe("build_changes_response — ordering and no_chrome", () => {
     ).toBe("0 change(s), 0 comment(s)");
   });
 });
+
+describe("build_changes_response — document-derived ids", () => {
+  it("14. never resolves a comment id through Object.prototype", () => {
+    // Python's `comments_data.get("toString")` misses and the bubble is parsed;
+    // a plain JS index would hand back `Object.prototype.toString`.
+    const proto = build_changes_response("The parties {>>[Com:toString] Bob Smith: hi<<} confer.", FP, {
+      comments_data: { "5": { author: "Jane Doe", text: "unrelated" } },
+    });
+    expect(entryLines(textOf(proto))).toEqual([
+      'Com:toString  Bob Smith  p1  "hi"',
+      'Com:5  Jane Doe  p1  "unrelated"',
+    ]);
+
+    expect(
+      entryLines(
+        textOf(
+          build_changes_response("The parties {>>[Com:__proto__] Bob Smith: hi<<} confer.", FP, {
+            comments_data: { "5": { author: "Jane Doe", text: "unrelated" } },
+          }),
+        ),
+      )[0],
+    ).toBe('Com:__proto__  Bob Smith  p1  "hi"');
+
+    // A real own entry with that name still wins over the bubble.
+    const own = build_changes_response("The parties {>>[Com:toString] Bob Smith: hi<<} confer.", FP, {
+      comments_data: { toString: { author: "Jane Doe", text: "from the comments part" } },
+    });
+    expect(entryLines(textOf(own))).toEqual([
+      'Com:toString  Jane Doe  p1  "from the comments part"',
+    ]);
+  });
+
+  it("15. reads Unicode ids and digits, as Python's `\\w`/`int()` do", () => {
+    // Arabic-Indic 12 sorts as 12, so the ASCII 2 declared after it comes first.
+    const unicode_digits = build_changes_response(
+      "x {--old--}{++new++}{>>[Chg:\u0661\u0662 delete] Jane Doe\n[Chg:2 insert] Jane Doe<<}",
+      FP,
+    );
+    expect(entryLines(textOf(unicode_digits))).toEqual([
+      'Chg:2  ins  Jane Doe  p1  "new"',
+      'Chg:\u0661\u0662  del  Jane Doe  p1  "old"',
+    ]);
+
+    // A tag the regex misses is swallowed into the preceding entry's author.
+    const trailing = build_changes_response(
+      "x {--old--}{++new++}{>>[Chg:2 insert] Jane Doe\n[Chg:\u0661\u0662 delete] Jane Doe<<}",
+      FP,
+    );
+    expect(entryLines(textOf(trailing))).toEqual([
+      'Chg:2  ins  Jane Doe  p1  "new"',
+      'Chg:\u0661\u0662  del  Jane Doe  p1  "old"',
+    ]);
+
+    // Pair ids, letters, and reply ids are the same `\w` class.
+    const paired = build_changes_response(
+      "x {--old--}{++new++}{>>[Chg:\u0661\u0662 delete] Jane Doe (pairs with Chg:\u0663)\n[Chg:\u0663 insert] Jane Doe<<}",
+      FP,
+    );
+    expect(entryLines(textOf(paired))).toEqual([
+      'Chg:\u0663  ins  Jane Doe  p1  "new"  (pairs Chg:\u0661\u0662)',
+      'Chg:\u0661\u0662  del  Jane Doe  p1  "old"  (pairs Chg:\u0663)',
+    ]);
+
+    expect(
+      entryLines(textOf(build_changes_response("x {--old--}{>>[Chg:Änderung delete] Åsa Öberg<<}", FP))),
+    ).toEqual(['Chg:Änderung  del  Åsa Öberg  p1  "old"']);
+
+    expect(
+      entryLines(
+        textOf(
+          build_changes_response(
+            "The parties {==confer==}{>>[Com:\u0665] Bob Smith (reply to Com:\u0664): text<<} first.",
+            FP,
+          ),
+        ),
+      ),
+    ).toEqual(['Com:\u0665  Bob Smith  p1  "text"  (reply to Com:\u0664)']);
+  });
+});

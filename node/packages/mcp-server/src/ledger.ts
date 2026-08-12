@@ -32,17 +32,23 @@ interface LedgerEntry {
 
 const BUBBLE_RE = /\{>>([\s\S]*?)<<\}/g;
 const WRAPPER_RE = /(\{\+\+|\{--|\{==)([\s\S]*?)(?:\+\+\}|--\}|==\})/g;
-const TAG_RE = /\[(Chg|Com):(\w+)(?:\s+(insert|delete|format))?\]/g;
-const PAIR_RE = /\(pairs\s+(?:with\s+)?((?:Chg:\w+(?:,\s*)?)+)\)/;
-const CHG_ID_RE = /Chg:(\w+)/g;
-const REPLY_RE = /\(reply\s+to\s+(Com:\w+|\w+)\)/;
+// `\w` -> `[\p{L}\p{N}_]` with the `u` flag: Python's `\w` is Unicode-aware
+// (alphanumeric per `str.isalnum`, plus `_`), JS's is ASCII-only, so an id typed
+// in a Word comment as `[Chg:١٢ delete]` or `[Com:مرجع]` is an id in Python and
+// nothing in Node — the tag then leaks into the previous entry's author.
+const TAG_RE = /\[(Chg|Com):([\p{L}\p{N}_]+)(?:\s+(insert|delete|format))?\]/gu;
+const PAIR_RE = /\(pairs\s+(?:with\s+)?((?:Chg:[\p{L}\p{N}_]+(?:,\s*)?)+)\)/u;
+const CHG_ID_RE = /Chg:([\p{L}\p{N}_]+)/gu;
+const REPLY_RE = /\(reply\s+to\s+(Com:[\p{L}\p{N}_]+|[\p{L}\p{N}_]+)\)/u;
 // re.sub replaces every occurrence, hence the `g`; `.` excludes newlines in both
 // engines (Python without re.DOTALL, JS without `s`).
 const AUTHOR_NOISE_RE = /\s*\((?:pairs(?:\s+with)?|reply\s+to)\s+.*?\)/g;
 
 // `\Z` -> `$`: with no `m` flag JS `$` is end-of-string, so the lookaheads and
 // the trailing anchor are equivalent. `re.DOTALL` -> `[\s\S]`.
-const COM_HEADER_DATED_RE = /^\s*([\s\S]*?)\s*@\s*(\d{4}\S*):(?=\s|$)\s*([\s\S]*)$/;
+// `\d` -> `\p{Nd}` for the same reason as `\w` above: Python's `\d` matches any
+// Unicode decimal digit, so a comment dated `@ ١٤٤٧-01-01:` has a header there.
+const COM_HEADER_DATED_RE = /^\s*([\s\S]*?)\s*@\s*(\p{Nd}{4}\S*):(?=\s|$)\s*([\s\S]*)$/u;
 const COM_HEADER_PLAIN_RE = /^\s*(?:([\s\S]*?):(?=\s|$)\s*|:\s*)([\s\S]*)$/;
 
 const SNIPPET_TAGS: Record<string, [string, string]> = {
@@ -58,8 +64,27 @@ const LEDGER_PAGE_SIZE = 300;
 const SNIPPET_LOOKBACK = 100000;
 
 const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
-const isDigits = (s: string) => /^\d+$/.test(s);
+/** `str.isdigit()`: any Unicode decimal digit, not just ASCII. */
+const isDigits = (s: string) => /^\p{Nd}+$/u.test(s);
 const stripPrefix = (s: string, prefix: string) => (s.startsWith(prefix) ? s.slice(prefix.length) : s);
+
+const ND_RE = /\p{Nd}/u;
+
+/**
+ * Rewrites Unicode decimal digits as ASCII ones, so `parseInt` reads what
+ * Python's `int()` reads (`int("١٢") == 12`, `parseInt("١٢")` is NaN — and a NaN
+ * sort key silently scrambles the ledger's order). Unicode guarantees decimal
+ * digits come in contiguous runs of ten starting at a zero, so a digit's value
+ * is its distance from the start of its run, mod 10.
+ */
+function ascii_digits(s: string): string {
+  return s.replace(/\p{Nd}/gu, (d) => {
+    const cp = d.codePointAt(0) as number;
+    let zero = cp;
+    while (zero > 0 && ND_RE.test(String.fromCodePoint(zero - 1))) zero--;
+    return String((cp - zero) % 10);
+  });
+}
 
 /**
  * Splits `[Com:N]`'s tail into author, body, and the offset of the delimiter
@@ -129,6 +154,15 @@ export function build_changes_response(
 
   let offset = opts.offset ?? 0;
   if (offset < 0) offset = 0;
+
+  // `dict.get` sees real entries only, so every lookup here is own-property
+  // only. A plain index reaches `Object.prototype`, and comment ids come from
+  // the document: `[Com:toString]` typed in a Word comment would find a
+  // function, report author "Unknown"/snippet "" and shadow the bubble Python
+  // parses. (Python's `comments_data.get(int(cid))` branch needs no port — a JS
+  // object's keys are strings already.)
+  const comment_data_for = (key: string) =>
+    comments_data && Object.hasOwn(comments_data, key) ? comments_data[key] : null;
 
   const body = bundle ? bundle.body : split_structural_appendix(text)[0];
   const pag_res = bundle ? bundle.pagination : paginate(body, "");
@@ -312,9 +346,7 @@ export function build_changes_response(
 
     for (const item of parsed_com_items) {
       const cid = item.cid;
-      // A JS object has string keys only, so the Python `int(cid)` lookup is
-      // the same lookup as `comments_data[cid]`.
-      const cdata = comments_data ? comments_data[cid] || comments_data[`Com:${cid}`] || null : null;
+      const cdata = comment_data_for(cid) || comment_data_for(`Com:${cid}`) || null;
 
       let author: string;
       let raw_comm: string;
@@ -415,7 +447,7 @@ export function build_changes_response(
     if (existing_ids !== null) e.pair_ids = e.pair_ids.filter((pid) => isLiveId(pid));
   }
 
-  const num_id = (cid: string) => (isDigits(cid) ? parseInt(cid, 10) : 0);
+  const num_id = (cid: string) => (isDigits(cid) ? parseInt(ascii_digits(cid), 10) : 0);
   const all_entries = [...chg_entries.values(), ...com_entries.values()].sort(
     (a, b) =>
       a.position - b.position ||
