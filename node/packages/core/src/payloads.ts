@@ -61,8 +61,28 @@ const _MIN_WARNING_CHARS = 26;
 // indicator for dropped context in elisions.
 const _ELISION = "...";
 
-// Python's str.splitlines() over the line endings that reach these payloads.
-const _LINE_SPLIT_RE = /\r\n|[\n\r]/;
+// Python's str.splitlines(), whose boundary set is wider than "\r\n|\n|\r":
+// \v, \f, \x1c-\x1e, \u0085 (NEL), \u2028 (LS) and \u2029 (PS) break a line
+// too. \u0085 and \u2028 are legal XML 1.0 characters, so the engine's
+// illegal-character scrub leaves them in place and they reach these payloads
+// inside real document text.
+const _LINE_SPLIT_RE = /\r\n|[\n\r\v\f\u001c-\u001e\u0085\u2028\u2029]/;
+
+/**
+ * Python truthiness for the JSON-shaped values a report field can hold: an
+ * EMPTY container is false. This is where a transliterated `if (value)`
+ * diverges — `[]` and `{}` are truthy in JS — and `pages` is the field that
+ * makes it ordinary rather than exotic: the engine sets `pages: _pages || []`
+ * on every per-edit report, so `if (edit.pages)` would emit `"pages":[]` where
+ * Python's `if edit.get("pages")` omits the key.
+ */
+function _truthy(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (value !== null && typeof value === "object") {
+    return Object.keys(value).length > 0;
+  }
+  return Boolean(value);
+}
 
 // The two-call recovery every batch failure teaches (spec B2). A batch is
 // transactional, so the reflex — resubmit the whole batch — repeats every edit
@@ -294,6 +314,8 @@ function _shrink_prose(
  * CriticMarkup or nothing.
  */
 function _fit_to_budget(edit: Record<string, unknown>): void {
+  // A string local: plain truthiness already IS Python's for `str`, and it
+  // narrows away the `undefined` for _changed_span.
   let markup = edit.critic_markup as string | undefined;
   if (markup) {
     const span = _changed_span(markup);
@@ -320,12 +342,12 @@ function _fit_to_budget(edit: Record<string, unknown>): void {
   }
 
   const warning = edit.warning;
-  if (warning) {
+  if (_truthy(warning)) {
     _shrink_prose(edit, "warning", String(warning), _MIN_WARNING_CHARS);
     if (_within_budget(edit)) return;
   }
 
-  if (edit.critic_markup) {
+  if (_truthy(edit.critic_markup)) {
     const preview = edit.critic_markup as string;
     // Measure the real JSON (escaping included) rather than predicting it.
     let preview_cap = preview.length;
@@ -367,11 +389,11 @@ function _minimal_edit(edit: Record<string, unknown>): Record<string, unknown> {
         FAILED_TARGET_STUB_CAP,
       );
     }
-  } else if (edit.critic_markup) {
+  } else if (_truthy(edit.critic_markup)) {
     minimal.critic_markup = edit.critic_markup;
   }
 
-  if (edit.pages) minimal.pages = edit.pages;
+  if (_truthy(edit.pages)) minimal.pages = edit.pages;
   const heading_path = String(edit.heading_path || "").trim();
   if (heading_path) minimal.heading_path = heading_path;
   if (
@@ -388,11 +410,25 @@ function _minimal_edit(edit: Record<string, unknown>): Record<string, unknown> {
   ) {
     minimal.match_mode = match_mode;
   }
-  if (edit.warning) minimal.warning = edit.warning;
-  if (edit.error) minimal.error = edit.error;
+  if (_truthy(edit.warning)) minimal.warning = edit.warning;
+  if (_truthy(edit.error)) minimal.error = edit.error;
 
   if (status !== "failed") _fit_to_budget(minimal);
   return minimal;
+}
+
+/**
+ * Python's `str(item).strip()` in its role here: a key that is equal for equal
+ * entries and distinct for distinct ones. `String(item)` cannot do that job —
+ * it collapses every object to "[object Object]", so any two non-string
+ * entries would compare equal, and each one after the first would be dropped
+ * as a duplicate. The spelling itself never reaches the caller (the ORIGINAL
+ * entry is what gets emitted), so JSON is free to stand in for repr.
+ */
+function _dedupe_key(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim()
+    : JSON.stringify(value ?? null);
 }
 
 /**
@@ -400,7 +436,7 @@ function _minimal_edit(edit: Record<string, unknown>): Record<string, unknown> {
  * or one of its lines.
  */
 function _error_lines(error: unknown): string[] {
-  const text = String(error).trim();
+  const text = _dedupe_key(error);
   return [
     text,
     ...text
@@ -418,7 +454,7 @@ function _dedupe_skipped(details: unknown[], edit_errors: Set<string>): unknown[
   const deduped: unknown[] = [];
   const seen = new Set<string>();
   for (const item of details) {
-    const key = String(item).trim();
+    const key = _dedupe_key(item);
     if (edit_errors.has(key) || seen.has(key)) continue;
     seen.add(key);
     deduped.push(item);
@@ -458,7 +494,7 @@ export function shrink_batch_stats(
         shrunk_edits.push(edit);
         continue;
       }
-      if (edit.error) {
+      if (_truthy(edit.error)) {
         for (const line of _error_lines(edit.error)) edit_errors.add(line);
       }
       shrunk_edits.push(_minimal_edit(edit));

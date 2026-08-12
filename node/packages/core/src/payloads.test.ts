@@ -114,6 +114,17 @@ describe("payloads", () => {
       expect(res.message).toBe("First line. Second line. Third line.");
     });
 
+    it("flattens every line boundary Python's splitlines breaks on", () => {
+      // \u0085 and \u2028 are legal XML 1.0 characters, so they survive the
+      // engine's illegal-character scrub and reach real document text.
+      expect(
+        failure_envelope("x", [], "a\u2028b\u0085c\u000bd\ne").message,
+      ).toBe("a b c d e");
+      expect(
+        failure_envelope("x", [], "a\fb\u001cc\u001dd\u001ee\u2029f").message,
+      ).toBe("a b c d e f");
+    });
+
     it("does not append the protocol for a non-batch code", () => {
       const res = failure_envelope(
         "response_budget_exceeded",
@@ -341,6 +352,19 @@ describe("payloads", () => {
       expect(msg).not.toContain(long_path);
     });
 
+    it("splits outline entries on every line boundary Python splitlines breaks on", () => {
+      const msg = whole_doc_guard_message(
+        207000,
+        76000,
+        "p.docx",
+        "# A\u2028# B",
+        3,
+      );
+      const lines = msg.split("\n");
+      expect(lines).toContain("# A");
+      expect(lines).toContain("# B");
+    });
+
     it("stays inside the 800 approx-token contract", () => {
       const msg = whole_doc_guard_message(
         120000,
@@ -418,6 +442,25 @@ describe("payloads", () => {
       expect("match_mode" in shrunk.edits[0]).toBe(false);
       expect(shrunk.edits[1].match_mode).toBe("first");
       expect(shrunk.edits[2].match_mode).toBe("all");
+    });
+
+    it("omits an empty `pages` list, as Python's truthiness does", () => {
+      // engine.ts sets `pages: edit._pages || []` on every per-edit report, so
+      // an empty list is the ordinary path, not an exotic one.
+      const shrunk = shrink_batch_stats({
+        edits: [
+          {
+            status: "applied",
+            type: "modify",
+            pages: [],
+            occurrences_modified: 1,
+          },
+        ],
+      });
+      expect(shrunk).toEqual({
+        edits: [{ status: "applied", type: "modify", occurrences_modified: 1 }],
+      });
+      expect("pages" in shrunk.edits[0]).toBe(false);
     });
 
     it("spends the locator before the evidence", () => {
@@ -554,6 +597,38 @@ describe("payloads", () => {
         "- Note: comments were preserved",
         "Other skipped detail",
       ]);
+    });
+
+    it("keeps distinct non-string skipped_details entries", () => {
+      const shrunk = shrink_batch_stats({
+        skipped_details: [{ a: 1 }, { b: 2 }, "note"],
+        edits: [],
+      });
+      expect(shrunk).toEqual({
+        skipped_details: [{ a: 1 }, { b: 2 }, "note"],
+        edits: [],
+      });
+    });
+
+    it("dedupes a non-string skipped detail against an identical edit error", () => {
+      const shrunk = shrink_batch_stats({
+        skipped_details: [{ code: "x" }, { code: "y" }],
+        edits: [{ status: "failed", error: { code: "x" } }],
+      });
+      expect(shrunk.skipped_details).toEqual([{ code: "y" }]);
+    });
+
+    it("dedupes a skipped detail repeating a \u2028-separated error line", () => {
+      const err_msg =
+        "- Edit 1 Failed: target text not found\u2028  Nearest candidate: 'Consultant shall'";
+      const shrunk = shrink_batch_stats({
+        skipped_details: [
+          "  Nearest candidate: 'Consultant shall'",
+          "Other skipped detail",
+        ],
+        edits: [{ status: "failed", error: err_msg }],
+      });
+      expect(shrunk.skipped_details).toEqual(["Other skipped detail"]);
     });
 
     describe("per-edit budget over the hard fixtures", () => {
