@@ -342,6 +342,32 @@ function mergeSpans(spans: Array<[number, number]>): Array<[number, number]> {
   return merged;
 }
 
+/**
+ * Widens `[start, end)` outward to the nearest code-point boundary, so a
+ * slice never cuts a surrogate pair in half.
+ *
+ * Python computes snippet windows in CODE POINTS (`hit.start - radius`
+ * indexes characters), so an astral character straddling a window edge is
+ * kept whole; JS offsets are UTF-16 code units, and slicing at the raw index
+ * ships a lone surrogate that becomes U+FFFD once encoded for the wire. This
+ * has no Python counterpart — it is what the port needs to reach parity.
+ */
+function snapCodePointBoundary(
+  text: string,
+  start: number,
+  end: number,
+): [number, number] {
+  if (start > 0 && start < text.length) {
+    const code = text.charCodeAt(start);
+    if (code >= 0xdc00 && code <= 0xdfff) start -= 1;
+  }
+  if (end > 0 && end < text.length) {
+    const code = text.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff) end += 1;
+  }
+  return [start, end];
+}
+
 function _build_appendix_pointer(has_appendix: boolean): string {
   if (!has_appendix) return "";
   return `\n\n---\n\n> **Appendix available.** This document has structural metadata (defined terms, cross-references, bookmarks, diagnostics) that may be relevant when editing. Call \`read_docx\` with \`mode='appendix'\` to load it before submitting edits.`;
@@ -1071,10 +1097,14 @@ export function build_search_response(
         Math.min(line_end, hit.end + radius),
       ]);
       // Balance AFTER merging (a widened window can swallow its neighbour) and
-      // merge again, so no two segments overlap.
+      // merge again, so no two segments overlap. Then snap each edge out to a
+      // code-point boundary: `radius` is a code-unit distance here, so an edge
+      // can land between the halves of a surrogate pair. Snapping cannot make
+      // two intervals overlap — merged intervals are separated by at least one
+      // code unit, and the unit after a pair is never a low surrogate.
       intervals = mergeSpans(
         mergeSpans(windows).map(([s, e]) => balanceSnippetWindow(body, s, e)),
-      );
+      ).map(([s, e]) => snapCodePointBoundary(body, s, e));
     }
 
     const segments: string[] = [];

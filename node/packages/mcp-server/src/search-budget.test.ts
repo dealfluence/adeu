@@ -230,6 +230,37 @@ describe("A2: snippet clamping", () => {
     expect(md).not.toContain("B".repeat(200));
   });
 
+  it("6b. keeps an astral character whole when it straddles the window edge", () => {
+    // The ±120 window opens at code unit 101 — the LOW half of the U+1F600 at
+    // 100..101. Python clamps in code points and emits the whole emoji, so
+    // slicing at the raw index here would ship a lone surrogate (U+FFFD once
+    // UTF-8 encoded for the wire).
+    const body =
+      "x".repeat(100) +
+      "\u{1F600}" +
+      "y".repeat(118) +
+      " Supplier clause " +
+      "z".repeat(300);
+    const md = mdOf(
+      build_search_response(
+        body,
+        "Supplier",
+        false,
+        true,
+        undefined,
+        "doc.docx",
+      ),
+    );
+    expect(md).toContain("..."); // clamped, or this proves nothing
+    expect(
+      md.match(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+      ),
+      `unpaired surrogate in snippet: ${JSON.stringify(md)}`,
+    ).toBeNull();
+    expect(md).toContain("\u{1F600}" + "y".repeat(118));
+  });
+
   it("7. walks the radius ladder down until the whole response fits", () => {
     const res = build_search_response(
       longParagraphs(50),
