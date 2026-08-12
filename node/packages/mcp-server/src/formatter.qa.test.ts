@@ -35,8 +35,7 @@ describe("QA Report V2: Formatter Parity", () => {
     expect(res).toContain("**Mode:** `all` (33 occurrences modified)");
     expect(res).toContain("*Preview (CriticMarkup):*");
     expect(res).toContain("> the {--Board of Directors--}{++Governing Body++}");
-    expect(res).toContain("*Preview (Clean):*");
-    expect(res).toContain("> the Governing Body");
+    expect(res).not.toContain("*Preview (Clean):*");
   });
 
   it("R1: Formats results with full enrichment fields", () => {

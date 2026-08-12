@@ -779,10 +779,11 @@ reversible and flagged in the receipt.
   - `cd node && npm run test` â€” zero failures.
 
 ## Task 5 â€” A1 wiring: `read_docx` gains `mode='changes'`, `changes_author`, `changes_offset`
-- **Status**: COMPLETE
+- **Status**: COMPLETED
 - **Failed Verify Cycles**: 1
 - **Attempt Ledger**:
   - attempt 1: wire mode='changes' in read_docx -> FAIL (changes_offset schema missing .int() constraint allowing fractional floats like 1.5, and test case 6 in mcp.schema-gaps.test.ts used 1-page doc instead of multi-page fixture for page="2-3")
+  - attempt 2: enforce integer constraint on changes_offset and fix multi-page test -> PASS
 
 - **Goal**: make the ledger reachable, cheaply, from the MCP surface, with
   Python's exact parameter names and refusals.
@@ -873,6 +874,7 @@ reversible and flagged in the receipt.
     via the test above; do not add a manual step to the definition of done.
 
 ## Task 6 â€” B9: uniform failure envelope with 0-based machine-readable blame
+- **Status**: COMPLETED
 
 - **Goal**: every batch failure â€” schema-level and engine-level â€” carries
   `{"error": code, "failed": [{"index": <0-based>, "reason": â€¦}], "message": â€¦}`,
@@ -1022,6 +1024,7 @@ reversible and flagged in the receipt.
     four cases pass, including the â‰¤500-token budget.
 
 ## Task 7 â€” B5: explicit-salvage contract (`partial`) with a PARTIAL-leading response
+- **Status**: COMPLETED
 
 - **Goal**: apply everything that validates, make the failures impossible to
   miss, and keep strict all-or-nothing available.
@@ -1132,7 +1135,8 @@ reversible and flagged in the receipt.
   - `cd node/packages/mcp-server && npx vitest run src/batch-envelope.test.ts` â€”
     the three new cases pass.
 
-## Task 8 â€” B1/E2: minimal report rendering (drop the duplicate preview, add the comment)
+## Task 8 — B1/E2: minimal report rendering (drop the duplicate preview, add the comment)
+- **Status**: COMPLETED
 
 - **Goal**: the MCP batch report stops echoing the caller's input and stops
   billing twice for one span, matching Python's MCP renderer.

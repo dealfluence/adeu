@@ -35,6 +35,7 @@ import {
   truncate_middle,
 } from "./utils/text.js";
 import { RegexTimeoutError } from "./utils/safe-regex.js";
+import { CORE_VERSION } from "./version.js";
 
 // Width of the surrounding-document window shown in redline previews.
 const PREVIEW_CONTEXT_CHARS = 30;
@@ -3950,7 +3951,7 @@ export class RedlineEngine {
       skipped_details: this.skipped_details,
       edits: edits_reports,
       engine: "node",
-      version: "1.18.2",
+      version: CORE_VERSION,
     };
   }
 

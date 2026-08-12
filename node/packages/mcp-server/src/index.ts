@@ -1395,7 +1395,11 @@ server.registerTool(
 
 // --- Formatter for process_document_batch ---
 export function formatBatchResult(stats: any, outPath: string): string {
+  // Rendered markdown is the minimal form for MCP tool output; see payloads.ts for structured consumers.
   let res = `Batch complete. Saved to: ${outPath}\n`;
+  if (stats.author_impersonation_warning) {
+    res += `\n*Warning:* ${stats.author_impersonation_warning}\n`;
+  }
   const total_occurrences = stats.edits
     ? stats.edits.reduce(
         (acc: number, e: any) =>
@@ -1433,10 +1437,11 @@ export function formatBatchResult(stats: any, outPath: string): string {
         res += `**Path:** \`${report.heading_path}\`\n`;
       }
 
-      if (report.match_mode) {
-        const occ =
-          report.occurrences_modified || (report.status === "applied" ? 1 : 0);
-        res += `**Mode:** \`${report.match_mode}\` (${occ} occurrence${occ !== 1 ? "s" : ""} modified)\n`;
+      const occ = report.occurrences_modified ?? 0;
+      res += `**Mode:** \`${report.match_mode || "strict"}\` (${occ} occurrence${occ !== 1 ? "s" : ""} modified)\n`;
+
+      if (report.comment) {
+        res += `**Comment:** "${report.comment}"\n`;
       }
 
       if (report.error) {
@@ -1448,9 +1453,6 @@ export function formatBatchResult(stats: any, outPath: string): string {
 
       if (report.critic_markup) {
         res += `*Preview (CriticMarkup):*\n> ${report.critic_markup.split("\\n").join("\\n> ")}\n`;
-      }
-      if (report.clean_text) {
-        res += `*Preview (Clean):*\n> ${report.clean_text.split("\\n").join("\\n> ")}\n`;
       }
       res += "\n";
     }
@@ -1464,7 +1466,7 @@ export function formatBatchResult(stats: any, outPath: string): string {
       d.trimStart().startsWith("- Note:"),
     );
     const header = allNotes ? "Notes:" : "Skipped Details:";
-    res += `${header}\n${stats.skipped_details.join("\n")}`;
+    res += `\n\n${header}\n${stats.skipped_details.join("\n")}`;
   }
   return res.trim();
 }

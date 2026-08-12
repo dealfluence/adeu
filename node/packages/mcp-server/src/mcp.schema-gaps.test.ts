@@ -324,7 +324,7 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
 
       const text: string = res.result.content[0].text;
       expect(res.result.isError).toBeFalsy();
-      expect(text).toContain("USD 500"); // capture group $1 substituted
+      expect(text).toContain("{++USD ++}500"); // capture group $1 substituted
     });
   });
 
