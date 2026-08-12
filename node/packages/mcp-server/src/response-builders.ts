@@ -8,6 +8,8 @@ import {
   RegexTimeoutError,
   userFindAllMatches,
   PAGE_RANGE_MAX_PAGES,
+  response_budget_limit,
+  whole_doc_guard_message,
 } from "@adeu/core";
 
 export interface ToolResult {
@@ -440,6 +442,42 @@ export function build_full_document_response(
       title: basename(file_path),
     },
   };
+}
+
+/**
+ * The whole-document response budget refusal for an oversized unbounded read
+ * (port of Python's build_budget_guard_message, _response_builders.py:654-700).
+ *
+ * The page count comes from the SAME pagination every reader path uses, so the
+ * page numbers the refusal advertises are the page numbers `page=N` accepts.
+ * The total is measured on `projected_text`, not on the split body — Python
+ * measures the same string (`:695`), so both engines report the same size.
+ *
+ * `nodes` are the cached outline nodes; documents with no L1 heading get no
+ * outline section at all, rather than a "(No headings detected)" placeholder.
+ * Pass `null` when no outline is available (the clean_view path has none) and
+ * the refusal ships without the heading map.
+ */
+export function build_budget_guard_message(
+  projected_text: string,
+  file_path: string,
+  nodes: OutlineNode[] | null,
+  bundle?: ProjectionBundle,
+): string {
+  const [body] = bundle
+    ? [bundle.body]
+    : split_structural_appendix(projected_text);
+  const pagination = bundle ? bundle.pagination : paginate(body, "");
+  const list = nodes ?? [];
+  const has_l1 = list.some((n) => n.level === 1);
+  const outline = has_l1 ? render_outline_tree(list, 1, false) : "";
+  return whole_doc_guard_message(
+    projected_text.length,
+    response_budget_limit(),
+    file_path,
+    outline,
+    pagination.total_pages,
+  );
 }
 
 export function build_paginated_response(

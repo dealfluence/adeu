@@ -22,6 +22,7 @@ import {
   parse_page_arg,
   PageArgKind,
   extract_comments_data,
+  response_budget_limit,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
 
@@ -29,6 +30,7 @@ import {
   build_paginated_response,
   build_page_range_response,
   build_full_document_response,
+  build_budget_guard_message,
   build_outline_response,
   build_appendix_response,
   build_search_response,
@@ -241,7 +243,7 @@ const READ_DOCX_COMMON_DESC =
 // drop optional-parameter descriptions in transit, so the tool description is
 // the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
 const READ_DOCX_TAIL =
-  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
+  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome; oversized documents are refused with an outline and a bounded-read recipe unless force=true. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
 // BUDGET: real MCP clients truncate tool descriptions at ~2048 chars — the
 // tail (wherever it falls) is invisible to the model. COMMON + OPERATIONS +
@@ -414,6 +416,12 @@ registerAppTool(
             ),
         )
         .optional(),
+      force: z
+        .boolean()
+        .default(false)
+        .describe(
+          "For mode='full' with page='all': read the whole document even when it exceeds the response budget.",
+        ),
       outline_max_level: z.coerce
         .number()
         .default(2)
@@ -482,6 +490,7 @@ registerAppTool(
       clean_view,
       mode,
       page,
+      force,
       outline_max_level,
       outline_verbose,
       search_query,
@@ -671,6 +680,31 @@ registerAppTool(
 
       if (mode === "full") {
         if (pageKind === "all") {
+          // A3: an UNBOUNDED whole-document read is the one path that can
+          // return an arbitrarily large payload. Refuse it over the budget
+          // with the page count, the L1 outline and the bounded-read recipe;
+          // `force` is the documented opt-out. Mirrors Python's
+          // tools/document.py:512-529 — the outline comes free from the cache
+          // entry already loaded above, so the refusal costs no extra work.
+          // clean_view refuses WITHOUT the heading map: this cache keeps only
+          // the raw outline, whose page numbers and CriticMarkup-bearing
+          // heading text describe a different projection than the one refused.
+          if (!force && text.length > response_budget_limit()) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: build_budget_guard_message(
+                    text,
+                    file_path,
+                    clean_view ? null : entry.outline_nodes,
+                    bundle,
+                  ),
+                },
+              ],
+            } as any;
+          }
           const res = build_full_document_response(text, file_path, bundle);
           return res as any;
         }

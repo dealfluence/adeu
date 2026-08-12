@@ -17,6 +17,8 @@ import {
   RedlineEngine,
   _extractTextFromDoc,
   extract_comments_data,
+  extract_outline,
+  OutlineNode,
   paginate,
   split_structural_appendix,
 } from "@adeu/core";
@@ -77,6 +79,8 @@ export interface ProjectedFixture {
   /** The projection every builder consumes: raw view, appendix excluded. */
   text: string;
   bundle: ProjectionBundle;
+  /** The heading map the doc-cache hands the outline and guard builders. */
+  outlineNodes: OutlineNode[];
   commentsData: Record<string, any>;
   /** Live change ids, as the disk MCP path collects them. */
   changeIds: Set<string>;
@@ -92,8 +96,16 @@ export interface ProjectedFixture {
 export async function projectFixture(fixture: string): Promise<ProjectedFixture> {
   const bytes = readFileSync(fixturePath(fixture));
   const doc = await DocumentObject.load(bytes);
-  const text = _extractTextFromDoc(doc, false, false) as string;
+  // Paragraph offsets are requested for the same reason capture_goldens.py
+  // requests them: extract_outline's fast path is the one the server runs.
+  const { text, paragraph_offsets } = _extractTextFromDoc(
+    doc,
+    false,
+    false,
+    true,
+  ) as { text: string; paragraph_offsets: Map<any, [number, number]> };
   const [body, appendix] = split_structural_appendix(text);
+  const pagination = paginate(body, "");
 
   // A separate load for the id sweep, so the engine constructor's document
   // touches cannot leak into the projected copy. `_existing_change_ids` is the
@@ -106,7 +118,14 @@ export async function projectFixture(fixture: string): Promise<ProjectedFixture>
   return {
     doc,
     text,
-    bundle: { body, appendix, pagination: paginate(body, "") },
+    bundle: { body, appendix, pagination },
+    outlineNodes: extract_outline(
+      doc,
+      body,
+      pagination.body_pages,
+      pagination.body_page_offsets,
+      paragraph_offsets,
+    ),
     commentsData: extract_comments_data(doc.pkg) as Record<string, any>,
     changeIds,
     filePath: placeholderPath(fixture),

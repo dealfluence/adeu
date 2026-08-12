@@ -157,13 +157,18 @@ describe.skipIf(!process.env.ADEU_CONFORMANCE)("conformance: Node builders match
 
   // --- whole-document budget guard (A3) -----------------------------------
 
+  // Node's builder takes the cached outline nodes positionally where Python
+  // takes `doc` / `outline_nodes` keywords — the shape Task 13 landed, and the
+  // shape the MCP handler calls it with (doc-cache entries carry the nodes).
   it("guard_long5", async () => {
     const fx = await projectFixture("long_5pages");
     await expectMatchesGolden("guard_long5", () =>
-      builder("build_budget_guard_message", "guard_long5")(fx.text, fx.filePath, {
-        doc: fx.doc,
-        bundle: fx.bundle,
-      }),
+      builder("build_budget_guard_message", "guard_long5")(
+        fx.text,
+        fx.filePath,
+        fx.outlineNodes,
+        fx.bundle,
+      ),
     );
   });
 
