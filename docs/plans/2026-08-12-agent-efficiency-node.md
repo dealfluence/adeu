@@ -175,6 +175,10 @@ reversible and flagged in the receipt.
 # Phase 0 â€” Foundations (must land first; every later task depends on them)
 
 ## Task 0 â€” Shared primitives in `@adeu/core`
+- **Status**: IN_PROGRESS
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: implement shared primitives in core -> FAIL (double trailing newline in node/packages/core/src/primitives.test.ts)
 
 - **Goal**: give the later tasks the four primitives Python's implementations are
   built on: `clamp_text`, `parse_page_arg` + `PAGE_RANGE_MAX_PAGES`,
