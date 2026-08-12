@@ -241,6 +241,16 @@ export function trim_common_context(
   return [prefix_len, suffix_len];
 }
 
+// One complete CriticMarkup block. The [\s\S] stands in for Python's DOTALL:
+// meta bubbles ({>>…<<}) legally span lines (change header + comment thread).
+// Mirrors python/src/adeu/diff.py CRITICMARKUP_BLOCK_RE.
+//
+// The `g` flag makes this object stateful: use it with String.matchAll or
+// String.replace (both of which leave `lastIndex` at 0) and never with
+// RegExp.test/exec, which would carry an offset into the next caller.
+export const CRITICMARKUP_BLOCK_RE =
+  /\{--[\s\S]*?--\}|\{\+\+[\s\S]*?\+\+\}|\{>>[\s\S]*?<<\}|\{==[\s\S]*?==\}/g;
+
 function _words_to_chars(
   text1: string,
   text2: string,
