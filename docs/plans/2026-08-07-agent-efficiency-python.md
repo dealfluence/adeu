@@ -382,12 +382,14 @@
 **Change.** Add `terse` parameter to `format_ambiguity_error` and `terse_errors` to `RedlineEngine`. Add `--terse-errors` to `adeu apply`.
 **Done when.** `uv run pytest tests/test_terse_errors.py` passes (3 tests).
 
-### Task 19 — Item D3: Env-Tunable Doc-Cache LRU
+### Task 19 — Item D3: Env-Tunable Doc-Cache LRU (COMPLETED)
 **Goal.** Allow configuring `doc_cache` capacity via `ADEU_DOC_CACHE_ENTRIES`.
+**Status.** Completed & Verified (commit `9e7e9b1`).
 **Failed Verify Cycles:** 2
 **Attempt Ledger:**
 - attempt 1: Added get_doc_cache_capacity() to doc_cache.py and tests to test_doc_cache.py -> VERDICT: FAIL (existing tests in test_doc_cache.py were ambient-env sensitive when ADEU_DOC_CACHE_ENTRIES was set)
 - attempt 2: Added _fresh_cache fixture in test_doc_cache.py -> VERDICT: FAIL (test_lru_size_is_env_tunable asserted get_doc_cache_capacity() == 7 but did not assert DocProjectionCache()._max_entries == 7)
+- attempt 3: Added assertions to test_lru_size_is_env_tunable instantiating DocProjectionCache(), verifying _max_entries == 7, and populating 8 entries to verify len(cache._entries) == 7 -> VERDICT: PASS
 **Files.** `python/src/adeu/mcp_components/doc_cache.py`.
 **Test first.** Append to `python/tests/test_doc_cache.py`:
 1. `test_lru_size_is_env_tunable`: `ADEU_DOC_CACHE_ENTRIES="7"` sets cache capacity to 7.
@@ -395,8 +397,9 @@
 **Change.** Read `ADEU_DOC_CACHE_ENTRIES` in `doc_cache.py`.
 **Done when.** `uv run pytest tests/test_doc_cache.py` passes.
 
-### Task 20 — Item D1: On-Disk Projection Cache for CLI
+### Task 20 — Item D1: On-Disk Projection Cache for CLI (COMPLETED)
 **Goal.** Skip DOCX parsing and Virtual Text projection on repeated CLI reads of unchanged files.
+**Status.** Completed & Verified.
 **Files.** `python/src/adeu/disk_cache.py` (new), `python/src/adeu/cli.py`.
 **Test first.** `python/tests/test_disk_projection_cache.py` (new):
 1. `test_second_read_is_byte_identical_and_hits_the_cache`: cached read produces byte-identical output.

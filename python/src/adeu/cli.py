@@ -673,35 +673,106 @@ def handle_extract(args):
         # that aliases the input DOCX.
         protected = [(args.input, "input DOCX")] if args.input else []
         _guard_text_output_path(args.output, protected)
+
+    text: str = ""
+    paragraph_offsets: Any = None
+    cached_outline_nodes: Any = None
+    cached_comments_data: Any = None
+    doc: Any = None
+
     if args.live:
         if sys.platform != "win32":
             _cli_error("unsupported", "--live is only supported on Windows.")
         from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
         text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
+        cached_outline_nodes = None
+        cached_comments_data = None
     else:
         if not args.input:
             _cli_error("invalid_input", "Must provide input file or use --live", exit_code=2)
 
-        doc = _load_docx_or_exit(args.input)
+        input_path = Path(args.input)
+        _require_input_file(input_path)
 
-        # Perform extraction
         needs_appendix = args.mode == "appendix"
         needs_offsets = args.mode == "outline"
 
-        from adeu.ingest import _extract_text_from_doc
+        from adeu.disk_cache import disk_projection_cache
 
-        extract_result = _extract_text_from_doc(
-            doc,
-            clean_view=args.clean_view,
-            include_appendix=needs_appendix,
-            return_paragraph_offsets=needs_offsets,
-        )
-        if needs_offsets:
-            text, paragraph_offsets = extract_result
-        else:
-            text = extract_result
+        use_cache = not getattr(args, "debug", False)
+        cached_view = disk_projection_cache.get(input_path, clean_view=args.clean_view) if use_cache else None
+
+        hit = False
+        if cached_view is not None:
+            if needs_appendix:
+                if cached_view.get("text_with_appendix") is not None:
+                    text = str(cached_view["text_with_appendix"])
+                    hit = True
+            elif needs_offsets:
+                if cached_view.get("base_text") is not None and cached_view.get("outline_nodes") is not None:
+                    text = str(cached_view["base_text"])
+                    hit = True
+            else:
+                if cached_view.get("base_text") is not None:
+                    text = str(cached_view["base_text"])
+                    hit = True
+
+        if hit and cached_view is not None:
+            doc = None
             paragraph_offsets = None
+            cached_outline_nodes = cached_view.get("outline_nodes")
+            cached_comments_data = cached_view.get("comments_data")
+        else:
+            doc = _load_docx_or_exit(input_path)
+
+            from adeu.ingest import _extract_text_from_doc
+
+            extract_result = _extract_text_from_doc(
+                doc,
+                clean_view=args.clean_view,
+                include_appendix=needs_appendix,
+                return_paragraph_offsets=needs_offsets,
+            )
+            if needs_offsets:
+                assert isinstance(extract_result, tuple)
+                text = str(extract_result[0])
+                paragraph_offsets = extract_result[1]
+            else:
+                assert isinstance(extract_result, str)
+                text = extract_result
+                paragraph_offsets = None
+
+            cached_outline_nodes = None
+            if needs_offsets:
+                from adeu.mcp_components._response_builders import paginate, split_structural_appendix
+                from adeu.outline import extract_outline
+
+                body, _ = split_structural_appendix(text)
+                pagination = paginate(body, "")
+                cached_outline_nodes = extract_outline(
+                    doc,
+                    body,
+                    pagination.body_pages,
+                    pagination.body_page_offsets,
+                    paragraph_offsets=paragraph_offsets,
+                )
+
+            from adeu.redline.comments import CommentsManager
+
+            cached_comments_data = CommentsManager(doc).extract_comments_data()
+
+            view_data: Dict[str, Any] = {}
+            if needs_appendix:
+                view_data["text_with_appendix"] = text
+            else:
+                view_data["base_text"] = text
+                if cached_outline_nodes is not None:
+                    view_data["outline_nodes"] = cached_outline_nodes
+                if cached_comments_data is not None:
+                    view_data["comments_data"] = cached_comments_data
+
+            disk_projection_cache.put(input_path, args.clean_view, view_data)
 
     from adeu.mcp_components._response_builders import (
         build_appendix_response,
@@ -797,13 +868,18 @@ def handle_extract(args):
                 outline_verbose=args.outline_verbose,
                 paragraph_offsets=paragraph_offsets,
                 is_cli=True,
+                outline_nodes=cached_outline_nodes,
                 no_chrome=no_chrome,
             )
         elif args.mode == "changes":
             from adeu.mcp_components._response_builders import build_changes_response
             from adeu.redline.comments import CommentsManager
 
-            comments_data = CommentsManager(doc).extract_comments_data() if doc is not None else None
+            comments_data = (
+                cached_comments_data
+                if cached_comments_data is not None
+                else (CommentsManager(doc).extract_comments_data() if doc is not None else None)
+            )
             existing_change_ids = None
             if not getattr(args, "live", False) and getattr(args, "input", None):
                 try:
@@ -872,6 +948,7 @@ def handle_extract(args):
                         text,
                         "Active Document" if args.live else str(args.input),
                         doc=doc,
+                        outline_nodes=cached_outline_nodes,
                         paragraph_offsets=paragraph_offsets,
                         is_cli=True,
                     ),
