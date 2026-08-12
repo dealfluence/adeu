@@ -859,10 +859,17 @@ server.registerTool(
         stats = engine.process_batch(sanitizedChanges);
       } catch (e: any) {
         if (e instanceof BatchValidationError) {
-          // The engine's transactional snapshot restored the DOM to the
-          // exact on-disk state — safe to pin it back for the retry that
-          // typically follows a rejected batch.
-          docCache.restoreHotDoc(original_docx_path, doc);
+          // Pin the DOM back for the retry that typically follows a rejected
+          // batch — but ONLY once the engine has verified that its rollback
+          // restored the exact on-disk state. It re-pinned unconditionally
+          // before, and a batch's review actions used to survive its own
+          // rollback: every rejected attempt handed the retry a document
+          // carrying the previous attempt's reply, so one reviewer comment
+          // ended up with three identical replies (BUG 2026-08-12). An
+          // unverified DOM is simply dropped; the retry re-parses from disk.
+          if (engine.rollback_verified) {
+            docCache.restoreHotDoc(original_docx_path, doc);
+          }
           return {
             isError: true,
             content: [

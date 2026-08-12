@@ -145,6 +145,58 @@ def assert_word_readable_ids(package: bytes, context: str = "") -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# The two paraId rules that are not about range ([MS-DOCX] 2.6.2.4 / 2.6.2.6)
+# ---------------------------------------------------------------------------
+
+#: `<w:p …>` / `<w15:commentEx …>` — any start tag, captured whole so the
+#: attributes on ONE element can be examined together.
+_ELEMENT_RE = re.compile(r"<[A-Za-z][-\w:.]*\b[^>]*/?>")
+
+
+def find_duplicate_para_ids(package: bytes) -> List[Tuple[str, str, str]]:
+    """Every `w14:paraId` used more than once within a single part.
+
+    [MS-DOCX] 2.6.2.4: the value "specifies an identifier for a paragraph that
+    is unique within the document part". Stated in prose, not in the schema, so
+    a duplicate validates exactly like the out-of-range values do.
+
+    Scoped PER PART because that is the scope the specification gives: the same
+    paraId in document.xml and in comments.xml is legal and common.
+    """
+    duplicates: List[Tuple[str, str, str]] = []
+    with zipfile.ZipFile(BytesIO(package)) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".xml"):
+                continue
+            text = archive.read(name).decode("utf-8", "ignore")
+            seen: dict = {}
+            for value in re.findall(r'w14:paraId="([0-9A-Fa-f]{1,8})"', text):
+                seen[value.upper()] = seen.get(value.upper(), 0) + 1
+            duplicates += [(name, "w14:paraId", value) for value, count in seen.items() if count > 1]
+    return duplicates
+
+
+def find_text_ids_without_para_id(package: bytes) -> List[Tuple[str, str]]:
+    """Every element carrying `w14:textId` but no `w14:paraId`.
+
+    [MS-DOCX] 2.6.2.6: "Any element having this attribute MUST also have the
+    paraId attribute." textId is a version stamp for the paragraph's TEXT and
+    is meaningless without the identity it versions, so Word treats the pair as
+    one unit — which makes it a constraint on any pass that rewrites ids.
+    """
+    orphans: List[Tuple[str, str]] = []
+    with zipfile.ZipFile(BytesIO(package)) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".xml"):
+                continue
+            text = archive.read(name).decode("utf-8", "ignore")
+            for tag in _ELEMENT_RE.findall(text):
+                if "w14:textId=" in tag and "w14:paraId=" not in tag:
+                    orphans.append((name, tag))
+    return orphans
+
+
 def edge_of_range_randint(high: bool) -> Callable[[int, int], int]:
     """A deterministic stand-in for `random.randint` that always draws from one
     END of whatever range the caller asks for, stepping inward one per call so

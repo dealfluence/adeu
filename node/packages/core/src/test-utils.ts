@@ -212,6 +212,69 @@ export function findOutOfRangeLongHexNumbers(
   return offenders;
 }
 
+// ---------------------------------------------------------------------------
+// The two paraId rules that are not about range ([MS-DOCX] 2.6.2.4 / 2.6.2.6)
+// ---------------------------------------------------------------------------
+
+/** `<w:p ...>` / `<w15:commentEx ...>` - any start tag, captured whole so the
+ *  attributes on ONE element can be examined together. */
+const ELEMENT_RE = /<[A-Za-z][-\w:.]*\b[^>]*\/?>/g;
+
+/**
+ * Every `w14:paraId` used more than once within a single part.
+ *
+ * [MS-DOCX] 2.6.2.4: the value "specifies an identifier for a paragraph that is
+ * unique within the document part". Stated in prose, not in the schema, so a
+ * duplicate validates exactly like the out-of-range values do.
+ *
+ * Scoped PER PART because that is the scope the specification gives: the same
+ * paraId in document.xml and in comments.xml is legal and common.
+ *
+ * Mirrors `find_duplicate_para_ids` in python/tests/utils.py.
+ */
+export function findDuplicateParaIds(pkg: Buffer): [string, string, string][] {
+  const duplicates: [string, string, string][] = [];
+  const unzipped = unzipSync(new Uint8Array(pkg));
+  for (const [name, bytes] of Object.entries(unzipped)) {
+    if (!name.endsWith(".xml")) continue;
+    const seen = new Map<string, number>();
+    for (const [, value] of strFromU8(bytes).matchAll(
+      /w14:paraId="([0-9A-Fa-f]{1,8})"/g,
+    )) {
+      const key = value.toUpperCase();
+      seen.set(key, (seen.get(key) ?? 0) + 1);
+    }
+    for (const [value, count] of seen) {
+      if (count > 1) duplicates.push([name, "w14:paraId", value]);
+    }
+  }
+  return duplicates;
+}
+
+/**
+ * Every element carrying `w14:textId` but no `w14:paraId`.
+ *
+ * [MS-DOCX] 2.6.2.6: "Any element having this attribute MUST also have the
+ * paraId attribute." textId is a version stamp for the paragraph's TEXT and is
+ * meaningless without the identity it versions, so Word treats the pair as one
+ * unit - which makes it a constraint on any pass that rewrites ids.
+ *
+ * Mirrors `find_text_ids_without_para_id` in python/tests/utils.py.
+ */
+export function findTextIdsWithoutParaId(pkg: Buffer): [string, string][] {
+  const orphans: [string, string][] = [];
+  const unzipped = unzipSync(new Uint8Array(pkg));
+  for (const [name, bytes] of Object.entries(unzipped)) {
+    if (!name.endsWith(".xml")) continue;
+    for (const [tag] of strFromU8(bytes).matchAll(ELEMENT_RE)) {
+      if (tag.includes("w14:textId=") && !tag.includes("w14:paraId=")) {
+        orphans.push([name, tag]);
+      }
+    }
+  }
+  return orphans;
+}
+
 /** The failure message that tells the next reader what actually broke. */
 export function outOfRangeIdReport(
   offenders: [string, string, string][],

@@ -1,11 +1,14 @@
 // FILE: node/packages/core/src/repro.para-id-signed-int32.test.ts
 import { describe, it, expect, afterEach } from "vitest";
+import { unzipSync, zipSync, strFromU8, strToU8 } from "fflate";
 import {
   createTestDocument,
   addParagraph,
   addTable,
   setCellText,
+  findDuplicateParaIds,
   findOutOfRangeLongHexNumbers,
+  findTextIdsWithoutParaId,
   outOfRangeIdReport,
 } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
@@ -434,5 +437,324 @@ describe("B5: derived cell anchors are ids Word will keep", () => {
     expect(new Set(ids).size, `derived anchors collide: ${ids.length - new Set(ids).size} duplicates`).toBe(
       ids.length,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B6: the id Adeu did not mint
+// ---------------------------------------------------------------------------
+//
+// B5 masked every id Adeu MINTS, and the two threading tests above prove it -
+// but both build their parent with the fixed engine, so the thread root is
+// always already legal. Neither covers a parent that ARRIVES with an id Word
+// will throw away.
+//
+// That is the case that shipped, through this engine: the western-district
+// demo ran the Node MCP (desktop-extension/Adeu.mcpb). Sarah Chen's comment
+// came in carrying `w14:paraId="D2AEAE20"`, `_adoptIntoModernComments` found a
+// paraId and reused it verbatim, and the reply's `w15:paraIdParent` was written
+// to point at a value Word discards on load. Word COM on the output: two
+// comments, both `Ancestor = NONE`, zero replies.
+
+/** The value the demo actually shipped with: an ordinary paraId whose top bit
+ *  happens to be set. */
+const POISON = "D2AEAE20";
+
+/** What folding POISON into range produces. Word-verified: patching the demo
+ *  document's root paraId to exactly this made the reply thread. */
+const POISON_FOLDED = "52AEAE20";
+
+function repack(pkg: Buffer, rewrite: (name: string, xml: string) => string): Buffer {
+  const unzipped = unzipSync(new Uint8Array(pkg));
+  const out: Record<string, Uint8Array> = {};
+  for (const [name, bytes] of Object.entries(unzipped)) {
+    out[name] = name.endsWith(".xml")
+      ? strToU8(rewrite(name, strFromU8(bytes)))
+      : bytes;
+  }
+  return Buffer.from(zipSync(out));
+}
+
+/**
+ * Rewrite ST_LongHexNumber values across every part, references included.
+ *
+ * This is exactly what produced the demo document: a fixture builder that
+ * rewrote the ids in a Word-authored package, masked `w16cid:durableId` because
+ * B3 had taught it to, and left `w14:paraId` alone because the note B3 left
+ * behind said paraId was unconstrained. The result validates against the
+ * schema, opens without complaint, and silently loses its thread.
+ */
+function poison(pkg: Buffer, replacements: Record<string, string>): Buffer {
+  return repack(pkg, (_name, xml) => {
+    for (const [from, to] of Object.entries(replacements)) {
+      xml = xml.split(`"${from}"`).join(`"${to}"`);
+    }
+    return xml;
+  });
+}
+
+/** The text of `word/<stem>.xml`, tolerating the numbered part names. */
+function partText(pkg: Buffer, stem: string): string {
+  const unzipped = unzipSync(new Uint8Array(pkg));
+  const pattern = new RegExp(`^word/${stem}\\d*\\.xml$`);
+  const name = Object.keys(unzipped).find((n) => pattern.test(n));
+  expect(name, `no word/${stem}.xml part in ${Object.keys(unzipped)}`).toBeDefined();
+  return strFromU8(unzipped[name!]);
+}
+
+/** `[paraId, paraIdParent | undefined]` from commentsExtended, in order. */
+function commentExEntries(pkg: Buffer): [string, string | undefined][] {
+  return Array.from(
+    partText(pkg, "commentsExtended").matchAll(
+      /w15:paraId="([0-9A-Fa-f]{1,8})"(?:\s+w15:paraIdParent="([0-9A-Fa-f]{1,8})")?/g,
+    ),
+  ).map(([, id, parent]) => [id, parent]);
+}
+
+function rootParaId(pkg: Buffer): string {
+  const roots = commentExEntries(pkg).filter(([, p]) => !p).map(([id]) => id);
+  expect(roots, "fixture precondition: expected exactly one thread root").toHaveLength(1);
+  return roots[0];
+}
+
+function paraIdsIn(pkg: Buffer, stem = "comments"): string[] {
+  return Array.from(partText(pkg, stem).matchAll(/w14:paraId="([0-9A-Fa-f]{1,8})"/g)).map(
+    ([, id]) => id,
+  );
+}
+
+/** Reply to whichever comment owns the thread root, and save. */
+async function replyToRoot(pkg: Buffer, text = "Addressed."): Promise<Buffer> {
+  const doc = await DocumentObject.load(pkg);
+  const engine = new RedlineEngine(doc, "Adeu AI (TS)");
+  const parentId = Object.keys(extract_comments_data(doc.pkg))[0];
+  const [applied, skipped] = engine.apply_review_actions([
+    { type: "reply", target_id: `Com:${parentId}`, text } as any,
+  ]);
+  expect([applied, skipped], "the reply did not apply at all").toEqual([1, 0]);
+  return await doc.save();
+}
+
+describe("B6: an inherited out-of-range id is repaired, not propagated", () => {
+  it("threads a reply onto a parent whose paraId Word would discard", async () => {
+    // The demo, reduced: one inherited high-bit paraId, one reply.
+    const base = await threadedPackage(0);
+    const pkg = poison(base, { [rootParaId(base)]: POISON });
+    expect(partText(pkg, "comments"), "fixture precondition").toContain(POISON);
+
+    const saved = await replyToRoot(pkg);
+
+    expectWordReadableIds(saved, "inherited parent paraId");
+    const entries = new Map(commentExEntries(saved));
+    const replies = [...entries].filter(([, parent]) => parent);
+    expect(replies, `expected one reply, got ${JSON.stringify([...entries])}`).toHaveLength(1);
+    const parent = replies[0][1]!;
+    expect(
+      entries.has(parent) && !entries.get(parent),
+      `the reply points at ${parent}, which is not a thread root in ` +
+        `${JSON.stringify([...entries])}. Word renders it as a second top-level comment: ` +
+        `right author, right text, wrong place.`,
+    ).toBe(true);
+  });
+
+  it("keeps the replies that already pointed at the root it repaired", async () => {
+    // The repair's own failure mode. Rewriting the root's paraId without
+    // rewriting the w15:paraIdParents that referenced it turns one broken
+    // thread into N broken threads - strictly worse than doing nothing.
+    const base = await threadedPackage(2);
+    const pkg = poison(base, { [rootParaId(base)]: POISON });
+
+    const entries = new Map(commentExEntries(await replyToRoot(pkg, "Third reply.")));
+    const roots = [...entries].filter(([, p]) => !p).map(([id]) => id);
+    const parents = new Set([...entries.values()].filter(Boolean));
+    expect(roots, `the repair split the thread: ${JSON.stringify([...entries])}`).toHaveLength(1);
+    expect([...parents]).toEqual(roots);
+    expect(entries.size, "expected root + 3 replies").toBe(4);
+  });
+
+  it("writes the repaired paraId identically into all three comment parts", async () => {
+    // Word consults comments.xml, commentsExtended AND commentsIds. A paraId
+    // repaired in one and left stale in another drops the comment out of the
+    // modern-comments path entirely - the same end state as not repairing it.
+    const base = await threadedPackage(1);
+    const saved = await replyToRoot(poison(base, { [rootParaId(base)]: POISON }));
+
+    for (const stem of ["comments", "commentsExtended", "commentsIds"]) {
+      expect(partText(saved, stem), `${stem} still carries ${POISON}`).not.toContain(POISON);
+    }
+    const root = rootParaId(saved);
+    expect(partText(saved, "comments")).toContain(`w14:paraId="${root}"`);
+    expect(partText(saved, "commentsIds")).toContain(`w16cid:paraId="${root}"`);
+  });
+
+  it("folds rather than reinvents, so a re-run is a no-op", async () => {
+    // D2AEAE20 -> 52AEAE20: clear the top bit, which is what Word does to the
+    // value anyway. Pinned because it is the exact substitution verified in
+    // Word against the demo document.
+    const base = await threadedPackage(0);
+    const saved = await replyToRoot(poison(base, { [rootParaId(base)]: POISON }));
+    expect(rootParaId(saved)).toBe(POISON_FOLDED);
+  });
+
+  it("repairs inherited out-of-range rsids in the comments part too", async () => {
+    // The demo document carried w:rsidR/@w:rsidRDefault/@w:rsidP = AD3412F6
+    // alongside the bad paraId. Word renumbers a PART, not an attribute, so a
+    // bad rsid left in comments.xml re-arms the pass that de-threads the reply.
+    const base = await threadedPackage(0);
+    const rsids = Array.from(
+      partText(base, "comments").matchAll(/w:rsidR="([0-9A-Fa-f]{1,8})"/g),
+    ).map(([, v]) => v);
+    const pkg = poison(base, {
+      [rootParaId(base)]: POISON,
+      ...Object.fromEntries(rsids.map((r) => [r, "AD3412F6"])),
+    });
+    expect(partText(pkg, "comments"), "fixture precondition").toContain("AD3412F6");
+
+    const saved = await replyToRoot(pkg);
+
+    expectWordReadableIds(saved, "inherited rsid");
+    expect(partText(saved, "comments")).not.toContain("AD3412F6");
+  });
+
+  it("leaves a package whose ids are already legal alone", async () => {
+    // The repair must be a no-op on a healthy document. A pass that re-mints
+    // unconditionally would churn every paraId on every save and invalidate
+    // every {#cell:paraId} anchor the caller is holding - the exact damage it
+    // exists to prevent.
+    const base = await threadedPackage(1);
+    const before = paraIdsIn(base);
+    const after = new Set(paraIdsIn(await replyToRoot(base)));
+    expect(
+      before.filter((id) => !after.has(id)),
+      "the repair re-minted ids that were already legal",
+    ).toEqual([]);
+  });
+
+  it("flattens a reply-to-a-reply onto the repaired root", async () => {
+    // Modern Word has no nesting: a reply to a reply points at the thread ROOT.
+    // That lookup runs through the poisoned value, so it has to see the
+    // repaired one.
+    const base = await threadedPackage(1);
+    const doc = await DocumentObject.load(poison(base, { [rootParaId(base)]: POISON }));
+    const engine = new RedlineEngine(doc, "Adeu AI (TS)");
+    const ids = Object.keys(extract_comments_data(doc.pkg));
+    const [applied, skipped] = engine.apply_review_actions([
+      { type: "reply", target_id: `Com:${ids[ids.length - 1]}`, text: "Reply to the reply." } as any,
+    ]);
+    expect([applied, skipped]).toEqual([1, 0]);
+
+    const entries = new Map(commentExEntries(await doc.save()));
+    const roots = [...entries].filter(([, p]) => !p).map(([id]) => id);
+    expect(roots, `reply-to-reply created a second root: ${JSON.stringify([...entries])}`).toHaveLength(1);
+    for (const parent of [...entries.values()].filter(Boolean)) {
+      expect(parent).toBe(roots[0]);
+    }
+  });
+
+  it("repairs what the demo document actually shipped", async () => {
+    // End to end on the real shape: parent paraId AND its registrations in
+    // commentsExtended / commentsIds all poisoned together, which is how a
+    // fixture builder that rewrites ids leaves a document.
+    const base = await threadedPackage(0);
+    const pkg = poison(base, { [rootParaId(base)]: POISON });
+    expect(
+      findOutOfRangeLongHexNumbers(pkg).map(([, attr, value]) => [attr, value]),
+      "fixture precondition: not the demo's shape",
+    ).toEqual([
+      ["w14:paraId", POISON],
+      ["w15:paraId", POISON],
+      ["w16cid:paraId", POISON],
+    ]);
+
+    expect(findOutOfRangeLongHexNumbers(await replyToRoot(pkg))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The other two MUSTs the schema does not state
+// ---------------------------------------------------------------------------
+
+describe("[MS-DOCX] 2.6.2.4: paraId is unique within the part", () => {
+  // Like the range rule, this is prose rather than schema, so nothing rejects a
+  // duplicate. It becomes load-bearing the moment ids are repaired rather than
+  // minted: folding clears the top bit, and D2AEAE20 and 52AEAE20 fold to the
+  // SAME value. A repair that ignores uniqueness turns a dangling paraIdParent
+  // into an ambiguous one, which is not an improvement.
+
+  it("holds for a freshly written thread", async () => {
+    expect(findDuplicateParaIds(await threadedPackage(3))).toEqual([]);
+  });
+
+  it("holds when a repair folds onto an id the part already uses", async () => {
+    // The collision is constructed, not hoped for: the document already
+    // contains 52AEAE20, which is exactly what D2AEAE20 folds to.
+    const doc = await createTestDocument();
+    addParagraph(doc, "The parties shall confer in good faith before moving to compel production.");
+    const engine = new RedlineEngine(doc, "Sarah Chen");
+    engine.apply_edits([
+      { type: "modify", target_text: "confer in good faith", new_text: "confer in good faith", comment: "Root note." } as any,
+      { type: "modify", target_text: "production", new_text: "production", comment: "Second thread." } as any,
+    ]);
+    const base = await doc.save();
+    const [first, second] = paraIdsIn(base);
+    const pkg = poison(base, { [first]: POISON, [second]: POISON_FOLDED });
+    expect(partText(pkg, "comments"), "fixture precondition: no collision to hit").toContain(
+      POISON_FOLDED,
+    );
+
+    const saved = await replyToRoot(pkg);
+
+    expect(
+      findDuplicateParaIds(saved),
+      "the repair folded onto a paraId the part was already using; [MS-DOCX] requires " +
+        "paraId to be unique within the part",
+    ).toEqual([]);
+    expectWordReadableIds(saved, "collision repair");
+  });
+
+  it("detects a collision when there is one", async () => {
+    // Guards the guard: a scanner that never fires makes the above vacuous.
+    const base = await threadedPackage(1);
+    const ids = paraIdsIn(base);
+    const collided = poison(base, { [ids[1]]: ids[0] });
+    expect(findDuplicateParaIds(collided).map(([, attr, value]) => [attr, value])).toEqual([
+      ["w14:paraId", ids[0]],
+    ]);
+  });
+});
+
+describe("[MS-DOCX] 2.6.2.6: textId travels with paraId", () => {
+  // textId carries the same range rule AND "any element having this attribute
+  // MUST also have the paraId attribute". Adeu writes w14:textId on every
+  // comment paragraph it creates, so the pairing is a real obligation, and it
+  // constrains the repair: renaming a paraId while leaving its textId behind
+  // produces an element that violates the spec even though every id is in range.
+
+  it("holds for a freshly written thread", async () => {
+    expect(findTextIdsWithoutParaId(await threadedPackage(2))).toEqual([]);
+  });
+
+  it("survives repairing an inherited paraId", async () => {
+    const base = await threadedPackage(1);
+    const saved = await replyToRoot(poison(base, { [rootParaId(base)]: POISON }));
+    expect(findTextIdsWithoutParaId(saved)).toEqual([]);
+  });
+
+  it("writes a textId that is itself in range", async () => {
+    // w14:textId is an ST_LongHexNumber like every other id here. Stated
+    // separately because it is the one Adeu writes as a literal rather than
+    // from the generator.
+    const xml = partText(await threadedPackage(1), "comments");
+    for (const [, value] of xml.matchAll(/w14:textId="([0-9A-Fa-f]{1,8})"/g)) {
+      expect(isLegal(value), `textId ${value} is outside the legal range`).toBe(true);
+    }
+  });
+
+  it("detects a lone textId when there is one", async () => {
+    const base = await threadedPackage(0);
+    const orphaned = repack(base, (_n, xml) =>
+      xml.replace(/\s*w14:paraId="[0-9A-Fa-f]{1,8}"/, ""),
+    );
+    expect(findTextIdsWithoutParaId(orphaned).length).toBeGreaterThan(0);
   });
 });

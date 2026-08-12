@@ -10,7 +10,11 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, nsmap, qn
 from docx.oxml.xmlchemy import serialize_for_reading
 
-from adeu.utils.long_hex_number import generate_long_hex_number
+from adeu.utils.long_hex_number import (
+    generate_long_hex_number,
+    is_word_readable_long_hex_number,
+    to_long_hex_number,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +41,47 @@ if "w16cex" not in nsmap:
 # Register w16se namespace (often used in ignorable)
 if "w16se" not in nsmap:
     nsmap["w16se"] = "http://schemas.microsoft.com/office/word/2015/wordml/symex"
+
+CT_EXTENDED = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+CT_IDS = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
+CT_EXTENSIBLE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
+
+# ---------------------------------------------------------------------------
+# Repairing ST_LongHexNumbers Adeu did not mint
+# ---------------------------------------------------------------------------
+#
+# The generators guarantee that every id Adeu MINTS is one Word will keep. They
+# can say nothing about the ids Adeu READS. A document arriving with
+# `w14:paraId="D2AEAE20"` â€” legal against the schema, discarded by Word on load
+# â€” takes the reply threaded onto it down with it, and no amount of correct
+# minting prevents that (2026-08-12 B6, western-district demo).
+#
+# Repairing means rewriting a value that other parts point AT, so the attribute
+# groups below exist to keep a repair from breaking the references it was
+# supposed to preserve.
+
+#: One logical paragraph identity, spelled four ways across three parts. Word
+#: consults all of them; repair them together or the comment drops out of the
+#: modern-comments path exactly as if it had not been repaired at all.
+PARA_ID_ATTRIBUTES = ("w14:paraId", "w15:paraId", "w15:paraIdParent", "w16cid:paraId")
+
+#: The comment's durable identity: commentsIds mints it, commentsExtensible
+#: points back at it. Out of range, the anchor collapses to a point (B3).
+DURABLE_ID_ATTRIBUTES = ("w16cid:durableId", "w16cex:durableId")
+
+#: ST_LongHexNumbers nothing else references, so they can be folded in place.
+#: Folding (rather than re-minting) keeps equal rsids equal, which is the only
+#: thing an rsid means, and keeps `w14:textId` on the element whose `w14:paraId`
+#: it versions â€” [MS-DOCX] 2.6.2.6 requires the two to travel together.
+STANDALONE_ID_ATTRIBUTES = (
+    "w14:textId",
+    "w:rsidR",
+    "w:rsidRPr",
+    "w:rsidRDefault",
+    "w:rsidP",
+    "w:rsidDel",
+    "w:rsidTr",
+)
 
 
 class CommentThreadingError(Exception):
@@ -205,7 +250,7 @@ class CommentsManager:
 
     def _get_or_create_extended_part(self) -> XmlPart:
         RELTYPE_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
-        CONTENT_TYPE_EXTENDED = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+        CONTENT_TYPE_EXTENDED = CT_EXTENDED
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_EXTENDED)
         if part:
@@ -226,7 +271,7 @@ class CommentsManager:
 
     def _get_or_create_ids_part(self) -> XmlPart:
         RELTYPE_IDS = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
-        CONTENT_TYPE_IDS = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml"
+        CONTENT_TYPE_IDS = CT_IDS
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_IDS)
         if part:
@@ -247,9 +292,7 @@ class CommentsManager:
 
     def _get_or_create_extensible_part(self) -> XmlPart:
         RELTYPE_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
-        CONTENT_TYPE_EXTENSIBLE = (
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml"
-        )
+        CONTENT_TYPE_EXTENSIBLE = CT_EXTENSIBLE
 
         part = self._get_existing_part_by_type(CONTENT_TYPE_EXTENSIBLE)
         if part:
@@ -333,7 +376,7 @@ class CommentsManager:
     # These stay as named aliases only so the call sites read as what they
     # mint; they must never diverge. Word parses ST_LongHexNumber as a SIGNED
     # 32-bit integer for ALL of them, silently discarding and regenerating
-    # anything outside (0x00000000, 0x80000000) — an out-of-range paraId drops
+    # anything outside (0x00000000, 0x80000000) â€” an out-of-range paraId drops
     # replies out of their thread (B5), an out-of-range durableId collapses the
     # comment's anchor (B3), and a zero paraId makes Word reject the file
     # outright. The earlier belief that only durableId was constrained is what
@@ -341,15 +384,15 @@ class CommentsManager:
     # BUG_paraId_signed_int32_thread_collapse.md.
 
     def _generate_para_id(self) -> str:
-        """`w14:paraId` — the identity `w15:paraIdParent` threads onto."""
+        """`w14:paraId` â€” the identity `w15:paraIdParent` threads onto."""
         return generate_long_hex_number()
 
     def _generate_durable_id(self) -> str:
-        """`w16cid:durableId` — the identity the comment anchor binds to."""
+        """`w16cid:durableId` â€” the identity the comment anchor binds to."""
         return generate_long_hex_number()
 
     def _generate_rsid(self) -> str:
-        """`w:rsidR` / `w:rsidRDefault` / `w:rsidP` — revision-save grouping."""
+        """`w:rsidR` / `w:rsidRDefault` / `w:rsidP` â€” revision-save grouping."""
         return generate_long_hex_number()
 
     def _get_initials(self, author: str) -> str:
@@ -390,9 +433,7 @@ class CommentsManager:
         Modern Word flattens all replies to point to the original comment.
         """
         direct_para_id = self._find_para_id_for_comment(comment_id)
-        ext_part = self._get_existing_part_by_type(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
-        )
+        ext_part = self._get_existing_part_by_type(CT_EXTENDED)
         if not direct_para_id or not ext_part:
             return direct_para_id
 
@@ -404,14 +445,125 @@ class CommentsManager:
                     return parent
         return direct_para_id
 
+    def _existing_comment_part_elements(self) -> list:
+        """Every comment part that ALREADY exists, as a mutable element.
+
+        Deliberately not the `comments_part` / `extended_part` properties: those
+        CREATE the part they cannot find, and a repair pass that invents a
+        commentsExtended part for a document that has no comments would be a
+        side effect nobody asked for.
+        """
+        elements = []
+        for content_type in (CT.WML_COMMENTS, CT_EXTENDED, CT_IDS, CT_EXTENSIBLE):
+            part = self._get_existing_part_by_type(content_type)
+            if part is not None:
+                elements.append(self._ensure_xml_part(part).element)
+        return elements
+
+    def _free_long_hex_number(self, value: str, taken: set) -> str:
+        """A legal id for `value` that the comment parts are not already using.
+
+        Folding first (clearing the top bit, which is what Word does to the
+        value anyway) keeps the repair DETERMINISTIC: the same document repaired
+        twice produces the same ids, so a re-run is a no-op rather than a fresh
+        set of anchors. `D2AEAE20 -> 52AEAE20`, Word-verified against the
+        western-district document.
+
+        The collision check is not belt-and-braces. [MS-DOCX] 2.6.2.4 requires
+        `w14:paraId` to be unique within the part, and folding is exactly the
+        operation that can violate it: `D2AEAE20` and `52AEAE20` fold to the
+        same value, so a document containing both would end up with one id
+        naming two paragraphs and a `w15:paraIdParent` that no longer says
+        which thread it means.
+        """
+        try:
+            candidate = to_long_hex_number(int(value, 16))
+        except ValueError:
+            candidate = generate_long_hex_number()
+        while candidate in taken:
+            candidate = generate_long_hex_number()
+        return candidate
+
+    def _repair_inherited_long_hex_numbers(self) -> None:
+        """Bring every ST_LongHexNumber in the comment parts into range.
+
+        B5 masked the generators, which fixed every id Adeu mints and none of
+        the ids it inherits. B6 is the second kind: the western-district demo
+        was handed a comment carrying `w14:paraId="D2AEAE20"`,
+        `_adopt_into_modern_comments` reused it verbatim because it was
+        present, and the reply's `w15:paraIdParent` was written to point at a
+        value Word discards on load. Every check passed on the way out â€” the
+        reply IS parented, `CommentThreadingError` correctly did not fire â€” and
+        the thread still collapsed the moment the document was opened.
+
+        Whole-part, not just the comment being replied to: Word renumbers a
+        PART when it finds a bad id in it, so leaving one bad rsid behind in
+        comments.xml re-arms the renumbering pass that de-threads the reply.
+
+        A no-op on a healthy document. It must stay that way: a pass that
+        re-mints unconditionally would churn every paraId on every save and
+        invalidate every `{#cell:<paraId>}` anchor the caller is holding, which
+        is the damage it exists to prevent.
+        """
+        elements = self._existing_comment_part_elements()
+        if not elements:
+            return
+
+        def remap_for(attributes) -> Dict[str, str]:
+            taken, broken = set(), []
+            for element in elements:
+                for el in element.iter():
+                    for attribute in attributes:
+                        value = el.get(qn(attribute))
+                        if not value:
+                            continue
+                        if is_word_readable_long_hex_number(value):
+                            taken.add(value.upper())
+                        elif value not in broken:
+                            broken.append(value)
+            remap: Dict[str, str] = {}
+            for value in broken:
+                repaired = self._free_long_hex_number(value, taken)
+                taken.add(repaired)
+                remap[value] = repaired
+            return remap
+
+        para_remap = remap_for(PARA_ID_ATTRIBUTES)
+        durable_remap = remap_for(DURABLE_ID_ATTRIBUTES)
+
+        standalone = 0
+        for element in elements:
+            for el in element.iter():
+                for attribute in PARA_ID_ATTRIBUTES:
+                    value = el.get(qn(attribute))
+                    if value in para_remap:
+                        el.set(qn(attribute), para_remap[value])
+                for attribute in DURABLE_ID_ATTRIBUTES:
+                    value = el.get(qn(attribute))
+                    if value in durable_remap:
+                        el.set(qn(attribute), durable_remap[value])
+                for attribute in STANDALONE_ID_ATTRIBUTES:
+                    value = el.get(qn(attribute))
+                    if value and not is_word_readable_long_hex_number(value):
+                        el.set(qn(attribute), self._free_long_hex_number(value, set()))
+                        standalone += 1
+
+        if para_remap or durable_remap or standalone:
+            logger.info(
+                "Repaired inherited ST_LongHexNumbers Word would have discarded",
+                para_ids=para_remap,
+                durable_ids=durable_remap,
+                standalone=standalone,
+            )
+
     def _adopt_into_modern_comments(self, comment_id: str) -> Optional[str]:
         """
         Gives an existing comment a modern paragraph identity so a reply can
         thread onto it, and returns that paraId (None if the comment does not
         exist at all).
 
-        A comment written by pre-2013 Word — or by any generator that skips the
-        modern-comments extensions — has no `w14:paraId`, so
+        A comment written by pre-2013 Word â€” or by any generator that skips the
+        modern-comments extensions â€” has no `w14:paraId`, so
         `_find_thread_root_para_id` resolves nothing and `w15:paraIdParent`
         never gets written: the "reply" silently becomes a second top-level
         thread (B1). Minting the missing identity is the repair; it is
@@ -465,14 +617,21 @@ class CommentsManager:
         predates modern comments. None means threading is impossible and the
         caller must fail loudly rather than mint a top-level comment.
 
-        The root lookup runs FIRST so a reply-to-a-reply still flattens onto the
+        The repair pass runs FIRST, because every lookup below reads paraIds
+        and a lookup that returns an id Word discards is worse than one that
+        returns nothing: `None` raises CommentThreadingError and leaves the
+        document alone, while a doomed id is reported as a successful reply and
+        collapses the thread on load (B6).
+
+        The root lookup runs next so a reply-to-a-reply still flattens onto the
         thread root (modern Word's model). The adoption pass then runs
-        unconditionally — it is idempotent, and it also backfills a parent that
+        unconditionally â€” it is idempotent, and it also backfills a parent that
         HAS a w14:paraId but is missing from commentsExtended / commentsIds:
         Word consults both, so a paraIdParent pointing at an unregistered
         paragraph drops the reply out of its thread just as surely as a missing
         attribute would.
         """
+        self._repair_inherited_long_hex_numbers()
         root_para_id = self._find_thread_root_para_id(str(parent_id))
         adopted_para_id = self._adopt_into_modern_comments(str(parent_id))
         return root_para_id or adopted_para_id
@@ -512,20 +671,24 @@ class CommentsManager:
     def add_comment(self, author: str, text: str, parent_id: Optional[str] = None) -> str:
         logger.info("Adding comment", author=author, parent_id=parent_id)
 
+        # Before anything else, and for top-level comments too: the paraIds this
+        # document arrived with are about to share a part with the ones we are
+        # about to mint, and Word renumbers the whole part if any of them is out
+        # of range (B6).
+        self._repair_inherited_long_hex_numbers()
+
         # Snapshot the modern-comments state BEFORE resolving threading: the
         # legacy `w15:p` fallback below keys on whether the document was
         # already on the modern path, and repairing a legacy parent may create
         # the commentsExtended part as a side effect.
         ext_part_existed = (
-            self._get_existing_part_by_type(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
-            )
+            self._get_existing_part_by_type(CT_EXTENDED)
             is not None
         )
 
         # Resolve threading BEFORE writing anything. A reply whose parent
         # cannot be resolved used to be written anyway, minus its
-        # w15:paraIdParent — i.e. as a brand-new top-level thread, reported as
+        # w15:paraIdParent â€” i.e. as a brand-new top-level thread, reported as
         # applied (B1). Failing here leaves the document untouched.
         parent_para_id: Optional[str] = None
         if parent_id is not None:
@@ -659,9 +822,7 @@ class CommentsManager:
             }
 
         # 2. Enrich with Threading and Resolved status from commentsExtended (Modern Word)
-        ext_part = self._get_existing_part_by_type(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
-        )
+        ext_part = self._get_existing_part_by_type(CT_EXTENDED)
         if ext_part:
             try:
                 ext_xml = parse_xml(ext_part.blob)

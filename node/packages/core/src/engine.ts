@@ -22,6 +22,7 @@ import { split_structural_appendix, paginate } from "./pagination.js";
 import {
   is_heading_paragraph,
   is_native_heading,
+  _get_style_cache,
   get_run_style_markers,
   get_run_text,
   apply_formatting_to_segments,
@@ -175,6 +176,17 @@ function stripMatchingHeadingHashes(
   newText: string,
 ): [string, string] {
   if (!target || !newText) return [target, newText];
+  // Only a rewrite of the heading ITSELF may cancel the markers. When the
+  // replacement spans several paragraphs the leading "#" belongs to the FIRST
+  // of them and the heading being targeted usually reappears at the end
+  // ("# SCOPE" -> "# NEW\n\nbody\n\n# SCOPE", i.e. insert a section in front of
+  // it). Cancelling the markers there desynchronises the two sides: the shared
+  // suffix shrinks from the whole heading to its bare text, so the replacement
+  // no longer ends on a paragraph break, the paragraph-preceding insertion path
+  // is missed, and the leftover "# " is welded onto the heading's own text
+  // ("# NEW SECTIONSCOPE" + an empty "# "). The Python twin has no such
+  // pre-processing step at all; this keeps Node's behaviour equal to it here.
+  if (newText.includes("\n")) return [target, newText];
   const targetMatch = target.match(/^(#+)\s+/);
   const newMatch = newText.match(/^(#+)\s+/);
   if (targetMatch && newMatch && targetMatch[1] === newMatch[1]) {
@@ -474,6 +486,15 @@ export class RedlineEngine {
    *  their authors ("Com:1 (by Sarah Chen)") — see B2 in
    *  BUG_comment_threading_anchoring_and_typography.md. */
   public removed_comment_notes: string[] = [];
+  /**
+   * Whether the LAST batch that was rejected provably left the document as it
+   * was (see _verify_rollback). A caller that reuses this engine's DOM after a
+   * rejection — the MCP hot-DOM slot pins it back for the retry that usually
+   * follows — MUST check this: `false` means the in-memory document no longer
+   * matches the file it was loaded from, and reusing it compounds the damage
+   * (BUG 2026-08-12: one comment collected three identical replies that way).
+   */
+  public rollback_verified: boolean = true;
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
   private _revisionIndex: RevisionIndex | null = null;
@@ -1867,7 +1888,34 @@ export class RedlineEngine {
    *
    * Does NOT attach comments; callers handle that.
    */
-  private _clone_pPr_scrubbing_headings(existing_pPr: Element): Element {
+  /**
+   * Is `p_el` a heading in the sense the text projection uses — i.e. does it
+   * render with "#" markers?
+   *
+   * Style NAMES are not enough: real templates declare their heading-ness as
+   * <w:outlineLvl> inside styles.xml under a house name ("LegalNum2L1"), which
+   * Word honours and a startsWith("Heading") test does not. is_native_heading
+   * resolves the style chain, and is the very function the mapper projects
+   * with, so the scrub below cannot drift away from what the agent reads.
+   */
+  private _is_native_heading_element(p_el: Element): boolean {
+    try {
+      const part = (this.doc as any).part || this.doc;
+      const [style_cache, default_pstyle] = _get_style_cache(part);
+      return is_native_heading(
+        { _element: p_el } as any,
+        style_cache,
+        default_pstyle,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private _clone_pPr_scrubbing_headings(
+    existing_pPr: Element,
+    source_paragraph: Element | null = null,
+  ): Element {
     const pPr_clone = existing_pPr.cloneNode(true) as Element;
     const pStyle_el = findChild(pPr_clone, "w:pStyle");
     if (pStyle_el) {
@@ -1876,7 +1924,9 @@ export class RedlineEngine {
         const is_heading =
           style_val.startsWith("Heading") ||
           style_val === "Title" ||
-          style_val.replace(/\s+/g, "").startsWith("Heading");
+          style_val.replace(/\s+/g, "").startsWith("Heading") ||
+          (source_paragraph !== null &&
+            this._is_native_heading_element(source_paragraph));
         if (is_heading) {
           pPr_clone.removeChild(pStyle_el);
         }
@@ -2093,8 +2143,10 @@ export class RedlineEngine {
         // Inherit pPr from the anchor paragraph (preserves list numbering).
         const existing_pPr = findChild(current_p, "w:pPr");
         if (existing_pPr) {
-          new_p.appendChild(this._clone_pPr_scrubbing_headings(existing_pPr));
-        }
+          new_p.appendChild(
+            this._clone_pPr_scrubbing_headings(existing_pPr, current_p),
+          );
+            }
       }
 
       // Track the paragraph break itself as an insertion.
@@ -3414,7 +3466,76 @@ export class RedlineEngine {
     return this._process_batch_internal(changes);
   }
 
+  /**
+   * Everything a batch can change, cheaply. Compared before the batch and
+   * after a rollback to VERIFY the rollback rather than assume it (see
+   * rollback_verified).
+   *
+   * Every way a batch mutates a document lands here: an applied edit mints
+   * new w:ins/w:del ids, accept/reject retires them, reply (and an edit's
+   * `comment`) adds a comment id. Count AND ids, because a document may reuse
+   * one w:id across several elements.
+   *
+   * Read from the TREE, never from the mapper: the mapper is rebuilt by the
+   * rollback but not by every operation that precedes a batch (accept_all
+   * leaves it stale by design), so a mapper-derived value would compare a
+   * stale "before" against a fresh "after" and report a clean rollback as a
+   * leak.
+   */
+  private _batch_fingerprint(): string {
+    let revisions = 0;
+    const ids = new Set<string>();
+    for (const tag of ALL_REVISION_TAGS) {
+      for (const n of this._revisionsByTag(tag)) {
+        revisions++;
+        if (n.id) ids.add(n.id);
+      }
+    }
+    return [
+      revisions,
+      [...ids].sort().join(","),
+      this._existing_comment_ids().join(","),
+    ].join("|");
+  }
+
+  /** Undo everything this batch did and put the engine's projections back. */
+  private _restore_batch_snapshot(snapshot: any, originalCurrentId: any): void {
+    if (!snapshot) return;
+    restoreSnapshot(this.doc, snapshot);
+    this.current_id = originalCurrentId;
+    this.mapper = new DocumentMapper(this.doc);
+    this.comments_manager = new CommentsManager(this.doc);
+    this.clean_mapper = null;
+    // The restore can swap whole parts for freshly parsed ones, so the
+    // revision index's owner-document identity check is not enough to catch
+    // every shape of it. Drop it: _batch_fingerprint reads through it, and a
+    // stale index would let a leak verify itself as clean.
+    this._revisionIndex = null;
+  }
+
+  /**
+   * Did the rollback actually roll back? A rejected batch is a promise that
+   * the document is untouched; this is the check that the promise held, and
+   * the ONLY thing a caching caller can safely key document reuse off.
+   */
+  private _verify_rollback(pre_batch_fingerprint: string | null): void {
+    // null = not fingerprinted (an edit-only batch): the edit rollback path is
+    // unchanged and separately pinned, and fingerprinting every batch would
+    // force a whole-document revision walk on the hot path for it.
+    if (pre_batch_fingerprint === null) return;
+    try {
+      this.rollback_verified =
+        this._batch_fingerprint() === pre_batch_fingerprint;
+    } catch {
+      this.rollback_verified = false;
+    }
+  }
+
   private _process_batch_internal(changes: DocumentChange[]): any {
+    // A fresh verdict per batch: a rejection that never mutated anything (a
+    // validation failure before the first apply) is a verified rollback too.
+    this.rollback_verified = true;
+
     // Pre-process edits: strip identical leading heading hashes from target_text and new_text
     for (const c of changes) {
       if (
@@ -3477,13 +3598,42 @@ export class RedlineEngine {
     let applied_actions = 0;
     let skipped_actions = 0;
     let already_resolved_actions = 0;
+
+    // ONE transaction for the WHOLE batch. The snapshot has to predate the
+    // review actions, not just the edits: they mutate the document too, and a
+    // rejection promises the caller that "it was rolled back and nothing was
+    // saved". Snapshotting after apply_review_actions made that promise false
+    // for every accept/reject/reply in a batch that a later edit — or a later
+    // ACTION — rejected, and the MCP layer then pinned the mutated DOM back
+    // for the retry, so each rejected attempt stacked another reply on the
+    // reviewer's comment (BUG 2026-08-12).
+    //
+    // Cost: an action-only batch now takes a snapshot it did not take before.
+    // takeSnapshot skips the deep clone for parts that are still clean (the
+    // ordinary case — the MCP loads a fresh document per call), so this is a
+    // few array copies there, and the correctness it buys is not optional.
+    const transactional = actions.length > 0 || edits.length > 0;
+    const snapshot = transactional ? takeSnapshot(this.doc) : null;
+    const pre_batch_fingerprint =
+      actions.length > 0 ? this._batch_fingerprint() : null;
+    const originalCurrentId = this.current_id;
+
     if (actions.length > 0) {
-      const res = this.apply_review_actions(actions);
-      applied_actions = res[0];
-      skipped_actions = res[1];
-      already_resolved_actions = res[2];
-      if (skipped_actions > 0) {
-        throw new BatchValidationError(this.skipped_details);
+      try {
+        const res = this.apply_review_actions(actions);
+        applied_actions = res[0];
+        skipped_actions = res[1];
+        already_resolved_actions = res[2];
+        if (skipped_actions > 0) {
+          throw new BatchValidationError(this.skipped_details);
+        }
+      } catch (err) {
+        // An action can also fail at APPLY time (a reply whose parent cannot
+        // be threaded, a w:id shared across authors) — long after validation
+        // passed and after earlier actions in the batch already applied.
+        this._restore_batch_snapshot(snapshot, originalCurrentId);
+        this._verify_rollback(pre_batch_fingerprint);
+        throw err;
       }
       if (applied_actions > 0) {
         this.mapper["_build_map"]();
@@ -3533,9 +3683,8 @@ export class RedlineEngine {
         });
 
       {
-        // Sequential validate-and-apply with transactional rollback.
-        const snapshot = takeSnapshot(this.doc);
-        const originalCurrentId = this.current_id;
+        // Sequential validate-and-apply, rolling back to the snapshot taken
+        // above — before this batch's ACTIONS applied, not after them.
         try {
           const sequential_errors: string[] = [];
           let applied_so_far = 0;
@@ -3585,11 +3734,8 @@ export class RedlineEngine {
             throw new BatchValidationError(sequential_errors);
           }
         } catch (err) {
-          restoreSnapshot(this.doc, snapshot);
-          this.current_id = originalCurrentId;
-          this.mapper = new DocumentMapper(this.doc);
-          this.comments_manager = new CommentsManager(this.doc);
-          this.clean_mapper = null;
+          this._restore_batch_snapshot(snapshot, originalCurrentId);
+          this._verify_rollback(pre_batch_fingerprint);
           throw err;
         }
 
@@ -3639,6 +3785,18 @@ export class RedlineEngine {
         }
       }
     }
+
+    // Cross-edit advisory: individually legal deletions can still add up to a
+    // sentence that reads as gibberish once accepted. Runs only after the
+    // batch has committed, and only ever appends to skipped_details.
+    if (applied_edits > 0) {
+      try {
+        this._warn_stranded_comment_anchors(originalCurrentId);
+      } catch {
+        /* an advisory must never be able to fail a committed batch */
+      }
+    }
+
     return {
       actions_applied: applied_actions,
       actions_skipped: skipped_actions,
@@ -4466,6 +4624,145 @@ export class RedlineEngine {
       const nb = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
       return na - nb || a.localeCompare(b);
     });
+  }
+
+  /**
+   * Batch-level advisory for the "stranded comment anchor" shape (demo run
+   * 2026-08-12, defect B).
+   *
+   * Editing around a foreign comment — deleting the words before its anchor
+   * and the words after it, while keeping the anchored phrase so the comment
+   * survives — is a legitimate move, and each of those deletions is legal on
+   * its own. Nothing cross-checked them against each other, so a batch could
+   * leave "...shall not be disclosed Attorney's Eyes Only ;" behind and report
+   * two cleanly applied edits. The caller never learned the sentence it wrote
+   * is gibberish once accepted.
+   *
+   * So: warn, never reject. The condition is deliberately narrow, because a
+   * false positive here trains the caller to ignore the warning:
+   *   - the anchored text must SURVIVE (text deleted along with its comment
+   *     is the normal case and is already reported elsewhere),
+   *   - there must be deleted text on BOTH sides of it in its own paragraph,
+   *   - and at least one of those deletions must come from THIS batch, so a
+   *     condition the caller inherited is not re-reported on every batch.
+   *
+   * `watermark` is the engine's revision-id counter as it stood before the
+   * batch: every id above it was minted by this batch (ids are monotonic, and
+   * a rejected batch restores the counter along with the DOM).
+   */
+  private _warn_stranded_comment_anchors(watermark: number): void {
+    let starts: Element[];
+    try {
+      starts = findAllDescendants(this.doc.element, "w:commentRangeStart");
+    } catch {
+      return;
+    }
+    if (starts.length === 0) return;
+
+    // Document-order index of every element in a paragraph, so "before the
+    // anchor" and "after the anchor" are decidable for nested runs too.
+    const order = (p: Element): Map<Element, number> => {
+      const seq = new Map<Element, number>();
+      let i = 0;
+      const walk = (node: Element) => {
+        seq.set(node, i++);
+        for (let c = node.firstChild; c; c = c.nextSibling) {
+          if (c.nodeType === 1) walk(c as Element);
+        }
+      };
+      walk(p);
+      return seq;
+    };
+
+    const paragraphOf = (el: Element): Element | null => {
+      let n: any = el.parentNode;
+      while (n && n.nodeType === 1) {
+        if (n.tagName === "w:p") return n as Element;
+        n = n.parentNode;
+      }
+      return null;
+    };
+
+    const hasDeletedAncestorWithin = (el: Element, root: Element): boolean => {
+      let n: any = el.parentNode;
+      while (n && n.nodeType === 1 && n !== root) {
+        if (n.tagName === "w:del") return true;
+        n = n.parentNode;
+      }
+      return false;
+    };
+
+    let authors: Record<string, string> | null = null;
+    const stranded: Array<[string, string]> = [];
+
+    for (const start of starts) {
+      const cid = start.getAttribute("w:id");
+      if (!cid) continue;
+      const para = paragraphOf(start);
+      if (!para) continue;
+
+      // A range that closes in a LATER paragraph is a block-level annotation,
+      // not the single-sentence shape this advisory is about.
+      const end = findAllDescendants(para, "w:commentRangeEnd").find(
+        (e) => e.getAttribute("w:id") === cid,
+      );
+      if (!end) continue;
+
+      const seq = order(para);
+      const startPos = seq.get(start);
+      const endPos = seq.get(end);
+      if (startPos === undefined || endPos === undefined || endPos < startPos) {
+        continue;
+      }
+
+      // Text inside the range that is NOT itself deleted: what a reader is
+      // left with after accepting everything.
+      let surviving = "";
+      for (const t of findAllDescendants(para, "w:t")) {
+        const pos = seq.get(t);
+        if (pos === undefined || pos < startPos || pos > endPos) continue;
+        if (hasDeletedAncestorWithin(t, para)) continue;
+        surviving += t.textContent || "";
+      }
+      if (!surviving.trim()) continue;
+
+      let deletedBefore = false;
+      let deletedAfter = false;
+      let ownedByThisBatch = false;
+      for (const del of findAllDescendants(para, "w:del")) {
+        const pos = seq.get(del);
+        if (pos === undefined) continue;
+        const side = pos < startPos ? "before" : pos > endPos ? "after" : null;
+        if (!side) continue;
+        const hasText = findAllDescendants(del, "w:delText").some((d) =>
+          (d.textContent || "").trim(),
+        );
+        if (!hasText) continue;
+        if (side === "before") deletedBefore = true;
+        else deletedAfter = true;
+        const rid = del.getAttribute("w:id") || "";
+        if (/^\d+$/.test(rid) && parseInt(rid, 10) > watermark) {
+          ownedByThisBatch = true;
+        }
+      }
+
+      if (deletedBefore && deletedAfter && ownedByThisBatch) {
+        if (authors === null) authors = this._comment_authors();
+        stranded.push([cid, surviving.trim()]);
+      }
+    }
+
+    for (const [cid, text] of stranded) {
+      const who = authors?.[cid];
+      const label = who ? `comment Com:${cid} (by ${who})` : `comment Com:${cid}`;
+      this.skipped_details.push(
+        `- Warning: this batch deleted text on both sides of ${label} but left its ` +
+          `anchored text "${truncate_middle(text, 60)}" in place, so once the changes are ` +
+          `accepted that text stands alone in its sentence. If you kept it to preserve the ` +
+          `comment's anchor, re-read the sentence; if you meant to remove the clause, extend ` +
+          `one edit over the anchored text too. The edits themselves were applied.`,
+      );
+    }
   }
 
   /** Comment ids present in the document, sorted for display. */
@@ -5823,7 +6120,12 @@ export class RedlineEngine {
           } else {
             const existing_pPr = findChild(_bug233_target_para, "w:pPr");
             if (existing_pPr) {
-              new_p.appendChild(this._clone_pPr_scrubbing_headings(existing_pPr));
+              new_p.appendChild(
+                this._clone_pPr_scrubbing_headings(
+                  existing_pPr,
+                  _bug233_target_para,
+                ),
+              );
             }
           }
           let pPr = findChild(new_p, "w:pPr");
@@ -5879,9 +6181,20 @@ export class RedlineEngine {
         ins_id!,
         null,
         suppress_emphasis,
-        // Paragraph-start insertions attach BEFORE the anchor (see
-        // before_anchor below): the suffix relocation must know.
-        start_idx === 0,
+        // Insertions that attach BEFORE the anchor: the suffix relocation must
+        // know, because everything it precedes belongs in the LAST inserted
+        // paragraph. Two shapes reach here:
+        //   - start_idx === 0: get_insertion_anchor(0) resolves to the
+        //     document's FIRST run, which the insertion precedes (see
+        //     before_anchor below).
+        //   - no anchor RUN, only an anchor PARAGRAPH: nothing inside that
+        //     paragraph precedes the insertion point, so it lands at paragraph
+        //     START (the anchor_para branch below) and the paragraph's existing
+        //     content is the suffix. Keying this on start_idx === 0 alone left
+        //     the host text welded onto the first inserted line for every
+        //     paragraph but the document's first. Mirrors the Python engine,
+        //     which keys on the anchor kind (engine.py `insert_before`).
+        start_idx === 0 || (anchor_run === null && anchor_para !== null),
       );
 
       if (!result.first_node) return false;

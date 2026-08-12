@@ -209,6 +209,13 @@ export class DocCache {
    * Put a DOM back in the slot after an operation that provably left it
    * equal to the on-disk file (a rolled-back failed batch — restored via
    * the engine's transactional snapshot).
+   *
+   * "Provably" is the caller's obligation, and it is not satisfied by the
+   * operation merely having thrown: the engine reports whether its rollback
+   * verified (RedlineEngine.rollback_verified), and only that answer makes a
+   * post-failure DOM safe to re-pin. Pinning an unverified one publishes a
+   * half-applied document under the UNCHANGED file's cache key, where the
+   * next call picks it up as if it had come from disk.
    */
   public restoreHotDoc(file_path: string, doc: DocumentObject): void {
     try {

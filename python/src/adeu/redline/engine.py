@@ -411,6 +411,13 @@ class RedlineEngine:
         # change; __init__ (also the rollback path) resets it.
         self._pristine_bytes = sanitized_bytes
         self._mutated_since_load = False
+        # Whether the LAST batch that was rejected provably left the document
+        # as it was (see _verify_rollback). A caller that reuses this engine —
+        # or its document — after a rejection MUST check it: False means the
+        # in-memory state no longer matches the file it was loaded from, and
+        # reusing it compounds the damage (BUG 2026-08-12: one comment
+        # collected three identical replies that way).
+        self.rollback_verified = True
         self.doc = Document(BytesIO(sanitized_bytes))
 
         # No part is stamped with the w16du namespace up front. Tracked-change
@@ -1040,6 +1047,50 @@ class RedlineEngine:
 
         return results
 
+    def _is_native_heading_paragraph(self, paragraph) -> bool:
+        """
+        Does `paragraph` render with "#" markers in the text projection?
+
+        Style NAMES are not enough: real templates declare their heading-ness
+        as <w:outlineLvl> inside styles.xml under a house name ("LegalNum2L1"),
+        which Word honours and a startswith("Heading") test does not.
+        is_native_heading resolves the style chain, and is the very function
+        the mapper projects with, so the scrub below cannot drift away from
+        what the agent reads.
+        """
+        try:
+            from adeu.utils.docx import _get_style_cache, is_native_heading
+
+            part = getattr(paragraph, "part", None) or getattr(self.doc, "part", None)
+            style_cache, default_pstyle = _get_style_cache(part)
+            return is_native_heading(paragraph, style_cache, default_pstyle)
+        except Exception:
+            return False
+
+    def _clone_pPr_scrubbing_headings(self, source_paragraph):
+        """
+        Deep-copies `source_paragraph`'s <w:pPr> for a paragraph that CONTINUES
+        it, dropping the heading-ness: an inserted body paragraph must not
+        inherit the heading style (nor, with it, the section's automatic
+        numbering) of the heading it follows.
+        """
+        pPr_clone = deepcopy(source_paragraph.pPr)
+        pStyle_el = pPr_clone.find(qn("w:pStyle"))
+        if pStyle_el is not None:
+            style_val = pStyle_el.get(qn("w:val"))
+            is_heading = style_val and (
+                style_val.startswith("Heading")
+                or style_val == "Title"
+                or style_val.replace(" ", "").startswith("Heading")
+                or self._is_native_heading_paragraph(source_paragraph)
+            )
+            if is_heading:
+                pPr_clone.remove(pStyle_el)
+        outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
+        if outlineLvl_el is not None:
+            pPr_clone.remove(outlineLvl_el)
+        return pPr_clone
+
     def track_insert(
         self,
         text: str,
@@ -1111,20 +1162,7 @@ class RedlineEngine:
                 if s_name:
                     self._set_paragraph_style(new_p, s_name)
                 elif current_p.pPr is not None:
-                    pPr_clone = deepcopy(current_p.pPr)
-                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
-                    if pStyle_el is not None:
-                        style_val = pStyle_el.get(qn("w:val"))
-                        is_heading = (
-                            style_val.startswith("Heading")
-                            or style_val == "Title"
-                            or style_val.replace(" ", "").startswith("Heading")
-                        )
-                        if style_val and is_heading:
-                            pPr_clone.remove(pStyle_el)
-                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
-                    if outlineLvl_el is not None:
-                        pPr_clone.remove(outlineLvl_el)
+                    pPr_clone = self._clone_pPr_scrubbing_headings(current_p)
                     new_p.append(pPr_clone)
 
                 # Track the paragraph break itself as an insertion
@@ -1333,20 +1371,7 @@ class RedlineEngine:
                 if style_name:
                     self._set_paragraph_style(new_p, style_name)
                 elif current_p.pPr is not None:
-                    pPr_clone = deepcopy(current_p.pPr)
-                    pStyle_el = pPr_clone.find(qn("w:pStyle"))
-                    if pStyle_el is not None:
-                        style_val = pStyle_el.get(qn("w:val"))
-                        is_heading = (
-                            style_val.startswith("Heading")
-                            or style_val == "Title"
-                            or style_val.replace(" ", "").startswith("Heading")
-                        )
-                        if style_val and is_heading:
-                            pPr_clone.remove(pStyle_el)
-                    outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
-                    if outlineLvl_el is not None:
-                        pPr_clone.remove(outlineLvl_el)
+                    pPr_clone = self._clone_pPr_scrubbing_headings(current_p)
                     if list_level is not None:
                         numPr = pPr_clone.find(qn("w:numPr"))
                         if numPr is not None:
@@ -2459,8 +2484,8 @@ class RedlineEngine:
     def _restore_from_snapshot(self, snapshot: Optional[BytesIO]) -> None:
         """
         Rolls the engine back to a pre-batch snapshot (as produced by
-        save_to_stream). Used for transactional rejection: when any edit in a
-        sequential batch fails validation, every edit the batch already
+        save_to_stream). Used for transactional rejection: when anything in a
+        batch fails, every edit AND every review action the batch already
         applied is undone before the BatchValidationError propagates.
         """
         if snapshot is None:
@@ -2471,6 +2496,56 @@ class RedlineEngine:
             id_discovery_hint=self.id_discovery_hint,
             terse_errors=self.terse_errors,
         )
+
+    def _batch_fingerprint(self) -> str:
+        """
+        Everything a batch can change, cheaply. Compared before the batch and
+        after a rollback to VERIFY the rollback rather than assume it (see
+        `rollback_verified`).
+
+        Every way a batch mutates a document lands here: an applied edit mints
+        new w:ins/w:del ids, accept/reject retires them, reply (and an edit's
+        `comment`) adds a comment id. Count AND ids, because a document may
+        reuse one w:id across several elements.
+
+        Read from the TREE, never from the mapper: the mapper is rebuilt by the
+        rollback but not by every operation that precedes a batch (accept_all
+        leaves it stale by design), so a mapper-derived value would compare a
+        stale "before" against a fresh "after" and report a clean rollback as a
+        leak.
+        """
+        revisions = [
+            n
+            for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS
+            for n in self.doc.element.findall(f".//{qn(tag)}")
+        ]
+        return "|".join(
+            (
+                str(len(revisions)),
+                ",".join(self._existing_change_ids()),
+                ",".join(self._existing_comment_ids()),
+            )
+        )
+
+    def _verify_rollback(self, pre_batch_fingerprint: Optional[str]) -> None:
+        """
+        Did the rollback actually roll back? A rejected batch is a promise that
+        the document is untouched; this is the check that the promise held, and
+        the ONLY thing a caching caller can safely key document reuse off.
+
+        Runs AFTER `_restore_from_snapshot`, which re-runs `__init__` and so
+        resets the flag along with everything else.
+
+        None = not fingerprinted (an edit-only batch): the edit rollback path
+        is unchanged and separately pinned, and fingerprinting every batch
+        would put a whole-document revision walk on the hot path for it.
+        """
+        if pre_batch_fingerprint is None:
+            return
+        try:
+            self.rollback_verified = self._batch_fingerprint() == pre_batch_fingerprint
+        except Exception:
+            self.rollback_verified = False
 
     @staticmethod
     def _report_new_text(edit: Any) -> str:
@@ -2687,6 +2762,41 @@ class RedlineEngine:
         action_indices = [i for i, _ in actions_with_idx]
 
         applied_actions, skipped_actions, already_resolved_actions = 0, 0, 0
+
+        # ONE transaction for the WHOLE batch. The snapshot has to predate the
+        # review actions, not just the edits: they mutate the document too, and
+        # a rejection promises the caller that "it was rolled back and nothing
+        # was saved". Taken after apply_review_actions, the snapshot CONTAINED
+        # every accept/reject/reply of a batch a later edit went on to reject,
+        # so the rollback could not undo them; a reused engine (or, on the Node
+        # twin, a cached DOM) then carried each rejected attempt's reply into
+        # the next one (BUG 2026-08-12).
+        #
+        # LAZY SNAPSHOT (docs/Performance.md §5.2): the snapshot must equal the
+        # engine's CURRENT state. Until something mutates the tree — a previous
+        # batch on this engine instance — the pristine load-time bytes ARE that
+        # state and the full save_to_stream serialize+re-zip is skipped.
+        # Hoisting the capture above the actions makes that fast path MORE
+        # reachable, since the actions no longer dirty the tree first. What it
+        # does cost is a snapshot for an ACTION-ONLY batch, which used to take
+        # none — on a fresh engine that is a BytesIO over bytes already held.
+        # `partial` is the explicit opt-out of transactional rejection, so it
+        # keeps nothing to roll back to.
+        pre_batch_snapshot: Optional[BytesIO] = None
+        pre_batch_fingerprint: Optional[str] = None
+        # Revision-id watermark: every id above this was minted by THIS batch,
+        # which is how the stranded-anchor advisory tells the deletions it
+        # caused from the ones the document arrived with.
+        pre_batch_revision_id = self.current_id
+        self.rollback_verified = True
+        if not partial and (actions or edits_with_idx):
+            if self._mutated_since_load:
+                pre_batch_snapshot = self.save_to_stream()
+            else:
+                pre_batch_snapshot = BytesIO(self._pristine_bytes)
+            if actions:
+                pre_batch_fingerprint = self._batch_fingerprint()
+
         if actions:
             action_shape_errors = validate_review_action_batch(actions, indices=action_indices)
             if action_shape_errors:
@@ -2706,7 +2816,15 @@ class RedlineEngine:
                 skipped_fails = _extract_failed_indices(self.skipped_details)
                 failed_list.extend(skipped_fails)
                 if not partial:
-                    raise BatchValidationError(self.skipped_details, failed=failed_list)
+                    # An action can fail at APPLY time (a reply whose parent
+                    # cannot be threaded, a w:id shared across authors) — after
+                    # validation passed and after earlier actions in the batch
+                    # already applied. Capture the details first: the restore
+                    # re-initializes the engine, which clears skipped_details.
+                    details = list(self.skipped_details)
+                    self._restore_from_snapshot(pre_batch_snapshot)
+                    self._verify_rollback(pre_batch_fingerprint)
+                    raise BatchValidationError(details, failed=failed_list)
             if edits_with_idx:
                 self.clean_mapper = None
                 self.original_mapper = None
@@ -2723,21 +2841,9 @@ class RedlineEngine:
             # against the document state produced by the edits before it, so a
             # later edit may target text an earlier edit introduced (chaining).
             # Validation failures keep the batch transactional: the run
-            # restores the pre-batch snapshot and rejects everything, with the
+            # restores the pre-batch snapshot — taken above, BEFORE this
+            # batch's actions applied — and rejects everything, with the
             # per-edit reports carried inside the BatchValidationError details.
-            #
-            # LAZY SNAPSHOT (docs/Performance.md §5.2 ported): the snapshot
-            # must equal the engine's CURRENT state. Until something mutates
-            # the tree — actions applied earlier in THIS batch, or a previous
-            # batch on this engine instance — the pristine load-time bytes
-            # are that state, and the full save_to_stream serialize+re-zip is
-            # skipped. Rollback re-initializes from whichever bytes were
-            # chosen, so the restore path is unchanged.
-            if self._mutated_since_load:
-                pre_batch_snapshot = self.save_to_stream()
-            else:
-                pre_batch_snapshot = BytesIO(self._pristine_bytes)
-
             cloned_edits = [(orig_idx, deepcopy(e)) for orig_idx, e in edits_with_idx]
 
             def _pinned_idx(e: Any) -> Optional[int]:
@@ -2849,15 +2955,26 @@ class RedlineEngine:
                     failed_list.append((orig_idx, rep.get("error") or "Failed to apply edit"))
 
             if not partial and validation_errors:
-                # Transactional rejection: undo every edit this batch
-                # already applied before raising.
+                # Transactional rejection: undo everything this batch already
+                # applied — its edits AND its review actions — before raising.
                 self._restore_from_snapshot(pre_batch_snapshot)
+                self._verify_rollback(pre_batch_fingerprint)
                 raise BatchValidationError(
                     validation_errors,
                     failed=failed_list,
                 )
 
             edits_reports = [r for r in reports_by_input if r is not None]
+
+        # Cross-edit advisory: individually legal deletions can still add up to
+        # a sentence that reads as gibberish once accepted. Runs only after the
+        # batch has committed, and only ever appends to skipped_details.
+        if applied_edits > 0:
+            try:
+                self._warn_stranded_comment_anchors(pre_batch_revision_id)
+            except Exception:
+                # An advisory must never be able to fail a committed batch.
+                logger.debug("stranded_comment_anchor_check_failed", exc_info=True)
 
         from adeu import __version__
 
@@ -4927,6 +5044,130 @@ class RedlineEngine:
             if n.get(qn("w:id"))
         }
         return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
+
+    def _warn_stranded_comment_anchors(self, watermark: int) -> None:
+        """
+        Batch-level advisory for the "stranded comment anchor" shape (demo run
+        2026-08-12, defect B).
+
+        Editing around a foreign comment — deleting the words before its anchor
+        and the words after it, while keeping the anchored phrase so the
+        comment survives — is a legitimate move, and each of those deletions is
+        legal on its own. Nothing cross-checked them against each other, so a
+        batch could leave "...necessary for this litigationAttorney's Eyes
+        Only;" behind and report two cleanly applied edits. The caller never
+        learned the sentence it wrote is gibberish once accepted.
+
+        So: warn, never reject. The condition is deliberately narrow, because a
+        false positive here trains the caller to ignore the warning:
+          - the anchored text must SURVIVE (text deleted along with its comment
+            is the normal case and is already reported elsewhere),
+          - there must be deleted text on BOTH sides of it in its own
+            paragraph,
+          - and at least one of those deletions must come from THIS batch, so a
+            condition the caller inherited is not re-reported on every batch.
+
+        `watermark` is the engine's revision-id counter as it stood before the
+        batch: every id above it was minted by this batch (ids are monotonic,
+        and a rejected batch reloads the document, resetting the counter).
+        """
+        try:
+            body = self.doc.element.body
+        except Exception:
+            return
+        starts = body.findall(".//" + qn("w:commentRangeStart"))
+        if not starts:
+            return
+
+        authors: Optional[Dict[str, str]] = None
+        stranded: List[tuple] = []
+
+        for start in starts:
+            cid = start.get(qn("w:id"))
+            if not cid:
+                continue
+
+            # The anchor's own paragraph. A range that closes in a LATER
+            # paragraph is a block-level annotation, not the single-sentence
+            # shape this advisory is about.
+            para = start.getparent()
+            while para is not None and para.tag != qn("w:p"):
+                para = para.getparent()
+            if para is None:
+                continue
+
+            # ONE document-order pass, materialised: lxml hands out throwaway
+            # proxies, so an element's identity is only stable while something
+            # holds a reference to it. Keeping this list is what makes the
+            # positional comparisons below meaningful.
+            elements = list(para.iter())
+
+            start_pos = end_pos = None
+            for i, el in enumerate(elements):
+                if el.get(qn("w:id")) != cid:
+                    continue
+                if start_pos is None and el.tag == qn("w:commentRangeStart"):
+                    start_pos = i
+                elif el.tag == qn("w:commentRangeEnd"):
+                    end_pos = i
+            # A range that closes in a LATER paragraph is a block-level
+            # annotation, not the single-sentence shape this advisory is about.
+            if start_pos is None or end_pos is None or end_pos < start_pos:
+                continue
+
+            def _inside_del(el, root) -> bool:
+                node = el.getparent()
+                while node is not None and node is not root:
+                    if node.tag == qn("w:del"):
+                        return True
+                    node = node.getparent()
+                return False
+
+            # Text inside the range that is NOT itself deleted: what a reader
+            # is left with after accepting everything.
+            surviving = ""
+            deleted_before = deleted_after = owned_by_this_batch = False
+            for i, el in enumerate(elements):
+                if el.tag == qn("w:t"):
+                    if start_pos < i < end_pos and not _inside_del(el, para):
+                        surviving += el.text or ""
+                    continue
+                if el.tag != qn("w:del"):
+                    continue
+                if i < start_pos:
+                    side = "before"
+                elif i > end_pos:
+                    side = "after"
+                else:
+                    continue
+                if not any((d.text or "").strip() for d in el.iter(qn("w:delText"))):
+                    continue
+                if side == "before":
+                    deleted_before = True
+                else:
+                    deleted_after = True
+                rid = el.get(qn("w:id")) or ""
+                if rid.isdigit() and int(rid) > watermark:
+                    owned_by_this_batch = True
+
+            if not surviving.strip():
+                continue
+
+            if deleted_before and deleted_after and owned_by_this_batch:
+                if authors is None:
+                    authors = self._comment_authors()
+                stranded.append((cid, surviving.strip()))
+
+        for cid, text in stranded:
+            who = (authors or {}).get(cid)
+            label = f"comment Com:{cid} (by {who})" if who else f"comment Com:{cid}"
+            self.skipped_details.append(
+                f"- Warning: this batch deleted text on both sides of {label} but left its "
+                f'anchored text "{truncate_middle(text, 60)}" in place, so once the changes are '
+                "accepted that text stands alone in its sentence. If you kept it to preserve the "
+                "comment's anchor, re-read the sentence; if you meant to remove the clause, extend "
+                "one edit over the anchored text too. The edits themselves were applied."
+            )
 
     def _existing_comment_ids(self) -> List[str]:
         """Comment ids present in the document, sorted for display."""
