@@ -680,6 +680,7 @@ def handle_extract(args):
     cached_comments_data: Any = None
     cached_existing_change_ids: Any = None
     doc: Any = None
+    use_cache = not args.live and not getattr(args, "debug", False)
 
     if args.live:
         if sys.platform != "win32":
@@ -687,8 +688,6 @@ def handle_extract(args):
         from adeu.mcp_components.tools.live_word import _read_active_word_document_core
 
         text, doc, paragraph_offsets = _read_active_word_document_core(clean_view=args.clean_view)
-        cached_outline_nodes = None
-        cached_comments_data = None
     else:
         if not args.input:
             _cli_error("invalid_input", "Must provide input file or use --live", exit_code=2)
@@ -698,30 +697,29 @@ def handle_extract(args):
 
         needs_appendix = args.mode == "appendix"
         needs_offsets = args.mode == "outline"
+        needs_changes = args.mode == "changes"
 
         from adeu.disk_cache import disk_projection_cache
 
-        use_cache = not getattr(args, "debug", False)
         cached_view = disk_projection_cache.get(input_path, clean_view=args.clean_view) if use_cache else None
 
-        hit = False
-        if cached_view is not None:
-            if needs_appendix:
-                if cached_view.get("text_with_appendix") is not None:
-                    text = str(cached_view["text_with_appendix"])
-                    hit = True
-            elif needs_offsets:
-                if cached_view.get("base_text") is not None and cached_view.get("outline_nodes") is not None:
-                    text = str(cached_view["base_text"])
-                    hit = True
-            else:
-                if cached_view.get("base_text") is not None:
-                    text = str(cached_view["base_text"])
-                    hit = True
+        # A cached view serves a read only when it carries EVERY field that mode
+        # renders. A partial entry falls through to a cold read, which merges the
+        # missing fields into the same view (disk_cache.put merges per view).
+        required: tuple[str, ...]
+        if needs_appendix:
+            required = ("text_with_appendix",)
+        elif needs_offsets:
+            required = ("base_text", "outline_nodes")
+        elif needs_changes:
+            required = ("base_text", "comments_data", "existing_change_ids")
+        else:
+            required = ("base_text",)
+
+        hit = cached_view is not None and all(cached_view.get(field) is not None for field in required)
 
         if hit and cached_view is not None:
-            doc = None
-            paragraph_offsets = None
+            text = str(cached_view["text_with_appendix" if needs_appendix else "base_text"])
             cached_outline_nodes = cached_view.get("outline_nodes")
             cached_comments_data = cached_view.get("comments_data")
             cached_existing_change_ids = cached_view.get("existing_change_ids")
@@ -734,56 +732,41 @@ def handle_extract(args):
                 doc,
                 clean_view=args.clean_view,
                 include_appendix=needs_appendix,
-                return_paragraph_offsets=needs_offsets or not needs_appendix,
+                return_paragraph_offsets=needs_offsets,
             )
-            if needs_offsets or not needs_appendix:
+            if needs_offsets:
                 assert isinstance(extract_result, tuple)
                 text = str(extract_result[0])
                 paragraph_offsets = extract_result[1]
             else:
                 assert isinstance(extract_result, str)
                 text = extract_result
-                paragraph_offsets = None
 
-            cached_outline_nodes = None
-            if not needs_appendix:
-                from adeu.mcp_components._response_builders import paginate, split_structural_appendix
-                from adeu.outline import extract_outline
-
-                body, _ = split_structural_appendix(text)
-                pagination = paginate(body, "")
-                cached_outline_nodes = extract_outline(
-                    doc,
-                    body,
-                    pagination.body_pages,
-                    pagination.body_page_offsets,
-                    paragraph_offsets=paragraph_offsets,
-                )
-
-            from adeu.redline.comments import CommentsManager
-
-            cached_comments_data = CommentsManager(doc).extract_comments_data()
-
-            cached_existing_change_ids = None
-            try:
-                engine = _open_redline_engine_or_exit(input_path)
-                cached_existing_change_ids = list(engine._existing_change_ids())
-            except Exception:
-                pass
-
+            # The cold path stays as lazy as the uncached CLI was: each mode pays
+            # only for the fields it renders. Populating outline, comments and the
+            # redline engine for every read cost uncached reads 25-69% (QA).
             view_data: Dict[str, Any] = {}
             if needs_appendix:
                 view_data["text_with_appendix"] = text
             else:
                 view_data["base_text"] = text
-                if cached_outline_nodes is not None:
-                    view_data["outline_nodes"] = cached_outline_nodes
-                if cached_comments_data is not None:
-                    view_data["comments_data"] = cached_comments_data
-                if cached_existing_change_ids is not None:
-                    view_data["existing_change_ids"] = cached_existing_change_ids
+            if needs_offsets:
+                cached_outline_nodes = _extract_outline_nodes(doc, text, paragraph_offsets)
+                view_data["outline_nodes"] = cached_outline_nodes
+            if needs_changes:
+                from adeu.redline.comments import CommentsManager
 
-            disk_projection_cache.put(input_path, args.clean_view, view_data)
+                cached_comments_data = CommentsManager(doc).extract_comments_data()
+                view_data["comments_data"] = cached_comments_data
+                try:
+                    engine = _open_redline_engine_or_exit(input_path)
+                    cached_existing_change_ids = sorted(engine._existing_change_ids())
+                    view_data["existing_change_ids"] = cached_existing_change_ids
+                except Exception:
+                    pass
+
+            if use_cache:
+                disk_projection_cache.put(input_path, args.clean_view, view_data)
 
     from adeu.mcp_components._response_builders import (
         build_appendix_response,
@@ -953,13 +936,28 @@ def handle_extract(args):
             ):
                 from adeu.mcp_components._response_builders import build_budget_guard_message
 
+                # The refusal carries an L1 heading map. This is the only place a
+                # non-outline mode needs it, so it is computed here — on a warm
+                # read the nodes come from the cache instead of a second parse.
+                guard_outline_nodes = cached_outline_nodes
+                if guard_outline_nodes is None and not args.live:
+                    if doc is None:
+                        doc = _load_docx_or_exit(Path(args.input))
+                    guard_outline_nodes = _extract_outline_nodes(doc, text, paragraph_offsets)
+                    if use_cache:
+                        from adeu.disk_cache import disk_projection_cache
+
+                        disk_projection_cache.put(
+                            Path(args.input), args.clean_view, {"outline_nodes": guard_outline_nodes}
+                        )
+
                 _cli_error(
                     "response_budget_exceeded",
                     build_budget_guard_message(
                         text,
                         "Active Document" if args.live else str(args.input),
                         doc=doc,
-                        outline_nodes=cached_outline_nodes,
+                        outline_nodes=guard_outline_nodes,
                         paragraph_offsets=paragraph_offsets,
                         is_cli=True,
                     ),
@@ -1009,6 +1007,28 @@ def handle_extract(args):
         print(json_output)
     else:
         print(output_text)
+
+
+def _extract_outline_nodes(doc, projected_text: str, paragraph_offsets=None):
+    """
+    Computes the heading map for `projected_text` — the cacheable outline nodes.
+
+    Shared by outline mode and the budget guard refusal so both cache (and read
+    back) exactly the same nodes; the fast and legacy extract_outline paths are
+    pinned as equivalent by tests/test_outline_fast_equivalence.py.
+    """
+    from adeu.mcp_components._response_builders import paginate, split_structural_appendix
+    from adeu.outline import extract_outline
+
+    body, _appendix = split_structural_appendix(projected_text)
+    pagination = paginate(body, "")
+    return extract_outline(
+        doc,
+        body,
+        pagination.body_pages,
+        pagination.body_page_offsets,
+        paragraph_offsets=paragraph_offsets,
+    )
 
 
 def _load_docx_or_exit(path: Path):
