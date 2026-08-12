@@ -61,7 +61,7 @@ const MATCH_MODE_SYNONYMS: Record<string, "strict" | "first" | "all"> = {
   every: "all",
 };
 
-function coerceChangeItemInPlace(item: any): void {
+export function coerceChangeItemInPlace(item: any): void {
   if (item === null || typeof item !== "object" || Array.isArray(item)) return;
 
   // Infer a missing `type` ONLY when exactly one variant fits unambiguously.
@@ -87,6 +87,28 @@ function coerceChangeItemInPlace(item: any): void {
       const mapped = MATCH_MODE_SYNONYMS[raw.trim().toLowerCase()];
       if (mapped === undefined) delete item.match_mode;
       else item.match_mode = mapped;
+    }
+  }
+
+  // MCP-boundary tolerance (parity with Python models.py:427): the published
+  // schema makes new_text optional, so a schema-following model that only
+  // wants to annotate sends target_text + comment. The lossless reading is
+  // the pure-comment form (new_text == target_text) — never a bounce, and
+  // never a tracked deletion. An explicit "" is left alone: empty means
+  // delete, and delete-with-explanation is a distinct intent.
+  if (
+    item.type === "modify" &&
+    (item.new_text === undefined || item.new_text === null)
+  ) {
+    const target = item.target_text;
+    const comment = item.comment;
+    if (
+      typeof target === "string" &&
+      target &&
+      typeof comment === "string" &&
+      comment.trim()
+    ) {
+      item.new_text = target;
     }
   }
 }
@@ -229,9 +251,9 @@ const READ_DOCX_TAIL =
 // the row-op fields (`cells` etc.) must be named in prose because clients
 // strip the typed item schema to {} in transit (QA F10).
 const PROCESS_BATCH_COMMON_DESC =
-  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change is validated against the state produced by the changes before it, so a later change may target text an earlier one introduced. Valid changes still apply when others fail (salvage default): the response LEADS with `PARTIAL: applied K of N` and lists every change that did NOT land — resubmit only those. Pass partial=false for all-or-nothing.\n\n";
+  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change validates against state from prior changes; later edits may target text an earlier edit introduced. Valid changes apply when others fail (salvage default): response LEADS with `PARTIAL: applied K of N` listing unapplied changes — resubmit only those. Pass partial=false for all-or-nothing.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', the default) — add surrounding context, or set `match_mode`:'first'/'all'. Set `regex`:true to treat `target_text` as a regex (capture groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split; empty `new_text` deletes. Never write CriticMarkup ({++, {--, {>>) manually — use the `comment` field.\n   • EMPTY CELLS: a blank table cell has no text to match; `read_docx` renders every cell with a trailing `{#cell:<id>}` anchor — set `target_text` to that exact anchor and put the value in `new_text`. The pipes are display separators, not editable text.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row': add a table row — `target_text` anchors on an existing row's text, `cells` holds the new row's cell values (strings, left to right), `position` is 'above'/'below' (default below). 'delete_row': remove the row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between document states — always call `read_docx` immediately before accept/reject/reply; never reuse ids from earlier turns. `{#cell:<id>}` anchors are stable across reads and edits, but finalize_document/sanitize regenerates them — re-read after finalizing.\n\n`author_name` sets Track Changes attribution; it defaults to 'Adeu AI (TS)' when omitted.";
+  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', default) — add context or set `match_mode`:'first'/'all'. Set `regex`:true for regex matching (groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split. Omit it (with a comment) to annotate without changing the text; an explicit empty string deletes. Never write CriticMarkup ({++, {--, {>>) manually — use the `comment` field.\n   • EMPTY CELLS: blank cells carry `{#cell:<id>}` anchors — set `target_text` to the anchor and value in `new_text`. Pipes are display separators, not text.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row': add a table row — `target_text` anchors on an existing row's text, `cells` holds cell values (left to right), `position` is 'above'/'below' (default below). 'delete_row': remove row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between states — call `read_docx` before accept/reject/reply; never reuse ids from earlier turns. `{#cell:<id>}` anchors are stable across edits, but finalize/sanitize regenerates them.\n\n`author_name` sets Track Changes attribution; defaults to 'Adeu AI (TS)' when omitted.";
 
 const DIFF_DOCX_DESC =
   "Compares two DOCX files and returns a compact `@@ Word Patch @@` diff — Adeu's token-level, sub-word patch format — of their text content. Useful for analyzing differences between versions before editing.";
@@ -690,7 +712,7 @@ const CHANGE_ITEM_SCHEMA = z
       .string()
       .optional()
       .describe(
-        "modify: replacement text. Supports Markdown (headings, **bold**, _italic_, '\\n\\n' paragraph splits); empty string deletes. Regex capture groups are available as $1, $2…",
+        "modify: replacement text. Supports Markdown (headings, **bold**, _italic_, '\\n\\n' paragraph splits); empty string deletes. Regex capture groups are available as $1, $2… Omit it (with a comment) to annotate without changing the text; an explicit empty string deletes.",
       ),
     target_id: z
       .string()
