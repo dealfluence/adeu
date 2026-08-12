@@ -136,6 +136,112 @@ export function sortToolsDeterministically<T extends { name?: string }>(
   });
 }
 
+/**
+ * JSON Schema keywords whose values are themselves schemas (or containers of
+ * schemas). Anything not listed here is treated as opaque data and left alone,
+ * so literal payloads under `const`, `default`, `enum` and `examples` survive
+ * verbatim even when they happen to contain a `$schema` key.
+ */
+const SCHEMA_VALUED_KEYWORDS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+
+/** Keywords holding arrays of schemas. */
+const SCHEMA_ARRAY_KEYWORDS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+
+/** Keywords holding a map of name -> schema (names are arbitrary, not keywords). */
+const SCHEMA_MAP_KEYWORDS = new Set([
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+]);
+
+/**
+ * Removes `$schema` dialect declarations from a JSON Schema, recursively.
+ *
+ * The MCP SDK converts Zod schemas with a hardcoded `target: 'draft-7'`
+ * (`mapMiniTarget` in sdk/server/zod-json-schema-compat.js defaults to
+ * `'draft-7'` whenever no target is passed, and mcp.js never passes one), so
+ * Zod v4 stamps `$schema: "http://json-schema.org/draft-07/schema#"` onto every
+ * published tool schema. Claude Desktop validates tool schemas with an Ajv
+ * instance built for 2020-12 only and rejects the tool outright:
+ *
+ *   Tool 'read_docx' has an invalid outputSchema: JSON Schema declares an
+ *   unsupported dialect ... supports JSON Schema 2020-12 only
+ *
+ * Dropping the declaration (rather than rewriting it to the 2020-12 URI) is
+ * both spec-legal and lossless here: `$schema` is optional in the MCP tool
+ * schema contract, clients that omit it default to 2020-12, and the schemas we
+ * emit use no keyword whose meaning differs between the two drafts (no tuple
+ * `items`/`additionalItems`, no `definitions`, no `$ref`). It also restores
+ * byte-parity with the Python engine, which publishes plain dicts with no
+ * `$schema` at all. A wire-level test asserts that draft-07-only constructs
+ * stay absent, so this stays true.
+ *
+ * Returns a copy; the input is never mutated.
+ */
+export function stripJsonSchemaDialect<T>(schema: T): T {
+  if (Array.isArray(schema)) {
+    return schema.map((item) => stripJsonSchemaDialect(item)) as unknown as T;
+  }
+  if (!schema || typeof schema !== "object") return schema;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    if (key === "$schema") continue;
+    if (SCHEMA_VALUED_KEYWORDS.has(key) || SCHEMA_ARRAY_KEYWORDS.has(key)) {
+      out[key] = stripJsonSchemaDialect(value);
+    } else if (SCHEMA_MAP_KEYWORDS.has(key)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const mapped: Record<string, unknown> = {};
+        for (const [name, sub] of Object.entries(value as Record<string, unknown>)) {
+          mapped[name] = stripJsonSchemaDialect(sub);
+        }
+        out[key] = mapped;
+      } else {
+        out[key] = value;
+      }
+    } else {
+      out[key] = value;
+    }
+  }
+  return out as unknown as T;
+}
+
+/**
+ * Applies {@link stripJsonSchemaDialect} to the schema-bearing fields of each
+ * published tool. Scoped to `tools[]` on purpose: `tools/call` results are
+ * opaque tool output, and a document that legitimately contains a `$schema`
+ * key must pass through untouched.
+ */
+function stripToolSchemaDialects<T>(tools: T[]): T[] {
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) return tool;
+    const t = tool as Record<string, unknown>;
+    let next: Record<string, unknown> | undefined;
+    for (const field of ["inputSchema", "outputSchema"]) {
+      const schema = t[field];
+      if (!schema || typeof schema !== "object" || Array.isArray(schema)) continue;
+      next ??= { ...t };
+      next[field] = stripJsonSchemaDialect(schema);
+    }
+    return (next ?? tool) as T;
+  });
+}
+
 /** Fallback when the originating request was not observed (adapter attached mid-flight). */
 export function inferCachePolicy(
   result: any,
@@ -242,7 +348,7 @@ export class ProtocolAdapter {
     result._meta = meta;
 
     if (Array.isArray(result.tools)) {
-      result.tools = sortToolsDeterministically(result.tools);
+      result.tools = stripToolSchemaDialects(sortToolsDeterministically(result.tools));
     }
 
     if (result.resultType === "complete") {

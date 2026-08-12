@@ -12,7 +12,15 @@ import {
   META_PROTOCOL_VERSION,
   META_CLIENT_CAPABILITIES,
   META_LOG_LEVEL,
+  stripJsonSchemaDialect,
 } from "./protocol-adapter.js";
+
+/**
+ * The dialect the MCP SDK stamps onto every Zod-derived tool schema. Kept as a
+ * test-local literal on purpose: production code strips ANY `$schema`, so it
+ * must never grow a dependency on this specific URI.
+ */
+const DRAFT_07_DIALECT = "http://json-schema.org/draft-07/schema#";
 
 describe("ProtocolAdapter Phase 1: Constants & Capability Reader", () => {
   it("exports supported versions and modern protocol version", () => {
@@ -778,6 +786,215 @@ describe("ProtocolAdapter Phase 5: attachProtocolAdapter", () => {
     if (res.action === "respond") {
       expect((res.message as any).error.code).toBe(-32022);
     }
+  });
+});
+
+describe("ProtocolAdapter Phase 6: JSON Schema dialect normalization", () => {
+  it("strips the root $schema dialect declaration", () => {
+    const out = stripJsonSchemaDialect({
+      $schema: DRAFT_07_DIALECT,
+      type: "object",
+      properties: { markdown: { type: "string" } },
+      required: ["markdown"],
+    });
+    expect(out).toEqual({
+      type: "object",
+      properties: { markdown: { type: "string" } },
+      required: ["markdown"],
+    });
+  });
+
+  it("strips $schema from nested subschemas at every applicator position", () => {
+    const out = stripJsonSchemaDialect({
+      $schema: DRAFT_07_DIALECT,
+      type: "object",
+      properties: {
+        nested: { $schema: DRAFT_07_DIALECT, type: "string" },
+      },
+      $defs: {
+        Ref: { $schema: DRAFT_07_DIALECT, type: "number" },
+      },
+      items: { $schema: DRAFT_07_DIALECT, type: "boolean" },
+      anyOf: [
+        { $schema: DRAFT_07_DIALECT, type: "null" },
+        { type: "integer" },
+      ],
+      additionalProperties: { $schema: DRAFT_07_DIALECT },
+    });
+    expect(JSON.stringify(out)).not.toContain("$schema");
+    expect(out).toEqual({
+      type: "object",
+      properties: { nested: { type: "string" } },
+      $defs: { Ref: { type: "number" } },
+      items: { type: "boolean" },
+      anyOf: [{ type: "null" }, { type: "integer" }],
+      additionalProperties: {},
+    });
+  });
+
+  it("preserves a declared property literally named $schema", () => {
+    // `properties` keys are user-chosen property names, not JSON Schema
+    // keywords: a tool whose payload has a `$schema` field must keep it.
+    const out: any = stripJsonSchemaDialect({
+      $schema: DRAFT_07_DIALECT,
+      type: "object",
+      properties: {
+        $schema: { type: "string", description: "dialect of the payload" },
+      },
+      required: ["$schema"],
+    });
+    expect(out.$schema).toBeUndefined();
+    expect(out.properties.$schema).toEqual({
+      type: "string",
+      description: "dialect of the payload",
+    });
+    expect(out.required).toEqual(["$schema"]);
+  });
+
+  it("leaves literal keyword payloads (const, default, enum, examples) untouched", () => {
+    const out: any = stripJsonSchemaDialect({
+      $schema: DRAFT_07_DIALECT,
+      type: "object",
+      properties: {
+        cfg: {
+          type: "object",
+          default: { $schema: DRAFT_07_DIALECT, a: 1 },
+          const: { $schema: DRAFT_07_DIALECT },
+          enum: [{ $schema: DRAFT_07_DIALECT }],
+          examples: [{ $schema: DRAFT_07_DIALECT }],
+        },
+      },
+    });
+    expect(out.properties.cfg.default).toEqual({
+      $schema: DRAFT_07_DIALECT,
+      a: 1,
+    });
+    expect(out.properties.cfg.const).toEqual({ $schema: DRAFT_07_DIALECT });
+    expect(out.properties.cfg.enum).toEqual([{ $schema: DRAFT_07_DIALECT }]);
+    expect(out.properties.cfg.examples).toEqual([{ $schema: DRAFT_07_DIALECT }]);
+  });
+
+  it("does not mutate its input and passes through non-objects", () => {
+    const input = { $schema: DRAFT_07_DIALECT, type: "object" };
+    const snapshot = JSON.parse(JSON.stringify(input));
+    stripJsonSchemaDialect(input);
+    expect(input).toEqual(snapshot);
+
+    expect(stripJsonSchemaDialect(null)).toBeNull();
+    expect(stripJsonSchemaDialect(undefined)).toBeUndefined();
+    expect(stripJsonSchemaDialect("x")).toBe("x");
+    expect(stripJsonSchemaDialect(7)).toBe(7);
+  });
+
+  it("strips the dialect from tools[].inputSchema and tools[].outputSchema on tools/list", () => {
+    const adapter = new ProtocolAdapter("srv", "1.0");
+    const tools = [
+      {
+        name: "read_docx",
+        inputSchema: {
+          $schema: DRAFT_07_DIALECT,
+          type: "object",
+          properties: { file_path: { type: "string" } },
+          required: ["file_path"],
+        },
+        outputSchema: {
+          $schema: DRAFT_07_DIALECT,
+          type: "object",
+          properties: { markdown: { type: "string" } },
+          required: ["markdown"],
+          additionalProperties: {},
+        },
+      },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(tools));
+
+    const res = adapter.transformOutgoingMessage({
+      jsonrpc: "2.0",
+      id: "tl-1",
+      result: { tools },
+    });
+
+    const tool = res.result.tools[0];
+    expect(tool.inputSchema.$schema).toBeUndefined();
+    expect(tool.outputSchema.$schema).toBeUndefined();
+    // Everything else survives verbatim: dropping the declaration must not
+    // silently drop the outputSchema (see mcp.js `if (obj)` guard).
+    expect(tool.inputSchema).toEqual({
+      type: "object",
+      properties: { file_path: { type: "string" } },
+      required: ["file_path"],
+    });
+    expect(tool.outputSchema).toEqual({
+      type: "object",
+      properties: { markdown: { type: "string" } },
+      required: ["markdown"],
+      additionalProperties: {},
+    });
+    expect(JSON.stringify(res)).not.toContain("json-schema.org/draft-07");
+    // Source array untouched
+    expect(tools).toEqual(snapshot);
+  });
+
+  it("tolerates tools without schemas, with null schemas, and non-object schemas", () => {
+    const adapter = new ProtocolAdapter("srv", "1.0");
+    const res = adapter.transformOutgoingMessage({
+      jsonrpc: "2.0",
+      id: "tl-2",
+      result: {
+        tools: [
+          { name: "a" },
+          { name: "b", inputSchema: null, outputSchema: undefined },
+          { name: "c", inputSchema: "not-a-schema" },
+          null,
+        ],
+      },
+    });
+    const [t0, t1, t2, t3] = res.result.tools;
+    expect(t0).toBeNull(); // null sorts first (missing name -> "")
+    // A tool that publishes no schema must not acquire one.
+    expect(Object.keys(t1)).toEqual(["name"]);
+    expect(t2.inputSchema).toBeNull();
+    expect(t2.outputSchema).toBeUndefined();
+    expect(t3.inputSchema).toBe("not-a-schema");
+  });
+
+  it("does NOT strip $schema outside tools[] schema positions", () => {
+    // tools/call payloads are opaque tool output; a document that happens to
+    // contain a `$schema` key must survive the adapter untouched.
+    const adapter = new ProtocolAdapter("srv", "1.0");
+    const res = adapter.transformOutgoingMessage({
+      jsonrpc: "2.0",
+      id: "tc-1",
+      result: {
+        content: [{ type: "text", text: "ok" }],
+        structuredContent: { $schema: DRAFT_07_DIALECT, markdown: "# Hi" },
+      },
+    });
+    expect(res.result.structuredContent).toEqual({
+      $schema: DRAFT_07_DIALECT,
+      markdown: "# Hi",
+    });
+  });
+
+  it("strips the dialect from a tool description-adjacent _meta schema too", () => {
+    // Regression guard: the adapter must reach every schema-bearing key it
+    // publishes, not just the two well-known ones.
+    const adapter = new ProtocolAdapter("srv", "1.0");
+    const res = adapter.transformOutgoingMessage({
+      jsonrpc: "2.0",
+      id: "tl-3",
+      result: {
+        tools: [
+          {
+            name: "x",
+            inputSchema: { $schema: DRAFT_07_DIALECT, type: "object" },
+            _meta: { ui: { resourceUri: "ui://x" } },
+          },
+        ],
+      },
+    });
+    expect(res.result.tools[0]._meta).toEqual({ ui: { resourceUri: "ui://x" } });
+    expect(res.result.tools[0].inputSchema).toEqual({ type: "object" });
   });
 });
 

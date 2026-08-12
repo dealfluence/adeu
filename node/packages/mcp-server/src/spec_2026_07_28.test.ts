@@ -132,6 +132,79 @@ describe("MCP Server 2026-07-28 Protocol Integration", () => {
     expect(names).toEqual(sorted);
   });
 
+  it("publishes tool schemas with no JSON Schema dialect declaration", async () => {
+    // The MCP SDK hardcodes `target: 'draft-7'` when converting Zod schemas
+    // (sdk/server/zod-json-schema-compat.js `mapMiniTarget`), so Zod v4 stamps
+    // `$schema: "http://json-schema.org/draft-07/schema#"` on every published
+    // schema. Claude Desktop rejects the tool outright:
+    //   Tool 'read_docx' has an invalid outputSchema: JSON Schema declares an
+    //   unsupported dialect ... supports JSON Schema 2020-12 only
+    const res = await sendRpc("tools/list", {});
+    const tools = res.result.tools;
+    expect(tools.length).toBeGreaterThan(0);
+
+    for (const tool of tools) {
+      expect(
+        tool.inputSchema,
+        `${tool.name} must publish an inputSchema`,
+      ).toBeDefined();
+      expect(
+        tool.inputSchema.$schema,
+        `${tool.name}.inputSchema must not declare a dialect`,
+      ).toBeUndefined();
+      if (tool.outputSchema !== undefined) {
+        expect(
+          tool.outputSchema.$schema,
+          `${tool.name}.outputSchema must not declare a dialect`,
+        ).toBeUndefined();
+      }
+    }
+
+    expect(JSON.stringify(res)).not.toContain("json-schema.org/draft-07");
+  });
+
+  it("still publishes read_docx.outputSchema after dialect stripping", async () => {
+    // Guard against the obvious wrong fix: handing the SDK a plain JSON Schema
+    // dict makes `normalizeObjectSchema` return undefined, so mcp.js silently
+    // omits outputSchema and the MCP Apps host stops forwarding
+    // structuredContent to the markdown viewer.
+    const res = await sendRpc("tools/list", {});
+    const readDocx = res.result.tools.find((t: any) => t.name === "read_docx");
+    expect(readDocx).toBeDefined();
+    expect(readDocx.outputSchema).toBeDefined();
+    expect(readDocx.outputSchema.type).toBe("object");
+    expect(readDocx.outputSchema.properties.markdown).toBeDefined();
+    expect(readDocx.outputSchema.required).toContain("markdown");
+  });
+
+  it("publishes no draft-07-only constructs that change meaning under 2020-12", async () => {
+    // Stripping `$schema` is only lossless while the emitted schemas stay
+    // within the draft-07 ∩ 2020-12 subset. These keywords are the ones whose
+    // meaning changed: tuple-form `items` + `additionalItems` became
+    // `prefixItems` + `items`, and `definitions` became `$defs`.
+    const res = await sendRpc("tools/list", {});
+
+    const offenders: string[] = [];
+    const walk = (node: any, path: string): void => {
+      if (Array.isArray(node)) {
+        node.forEach((v, i) => walk(v, `${path}[${i}]`));
+        return;
+      }
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node.items)) offenders.push(`${path}.items (tuple form)`);
+      if ("additionalItems" in node) offenders.push(`${path}.additionalItems`);
+      if ("definitions" in node) offenders.push(`${path}.definitions`);
+      for (const [k, v] of Object.entries(node)) walk(v, `${path}.${k}`);
+    };
+
+    for (const tool of res.result.tools) {
+      walk(tool.inputSchema, `${tool.name}.inputSchema`);
+      if (tool.outputSchema) walk(tool.outputSchema, `${tool.name}.outputSchema`);
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
   it("rejects request with unsupported protocol version in _meta with error -32022 and exactly ONE response", async () => {
     const responses = await sendRpcCollectAll("tools/list", {
       _meta: {
