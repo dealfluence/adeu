@@ -57,14 +57,23 @@ describe("comment-only modify boundary normalization", () => {
   });
 });
 
-// The unit cases above prove WHERE the normalisation happens; these two prove
-// what it must never cause downstream — the guardrails the task exists to
-// protect (heading-hash parity through `stripMatchingHeadingHashes`, and the
-// never-a-w:del invariant of spec §10) asserted on the SAVED document.
+// The unit cases above prove WHERE the normalisation happens. The live cases
+// below prove two different things:
+//   - the heading-parity and never-a-w:del guards are downstream regression
+//     guards asserted on the SAVED document, NOT proof of location: the engine
+//     normalises an absent new_text too (engine.ts, "QA 2026-07-23 customer
+//     C3"), so an omitted new_text still reaches the engine and is repaired
+//     there even with the boundary block removed;
+//   - the `new_text: null` case is boundary-exclusive: `new_text` is
+//     `z.string().optional()`, so an explicit null never reaches the engine —
+//     without the boundary coercion in the item preprocess the call comes back
+//     as an isError result carrying "MCP error -32602: … expected string,
+//     received null at changes[0].new_text", before the handler ever runs.
 describe("comment-only modify through process_document_batch (live MCP server)", () => {
   let server: TestServer;
   let reportText: string;
   let savedDoc: DocumentObject;
+  let headingDocPath: string;
 
   beforeAll(async () => {
     server = await startTestServer("comment_only_modify");
@@ -101,7 +110,7 @@ describe("comment-only modify through process_document_batch (live MCP server)",
     para.appendChild(pRun);
     body.appendChild(para);
 
-    const headingDocPath = server.tempOut("heading_doc");
+    headingDocPath = server.tempOut("heading_doc");
     writeFileSync(headingDocPath, await doc.save());
     const outPath = server.tempOut("heading_out");
 
@@ -139,8 +148,9 @@ describe("comment-only modify through process_document_batch (live MCP server)",
       ),
     ).toBe(true);
 
-    // `stripMatchingHeadingHashes` only runs when new_text is present, so a
-    // boundary-normalised item is what keeps the "##" out of the heading.
+    // `stripMatchingHeadingHashes` only runs when new_text is present; the
+    // engine's own normalisation also supplies it, so this asserts the
+    // end-to-end outcome, not where the repair happened.
     const heading = savedDoc.element.getElementsByTagName("w:p")[0];
     expect(paragraphText(heading)).toBe("Term");
     expect(
@@ -152,4 +162,46 @@ describe("comment-only modify through process_document_batch (live MCP server)",
     expect(savedDoc.element.getElementsByTagName("w:del").length).toBe(0);
     expect(savedDoc.element.getElementsByTagName("w:ins").length).toBe(0);
   });
+
+  it(
+    "boundary-exclusive: an explicit new_text: null survives schema validation " +
+      "and applies as a comment-only modify",
+    async () => {
+      // `new_text` is `z.string().optional()`: null is NOT optional-absent, so
+      // this payload only reaches the handler because the item preprocess
+      // coerces it first. Remove the boundary block and this call returns
+      // isError with "MCP error -32602: Input validation error: … expected
+      // string, received null at changes[0].new_text" instead.
+      const outPath = server.tempOut("null_new_text");
+      const res = await server.callTool("process_document_batch", {
+        reasoning: "annotate the paragraph without changing its text",
+        original_docx_path: headingDocPath,
+        author_name: "Reviewer AI",
+        changes: [
+          {
+            type: "modify",
+            target_text: "Normal paragraph text.",
+            new_text: null,
+            comment: "why this paragraph matters",
+          },
+        ],
+        output_path: outPath,
+      });
+
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0].text).toContain("Edits: 1 applied");
+
+      const doc = await DocumentObject.load(readFileSync(outPath));
+      expect(doc.element.getElementsByTagName("w:del").length).toBe(0);
+      const comments = Object.values(extract_comments_data(doc.pkg));
+      expect(
+        comments.some((c: any) =>
+          String(c.text).includes("why this paragraph matters"),
+        ),
+      ).toBe(true);
+      const para = doc.element.getElementsByTagName("w:p")[1];
+      expect(paragraphText(para)).toBe("Normal paragraph text.");
+    },
+    60000,
+  );
 });
