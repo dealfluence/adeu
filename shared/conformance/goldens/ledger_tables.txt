@@ -1,0 +1,8 @@
+> **File Path:** `/fixtures/tables_cells.docx`
+
+> **Changes ledger** — 2 change(s), 0 comment(s) across 1 page(s).
+> Distribution — p1: 2
+> Authors — Jane Doe
+
+Chg:1  del  Jane Doe  p1  "40,000"  (pairs Chg:2)
+Chg:2  ins  Jane Doe  p1  "36,500"  (pairs Chg:1)

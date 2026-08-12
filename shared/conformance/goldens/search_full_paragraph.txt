@@ -1,0 +1,37 @@
+> **File Path:** `/fixtures/long_5pages.docx`
+
+> **Search Results** — Found 101 matches for query `Confidential Information` in `long_5pages.docx` (101 total, 3 shown).
+
+> Distribution across 5 document pages — p1: 20, p2: 22, p3: 20, p4: 22, p5: 17
+
+> **Note:** Only 3 matches shown (max_matches=3). Continue with `match_offset=3`.
+
+---
+
+### Match 1 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> Clause 1. **Confidential Information** disclosed under this clause remains the property of the disclosing party at all times. The receiving party shall limit access to those employees who need it to perform the services described here. No waiver of any provision is effective unless it is made in writing and signed by an authorised officer. Any notice given under this clause takes effect upon actual receipt at the address on the signature page. The parties shall review this clause annually and record any agreed amendment in a written change order. Nothing in this clause limits a remedy available at law or in equity for a material breach of the agreement.
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 2 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> Clause 4. Any notice given under this clause takes effect upon actual receipt at the address on the signature page. The parties shall review this clause annually and record any agreed amendment in a written change order. Nothing in this clause limits a remedy available at law or in equity for a material breach of the agreement. Fees stated in this clause are exclusive of value added tax and of documented out-of-pocket expenses. Each party shall perform its obligations under this clause with reasonable diligence and without undue delay. **Confidential Information** disclosed under this clause remains the property of the disclosing party at all times.
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 3 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> Clause 5. The parties shall review this clause annually and record any agreed amendment in a written change order. Nothing in this clause limits a remedy available at law or in equity for a material breach of the agreement. Fees stated in this clause are exclusive of value added tax and of documented out-of-pocket expenses. Each party shall perform its obligations under this clause with reasonable diligence and without undue delay. **Confidential Information** disclosed under this clause remains the property of the disclosing party at all times. The receiving party shall limit access to those employees who need it to perform the services described here.
+
+*Occurrences:* This exact phrasing appears 101 times in the document.

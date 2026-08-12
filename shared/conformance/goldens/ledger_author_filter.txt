@@ -1,0 +1,8 @@
+> **File Path:** `/fixtures/multi_author.docx`
+
+> **Changes ledger** — 2 change(s), 0 comment(s) across 1 page(s).
+> Distribution — p1: 2
+> Authors — Bob Smith
+
+Chg:9  del  Bob Smith  p1  "thirtyforty"  (pairs Chg:10)
+Chg:10  ins  Bob Smith  p1  "thirty-five"  (pairs Chg:9)

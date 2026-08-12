@@ -1,0 +1,11 @@
+> **File Path:** `/fixtures/comments_threads.docx`
+
+> **Changes ledger** — 0 change(s), 5 comment(s) across 1 page(s).
+> Distribution — p1: 5
+> Authors — Mikko Korpela, Sarah Chen
+
+Com:1  Sarah Chen  p1  "Should this reference the protective order?"
+Com:4  Mikko Korpela  p1  "Yes — cite the protective order, section 4."  (reply to Com:1)
+Com:2  Sarah Chen  p1  "Confirm this matches the scheduling order."
+Com:5  Mikko Korpela  p1  "It does not; the order says forty-five days."  (reply to Com:2)
+Com:3  Sarah Chen  p1  "Whose cost is this, really?"

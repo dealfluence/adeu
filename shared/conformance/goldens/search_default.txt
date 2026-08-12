@@ -1,0 +1,179 @@
+> **File Path:** `/fixtures/long_5pages.docx`
+
+> **Search Results** — Found 101 matches for query `Confidential Information` in `long_5pages.docx` (101 total, 17 shown).
+
+> Distribution across 5 document pages — p1: 20, p2: 22, p3: 20, p4: 22, p5: 17
+
+> **Note:** Only 17 matches shown (max_matches=20). Continue with `match_offset=17`.
+
+---
+
+### Match 1 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> Clause 1. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 2 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 3 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 4 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 5 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 6 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 7 (p1)
+
+**Path:** `Article 1 — Definitions > 1.1 Definitions — operative provisions`
+
+> Clause 9. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 8 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 9 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 10 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 11 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 12 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 13 (p1)
+
+**Path:** `Article 1 — Definitions > 1.2 Definitions — operative provisions`
+
+> Clause 17. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 14 (p1)
+
+**Path:** `Article 1 — Definitions > 1.3 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 15 (p1)
+
+**Path:** `Article 1 — Definitions > 1.3 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 16 (p1)
+
+**Path:** `Article 1 — Definitions > 1.3 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+---
+
+### Match 17 (p1)
+
+**Path:** `Article 1 — Definitions > 1.3 Definitions — operative provisions`
+
+> ...ut undue delay. **Confidential Information** disclosed under...
+
+*Occurrences:* This exact phrasing appears 101 times in the document.
+
+> **Note:** Snippets trimmed to ±16 chars and trailing matches dropped to fit the response size budget — continue from the `match_offset` above.

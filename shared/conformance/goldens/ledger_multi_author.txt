@@ -1,0 +1,19 @@
+> **File Path:** `/fixtures/multi_author.docx`
+
+> **Changes ledger** — 13 change(s), 0 comment(s) across 1 page(s).
+> Distribution — p1: 13
+> Authors — Acme LLP, Bob Smith, Jane Doe
+
+Chg:1  del  Jane Doe  p1  "thirtyforty"  (pairs Chg:2)
+Chg:2  ins  Jane Doe  p1  "thirty-five"  (pairs Chg:1)
+Chg:9  del  Bob Smith  p1  "thirtyforty"  (pairs Chg:10)
+Chg:10  ins  Bob Smith  p1  "thirty-five"  (pairs Chg:9)
+Chg:3  del  Jane Doe  p1  "30"  (pairs Chg:4)
+Chg:4  ins  Jane Doe  p1  "45"  (pairs Chg:3)
+Chg:11  del  Acme LLP  p1  "one"  (pairs Chg:12)
+Chg:12  ins  Acme LLP  p1  "two"  (pairs Chg:11)
+Chg:5  del  Jane Doe  p1  "ninety"  (pairs Chg:6)
+Chg:6  ins  Jane Doe  p1  "sixty"  (pairs Chg:5)
+Chg:7  del  Jane Doe  p1  "90"  (pairs Chg:8)
+Chg:8  ins  Jane Doe  p1  "60"  (pairs Chg:7)
+Chg:901  fmt  Acme LLP  p1  "**This Agreement is governed by the laws of t..."

@@ -1,0 +1,11 @@
+> **File Path:** `/fixtures/long_5pages.docx`
+
+> **Outline view** — showing 5 of 20 headings (L1-L1 (15 more at deeper levels, raise outline_max_level to see)) across 5 page(s). Call `read_docx` with `mode='full'` and `page=N` to read a section.
+
+---
+
+# Article 1 — Definitions (p1)
+# Article 2 — Services (p1)
+# Article 3 — Fees and Invoicing (p2)
+# Article 4 — Confidentiality (p3)
+# Article 5 — Term and Termination (p4-p5)

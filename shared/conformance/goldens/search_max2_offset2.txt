@@ -1,0 +1,5 @@
+> **File Path:** `/fixtures/long_5pages.docx`
+
+> **Search Results** — Found 101 matches for query `Confidential Information` in `long_5pages.docx`.
+
+> **Note:** No matches shown in this window: not even one ±16-char snippet fits the response size budget (max_matches=2, total matches=101). Raise `max_matches`, or pass `full_paragraph=true` to read the matching paragraph in full.

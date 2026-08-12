@@ -1,0 +1,15 @@
+Refused unbounded full document read for '/fixtures/long_5pages.docx' (5 pages): total size (89,564 chars, ~22,391 tokens) exceeds response budget limit (76,000 chars).
+
+Recipe to read bounded sections:
+  - One page or a page range: --page 3 / --page 1-5 (MCP page=3 / page='1-5')
+  - Find a passage: --search-query "text" (MCP search_query='text')
+  - Heading map: --mode outline (MCP mode='outline')
+  - Tracked changes ledger: --mode changes (MCP mode='changes')
+  - Read it all anyway: --force (MCP force=True)
+
+Outline (L1 Headings):
+# Article 1 — Definitions (p1)
+# Article 2 — Services (p1)
+# Article 3 — Fees and Invoicing (p2)
+# Article 4 — Confidentiality (p3)
+# Article 5 — Term and Termination (p4-p5)
