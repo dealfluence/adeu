@@ -15,6 +15,7 @@ import {
   DocumentObject,
   RedlineEngine,
   BatchValidationError,
+  failure_envelope,
   create_word_patch_diff,
   collect_media_difference_warnings,
   finalize_document,
@@ -885,6 +886,9 @@ server.registerTool(
         "delete_row",
       ]);
       const typeErrors: string[] = [];
+      // (0-based index in the caller's `changes`, reason) — the machine-readable
+      // half of the same rejection (B9). The human line stays 1-based.
+      const typeFailed: [number, string][] = [];
       sanitizedChanges.forEach((c: any, i: number) => {
         if (
           c !== null &&
@@ -892,18 +896,26 @@ server.registerTool(
           !Array.isArray(c) &&
           (!c.type || !VALID_TYPES.has(c.type))
         ) {
-          typeErrors.push(
-            `- Change ${i + 1}: missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].`,
-          );
+          const reason = `missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].`;
+          typeErrors.push(`- Change ${i + 1}: ${reason}`);
+          typeFailed.push([i, reason]);
         }
       });
       if (typeErrors.length > 0) {
+        const env = failure_envelope(
+          "invalid_changes_file",
+          typeFailed,
+          "Batch rejected. Some changes are malformed.",
+          typeErrors,
+        );
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Batch rejected. Some changes are malformed:\n\n${typeErrors.join("\n")}`,
+              text:
+                `Batch rejected. Some changes are malformed:\n\n${typeErrors.join("\n")}` +
+                `\n\n\`\`\`json\n${JSON.stringify(env)}\n\`\`\``,
             },
           ],
         };
@@ -951,12 +963,23 @@ server.registerTool(
           if (engine.rollback_verified) {
             docCache.restoreHotDoc(original_docx_path, doc);
           }
+          // Prose for the human reader, envelope for the machine one: the
+          // indices name positions in the caller's own `changes` array
+          // (B9; python/src/adeu/mcp_components/tools/document.py:710-717).
+          const env = failure_envelope(
+            "batch_validation_failed",
+            e.failed,
+            "Batch rejected. Some edits failed validation.",
+            e.errors,
+          );
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Batch rejected. Some edits failed validation:\n\n${e.errors.join("\n\n")}`,
+                text:
+                  `Batch rejected. Some edits failed validation:\n\n${e.errors.join("\n\n")}` +
+                  `\n\n\`\`\`json\n${JSON.stringify(env)}\n\`\`\``,
               },
             ],
           };

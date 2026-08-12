@@ -4,7 +4,7 @@ export function identifyEngine() {
 
 export { DocumentObject } from './docx/bridge.js';
 export { DocumentMapper, TextSpan } from './mapper.js';
-export { RedlineEngine, BatchValidationError, validate_edit_strings, describe_illegal_control_chars } from './engine.js';
+export { RedlineEngine, BatchValidationError, extract_failed_indices, validate_edit_strings, describe_illegal_control_chars } from './engine.js';
 export { generate_edits_from_text, generate_structured_edits, trim_common_context, create_unified_diff, create_word_patch_diff, collect_media_difference_warnings, DiffEdit } from './diff.js';
 export { apply_edits_to_markdown, MarkupEditReport } from './markup.js';
 export { paginate, split_structural_appendix, parse_page_arg, PAGE_RANGE_MAX_PAGES, PaginationResult, PageInfo, PageArgKind } from './pagination.js';

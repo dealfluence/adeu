@@ -199,12 +199,44 @@ function stripMatchingHeadingHashes(
 }
 
 // --- Validation ---
+/**
+ * Parses "- Edit N Failed: reason" / "- Action N Failed: reason" /
+ * "- Note: Action N …" prose back into (0-based index, reason) pairs so a
+ * failure envelope can blame the caller's own `changes` positions. Prose that
+ * names no number is blamed on index 0 rather than dropped — an unattributed
+ * failure must still travel. Mirrors
+ * python/src/adeu/redline/engine.py _extract_failed_indices (:70-83).
+ */
+export function extract_failed_indices(errors: string[]): [number, string][] {
+  const pattern = /^-\s*(?:Action|Edit|Note: Action)\s+(\d+)\b/i;
+  const failed: [number, string][] = [];
+  for (const err of errors) {
+    const first_line = err ? err.split("\n")[0] : "";
+    const m = pattern.exec(first_line);
+    if (m) {
+      const idx = parseInt(m[1], 10) - 1;
+      // Python's split("Failed: ", 1) keeps the remainder intact; JS's limit
+      // argument DISCARDS it, so the tail is rejoined explicitly.
+      const parts = err.split("Failed: ");
+      const reason =
+        parts.length > 1 ? parts.slice(1).join("Failed: ").trim() : err.trim();
+      failed.push([idx, reason]);
+    } else {
+      failed.push([0, err.trim()]);
+    }
+  }
+  return failed;
+}
+
 export class BatchValidationError extends Error {
   public errors: string[];
-  constructor(errors: string[]) {
+  /** (0-based index into the caller's `changes`, reason) for every failure. */
+  public failed: [number, string][];
+  constructor(errors: string[], failed?: [number, string][]) {
     super("Batch validation failed:\n" + errors.join("\n"));
     this.name = "BatchValidationError";
     this.errors = errors;
+    this.failed = failed ?? extract_failed_indices(errors);
   }
 }
 
@@ -3329,8 +3361,14 @@ export class RedlineEngine {
     return null;
   }
 
-  public validate_review_actions(actions: any[]): string[] {
+  /**
+   * `indices` maps each action's position in this array to its position in the
+   * caller's `changes` array, so every "- Action N" names the item the caller
+   * actually submitted. Omitted (direct callers): the array's own positions.
+   */
+  public validate_review_actions(actions: any[], indices?: number[]): string[] {
     const errors: string[] = [];
+    const gidx = (pos: number) => (indices ? indices[pos] : pos);
 
     // Document-context-free shape checks (QA 2026-07-19 v8 F-07), mirroring
     // Python's validate_review_action_batch: blank replies render as empty
@@ -3347,7 +3385,7 @@ export class RedlineEngine {
       if (type === "reply") {
         if (!String(action.text ?? "").trim()) {
           errors.push(
-            `- Action ${i + 1} Failed: reply text for ${target_id} is empty or ` +
+            `- Action ${gidx(i) + 1} Failed: reply text for ${target_id} is empty or ` +
               `whitespace-only. Word would show a blank comment bubble — provide the ` +
               `reply content in 'text'.`,
           );
@@ -3356,7 +3394,7 @@ export class RedlineEngine {
         const reply_key = target_id + '\x00' + String(action.text).trim();
         if (seen_replies.has(reply_key)) {
           errors.push(
-            `- Action ${i + 1} Failed: duplicate reply — this batch already replies to ` +
+            `- Action ${gidx(i) + 1} Failed: duplicate reply — this batch already replies to ` +
               `${target_id} with the same text. Remove the duplicate action.`,
           );
         }
@@ -3367,13 +3405,13 @@ export class RedlineEngine {
           const [first_idx, first_type] = prior;
           if (first_type === type) {
             errors.push(
-              `- Action ${i + 1} Failed: duplicate action — Action ${first_idx + 1} in this ` +
+              `- Action ${gidx(i) + 1} Failed: duplicate action — Action ${gidx(first_idx) + 1} in this ` +
                 `batch already applies '${type}' to ${target_id}. A change can only be ` +
                 `resolved once; remove the duplicate action.`,
             );
           } else {
             errors.push(
-              `- Action ${i + 1} Failed: conflicting actions — Action ${first_idx + 1} in ` +
+              `- Action ${gidx(i) + 1} Failed: conflicting actions — Action ${gidx(first_idx) + 1} in ` +
                 `this batch applies '${first_type}' to ${target_id}, but this action applies ` +
                 `'${type}'. Decide the outcome and keep exactly one of them.`,
             );
@@ -3403,7 +3441,7 @@ export class RedlineEngine {
         }
         if (!found) {
           errors.push(
-            this._action_not_found_error(action.target_id, "reply", `- Action ${i + 1} Failed:`),
+            this._action_not_found_error(action.target_id, "reply", `- Action ${gidx(i) + 1} Failed:`),
           );
         }
       } else if (type === "accept" || type === "reject") {
@@ -3426,7 +3464,7 @@ export class RedlineEngine {
           all_ppc.length === 0
         ) {
           errors.push(
-            this._action_not_found_error(action.target_id, type, `- Action ${i + 1} Failed:`),
+            this._action_not_found_error(action.target_id, type, `- Action ${gidx(i) + 1} Failed:`),
           );
         }
       }
@@ -3434,7 +3472,18 @@ export class RedlineEngine {
     return errors;
   }
 
-  public process_batch(changes: DocumentChange[]): any {
+  /**
+   * `original_indices` maps each element of `changes` to its position in the
+   * caller's ORIGINAL array, for callers that already dropped items (the MCP
+   * schema-salvage path): every "- Edit N" / "- Action N" and every `failed`
+   * index then names what the caller submitted. Signature parity with
+   * python/src/adeu/redline/engine.py process_batch (:2551-2556).
+   */
+  public process_batch(
+    changes: DocumentChange[],
+    original_indices?: number[],
+    partial: boolean = false,
+  ): any {
     // Defensive sanitization: some LLM clients "double-serialize" nested
     // arrays, delivering each element of `changes` as a JSON string instead of
     // a parsed object. Downstream code mutates state trackers (e.g.
@@ -3463,7 +3512,7 @@ export class RedlineEngine {
       }) as DocumentChange[];
     }
 
-    return this._process_batch_internal(changes);
+    return this._process_batch_internal(changes, original_indices, partial);
   }
 
   /**
@@ -3531,11 +3580,15 @@ export class RedlineEngine {
     }
   }
 
-  private _process_batch_internal(changes: DocumentChange[]): any {
+  private _process_batch_internal(
+    changes: DocumentChange[],
+    original_indices?: number[],
+    partial: boolean = false,
+  ): any {
+    void partial; // wired in the explicit-salvage contract (B5)
     // A fresh verdict per batch: a rejection that never mutated anything (a
     // validation failure before the first apply) is a verified rollback too.
     this.rollback_verified = true;
-
     // Pre-process edits: strip identical leading heading hashes from target_text and new_text
     for (const c of changes) {
       if (
@@ -3555,19 +3608,28 @@ export class RedlineEngine {
     }
 
     this.skipped_details = [];
+    // (0-based index in the CALLER's array, reason) for every failure, whatever
+    // bucket it came from — the machine-readable half of the failure envelope
+    // (B9, mirrors engine.py:2673).
+    const failed_list: [number, string][] = [];
 
-    const actions = changes.filter(
-      (c) =>
-        c !== null &&
-        typeof c === "object" &&
-        ["accept", "reject", "reply"].includes(c.type),
-    );
-    const edits = changes.filter(
-      (c) =>
-        c === null ||
-        typeof c !== "object" ||
-        !["accept", "reject", "reply"].includes(c.type),
-    );
+    // Buckets carry the caller's index with them: numbering each bucket from 1
+    // blamed "Edit 1" for the caller's changes[1] whenever an action preceded
+    // it (engine.py:2675-2687).
+    const idx_of = (i: number) => (original_indices ? original_indices[i] : i);
+    const is_action = (c: any) =>
+      c !== null &&
+      typeof c === "object" &&
+      ["accept", "reject", "reply"].includes(c.type);
+    const actions_with_idx = changes
+      .map((c, i) => ({ c, i: idx_of(i) }))
+      .filter(({ c }) => is_action(c));
+    const edits_with_idx = changes
+      .map((c, i) => ({ c, i: idx_of(i) }))
+      .filter(({ c }) => !is_action(c));
+    const actions = actions_with_idx.map(({ c }) => c);
+    const action_indices = actions_with_idx.map(({ i }) => i);
+    const edits = edits_with_idx.map(({ c }) => c);
 
     // Never pre-unwrap a foreign author's <w:ins> to make a partially
     // straddling edit fit: that turns their tracked-inserted text into
@@ -3584,15 +3646,31 @@ export class RedlineEngine {
     // DOM: accept + reject across one replacement's del+ins pair is a
     // contradiction, not two independent operations (ADEU-QA-004).
     let action_errors =
-      actions.length > 0 ? this.validate_review_actions(actions) : [];
+      actions.length > 0
+        ? this.validate_review_actions(actions, action_indices)
+        : [];
     if (actions.length > 0 && action_errors.length === 0) {
-      action_errors = this.validate_action_pairing(actions);
+      action_errors = this.validate_action_pairing(actions, action_indices);
     }
     const validate_edits_now = edits.length > 0 && action_errors.length > 0;
-    const edit_errors = validate_edits_now ? this.validate_edits(edits) : [];
+    const edit_errors: string[] = [];
+    if (validate_edits_now) {
+      // One call per edit so each carries its own caller index; validate_edits
+      // is a per-edit loop, so this is the same work in the same order.
+      for (const { c, i } of edits_with_idx) {
+        const single = this.validate_edits([c], i);
+        if (single.length > 0) {
+          edit_errors.push(...single);
+          failed_list.push([i, single.join("\n")]);
+        }
+      }
+    }
     const all_errors = [...action_errors, ...edit_errors];
     if (all_errors.length > 0) {
-      throw new BatchValidationError(all_errors);
+      // Action prose already names the caller's index — read it back rather
+      // than tracking it twice (engine.py:2693,2700).
+      failed_list.unshift(...extract_failed_indices(action_errors));
+      throw new BatchValidationError(all_errors, failed_list);
     }
 
     let applied_actions = 0;
@@ -3620,12 +3698,13 @@ export class RedlineEngine {
 
     if (actions.length > 0) {
       try {
-        const res = this.apply_review_actions(actions);
+        const res = this.apply_review_actions(actions, action_indices);
         applied_actions = res[0];
         skipped_actions = res[1];
         already_resolved_actions = res[2];
         if (skipped_actions > 0) {
-          throw new BatchValidationError(this.skipped_details);
+          failed_list.push(...extract_failed_indices(this.skipped_details));
+          throw new BatchValidationError(this.skipped_details, failed_list);
         }
       } catch (err) {
         // An action can also fail at APPLY time (a reply whose parent cannot
@@ -3671,8 +3750,8 @@ export class RedlineEngine {
           return e._match_start_index;
         return null;
       };
-      const ordered_edits = edits
-        .map((edit, i) => ({ edit: edit as any, i }))
+      const ordered_edits = edits_with_idx
+        .map(({ c, i: orig_idx }, i) => ({ edit: c as any, i, orig_idx }))
         .sort((a, b) => {
           const ka = pinned_idx(a.edit);
           const kb = pinned_idx(b.edit);
@@ -3688,16 +3767,17 @@ export class RedlineEngine {
         try {
           const sequential_errors: string[] = [];
           let applied_so_far = 0;
-          for (const { edit, i } of ordered_edits) {
+          for (const { edit, orig_idx } of ordered_edits) {
             let single_errors: string[];
             try {
-              single_errors = this.validate_edits([edit], i);
+              single_errors = this.validate_edits([edit], orig_idx);
             } catch (e) {
               // Clean per-edit failure for time-budget violations (QA F5).
               if (!(e instanceof RegexTimeoutError)) throw e;
-              single_errors = [`- Edit ${i + 1} Failed: ${e.message}`];
+              single_errors = [`- Edit ${orig_idx + 1} Failed: ${e.message}`];
             }
             if (single_errors.length > 0) {
+              failed_list.push([orig_idx, single_errors.join("\n")]);
               if (applied_so_far > 0) {
                 const hint = sequential_context_hint(applied_so_far);
                 single_errors = single_errors.map((err) => err + hint);
@@ -3721,7 +3801,8 @@ export class RedlineEngine {
                 // failed edit's partial mutations.
                 let msg =
                   (edit as any)._error_msg ||
-                  `- Edit ${i + 1} Failed: Failed to apply edit.`;
+                  `- Edit ${orig_idx + 1} Failed: Failed to apply edit.`;
+                failed_list.push([orig_idx, msg]);
                 if (applied_so_far > 0) {
                   msg += sequential_context_hint(applied_so_far);
                 }
@@ -3731,7 +3812,7 @@ export class RedlineEngine {
             }
           }
           if (sequential_errors.length > 0) {
-            throw new BatchValidationError(sequential_errors);
+            throw new BatchValidationError(sequential_errors, failed_list);
           }
         } catch (err) {
           this._restore_batch_snapshot(snapshot, originalCurrentId);
@@ -3798,6 +3879,15 @@ export class RedlineEngine {
     }
 
     return {
+      // Uniform outcome keys (B9): a caller reads `status` and `failed`
+      // without knowing which bucket a failure came from. `status` becomes
+      // "partial" with the explicit-salvage contract (B5); engine.py:2864-2869.
+      status: "ok",
+      failed: failed_list.map(([index, reason]) => ({
+        index,
+        reason,
+        error: reason,
+      })),
       actions_applied: applied_actions,
       actions_skipped: skipped_actions,
       // Actions whose target was already resolved by an earlier action of
@@ -4479,9 +4569,12 @@ export class RedlineEngine {
    * batch that accepts one side and rejects the other is contradictory.
    * Rejecting it up front — before any action mutates the document — keeps
    * the batch transactional.
+   *
+   * `indices` as in validate_review_actions: caller-index space for the prose.
    */
-  public validate_action_pairing(actions: any[]): string[] {
+  public validate_action_pairing(actions: any[], indices?: number[]): string[] {
     const errors: string[] = [];
+    const gidx = (pos: number) => (indices ? indices[pos] : pos);
     const group_first = new Map<string, [number, string, string]>();
     for (let pos = 0; pos < actions.length; pos++) {
       const act = actions[pos];
@@ -4502,8 +4595,8 @@ export class RedlineEngine {
       if (conflict !== null) {
         const [first_pos, first_type, first_id] = conflict;
         errors.push(
-          `- Action ${pos + 1} Failed: conflicting actions on one replacement — Action ` +
-            `${first_pos + 1} applies '${first_type}' to Chg:${first_id}, and Chg:${target_id} is ` +
+          `- Action ${gidx(pos) + 1} Failed: conflicting actions on one replacement — Action ` +
+            `${gidx(first_pos) + 1} applies '${first_type}' to Chg:${first_id}, and Chg:${target_id} is ` +
             `part of the same change (a replacement's contiguous del+ins pair resolves as one ` +
             `unit, so '${first_type}' already decides both sides). Accepting one side and ` +
             `rejecting the other is contradictory — decide the outcome and submit exactly one ` +
@@ -4891,7 +4984,12 @@ export class RedlineEngine {
     );
   }
 
-  public apply_review_actions(actions: any[]): [number, number, number] {
+  /** `indices` as in validate_review_actions: caller-index space for the prose. */
+  public apply_review_actions(
+    actions: any[],
+    indices?: number[],
+  ): [number, number, number] {
+    const gidx = (pos: number) => (indices ? indices[pos] : pos);
     let applied = 0;
     let skipped = 0;
     let already_resolved = 0;
@@ -4922,7 +5020,7 @@ export class RedlineEngine {
             this._action_not_found_error(
               action.target_id,
               "reply",
-              `- Action ${pos + 1} Failed:`,
+              `- Action ${gidx(pos) + 1} Failed:`,
             ),
           );
           continue;
@@ -4939,7 +5037,7 @@ export class RedlineEngine {
             // (BUG_comment_threading_anchoring_and_typography.md B1).
             skipped++;
             this.skipped_details.push(
-              `- Action ${pos + 1} Failed: reply on ${action.target_id} — ${e.message}`,
+              `- Action ${gidx(pos) + 1} Failed: reply on ${action.target_id} — ${e.message}`,
             );
             continue;
           }
@@ -4960,7 +5058,7 @@ export class RedlineEngine {
           // happens — report it accurately (ADEU-QA-004).
           already_resolved++;
           this.skipped_details.push(
-            `- Note: Action ${pos + 1} ('${type}' on ${action.target_id}) had no additional effect — ` +
+            `- Note: Action ${gidx(pos) + 1} ('${type}' on ${action.target_id}) had no additional effect — ` +
               `the change was already resolved together with its replacement pair by an earlier ` +
               `action in this batch. Counted as already_resolved, not applied.`,
           );
@@ -4969,7 +5067,7 @@ export class RedlineEngine {
         // Contradiction. validate_action_pairing rejects this shape before
         // anything mutates; this guard covers direct callers.
         this.skipped_details.push(
-          `- Action ${pos + 1} Failed: contradictory action — '${type}' on ${action.target_id}, but ` +
+          `- Action ${gidx(pos) + 1} Failed: contradictory action — '${type}' on ${action.target_id}, but ` +
             `the change was already resolved as '${prior_type}' together with its replacement ` +
             `pair by an earlier action in this batch.`,
         );
