@@ -694,7 +694,7 @@ registerAppTool(
 // string is still accepted (and normalized in-handler) so double-serialized
 // payloads from some LLM clients keep working; only `type` is required, all
 // other fields are optional, and unknown keys pass through untouched.
-const CHANGE_ITEM_SCHEMA = z
+export const CHANGE_ITEM_SCHEMA = z
   .object({
     type: z
       .enum(["modify", "accept", "reject", "reply", "insert_row", "delete_row"])
