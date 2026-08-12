@@ -678,6 +678,7 @@ def handle_extract(args):
     paragraph_offsets: Any = None
     cached_outline_nodes: Any = None
     cached_comments_data: Any = None
+    cached_existing_change_ids: Any = None
     doc: Any = None
 
     if args.live:
@@ -723,6 +724,7 @@ def handle_extract(args):
             paragraph_offsets = None
             cached_outline_nodes = cached_view.get("outline_nodes")
             cached_comments_data = cached_view.get("comments_data")
+            cached_existing_change_ids = cached_view.get("existing_change_ids")
         else:
             doc = _load_docx_or_exit(input_path)
 
@@ -732,9 +734,9 @@ def handle_extract(args):
                 doc,
                 clean_view=args.clean_view,
                 include_appendix=needs_appendix,
-                return_paragraph_offsets=needs_offsets,
+                return_paragraph_offsets=needs_offsets or not needs_appendix,
             )
-            if needs_offsets:
+            if needs_offsets or not needs_appendix:
                 assert isinstance(extract_result, tuple)
                 text = str(extract_result[0])
                 paragraph_offsets = extract_result[1]
@@ -744,7 +746,7 @@ def handle_extract(args):
                 paragraph_offsets = None
 
             cached_outline_nodes = None
-            if needs_offsets:
+            if not needs_appendix:
                 from adeu.mcp_components._response_builders import paginate, split_structural_appendix
                 from adeu.outline import extract_outline
 
@@ -762,6 +764,13 @@ def handle_extract(args):
 
             cached_comments_data = CommentsManager(doc).extract_comments_data()
 
+            cached_existing_change_ids = None
+            try:
+                engine = _open_redline_engine_or_exit(input_path)
+                cached_existing_change_ids = list(engine._existing_change_ids())
+            except Exception:
+                pass
+
             view_data: Dict[str, Any] = {}
             if needs_appendix:
                 view_data["text_with_appendix"] = text
@@ -771,6 +780,8 @@ def handle_extract(args):
                     view_data["outline_nodes"] = cached_outline_nodes
                 if cached_comments_data is not None:
                     view_data["comments_data"] = cached_comments_data
+                if cached_existing_change_ids is not None:
+                    view_data["existing_change_ids"] = cached_existing_change_ids
 
             disk_projection_cache.put(input_path, args.clean_view, view_data)
 
@@ -880,14 +891,14 @@ def handle_extract(args):
                 if cached_comments_data is not None
                 else (CommentsManager(doc).extract_comments_data() if doc is not None else None)
             )
-            existing_change_ids = None
-            if not getattr(args, "live", False) and getattr(args, "input", None):
+            existing_change_ids = set(cached_existing_change_ids) if cached_existing_change_ids is not None else None
+            if existing_change_ids is None and doc is not None and getattr(args, "input", None):
                 try:
                     engine = _open_redline_engine_or_exit(Path(args.input))
                     existing_change_ids = set(engine._existing_change_ids())
                 except Exception:
                     pass
-            elif getattr(args, "live", False) and doc is not None:
+            elif existing_change_ids is None and getattr(args, "live", False) and doc is not None:
                 try:
                     from io import BytesIO
 

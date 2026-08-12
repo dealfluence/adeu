@@ -215,7 +215,12 @@ class DiskProjectionCache:
             if "outline_nodes" in serializable_view and serializable_view["outline_nodes"] is not None:
                 serializable_view["outline_nodes"] = serialize_outline_nodes(serializable_view["outline_nodes"])
 
-            data.setdefault("views", {})[view_key] = serializable_view
+            views = data.setdefault("views", {})
+            existing_view = views.get(view_key)
+            if isinstance(existing_view, dict):
+                existing_view.update(serializable_view)
+            else:
+                views[view_key] = serializable_view
 
             # Serialize and write
             content = json.dumps(data, ensure_ascii=False)

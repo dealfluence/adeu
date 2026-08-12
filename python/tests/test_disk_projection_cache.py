@@ -28,6 +28,7 @@ def _isolate_cache(tmp_path, monkeypatch):
     disk_projection_cache.cache_dir = cache_dir
     disk_projection_cache.clear_stats()
     yield
+    disk_projection_cache.cache_dir = None
     disk_projection_cache.clear_stats()
 
 
@@ -143,3 +144,66 @@ def test_corrupt_cache_entry_is_ignored(tmp_path, capsys):
     repaired_text = cache_file.read_text(encoding="utf-8")
     parsed = json.loads(repaired_text)
     assert "key" in parsed
+
+
+def test_view_merging_across_mode_switches(capsys):
+    fixture_path = get_fixture_path("golden.docx")
+
+    # 1. Run in outline mode (cold read)
+    out_outline1 = _run_cli(["extract", str(fixture_path), "--mode", "outline"], capsys)
+    assert disk_projection_cache.stats["misses"] >= 1
+
+    # 2. Run in appendix mode (cold read for appendix view)
+    out_appendix = _run_cli(["extract", str(fixture_path), "--mode", "appendix"], capsys)
+    assert out_appendix
+
+    # 3. Run in outline mode again (warm read - should hit cache and match out_outline1)
+    hits_before = disk_projection_cache.stats["hits"]
+    out_outline2 = _run_cli(["extract", str(fixture_path), "--mode", "outline"], capsys)
+    assert out_outline1 == out_outline2
+    assert disk_projection_cache.stats["hits"] > hits_before
+
+
+def test_budget_guard_output_identity_cold_vs_warm(capsys, monkeypatch):
+    fixture_path = get_fixture_path("golden.docx")
+    monkeypatch.setattr("adeu.payloads.response_budget_limit", lambda: 10)
+
+    # Cold read (budget exceeded)
+    test_args1 = ["adeu", "extract", str(fixture_path), "--page", "all"]
+    with patch.object(sys, "argv", test_args1):
+        with pytest.raises(SystemExit) as exc1:
+            main()
+        assert exc1.value.code == 1
+    err1 = capsys.readouterr().err
+
+    hits_before = disk_projection_cache.stats["hits"]
+
+    # Warm read (budget exceeded, should hit cache and match cold output byte-for-byte)
+    test_args2 = ["adeu", "extract", str(fixture_path), "--page", "all"]
+    with patch.object(sys, "argv", test_args2):
+        with pytest.raises(SystemExit) as exc2:
+            main()
+        assert exc2.value.code == 1
+    err2 = capsys.readouterr().err
+
+    assert disk_projection_cache.stats["hits"] > hits_before
+    assert err1 == err2
+    assert len(err1) > 0
+
+
+def test_mode_changes_cache_hit_does_not_reopen_docx(capsys):
+    fixture_path = get_fixture_path("golden.docx")
+
+    # Cold read
+    out1 = _run_cli(["extract", str(fixture_path), "--mode", "changes"], capsys)
+    hits_before = disk_projection_cache.stats["hits"]
+
+    # Warm read: patch _open_redline_engine_or_exit and _load_docx_or_exit to raise if called
+    with patch(
+        "adeu.cli._open_redline_engine_or_exit", side_effect=AssertionError("Should not re-open DOCX on cache hit")
+    ):
+        with patch("adeu.cli._load_docx_or_exit", side_effect=AssertionError("Should not re-load DOCX on cache hit")):
+            out2 = _run_cli(["extract", str(fixture_path), "--mode", "changes"], capsys)
+
+    assert out1 == out2
+    assert disk_projection_cache.stats["hits"] > hits_before
