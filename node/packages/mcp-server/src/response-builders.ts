@@ -417,7 +417,13 @@ export function render_outline_tree(
         meta_parts.push("fn:" + node.footnote_ids.join(","));
       lines.push(`${prefix} ${node.text} (${meta_parts.join(", ")})`);
     } else {
-      lines.push(`${prefix} ${node.text} (p${node.page})`);
+      // A heading that spans pages advertises the whole range it owns, so a
+      // reader knows how many page reads the section costs (_response_builders.py:398-401).
+      const page_str =
+        node.end_page && node.end_page > node.page
+          ? `p${node.page}-p${node.end_page}`
+          : `p${node.page}`;
+      lines.push(`${prefix} ${node.text} (${page_str})`);
     }
   }
   return lines.join("\n");
@@ -453,10 +459,10 @@ export function build_full_document_response(
  * The total is measured on `projected_text`, not on the split body — Python
  * measures the same string (`:695`), so both engines report the same size.
  *
- * `nodes` are the cached outline nodes; documents with no L1 heading get no
- * outline section at all, rather than a "(No headings detected)" placeholder.
- * Pass `null` when no outline is available (the clean_view path has none) and
- * the refusal ships without the heading map.
+ * `nodes` are the cached outline nodes OF THE VIEW being refused (the clean
+ * view has its own — DocCache.ensureCleanOutline). Documents with no L1
+ * heading get no outline section at all, rather than a "(No headings
+ * detected)" placeholder; `null` ships the refusal without a heading map.
  */
 export function build_budget_guard_message(
   projected_text: string,

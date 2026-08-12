@@ -89,7 +89,16 @@ describe("read_docx response-budget guard (A3)", () => {
     for (const line of RECIPE) expect(lines).toContain(line);
 
     expect(text).toContain("Outline (L1 Headings):");
-    expect(lines.filter((l) => l.startsWith("# Article ")).length).toBe(5);
+    // Byte-exact heading map, INCLUDING the page RANGE on the last article:
+    // a heading owns pages up to the one before the next equal-or-higher
+    // heading, so Article 5 spans p4-p5 (outline.py:184-194).
+    expect(lines.filter((l) => l.startsWith("# Article "))).toEqual([
+      "# Article 1 — Definitions (p1)",
+      "# Article 2 — Services (p1)",
+      "# Article 3 — Fees and Invoicing (p2)",
+      "# Article 4 — Confidentiality (p3)",
+      "# Article 5 — Term and Termination (p4-p5)",
+    ]);
   });
 
   it("2. keeps the refusal inside the 800 approx-token contract", async () => {
@@ -131,6 +140,20 @@ describe("read_docx response-budget guard (A3)", () => {
     expect(text).toContain(SMALL_DOC[SMALL_DOC.length - 1]);
     // page='all' stays chrome-free: file-path banner only, no page banner.
     expect(text).not.toContain("synthetic page");
+  });
+
+  it("8. refuses a clean_view read with the CLEAN heading map", async () => {
+    const res = await readAll(server, OVERSIZED, { clean_view: true });
+
+    expect(res.isError).toBe(true);
+    const text = textOf(res);
+    expect(text).toContain(REFUSAL);
+    // Python fills outline nodes per VIEW (doc_cache.py:155-188), so its
+    // clean-view refusal carries a heading map — Node's must too.
+    expect(text).toContain("Outline (L1 Headings):");
+    expect(
+      text.split("\n").filter((l) => l.startsWith("# Article ")).length,
+    ).toBe(5);
   });
 });
 

@@ -25,6 +25,28 @@ export interface OutlineNode {
   style: string;
   has_table: boolean;
   footnote_ids: string[];
+  /** Last page of the range this heading owns; filled by _assign_end_pages. */
+  end_page: number;
+}
+
+/**
+ * Fills `end_page`: a heading owns pages up to the page BEFORE the next
+ * heading at the same or a higher level, or the last page when it reaches the
+ * end (port of outline.py:184-194 / :343-353). Renderers show a range only
+ * when end_page > page.
+ */
+function _assign_end_pages(nodes: OutlineNode[], total_pages: number): void {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    let end_page = total_pages;
+    for (let j = i + 1; j < nodes.length; j++) {
+      if (nodes[j].level <= node.level) {
+        end_page = nodes[j].page > node.page ? nodes[j].page - 1 : node.page;
+        break;
+      }
+    }
+    node.end_page = end_page;
+  }
 }
 
 interface _BlockRecord {
@@ -86,9 +108,18 @@ export function extract_outline(
 
     const page_num = offset_to_page(rec.start_offset, body_page_offsets);
 
-    nodes.push({ level, text, page: page_num, style, has_table, footnote_ids });
+    nodes.push({
+      level,
+      text,
+      page: page_num,
+      style,
+      has_table,
+      footnote_ids,
+      end_page: page_num,
+    });
   }
 
+  _assign_end_pages(nodes, body_pages.length);
   return nodes;
 }
 
@@ -688,9 +719,11 @@ function _extract_outline_fast(
       style,
       has_table,
       footnote_ids,
+      end_page: page_num,
     });
   }
 
+  _assign_end_pages(nodes, body_page_offsets.length);
   return nodes;
 }
 

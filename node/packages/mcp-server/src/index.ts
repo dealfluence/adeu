@@ -684,12 +684,14 @@ registerAppTool(
           // return an arbitrarily large payload. Refuse it over the budget
           // with the page count, the L1 outline and the bounded-read recipe;
           // `force` is the documented opt-out. Mirrors Python's
-          // tools/document.py:512-529 — the outline comes free from the cache
-          // entry already loaded above, so the refusal costs no extra work.
-          // clean_view refuses WITHOUT the heading map: this cache keeps only
-          // the raw outline, whose page numbers and CriticMarkup-bearing
-          // heading text describe a different projection than the one refused.
+          // tools/document.py:512-529, which asks its cache for the outline of
+          // the view it is refusing — so clean_view gets the CLEAN heading map,
+          // not the raw one (whose page numbers and CriticMarkup-bearing
+          // heading text describe a different projection).
           if (!force && text.length > response_budget_limit()) {
+            const nodes = clean_view
+              ? await docCache.ensureCleanOutline(entry, readBytes, loadDoc)
+              : entry.outline_nodes;
             return {
               isError: true,
               content: [
@@ -698,7 +700,7 @@ registerAppTool(
                   text: build_budget_guard_message(
                     text,
                     file_path,
-                    clean_view ? null : entry.outline_nodes,
+                    nodes,
                     bundle,
                   ),
                 },

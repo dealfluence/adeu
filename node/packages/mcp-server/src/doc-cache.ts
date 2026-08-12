@@ -64,6 +64,8 @@ export interface DocCacheEntry {
   clean_text: string | null;
   /** Lazily derived on the first clean_view paginated/search read. */
   clean_bundle: ProjectionBundle | null;
+  /** Clean-view heading map; lazily derived (see ensureCleanOutline). */
+  clean_outline_nodes: OutlineNode[] | null;
   /** In-flight background clean fill; ensureCleanText awaits it. */
   clean_fill: Promise<void> | null;
   /** Set by ensureCleanText: skip the quiet-period wait and fill NOW. */
@@ -431,6 +433,7 @@ export class DocCache {
       outline_nodes,
       clean_text: null,
       clean_bundle: null,
+      clean_outline_nodes: null,
       clean_fill: null,
     };
     this.store(entry);
@@ -578,6 +581,41 @@ export class DocCache {
       );
     }
     return entry.clean_bundle;
+  }
+
+  /**
+   * Clean-view heading map. The raw outline cannot stand in for it: its page
+   * numbers and CriticMarkup-bearing heading text describe a different
+   * projection. Python fills outline nodes per VIEW (doc_cache.py:155-188), so
+   * both engines' clean-view readers get a real heading map.
+   *
+   * Costs a parse: the paragraph-offset map the extractor needs references
+   * live elements from ITS OWN parse, so it can never be derived from the
+   * cached clean string. Cached on the entry, so at most once per version.
+   */
+  public async ensureCleanOutline(
+    entry: DocCacheEntry,
+    readBytes: () => Buffer,
+    loadDoc: LoadDocFn,
+  ): Promise<OutlineNode[]> {
+    this.lastTouch = Date.now();
+    if (entry.clean_outline_nodes) return entry.clean_outline_nodes;
+    const doc = await loadDoc(readBytes());
+    const extract_res = _extractTextFromDoc(doc, true, true, true) as {
+      text: string;
+      paragraph_offsets: Map<any, [number, number]>;
+    };
+    if (entry.clean_text === null) entry.clean_text = extract_res.text;
+    if (!entry.clean_bundle) entry.clean_bundle = makeBundle(extract_res.text);
+    const bundle = entry.clean_bundle;
+    entry.clean_outline_nodes = extract_outline(
+      doc,
+      bundle.body,
+      bundle.pagination.body_pages,
+      bundle.pagination.body_page_offsets,
+      extract_res.paragraph_offsets,
+    );
+    return entry.clean_outline_nodes;
   }
 
   private store(entry: DocCacheEntry) {
