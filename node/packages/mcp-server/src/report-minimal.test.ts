@@ -144,4 +144,3 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
     expect(stats.version).not.toBe("1.18.2");
   });
 });
-
