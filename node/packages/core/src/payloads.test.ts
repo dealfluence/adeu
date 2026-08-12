@@ -187,8 +187,31 @@ describe("payloads", () => {
       expect(response_budget_limit()).toBe(1000);
     });
 
+    it("reads digit-group underscores like Python's int()", () => {
+      for (const [raw, expected] of [
+        ["1_000", 1000],
+        ["+1_0", 10],
+        [" 1_000_000 ", 1000000],
+      ] as const) {
+        process.env.ADEU_MAX_RESPONSE_CHARS = raw;
+        expect(response_budget_limit()).toBe(expected);
+      }
+    });
+
     it("ignores unparseable and empty values", () => {
-      for (const bad of ["", "abc", "10.5", "1e3px", "  "]) {
+      // The underscore forms here are the ones int() rejects too: a separator
+      // needs a digit on both sides, and doubling it is an error.
+      for (const bad of [
+        "",
+        "abc",
+        "10.5",
+        "1e3px",
+        "  ",
+        "_1",
+        "1_",
+        "1__0",
+        "+_1",
+      ]) {
         process.env.ADEU_MAX_RESPONSE_CHARS = bad;
         expect(response_budget_limit()).toBe(76000);
       }

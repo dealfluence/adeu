@@ -477,11 +477,17 @@ export function shrink_batch_stats(
  * Defaults to 76,000 characters (~19,000 tokens), overridable via ADEU_MAX_RESPONSE_CHARS.
  */
 export function response_budget_limit(): number {
-  const val = process.env.ADEU_MAX_RESPONSE_CHARS;
-  // Accepts exactly what Python's int() does here — a signed run of digits,
-  // surrounding whitespace forgiven — so "1e3", "0x10" and "  " fall back
-  // rather than resolving to a number JS alone would have parsed.
-  if (val && /^[+-]?\d+$/.test(val.trim())) return Number(val.trim());
+  // Python's int() is the reference: an optionally signed run of digits with
+  // surrounding whitespace forgiven, plus underscores as digit-group
+  // separators BETWEEN digits ("1_000" -> 1000, while "_1", "1_" and "1__0"
+  // stay errors). So "1e3", "0x10" and "  " fall back rather than resolving to
+  // a number JS alone would have parsed. One divergence kept on purpose:
+  // int() also reads non-ASCII decimal digits (int("\uFF11\uFF10") == 10), and
+  // JS exposes no digit-value API to match that without shipping a Unicode
+  // table that would then drift against Python's Unicode version — such values
+  // fall back to the default here.
+  const text = (process.env.ADEU_MAX_RESPONSE_CHARS ?? "").trim();
+  if (/^[+-]?\d+(?:_\d+)*$/.test(text)) return Number(text.replace(/_/g, ""));
   return 76000;
 }
 
