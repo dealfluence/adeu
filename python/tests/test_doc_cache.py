@@ -284,6 +284,11 @@ def test_clean_and_raw_views_are_independent(structured_docx):
 def test_lru_size_is_env_tunable(monkeypatch):
     monkeypatch.setenv("ADEU_DOC_CACHE_ENTRIES", "7")
     assert get_doc_cache_capacity() == 7
+    cache = DocProjectionCache()
+    assert cache._max_entries == 7
+    for i in range(8):
+        cache.entry((f"/doc-{i}", i, i))
+    assert len(cache._entries) == 7
 
 
 def test_lru_size_falls_back_on_garbage_and_zero(monkeypatch):
