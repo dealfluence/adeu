@@ -14,7 +14,7 @@ from docx import Document
 from docx.document import Document as DocumentObject
 from pydantic import TypeAdapter, ValidationError
 
-from adeu.cli import _extract_schema_failures, _write_output_or_exit
+from adeu.cli import _extract_schema_failures, _write_output_or_exit, take_last_cli_error
 from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
@@ -42,6 +42,21 @@ def _emit_json(data: Dict[str, Any]) -> None:
 def _emit_error(code: str, message: str) -> None:
     """Emits a standard error response JSON object."""
     _emit_json({"status": "error", "error": code, "message": message})
+
+
+def _emit_cli_error(fallback_code: str, fallback_message: str, **extra: Any) -> None:
+    """
+    Emits the failure envelope recorded by the CLI helper that raised, falling
+    back to `fallback_code`/`fallback_message` for failures that did not come
+    from `_cli_error`.
+
+    The in-process CLI helpers (`_load_batch_from_json`, `_write_output_or_exit`)
+    report failure by exiting, so the caught exception stringifies to the exit
+    code — "Error: 1" — with the code and diagnostics dropped.
+    `take_last_cli_error()` recovers both.
+    """
+    env = take_last_cli_error() or {"error": fallback_code, "message": fallback_message}
+    _emit_json({"status": "error", **env, **extra})
 
 
 def _load_docx_doc(path: Path) -> DocumentObject:
@@ -177,22 +192,10 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
                 no_chrome=no_chrome,
             )
         elif mode == "changes":
+            # Ordered ahead of `want_all_pages` exactly as in cli.py: the ledger
+            # is already a bounded summary, so `--page all --mode changes` is
+            # exempt from the response budget guard.
             text, _ = doc_cache.get_pagination(entry, clean_view=False)
-            from adeu.payloads import response_budget_limit
-
-            if want_all_pages and not req.get("force", False) and len(text) > response_budget_limit():
-                from adeu.mcp_components._response_builders import build_budget_guard_message
-
-                text_out, _, outline_nodes = doc_cache.get_outline(entry, clean_view=False)
-                msg = build_budget_guard_message(
-                    text_out,
-                    str(path),
-                    outline_nodes=outline_nodes,
-                    is_cli=True,
-                )
-                _emit_error("response_budget_exceeded", msg)
-                return
-
             doc = _load_docx_doc(path)
             from adeu.redline.comments import CommentsManager
 
@@ -276,7 +279,7 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
         else:
             _emit_error("invalid_input", f"Error: {e}")
     except (Exception, SystemExit) as e:
-        _emit_error("invalid_input", f"Error: {e}")
+        _emit_cli_error("invalid_input", f"Error: {e}")
 
 
 def _handle_apply_command(req: Dict[str, Any]) -> None:
@@ -325,18 +328,17 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
         applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
         is_partial = (stats.get("status") == "partial" or bool(stats.get("failed"))) and partial
 
+        # Same three-way rule as handle_apply in cli.py. In particular an EMPTY
+        # batch is not a failure: `adeu apply` writes an unmodified copy and
+        # succeeds, so "nothing applied" alone must not become an error.
         if is_partial and applied_count > 0:
             batch_failed = False
         elif partial and applied_count == 0 and len(changes) > 0:
             batch_failed = True
         else:
-            batch_failed = (
-                stats.get("actions_skipped", 0) > 0
-                or stats.get("edits_skipped", 0) > 0
-                or (applied_count == 0 and len(changes) > 0)
-            )
+            batch_failed = stats.get("actions_skipped", 0) > 0 or stats.get("edits_skipped", 0) > 0
 
-        if batch_failed or applied_count == 0:
+        if batch_failed:
             stats["status"] = "error"
             stats["output_path"] = None
         else:
@@ -352,7 +354,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             try:
                 _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
             except (SystemExit, OSError) as e:
-                _emit_error("write_failed", f"Could not write output file '{output_path}': {e}")
+                _emit_cli_error("write_failed", f"Could not write output file '{output_path}': {e}", output_path=None)
                 return
             stats["output_path"] = str(output_path)
 
@@ -380,7 +382,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
         else:
             _emit_error("invalid_input", f"Error: {e}")
     except (Exception, SystemExit) as e:
-        _emit_error("invalid_input", f"Error: {e}")
+        _emit_cli_error("invalid_input", f"Error: {e}", output_path=None)
 
 
 def run_serve() -> int:
@@ -423,6 +425,6 @@ def run_serve() -> int:
             else:
                 _emit_error("invalid_input", f"Unknown command: '{cmd}'")
         except (Exception, SystemExit) as e:
-            _emit_error("error", f"Error executing command '{cmd}': {e}")
+            _emit_cli_error("error", f"Error executing command '{cmd}': {e}")
 
     return 0

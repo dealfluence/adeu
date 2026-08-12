@@ -191,7 +191,11 @@ def test_daemon_survives_write_error(tmp_path, monkeypatch, capsys):
 
     err_res = json.loads(captured[0])
     assert err_res.get("status") == "error"
-    assert err_res.get("error") in ("write_failed", "invalid_input", "error")
+    # The write goes through the CLI's _write_output_or_exit, which signals
+    # failure with SystemExit: the daemon must report that helper's structured
+    # code and diagnostics, not the stringified exit status ("Error: 1").
+    assert err_res.get("error") == "write_failed"
+    assert "Could not write output file" in err_res.get("message", "")
 
     ping_res = json.loads(captured[1])
     assert ping_res == {"status": "ok", "pong": True}
@@ -240,6 +244,8 @@ def test_serve_apply_zero_edits_applied(tmp_path, monkeypatch, capsys):
     fixture_path = get_fixture_path("golden.docx")
     out_docx = tmp_path / "should_not_exist.docx"
 
+    # A non-empty batch whose every edit fails is a failed batch, even under
+    # --partial: nothing was applied, so nothing may be written.
     changes = [{"type": "modify", "target_text": "nonexistent text 123456", "new_text": "foo"}]
 
     lines = [
@@ -249,6 +255,7 @@ def test_serve_apply_zero_edits_applied(tmp_path, monkeypatch, capsys):
                 "file_path": str(fixture_path),
                 "changes": changes,
                 "output": str(out_docx),
+                "partial": True,
             }
         ),
         json.dumps({"command": "exit"}),
@@ -265,3 +272,110 @@ def test_serve_apply_zero_edits_applied(tmp_path, monkeypatch, capsys):
     assert res.get("status") == "error"
     assert res.get("output_path") is None
     assert not out_docx.exists()
+
+
+def test_serve_apply_empty_batch_saves_an_unmodified_copy(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    out_docx = tmp_path / "copy.docx"
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": [],
+                "output": str(out_docx),
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+
+    # `adeu apply` with a 0-change batch writes an unmodified copy and succeeds;
+    # the daemon must not turn "nothing applied" into a failure.
+    res = json.loads(captured[0])
+    assert res.get("status") == "ok"
+    assert res.get("output_path") == str(out_docx)
+    assert out_docx.exists()
+
+
+def test_serve_bad_changes_file_returns_the_structured_cli_code(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    changes_file = tmp_path / "batch.json"
+    changes_file.write_text('{"edits": [], "actions": []}', encoding="utf-8")
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": str(changes_file),
+                "output": str(tmp_path / "out.docx"),
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+
+    # _load_batch_from_json rejects the batch via _cli_error → SystemExit. The
+    # daemon must surface that code and prose, not "Error: 1".
+    res = json.loads(captured[0])
+    assert res.get("status") == "error"
+    assert res.get("error") == "invalid_changes_file"
+    assert res.get("output_path") is None
+    assert "pre-v1.1.0" in res.get("message", "")
+
+
+def test_serve_changes_mode_page_all_skips_the_budget_guard(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    redlined = tmp_path / "redlined.docx"
+    monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "record"}],
+                "output": str(redlined),
+            }
+        ),
+        json.dumps(
+            {
+                "command": "extract",
+                "file_path": str(redlined),
+                "mode": "changes",
+                "page": "all",
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+
+    apply_res = json.loads(captured[0])
+    assert apply_res.get("edits_applied") == 1
+
+    # The ledger is a bounded summary, so `--mode changes` is exempt from the
+    # response budget guard (cli.py checks it only on the want_all_pages path).
+    res = json.loads(captured[1])
+    assert res.get("error") is None
+    assert res.get("title") == "redlined.docx"
+    assert "Chg:" in res.get("markdown", "")

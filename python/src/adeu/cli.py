@@ -193,6 +193,20 @@ def _set_json_mode(enabled: bool) -> None:
     _JSON_MODE = bool(enabled)
 
 
+# _cli_error signals failure with SystemExit, whose string form is a bare exit
+# code ("1"). In-process callers — the `adeu serve` daemon, which must survive
+# the exit and answer the next request — recover the code and diagnostics from
+# here instead of stringifying the exception (QA 2026-08-12).
+_LAST_CLI_ERROR: "Dict[str, Any] | None" = None
+
+
+def take_last_cli_error() -> "Dict[str, Any] | None":
+    """Pops the failure envelope recorded by the most recent _cli_error() call."""
+    global _LAST_CLI_ERROR
+    env, _LAST_CLI_ERROR = _LAST_CLI_ERROR, None
+    return env
+
+
 def _cli_error(
     code: str,
     message: str,
@@ -221,8 +235,10 @@ def _cli_error(
         print(f"❌ {message}", file=sys.stderr)
         if hint:
             print(hint, file=sys.stderr)
+    global _LAST_CLI_ERROR
+    env = failure_envelope(code, failed or [], message, errors=errors)
+    _LAST_CLI_ERROR = env
     if _JSON_MODE:
-        env = failure_envelope(code, failed or [], message, errors=errors)
         print(json.dumps(env, ensure_ascii=False))
     sys.exit(exit_code)
 
