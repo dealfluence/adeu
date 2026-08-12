@@ -226,7 +226,7 @@ When developing inside the `python/` directory, please note the following invari
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `ADEU_DOC_CACHE_ENTRIES` | Capacity for in-memory parsed document LRU cache | `5` |
+| `ADEU_DOC_CACHE_ENTRIES` | Capacity for in-memory parsed document LRU cache | `3` |
 | `ADEU_NO_CACHE` | Set to `1` or `true` to disable disk-level projection caching | `0` |
 | `ADEU_CACHE_DIR` | Custom storage directory for disk projection cache | OS cache dir |
-| `ADEU_AUTHOR` | Fallback author name for tracked changes when unspecified | `AI Copilot` |
+| `ADEU_AUTHOR` | Fallback author name for tracked changes when unspecified | OS username (fallback: Adeu AI) |
