@@ -138,3 +138,130 @@ def test_apply_over_serve_writes_the_document(tmp_path, monkeypatch, capsys):
     apply_res = json.loads(captured[0])
     assert apply_res.get("edits_applied") == 1
     assert out_docx.exists()
+
+
+def test_cli_subcommand_serve_wiring(monkeypatch, capsys):
+    lines = [
+        json.dumps({"command": "ping"}),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+    monkeypatch.setattr("sys.argv", ["adeu", "serve"])
+
+    from adeu.cli import main
+
+    try:
+        main()
+    except SystemExit as e:
+        assert e.code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+    assert json.loads(captured[0]) == {"status": "ok", "pong": True}
+
+
+def test_daemon_survives_write_error(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    bad_dir = tmp_path / "nonexistent_parent_dir" / "sub"
+    bad_output = bad_dir / "output.docx"
+
+    # Make the parent path a file so mkdir/write fails with OSError
+    blocker_file = tmp_path / "nonexistent_parent_dir"
+    blocker_file.write_text("i am a file, not a directory")
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "modified"}],
+                "output": str(bad_output),
+            }
+        ),
+        json.dumps({"command": "ping"}),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+
+    err_res = json.loads(captured[0])
+    assert err_res.get("status") == "error"
+    assert err_res.get("error") in ("write_failed", "invalid_input", "error")
+
+    ping_res = json.loads(captured[1])
+    assert ping_res == {"status": "ok", "pong": True}
+
+
+def test_serve_response_budget_guard(monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
+
+    lines = [
+        json.dumps(
+            {
+                "command": "extract",
+                "file_path": str(fixture_path),
+                "page": "all",
+            }
+        ),
+        json.dumps(
+            {
+                "command": "extract",
+                "file_path": str(fixture_path),
+                "page": "all",
+                "force": True,
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+
+    res1 = json.loads(captured[0])
+    assert res1.get("status") == "error"
+    assert res1.get("error") == "response_budget_exceeded"
+
+    res2 = json.loads(captured[1])
+    assert res2.get("title") == "golden.docx"
+    assert "markdown" in res2
+
+
+def test_serve_apply_zero_edits_applied(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    out_docx = tmp_path / "should_not_exist.docx"
+
+    changes = [{"type": "modify", "target_text": "nonexistent text 123456", "new_text": "foo"}]
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": changes,
+                "output": str(out_docx),
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+
+    res = json.loads(captured[0])
+    assert res.get("status") == "error"
+    assert res.get("output_path") is None
+    assert not out_docx.exists()

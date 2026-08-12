@@ -178,6 +178,21 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
             )
         elif mode == "changes":
             text, _ = doc_cache.get_pagination(entry, clean_view=False)
+            from adeu.payloads import response_budget_limit
+
+            if want_all_pages and not req.get("force", False) and len(text) > response_budget_limit():
+                from adeu.mcp_components._response_builders import build_budget_guard_message
+
+                text_out, _, outline_nodes = doc_cache.get_outline(entry, clean_view=False)
+                msg = build_budget_guard_message(
+                    text_out,
+                    str(path),
+                    outline_nodes=outline_nodes,
+                    is_cli=True,
+                )
+                _emit_error("response_budget_exceeded", msg)
+                return
+
             doc = _load_docx_doc(path)
             from adeu.redline.comments import CommentsManager
 
@@ -220,6 +235,21 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
             )
         elif want_all_pages:
             text = doc_cache.get_base_text(entry, clean_view=clean_view)
+            from adeu.payloads import response_budget_limit
+
+            if not req.get("force", False) and len(text) > response_budget_limit():
+                from adeu.mcp_components._response_builders import build_budget_guard_message
+
+                text_out, _, outline_nodes = doc_cache.get_outline(entry, clean_view=clean_view)
+                msg = build_budget_guard_message(
+                    text_out,
+                    str(path),
+                    outline_nodes=outline_nodes,
+                    is_cli=True,
+                )
+                _emit_error("response_budget_exceeded", msg)
+                return
+
             res = build_full_document_response(
                 text,
                 str(path),
@@ -245,7 +275,7 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
             _emit_error("invalid_docx", err_str)
         else:
             _emit_error("invalid_input", f"Error: {e}")
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         _emit_error("invalid_input", f"Error: {e}")
 
 
@@ -292,17 +322,39 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
         engine = _open_redline_engine_safe(path, author=author, terse_errors=terse_errors)
         stats = engine.process_batch(changes, partial=partial)
 
-        output_path_str = req.get("output") or req.get("output_path")
-        if output_path_str:
-            output_path = Path(output_path_str)
-        else:
-            if path.stem.endswith("_redlined") or path.stem.endswith("_processed"):
-                output_path = path
-            else:
-                output_path = path.with_name(f"{path.stem}_redlined.docx")
+        applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+        is_partial = (stats.get("status") == "partial" or bool(stats.get("failed"))) and partial
 
-        _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
-        stats["output_path"] = str(output_path)
+        if is_partial and applied_count > 0:
+            batch_failed = False
+        elif partial and applied_count == 0 and len(changes) > 0:
+            batch_failed = True
+        else:
+            batch_failed = (
+                stats.get("actions_skipped", 0) > 0
+                or stats.get("edits_skipped", 0) > 0
+                or (applied_count == 0 and len(changes) > 0)
+            )
+
+        if batch_failed or applied_count == 0:
+            stats["status"] = "error"
+            stats["output_path"] = None
+        else:
+            output_path_str = req.get("output") or req.get("output_path")
+            if output_path_str:
+                output_path = Path(output_path_str)
+            else:
+                if path.stem.endswith("_redlined") or path.stem.endswith("_processed"):
+                    output_path = path
+                else:
+                    output_path = path.with_name(f"{path.stem}_redlined.docx")
+
+            try:
+                _write_output_or_exit(output_path, engine.save_to_stream().getvalue())
+            except (SystemExit, OSError) as e:
+                _emit_error("write_failed", f"Could not write output file '{output_path}': {e}")
+                return
+            stats["output_path"] = str(output_path)
 
         if report_style == "minimal":
             stats = shrink_batch_stats(stats)
@@ -312,12 +364,14 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
         failed_pairs, prose_msg = _extract_schema_failures(e)
         env = failure_envelope("invalid_changes_file", failed_pairs, prose_msg)
         env["status"] = "error"
+        env["output_path"] = None
         _emit_json(env)
     except BatchValidationError as e:
         env = failure_envelope(
             "batch_validation_failed", e.failed, "Batch rejected. Edits failed validation.", errors=e.errors
         )
         env["status"] = "error"
+        env["output_path"] = None
         _emit_json(env)
     except (zipfile.BadZipFile, ValueError) as e:
         err_str = str(e)
@@ -325,7 +379,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             _emit_error("invalid_docx", err_str)
         else:
             _emit_error("invalid_input", f"Error: {e}")
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         _emit_error("invalid_input", f"Error: {e}")
 
 
@@ -333,6 +387,10 @@ def run_serve() -> int:
     """
     Runs the JSON-lines daemon reading from sys.stdin and writing to sys.stdout.
     """
+    from adeu.cli import _set_json_mode
+
+    _set_json_mode(False)
+
     for line in sys.stdin:
         line_str = line.strip()
         if not line_str:
@@ -353,15 +411,18 @@ def run_serve() -> int:
             _emit_error("invalid_input", "Missing or invalid 'command' field.")
             continue
 
-        if cmd == "ping":
-            _emit_json({"status": "ok", "pong": True})
-        elif cmd == "exit":
-            return 0
-        elif cmd == "extract":
-            _handle_extract_command(req)
-        elif cmd == "apply":
-            _handle_apply_command(req)
-        else:
-            _emit_error("invalid_input", f"Unknown command: '{cmd}'")
+        try:
+            if cmd == "ping":
+                _emit_json({"status": "ok", "pong": True})
+            elif cmd == "exit":
+                return 0
+            elif cmd == "extract":
+                _handle_extract_command(req)
+            elif cmd == "apply":
+                _handle_apply_command(req)
+            else:
+                _emit_error("invalid_input", f"Unknown command: '{cmd}'")
+        except (Exception, SystemExit) as e:
+            _emit_error("error", f"Error executing command '{cmd}': {e}")
 
     return 0
