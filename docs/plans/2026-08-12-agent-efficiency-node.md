@@ -661,6 +661,11 @@ reversible and flagged in the receipt.
     byte-for-byte.
 
 ## Task 4 â€” A1: the changes ledger builder
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: implement changes ledger builder build_changes_response -> FAIL (comments_data object prototype lookup for IDs like "toString", and regex \w/\d ASCII vs Unicode digits/letters in TAG_RE/isDigits)
+  - attempt 2: fix prototype pollution and Unicode digit/char matching in ledger -> PASS
 
 - **Goal**: port `build_changes_response` so a review agent enumerates every
   tracked change and comment in one bounded call (â‰¤18 tokens/change).
@@ -774,6 +779,7 @@ reversible and flagged in the receipt.
   - `cd node && npm run test` â€” zero failures.
 
 ## Task 5 â€” A1 wiring: `read_docx` gains `mode='changes'`, `changes_author`, `changes_offset`
+- **Status**: COMPLETE
 
 - **Goal**: make the ledger reachable, cheaply, from the MCP surface, with
   Python's exact parameter names and refusals.

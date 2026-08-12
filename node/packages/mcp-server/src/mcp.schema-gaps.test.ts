@@ -422,4 +422,84 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       expect(text).toMatch(/read-only/i);
     });
   });
+
+  // ======================================================================
+  // read_docx — mode='changes', changes_author, changes_offset
+  // ======================================================================
+  describe("read_docx: mode='changes', changes_author, changes_offset", () => {
+    it("advertises 'changes' in mode enum, and advertises changes_author and changes_offset (defaulting to 0)", () => {
+      const readDocx = getTool("read_docx");
+      expect(readDocx).toBeDefined();
+
+      const modeProp = readDocx.inputSchema.properties.mode;
+      expect(modeProp.enum).toContain("changes");
+
+      const props = readDocx.inputSchema.properties;
+      expect(props.changes_author).toBeDefined();
+      expect(props.changes_offset).toBeDefined();
+      expect(props.changes_offset.default).toBe(0);
+    });
+
+    it("mentions mode='changes' in read_docx description for discoverability", () => {
+      const readDocx = getTool("read_docx");
+      expect(readDocx.description).toContain("mode='changes'");
+    });
+
+    it("returns tracked changes ledger for mode='changes' on fixture with tracked changes", async () => {
+      const trackedFixture = resolve(
+        __dirname,
+        "../../../../shared/conformance/fixtures/multi_author.docx",
+      );
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: trackedFixture,
+          mode: "changes",
+        },
+      });
+
+      expect(res.result.isError).toBeFalsy();
+      const text: string = res.result.content[0].text;
+      expect(text).toMatch(/^> \*\*File Path:\*\*/);
+      expect(text).toContain("> **Changes ledger** —");
+      expect(text).toContain("Chg:");
+    });
+
+    it("refuses mode='changes' with clean_view:true", async () => {
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: pdbFixture,
+          mode: "changes",
+          clean_view: true,
+        },
+      });
+
+      expect(res.result.isError).toBe(true);
+      const text: string = res.result.content[0].text;
+      expect(text).toContain("--clean-view cannot be used with mode='changes'.");
+    });
+
+    it("supports page ranges with mode='changes' without error", async () => {
+      const trackedFixture = resolve(
+        __dirname,
+        "../../../../shared/conformance/fixtures/multi_author.docx",
+      );
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: trackedFixture,
+          mode: "changes",
+          page: "1-2",
+        },
+      });
+
+      expect(res.result.isError).toBeFalsy();
+      const text: string = res.result.content[0].text;
+      expect(text).toContain("> **Changes ledger** —");
+    });
+  });
 });

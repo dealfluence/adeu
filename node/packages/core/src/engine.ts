@@ -4765,6 +4765,12 @@ export class RedlineEngine {
     }
   }
 
+  /** Public, read-only view of the document's tracked-change ids — the ledger
+   *  (A1) filters against it so a stale bubble id never reaches the agent. */
+  public existing_change_ids(): string[] {
+    return this._existing_change_ids();
+  }
+
   /** Comment ids present in the document, sorted for display. */
   private _existing_comment_ids(): string[] {
     let ids: string[] = [];

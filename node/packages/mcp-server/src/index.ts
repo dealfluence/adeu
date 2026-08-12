@@ -20,6 +20,7 @@ import {
   finalize_document,
   parse_page_arg,
   PageArgKind,
+  extract_comments_data,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
 
@@ -31,6 +32,7 @@ import {
   build_appendix_response,
   build_search_response,
   render_outline_response,
+  build_changes_response,
 } from "./response-builders.js";
 import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
@@ -216,7 +218,7 @@ const READ_DOCX_COMMON_DESC =
 // drop optional-parameter descriptions in transit, so the tool description is
 // the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
 const READ_DOCX_TAIL =
-  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
+  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
 // BUDGET: real MCP clients truncate tool descriptions at ~2048 chars — the
 // tail (wherever it falls) is invisible to the model. COMMON + OPERATIONS +
@@ -366,10 +368,10 @@ registerAppTool(
           "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ),
       mode: z
-        .enum(["full", "outline", "appendix"])
+        .enum(["full", "outline", "appendix", "changes"])
         .default("full")
         .describe(
-          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms.",
+          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms. 'changes' returns tracked changes and comments ledger.",
         ),
       // ONE published JSON type (string) — real MCP clients strip
       // property-level anyOf/oneOf to {}, losing the type and docs entirely
@@ -396,6 +398,18 @@ registerAppTool(
         .boolean()
         .default(false)
         .describe("For mode='outline' only: includes metadata."),
+      changes_author: z
+        .string()
+        .optional()
+        .describe(
+          "For mode='changes' only: filter tracked changes ledger by author name.",
+        ),
+      changes_offset: z.coerce
+        .number()
+        .default(0)
+        .describe(
+          "For mode='changes' only: entry offset for paginating tracked changes ledger.",
+        ),
       search_query: z
         .string()
         .optional()
@@ -428,6 +442,8 @@ registerAppTool(
       search_query,
       search_regex,
       search_case_sensitive,
+      changes_author,
+      changes_offset,
     },
     extra?: any,
   ) => {
@@ -517,6 +533,41 @@ registerAppTool(
           file_path,
           bundle,
         );
+        return res as any;
+      }
+
+      if (mode === "changes") {
+        if (clean_view) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "Error executing tool read_docx: --clean-view cannot be used with mode='changes'.",
+              },
+            ],
+          };
+        }
+        const entry2 = await getEntry();
+        let comments_data: Record<string, any> | null = null;
+        let existing_change_ids: string[] | null = null;
+        try {
+          const buf = readBytes();
+          const doc = await loadDocxOrThrow(buf, file_path);
+          comments_data = extract_comments_data(doc.pkg);
+          existing_change_ids = new RedlineEngine(doc).existing_change_ids();
+        } catch {
+          // Best-effort enrichment, exactly as Python (document.py:436-451):
+          // a ledger without comment authors still beats no ledger.
+        }
+        const res = build_changes_response(entry2.raw_text, file_path, {
+          comments_data,
+          author_filter: changes_author ?? null,
+          page: page ?? null,
+          offset: changes_offset,
+          bundle: entry2.raw_bundle,
+          existing_change_ids,
+        });
         return res as any;
       }
 
