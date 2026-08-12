@@ -8,7 +8,9 @@
   "bin": {
     "adeu-mcp-server": "./dist/index.js"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
   "scripts": {
     "build": "tsup && tsc --emitDeclarationOnly",
     "postbuild": "npm run build:verify",

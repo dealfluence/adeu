@@ -1,7 +1,7 @@
 r"""
 Terminal-encoding strategy tests (see adeu/utils/console.py).
 
-Three pillars, each pinned here:
+Four pillars, each pinned here:
 
 1. Output bytes are always UTF-8, independent of the host code page —
    document payloads must neither crash (`UnicodeEncodeError` on a cp1252
@@ -14,8 +14,12 @@ Three pillars, each pinned here:
    BOM-marked UTF-8/16/32 silently, plain UTF-8 silently, cp1252 with a
    loud warning, and guided errors for binary-looking or undecodable
    content. Newlines are normalized like text-mode open().
+4. The test suite itself decodes what the CLI emits. A test that decodes a
+   child process with the host ANSI code page fails on correct output, on a
+   Windows developer machine only, and points at the wrong thing when it does.
 """
 
+import ast
 import codecs
 import json
 import os
@@ -28,6 +32,7 @@ import pytest
 
 from adeu.cli import _read_text_file
 from adeu.utils.console import demote_glyphs
+from tests.utils import run_cli
 
 
 def get_fixture_path(name: str) -> Path:
@@ -241,3 +246,99 @@ def test_diff_cp1252_end_to_end_warns_and_diffs(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "Windows-1252" in err
     assert "Found 1 changes" in err
+
+
+# ---------------------------------------------------------------------------
+# Pillar 4: the test suite decodes what the CLI emits
+# ---------------------------------------------------------------------------
+
+_SUBPROCESS_TEXT_MODE_KWARGS = ("text", "universal_newlines")
+
+
+def _subprocess_call_name(node: ast.Call) -> str | None:
+    """`subprocess.run(...)` / `run(...)` after a from-import -> "run"."""
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _text_mode_subprocess_calls_without_encoding() -> list[str]:
+    """Every `subprocess.*(..., text=True)` in the suite that omits `encoding=`."""
+    launchers = {"run", "Popen", "check_output", "check_call", "call"}
+    offenders: list[str] = []
+    for path in sorted(Path(__file__).parent.rglob("*.py")):
+        # utf-8-sig: a BOM is legal in Python source but ast.parse() rejects it
+        # as a non-printable character, which would mask the real finding.
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or _subprocess_call_name(node) not in launchers:
+                continue
+            keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            text_mode = any(
+                isinstance(keywords.get(name), ast.Constant) and keywords[name].value is True
+                for name in _SUBPROCESS_TEXT_MODE_KWARGS
+            )
+            if text_mode and "encoding" not in keywords:
+                offenders.append(f"{path.name}:{node.lineno}")
+    return offenders
+
+
+def test_no_test_decodes_a_child_process_with_the_host_code_page():
+    """The choke-point guard — this is what catches every call site at once.
+
+    `text=True` with no `encoding=` decodes with `locale.getpreferredencoding()`:
+    UTF-8 on CI, cp1252 on a Windows host. Adeu writes UTF-8 either way, so on a
+    developer machine the `❌` in an error message (`E2 9D 8C`) hits an undefined
+    cp1252 byte. That `UnicodeDecodeError` is raised inside subprocess's reader
+    THREAD, which `communicate()` does not propagate — it just leaves `.stdout` /
+    `.stderr` as `None`, and the test fails somewhere else entirely.
+
+    Runs everywhere, including UTF-8 CI, precisely because the defect it guards
+    cannot be observed there. See BUG_cli_test_encoding_and_n8n_lint_toolchain.md.
+    """
+    offenders = _text_mode_subprocess_calls_without_encoding()
+    assert not offenders, (
+        f"{len(offenders)} subprocess call(s) decode a child with the host ANSI code page "
+        f"instead of an explicit codec: {offenders}. Use tests.utils.run_cli() for the Adeu "
+        "CLI, or pass encoding='utf-8' explicitly; capturing bytes and decoding by hand is "
+        "also fine. See BUG_cli_test_encoding_and_n8n_lint_toolchain.md."
+    )
+
+
+def test_run_cli_helper_pins_the_decode_to_utf8():
+    """Pins the helper the guard above sends everyone to.
+
+    Host-independent by construction: the kwarg is asserted, not the decoded
+    result, so removing it fails on UTF-8 CI too rather than on Windows only.
+    """
+    with patch("subprocess.run") as mock_run:
+        run_cli("extract", "whatever.docx")
+
+    args, kwargs = mock_run.call_args
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("text") is True
+    assert args[0][:3] == [sys.executable, "-m", "adeu.cli"]
+
+
+def test_cli_error_message_round_trips_back_through_the_helper():
+    """End to end: a real ❌ error message, decoded by the real helper.
+
+    The symptom this class produces is `.stderr is None` — not a decode error —
+    so assert the round trip itself. `PYTHONIOENCODING=utf-8` is what makes the
+    CLI keep the glyph (console._terminal_can_display_glyphs), i.e. the exact
+    condition under which the three migrated tests used to fail.
+    """
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "0"}
+    env.pop("ADEU_ASCII", None)
+
+    proc = run_cli("extract", "missing_file_xyz.docx", env=env, timeout=120)
+
+    assert proc.stderr is not None, (
+        "stderr decoded to None: subprocess's reader thread died on a UnicodeDecodeError. "
+        "The pipe carries UTF-8 and something decoded it with the host code page."
+    )
+    assert proc.returncode == 1
+    assert "❌ File not found" in proc.stderr

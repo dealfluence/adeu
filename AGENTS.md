@@ -26,10 +26,11 @@ Run commands from the respective package directory:
    - Debug serial run: `uv run pytest -n 0`
 
 ### Node.js (`node/`)
-1. **Build All Packages:** `npm run build` (MUST build before testing; compiles tsup outputs for all packages and verifies MCP bundle)
-2. **Run Tests:** `npm run test`
+1. **Install:** `npm ci` (not `npm install`: the split TypeScript pin below only holds if the tree matches the lockfile)
+2. **Build All Packages:** `npm run build` (MUST build before testing; compiles tsup outputs for all packages and verifies MCP bundle)
+3. **Run Tests:** `npm run test`
    - Single test: `cd packages/core && npm run test -- -t "test_name"`
-3. **Lint (n8n package):** `cd packages/n8n-nodes-adeu && npm run lint`
+4. **Lint:** `npm run lint` (all workspaces), or `cd packages/n8n-nodes-adeu && npm run lint`
 
 ### LangChain (`langchain/`)
 1. **Lint & Format Check:** `uv run ruff check . && uv run ruff format --check .`
@@ -42,6 +43,8 @@ Run commands from the respective package directory:
 - **Dual-Engine Parity:** Python (`adeu`) and TypeScript (`@adeu/core`) share identical Virtual Text, CriticMarkup, and redlining algorithms. Changes to parsing, diffing, or redlining logic MUST be mirrored in both engines.
 - **Monorepo Version Bumping:** Run `python scripts/bump.py [minor|major|patch|X.Y.Z]` from repo root to sync version numbers and lockfiles across subprojects, then verify with `node scripts/check_release_consistency.mjs`.
   - **n8n Codex Exception:** Do NOT bump `nodeVersion` or `codexVersion` in `node/packages/n8n-nodes-adeu/nodes/Adeu/Adeu.node.json` during release bumps. `nodeVersion` mirrors `Adeu.node.ts` runtime `version` (e.g. `"1.0"`), and `codexVersion` is the fixed schema version (`"1.0"`). Syncing them to package versions breaks n8n Cloud verification.
+- **Split TypeScript Pin (node/):** The workspace root pins `typescript` to `~6.0.3` and `packages/core` + `packages/mcp-server` pin `^7.0.2` nested. This is deliberate, not drift. TypeScript 7 is the native port: `require("typescript")` exports only `{ version, versionMajorMinor }`, so `ts-api-utils` throws at module load and eslint dies before parsing a file — and npm hoists `ts-api-utils` to the workspace root, which is why the JS-API TypeScript has to live there. `tsc --emitDeclarationOnly` runs the compiler *binary* and tsup compiles with esbuild, so builds keep TS 7. Do NOT collapse this to a single root `^7.0.2` until `typescript-eslint` supports TypeScript 7 (`@typescript-eslint/parser@8.67.0` still declares peer `typescript >=4.8.4 <6.1.0`). See `BUG_cli_test_encoding_and_n8n_lint_toolchain.md`.
+- **Test Subprocesses Decode Explicitly (python/):** `subprocess.run(..., text=True)` with no `encoding=` decodes with the host ANSI code page (cp1252 on Windows) while the CLI writes UTF-8 — and the resulting `UnicodeDecodeError` dies in a reader *thread*, silently leaving `.stdout`/`.stderr` as `None`. Use `tests.utils.run_cli()`; `tests/test_cli_encoding.py` fails the build if any test call site skips it.
 - **Sequential Edit Evaluation:** `process_document_batch` applies edits sequentially. Dependent edits in one batch evaluate against the document state produced by preceding edits.
 - **OPC Part Boundaries:** Header, body, footer, footnote, and endnote parts are separated by hard walls. Edits (including context widening) cannot cross OPC part boundaries.
 - **Windows Live Word COM (win32):** Windows-only (`pywin32`). STA COM tests intentionally omit `pythoncom.CoUninitialize()` and `app.Quit()` during teardown to avoid Windows RPC Access Violations (`0x800706be`). Live Word COM tests are serialized via `pytest.mark.xdist_group("live_word")` + `--dist loadgroup` so they run sequentially on a single xdist worker.

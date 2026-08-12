@@ -1,6 +1,4 @@
 import io
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -11,7 +9,7 @@ from adeu.mcp_components._response_builders import BuilderError, build_page_rang
 from adeu.mcp_components.tools.document import read_docx
 from adeu.pagination import parse_page_arg
 from tests.fixtures_synth import build_long_docx
-from tests.utils import approx_tokens, extract_content, get_mock_ctx, run_async
+from tests.utils import approx_tokens, extract_content, get_mock_ctx, run_async, run_cli
 
 
 def test_mid_range_returns_all_pages_in_one_response(tmp_path: Path):
@@ -71,8 +69,7 @@ def test_cli_page_range(tmp_path: Path):
     doc_path = tmp_path / "doc6.docx"
     build_long_docx(doc_path, pages=6)
 
-    cmd = [sys.executable, "-m", "adeu.cli", "extract", str(doc_path), "--page", "2-3"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_cli("extract", str(doc_path), "--page", "2-3")
     assert result.returncode == 0
     assert "**Page 2 of 6**" in result.stdout
     assert "**Page 3 of 6**" in result.stdout
@@ -83,18 +80,7 @@ def test_cli_range_rejected_with_search_query(tmp_path: Path):
     doc_path = tmp_path / "doc6.docx"
     build_long_docx(doc_path, pages=6)
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "adeu.cli",
-        "extract",
-        str(doc_path),
-        "--page",
-        "2-3",
-        "--search-query",
-        "Section",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_cli("extract", str(doc_path), "--page", "2-3", "--search-query", "Section")
     assert result.returncode == 2
     assert "Page ranges (e.g. '2-3') are not supported with --search-query." in result.stderr
 
@@ -154,18 +140,7 @@ def test_appendix_mode_with_page_range_raises_error(tmp_path: Path):
     assert "Page range pagination is only supported in 'full' mode, not 'appendix' mode." in str(exc_info.value)
 
     # CLI path
-    cmd = [
-        sys.executable,
-        "-m",
-        "adeu.cli",
-        "extract",
-        str(doc_path),
-        "--mode",
-        "appendix",
-        "--page",
-        "1-3",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_cli("extract", str(doc_path), "--mode", "appendix", "--page", "1-3")
     assert result.returncode == 2
     assert "Page range pagination is only supported in 'full' mode, not 'appendix' mode." in result.stderr
 

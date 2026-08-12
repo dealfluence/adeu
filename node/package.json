@@ -6,15 +6,33 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
   },
   "engines": {
     "node": ">=22.0.0"
   },
+  "//typescript": [
+    "The HOISTED copy, and the only one the eslint stack can see. typescript@7 is",
+    "the native port: its CommonJS entry exports { version, versionMajorMinor } and",
+    "nothing else, so require('typescript').TypeFlags is undefined and ts-api-utils",
+    "throws at module load — eslint dies before parsing a single file. Every",
+    "@typescript-eslint package declares the real range as peer 'typescript",
+    ">=4.8.4 <6.1.0' (still true of 8.67.0, the latest); ts-api-utils is the one",
+    "that declares '>=4.8.4' unbounded, which is why npm resolved the tree anyway.",
+    "~6.0.3 is the last line carrying the JS compiler API, and pinning it BELOW 6.1",
+    "keeps it inside that peer range. It has to live at the workspace root because",
+    "npm hoists ts-api-utils to the root, and Node resolves 'typescript' from there",
+    "upward — a pin inside packages/n8n-nodes-adeu cannot be seen from that path.",
+    "packages/core and packages/mcp-server keep ^7.0.2 nested for `tsc",
+    "--emitDeclarationOnly`, which runs the BINARY and does not touch the JS API.",
+    "Collapse this back to one root ^7.0.2 once typescript-eslint supports TS 7.",
+    "See BUG_cli_test_encoding_and_n8n_lint_toolchain.md."
+  ],
   "devDependencies": {
     "@types/node": "^26.1.2",
     "tsup": "^8.5.1",
-    "typescript": "^7.0.2",
+    "typescript": "~6.0.3",
     "vitest": "^4.1.10",
     "zod": "4.4.3"
   }

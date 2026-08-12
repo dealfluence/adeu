@@ -1,8 +1,10 @@
 import asyncio
 import re
+import subprocess
+import sys
 import zipfile
 from io import BytesIO
-from typing import Callable, List, Tuple
+from typing import Any, Callable, List, Tuple
 from unittest.mock import AsyncMock
 
 from fastmcp.tools import ToolResult
@@ -13,6 +15,40 @@ from adeu.utils.long_hex_number import is_word_readable_long_hex_number
 def run_async(coro):
     """Simple wrapper to run a coroutine in a new event loop."""
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Running the real CLI (see BUG_cli_test_encoding_and_n8n_lint_toolchain.md)
+# ---------------------------------------------------------------------------
+
+#: The CLI always writes UTF-8 bytes (adeu/utils/console.py), so every test
+#: that decodes its output must say so. Never rely on the default.
+CLI_OUTPUT_ENCODING = "utf-8"
+
+
+def run_cli(*args: Any, **kwargs: Any) -> "subprocess.CompletedProcess[str]":
+    """Run `python -m adeu.cli <args>` and decode its output as UTF-8.
+
+    ALWAYS decode explicitly. `capture_output=True, text=True` alone decodes
+    with `locale.getpreferredencoding()` — cp1252 on a Windows host — while the
+    CLI emits UTF-8 whenever the consumer declares it (`PYTHONIOENCODING=utf-8`),
+    including the `❌` that prefixes every error message. U+274C is `E2 9D 8C`,
+    and `0x9D` is undefined in cp1252, so the mismatch kills subprocess's reader
+    THREAD; `communicate()` does not propagate that, it just leaves `.stdout` /
+    `.stderr` as `None`. The test then fails somewhere else entirely, with an
+    `AttributeError: 'NoneType' object has no attribute 'lower'` that reads like
+    a CLI which printed nothing.
+
+    This helper is the choke point: route every CLI subprocess through it so no
+    call site can re-introduce the defect by writing the obvious thing.
+    Tests that want the raw bytes (to pin what the CLI *emitted*, rather than
+    consume what it means) should call `subprocess.run` without `text=True` and
+    decode explicitly — see tests/test_cli_encoding.py.
+    """
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    kwargs.setdefault("encoding", CLI_OUTPUT_ENCODING)
+    return subprocess.run([sys.executable, "-m", "adeu.cli", *[str(a) for a in args]], **kwargs)
 
 
 def get_mock_ctx():

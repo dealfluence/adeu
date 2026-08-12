@@ -78,7 +78,14 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Install dependencies
         working-directory: ./node
-        run: npm install
+        # ci, not install: the lint stack's TypeScript pin (see node/package.json
+        # "//typescript") only holds if the tree matches the lockfile.
+        run: npm ci
+      # Enforced here or nowhere: this lint is what serves n8n Cloud verification,
+      # and it silently stopped running once before with nothing to catch it.
+      - name: Lint (eslint, n8n community node rules)
+        working-directory: ./node
+        run: npm run lint
       - name: Build and Test
         working-directory: ./node
         run: |

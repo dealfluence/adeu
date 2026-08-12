@@ -54,10 +54,15 @@ def _xmllint(xml_bytes: bytes, tmp_path, filename: str = "test.xml") -> subproce
         )
     path = tmp_path / filename
     path.write_bytes(xml_bytes)
+    # encoding= is mandatory: text=True alone decodes with the host ANSI code
+    # page and a mis-decode silently yields None instead of raising. See
+    # BUG_cli_test_encoding_and_n8n_lint_toolchain.md.
     return subprocess.run(
         ["xmllint", "--noout", str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 

@@ -961,7 +961,10 @@ class TestM6ExtractStartup:
             "    assert (e.code or 0) == 0, e.code\n"
             "assert 'fastmcp' not in sys.modules, 'extract imported the MCP framework'\n"
         )
-        result = subprocess.run([_sys.executable, "-c", probe], capture_output=True, text=True)
+        # The probe runs the CLI, which always writes UTF-8: decode it as UTF-8
+        # rather than with the host ANSI code page. See
+        # BUG_cli_test_encoding_and_n8n_lint_toolchain.md.
+        result = subprocess.run([_sys.executable, "-c", probe], capture_output=True, text=True, encoding="utf-8")
         assert result.returncode == 0, result.stderr
 
 
