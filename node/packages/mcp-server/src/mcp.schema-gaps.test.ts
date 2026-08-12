@@ -483,6 +483,26 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
     });
 
     it("supports page ranges with mode='changes' without error", async () => {
+      const denseFixture = resolve(
+        __dirname,
+        "../../../../shared/conformance/fixtures/dense_175.docx",
+      );
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: denseFixture,
+          mode: "changes",
+          page: "2-3",
+        },
+      });
+
+      expect(res.result.isError).toBeFalsy();
+      const text: string = res.result.content[0].text;
+      expect(text).toContain("> **Changes ledger** —");
+    });
+
+    it("rejects non-integer changes_offset", async () => {
       const trackedFixture = resolve(
         __dirname,
         "../../../../shared/conformance/fixtures/multi_author.docx",
@@ -493,13 +513,13 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
           reasoning: "test",
           file_path: trackedFixture,
           mode: "changes",
-          page: "1-2",
+          changes_offset: 1.5,
         },
       });
 
-      expect(res.result.isError).toBeFalsy();
-      const text: string = res.result.content[0].text;
-      expect(text).toContain("> **Changes ledger** —");
+      const isValidationError =
+        res.error?.code === -32602 || res.result?.isError === true;
+      expect(isValidationError).toBe(true);
     });
   });
 });

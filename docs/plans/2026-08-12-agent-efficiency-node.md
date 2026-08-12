@@ -780,6 +780,9 @@ reversible and flagged in the receipt.
 
 ## Task 5 â€” A1 wiring: `read_docx` gains `mode='changes'`, `changes_author`, `changes_offset`
 - **Status**: COMPLETE
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: wire mode='changes' in read_docx -> FAIL (changes_offset schema missing .int() constraint allowing fractional floats like 1.5, and test case 6 in mcp.schema-gaps.test.ts used 1-page doc instead of multi-page fixture for page="2-3")
 
 - **Goal**: make the ledger reachable, cheaply, from the MCP surface, with
   Python's exact parameter names and refusals.

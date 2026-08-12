@@ -406,6 +406,7 @@ registerAppTool(
         ),
       changes_offset: z.coerce
         .number()
+        .int()
         .default(0)
         .describe(
           "For mode='changes' only: entry offset for paginating tracked changes ledger.",
