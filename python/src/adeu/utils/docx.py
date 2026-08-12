@@ -1486,21 +1486,27 @@ def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
                 yield from _iter_block_children(sdt_content)
 
 
-def suggest_sibling_docx(path: Union[str, Path], limit: int = 5) -> list[str]:
-    """Finds up to `limit` sibling .docx files in `path.parent`."""
+def suggest_sibling_docx(path: Union[str, Path], limit: int = 5) -> Tuple[list[str], int]:
+    """
+    Finds the sibling .docx files in `path.parent` closest to `path.name`.
+
+    Returns `(closest_names, total_sibling_count)`. The names are capped at
+    `limit`; the total is uncapped so callers can report how many candidates
+    the cap withheld (e.g. the MCP "(+N more in <dir>)" suffix).
+    """
     import difflib
 
     try:
         p = Path(path)
         parent = p.parent
         if not parent.exists() or not parent.is_dir():
-            return []
+            return [], 0
         siblings = sorted(f.name for f in parent.iterdir() if f.is_file() and f.suffix.lower() == ".docx")
         if not siblings:
-            return []
-        return difflib.get_close_matches(p.name, siblings, n=limit, cutoff=0.0)
+            return [], 0
+        return difflib.get_close_matches(p.name, siblings, n=limit, cutoff=0.0), len(siblings)
     except (OSError, ValueError):
-        return []
+        return [], 0
 
 
 def strip_bom_from_docx_bytes(data: bytes) -> bytes:

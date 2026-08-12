@@ -35,9 +35,12 @@ def _not_found_error(path: str) -> FileNotFoundError:
     """
     p = Path(path)
     listing = ""
-    shown = suggest_sibling_docx(p, limit=_NOT_FOUND_SUGGESTION_CAP)
+    shown, total = suggest_sibling_docx(p, limit=_NOT_FOUND_SUGGESTION_CAP)
     if shown:
         listing = f" available files: [{', '.join(shown)}]"
+        more = total - len(shown)
+        if more > 0:
+            listing += f" (+{more} more in {p.parent})"
     hint = ""
     if not p.is_absolute():
         hint = " Provide an absolute path — the MCP server cannot resolve relative paths against your workspace."

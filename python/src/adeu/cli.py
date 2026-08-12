@@ -228,7 +228,7 @@ def _cli_error(
 
 
 def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
-    siblings = suggest_sibling_docx(path)
+    siblings, _ = suggest_sibling_docx(path)
     hint = f"Did you mean: {', '.join(siblings)}?" if siblings else None
     _cli_error(
         "file_not_found",

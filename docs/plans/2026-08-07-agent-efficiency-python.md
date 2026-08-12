@@ -328,13 +328,13 @@
 **Change.** Extract shared text revision helpers into `text_revision.py`. Register `apply_text_revision` tool on MCP.
 **Done when.** `uv run pytest tests/test_mcp_apply_text_revision.py` passes (5 tests).
 
-### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints (COMPLETED)
+### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints
 **Goal.** Offer sibling file suggestions on CLI missing-file errors and point ID discovery hints at `--mode changes`.
-**Status.** Completed & Verified.
-**Failed Verify Cycles:** 1
+**Failed Verify Cycles:** 2 (Escalated to @opus-coder: trigger (a) second failed cycle)
 **Attempt Ledger:**
 - attempt 1: Added suggest_sibling_docx to utils/docx.py, updated CLI missing file handler and ID hints -> VERDICT: FAIL (suggest_sibling_docx in utils/docx.py duplicated sibling matching in mcp_components/shared.py)
-- attempt 2: Made suggest_sibling_docx in utils/docx.py single source of truth accepting limit and path as Union[str, Path]; reused it in shared.py _not_found_error -> VERDICT: PASS
+- attempt 2: Made suggest_sibling_docx in utils/docx.py single source of truth accepting limit and path -> VERDICT: FAIL (_not_found_error lost the (+N more in <dir>) suffix when total siblings exceeded cap)
+- attempt 3 (@opus-coder): Made suggest_sibling_docx return (capped_names, total_sibling_count) so shared._not_found_error can restore the "(+N more in <dir>)" suffix; added tests for the cap suffix, its absence when nothing is withheld, and delegation to utils.docx
 **Files.**
 - `python/src/adeu/utils/docx.py`
 - `python/src/adeu/mcp_components/shared.py`
