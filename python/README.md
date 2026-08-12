@@ -116,7 +116,9 @@ The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
 
 * **stdout** carries only document data (Markdown/CriticMarkup) or, with `--json`, a machine-readable JSON result. `uvx adeu extract doc.docx > out.md` always produces a clean file, even with `--debug`.
 * **stderr** carries all logs, progress messages, warnings, and errors.
-* **Exit codes**: `0` = full success; `1` = failure or a partially applied batch (check `edits_skipped` in the JSON stats).
+* **Exit codes**:
+  - `0` = success (in `--partial` mode, at least one edit applied; check `edits_skipped` in JSON stats to detect skipped edits)
+  - `1` = failure (in atomic mode, if any edit fails; in `--partial` mode, if all edits fail)
 
 `adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
 
