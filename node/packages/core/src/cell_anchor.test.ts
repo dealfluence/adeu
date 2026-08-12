@@ -7,6 +7,7 @@ import {
   addNestedTable,
 } from "./test-utils.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
+import { toLongHexNumber } from "./docx/long-hex-number.js";
 import { FastNode, parseFastXml } from "./docx/fast-xml.js";
 import { _extractTextFromDoc } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
@@ -16,6 +17,13 @@ import { DocumentObject } from "./docx/bridge.js";
  * Verbatim port of the HISTORICAL fallback-id algorithm (the whole-document
  * rescan) — the cached implementation in cell-anchor.ts must be observably
  * indistinguishable from this.
+ *
+ * The final fold into the ST_LongHexNumber range is part of the derivation,
+ * not part of the caching: the unmasked `(hash >>> 0)` this used to end with
+ * put 95 of the first 128 paragraph indices in the high half, where Word
+ * discards the id and renumbers the whole part
+ * (BUG_paraId_signed_int32_thread_collapse.md). Range coverage is asserted in
+ * repro.para-id-signed-int32.test.ts; this oracle only has to agree.
  */
 function referenceAnchor(
   cell_element: Element,
@@ -41,7 +49,7 @@ function referenceAnchor(
       hash ^= str.charCodeAt(i);
       hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
     }
-    paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, "0");
+    paraId = toLongHexNumber(hash);
     firstP.setAttribute("w14:paraId", paraId);
   }
   return paraId;

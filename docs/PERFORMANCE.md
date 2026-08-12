@@ -75,13 +75,24 @@ cell the engine derives a deterministic fallback id:
 ```
 index  = document-order position of the cell's first paragraph
          among ALL <w:p> elements of its XML part
-id     = FNV-1a-32("fallback-paraId-" + index), rendered as
+hash   = FNV-1a-32("fallback-paraId-" + index)
+id     = (hash & 0x7FFFFFFF) or 0x00000001, rendered as
          8-char uppercase hex (zero-padded)
 ```
 
 The paragraph is then stamped with the derived id (an attribute write into
 the in-memory tree) so that later passes — and any process re-reading the
 saved file — resolve the same anchor.
+
+The final fold is **not** cosmetic. `w14:paraId` is an `ST_LongHexNumber`, and
+Word parses those as SIGNED 32-bit integers: it silently discards any value
+outside `(0x00000000, 0x80000000)` on load and renumbers *every* paraId in the
+part with it. The derivation used to end at `hash >>> 0` — the full unsigned
+range — which put **95 of the first 128 paragraph indices** (0–7 among them,
+i.e. the first tables in a document) in the high half. Deterministically, not
+half the time. Every `{#cell:<id>}` anchor in such a document stops addressing
+anything the moment Word saves it. See
+`BUG_paraId_signed_int32_thread_collapse.md` and `docx/long-hex-number.ts`.
 
 ### 3.2 Why it was quadratic
 
@@ -158,8 +169,13 @@ heart of the change. They reproduce the historical behavior exactly:
   multiply step expressed as shift-adds
   (`hash += (hash<<1)+(hash<<4)+(hash<<7)+(hash<<8)+(hash<<24)`), all in
   32-bit unsigned arithmetic (mask with `0xFFFFFFFF` in languages with big
-  integers), rendered as uppercase hex, left-padded to 8 chars. Both engines
-  and every process must derive identical ids from identical documents.
+  integers), **then folded into the ST_LongHexNumber range Word accepts** —
+  `toLongHexNumber` / `to_long_hex_number`, i.e. `& 0x7FFFFFFF` with `0`
+  mapped to `1` — and rendered as uppercase hex, left-padded to 8 chars. Both
+  engines and every process must derive identical ids from identical
+  documents. The fold is part of the contract, not an implementation detail:
+  an unfolded id is one Word discards on load, taking every other paraId in
+  the part with it (BUG 2026-08-12 B5).
 - **`index` is the position among ALL paragraphs of the part** (including
   paragraphs inside nested tables, text boxes, etc.), in document order —
   not among body-level paragraphs only.
@@ -423,10 +439,12 @@ the full regression suite stayed green and the projection goldens
    Mapper goldens were recaptured; reader goldens byte-unchanged.
 4. **FNV fallback anchors (parity, deferred by decision).** Port would make
    Python emit Node's derived `{#cell:…}` ids on paraId-less docs; port it
-   WITH the §3.3 index from day one. Cross-engine goldens can't match until
-   this and the nested-table divergence (Node duplicates nested cells as
-   parent-row columns; Python nests inline — Python's rendering was chosen
-   as the keeper) are resolved.
+   WITH the §3.3 index from day one, and with the §3.1 fold into the
+   ST_LongHexNumber range (`adeu.utils.long_hex_number.to_long_hex_number` is
+   already there for it). Cross-engine goldens can't match until this and the
+   nested-table divergence (Node duplicates nested cells as parent-row
+   columns; Python nests inline — Python's rendering was chosen as the
+   keeper) are resolved.
 5. Appendix cost (~4.2 s, appendix mode only) — `domain.py` typo-detector
    still defeats its own first-letter bucketing for >5-char candidates
    (same as node's §5.3 note); left semantics-identical on purpose.

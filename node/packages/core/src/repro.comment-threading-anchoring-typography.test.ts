@@ -156,14 +156,26 @@ describe("B3: w16cid:durableId must be a positive signed int32", () => {
     ).toBe(0);
   });
 
-  it("keeps the full 32-bit range for paraId / rsid", async () => {
-    // Only durableId carries the signed-int32 constraint; narrowing the shared
-    // hex generator would halve the paraId/rsid space for no reason.
+  it("masks paraId and rsid exactly like durableId", async () => {
+    // RETRACTION. This used to assert the opposite — that the shared hex
+    // generator "keeps the full 32-bit range" because only durableId carried
+    // the signed-int32 constraint. That belief was wrong, it was pinned here,
+    // and it is why the same bug shipped again three weeks later: an
+    // out-of-range w14:paraId is discarded by Word exactly like a durableId,
+    // dangling every w15:paraIdParent that pointed at it
+    // (BUG_paraId_signed_int32_thread_collapse.md, B5, Word-verified).
+    // Full coverage in repro.para-id-signed-int32.test.ts.
     const doc = await createTestDocument();
     const mgr = new CommentsManager(doc) as any;
     const values: string[] = [];
-    for (let i = 0; i < 512; i++) values.push(mgr._generateHexId());
-    expect(values.some((v) => parseInt(v, 16) > 0x7fffffff)).toBe(true);
+    for (let i = 0; i < 512; i++) {
+      values.push(mgr._generateHexId(), mgr._generateDurableId());
+    }
+    expect(
+      values.every((v) => parseInt(v, 16) > 0 && parseInt(v, 16) <= 0x7fffffff),
+      "paraId, rsid and durableId are all ST_LongHexNumber and Word reads all " +
+        "three as signed 32-bit integers: they share one generator and one range",
+    ).toBe(true);
   });
 });
 

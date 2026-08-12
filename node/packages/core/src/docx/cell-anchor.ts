@@ -6,9 +6,10 @@
  *
  * A cell with no w14:paraId on its first paragraph and no projected content
  * still needs a stable, document-native `{#cell:<id>}` anchor. The fallback
- * id is deterministic: FNV-1a over `fallback-paraId-${index}` where `index`
- * is the paragraph's document-order position among ALL w:p elements of its
- * OPC part. Word-assigned paraIds and this derivation must both survive
+ * id is deterministic: FNV-1a over `fallback-paraId-${index}`, folded into the
+ * ST_LongHexNumber range Word accepts (see docx/long-hex-number.ts), where
+ * `index` is the paragraph's document-order position among ALL w:p elements of
+ * its OPC part. Word-assigned paraIds and this derivation must both survive
  * re-reads across processes, so the index MUST equal what
  * `Array.from(ownerDocument.getElementsByTagName("w:p")).indexOf(firstP)`
  * would produce — that expression was the historical implementation.
@@ -33,6 +34,8 @@
  * - On DOM implementations without `_inc`, every lookup rebuilds — the
  *   historical cost, never stale data.
  */
+
+import { toLongHexNumber } from "./long-hex-number.js";
 
 interface WpIndexCache {
   inc: number;
@@ -174,7 +177,16 @@ export function resolve_cell_anchor(
       hash +=
         (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
     }
-    paraId = (hash >>> 0).toString(16).toUpperCase().padStart(8, "0");
+    // The derived id is STAMPED into word/document.xml and handed to agents as
+    // a `{#cell:<paraId>}` address, so it has to be an id Word will keep.
+    // `(hash >>> 0)` spans the full UNSIGNED 32-bit range; Word reads
+    // w14:paraId as a SIGNED int32 and discards anything at or above
+    // 0x80000000 — then renumbers every other paraId in the part with it. That
+    // is not a coin flip here: the derivation is deterministic, and it put 95
+    // of the first 128 paragraph indices (indices 0-7 among them, i.e. the
+    // first tables in a document) in the high half. See
+    // BUG_paraId_signed_int32_thread_collapse.md.
+    paraId = toLongHexNumber(hash);
     firstP.setAttribute("w14:paraId", paraId);
     resyncAfterOwnAttributeMutation(ownerDoc);
     if (wasClean) markPartClean(ownerDoc);

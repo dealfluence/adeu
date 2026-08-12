@@ -27,9 +27,11 @@ generated families:
       the text modulo that normalization, and is idempotent. This is what
       makes the matcher and the writer forgive the SAME set of characters
       (BUG_comment_threading_anchoring_and_typography.md B4).
-  P7  durableId range: every `w16cid:durableId` Adeu mints is a positive
-      signed 32-bit integer, because Word parses it as one and silently
-      unanchors the comment when it is negative (B3).
+  P7  ST_LongHexNumber range: EVERY id Adeu mints — `w14:paraId`, `w:rsid*`,
+      `w16cid:durableId` — is greater than 0x00000000 and less than
+      0x80000000, because Word parses all of them as signed 32-bit integers
+      and silently discards anything outside that (B3, then B5 when the same
+      conclusion was applied to only one of the three).
 
 Alphabets deliberately exclude Markdown/CriticMarkup metacharacters
 (#, *, _, |, [], {}, ^) — text containing those exercises separately
@@ -60,6 +62,7 @@ from adeu.redline.comments import CommentsManager
 from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.redline.mapper import DocumentMapper
 from adeu.sanitize.core import sanitize_docx
+from adeu.utils.long_hex_number import is_word_readable_long_hex_number, to_long_hex_number
 from adeu.utils.text import (
     SMART_QUOTE_MAP,
     normalize_smart_quotes,
@@ -452,17 +455,40 @@ def test_p6_writer_forgives_exactly_what_the_matcher_forgives():
 
 
 # ---------------------------------------------------------------------------
-# P7 — durableId stays a positive signed int32
+# P7 — every minted ST_LongHexNumber stays a positive signed int32
 # ---------------------------------------------------------------------------
 
 
-@given(count=st.integers(min_value=1, max_value=64))
+@given(
+    count=st.integers(min_value=1, max_value=64),
+    generator=st.sampled_from(["_generate_para_id", "_generate_rsid", "_generate_durable_id"]),
+)
 @settings(max_examples=25, deadline=None)
-def test_p7_durable_ids_are_positive_signed_int32(count):
+def test_p7_minted_ids_are_positive_signed_int32(count, generator):
+    """
+    All three, not just durableId. B3 fixed the range for `durableId` alone and
+    recorded that the other two did not need it; three weeks later the same
+    defect shipped as B5 through `paraId`. There is no attribute here for
+    which the high half is safe.
+    """
     manager = CommentsManager(Document())
+    mint = getattr(manager, generator)
     for _ in range(count):
-        value = manager._generate_durable_id()
-        assert len(value) == 8 and int(value, 16) <= 0x7FFFFFFF, (
-            f"durableId {value} is negative when read as a signed 32-bit integer, which is how "
-            "Word reads w16cid:durableId — the comment opens anchored to nothing"
+        value = mint()
+        assert len(value) == 8 and is_word_readable_long_hex_number(value), (
+            f"{generator} produced {value}, which Word reads as a negative (or zero) signed "
+            "32-bit integer and discards on load: the comment loses its anchor, the reply "
+            "loses its thread, and nothing in the XML says so"
         )
+
+
+@given(value=st.integers(min_value=0, max_value=0xFFFFFFFF))
+@settings(max_examples=200, deadline=None)
+def test_p7_folding_any_32_bit_value_yields_a_word_readable_id(value):
+    """`to_long_hex_number` is the DERIVED-id path (Node's `{#cell:paraId}`
+    FNV fallback). No input may escape the legal range — including the two
+    that map to the forbidden zero."""
+    folded = to_long_hex_number(value)
+    assert len(folded) == 8 and is_word_readable_long_hex_number(folded), (
+        f"folding {value:#010x} produced {folded}, which Word will discard"
+    )

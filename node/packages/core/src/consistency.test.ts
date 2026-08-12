@@ -15,6 +15,10 @@ import { DocumentObject } from "./docx/bridge.js";
 import { RedlineEngine } from "./engine.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { serializeXml } from "./docx/dom.js";
+import {
+  findOutOfRangeLongHexNumbers,
+  outOfRangeIdReport,
+} from "./test-utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -125,7 +129,17 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           engine.process_batch(testConfig.changes || []);
           outBuffer = await doc.save();
 
-          // 2. Validate comments XML namespaces when requested by test.json
+          // 2. Every ST_LongHexNumber must be one Word will keep. Unconditional
+          // and in BOTH twins (python/tests/test_cross_platform_consistency.py
+          // asserts the same thing on the same corpus): this is where the two
+          // engines are held to the same id ranges, and where a scenario added
+          // later gets the check for free. Word discards out-of-range paraIds /
+          // durableIds / rsids on load and renumbers the whole part with them
+          // (BUG_paraId_signed_int32_thread_collapse.md).
+          const offenders = findOutOfRangeLongHexNumbers(outBuffer);
+          expect(offenders, outOfRangeIdReport(offenders, folder)).toEqual([]);
+
+          // 3. Validate comments XML namespaces when requested by test.json
           if (testConfig.validate_comments_xml_namespaces) {
             await validateCommentsXmlNamespaces(outBuffer, folder);
           }

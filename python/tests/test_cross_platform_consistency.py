@@ -36,6 +36,7 @@ from adeu.models import (
 )
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.xml_debug import get_abstracted_xml_snapshot
+from tests.utils import assert_word_readable_ids
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -175,6 +176,14 @@ def test_corpus_scenario(test_dir: Path, tmp_path: Path):
         engine = RedlineEngine(io.BytesIO(docx_bytes), author=author)
         engine.process_batch(changes)
         output_bytes = engine.save_to_stream().getvalue()
+
+        # --- ST_LongHexNumber ranges (unconditional, and in BOTH twins) ---
+        # consistency.test.ts asserts the same thing on the same corpus: this
+        # is where the two engines are held to the same id ranges, and where a
+        # scenario added later gets the check for free. Word discards
+        # out-of-range paraIds / durableIds / rsids on load and renumbers the
+        # whole part with them (BUG_paraId_signed_int32_thread_collapse.md).
+        assert_word_readable_ids(output_bytes, context=f"[{test_dir.name}] ")
 
     # --- Namespace validation (custom check, not covered by abstract golden) ---
     if validate_ns and not is_read_only:

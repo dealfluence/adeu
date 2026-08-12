@@ -227,17 +227,29 @@ class TestB3DurableIdSignedRange:
             "Word drops the anchor for each of them"
         )
 
-    def test_para_id_and_rsid_keep_the_full_32_bit_range(self):
+    def test_para_id_and_rsid_are_masked_exactly_like_durable_id(self):
         """
-        Only durableId has the signed-int32 constraint. paraId/rsid are opaque
-        32-bit tokens — narrowing the shared generator would silently halve
-        their space for no reason, so pin that they are NOT masked.
+        RETRACTION. This test used to assert the opposite — that paraId and
+        rsid "keep the full 32-bit range", because only durableId was believed
+        to carry the signed-int32 constraint. That belief was wrong, it was
+        recorded here as a pin, and it is why the same bug shipped a second
+        time three weeks later: `w14:paraId` above 0x7FFFFFFF is discarded by
+        Word exactly like a durableId, dangling every `w15:paraIdParent` that
+        pointed at it and dropping the reply out of its thread
+        (BUG_paraId_signed_int32_thread_collapse.md, B5, Word-verified).
+
+        There is no attribute for which the high half is safe. The full
+        coverage lives in tests/test_repro_para_id_signed_int32.py; what stays
+        here is the correction, next to the reasoning it corrects.
         """
         manager = CommentsManager(Document())
-        para_ids = [manager._generate_para_id() for _ in range(512)]
-        rsids = [manager._generate_rsid() for _ in range(512)]
-        assert any(int(v, 16) > 0x7FFFFFFF for v in para_ids), "paraId must keep the full 32-bit range"
-        assert any(int(v, 16) > 0x7FFFFFFF for v in rsids), "rsid must keep the full 32-bit range"
+        values = [manager._generate_para_id() for _ in range(512)]
+        values += [manager._generate_rsid() for _ in range(512)]
+        values += [manager._generate_durable_id() for _ in range(512)]
+        assert all(0 < int(v, 16) <= 0x7FFFFFFF for v in values), (
+            "paraId, rsid and durableId are all ST_LongHexNumber and Word reads all three as "
+            "signed 32-bit integers: they share one generator and one range"
+        )
 
 
 # ---------------------------------------------------------------------------

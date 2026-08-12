@@ -47,15 +47,16 @@ def pytest_collection_modifyitems(config, items):
     the nodeid to "…@group" for the loadgroup scheduler). Our marker must be
     attached before that hook runs, or the grouping silently does nothing.
 
-    Tests that drive the real Word COM instance (the `active_word_app`
-    fixture, plus everything in test_live_word*.py) all bind to the single
-    active Word application — two xdist workers doing that concurrently
+    Tests that drive the real Word COM instance (the `active_word_app` and
+    `word_app` fixtures, plus everything in test_live_word*.py) all bind to the
+    single active Word application — two xdist workers doing that concurrently
     corrupt each other's document state. `xdist_group` + `--dist loadgroup`
     (set in pyproject addopts) pins them to ONE worker, where they run
     sequentially; every other test still distributes freely.
     """
+    com_fixtures = {"active_word_app", "word_app"}
     for item in items:
-        is_live_word = "active_word_app" in getattr(item, "fixturenames", ())
+        is_live_word = bool(com_fixtures & set(getattr(item, "fixturenames", ())))
         if not is_live_word:
             basename = item.path.name if getattr(item, "path", None) else ""
             is_live_word = basename.startswith("test_live_word")
@@ -135,3 +136,42 @@ if sys.platform == "win32":
                     pass
                 # We intentionally omit app.Quit() and pythoncom.CoUninitialize()
                 # to avoid Windows Access Violations (0x800706be) when Pytest holds COM locals.
+
+    @pytest.fixture(scope="session")
+    def word_app():
+        """
+        A Word application for INSPECTING packages the engine wrote to disk
+        (tests/word_com.py). Distinct from `active_word_app`, which drives an
+        open document through the live-Word tools: this one opens saved files
+        read-only and is the oracle for ids Word reinterprets on load —
+        w14:paraId threading, w16cid:durableId anchoring
+        (BUG_paraId_signed_int32_thread_collapse.md).
+
+        Session-scoped because starting Word costs seconds and the tests only
+        read. Like `active_word_app` it deliberately omits app.Quit() and
+        pythoncom.CoUninitialize(): tearing COM down while pytest still holds
+        proxies raises 0x800706be. Not quitting is also what makes it safe to
+        attach to a developer's already-running Word.
+
+        `Visible` is deliberately NOT touched. Dispatch attaches to the running
+        Word instance, so this is the SAME application object `active_word_app`
+        drives and the developer has open; forcing it hidden changes what
+        `GetActiveObject` binds to in the live-Word tools. Reading document
+        properties does not need visibility. `DisplayAlerts` does have to go:
+        without it, opening a package Word considers corrupted — which is one
+        of the outcomes under test — blocks on a modal dialog forever.
+        """
+        pythoncom.CoInitialize()
+        try:
+            app = win32com.client.Dispatch("Word.Application")
+            app.DisplayAlerts = 0
+        except Exception as e:
+            pytest.skip(f"Could not initialize Word COM for testing: {e}")
+            return
+        yield app
+
+else:  # pragma: no cover - non-Windows CI
+
+    @pytest.fixture(scope="session")
+    def word_app():
+        pytest.skip("Live Word COM tests require Windows")

@@ -1,5 +1,4 @@
 import datetime
-import random
 import re
 from typing import Dict, Optional
 
@@ -10,6 +9,8 @@ from docx.opc.part import Part, XmlPart
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, nsmap, qn
 from docx.oxml.xmlchemy import serialize_for_reading
+
+from adeu.utils.long_hex_number import generate_long_hex_number
 
 logger = structlog.get_logger(__name__)
 
@@ -327,28 +328,29 @@ class CommentsManager:
                     pass
         return max(ids) + 1
 
+    # Every id below is an ST_LongHexNumber and comes from ONE generator.
+    #
+    # These stay as named aliases only so the call sites read as what they
+    # mint; they must never diverge. Word parses ST_LongHexNumber as a SIGNED
+    # 32-bit integer for ALL of them, silently discarding and regenerating
+    # anything outside (0x00000000, 0x80000000) — an out-of-range paraId drops
+    # replies out of their thread (B5), an out-of-range durableId collapses the
+    # comment's anchor (B3), and a zero paraId makes Word reject the file
+    # outright. The earlier belief that only durableId was constrained is what
+    # produced B5; see adeu.utils.long_hex_number and
+    # BUG_paraId_signed_int32_thread_collapse.md.
+
     def _generate_para_id(self) -> str:
-        return f"{random.randint(0, 0xFFFFFFFF):08X}"
+        """`w14:paraId` — the identity `w15:paraIdParent` threads onto."""
+        return generate_long_hex_number()
 
     def _generate_durable_id(self) -> str:
-        """
-        `w16cid:durableId` is schema-typed `ST_LongHexNumber`, but Word parses
-        it as a SIGNED 32-bit integer. With the high bit set the value is
-        negative, Word fails to bind the comment and silently collapses its
-        anchor to a zero-length point: right author, right text, right date,
-        highlight simply absent — no error, no repair prompt, nothing wrong in
-        the XML (BUG_comment_threading_anchoring_and_typography.md B3,
-        Word-verified via `Comment.Scope`). Word's own durable ids are always
-        high-bit clear, so mask to 31 bits.
-
-        Deliberately a dedicated generator: `paraId` and `rsid` are opaque
-        32-bit tokens with no such constraint, and narrowing the shared helper
-        would halve their space for no reason.
-        """
-        return f"{random.randint(0, 0x7FFFFFFF):08X}"
+        """`w16cid:durableId` — the identity the comment anchor binds to."""
+        return generate_long_hex_number()
 
     def _generate_rsid(self) -> str:
-        return f"{random.randint(0, 0xFFFFFFFF):08X}"
+        """`w:rsidR` / `w:rsidRDefault` / `w:rsidP` — revision-save grouping."""
+        return generate_long_hex_number()
 
     def _get_initials(self, author: str) -> str:
         if not author:
