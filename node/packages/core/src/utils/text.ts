@@ -41,6 +41,19 @@ export function escape_critic_tokens(text: string): string {
 }
 
 /**
+ * Hard-caps `text` to at most `cap` characters, marking the elision with an
+ * ASCII "...". Use this wherever the cap is a real ceiling: truncate_middle
+ * keeps head AND tail plus a "[N chars omitted]" note, so its result
+ * routinely runs LONGER than `cap` — fine for a 500-char echo budget, fatal
+ * for the minimal report's per-edit token budget.
+ * Mirrors python/src/adeu/utils/text.py clamp_text.
+ */
+export function clamp_text(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  return text.slice(0, Math.max(1, cap - 3)) + "...";
+}
+
+/**
  * Bounds `text` to roughly `cap` visible characters, keeping the head and
  * tail and stating how much was omitted. Returns short strings unchanged.
  */

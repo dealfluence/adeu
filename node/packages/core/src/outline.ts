@@ -84,7 +84,7 @@ export function extract_outline(
     const has_table = _direct_has_table(block_records, rec_idx + 1, owned_end);
     const footnote_ids = _collect_footnote_ids(owned_blocks);
 
-    const page_num = _offset_to_page(rec.start_offset, body_page_offsets);
+    const page_num = offset_to_page(rec.start_offset, body_page_offsets);
 
     nodes.push({ level, text, page: page_num, style, has_table, footnote_ids });
   }
@@ -562,7 +562,7 @@ function _collect_footnote_ids(owned_blocks: _BlockRecord[]): string[] {
   return ordered;
 }
 
-function _offset_to_page(offset: number, body_page_offsets: number[]): number {
+export function offset_to_page(offset: number, body_page_offsets: number[]): number {
   if (!body_page_offsets || body_page_offsets.length === 0) return 1;
   let page = 1;
   for (let i = 0; i < body_page_offsets.length; i++) {
@@ -678,7 +678,7 @@ function _extract_outline_fast(
     let page_num = 1;
     if (para_offset !== undefined) {
       const [start_offset] = para_offset;
-      page_num = _offset_to_page(start_offset, body_page_offsets);
+      page_num = offset_to_page(start_offset, body_page_offsets);
     }
 
     nodes.push({

@@ -3,7 +3,44 @@
  */
 
 const PAGE_TARGET_CHARS = 19_000;
+export const PAGE_RANGE_MAX_PAGES = 8;
 const APPENDIX_MARKER = '<!-- READONLY_BOUNDARY_START -->';
+
+export type PageArgKind = "single" | "range" | "all";
+const _PAGE_RANGE_RE = /^\s*(\d+)\s*-\s*(\d+)\s*$/;
+
+/** Mirrors python/src/adeu/pagination.py parse_page_arg (:26-89). */
+export function parse_page_arg(
+  page: number | string | null | undefined,
+): [PageArgKind, number | [number, number] | null] {
+  const bad = (raw: unknown): never => {
+    throw new Error(
+      `Invalid page parameter: '${raw}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'.`,
+    );
+  };
+  if (page === null || page === undefined) return ["single", 1];
+  if (typeof page === "number") {
+    if (!Number.isInteger(page) || page < 1) bad(page);
+    return ["single", page];
+  }
+  if (typeof page === "string") {
+    const s = page.trim();
+    if (!s) bad(page);
+    if (s.toLowerCase() === "all") return ["all", null];
+    const m = _PAGE_RANGE_RE.exec(s);
+    if (m) {
+      const startP = parseInt(m[1], 10);
+      const endP = parseInt(m[2], 10);
+      if (startP < 1 || endP < 1) bad(page);
+      return ["range", [startP, endP]];
+    }
+    if (!/^\d+$/.test(s)) bad(page);
+    const val = parseInt(s, 10);
+    if (val < 1) bad(page);
+    return ["single", val];
+  }
+  return bad(page);
+}
 
 const _CRITIC_TOKENS: Record<string, string> = {
   '{++': '++}',
