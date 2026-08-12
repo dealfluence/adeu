@@ -1,5 +1,6 @@
 import io
 import json
+import zipfile
 
 import pytest
 from docx import Document
@@ -94,6 +95,74 @@ def _create_docx_with_table_revision(author: str, marker: str = "tblPrChange") -
     doc.save(stream)
     stream.seek(0)
     return stream
+
+
+def _create_docx_with_notes_revision(author: str, part: str = "footnotes") -> io.BytesIO:
+    """Builds a docx whose only pending revision lives in a notes part.
+
+    python-docx exposes no API for footnote/endnote parts, so the part, its
+    content-type override, and its relationship are spliced into the saved
+    package. `w:footnotes` / `w:endnotes` are not registered oxml element
+    classes, so their parsed roots are plain lxml elements with no Open XML
+    namespace mapping of their own.
+    """
+    singular = part.rstrip("s")
+    notes_xml = (
+        f"<w:{part} {W_NS}>"
+        f'<w:{singular} w:id="2"><w:p>'
+        f'<w:ins w:id="90" w:author="{author}" w:date="2026-08-12T00:00:00Z">'
+        f"<w:r><w:t>pending note text</w:t></w:r></w:ins>"
+        f"</w:p></w:{singular}></w:{part}>"
+    ).encode("utf-8")
+
+    part_name = f"word/{part}.xml"
+    content_type = f"application/vnd.openxmlformats-officedocument.wordprocessingml.{part}+xml"
+    rel_type = f"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{part}"
+
+    source = _create_clean_docx_stream().getvalue()
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(source)) as zin,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"</Types>",
+                    f'<Override PartName="/{part_name}" ContentType="{content_type}"/></Types>'.encode("utf-8"),
+                )
+            elif item.filename == "word/_rels/document.xml.rels":
+                data = data.replace(
+                    b"</Relationships>",
+                    f'<Relationship Id="rId900" Type="{rel_type}" Target="{part}.xml"/></Relationships>'.encode(
+                        "utf-8"
+                    ),
+                )
+            zout.writestr(item, data)
+        zout.writestr(part_name, notes_xml)
+
+    out.seek(0)
+    return out
+
+
+@pytest.mark.parametrize("part", ["footnotes", "endnotes"])
+def test_warning_when_pending_revision_lives_in_a_notes_part(part):
+    doc_stream = _create_docx_with_notes_revision("Heidi", part=part)
+    engine = RedlineEngine(doc_stream, author="Heidi")
+
+    assert "Heidi" in engine.get_pending_revision_authors(), f"{part} author was not detected"
+
+    edit = ModifyText(target_text="baseline text", new_text="updated text")
+    stats = engine.process_batch([edit])
+
+    assert stats.get("author_impersonation_warning") is not None, f"{part} author was not detected"
+    assert "Heidi" in stats["author_impersonation_warning"]
+    assert "matches an author with pending revisions" in stats["author_impersonation_warning"]
+
+    # A distinct acting author on the same document stays silent.
+    other_engine = RedlineEngine(_create_docx_with_notes_revision("Heidi", part=part), author="Ivan")
+    assert other_engine.process_batch([edit]).get("author_impersonation_warning") is None
 
 
 def test_warning_when_acting_author_impersonates_a_pending_author():

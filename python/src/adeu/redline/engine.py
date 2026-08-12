@@ -2586,12 +2586,19 @@ class RedlineEngine:
         ``w:comment``, ...). Matching on a list of tag names instead silently
         drops the table/row/cell revision markers, so we collect the attribute
         wherever it appears — in the live body and in every other XML part.
+
+        The walk uses ``iter()`` rather than an XPath predicate on purpose:
+        roots of parts without a registered oxml element class (``w:footnotes``,
+        ``w:endnotes``, ...) are plain lxml elements that bind no ``w`` prefix,
+        so ``//*[@w:author]`` raises ``XPathEvalError`` on them, while
+        ``BaseOxmlElement.xpath()`` accepts no ``namespaces`` argument.
         """
         authors: set[str] = set()
+        author_attr = qn("w:author")
 
         def collect(root: Any) -> None:
-            for el in root.xpath("//*[@w:author]"):
-                author = el.get(qn("w:author"))
+            for el in root.iter(etree.Element):
+                author = el.get(author_attr)
                 if author:
                     authors.add(author)
 
@@ -2608,17 +2615,22 @@ class RedlineEngine:
 
         try:
             package = getattr(self.doc.part, "package", None)
-            for part in getattr(package, "parts", None) or ():
-                # The main part is already covered by the live body scan above,
-                # which also sees edits not yet serialized to its blob.
-                if part is self.doc.part or not str(part.content_type).endswith("+xml"):
-                    continue
-                try:
-                    collect(parse_xml(part.blob))
-                except Exception:
-                    continue
+            parts = list(getattr(package, "parts", None) or ())
         except Exception:
-            pass
+            parts = []
+
+        for part in parts:
+            # The main part is already covered by the live body scan above,
+            # which also sees edits not yet serialized to its blob.
+            if part is self.doc.part or not str(part.content_type).endswith("+xml"):
+                continue
+            try:
+                root = parse_xml(part.blob)
+            except Exception:
+                # Unparsable payload: nothing to scan. Scanning itself is left
+                # outside the guard so real scan failures are never swallowed.
+                continue
+            collect(root)
 
         return authors
 
