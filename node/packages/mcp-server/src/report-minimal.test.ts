@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatBatchResult } from "./index.js";
 import { approxTokens, projectFixture } from "./conformance-utils.js";
-import { RedlineEngine, shrink_batch_stats } from "@adeu/core";
+import { RedlineEngine } from "@adeu/core";
 
 describe("Minimal Batch Report Rendering (Task 8)", () => {
   it("applied edit renders path, mode, occurrences, single CriticMarkup preview, and no clean preview", () => {
@@ -104,35 +104,45 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
     expect(res).toContain("Batch complete. Saved to: output.docx\n\n*Warning:* Caller identity 'Alice' does not match session author 'Bob'\nActions: 0 applied");
   });
 
-  it("token budget for 10 applied edits with 200-char previews (measured: 47 tokens/edit)", () => {
-    const preview100 = `{--${"A".repeat(50)}--}{++${"B".repeat(50)}++}`;
-    const edits = Array.from({ length: 10 }, (_, i) => ({
-      status: "applied",
-      heading_path: `Section ${i + 1}`,
-      match_mode: "strict",
-      occurrences_modified: 1,
-      pages: [i + 1],
-      critic_markup: preview100,
-      clean_text: "Clean text preview that should not appear"
-    }));
+  // Measured on the shape the MCP tool actually emits: RAW engine stats, never
+  // `shrink_batch_stats` (opt-in and JSON-only in both engines — `cli.py:1465`,
+  // `serve.py:345`), with the CriticMarkup preview rendered in full to match
+  // Python's renderer (`tools/document.py:813-821`: a shortened preview "is not
+  // verification, and a cut through a bubble is not even valid CriticMarkup").
+  //
+  // Ceiling corrected from the plan's 60 to 85 (Task 8 deviation note): a
+  // 200-char preview alone is 50 approx-tokens and the `> ` block label adds 7,
+  // so 60 is unreachable — the floor for one edit, with the path and mode lines
+  // dropped entirely, is 64. The remaining 27 tokens are the edit header, path
+  // and mode lines; the exact assertion below is the tripwire that keeps that
+  // chrome from growing unnoticed.
+  it("token budget for 10 applied edits with 200-char previews on raw stats (measured: 84 tokens/edit)", () => {
+    const preview200 = `{--${"A".repeat(97)}--}{++${"B".repeat(91)}++}`;
+    expect(preview200.length).toBe(200);
     const rawStats = {
       version: "2.2.0",
       actions_applied: 10,
       actions_skipped: 0,
       edits_applied: 10,
       edits_skipped: 0,
-      edits
+      edits: Array.from({ length: 10 }, (_, i) => ({
+        status: "applied",
+        heading_path: `Section ${i + 1}`,
+        match_mode: "strict",
+        occurrences_modified: 1,
+        pages: [i + 1],
+        critic_markup: preview200,
+        clean_text: "Clean text preview that should not appear"
+      }))
     };
-    const stats = shrink_batch_stats(rawStats);
 
-    const res = formatBatchResult(stats, "output.docx");
+    const res = formatBatchResult(rawStats, "output.docx");
     const tokensPerEdit = Math.round(approxTokens(res) / 10);
-    expect(tokensPerEdit).toBe(47);
-    expect(tokensPerEdit).toBeLessThanOrEqual(60);
+    expect(tokensPerEdit).toBe(84);
+    expect(tokensPerEdit).toBeLessThanOrEqual(85);
 
-    const resRaw = formatBatchResult(rawStats, "output.docx");
-    expect(resRaw).not.toContain("*Preview (Clean):*");
-    expect(resRaw).not.toContain("Clean text preview that should not appear");
+    expect(res).not.toContain("*Preview (Clean):*");
+    expect(res).not.toContain("Clean text preview that should not appear");
   });
 
   it("stats.version is a non-empty string and is not '1.18.2'", async () => {
