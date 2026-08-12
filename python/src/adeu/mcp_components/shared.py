@@ -4,6 +4,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from adeu.utils.docx import suggest_sibling_docx
+
 # Centralized MCP Configuration
 MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 
@@ -31,20 +33,11 @@ def _not_found_error(path: str) -> FileNotFoundError:
     sandboxes and no CLI-migration essay for a plain ENOENT
     (QA round 3, finding 3.11).
     """
-    import difflib
-
     p = Path(path)
     listing = ""
-    try:
-        siblings = sorted(f.name for f in p.parent.iterdir() if f.suffix.lower() == ".docx")
-    except OSError:
-        siblings = []
-    if siblings:
-        shown = difflib.get_close_matches(p.name, siblings, n=_NOT_FOUND_SUGGESTION_CAP, cutoff=0.0)
+    shown = suggest_sibling_docx(p, limit=_NOT_FOUND_SUGGESTION_CAP)
+    if shown:
         listing = f" available files: [{', '.join(shown)}]"
-        more = len(siblings) - len(shown)
-        if more > 0:
-            listing += f" (+{more} more in {p.parent})"
     hint = ""
     if not p.is_absolute():
         hint = " Provide an absolute path — the MCP server cannot resolve relative paths against your workspace."

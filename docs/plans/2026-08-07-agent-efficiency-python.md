@@ -289,8 +289,13 @@
 **Change.** Add `no_chrome: bool = False` to response builders and `--no-chrome` flag to `adeu extract`.
 **Done when.** `uv run pytest tests/test_no_chrome.py` passes (5 tests).
 
-### Task 14 — Item A5: Compact `diff --json`
+### Task 14 — Item A5: Compact `diff --json` (COMPLETED)
 **Goal.** Reduce `diff --json` size by 25%+ by removing indentation, default fields, and generator `Diff:` comments.
+**Status.** Completed & Verified (commit `62f61e3`).
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Used exclude_defaults=True, separators=(",",":"), and stripped Diff: boilerplate comments in cli.py, created test_compact_diff_json.py -> VERDICT: FAIL (tests 3 and 4 in test_compact_diff_json.py passed against pre-change code)
+- attempt 2: Sharpened tests in test_compact_diff_json.py to assert single-line output, omission of default fields, and absence of Diff: boilerplate comments -> VERDICT: PASS
 **Files.** `python/src/adeu/cli.py:970-977`.
 **Test first.** `python/tests/test_compact_diff_json.py` (new):
 1. `test_diff_json_is_unindented_and_omits_defaults`: unindented JSON without default fields or `Diff:` comments.
@@ -300,8 +305,15 @@
 **Change.** Dump models with `exclude_defaults=True`, separators `(",", ":")`, and strip `Diff: ` boilerplate comments.
 **Done when.** `uv run pytest tests/test_compact_diff_json.py` passes (4 tests).
 
-### Task 15 — Item C3: MCP `apply_text_revision` Tool
+### Task 15 — Item C3: MCP `apply_text_revision` Tool (COMPLETED)
 **Goal.** Expose whole-text diff->tracked-changes apply primitive over MCP with clean-text verification gate.
+**Status.** Completed & Verified (commit `cebb7fc`).
+**Failed Verify Cycles:** 3 (opus-coder cycle 2)
+**Attempt Ledger:**
+- attempt 1: Extracted text_revision module and added apply_text_revision MCP tool -> VERDICT: FAIL (flat 30% deletion threshold broke existing small doc deletion tests; CLI error message lost --allow-major-deletions flag hint; CLI json/human verification failure/success outputs regressed)
+- attempt 2: Restored character deletion threshold in text_revision.py and CLI failure/success outputs -> VERDICT: FAIL (unneeded >50 paragraphs guard refused 30% char deletion; MCP schema text still said >30%; CLI text apply lost progress line, overwrite warning, BatchValidationError catch, and full refusal message)
+- attempt 3 (@opus-coder): Removed paragraph deletion guard; restored full refusal message; routed CLI text apply back through shared apply path -> VERDICT: FAIL (CRITICMARKUP_TOKENS widened to closing tokens like ~> causing false positive CriticMarkup refusals on plain text containing ~>)
+- attempt 4 (@opus-coder): Restricted _CRITICMARKUP_TOKENS in text_revision.py to open tags only: ("{++", "{--", "{~~", "{==", "{>>"); added unit and end-to-end tests in test_mcp_apply_text_revision.py -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/text_revision.py` (new)
 - `python/src/adeu/cli.py`
@@ -316,8 +328,13 @@
 **Change.** Extract shared text revision helpers into `text_revision.py`. Register `apply_text_revision` tool on MCP.
 **Done when.** `uv run pytest tests/test_mcp_apply_text_revision.py` passes (5 tests).
 
-### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints
+### Task 16 — Items E3 & E4: Shared Missing-File Suggestions & Discovery Hints (COMPLETED)
 **Goal.** Offer sibling file suggestions on CLI missing-file errors and point ID discovery hints at `--mode changes`.
+**Status.** Completed & Verified.
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Added suggest_sibling_docx to utils/docx.py, updated CLI missing file handler and ID hints -> VERDICT: FAIL (suggest_sibling_docx in utils/docx.py duplicated sibling matching in mcp_components/shared.py)
+- attempt 2: Made suggest_sibling_docx in utils/docx.py single source of truth accepting limit and path as Union[str, Path]; reused it in shared.py _not_found_error -> VERDICT: PASS
 **Files.**
 - `python/src/adeu/utils/docx.py`
 - `python/src/adeu/mcp_components/shared.py`

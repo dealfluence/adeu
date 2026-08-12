@@ -6,9 +6,10 @@ import pytest
 from docx import Document
 
 from adeu.cli import _print_sandbox_warning_and_exit, _set_json_mode
-from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT
+from adeu.mcp_components.shared import MCP_ID_DISCOVERY_HINT, _not_found_error
 from adeu.models import AcceptChange
 from adeu.redline.engine import RedlineEngine
+from adeu.utils.docx import suggest_sibling_docx
 
 
 def _create_simple_docx() -> BytesIO:
@@ -79,3 +80,30 @@ def test_mcp_hint_names_the_changes_ledger_and_never_the_cli():
     assert "read_docx" in err_msg
     assert "mode='changes'" in err_msg or 'mode="changes"' in err_msg
     assert "adeu" not in err_msg.lower()
+
+
+def test_suggest_sibling_docx_accepts_limit_and_string_or_path(tmp_path: Path):
+    workdir = tmp_path / "test_siblings"
+    workdir.mkdir()
+    for i in range(12):
+        (workdir / f"doc_{i:02d}.docx").write_bytes(b"dummy")
+
+    missing = workdir / "doc_00_missing.docx"
+
+    # Test limit cap
+    res5 = suggest_sibling_docx(missing, limit=5)
+    assert len(res5) == 5
+
+    res10 = suggest_sibling_docx(str(missing), limit=10)
+    assert len(res10) == 10
+
+
+def test_not_found_error_uses_suggest_sibling_docx(tmp_path: Path):
+    workdir = tmp_path / "test_mcp_siblings"
+    workdir.mkdir()
+    (workdir / "sample_v1.docx").write_bytes(b"dummy")
+    missing = workdir / "sample_v2.docx"
+
+    err = _not_found_error(str(missing))
+    assert isinstance(err, FileNotFoundError)
+    assert "available files: [sample_v1.docx]" in str(err)
