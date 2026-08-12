@@ -2,6 +2,7 @@ import io
 import json
 
 from docx import Document
+from docx.oxml import parse_xml
 
 from adeu.cli import handle_apply
 from adeu.models import ModifyText
@@ -44,6 +45,22 @@ def _create_docx_with_pending_comment(author: str) -> io.BytesIO:
     return out_stream
 
 
+def _create_docx_with_tracked_move(author: str, tag_name: str = "w:moveTo") -> io.BytesIO:
+    doc = Document()
+    p = doc.add_paragraph("This is a simple document with baseline text for testing author impersonation warnings.")
+    move_xml = (
+        f'<{tag_name} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        f' w:id="1" w:author="{author}" w:date="2026-08-12T00:00:00Z">'
+        f"<w:r><w:t>moved text</w:t></w:r>"
+        f"</{tag_name}>"
+    )
+    p._element.append(parse_xml(move_xml))
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    return stream
+
+
 def test_warning_when_acting_author_impersonates_a_pending_author():
     # Document has pending revision by "Alice"
     doc_stream = _create_docx_with_pending_revision("Alice")
@@ -64,6 +81,27 @@ def test_warning_when_acting_author_impersonates_a_pending_author():
 
     assert stats_comment.get("author_impersonation_warning") is not None
     assert "Charlie" in stats_comment["author_impersonation_warning"]
+
+
+def test_warning_when_acting_author_matches_tracked_move_author():
+    # Test w:moveTo
+    moveto_stream = _create_docx_with_tracked_move("Dave", tag_name="w:moveTo")
+    engine_moveto = RedlineEngine(moveto_stream, author="Dave")
+    edit = ModifyText(target_text="baseline text", new_text="updated text")
+    stats_moveto = engine_moveto.process_batch([edit])
+
+    assert stats_moveto.get("author_impersonation_warning") is not None
+    assert "Dave" in stats_moveto["author_impersonation_warning"]
+    assert "matches an author with pending revisions" in stats_moveto["author_impersonation_warning"]
+
+    # Test w:moveFrom
+    movefrom_stream = _create_docx_with_tracked_move("Eve", tag_name="w:moveFrom")
+    engine_movefrom = RedlineEngine(movefrom_stream, author="Eve")
+    stats_movefrom = engine_movefrom.process_batch([edit])
+
+    assert stats_movefrom.get("author_impersonation_warning") is not None
+    assert "Eve" in stats_movefrom["author_impersonation_warning"]
+    assert "matches an author with pending revisions" in stats_movefrom["author_impersonation_warning"]
 
 
 def test_no_warning_for_a_distinct_author():

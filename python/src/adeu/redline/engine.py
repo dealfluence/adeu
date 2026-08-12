@@ -2578,12 +2578,23 @@ class RedlineEngine:
         return " > ".join(path) if path else "", page
 
     def get_pending_revision_authors(self) -> set[str]:
-        """Collects author names from all pending revisions (<w:ins>, <w:del>, property changes) and comments."""
+        """Collects author names from all pending revisions and comments."""
         authors: set[str] = set()
 
         for el in self.doc.element.xpath("//*[@w:author]"):
             tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-            if tag in ("ins", "del", "rPrChange", "pPrChange", "sectPrChange", "tcPrChange", "trPrChange", "comment"):
+            if tag in (
+                "ins",
+                "del",
+                "moveTo",
+                "moveFrom",
+                "rPrChange",
+                "pPrChange",
+                "sectPrChange",
+                "tcPrChange",
+                "trPrChange",
+                "comment",
+            ):
                 author = el.get(qn("w:author"))
                 if author:
                     authors.add(author)
@@ -2615,6 +2626,8 @@ class RedlineEngine:
                                 if tag in (
                                     "ins",
                                     "del",
+                                    "moveTo",
+                                    "moveFrom",
                                     "rPrChange",
                                     "pPrChange",
                                     "sectPrChange",

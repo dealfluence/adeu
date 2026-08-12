@@ -354,9 +354,11 @@
 
 ## Phase 4 (P3 Items) — Tasks 17 to 21
 
-### Task 17 — Item C2: Gate Author-Name Bypass (COMPLETED)
+### Task 17 — Item C2: Gate Author-Name Bypass
 **Goal.** Emit warning when acting author matches an author with pending revisions in the document.
-**Status.** Completed & Verified.
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Added get_pending_revision_authors() to engine.py and updated CLI and MCP response summaries, created test_author_impersonation_gate.py -> VERDICT: FAIL (get_pending_revision_authors missed w:moveTo / w:moveFrom tracked move elements)
 **Files.** `python/src/adeu/redline/engine.py`, `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`.
 **Test first.** `python/tests/test_author_impersonation_gate.py` (new):
 1. `test_warning_when_acting_author_impersonates_a_pending_author`: warning emitted on author name match.
