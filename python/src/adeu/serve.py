@@ -6,15 +6,19 @@ JSON-Lines daemon (`adeu serve`) keeping a single process alive with a warm
 import json
 import sys
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict
 
-from docx import Document
-from docx.document import Document as DocumentObject
 from pydantic import TypeAdapter, ValidationError
 
-from adeu.cli import _extract_schema_failures, _write_output_or_exit, take_last_cli_error
+from adeu.cli import (
+    _extract_schema_failures,
+    _load_docx_or_exit,
+    _open_redline_engine_or_exit,
+    _require_docx_output,
+    _write_output_or_exit,
+    take_last_cli_error,
+)
 from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
@@ -29,8 +33,7 @@ from adeu.mcp_components.doc_cache import doc_cache
 from adeu.models import StrictBatchChanges
 from adeu.pagination import parse_page_arg
 from adeu.payloads import failure_envelope, shrink_batch_stats
-from adeu.redline.engine import BatchValidationError, RedlineEngine
-from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.redline.engine import BatchValidationError
 
 
 def _emit_json(data: Dict[str, Any]) -> None:
@@ -57,37 +60,6 @@ def _emit_cli_error(fallback_code: str, fallback_message: str, **extra: Any) -> 
     """
     env = take_last_cli_error() or {"error": fallback_code, "message": fallback_message}
     _emit_json({"status": "error", **env, **extra})
-
-
-def _load_docx_doc(path: Path) -> DocumentObject:
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-    if not path.is_file():
-        raise ValueError(f"'{path}' is a directory, not a file.")
-    try:
-        with open(path, "rb") as fh:
-            magic = fh.read(4)
-    except OSError as e:
-        raise ValueError(f"Could not read '{path.name}': {e.strerror or e}") from e
-    if magic != b"PK\x03\x04" and path.suffix.lower() != ".docx":
-        raise ValueError(f"'{path.name}' must be a DOCX file (got {path.suffix or 'no extension'}).")
-    with open(path, "rb") as f:
-        data = f.read()
-    sanitized = strip_bom_from_docx_bytes(data)
-    return Document(BytesIO(sanitized))
-
-
-def _open_redline_engine_safe(path: Path, author: str | None = None, terse_errors: bool = False) -> RedlineEngine:
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-    if not path.is_file():
-        raise ValueError(f"'{path}' is a directory, not a file.")
-    with open(path, "rb") as f:
-        data = f.read()
-    stream = BytesIO(data)
-    if author is not None:
-        return RedlineEngine(stream, author=author, terse_errors=terse_errors)
-    return RedlineEngine(stream, terse_errors=terse_errors)
 
 
 def _handle_extract_command(req: Dict[str, Any]) -> None:
@@ -180,9 +152,12 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
             )
         elif mode == "outline":
             text, _, outline_nodes = doc_cache.get_outline(entry, clean_view=clean_view)
-            doc = _load_docx_doc(path)
+            # `doc_cache.get_outline` always returns the outline nodes (filling
+            # them from its own parse when cold), and build_outline_response
+            # never consults `doc` once nodes are supplied. Loading the DOCX
+            # here would re-parse the package the cache just served.
             res = build_outline_response(
-                doc,
+                None,
                 text,
                 str(path),
                 outline_max_level=int(req.get("outline_max_level", 2)),
@@ -196,14 +171,18 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
             # is already a bounded summary, so `--page all --mode changes` is
             # exempt from the response budget guard.
             text, _ = doc_cache.get_pagination(entry, clean_view=False)
-            doc = _load_docx_doc(path)
+            doc = _load_docx_or_exit(path)
             from adeu.redline.comments import CommentsManager
 
             comments_data = CommentsManager(doc).extract_comments_data()
             try:
-                engine = _open_redline_engine_safe(path)
+                engine = _open_redline_engine_or_exit(path)
                 existing_change_ids = set(engine._existing_change_ids())
-            except Exception:
+            except (Exception, SystemExit):
+                # The ledger degrades gracefully without the id set (cli.py does
+                # the same). SystemExit means the CLI helper recorded a failure
+                # envelope; drain it so it cannot be misreported as a later error.
+                take_last_cli_error()
                 existing_change_ids = None
 
             res = build_changes_response(
@@ -305,8 +284,16 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
     partial = bool(req.get("partial", False))
     terse_errors = bool(req.get("terse_errors", False))
     report_style = req.get("report", "standard")
+    output_path_str = req.get("output") or req.get("output_path")
+    output_path = Path(output_path_str) if output_path_str else None
 
     try:
+        # Checked up front, exactly where handle_apply in cli.py checks it: a
+        # DOCX package hiding behind 'out.txt' breaks every consumer that
+        # trusts the extension, batch outcome notwithstanding. The helper
+        # signals refusal with SystemExit, recovered below as invalid_input.
+        _require_docx_output(output_path)
+
         if isinstance(changes_raw, list):
             adapter = TypeAdapter(StrictBatchChanges)
             changes = adapter.validate_python(changes_raw)
@@ -322,7 +309,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             _emit_error("invalid_input", "Invalid 'changes' format; expected array or file path string.")
             return
 
-        engine = _open_redline_engine_safe(path, author=author, terse_errors=terse_errors)
+        engine = _open_redline_engine_or_exit(path, author=author, terse_errors=terse_errors)
         stats = engine.process_batch(changes, partial=partial)
 
         applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
@@ -342,10 +329,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             stats["status"] = "error"
             stats["output_path"] = None
         else:
-            output_path_str = req.get("output") or req.get("output_path")
-            if output_path_str:
-                output_path = Path(output_path_str)
-            else:
+            if output_path is None:
                 if path.stem.endswith("_redlined") or path.stem.endswith("_processed"):
                     output_path = path
                 else:

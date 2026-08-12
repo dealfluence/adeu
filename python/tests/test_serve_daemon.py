@@ -379,3 +379,83 @@ def test_serve_changes_mode_page_all_skips_the_budget_guard(tmp_path, monkeypatc
     assert res.get("error") is None
     assert res.get("title") == "redlined.docx"
     assert "Chg:" in res.get("markdown", "")
+
+
+def test_serve_apply_refuses_non_docx_output(tmp_path, monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    out_txt = tmp_path / "out.txt"
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "modified"}],
+                "output": str(out_txt),
+            }
+        ),
+        json.dumps({"command": "ping"}),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+
+    # `adeu apply` refuses a non-.docx output via _require_docx_output; the
+    # daemon must apply the same gate and write nothing.
+    res = json.loads(captured[0])
+    assert res.get("status") == "error"
+    assert res.get("error") == "invalid_input"
+    assert "must end in .docx" in res.get("message", "")
+    assert res.get("output_path") is None
+    assert not out_txt.exists()
+
+    assert json.loads(captured[1]) == {"status": "ok", "pong": True}
+
+
+def test_serve_outline_warm_read_does_not_reparse_the_docx(monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+
+    from adeu.mcp_components import doc_cache as doc_cache_module
+
+    doc_cache_module.doc_cache.clear()
+
+    parses: list = []
+    real_load = doc_cache_module.DocProjectionCache._load_document
+
+    def counting_load(path, cb=None):
+        parses.append(str(path))
+        return real_load(path, cb)
+
+    monkeypatch.setattr(doc_cache_module.DocProjectionCache, "_load_document", staticmethod(counting_load))
+
+    def refuse_load(path):
+        parses.append(f"serve:{path}")
+        raise AssertionError(f"outline re-parsed {path}")
+
+    monkeypatch.setattr("adeu.serve._load_docx_or_exit", refuse_load)
+
+    lines = [
+        json.dumps({"command": "extract", "file_path": str(fixture_path), "mode": "outline"}),
+        json.dumps({"command": "extract", "file_path": str(fixture_path), "mode": "outline"}),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+    assert json.loads(captured[0]) == json.loads(captured[1])
+    assert json.loads(captured[0]).get("error") is None
+    assert json.loads(captured[0]).get("title") == "golden.docx"
+
+    # One parse total — the cold doc_cache fill, which computes the outline
+    # nodes itself. Rendering the outline consults the cached nodes only, so
+    # neither the cold nor the warm read may open the DOCX again.
+    assert parses == [str(fixture_path.resolve())]
