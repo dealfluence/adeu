@@ -10,7 +10,7 @@ from fastmcp.exceptions import ToolError
 from adeu.cli import _main_impl
 from adeu.mcp_components.tools.document import apply_text_revision
 from adeu.payloads import BATCH_RECOVERY_PROTOCOL
-from adeu.text_revision import check_major_deletions
+from adeu.text_revision import check_criticmarkup, check_major_deletions
 
 
 def run_cli(args, capsys):
@@ -128,6 +128,53 @@ def test_apply_text_revision_refuses_criticmarkup_input(sample_docx, tmp_path):
             )
         )
     assert "criticmarkup" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Only the OPEN CriticMarkup tokens mark markup-view text. Matching bare
+# closing tokens refused ordinary prose: "~>" and "-->" are arrows people
+# write (verifier finding, Task 15 attempt 3).
+# ---------------------------------------------------------------------------
+
+
+def test_criticmarkup_guard_ignores_arrows_and_bare_closing_tokens():
+    for prose in (
+        "Payment flows A ~> B.",
+        "Escalation -> resolution within 5 days.",
+        "The rate++} is stated below.",
+        "Ends with <<} and --} and ==} and ~~}.",
+    ):
+        check_criticmarkup(prose)  # must not raise
+
+    for markup in ("a {++b++} c", "a {--b--} c", "a {~~b~>c~~} d", "a {==b==} c", "a {>>b<<} c"):
+        with pytest.raises(ValueError, match="CriticMarkup"):
+            check_criticmarkup(markup)
+
+
+def test_apply_text_revision_accepts_arrows_in_plain_text(sample_docx, tmp_path):
+    ctx = MockContext()
+    out_path = str(tmp_path / "arrows.docx")
+    revised = (
+        "This is the original paragraph one of the document. Payment flows A ~> B.\n\n"
+        "This is paragraph two, containing more text for testing purposes. Escalation -> resolution.\n\n"
+        "And paragraph three concludes the baseline document content."
+    )
+
+    result = asyncio.run(
+        apply_text_revision(
+            file_path=sample_docx,
+            revised_text=revised,
+            ctx=ctx,
+            output_path=out_path,
+            author="TestAuthor",
+        )
+    )
+
+    assert "criticmarkup" not in result.lower()
+    doc = Document(out_path)
+    xml = doc.element.xml
+    assert "w:ins" in xml
+    assert "Payment flows A ~" in xml
 
 
 def test_apply_text_revision_verification_failure_writes_unverified_sibling(sample_docx, tmp_path):

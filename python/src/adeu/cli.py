@@ -418,8 +418,8 @@ def _load_roundtrip_text(path: Path, original: Path, command: str) -> str:
 
     if any(tok in text for tok in _CRITICMARKUP_TOKENS):
         print(
-            f"❌ '{path.name}' contains CriticMarkup tokens ({{++..++}}, {{--..--}}, {{==..==}}, "
-            "{>>..<<}), which means it was extracted in the default markup view. "
+            f"❌ '{path.name}' contains CriticMarkup tokens ({{++..++}}, {{--..--}}, {{~~..~>..~~}}, "
+            "{==..==}, {>>..<<}), which means it was extracted in the default markup view. "
             f"`{command}` compares text against the document's CLEAN view, so markup-view text "
             "would be diffed into the document as literal prose (including reviewer names and "
             "change IDs).\n"

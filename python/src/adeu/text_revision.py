@@ -12,19 +12,10 @@ from adeu.models import DocumentChange
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
 
-_CRITICMARKUP_TOKENS = (
-    "{++",
-    "++}",
-    "{--",
-    "--}",
-    "{~~",
-    "~>",
-    "~~}",
-    "{==",
-    "==}",
-    "{>>",
-    "<<}",
-)
+# Only the OPEN tokens: a bare closing token is ordinary prose far more often
+# than it is markup ("A ~> B", "rate++}"), and markup view never emits one
+# without its opener (verifier finding, Task 15 attempt 3).
+_CRITICMARKUP_TOKENS = ("{++", "{--", "{~~", "{==", "{>>")
 
 _EXTRACT_HEADER_RE = re.compile(r"^> \*\*File Path:\*\*[^\n]*\n+")
 _PAGE_BANNER_RE = re.compile(r"^> \*\*Page (\d+) of (\d+)\*\*[^\n]*\n+(?:---\n+)?")
