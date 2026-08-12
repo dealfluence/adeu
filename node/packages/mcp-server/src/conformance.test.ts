@@ -279,4 +279,18 @@ describe("conformance harness", () => {
   it("addresses fixtures by stable placeholder path, never a real one", () => {
     expect(placeholderPath("multi_author")).toBe("/fixtures/multi_author.docx");
   });
+
+  it("canonicalises the file-path banner to the goldens' POSIX placeholder", () => {
+    // The builders run file_path through Node's resolve(), which is load-bearing
+    // on the real MCP path but rewrites the placeholder to `D:\fixtures\…` on
+    // win32. normalize() must undo that, or every banner-bearing case carries a
+    // permanent line-1 diff on Windows.
+    expect(normalize("> **File Path:** `D:\\fixtures\\multi_author.docx`\r\n\r\nbody")).toBe(
+      "> **File Path:** `/fixtures/multi_author.docx`\n\nbody",
+    );
+    // POSIX output (and any non-banner text) passes through unchanged.
+    expect(normalize("> **File Path:** `/fixtures/multi_author.docx`\n\nbody")).toBe(
+      "> **File Path:** `/fixtures/multi_author.docx`\n\nbody",
+    );
+  });
 });

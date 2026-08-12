@@ -42,8 +42,26 @@ export function golden(name: string): string | null {
   return readFileSync(p, "utf-8").replace(/\r\n/g, "\n");
 }
 
-/** Node output normalised the same way, ready to compare against a golden. */
-export const normalize = (s: string) => s.replace(/\r\n/g, "\n");
+/** The line-1 banner every builder prefixes to its LLM content. */
+const FILE_PATH_BANNER = /^> \*\*File Path:\*\* `([^`]*)`/;
+
+/**
+ * Node output normalised the same way, ready to compare against a golden.
+ *
+ * The banner path is re-canonicalised to the POSIX placeholder the goldens
+ * hold: the builders run `file_path` through Node's `resolve()`, which is
+ * load-bearing on the real MCP path but rewrites `/fixtures/x.docx` to
+ * `D:\fixtures\x.docx` on win32. Undoing the platform-specific part here keeps
+ * the comparison byte-exact everywhere without weakening the builders.
+ */
+export const normalize = (s: string) =>
+  s
+    .replace(/\r\n/g, "\n")
+    .replace(
+      FILE_PATH_BANNER,
+      (_line, p: string) =>
+        `> **File Path:** \`${p.replace(/\\/g, "/").replace(/^[A-Za-z]:/, "")}\``,
+    );
 
 /**
  * The path string that goes into every response: a STABLE PLACEHOLDER, never a
