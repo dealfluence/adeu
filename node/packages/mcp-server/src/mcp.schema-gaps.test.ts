@@ -538,4 +538,89 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       expect(isValidationError).toBe(true);
     });
   });
+
+  // ======================================================================
+  // optional reasoning parameter on every tool
+  // ======================================================================
+  describe("optional reasoning parameter on all tools", () => {
+    const FIVE_TOOLS = [
+      "read_docx",
+      "process_document_batch",
+      "accept_all_changes",
+      "diff_docx_files",
+      "finalize_document",
+    ];
+
+    it("tools/list shows reasoning is NOT included in inputSchema.required for all five tools", () => {
+      for (const toolName of FIVE_TOOLS) {
+        const tool = getTool(toolName);
+        expect(tool, `${toolName} must be advertised`).toBeDefined();
+        const requiredList = tool.inputSchema?.required ?? [];
+        expect(
+          requiredList,
+          `reasoning should not be required in ${toolName}`,
+        ).not.toContain("reasoning");
+      }
+    });
+
+    it("tools/call read_docx without reasoning succeeds and returns document text", async () => {
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          file_path: pdbFixture,
+        },
+      });
+
+      expect(res.result?.isError).toBeFalsy();
+      const text: string = res.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("Confidential Information");
+    });
+
+    it("tools/call process_document_batch without reasoning applies the batch successfully", async () => {
+      const outPath = tempOut("no_reasoning_batch");
+      const res = await rpc("tools/call", {
+        name: "process_document_batch",
+        arguments: {
+          original_docx_path: pdbFixture,
+          author_name: "No Reasoning Test",
+          changes: [
+            {
+              type: "modify",
+              target_text: "Setup fee is $500",
+              new_text: "Setup fee is $600",
+            },
+          ],
+          output_path: outPath,
+        },
+      });
+
+      expect(res.result?.isError).toBeFalsy();
+      const text: string = res.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("Batch complete");
+      expect(text).toContain("{++600++}");
+    });
+
+    it("reasoning is still accepted when sent and produces identical content", async () => {
+      const resWithout = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          file_path: pdbFixture,
+        },
+      });
+
+      const resWith = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "Because I want to inspect paragraph 1",
+          file_path: pdbFixture,
+        },
+      });
+
+      expect(resWithout.result?.isError).toBeFalsy();
+      expect(resWith.result?.isError).toBeFalsy();
+      expect(resWith.result?.content?.[0]?.text).toBe(
+        resWithout.result?.content?.[0]?.text,
+      );
+    });
+  });
 });

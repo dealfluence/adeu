@@ -380,6 +380,7 @@ registerAppTool(
     inputSchema: z.object({
       reasoning: z
         .string()
+        .optional()
         .describe(
           "Why do I need to read this docx document? State this reason before any other parameter.",
         ),
@@ -792,6 +793,7 @@ server.registerTool(
     inputSchema: {
       reasoning: z
         .string()
+        .optional()
         .describe(
           "Why do I need to apply these changes to the document? State this reason before any other parameter.",
         ),
@@ -1124,6 +1126,7 @@ server.registerTool(
     inputSchema: {
       reasoning: z
         .string()
+        .optional()
         .describe(
           "Why do I need to accept all changes in this document? State this reason before any other parameter.",
         ),
@@ -1233,6 +1236,7 @@ server.registerTool(
     inputSchema: {
       reasoning: z
         .string()
+        .optional()
         .describe(
           "Why do I need to diff these two documents? State this reason before any other parameter.",
         ),
@@ -1316,6 +1320,7 @@ server.registerTool(
     inputSchema: {
       reasoning: z
         .string()
+        .optional()
         .describe(
           "Why do I need to finalize this document? State this reason before any other parameter.",
         ),

@@ -1260,6 +1260,15 @@ reversible and flagged in the receipt.
     break the CJS build).
 
 ## Task 9 â€” B3: comment-only `modify` normalised at the Node MCP boundary
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 3
+- **Attempt Ledger**:
+  - attempt 1: normalize comment-only modify in coerceChangeItemInPlace and write tests -> FAIL (verifier audit: test suite must strictly prove boundary normalization is active and necessary for coerceChangeItemInPlace and schema validation)
+  - attempt 2: rewrite comment-only-modify.test.ts to test unit functions directly -> FAIL (verifier audit: integration tests were removed, leaving criterion 7 unasserted on saved XML; all 6 specified cases needed)
+  - attempt 3 (escalated): keep 4 unit test cases and restore 2 live RPC test cases in comment-only-modify.test.ts -> FAIL (verifier audit: test comment misstated causal location and new_text:null live boundary test missing)
+  - attempt 4 (escalated fix): keep all 6 test cases, update comment explaining dual-normalization, and add 7th live RPC case for new_text:null boundary coercion -> PASS
+
+
 
 - **Goal**: a `{"type":"modify","target_text":â€¦,"comment":â€¦}` batch behaves
   identically on Node MCP, Python MCP and the Python CLI â€” including the
@@ -1325,6 +1334,8 @@ reversible and flagged in the receipt.
     â€” six cases pass.
 
 ## Task 10 â€” B4: honour `comment` on accept/reject  âš  PARITY-LEADING
+- **Status**: COMPLETED
+
 
 - **Goal**: a rejection or acceptance rationale becomes a visible margin comment
   instead of being silently discarded, and the resulting comment id is reported.
@@ -1436,6 +1447,7 @@ reversible and flagged in the receipt.
 # Phase 2 â€” P1 (cheap, high leverage, no semantic risk)
 
 ## Task 11 â€” E1: make `reasoning` optional on every tool
+- **Status**: COMPLETED
 
 - **Goal**: stop taxing every single call with a mandatory output-token string
   that is deleted unused.
