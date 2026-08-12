@@ -2345,6 +2345,15 @@ def _main_impl():
     )
     p_sanitize.set_defaults(func=handle_sanitize)
 
+    p_serve = subparsers.add_parser("serve", help="Run JSON-lines daemon for persistent document caching")
+
+    def handle_serve(serve_args: argparse.Namespace):
+        from adeu.serve import run_serve
+
+        sys.exit(run_serve())
+
+    p_serve.set_defaults(func=handle_serve)
+
     # `adeu help` / `adeu help <command>` — the shell convention alongside
     # -h/--help (QA 2026-07-19 v8 F-13).
     p_help = subparsers.add_parser("help", help="Show help for adeu or a subcommand")
