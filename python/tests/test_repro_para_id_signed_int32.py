@@ -622,8 +622,7 @@ class TestAnInheritedOutOfRangeIdIsRepaired:
         comments = RedlineEngine(io.BytesIO(saved), author="x").comments_manager.extract_comments_data()
         root = next(c for c in comments.values() if c["text"] == "Root note.")
         original = next(
-            c
-            for c in RedlineEngine(io.BytesIO(package), author="x").comments_manager.extract_comments_data().values()
+            c for c in RedlineEngine(io.BytesIO(package), author="x").comments_manager.extract_comments_data().values()
         )
         assert (root["author"], root["text"]) == (original["author"], original["text"])
 
@@ -737,9 +736,7 @@ class TestParaIdUniqueness:
         base = threaded_package(reply_count=1)
         ids = para_ids_in(base)
         collided = poison(base, {ids[1]: ids[0]})
-        assert [(attr, value) for _part, attr, value in find_duplicate_para_ids(collided)] == [
-            ("w14:paraId", ids[0])
-        ]
+        assert [(attr, value) for _part, attr, value in find_duplicate_para_ids(collided)] == [("w14:paraId", ids[0])]
 
 
 def reply_to_root_of(package: bytes, para_id: str) -> bytes:

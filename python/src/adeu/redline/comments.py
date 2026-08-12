@@ -681,10 +681,7 @@ class CommentsManager:
         # legacy `w15:p` fallback below keys on whether the document was
         # already on the modern path, and repairing a legacy parent may create
         # the commentsExtended part as a side effect.
-        ext_part_existed = (
-            self._get_existing_part_by_type(CT_EXTENDED)
-            is not None
-        )
+        ext_part_existed = self._get_existing_part_by_type(CT_EXTENDED) is not None
 
         # Resolve threading BEFORE writing anything. A reply whose parent
         # cannot be resolved used to be written anyway, minus its
