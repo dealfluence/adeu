@@ -382,9 +382,11 @@
 **Change.** Add `terse` parameter to `format_ambiguity_error` and `terse_errors` to `RedlineEngine`. Add `--terse-errors` to `adeu apply`.
 **Done when.** `uv run pytest tests/test_terse_errors.py` passes (3 tests).
 
-### Task 19 — Item D3: Env-Tunable Doc-Cache LRU (COMPLETED)
+### Task 19 — Item D3: Env-Tunable Doc-Cache LRU
 **Goal.** Allow configuring `doc_cache` capacity via `ADEU_DOC_CACHE_ENTRIES`.
-**Status.** Completed & Verified.
+**Failed Verify Cycles:** 1
+**Attempt Ledger:**
+- attempt 1: Added get_doc_cache_capacity() to doc_cache.py and tests to test_doc_cache.py -> VERDICT: FAIL (existing tests in test_doc_cache.py were ambient-env sensitive when ADEU_DOC_CACHE_ENTRIES was set)
 **Files.** `python/src/adeu/mcp_components/doc_cache.py`.
 **Test first.** Append to `python/tests/test_doc_cache.py`:
 1. `test_lru_size_is_env_tunable`: `ADEU_DOC_CACHE_ENTRIES="7"` sets cache capacity to 7.

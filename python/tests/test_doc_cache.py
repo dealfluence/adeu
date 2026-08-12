@@ -42,7 +42,9 @@ class MockContext:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache():
+def _fresh_cache(monkeypatch):
+    monkeypatch.delenv("ADEU_DOC_CACHE_ENTRIES", raising=False)
+    doc_cache._max_entries = MAX_ENTRIES
     doc_cache.clear()
     yield
     doc_cache.clear()
