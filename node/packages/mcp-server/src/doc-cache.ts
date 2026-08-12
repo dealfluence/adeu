@@ -33,9 +33,9 @@ import {
   extract_outline,
   OutlineNode,
   paginate,
-  split_structural_appendix,
 } from "@adeu/core";
 import type { ProjectionBundle } from "./response-builders.js";
+import { split_projection } from "./shared.js";
 
 export type ProgressFn = (
   message: string,
@@ -73,7 +73,7 @@ export interface DocCacheEntry {
 }
 
 function makeBundle(text: string): ProjectionBundle {
-  const [body, appendix] = split_structural_appendix(text);
+  const [body, appendix] = split_projection(text);
   return { body, appendix, pagination: paginate(body, "") };
 }
 

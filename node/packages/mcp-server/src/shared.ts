@@ -1,5 +1,31 @@
 // FILE: node/packages/mcp-server/src/shared.ts
+import { split_structural_appendix } from "@adeu/core";
+
 export const MARKDOWN_UI_URI = "ui://adeu/markdown-ui";
+
+/**
+ * The projection split this server layer works from — body without the
+ * structural appendix OR the rule that introduces it.
+ *
+ * Python's doc cache projects with `include_appendix=False`
+ * (doc_cache.py:159-164), so its body simply ends at the last body line. Node
+ * projects WITH the appendix (one pass also feeds mode='appendix') and splits
+ * it off afterwards — but the appendix block opens with a `"\n\n---"` rule
+ * (domain.ts:369-372) that lands on the BODY side of the split:
+ * `split_structural_appendix` rstrips whitespace only, identically in both
+ * engines (pagination.ts:77, pagination.py:163 — both return 556 chars for
+ * unicode.docx). Dropping that one separator makes Node's body the exact
+ * string Python serves, paginates and measures: 551 chars, no dangling rule
+ * at the end of `page='all'`.
+ *
+ * The separator is dropped once and only at the very end, so a document whose
+ * own last block is a horizontal rule keeps it — as it does in Python's
+ * appendix-free projection.
+ */
+export function split_projection(text: string): [string, string] {
+  const [body, appendix] = split_structural_appendix(text);
+  return [appendix ? body.replace(/\n\n---$/, "") : body, appendix];
+}
 
 /**
  * Minimal CLI handling BEFORE the stdio server starts: `--help` and

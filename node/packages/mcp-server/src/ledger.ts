@@ -11,8 +11,9 @@
 // package has no CLI.
 
 import { resolve, basename } from "node:path";
-import { offset_to_page, paginate, parse_page_arg, split_structural_appendix } from "@adeu/core";
+import { offset_to_page, paginate, parse_page_arg } from "@adeu/core";
 import type { ProjectionBundle, ToolResult } from "./response-builders.js";
+import { split_projection } from "./shared.js";
 
 /** Mirrors `_LedgerEntry` (`_response_builders.py:703-713`). */
 interface LedgerEntry {
@@ -164,7 +165,7 @@ export function build_changes_response(
   const comment_data_for = (key: string) =>
     comments_data && Object.hasOwn(comments_data, key) ? comments_data[key] : null;
 
-  const body = bundle ? bundle.body : split_structural_appendix(text)[0];
+  const body = bundle ? bundle.body : split_projection(text)[0];
   const pag_res = bundle ? bundle.pagination : paginate(body, "");
   const page_offsets = pag_res.body_page_offsets;
   const total_pages = pag_res.total_pages;

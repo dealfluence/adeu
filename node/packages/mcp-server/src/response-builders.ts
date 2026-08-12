@@ -2,7 +2,6 @@ import { resolve, basename } from "node:path";
 import {
   DocumentObject,
   paginate,
-  split_structural_appendix,
   extract_outline,
   OutlineNode,
   RegexTimeoutError,
@@ -11,6 +10,7 @@ import {
   response_budget_limit,
   whole_doc_guard_message,
 } from "@adeu/core";
+import { split_projection } from "./shared.js";
 
 export interface ToolResult {
   content: { type: "text"; text: string }[];
@@ -437,7 +437,7 @@ export function build_full_document_response(
   // The ENTIRE document body with no page banner, continuation footer, or
   // appendix pointer — the round-trip artifact for text-based apply/diff
   // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
-  const body = bundle ? bundle.body : split_structural_appendix(text)[0];
+  const body = bundle ? bundle.body : split_projection(text)[0];
   const ui_markdown = body;
   const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
   return {
@@ -475,7 +475,7 @@ export function build_budget_guard_message(
 ): string {
   const [body] = bundle
     ? [bundle.body]
-    : split_structural_appendix(projected_text);
+    : split_projection(projected_text);
   const pagination = bundle ? bundle.pagination : paginate(body, "");
   const list = nodes ?? [];
   const has_l1 = list.some((n) => n.level === 1);
@@ -497,7 +497,7 @@ export function build_paginated_response(
 ): ToolResult {
   const [body, appendix] = bundle
     ? [bundle.body, bundle.appendix]
-    : split_structural_appendix(text);
+    : split_projection(text);
   const has_appendix = Boolean(appendix.trim());
 
   const result = bundle ? bundle.pagination : paginate(body, "");
@@ -544,7 +544,7 @@ export function build_page_range_response(
     throw new Error(`Invalid page number ${start}: page numbers must be positive integers.`);
   if (start > end)
     throw new Error(`end page (${end}) cannot be less than start page (${start})`);
-  const [body, appendix] = bundle ? [bundle.body, bundle.appendix] : split_structural_appendix(text);
+  const [body, appendix] = bundle ? [bundle.body, bundle.appendix] : split_projection(text);
   const has_appendix = Boolean(appendix.trim());
   const result = bundle ? bundle.pagination : paginate(body, "");
   const total_pages = result.total_pages;
@@ -589,7 +589,7 @@ export function build_outline_response(
   outline_verbose: boolean = false,
   paragraph_offsets: Map<any, [number, number]> | null = null,
 ): ToolResult {
-  const [body] = split_structural_appendix(projected_text);
+  const [body] = split_projection(projected_text);
   const pagination_result = paginate(body, "");
 
   const nodes = extract_outline(
@@ -664,7 +664,7 @@ export function build_appendix_response(
 ): ToolResult {
   const appendix = bundle
     ? bundle.appendix
-    : split_structural_appendix(text)[1];
+    : split_projection(text)[1];
 
   if (!appendix.trim()) {
     const ui_markdown =
@@ -773,7 +773,7 @@ export function build_search_response(
   let match_offset = opts?.match_offset ?? 0;
   if (match_offset < 0) match_offset = 0;
 
-  const body = bundle ? bundle.body : split_structural_appendix(text)[0];
+  const body = bundle ? bundle.body : split_projection(text)[0];
   const flags = search_case_sensitive ? "g" : "gi";
 
   const literalMatches = (): Array<{ start: number; end: number }> =>

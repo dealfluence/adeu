@@ -10,6 +10,12 @@ import { DocCache } from "./doc-cache.js";
 const FIXTURE = resolve(__dirname, "../tests/fixtures/gap2_minimal_repro.docx");
 const FIXTURE2 = resolve(__dirname, "../tests/fixtures/gap1_minimal_repro.docx");
 const FIXTURE3 = resolve(__dirname, "../tests/fixtures/gap1_deleted_row_repro.docx");
+// The only conformance fixture with a structural appendix — the one shape that
+// tells the two body derivations apart (see the bundle-parity test below).
+const APPENDIX_FIXTURE = resolve(
+  __dirname,
+  "../../../../shared/conformance/fixtures/unicode.docx",
+);
 
 const tmp = mkdtempSync(join(tmpdir(), "adeu-doccache-"));
 afterAll(() => {
@@ -44,6 +50,29 @@ describe("DocCache", () => {
     const doc = await DocumentObject.load(readFileSync(FIXTURE));
     const fresh = _extractTextFromDoc(doc, false, true) as string;
     expect(entry.raw_text).toBe(fresh);
+  });
+
+  // Python's cache projects with include_appendix=False (doc_cache.py:159-164),
+  // so its body never sees the "\n\n---" rule the appendix block opens with
+  // (domain.ts:369-372). Node projects WITH the appendix and splits it off, and
+  // split_structural_appendix only rstrips whitespace — in BOTH engines
+  // (pagination.ts:77, pagination.py:163), so the rule stays on the body side
+  // and Node served 556 chars where Python serves 551. The bundle body is what
+  // page='all' returns and what the response-budget guard measures, so the
+  // 5-char gap changed both the payload and the refusal threshold.
+  it("bundles the body Python's cache holds — no appendix separator", async () => {
+    const entry = await cache.get(
+      APPENDIX_FIXTURE,
+      readerFor(APPENDIX_FIXTURE),
+      loadDoc,
+    );
+    const doc = await DocumentObject.load(readFileSync(APPENDIX_FIXTURE));
+    const appendix_free = _extractTextFromDoc(doc, false, false) as string;
+
+    expect(entry.raw_bundle.appendix).toContain("READONLY_BOUNDARY_START");
+    expect(entry.raw_bundle.body).toBe(appendix_free);
+    expect(entry.raw_bundle.body.length).toBe(551);
+    expect(entry.raw_bundle.body.endsWith("---")).toBe(false);
   });
 
   it("a rewritten file (new mtime/size) re-ingests; an untouched one does not", async () => {

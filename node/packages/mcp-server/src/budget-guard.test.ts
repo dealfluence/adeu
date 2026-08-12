@@ -28,9 +28,11 @@ const RECIPE = [
 const OVERSIZED = fixturePath("long_5pages");
 
 /**
- * The unicode conformance fixture: a 556-char body plus a 374-char structural
- * appendix — 932 chars of raw projection. A budget BETWEEN the two pins which
- * string the guard measures.
+ * The unicode conformance fixture: a 551-char body plus a structural appendix
+ * — 932 chars of raw projection. Python measures 551 here (its cached text is
+ * projected with include_appendix=False, doc_cache.py:159-164), so a budget
+ * band around 551 pins BOTH which string the guard measures and that Node
+ * measures the same number of characters as Python.
  */
 const APPENDIX_DOC = fixturePath("unicode");
 
@@ -196,26 +198,45 @@ describe("read_docx response-budget guard — ADEU_MAX_RESPONSE_CHARS", () => {
 });
 
 describe("read_docx response-budget guard — structural appendix", () => {
-  let tuned: TestServer;
+  let served: TestServer;
+  let refused: TestServer;
 
   beforeAll(async () => {
-    tuned = await startWithBudget("budget_guard_appendix", "700");
+    served = await startWithBudget("budget_guard_appendix", "553");
+    refused = await startWithBudget("budget_guard_appendix_tight", "550");
   }, 30000);
 
-  afterAll(() => tuned?.stop());
+  afterAll(() => {
+    served?.stop();
+    refused?.stop();
+  });
 
   it("9. measures the body it returns, not the appendix it withholds", async () => {
-    const res = await readAll(tuned, APPENDIX_DOC);
+    const res = await readAll(served, APPENDIX_DOC);
 
-    // 556-char body <= 700 < 932-char raw projection: measuring the raw
+    // 551-char body <= 553 < 932-char raw projection: measuring the raw
     // projection refused a document Python serves, because Python's mode='full'
     // text is projected with include_appendix=False (doc_cache.py:159-164).
     expect(res.isError).toBeFalsy();
     const text = textOf(res);
     expect(text).not.toContain(REFUSAL);
     expect(text).toContain("# Schédule A — Definitions");
-    // The payload really is body-only, so the appendix really is not returned.
+    // The payload really is body-only, so the appendix really is not returned —
+    // nor the "\n\n---" rule that opens the appendix block.
     expect(text).not.toContain("READONLY_BOUNDARY_START");
+    expect(text.trimEnd().endsWith("---")).toBe(false);
+  });
+
+  it("9b. one char under the body length refuses, reporting Python's count", async () => {
+    const res = await readAll(refused, APPENDIX_DOC);
+
+    // The size the refusal advertises is the size Python advertises: a 5-char
+    // Node-only appendix separator on the body made this fixture 556 chars
+    // here and 551 there, so a 553-char budget disagreed across engines.
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain(
+      "total size (551 chars, ~137 tokens) exceeds response budget limit (550 chars).",
+    );
   });
 });
 
