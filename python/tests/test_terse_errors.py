@@ -94,7 +94,7 @@ def test_terse_stale_id_error_lists_at_most_eight_ids():
     assert "Chg:12" in err_full
 
 
-def test_cli_apply_accepts_terse_errors_flag(tmp_path):
+def test_cli_apply_accepts_terse_errors_flag(tmp_path, capsys):
     # Create a docx with ambiguous target text
     doc = Document()
     for _ in range(5):
@@ -112,19 +112,34 @@ def test_cli_apply_accepts_terse_errors_flag(tmp_path):
 
     out_path = tmp_path / "out.docx"
 
-    class Args:
+    class DefaultArgs:
         original = orig_path
         changes = changes_json
         output = out_path
         author = "Test"
-        json = True
+        json = False
         live = False
         partial = False
-        terse_errors = True
+        terse_errors = False
         report = "standard"
         allow_major_deletions = False
 
-    with pytest.raises(SystemExit) as exc_info:
-        handle_apply(Args())
+    class TerseArgs(DefaultArgs):
+        terse_errors = True
 
-    assert exc_info.value.code == 1
+    # Default run (terse_errors=False)
+    with pytest.raises(SystemExit) as exc_info_default:
+        handle_apply(DefaultArgs())
+    assert exc_info_default.value.code == 1
+    err_default = capsys.readouterr().err
+
+    # Terse run (terse_errors=True)
+    with pytest.raises(SystemExit) as exc_info_terse:
+        handle_apply(TerseArgs())
+    assert exc_info_terse.value.code == 1
+    err_terse = capsys.readouterr().err
+
+    assert "RECOMMENDED:" in err_default
+    assert "RECOMMENDED:" not in err_terse
+    assert len(err_terse) < len(err_default)
+    assert approx_tokens(err_terse) < approx_tokens(err_default)
