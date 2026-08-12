@@ -394,7 +394,9 @@ class RedlineEngine:
         doc_stream: BytesIO,
         author: str = "Adeu AI",
         id_discovery_hint: Optional[str] = None,
+        terse_errors: bool = False,
     ):
+        self.terse_errors = terse_errors
         # Surface-aware advice for "how do I list the current Chg:/Com: ids":
         # the CLI default points at CLI commands; the MCP layer passes a
         # read_docx-based hint because MCP callers cannot run the CLI
@@ -2154,6 +2156,7 @@ class RedlineEngine:
                         target_text=edit.target_text,
                         haystack=active_text,
                         match_positions=positions,
+                        terse=self.terse_errors,
                     )
                 )
 
@@ -2462,7 +2465,12 @@ class RedlineEngine:
         """
         if snapshot is None:
             return
-        self.__init__(snapshot, author=self.author, id_discovery_hint=self.id_discovery_hint)  # type: ignore[misc]
+        self.__init__(  # type: ignore[misc]
+            snapshot,
+            author=self.author,
+            id_discovery_hint=self.id_discovery_hint,
+            terse_errors=self.terse_errors,
+        )
 
     @staticmethod
     def _report_new_text(edit: Any) -> str:
@@ -4955,8 +4963,9 @@ class RedlineEngine:
         noun = "comment" if len(ids) == 1 else "comments"
         return f"{noun} {rendered}"
 
-    @staticmethod
-    def _format_id_list(ids: List[str], prefix: str, limit: int = 20) -> str:
+    def _format_id_list(self, ids: List[str], prefix: str, limit: Optional[int] = None) -> str:
+        if limit is None:
+            limit = 8 if getattr(self, "terse_errors", False) else 20
         shown = ids[:limit]
         rendered = ", ".join(f"{prefix}{i}" for i in shown)
         if len(ids) > len(shown):

@@ -963,7 +963,7 @@ def _load_docx_or_exit(path: Path):
         raise
 
 
-def _open_redline_engine_or_exit(path: Path, author: "str | None" = None) -> RedlineEngine:
+def _open_redline_engine_or_exit(path: Path, author: "str | None" = None, terse_errors: bool = False) -> RedlineEngine:
     """Opens a RedlineEngine on `path` through the single shared error path."""
     _require_input_file(path)
     import zipfile
@@ -972,8 +972,8 @@ def _open_redline_engine_or_exit(path: Path, author: "str | None" = None) -> Red
         with open(path, "rb") as f:
             stream = BytesIO(f.read())
         if author is not None:
-            return RedlineEngine(stream, author=author)
-        return RedlineEngine(stream)
+            return RedlineEngine(stream, author=author, terse_errors=terse_errors)
+        return RedlineEngine(stream, terse_errors=terse_errors)
     except SystemExit:
         raise
     except Exception as e:
@@ -1241,7 +1241,11 @@ def handle_apply(args):
 
     if not args.json:
         print(f"Applying {len(changes)} changes to {args.original.name}...", file=sys.stderr)
-    engine = _open_redline_engine_or_exit(args.original, author=args.author)
+    engine = _open_redline_engine_or_exit(
+        args.original,
+        author=args.author,
+        terse_errors=getattr(args, "terse_errors", False),
+    )
     try:
         stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
     except BatchValidationError as e:
@@ -2098,6 +2102,11 @@ def _main_impl():
         "--atomic",
         action="store_true",
         help="Reject whole batch if any edit fails (default).",
+    )
+    p_apply.add_argument(
+        "--terse-errors",
+        action="store_true",
+        help="Reduce ambiguity examples (2 max, ±25 chars context) and listed stale IDs (8 max) in error payloads.",
     )
     p_apply.add_argument(
         "--json",

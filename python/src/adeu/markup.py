@@ -363,6 +363,7 @@ def format_ambiguity_error(
     target_text: str,
     haystack: str,
     match_positions: list[tuple[int, int]],
+    terse: bool = False,
 ) -> str:
     """
     Builds a uniformly-formatted ambiguity error message used by both the disk
@@ -373,8 +374,9 @@ def format_ambiguity_error(
         target_text: the search string the agent provided.
         haystack: the text the search was performed against.
         match_positions: list of (start, end) tuples for ALL matches found.
-            The function shows up to AMBIGUITY_EXAMPLES_CAP examples and
-            indicates how many additional matches are not shown.
+            The function shows up to AMBIGUITY_EXAMPLES_CAP examples (or 2 if terse)
+            and indicates how many additional matches are not shown.
+        terse: if True, caps examples to 2 and context window to ±25 characters.
 
     Returns:
         A multi-line error string suitable for inclusion in the
@@ -388,7 +390,10 @@ def format_ambiguity_error(
     if total < 2:
         raise ValueError(f"format_ambiguity_error requires at least 2 matches, got {total}")
 
-    shown = match_positions[:AMBIGUITY_EXAMPLES_CAP]
+    cap = 2 if terse else AMBIGUITY_EXAMPLES_CAP
+    context_chars = 25 if terse else AMBIGUITY_CONTEXT_CHARS
+
+    shown = match_positions[:cap]
     remaining = total - len(shown)
 
     lines = [
@@ -397,8 +402,8 @@ def format_ambiguity_error(
     ]
 
     for i, (start, end) in enumerate(shown, start=1):
-        pre_start = max(0, start - AMBIGUITY_CONTEXT_CHARS)
-        post_end = min(len(haystack), end + AMBIGUITY_CONTEXT_CHARS)
+        pre_start = max(0, start - context_chars)
+        post_end = min(len(haystack), end + context_chars)
 
         pre_context = haystack[pre_start:start].replace("\n", " ")
         post_context = haystack[end:post_end].replace("\n", " ")
@@ -416,25 +421,23 @@ def format_ambiguity_error(
     if remaining > 0:
         lines.append(f"    ... and {remaining} more occurrence(s) not shown.")
 
-    # Tell the agent EXACTLY how to re-call. Without this, agents loop forever
-    # refining target_text/regex because they never learn that match_mode is the
-    # built-in escape hatch for genuine ambiguity. The safe strategy (more
-    # context) comes first: blindly switching to "first"/"all" has silently
-    # modified unrelated occurrences — dates, section numbers — in real use
-    # (QA C1), so those options carry an explicit verification warning.
-    lines.append("  To resolve, re-send this edit using ONE of these strategies:")
-    lines.append(
-        "    1. RECOMMENDED: Provide more surrounding context in your target_text to uniquely "
-        'identify a single location (keep the default "match_mode": "strict").'
-    )
-    lines.append(
-        f'    2. Set "match_mode": "all" to modify ALL {total} occurrences — only after verifying '
-        "from the occurrence list above that EVERY occurrence should change."
-    )
-    lines.append(
-        '    3. Set "match_mode": "first" to modify only the FIRST occurrence — only after verifying '
-        "the first occurrence above is the one you intend to change."
-    )
+    # Tell the agent how to re-call.
+    if terse:
+        lines.append('  To resolve, re-send with more target_text context, or match_mode "first"/"all".')
+    else:
+        lines.append("  To resolve, re-send this edit using ONE of these strategies:")
+        lines.append(
+            "    1. RECOMMENDED: Provide more surrounding context in your target_text to uniquely "
+            'identify a single location (keep the default "match_mode": "strict").'
+        )
+        lines.append(
+            f'    2. Set "match_mode": "all" to modify ALL {total} occurrences — only after verifying '
+            "from the occurrence list above that EVERY occurrence should change."
+        )
+        lines.append(
+            '    3. Set "match_mode": "first" to modify only the FIRST occurrence — only after verifying '
+            "the first occurrence above is the one you intend to change."
+        )
 
     return "\n".join(lines)
 
@@ -501,6 +504,7 @@ def apply_edits_to_markdown(
     highlight_only: bool = False,
     edit_reports: Optional[List[Dict[str, Any]]] = None,
     indices: Optional[List[int]] = None,
+    terse: bool = False,
 ) -> str:
     """
     Applies edits to Markdown text and returns CriticMarkup-annotated output.
@@ -578,6 +582,7 @@ def apply_edits_to_markdown(
                 target_text=target,
                 haystack=markdown_text,
                 match_positions=spans,
+                terse=terse,
             )
             logger.warning(msg)
             failed_indices.add(idx)
