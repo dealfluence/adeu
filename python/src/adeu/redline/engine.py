@@ -2592,6 +2592,10 @@ class RedlineEngine:
         ``w:endnotes``, ...) are plain lxml elements that bind no ``w`` prefix,
         so ``//*[@w:author]`` raises ``XPathEvalError`` on them, while
         ``BaseOxmlElement.xpath()`` accepts no ``namespaces`` argument.
+
+        ``word/people.xml`` is skipped: its ``w15:person`` entries are Word's
+        persona registry, which survives accepting every revision, so its
+        ``w:author`` attributes are metadata rather than pending revisions.
         """
         authors: set[str] = set()
         author_attr = qn("w:author")
@@ -2623,6 +2627,8 @@ class RedlineEngine:
             # The main part is already covered by the live body scan above,
             # which also sees edits not yet serialized to its blob.
             if part is self.doc.part or not str(part.content_type).endswith("+xml"):
+                continue
+            if str(part.partname).lower().endswith("/people.xml"):
                 continue
             try:
                 root = parse_xml(part.blob)

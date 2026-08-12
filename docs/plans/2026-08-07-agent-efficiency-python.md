@@ -356,10 +356,12 @@
 
 ### Task 17 — Item C2: Gate Author-Name Bypass
 **Goal.** Emit warning when acting author matches an author with pending revisions in the document.
-**Failed Verify Cycles:** 2 (opus-coder cycle 1)
+**Failed Verify Cycles:** 4 (opus-coder cycle 3)
 **Attempt Ledger:**
 - attempt 1: Added get_pending_revision_authors() to engine.py and updated CLI and MCP response summaries, created test_author_impersonation_gate.py -> VERDICT: FAIL (get_pending_revision_authors missed w:moveTo / w:moveFrom tracked move elements)
 - attempt 2: Added moveTo and moveFrom tags to get_pending_revision_authors -> VERDICT: FAIL (hardcoded tag list missed w:tblPrChange, w:cellIns, w:cellDel, etc; MCP response warning was unasserted by tests)
+- attempt 3 (@opus-coder): Refactored get_pending_revision_authors to use generic .//*[@w:author] XPath search without hardcoded tag lists -> VERDICT: FAIL (root.xpath raised XPathEvalError on unregistered roots like footnotes/endnotes which were silently caught by except Exception)
+- attempt 4 (@opus-coder): Replaced root.xpath with prefix-free root.iter() attribute scan in collect() helper -> VERDICT: FAIL (scanned word/people.xml containing w15:person w:author="Zed", causing false positive on clean docs with accepted revisions)
 **Files.** `python/src/adeu/redline/engine.py`, `python/src/adeu/cli.py`, `python/src/adeu/mcp_components/tools/document.py`.
 **Test first.** `python/tests/test_author_impersonation_gate.py` (new):
 1. `test_warning_when_acting_author_impersonates_a_pending_author`: warning emitted on author name match.

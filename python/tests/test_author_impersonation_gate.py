@@ -97,14 +97,43 @@ def _create_docx_with_table_revision(author: str, marker: str = "tblPrChange") -
     return stream
 
 
+def _splice_part(source: bytes, part_name: str, content_type: str, rel_type: str, data: bytes) -> io.BytesIO:
+    """Adds `part_name` to a saved package with its content-type override and relationship.
+
+    python-docx exposes no API for footnote/endnote/people parts, so they are
+    spliced into the saved zip directly.
+    """
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(source)) as zin,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            item_data = zin.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                item_data = item_data.replace(
+                    b"</Types>",
+                    f'<Override PartName="/{part_name}" ContentType="{content_type}"/></Types>'.encode("utf-8"),
+                )
+            elif item.filename == "word/_rels/document.xml.rels":
+                target = part_name.rsplit("/", 1)[-1]
+                item_data = item_data.replace(
+                    b"</Relationships>",
+                    f'<Relationship Id="rId900" Type="{rel_type}" Target="{target}"/></Relationships>'.encode("utf-8"),
+                )
+            zout.writestr(item, item_data)
+        zout.writestr(part_name, data)
+
+    out.seek(0)
+    return out
+
+
 def _create_docx_with_notes_revision(author: str, part: str = "footnotes") -> io.BytesIO:
     """Builds a docx whose only pending revision lives in a notes part.
 
-    python-docx exposes no API for footnote/endnote parts, so the part, its
-    content-type override, and its relationship are spliced into the saved
-    package. `w:footnotes` / `w:endnotes` are not registered oxml element
-    classes, so their parsed roots are plain lxml elements with no Open XML
-    namespace mapping of their own.
+    `w:footnotes` / `w:endnotes` are not registered oxml element classes, so
+    their parsed roots are plain lxml elements with no Open XML namespace
+    mapping of their own.
     """
     singular = part.rstrip("s")
     notes_xml = (
@@ -115,35 +144,37 @@ def _create_docx_with_notes_revision(author: str, part: str = "footnotes") -> io
         f"</w:p></w:{singular}></w:{part}>"
     ).encode("utf-8")
 
-    part_name = f"word/{part}.xml"
-    content_type = f"application/vnd.openxmlformats-officedocument.wordprocessingml.{part}+xml"
-    rel_type = f"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{part}"
+    return _splice_part(
+        _create_clean_docx_stream().getvalue(),
+        f"word/{part}.xml",
+        f"application/vnd.openxmlformats-officedocument.wordprocessingml.{part}+xml",
+        f"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{part}",
+        notes_xml,
+    )
 
-    source = _create_clean_docx_stream().getvalue()
-    out = io.BytesIO()
-    with (
-        zipfile.ZipFile(io.BytesIO(source)) as zin,
-        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout,
-    ):
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == "[Content_Types].xml":
-                data = data.replace(
-                    b"</Types>",
-                    f'<Override PartName="/{part_name}" ContentType="{content_type}"/></Types>'.encode("utf-8"),
-                )
-            elif item.filename == "word/_rels/document.xml.rels":
-                data = data.replace(
-                    b"</Relationships>",
-                    f'<Relationship Id="rId900" Type="{rel_type}" Target="{part}.xml"/></Relationships>'.encode(
-                        "utf-8"
-                    ),
-                )
-            zout.writestr(item, data)
-        zout.writestr(part_name, notes_xml)
 
-    out.seek(0)
-    return out
+def _create_docx_with_people_part(author: str) -> io.BytesIO:
+    """Builds a clean docx carrying Word's persona registry for `author`.
+
+    `word/people.xml` is metadata: Word keeps `w15:person` entries around long
+    after the matching revisions were accepted, so its `w:author` attributes
+    say nothing about pending revisions.
+    """
+    people_xml = (
+        '<w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" '
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w15:person w:author="{author}">'
+        f'<w15:presenceInfo w15:providerId="None" w15:userId="{author}"/>'
+        "</w15:person></w15:people>"
+    ).encode("utf-8")
+
+    return _splice_part(
+        _create_clean_docx_stream().getvalue(),
+        "word/people.xml",
+        "application/vnd.ms-word.people+xml",
+        "http://schemas.microsoft.com/office/2011/relationships/people",
+        people_xml,
+    )
 
 
 @pytest.mark.parametrize("part", ["footnotes", "endnotes"])
@@ -243,6 +274,19 @@ def test_no_warning_on_a_clean_document():
 
     # Acting author is "Alice"
     engine = RedlineEngine(doc_stream, author="Alice")
+    edit = ModifyText(target_text="baseline text", new_text="updated text")
+    stats = engine.process_batch([edit])
+
+    assert stats.get("author_impersonation_warning") is None
+
+
+def test_no_warning_when_only_the_persona_registry_names_the_author():
+    # Clean document whose only mention of "Zed" is the word/people.xml persona registry
+    doc_stream = _create_docx_with_people_part("Zed")
+
+    engine = RedlineEngine(doc_stream, author="Zed")
+    assert "Zed" not in engine.get_pending_revision_authors()
+
     edit = ModifyText(target_text="baseline text", new_text="updated text")
     stats = engine.process_batch([edit])
 
