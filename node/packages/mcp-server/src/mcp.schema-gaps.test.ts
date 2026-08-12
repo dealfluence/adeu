@@ -540,6 +540,55 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
   });
 
   // ======================================================================
+  // read_docx — search paging knobs are INTEGER counts, like Python's
+  // ======================================================================
+  describe("read_docx: max_matches / match_offset are integers", () => {
+    it("publishes type 'integer' for max_matches and match_offset, matching the Python authority", () => {
+      const props = getTool("read_docx").inputSchema.properties;
+
+      expect(props.max_matches).toBeDefined();
+      expect(props.max_matches.type).toBe("integer");
+      expect(props.max_matches.default).toBe(20);
+
+      expect(props.match_offset).toBeDefined();
+      expect(props.match_offset.type).toBe("integer");
+      expect(props.match_offset.default).toBe(0);
+    });
+
+    it("rejects a non-integer match_offset instead of paginating from 2.5", async () => {
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: pdbFixture,
+          search_query: "Confidential",
+          match_offset: 2.5,
+        },
+      });
+
+      const isValidationError =
+        res.error?.code === -32602 || res.result?.isError === true;
+      expect(isValidationError).toBe(true);
+    });
+
+    it("rejects a non-integer max_matches", async () => {
+      const res = await rpc("tools/call", {
+        name: "read_docx",
+        arguments: {
+          reasoning: "test",
+          file_path: pdbFixture,
+          search_query: "Confidential",
+          max_matches: 2.5,
+        },
+      });
+
+      const isValidationError =
+        res.error?.code === -32602 || res.result?.isError === true;
+      expect(isValidationError).toBe(true);
+    });
+  });
+
+  // ======================================================================
   // optional reasoning parameter on every tool
   // ======================================================================
   describe("optional reasoning parameter on all tools", () => {

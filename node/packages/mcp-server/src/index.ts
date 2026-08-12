@@ -453,12 +453,14 @@ registerAppTool(
         .describe("Set to false to perform case-insensitive matching."),
       max_matches: z.coerce
         .number()
+        .int()
         .default(20)
         .describe(
           "For search queries: maximum number of search matches to return (default 20).",
         ),
       match_offset: z.coerce
         .number()
+        .int()
         .default(0)
         .describe(
           "For search queries: 0-based match offset to start search results from for pagination (default 0).",
