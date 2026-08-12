@@ -2578,26 +2578,24 @@ class RedlineEngine:
         return " > ".join(path) if path else "", page
 
     def get_pending_revision_authors(self) -> set[str]:
-        """Collects author names from all pending revisions and comments."""
+        """Collects author names from all pending revisions and comments.
+
+        The ``w:author`` attribute *is* the signal: every tracked-change and
+        comment marker carries it (``w:ins``, ``w:del``, ``w:moveTo``,
+        ``w:pPrChange``, ``w:tblPrChange``, ``w:cellIns``, ``w:cellDel``,
+        ``w:comment``, ...). Matching on a list of tag names instead silently
+        drops the table/row/cell revision markers, so we collect the attribute
+        wherever it appears — in the live body and in every other XML part.
+        """
         authors: set[str] = set()
 
-        for el in self.doc.element.xpath("//*[@w:author]"):
-            tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-            if tag in (
-                "ins",
-                "del",
-                "moveTo",
-                "moveFrom",
-                "rPrChange",
-                "pPrChange",
-                "sectPrChange",
-                "tcPrChange",
-                "trPrChange",
-                "comment",
-            ):
+        def collect(root: Any) -> None:
+            for el in root.xpath("//*[@w:author]"):
                 author = el.get(qn("w:author"))
                 if author:
                     authors.add(author)
+
+        collect(self.doc.element)
 
         try:
             comments_data = self.comments_manager.extract_comments_data()
@@ -2610,36 +2608,15 @@ class RedlineEngine:
 
         try:
             package = getattr(self.doc.part, "package", None)
-            if package:
-                for part in package.parts:
-                    if part.content_type in (
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
-                    ):
-                        try:
-                            part_xml = parse_xml(part.blob)
-                            for el in part_xml.xpath("//*[@w:author]"):
-                                tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-                                if tag in (
-                                    "ins",
-                                    "del",
-                                    "moveTo",
-                                    "moveFrom",
-                                    "rPrChange",
-                                    "pPrChange",
-                                    "sectPrChange",
-                                    "tcPrChange",
-                                    "trPrChange",
-                                    "comment",
-                                ):
-                                    author = el.get(qn("w:author"))
-                                    if author:
-                                        authors.add(author)
-                        except Exception:
-                            pass
+            for part in getattr(package, "parts", None) or ():
+                # The main part is already covered by the live body scan above,
+                # which also sees edits not yet serialized to its blob.
+                if part is self.doc.part or not str(part.content_type).endswith("+xml"):
+                    continue
+                try:
+                    collect(parse_xml(part.blob))
+                except Exception:
+                    continue
         except Exception:
             pass
 
