@@ -1,5 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DocumentObject, extract_comments_data } from "@adeu/core";
 import { coerceChangeItemInPlace, CHANGE_ITEM_SCHEMA } from "./index.js";
+import { startTestServer, TestServer } from "./test-rpc.js";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+
+/** Concatenated `w:t` text of a paragraph, in document order. */
+function paragraphText(p: Element): string {
+  return Array.from(p.getElementsByTagName("w:t"))
+    .map((t) => t.textContent || "")
+    .join("");
+}
 
 describe("comment-only modify boundary normalization", () => {
   it("populates new_text = target_text when type is modify, new_text is missing, and non-empty comment is present (including heading syntax)", () => {
@@ -40,5 +54,102 @@ describe("comment-only modify boundary normalization", () => {
     coerceChangeItemInPlace(item);
     expect(item.type).toBeUndefined();
     expect(item.new_text).toBeUndefined();
+  });
+});
+
+// The unit cases above prove WHERE the normalisation happens; these two prove
+// what it must never cause downstream — the guardrails the task exists to
+// protect (heading-hash parity through `stripMatchingHeadingHashes`, and the
+// never-a-w:del invariant of spec §10) asserted on the SAVED document.
+describe("comment-only modify through process_document_batch (live MCP server)", () => {
+  let server: TestServer;
+  let reportText: string;
+  let savedDoc: DocumentObject;
+
+  beforeAll(async () => {
+    server = await startTestServer("comment_only_modify");
+
+    // Fixture: a Heading 2 "Term" (which `read_docx` renders as "## Term", the
+    // form an agent copies into target_text) plus one ordinary paragraph.
+    const initialPath = resolve(
+      __dirname,
+      "../../../../shared/fixtures/initial.docx",
+    );
+    const doc = await DocumentObject.load(readFileSync(initialPath));
+    const body = doc.element;
+    while (body.firstChild) body.removeChild(body.firstChild);
+    const xmlDoc = body.ownerDocument!;
+
+    const heading = xmlDoc.createElement("w:p");
+    const pPr = xmlDoc.createElement("w:pPr");
+    const pStyle = xmlDoc.createElement("w:pStyle");
+    pStyle.setAttribute("w:val", "Heading2");
+    pPr.appendChild(pStyle);
+    heading.appendChild(pPr);
+    const hRun = xmlDoc.createElement("w:r");
+    const hText = xmlDoc.createElement("w:t");
+    hText.textContent = "Term";
+    hRun.appendChild(hText);
+    heading.appendChild(hRun);
+    body.appendChild(heading);
+
+    const para = xmlDoc.createElement("w:p");
+    const pRun = xmlDoc.createElement("w:r");
+    const pText = xmlDoc.createElement("w:t");
+    pText.textContent = "Normal paragraph text.";
+    pRun.appendChild(pText);
+    para.appendChild(pRun);
+    body.appendChild(para);
+
+    const headingDocPath = server.tempOut("heading_doc");
+    writeFileSync(headingDocPath, await doc.save());
+    const outPath = server.tempOut("heading_out");
+
+    // The wire payload under test: no `new_text` at all.
+    const res = await server.callTool("process_document_batch", {
+      reasoning: "annotate the heading without changing its text",
+      original_docx_path: headingDocPath,
+      author_name: "Reviewer AI",
+      changes: [
+        {
+          type: "modify",
+          target_text: "## Term",
+          comment: "defined term needs a cross-reference",
+        },
+      ],
+      output_path: outPath,
+    });
+
+    expect(res.isError).toBeFalsy();
+    reportText = res.content[0].text;
+    savedDoc = await DocumentObject.load(readFileSync(outPath));
+  }, 60000);
+
+  afterAll(() => {
+    server?.stop();
+  });
+
+  it("heading parity: the batch applies, the rationale lands as a comment, and the heading keeps its text and style", () => {
+    expect(reportText).toContain("Edits: 1 applied");
+
+    const comments = Object.values(extract_comments_data(savedDoc.pkg));
+    expect(
+      comments.some((c: any) =>
+        String(c.text).includes("defined term needs a cross-reference"),
+      ),
+    ).toBe(true);
+
+    // `stripMatchingHeadingHashes` only runs when new_text is present, so a
+    // boundary-normalised item is what keeps the "##" out of the heading.
+    const heading = savedDoc.element.getElementsByTagName("w:p")[0];
+    expect(paragraphText(heading)).toBe("Term");
+    expect(
+      heading.getElementsByTagName("w:pStyle")[0]?.getAttribute("w:val"),
+    ).toBe("Heading2");
+  });
+
+  it("regression (spec §10): a comment-only modify never produces a tracked deletion", () => {
+    expect(savedDoc.element.getElementsByTagName("w:del").length).toBe(0);
+    expect(savedDoc.element.getElementsByTagName("w:ins").length).toBe(0);
   });
 });
