@@ -39,6 +39,7 @@ from adeu.text_revision import (
     get_default_author as _default_author,
 )
 from adeu.utils.console import configure_cli_streams, dynamic_stderr
+from adeu.utils.docx import suggest_sibling_docx
 from adeu.utils.text import batch_details_header
 
 
@@ -227,16 +228,13 @@ def _cli_error(
 
 
 def _print_sandbox_warning_and_exit(path: Path, exit_code: int = 1):
+    siblings = suggest_sibling_docx(path)
+    hint = f"Did you mean: {', '.join(siblings)}?" if siblings else None
     _cli_error(
         "file_not_found",
         f"File not found: {path}",
         exit_code=exit_code,
-        hint=(
-            "Note: If you are running in a sandboxed/containerized environment, "
-            "the host application or MCP server may not have access to your local workspace files. "
-            "You can resolve this by installing Adeu directly inside your sandboxed environment using "
-            "'uv tool install adeu' and executing the commands via the CLI."
-        ),
+        hint=hint,
     )
 
 

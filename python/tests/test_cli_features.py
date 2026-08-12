@@ -726,7 +726,7 @@ def test_cli_accept_all_missing_file(capsys):
         assert exc_info.value.code == 1
 
     captured = capsys.readouterr()
-    assert "sandboxed" in captured.err
+    assert "File not found" in captured.err
 
 
 def test_cli_debug_logs_go_to_stderr_only(capsys):

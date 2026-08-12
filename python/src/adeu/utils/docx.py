@@ -5,6 +5,7 @@ Contains normalization logic ported from Open-Xml-PowerTools concepts.
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterator, NamedTuple, Optional, Tuple, Union, cast
 
 import structlog
@@ -1483,6 +1484,22 @@ def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
             sdt_content = child.find(qn("w:sdtContent"))
             if sdt_content is not None:
                 yield from _iter_block_children(sdt_content)
+
+
+def suggest_sibling_docx(path: Path) -> list[str]:
+    """Finds up to 5 sibling .docx files in `path.parent`."""
+    import difflib
+
+    try:
+        parent = path.parent
+        if not parent.exists() or not parent.is_dir():
+            return []
+        siblings = sorted(f.name for f in parent.iterdir() if f.is_file() and f.suffix.lower() == ".docx")
+        if not siblings:
+            return []
+        return difflib.get_close_matches(path.name, siblings, n=5, cutoff=0.0)
+    except (OSError, ValueError):
+        return []
 
 
 def strip_bom_from_docx_bytes(data: bytes) -> bytes:

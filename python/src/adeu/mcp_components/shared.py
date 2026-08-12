@@ -11,7 +11,7 @@ MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
 # must point at the MCP tool instead (QA 2026-07-23 F11). Passed to
 # RedlineEngine(id_discovery_hint=...) by every MCP-surface engine construction.
 MCP_ID_DISCOVERY_HINT = (
-    "Call `read_docx` on the document again to list the current change (Chg:) "
+    "Call `read_docx` with `mode='changes'` on the document again to list the current change (Chg:) "
     "and comment (Com:) ids — ids shift between document states."
 )
 

@@ -4901,8 +4901,7 @@ class RedlineEngine:
         comment_ids = self._existing_comment_ids()
         has_prefix = raw_id.startswith("Chg:") or raw_id.startswith("Com:")
         find_hint = self.id_discovery_hint or (
-            "Run `adeu markup <file> -i` or `adeu extract <file>` to list the current "
-            "change (Chg:) and comment (Com:) ids."
+            "Run `adeu extract <file> --mode changes` to list the current change (Chg:) and comment (Com:) ids."
         )
         prefix = f"- Action {batch_idx + 1} Failed: " if batch_idx is not None else "- Failed to apply action: "
 
