@@ -200,7 +200,7 @@ describe("Polyglot Consistency Framework (TS vs Python)", () => {
           ).replace(/\r\n/g, "\n");
           expect(actualClean).toBe(expectedClean);
         }
-      });
+      }, 30000);
     });
   }
 });

@@ -45,7 +45,7 @@ import {
 import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
 
-import { MARKDOWN_UI_URI, handleServerCliArgs } from "./shared.js";
+import { MARKDOWN_UI_URI, MCP_ID_DISCOVERY_HINT, handleServerCliArgs } from "./shared.js";
 import { attachProtocolAdapter } from "./protocol-adapter.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
@@ -618,7 +618,9 @@ registerAppTool(
           const buf = readBytes();
           const doc = await loadDocxOrThrow(buf, file_path);
           comments_data = extract_comments_data(doc.pkg);
-          existing_change_ids = new RedlineEngine(doc).existing_change_ids();
+          existing_change_ids = new RedlineEngine(doc, "Adeu AI (TS)", {
+            id_discovery_hint: MCP_ID_DISCOVERY_HINT,
+          }).existing_change_ids();
         } catch {
           // Best-effort enrichment, exactly as Python (document.py:436-451):
           // a ledger without comment authors still beats no ledger.
@@ -1052,7 +1054,9 @@ server.registerTool(
         const buf = readFileBytesOrThrow(original_docx_path);
         doc = await loadDocxOrThrow(buf, original_docx_path);
       }
-      const engine = new RedlineEngine(doc, author_name);
+      const engine = new RedlineEngine(doc, author_name, {
+        id_discovery_hint: MCP_ID_DISCOVERY_HINT,
+      });
 
       let stats;
       try {
@@ -1227,7 +1231,9 @@ server.registerTool(
 
       const buf = readFileBytesOrThrow(docx_path);
       const doc = await loadDocxOrThrow(buf, docx_path);
-      const engine = new RedlineEngine(doc);
+      const engine = new RedlineEngine(doc, "Adeu AI (TS)", {
+        id_discovery_hint: MCP_ID_DISCOVERY_HINT,
+      });
 
       // Revision-mark counts straight from the engine (AI_CONTEXT
       // "Accept-All Counts Are Revision MARKS"): a no-op must say so instead

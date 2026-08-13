@@ -532,13 +532,19 @@ export class RedlineEngine {
    * (BUG 2026-08-12: one comment collected three identical replies that way).
    */
   public rollback_verified: boolean = true;
+  public id_discovery_hint: string | null;
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
   private _revisionIndex: RevisionIndex | null = null;
 
-  constructor(doc: DocumentObject, author: string = "Adeu AI (TS)") {
+  constructor(
+    doc: DocumentObject,
+    author: string = "Adeu AI (TS)",
+    opts?: { id_discovery_hint?: string },
+  ) {
     this.doc = doc;
     this.author = author;
+    this.id_discovery_hint = opts?.id_discovery_hint ?? null;
     this.timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
     const w16du_ns =
@@ -5154,8 +5160,8 @@ export class RedlineEngine {
     // Bare numeric id, regardless of which prefix (or none) the caller used.
     const bare = raw_id.replace(/^(Chg:|Com:)/, "");
     const find_hint =
-      "Call `read_docx` on the document again to list the current change (Chg:) " +
-      "and comment (Com:) ids — ids shift between document states.";
+      this.id_discovery_hint ||
+      "Call extract_changes or list_changes on the document again to list current ids.";
 
     if (type === "reply") {
       const echo = has_prefix ? raw_id : `Com:${bare}`;

@@ -23,7 +23,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DocumentObject } from "@adeu/core";
 
@@ -670,6 +670,62 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       expect(resWith.result?.content?.[0]?.text).toBe(
         resWithout.result?.content?.[0]?.text,
       );
+    });
+  });
+
+  // ======================================================================
+  // E3 / E4 — id-discovery hint and missing-file hints
+  // ======================================================================
+  describe("E3/E4: file hints and id discovery hint", () => {
+    it("E3: process_document_batch call on stale ID contains Call `read_docx` with `mode='changes'`", async () => {
+      const res = await rpc("tools/call", {
+        name: "process_document_batch",
+        arguments: {
+          original_docx_path: pdbFixture,
+          author_name: "QA Agent",
+          changes: [{ type: "accept", target_id: "Chg:999" }],
+        },
+      });
+
+      expect(res.result?.isError).toBe(true);
+      const text: string = res.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("Call `read_docx` with `mode='changes'`");
+    });
+
+    it("E4: missing-file error for relative path contains available files: [ and (+N more in ...) if directory holds >10 .docx files", async () => {
+      const crowdedDirName = "temp_crowded_docs_test";
+      const crowdedDirPath = resolve(process.cwd(), crowdedDirName);
+      if (!existsSync(crowdedDirPath)) {
+        mkdirSync(crowdedDirPath, { recursive: true });
+      }
+      for (let i = 1; i <= 12; i++) {
+        const docName = `doc_${String(i).padStart(2, "0")}.docx`;
+        writeFileSync(join(crowdedDirPath, docName), "dummy");
+      }
+
+      try {
+        const relativeMissingPath = join(crowdedDirName, "missing_doc.docx");
+        const res = await rpc("tools/call", {
+          name: "read_docx",
+          arguments: {
+            file_path: relativeMissingPath,
+          },
+        });
+
+        expect(res.result?.isError).toBe(true);
+        const text: string = res.result?.content?.[0]?.text ?? "";
+        expect(text).toContain("file not found:");
+        expect(text).toContain("available files: [");
+        expect(text).toContain("(+2 more in");
+        expect(text).toContain("Provide an absolute path");
+      } finally {
+        for (let i = 1; i <= 12; i++) {
+          const docName = `doc_${String(i).padStart(2, "0")}.docx`;
+          const p = join(crowdedDirPath, docName);
+          if (existsSync(p)) unlinkSync(p);
+        }
+        if (existsSync(crowdedDirPath)) rmSync(crowdedDirPath, { recursive: true, force: true });
+      }
     });
   });
 });

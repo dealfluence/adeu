@@ -2101,6 +2101,8 @@ reversible and flagged in the receipt.
 - **Failed Verify Cycles**: 1
 - **Attempt Ledger**:
   - attempt 1: remove comment field in diff.ts -> FAIL (verifier audit: removing comment field in diff.ts breaks Word margin comment creation on applied diffs and breaks Python parity where diff.py generates comment fields for redline comments)
+  - attempt 2: restore comment field in diff.ts, ensure match_mode and regex defaults are omitted, and update diff-payload.test.ts to assert margin comment creation on round-trip -> PASS
+
 
 
 - **Goal**: make sure Node's ready-to-apply edit payloads do not carry
@@ -2135,7 +2137,11 @@ reversible and flagged in the receipt.
     cases pass.
   - `cd node && npm run build && npm run test` â€” zero failures.
 
-## Task 21 â€” E3/E4: id-discovery and missing-file hints point at the ledger
+## Task 21 — E3/E4: id-discovery and missing-file hints point at the ledger
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 0
+- **Attempt Ledger**:
+  - attempt 1: implement id_discovery_hint in engine.ts and MCP_ID_DISCOVERY_HINT in shared.ts/index.ts with core and mcp-server tests -> PASS
 
 - **Goal**: once the ledger exists (Task 4/5), every error that tells an agent how
   to find ids names it; and the missing-file helper stays parity-checked.

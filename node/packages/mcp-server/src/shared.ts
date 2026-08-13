@@ -3,6 +3,9 @@ import { split_structural_appendix } from "@adeu/core";
 
 export const MARKDOWN_UI_URI = "ui://adeu/markdown-ui";
 
+export const MCP_ID_DISCOVERY_HINT =
+  "Call `read_docx` with `mode='changes'` on the document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.";
+
 /**
  * The projection split this server layer works from — body without the
  * structural appendix OR the rule that introduces it.
