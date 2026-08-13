@@ -36,3 +36,12 @@ cd node/packages/mcp-server && ADEU_CONFORMANCE=1 npx vitest run src/conformance
 | `guard_long5` | `long_5pages` (89,564 chars > 76,000) | `build_budget_guard_message` |
 | `search_default` / `search_max2_offset2` / `search_full_paragraph` | `long_5pages` | `"Confidential Information"`, 101 hits |
 | `outline_l1` | `long_5pages` | `outline_max_level=1` |
+
+## Declared differences
+
+Behaviour the two engines are deliberately NOT identical on. Anything not
+listed here is a bug in one of them.
+
+| surface | Python | Node | why |
+| --- | --- | --- | --- |
+| `apply_text_revision` default Track Changes author | explicit `author`, else `ADEU_AUTHOR`, else the OS account name (`getpass.getuser()`, filtered against machine accounts like `root`/`system`), else `"Adeu AI"` | explicit `author`, else `ADEU_AUTHOR`, else `"Adeu AI (TS)"` | the Node MCP server has no CLI user concept, and `"Adeu AI (TS)"` is the default its engine and `process_document_batch` schema already advertise — inventing a user lookup would change attribution for existing Node users and diverge silently |

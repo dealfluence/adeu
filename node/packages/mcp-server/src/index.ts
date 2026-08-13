@@ -25,6 +25,9 @@ import {
   response_budget_limit,
   has_fused_json_marker,
   FUSED_JSON_HINT,
+  apply_text_revision_core,
+  TextRevisionError,
+  TextRevisionVerificationError,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
 
@@ -1485,6 +1488,123 @@ server.registerTool(
       return {
         isError: true,
         content: [{ type: "text", text: `Error: ${e.message}` }],
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "apply_text_revision",
+  {
+    description:
+      "Applies whole-text revised text to a DOCX document by computing a diff and generating " +
+      "tracked changes. Includes a clean-text verification gate to ensure the applied document " +
+      "matches the supplied text.\n\n" +
+      "`revised_text` must be the complete CLEAN view of the document: read it with `read_docx` " +
+      "(`clean_view=true`, `page='all'`), edit that text, and send ALL of it back. Never " +
+      "CriticMarkup ({++, {--, {>>) — this tool diffs against the clean view, so markup tokens " +
+      "would land in the document as literal prose. Never one page of a paginated extract — " +
+      "everything absent from the text is applied as a tracked deletion.\n\n" +
+      "INTERLOCK: a revision that drops >50% of the characters (>75% for documents under 2000 " +
+      "characters) is refused unless you pass allow_major_deletions=true.\n\n" +
+      "If the applied document's clean text does not then match `revised_text`, NOTHING is " +
+      "written to output_path: a diagnostic copy is kept at <name>.unverified.docx and the call " +
+      "fails. output_path defaults to <name>_redlined.docx; an existing _redlined/_processed " +
+      "artifact is revised in place.",
+    inputSchema: {
+      reasoning: z
+        .string()
+        .optional()
+        .describe(
+          "Why do I need to apply this text revision? State this reason before any other parameter.",
+        ),
+      file_path: z.string().describe("Absolute path to the source DOCX file."),
+      revised_text: z
+        .string()
+        .describe("The complete revised clean text of the document."),
+      output_path: z
+        .string()
+        .optional()
+        .describe("Optional output path for the modified DOCX."),
+      author: z.string().optional().describe("Author name for Track Changes."),
+      allow_major_deletions: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Allow deleting >50% of characters (>75% for documents under 2000 characters).",
+        ),
+    },
+  },
+  async ({
+    reasoning,
+    file_path,
+    revised_text,
+    output_path,
+    author,
+    allow_major_deletions,
+  }) => {
+    try {
+      void reasoning;
+      const buf = readFileBytesOrThrow(file_path);
+      const doc = await loadDocxOrThrow(buf, file_path);
+
+      const result = await apply_text_revision_core({
+        doc,
+        input_path: file_path,
+        revised_text,
+        output_path,
+        author,
+        allow_major_deletions,
+      });
+      const outPath = result.output_path;
+
+      const existedBefore = fs.existsSync(outPath);
+      fs.mkdirSync(dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, result.out_bytes);
+      // Never primeFromDoc here: only the batch pipeline's byte-equality gate
+      // is covered (see the comment on the batch tool's prime call), so the
+      // correct-by-construction choice is to make the next read re-parse.
+      docCache.invalidate(outPath);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              formatBatchResult(result.stats, outPath) +
+              overwriteNote(outPath, file_path, existedBefore),
+          },
+        ],
+      };
+    } catch (e: any) {
+      if (e instanceof TextRevisionVerificationError) {
+        // The gate refused the document: keep the copy it refused, next to the
+        // path the caller asked for, so a human can see what could not be
+        // realized — and say so in the SAME message that reports the failure.
+        let note = "";
+        try {
+          fs.mkdirSync(dirname(e.unverified_path), { recursive: true });
+          fs.writeFileSync(e.unverified_path, e.unverified_bytes);
+        } catch (werr: any) {
+          note = ` (the diagnostic copy could not be written: ${werr.message})`;
+        }
+        return {
+          isError: true,
+          content: [{ type: "text", text: e.message + note }],
+        };
+      }
+      // A guard refusal is the agent's recovery instruction verbatim (parity
+      // with Python's ToolError(str(e))); anything else keeps the "Error: "
+      // shape the other tools use.
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text:
+              e instanceof TextRevisionError ? e.message : `Error: ${e.message}`,
+          },
+        ],
       };
     }
   },
