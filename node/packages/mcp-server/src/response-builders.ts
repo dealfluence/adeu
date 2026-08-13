@@ -370,6 +370,32 @@ function snapCodePointBoundary(
   return [start, end];
 }
 
+function parseBundleAndOptions(
+  arg3?: ProjectionBundle | { no_chrome?: boolean } | boolean,
+  arg4?: boolean | { no_chrome?: boolean },
+): { bundle?: ProjectionBundle; no_chrome: boolean } {
+  let bundle: ProjectionBundle | undefined;
+  let no_chrome = false;
+
+  if (typeof arg3 === "boolean") {
+    no_chrome = arg3;
+  } else if (arg3 && "body" in arg3) {
+    bundle = arg3 as ProjectionBundle;
+  } else if (arg3 && typeof arg3 === "object") {
+    if ("no_chrome" in arg3 && arg3.no_chrome !== undefined) {
+      no_chrome = Boolean(arg3.no_chrome);
+    }
+  }
+
+  if (typeof arg4 === "boolean") {
+    no_chrome = arg4;
+  } else if (arg4 && typeof arg4 === "object" && "no_chrome" in arg4 && arg4.no_chrome !== undefined) {
+    no_chrome = Boolean(arg4.no_chrome);
+  }
+
+  return { bundle, no_chrome };
+}
+
 function _build_appendix_pointer(has_appendix: boolean): string {
   if (!has_appendix) return "";
   return `\n\n---\n\n> **Appendix available.** This document has structural metadata (defined terms, cross-references, bookmarks, diagnostics) that may be relevant when editing. Call \`read_docx\` with \`mode='appendix'\` to load it before submitting edits.`;
@@ -396,6 +422,7 @@ export function render_outline_tree(
   nodes: OutlineNode[],
   max_level: number = 2,
   verbose: boolean = false,
+  no_chrome: boolean = false,
 ): string {
   if (!nodes || nodes.length === 0) {
     return "# (No headings detected)\n\nThis document has no detectable headings.";
@@ -404,6 +431,9 @@ export function render_outline_tree(
   const visible = nodes.filter((n) => n.level <= max_level);
 
   if (visible.length === 0) {
+    if (no_chrome) {
+      return `# (No headings at level <= ${max_level})\n\nDocument has ${nodes.length} headings, all at deeper levels.`;
+    }
     return `# (No headings at level <= ${max_level})\n\nDocument has ${nodes.length} headings, all at deeper levels. Call read_docx with mode='outline' and outline_max_level=N (up to 6) to see them.`;
   }
 
@@ -432,14 +462,21 @@ export function render_outline_tree(
 export function build_full_document_response(
   text: string,
   file_path: string,
-  bundle?: ProjectionBundle,
+  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
+  no_chrome_param?: boolean | { no_chrome?: boolean },
 ): ToolResult {
   // The ENTIRE document body with no page banner, continuation footer, or
   // appendix pointer — the round-trip artifact for text-based apply/diff
   // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
+  const { bundle, no_chrome } = parseBundleAndOptions(
+    bundleOrOpts,
+    no_chrome_param,
+  );
   const body = bundle ? bundle.body : split_projection(text)[0];
   const ui_markdown = body;
-  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  const llm_content = no_chrome
+    ? ui_markdown
+    : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
   return {
     content: [{ type: "text", text: llm_content }],
     structuredContent: {
@@ -493,8 +530,13 @@ export function build_paginated_response(
   text: string,
   page: number,
   file_path: string,
-  bundle?: ProjectionBundle,
+  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
+  no_chrome_param?: boolean | { no_chrome?: boolean },
 ): ToolResult {
+  const { bundle, no_chrome } = parseBundleAndOptions(
+    bundleOrOpts,
+    no_chrome_param,
+  );
   const [body, appendix] = bundle
     ? [bundle.body, bundle.appendix]
     : split_projection(text);
@@ -509,17 +551,29 @@ export function build_paginated_response(
   }
 
   const selected = result.pages[page - 1];
-  const banner = _build_page_banner(selected.page, selected.total_pages);
-  const footer = _build_page_footer(
-    selected.page,
-    selected.total_pages,
-    selected.has_next,
-  );
-  const appendix_pointer = _build_appendix_pointer(has_appendix);
 
-  const ui_markdown =
-    banner + selected.page_content + footer + appendix_pointer;
-  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  let ui_markdown: string;
+  let llm_content: string;
+
+  if (no_chrome) {
+    const page_marker =
+      selected.total_pages > 1
+        ? `[p${selected.page}/${selected.total_pages}]\n\n`
+        : "";
+    ui_markdown = `${page_marker}${selected.page_content}`;
+    llm_content = ui_markdown;
+  } else {
+    const banner = _build_page_banner(selected.page, selected.total_pages);
+    const footer = _build_page_footer(
+      selected.page,
+      selected.total_pages,
+      selected.has_next,
+    );
+    const appendix_pointer = _build_appendix_pointer(has_appendix);
+
+    ui_markdown = banner + selected.page_content + footer + appendix_pointer;
+    llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  }
 
   return {
     content: [{ type: "text", text: llm_content }],
@@ -537,9 +591,13 @@ export function build_page_range_response(
   start: number,
   end: number,
   file_path: string,
-  bundle?: ProjectionBundle,
-  no_chrome: boolean = false,
+  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
+  no_chrome_param?: boolean | { no_chrome?: boolean },
 ): ToolResult {
+  const { bundle, no_chrome } = parseBundleAndOptions(
+    bundleOrOpts,
+    no_chrome_param,
+  );
   if (start < 1)
     throw new Error(`Invalid page number ${start}: page numbers must be positive integers.`);
   if (start > end)
@@ -588,6 +646,7 @@ export function build_outline_response(
   outline_max_level: number = 2,
   outline_verbose: boolean = false,
   paragraph_offsets: Map<any, [number, number]> | null = null,
+  no_chromeOrOpts: boolean | { no_chrome?: boolean } = false,
 ): ToolResult {
   const [body] = split_projection(projected_text);
   const pagination_result = paginate(body, "");
@@ -606,6 +665,7 @@ export function build_outline_response(
     file_path,
     outline_max_level,
     outline_verbose,
+    no_chromeOrOpts,
   );
 }
 
@@ -621,7 +681,13 @@ export function render_outline_response(
   file_path: string,
   outline_max_level: number = 2,
   outline_verbose: boolean = false,
+  no_chromeOrOpts: boolean | { no_chrome?: boolean } = false,
 ): ToolResult {
+  const no_chrome =
+    typeof no_chromeOrOpts === "boolean"
+      ? no_chromeOrOpts
+      : Boolean(no_chromeOrOpts?.no_chrome);
+
   // Levels outside 1-6 are meaningless (0/negative would render a
   // nonsensical "L1-L0" range label, QA L2). Clamp to the nearest sensible
   // depth, mirroring the Python builder.
@@ -631,6 +697,7 @@ export function render_outline_response(
     nodes,
     outline_max_level,
     outline_verbose,
+    no_chrome,
   );
 
   const visible_count = nodes.filter(
@@ -642,9 +709,17 @@ export function render_outline_response(
       ? ` (${deeper_count} more at deeper levels, raise outline_max_level to see)`
       : "";
 
-  const header = `> **Outline view** — showing ${visible_count} of ${nodes.length} headings (L1-L${outline_max_level}${deeper_hint}) across ${total_pages} page(s). Call \`read_docx\` with \`mode='full'\` and \`page=N\` to read a section.\n\n---\n\n`;
-  const ui_markdown = header + rendered;
-  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  let ui_markdown: string;
+  let llm_content: string;
+
+  if (no_chrome) {
+    ui_markdown = rendered;
+    llm_content = ui_markdown;
+  } else {
+    const header = `> **Outline view** — showing ${visible_count} of ${nodes.length} headings (L1-L${outline_max_level}${deeper_hint}) across ${total_pages} page(s). Call \`read_docx\` with \`mode='full'\` and \`page=N\` to read a section.\n\n---\n\n`;
+    ui_markdown = header + rendered;
+    llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  }
 
   return {
     content: [{ type: "text", text: llm_content }],
@@ -660,8 +735,13 @@ export function build_appendix_response(
   text: string,
   page: number,
   file_path: string,
-  bundle?: ProjectionBundle,
+  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
+  no_chrome_param?: boolean | { no_chrome?: boolean },
 ): ToolResult {
+  const { bundle, no_chrome } = parseBundleAndOptions(
+    bundleOrOpts,
+    no_chrome_param,
+  );
   const appendix = bundle
     ? bundle.appendix
     : split_projection(text)[1];
@@ -669,7 +749,9 @@ export function build_appendix_response(
   if (!appendix.trim()) {
     const ui_markdown =
       "# Appendix\n\nThis document has no structural appendix (no defined terms, named anchors, or diagnostics detected).";
-    const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    const llm_content = no_chrome
+      ? ui_markdown
+      : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
     return {
       content: [{ type: "text", text: llm_content }],
       structuredContent: {
@@ -690,21 +772,33 @@ export function build_appendix_response(
 
   const selected = result.pages[page - 1];
 
-  let banner = "";
-  let footer = "";
+  let ui_markdown: string;
+  let llm_content: string;
 
-  if (selected.total_pages > 1) {
-    banner = `> **Appendix page ${selected.page} of ${selected.total_pages}** — structural metadata for this document.\n\n---\n\n`;
-    footer = selected.has_next
-      ? `\n\n---\n\n> **Continues on appendix page ${selected.page + 1} of ${selected.total_pages}.**`
-      : "";
+  if (no_chrome) {
+    const page_marker =
+      selected.total_pages > 1
+        ? `[p${selected.page}/${selected.total_pages}]\n\n`
+        : "";
+    ui_markdown = `${page_marker}${selected.page_content}`;
+    llm_content = ui_markdown;
   } else {
-    banner =
-      "> **Appendix** — structural metadata for this document.\n\n---\n\n";
-  }
+    let banner = "";
+    let footer = "";
 
-  const ui_markdown = banner + selected.page_content + footer;
-  const llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    if (selected.total_pages > 1) {
+      banner = `> **Appendix page ${selected.page} of ${selected.total_pages}** — structural metadata for this document.\n\n---\n\n`;
+      footer = selected.has_next
+        ? `\n\n---\n\n> **Continues on appendix page ${selected.page + 1} of ${selected.total_pages}.**`
+        : "";
+    } else {
+      banner =
+        "> **Appendix** — structural metadata for this document.\n\n---\n\n";
+    }
+
+    ui_markdown = banner + selected.page_content + footer;
+    llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+  }
 
   return {
     content: [{ type: "text", text: llm_content }],
