@@ -162,27 +162,43 @@ function _normalize_virtual_projection_text(text: string): string {
   return text.replace(/^#+\s*/gm, "");
 }
 
+// Python's `str.isprintable()` is False for every code point in category Other
+// (C) or Separator (Z), the ASCII space alone excepted — so this is the exact
+// set `repr()` escapes.
+const _RE_NONPRINTABLE = /\p{C}|\p{Z}/u;
+
 /**
  * Python's `repr()` of a short string, for the divergence message. NOT
  * `JSON.stringify`: Python prefers single quotes and only switches to double
- * quotes when the text holds a single quote but no double quote, and it prints
- * control characters as `\xNN` rather than `\uNNNN`. The two engines' failure
- * text has to read identically (shared/conformance/README.md), and this string
- * is quoted from a real document, so tabs, breaks (`\x0b`) and apostrophes all
- * turn up in practice.
+ * quotes when the text holds a single quote but no double quote, and it sizes
+ * each escape to the code point (`\xNN`, `\uNNNN`, `\UNNNNNNNN`) rather than
+ * always emitting `\uNNNN`. The two engines' failure text has to read
+ * identically (shared/conformance/README.md), and this string is quoted from a
+ * real document, so tabs, breaks (`\x0b`) and apostrophes all turn up.
+ *
+ * The escape set is the FULL non-printable set, not just C0/C1 (verifier
+ * finding, Task 19 attempt 2): NBSP, soft hyphen and zero-width space are
+ * everyday Word characters, and left raw they render the message useless —
+ * both excerpts read "Fee 1000" while differing by an invisible code point,
+ * which is the one thing quoting the excerpts is for.
  */
 function _repr(text: string): string {
   const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
-  const body = text
-    .replace(/\\/g, "\\\\")
-    .replace(new RegExp(quote, "g"), `\\${quote}`)
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t")
-    .replace(
-      /[\x00-\x1f\x7f-\x9f]/g,
-      (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
-    );
+  let body = "";
+  // By code point, so astral characters are escaped whole, not per surrogate.
+  for (const ch of text) {
+    if (ch === "\\") body += "\\\\";
+    else if (ch === "\n") body += "\\n";
+    else if (ch === "\r") body += "\\r";
+    else if (ch === "\t") body += "\\t";
+    else if (ch === quote) body += `\\${quote}`;
+    else if (ch !== " " && _RE_NONPRINTABLE.test(ch)) {
+      const cp = ch.codePointAt(0)!;
+      const [prefix, width] =
+        cp < 0x100 ? ["x", 2] : cp < 0x10000 ? ["u", 4] : ["U", 8];
+      body += `\\${prefix}${cp.toString(16).padStart(width, "0")}`;
+    } else body += ch;
+  }
   return `${quote}${body}${quote}`;
 }
 

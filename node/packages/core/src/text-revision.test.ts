@@ -380,6 +380,31 @@ describe("apply_text_revision_core — verification gate", () => {
     expect(msg).toContain(`applied reads "Don't stop."`);
     expect(msg).toContain(`supplied text reads "Won't stop."`);
   });
+
+  it("6e. escapes invisible characters so the two excerpts differ on screen", async () => {
+    // The whole point of the escaping: NBSP and ZWSP are routine in Word
+    // documents, and unescaped they make the message read "applied reads
+    // 'Fee 1000', supplied text reads 'Fee 1000'" — two identical-looking
+    // excerpts. repr() prints them as \xa0 and \u200b (isprintable() is False
+    // for every Other/Separator code point except ASCII space).
+    const nbsp = await createTestDocument();
+    addParagraph(nbsp, "Fee\xa01000");
+    const [, nbspMsg] = verify_clean_text(
+      await loadDoc(await nbsp.save()),
+      "Xee 1000",
+    );
+    expect(nbspMsg).toContain("applied reads 'Fee\\xa01000'");
+    expect(nbspMsg).toContain("supplied text reads 'Xee 1000'");
+
+    const zwsp = await createTestDocument();
+    addParagraph(zwsp, "zero\u200bwidth");
+    const [, zwspMsg] = verify_clean_text(
+      await loadDoc(await zwsp.save()),
+      "Xero width",
+    );
+    // Above U+00FF repr() switches from \xNN to \uNNNN.
+    expect(zwspMsg).toContain("applied reads 'zero\\u200bwidth'");
+  });
 });
 
 describe("apply_text_revision_core — default output path", () => {
