@@ -1764,6 +1764,8 @@ reversible and flagged in the receipt.
     cases pass.
 
 ## Task 15 â€” C1: multi-author guard message teaches the lawful recovery
+- **Status**: COMPLETED
+
 
 - **Goal**: the guard refusal names the change to accept, in copy-pasteable JSON,
   and stays inside the 280-char cap â€” matching Python byte-for-byte.
@@ -1812,6 +1814,7 @@ reversible and flagged in the receipt.
     seven cases pass.
 
 ## Task 16 â€” B6: pin the non-escaping of non-ASCII (regression guard only)
+- **Status**: COMPLETED
 
 - **Goal**: prove Node never `\uXXXX`-escapes legal text, so the Python fix stays
   parity-checked from both sides.
