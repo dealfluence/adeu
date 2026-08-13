@@ -89,11 +89,22 @@ describe("unicode passthrough (B6 regression guard)", () => {
 
   it("a non-ASCII author name appears literally on entry lines when filtered by author", async () => {
     const fx = await projectFixture("unicode");
+
+    const resUnmatched = build_changes_response(fx.text, fx.filePath, {
+      comments_data: fx.commentsData,
+      existing_change_ids: fx.changeIds,
+      bundle: fx.bundle,
+      author_filter: "Zzz",
+    });
+    const textUnmatched = textOf(resUnmatched);
+    expect(textUnmatched).not.toContain("Com:");
+    expect(textUnmatched).not.toContain("Chg:");
+
     const res = build_changes_response(fx.text, fx.filePath, {
       comments_data: fx.commentsData,
       existing_change_ids: fx.changeIds,
       bundle: fx.bundle,
-      changes_author: "Åsa",
+      author_filter: "Åsa",
     });
     const text = textOf(res);
 
