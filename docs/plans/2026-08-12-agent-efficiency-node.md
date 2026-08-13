@@ -2139,9 +2139,11 @@ reversible and flagged in the receipt.
 
 ## Task 21 — E3/E4: id-discovery and missing-file hints point at the ledger
 - **Status**: COMPLETED
-- **Failed Verify Cycles**: 0
+- **Failed Verify Cycles**: 1
 - **Attempt Ledger**:
-  - attempt 1: implement id_discovery_hint in engine.ts and MCP_ID_DISCOVERY_HINT in shared.ts/index.ts with core and mcp-server tests -> PASS
+  - attempt 1: implement id_discovery_hint in engine.ts and MCP_ID_DISCOVERY_HINT in shared.ts/index.ts -> FAIL (verifier audit: default fallback hint in engine.ts named non-existent extract_changes instead of current generic sentence naming read_docx)
+  - attempt 2: restore default fallback hint to read_docx in engine.ts, revert repro test assertion to read_docx, and update engine.id-hint.test.ts -> PASS
+
 
 - **Goal**: once the ledger exists (Task 4/5), every error that tells an agent how
   to find ids names it; and the missing-file helper stays parity-checked.

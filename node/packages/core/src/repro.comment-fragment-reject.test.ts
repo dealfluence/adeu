@@ -127,7 +127,7 @@ describe("invalid action id gives a self-service error (QA 2026-07-22 bug #3)", 
     // The id-discovery hint must name an interface the caller can actually
     // use: MCP callers cannot run the CLI, so the hint points at read_docx
     // (QA 2026-07-23 F11 — previously `adeu markup` / `adeu extract`).
-    expect(msg).toContain("extract_changes");
+    expect(msg).toContain("read_docx");
   });
 
   it("reject on a comment id flags the kind mismatch", async () => {

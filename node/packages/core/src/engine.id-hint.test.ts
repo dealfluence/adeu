@@ -76,7 +76,7 @@ describe("RedlineEngine id_discovery_hint and _action_not_found_error (E3)", () 
     } catch (err: any) {
       expect(err).toBeInstanceOf(BatchValidationError);
       expect(err.message).toContain(
-        "Call extract_changes or list_changes on the document again to list current ids.",
+        "Call `read_docx` with `mode='changes'` on the document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.",
       );
     }
   });

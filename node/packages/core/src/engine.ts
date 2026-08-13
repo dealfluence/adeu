@@ -5161,7 +5161,7 @@ export class RedlineEngine {
     const bare = raw_id.replace(/^(Chg:|Com:)/, "");
     const find_hint =
       this.id_discovery_hint ||
-      "Call extract_changes or list_changes on the document again to list current ids.";
+      "Call `read_docx` with `mode='changes'` on the document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.";
 
     if (type === "reply") {
       const echo = has_prefix ? raw_id : `Com:${bare}`;
