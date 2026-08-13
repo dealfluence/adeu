@@ -2208,9 +2208,12 @@ reversible and flagged in the receipt.
 
 ## Task 22 â€” Release: ungate conformance, bump to 2.3.0, docs
 - **Status**: IN_PROGRESS
-- **Failed Verify Cycles**: 1
+- **Failed Verify Cycles**: 3
 - **Attempt Ledger**:
   - attempt 1: ungate conformance.test.ts, update docs -> FAIL (verifier audit: GEMINI.md max_matches default should say 20 not 10, partial default should say true not false, and python apply_text_revision author default should match README.md)
+  - attempt 2: fix GEMINI.md defaults and author resolution -> FAIL (verifier audit: GEMINI.md line 46 should say OS user name with machine account names excluded, matching README.md, and record python pytest pre-existing property test note)
+  - attempt 3: update GEMINI.md author resolution, record python test note in commit message -> FAIL (verifier audit: monorepo version needs bump to 2.4.0 via bump.py minor as 2.3.1 is already published)
+
 
 
 - **Goal**: turn the conformance suite on permanently, ship the version lockstep,
