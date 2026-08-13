@@ -405,6 +405,25 @@ describe("apply_text_revision_core — verification gate", () => {
     // Above U+00FF repr() switches from \xNN to \uNNNN.
     expect(zwspMsg).toContain("applied reads 'zero\\u200bwidth'");
   });
+
+  it("6f. slices the excerpt by code point so astral characters stay whole", async () => {
+    // Python slices str by code point, so repr(norm[div : div + 40]) ends on a
+    // whole emoji. Slicing UTF-16 code units instead cuts the pair sitting at
+    // the 40th character in half and prints a lone '\ud83d' the twin engine
+    // never emits — in the one excerpt this message exists to show.
+    const tail = `${"a".repeat(38)}\u{1F600} and more text after the window`;
+    const doc = await createTestDocument();
+    addParagraph(doc, `Z${tail}`);
+    const loaded = await loadDoc(await doc.save());
+    const [ok, msg] = verify_clean_text(loaded, `Y${tail}`);
+    expect(ok).toBe(false);
+    expect(msg).toContain("first divergence at character 0");
+    expect(msg).toContain(`applied reads 'Z${"a".repeat(38)}\u{1F600}'`);
+    expect(msg).toContain(`supplied text reads 'Y${"a".repeat(38)}\u{1F600}'`);
+    // In `u` mode this class matches UNPAIRED surrogates only: a whole astral
+    // code point is one element and never matches.
+    expect(msg).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
 });
 
 describe("apply_text_revision_core — default output path", () => {

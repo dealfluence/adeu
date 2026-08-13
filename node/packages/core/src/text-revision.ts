@@ -212,10 +212,18 @@ export function verify_clean_text(
   const expected_norm = _normalize_virtual_projection_text(expected_text.trim());
 
   if (actual_norm !== expected_norm) {
-    const shared = Math.min(actual_norm.length, expected_norm.length);
+    // BY CODE POINT, like Python's `zip(actual_norm, expected_norm)` and
+    // `norm[div : div + 40]` (verifier finding, Task 19 attempt 3): indexing
+    // UTF-16 units instead halves a surrogate pair straddling the 40-character
+    // window, and `_repr` then quotes a lone `\ud83d` into the one excerpt this
+    // message exists to show. `div` is therefore a code-point index too —
+    // Python's number, and nothing else consumes it.
+    const actual_cp = Array.from(actual_norm);
+    const expected_cp = Array.from(expected_norm);
+    const shared = Math.min(actual_cp.length, expected_cp.length);
     let div = shared;
     for (let k = 0; k < shared; k++) {
-      if (actual_norm[k] !== expected_norm[k]) {
+      if (actual_cp[k] !== expected_cp[k]) {
         div = k;
         break;
       }
@@ -223,8 +231,8 @@ export function verify_clean_text(
     const msg =
       "Post-apply verification failed: the applied document's clean text does not match " +
       `the supplied text (first divergence at character ${div}: ` +
-      `applied reads ${_repr(actual_norm.slice(div, div + 40))}, supplied text reads ` +
-      `${_repr(expected_norm.slice(div, div + 40))}). The document structure could not fully realize ` +
+      `applied reads ${_repr(actual_cp.slice(div, div + 40).join(""))}, supplied text reads ` +
+      `${_repr(expected_cp.slice(div, div + 40).join(""))}). The document structure could not fully realize ` +
       "the requested text (e.g. headings or table cells cannot be deleted via text replacement).";
     return [false, msg];
   }
