@@ -3549,6 +3549,98 @@ export class RedlineEngine {
   }
 
   /**
+   * Collects author names from all pending revisions and comments.
+   *
+   * The `w:author` attribute is the signal: every tracked-change and comment
+   * marker carries it (w:ins, w:del, w:moveTo, w:pPrChange, w:tblPrChange,
+   * w:cellIns, w:cellDel, w:comment, ...).
+   *
+   * Word's persona registry (people.xml) is skipped: its entries survive accepting
+   * every revision, so its w:author attributes are metadata rather than pending revisions.
+   */
+  public get_pending_revision_authors(): Set<string> {
+    const authors = new Set<string>();
+
+    const collect = (root: any) => {
+      if (!root) return;
+      try {
+        if (typeof root.getAttribute === "function") {
+          const rootAuth = root.getAttribute("w:author");
+          if (rootAuth) {
+            authors.add(rootAuth);
+          }
+        }
+        const descendants = findAllDescendants(root, "*");
+        for (const el of descendants) {
+          const auth = el.getAttribute("w:author");
+          if (auth) {
+            authors.add(auth);
+          }
+        }
+      } catch {
+        /* ignore element scan errors */
+      }
+    };
+
+    try {
+      if (this.doc?.element) {
+        collect(this.doc.element);
+      }
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      if (this.doc?.pkg) {
+        const commentsData = extract_comments_data(this.doc.pkg);
+        for (const cInfo of Object.values(commentsData)) {
+          const cAuthor = (cInfo as any)?.author;
+          if (cAuthor && cAuthor !== "Unknown") {
+            authors.add(cAuthor);
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      const parts = this.doc?.pkg?.parts || [];
+      for (const part of parts) {
+        if (
+          part === this.doc?.part ||
+          !String(part.contentType || "").endsWith("+xml")
+        ) {
+          continue;
+        }
+        const partname = String(part.partname || "").toLowerCase();
+        const contentType = String(part.contentType || "");
+        if (
+          contentType === "application/vnd.ms-word.people+xml" ||
+          partname.includes("people")
+        ) {
+          continue;
+        }
+        try {
+          let root: any = part._element;
+          if (!root && part.blob) {
+            root = parseXml(part.blob);
+          }
+          if (root) {
+            collect(root);
+          }
+        } catch {
+          /* unparsable payload: ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    return authors;
+  }
+
+  /**
    * `original_indices` maps each element of `changes` to its position in the
    * caller's ORIGINAL array, for callers that already dropped items (the MCP
    * schema-salvage path): every "- Edit N" / "- Action N" and every `failed`
@@ -3664,6 +3756,13 @@ export class RedlineEngine {
     // A fresh verdict per batch: a rejection that never mutated anything (a
     // validation failure before the first apply) is a verified rollback too.
     this.rollback_verified = true;
+
+    const pending_authors = this.get_pending_revision_authors();
+    const author_impersonation_warning =
+      this.author && pending_authors.has(this.author)
+        ? `[!] Warning: acting author '${this.author}' matches an author with pending revisions in this document.`
+        : null;
+
     // Pre-process edits: strip identical leading heading hashes from target_text and new_text
     for (const c of changes) {
       if (
@@ -3990,6 +4089,7 @@ export class RedlineEngine {
       // can report "partial" — strict mode throws instead (B5);
       // engine.py:2864-2869.
       status: partial && failed_list.length > 0 ? "partial" : "ok",
+      author_impersonation_warning: author_impersonation_warning,
       failed: failed_list.map(([index, reason]) => ({
         index,
         reason,

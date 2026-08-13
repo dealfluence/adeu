@@ -1845,6 +1845,8 @@ reversible and flagged in the receipt.
 # Phase 3 â€” P2 / P3 (contract changes needing version care, then the rest)
 
 ## Task 17 â€” A4: `no_chrome` on every builder (internal parameter)
+- **Status**: COMPLETED
+
 
 - **Goal**: one switch that drops the File-Path header, page banners/footers and
   the appendix pointer, keeping a bare `[p3/16]` marker â€” the shape Python's
@@ -1902,6 +1904,7 @@ reversible and flagged in the receipt.
     â€” matches the Python golden.
 
 ## Task 18 â€” C2: author-impersonation warning
+- **Status**: COMPLETED
 
 - **Goal**: setting the acting author to a name that already has pending
   revisions no longer silently bypasses the multi-author guard.
