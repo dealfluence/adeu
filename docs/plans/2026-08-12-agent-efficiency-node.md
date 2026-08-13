@@ -1819,6 +1819,8 @@ reversible and flagged in the receipt.
 - **Attempt Ledger**:
   - attempt 1: create unicode-passthrough.test.ts -> FAIL (verifier audit: test 2 should test failure envelope text from server call rather than direct JSON.stringify, test 3 should assert comment body text "Add a five-year tail — see §12.3.", and test 4 should assert author name without duplicating ledger.test.ts)
   - attempt 2: update unicode-passthrough.test.ts to exercise live RPC failure envelope in case 2, assert literal comment body in case 3, and test author filter -> FAIL (verifier audit: case 4 passed changes_author instead of author_filter in build_changes_response options bag)
+  - attempt 3 (fix cycle 2): update unicode-passthrough.test.ts case 4 to pass author_filter: "Åsa" and assert author_filter: "Zzz" excludes entry lines -> PASS
+
 
 
 
