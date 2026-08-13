@@ -31,11 +31,15 @@ import { format_ambiguity_error } from "./markup.js";
 import {
   PREVIEW_TEXT_CAP,
   REPORT_ECHO_CAP,
+  clamp_text,
   restore_matched_typography,
   truncate_middle,
 } from "./utils/text.js";
 import { RegexTimeoutError } from "./utils/safe-regex.js";
 import { CORE_VERSION } from "./version.js";
+
+// Ceiling for refusal advisory message characters (~70 approx tokens).
+const GUARD_MESSAGE_CAP = 70 * 4;
 
 // Width of the surrounding-document window shown in redline previews.
 const PREVIEW_CONTEXT_CHARS = 30;
@@ -3209,8 +3213,8 @@ export class RedlineEngine {
         const spans = target_mapper.spans.filter(
           (s) => s.end > start && s.start < start + length,
         );
-        const insAuthors = new Set<string>();
-        const commentAuthors = new Set<string>();
+        const insAuthorsToIds = new Map<string, Set<string>>();
+        const commentAuthorsToIds = new Map<string, Set<string>>();
         // Does any real (run-backed) text in the target lie OUTSIDE a foreign
         // insertion? If so the target only partially overlaps the insertion and
         // replacing it as one span would straddle the <w:ins> boundary — that
@@ -3227,7 +3231,10 @@ export class RedlineEngine {
             if (insNodes.length > 0) {
               const auth = insNodes[0].getAttribute("w:author");
               if (auth && auth !== this.author) {
-                insAuthors.add(auth);
+                if (!insAuthorsToIds.has(auth)) {
+                  insAuthorsToIds.set(auth, new Set());
+                }
+                insAuthorsToIds.get(auth)!.add(s.ins_id);
                 isForeignIns = true;
               }
             }
@@ -3239,12 +3246,15 @@ export class RedlineEngine {
             for (const cid of s.comment_ids) {
               const c_data = this.mapper.comments_map[cid];
               if (c_data && c_data.author && c_data.author !== this.author) {
-                commentAuthors.add(c_data.author);
+                if (!commentAuthorsToIds.has(c_data.author)) {
+                  commentAuthorsToIds.set(c_data.author, new Set());
+                }
+                commentAuthorsToIds.get(c_data.author)!.add(`Com:${cid}`);
               }
             }
           }
         }
-        if (insAuthors.size > 0) {
+        if (insAuthorsToIds.size > 0) {
           // A single (strict/first) modification whose target lies ENTIRELY
           // inside foreign-authored insertion(s) is allowed: track_delete_run
           // splits the enclosing <w:ins> and nests the change, producing valid
@@ -3258,9 +3268,41 @@ export class RedlineEngine {
               fullyWithinForeignIns
             )
           ) {
-            errors.push(
-              `- Edit ${i + 1 + index_offset} Failed: Modification targets an active insertion from another author (${Array.from(insAuthors).join(", ")}). Accept that change first or scope your edit outside of it.`,
-            );
+            // Keep the hint bounded: naming every author and every id
+            // makes the refusal grow without limit, blowing the message
+            // token budget. One author with up to two ids is enough to
+            // act on; the rest are summarised as a count.
+            const sortedAuthors = Array.from(insAuthorsToIds.keys()).sort();
+            const namedAuthor = sortedAuthors[0];
+            const authorIds = Array.from(insAuthorsToIds.get(namedAuthor)!);
+            const sortedIds = authorIds.sort((a, b) => {
+              const numA = /^\d+$/.test(a) ? parseInt(a, 10) : 0;
+              const numB = /^\d+$/.test(b) ? parseInt(b, 10) : 0;
+              if (numA !== numB) return numA - numB;
+              return a.localeCompare(b);
+            });
+            const firstTargetId =
+              sortedIds.length > 0 ? `Chg:${sortedIds[0]}` : null;
+            const idHints = sortedIds
+              .slice(0, 2)
+              .map((cid) => `Chg:${cid}`)
+              .join(", ");
+            let hintSuffix = idHints ? ` (e.g. ${idHints})` : "";
+            if (sortedAuthors.length > 1) {
+              hintSuffix += ` (+${sortedAuthors.length - 1} more)`;
+            }
+            const acceptJson = firstTargetId
+              ? `{"type": "accept", "target_id": "${firstTargetId}"}`
+              : "";
+            const advice =
+              match_mode === "all" && fullyWithinForeignIns
+                ? 'or use match_mode="strict" or "first", or scope your edit outside of it.'
+                : "or scope your edit outside of it.";
+            const head = `- Edit ${i + 1 + index_offset} Failed: Modification targets an active insertion from another author (`;
+            const tail = `${hintSuffix}). Accept first with ${acceptJson} ${advice}`;
+            const authorBudget = GUARD_MESSAGE_CAP - head.length - tail.length;
+            const msg = head + clamp_text(namedAuthor, authorBudget) + tail;
+            errors.push(clamp_text(msg, GUARD_MESSAGE_CAP));
             continue;
           }
         }
@@ -3270,9 +3312,26 @@ export class RedlineEngine {
         // Only blind match_mode="all" fan-outs are refused, so a bulk
         // replacement cannot silently sweep through another author's
         // annotations (transactional rollback).
-        if (commentAuthors.size > 0 && match_mode === "all") {
+        if (commentAuthorsToIds.size > 0 && match_mode === "all") {
+          const authorHints: string[] = [];
+          const sortedCommentAuthors = Array.from(
+            commentAuthorsToIds.keys(),
+          ).sort();
+          for (const auth of sortedCommentAuthors) {
+            const cids = Array.from(commentAuthorsToIds.get(auth)!);
+            const sortedCids = cids.sort((a, b) => {
+              const numAStr = a.split(":").pop() || "";
+              const numBStr = b.split(":").pop() || "";
+              const numA = /^\d+$/.test(numAStr) ? parseInt(numAStr, 10) : 0;
+              const numB = /^\d+$/.test(numBStr) ? parseInt(numBStr, 10) : 0;
+              if (numA !== numB) return numA - numB;
+              return a.localeCompare(b);
+            });
+            const idHints = sortedCids.join(", ");
+            authorHints.push(idHints ? `${auth} (e.g. ${idHints})` : auth);
+          }
           errors.push(
-            `- Edit ${i + 1 + index_offset} Failed: match_mode="all" would sweep through a comment range from another author (${Array.from(commentAuthors).join(", ")}). Target the commented text deliberately with match_mode "strict" or "first", or scope your edit outside of it.`,
+            `- Edit ${i + 1 + index_offset} Failed: match_mode="all" would sweep through a comment range from another author (${authorHints.join(", ")}). Target the commented text deliberately with match_mode "strict" or "first", or scope your edit outside of it.`,
           );
         }
       }
