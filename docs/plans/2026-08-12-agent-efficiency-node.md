@@ -1481,6 +1481,15 @@ reversible and flagged in the receipt.
     untouched.
 
 ## Task 12 â€” A2: search paging, snippet clamping and the response-size budget
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 2
+- **Attempt Ledger**:
+  - attempt 1: rewrite build_search_response with search budget, snippet clamping, and match_offset -> FAIL (verifier audit: max_matches and match_offset schema types published as number instead of integer; need .int() constraint)
+  - attempt 2: add .int() constraint to max_matches and match_offset schemas in read_docx schema -> FAIL (verifier audit: window edges in render_entry cut astral characters straddling radius edge into lone surrogates)
+  - attempt 3 (fix cycle 2): implement snapCodePointBoundary for window intervals in render_entry and add test case 6b for astral surrogate boundary handling -> PASS
+
+
+
 
 - **Goal**: every match reachable via `match_offset`, snippets clamped to Â±120
   chars with a radius ladder, and a worst-case default search bounded to â‰¤1.5k
@@ -1610,6 +1619,17 @@ reversible and flagged in the receipt.
     Python goldens byte-for-byte.
 
 ## Task 13 â€” A3: response-budget guard on whole-document reads (ships only with A6)
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 3
+- **Attempt Ledger**:
+  - attempt 1: implement build_budget_guard_message and force parameter on read_docx -> FAIL (verifier audit: guard_long5 conformance golden fails due to missing end_page on OutlineNode, and clean_view=true budget guard lacks outline section)
+  - attempt 2 (fix cycle 1): implement end_page on OutlineNode, render_outline_tree p4-p5 range formatting, clean_outline_nodes caching -> FAIL (verifier audit: text.length in budget guard includes structural appendix rather than body length, causing premature refusal for docs with appendix)
+  - attempt 3 (fix cycle 2): measure bundle.body.length in index.ts for read_docx budget guard and update budget-guard.test.ts case 9 -> FAIL (verifier audit: bundle.body in split_structural_appendix carries trailing \n\n--- separator, leaving 5-char delta vs Python 551 chars)
+  - attempt 4 (fix cycle 3): implement split_projection in shared.ts to strip trailing \n\n--- separator from bundle.body, making unicode.docx body 551 chars matching Python, and add tests for 551 chars body length and ADEU_MAX_RESPONSE_CHARS=553 serving -> PASS
+
+
+
+
 
 - **Goal**: refuse an unbounded whole-document body read over the budget and
   answer with page count, estimated tokens, the L1 outline and the bounded-read
@@ -1695,7 +1715,13 @@ reversible and flagged in the receipt.
   - `ADEU_CONFORMANCE=1 npx vitest run src/conformance.test.ts -t "guard_long5"`
     â€” matches the Python golden byte-for-byte.
 
-## Task 14 â€” B7: fused-JSON hint on unrecognised `type`
+## Task 14 — B7: fused-JSON hint on unrecognised `type`
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 0
+- **Attempt Ledger**:
+  - attempt 1: change CHANGE_ITEM_SCHEMA type to z.string().optional(), append fused hint in typeErrors loop when has_fused_json_marker(c.type) is true, and add fused-json.test.ts -> PASS
+
+
 
 - **Goal**: when a `type` string carries `{`, `}` or `":`, the error names the
   cause (two edits fused during generation) and the fix (resubmit this edit

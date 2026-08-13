@@ -23,6 +23,8 @@ import {
   PageArgKind,
   extract_comments_data,
   response_budget_limit,
+  has_fused_json_marker,
+  FUSED_JSON_HINT,
 } from "@adeu/core";
 import { describe_illegal_control_chars } from "@adeu/core";
 
@@ -765,7 +767,7 @@ registerAppTool(
 export const CHANGE_ITEM_SCHEMA = z
   .object({
     type: z
-      .enum(["modify", "accept", "reject", "reply", "insert_row", "delete_row"])
+      .string()
       .optional()
       .describe(
         "Change kind: 'modify' (search-and-replace), 'accept'/'reject' (resolve a tracked change by id), 'reply' (reply to a comment by id), 'insert_row'/'delete_row' (table edits; disk mode only). If omitted it is inferred when unambiguous from the other fields.",
@@ -997,7 +999,8 @@ server.registerTool(
           !Array.isArray(c) &&
           (!c.type || !VALID_TYPES.has(c.type))
         ) {
-          const reason = `missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].`;
+          const fused = has_fused_json_marker(c.type) ? ` ${FUSED_JSON_HINT}` : "";
+          const reason = `missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].${fused}`;
           typeErrors.push(`- Change ${i + 1}: ${reason}`);
           typeFailed.push([i, reason]);
         }
