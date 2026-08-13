@@ -6,10 +6,12 @@ import {
 } from "./diff.js";
 import { RedlineEngine } from "./engine.js";
 import { createTestDocument, addParagraph } from "./test-utils.js";
+import { extract_comments_data } from "./comments.js";
+import { DocumentObject } from "./docx/bridge.js";
 import type { ExtractStructure } from "./ingest.js";
 
 describe("A5: compact structured-diff payload audit", () => {
-  it("emitted DiffEdits contain no match_mode:strict, regex:false, or boilerplate comment:Diff:* keys", () => {
+  it("emitted DiffEdits contain no match_mode or regex default keys", () => {
     const orig = "The party of the first part shall deliver the goods on Monday.";
     const mod = "The supplier shall deliver the merchandise on Tuesday.";
 
@@ -36,10 +38,8 @@ describe("A5: compact structured-diff payload audit", () => {
 
     for (const edit of allEdits) {
       const json = JSON.stringify(edit);
-      expect(json).not.toContain('"match_mode":"strict"');
-      expect(json).not.toContain('"regex":false');
-      expect(json).not.toContain('"comment":"Diff:');
-      expect(json).not.toContain('"comment"');
+      expect(json.includes('"match_mode"')).toBe(false);
+      expect(json.includes('"regex"')).toBe(false);
     }
   });
 
@@ -56,6 +56,9 @@ describe("A5: compact structured-diff payload audit", () => {
 
     expect(res.edits_skipped).toBe(0);
     expect(res.edits_applied).toBeGreaterThan(0);
+
+    const savedDoc = await DocumentObject.load(await doc.save());
+    expect(Object.keys(extract_comments_data(savedDoc.pkg)).length).toBeGreaterThan(0);
   });
 
   it("size regression guard: JSON payload length for fixed fixture stays within upper bound", () => {
@@ -67,9 +70,7 @@ describe("A5: compact structured-diff payload audit", () => {
     const edits = generate_edits_via_paragraph_alignment(origText, modText);
     const jsonStr = JSON.stringify(edits);
 
-    // Measured JSON length without boilerplate comment fields is 1204 chars (down from 1628).
-    // 10% headroom on 1204 gives 1325.
-    const UPPER_BOUND_WITH_10_PERCENT_HEADROOM = 1325;
-    expect(jsonStr.length).toBeLessThanOrEqual(UPPER_BOUND_WITH_10_PERCENT_HEADROOM);
+    const UPPER_BOUND_WITH_HEADROOM = 1800;
+    expect(jsonStr.length).toBeLessThanOrEqual(UPPER_BOUND_WITH_HEADROOM);
   });
 });

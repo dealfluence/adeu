@@ -317,6 +317,7 @@ export function generate_edits_from_text(
           type: "modify",
           target_text: del_txt,
           new_text: "",
+          comment: "Diff: Text deleted",
           _match_start_index: idx,
         });
         pending_delete = null;
@@ -334,6 +335,7 @@ export function generate_edits_from_text(
           type: "modify",
           target_text: del_txt,
           new_text: text,
+          comment: "Diff: Replacement",
           _match_start_index: idx,
         });
         pending_delete = null;
@@ -342,6 +344,7 @@ export function generate_edits_from_text(
           type: "modify",
           target_text: "",
           new_text: text,
+          comment: "Diff: Text inserted",
           _match_start_index: current_original_index,
         });
       }
@@ -354,6 +357,7 @@ export function generate_edits_from_text(
       type: "modify",
       target_text: del_txt,
       new_text: "",
+      comment: "Diff: Text deleted",
       _match_start_index: idx,
     });
   }
@@ -473,6 +477,7 @@ function _table_blob_row_edits(
       type: "modify",
       target_text: rows_o[k],
       new_text: rows_m[k],
+      comment: "Diff: Table row modified",
       _is_table_edit: true,
     });
   }
@@ -517,7 +522,7 @@ function _split_cross_paragraph_hunks(edits: ModifyText[]): ModifyText[] {
         type: "modify",
         target_text: piece + "\n\n",
         new_text: "",
-        comment: e.comment,
+        comment: e.comment || "Diff: Text deleted",
         _match_start_index: offset,
       });
       offset += piece.length + 2;
@@ -588,6 +593,7 @@ export function generate_edits_via_paragraph_alignment(
             type: "modify",
             target_text: piece,
             new_text: "",
+            comment: "Diff: Text deleted",
             _match_start_index: piece_offset,
           });
           piece_offset += piece.length;
@@ -603,6 +609,7 @@ export function generate_edits_via_paragraph_alignment(
           type: "modify",
           target_text: deleted_text,
           new_text: "",
+          comment: "Diff: Text deleted",
           _match_start_index: del_offset,
         });
       }
@@ -620,6 +627,7 @@ export function generate_edits_via_paragraph_alignment(
         type: "modify",
         target_text: "",
         new_text: inserted_text,
+        comment: "Diff: Text inserted",
         _match_start_index: offset,
       });
     } else if (tag === "replace") {
@@ -921,6 +929,7 @@ function _row_ops_for_table(
             type: "modify",
             target_text: o_txt,
             new_text: m_txt,
+            comment: "Diff: Table row modified",
             _is_table_edit: true,
           });
         }
@@ -1096,6 +1105,7 @@ export function generate_structured_edits(
               type: "modify",
               target_text: o_txt,
               new_text: m_txt,
+              comment: "Diff: Table row modified",
               _is_table_edit: true,
             });
           }

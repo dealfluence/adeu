@@ -2096,8 +2096,12 @@ reversible and flagged in the receipt.
   - `cd node/packages/mcp-server && npx vitest run src/text-revision-tool.test.ts`
     â€” four cases pass.
 
-## Task 20 â€” A5: audit the structured-diff payload for default-valued fields
+## Task 20 — A5: audit the structured-diff payload for default-valued fields
 - **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: remove comment field in diff.ts -> FAIL (verifier audit: removing comment field in diff.ts breaks Word margin comment creation on applied diffs and breaks Python parity where diff.py generates comment fields for redline comments)
+
 
 - **Goal**: make sure Node's ready-to-apply edit payloads do not carry
   default-valued fields that inflate the agent's next tool call by 25â€“40%.
