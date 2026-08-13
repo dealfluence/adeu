@@ -162,9 +162,28 @@ function _normalize_virtual_projection_text(text: string): string {
   return text.replace(/^#+\s*/gm, "");
 }
 
-/** Python's `repr()` of a short string, for the divergence message. */
+/**
+ * Python's `repr()` of a short string, for the divergence message. NOT
+ * `JSON.stringify`: Python prefers single quotes and only switches to double
+ * quotes when the text holds a single quote but no double quote, and it prints
+ * control characters as `\xNN` rather than `\uNNNN`. The two engines' failure
+ * text has to read identically (shared/conformance/README.md), and this string
+ * is quoted from a real document, so tabs, breaks (`\x0b`) and apostrophes all
+ * turn up in practice.
+ */
 function _repr(text: string): string {
-  return JSON.stringify(text);
+  const quote = text.includes("'") && !text.includes('"') ? '"' : "'";
+  const body = text
+    .replace(/\\/g, "\\\\")
+    .replace(new RegExp(quote, "g"), `\\${quote}`)
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(
+      /[\x00-\x1f\x7f-\x9f]/g,
+      (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    );
+  return `${quote}${body}${quote}`;
 }
 
 /** Verifies that the clean view of `doc` matches `expected_text`. */
@@ -198,15 +217,18 @@ export function verify_clean_text(
 
 /** `x.docx` → `x_redlined.docx`; an already-suffixed artifact stays in place. */
 function _default_output_path(input_path: string): string {
-  const ext = extname(input_path);
-  const stem = basename(input_path, ext);
+  const stem = basename(input_path, extname(input_path));
   // Idempotency guard (parity with text_revision.py:243-246): a second pass
   // over an artifact must not compound the suffix into
   // contract_redlined_redlined.docx and fragment the agent's document state.
   if (stem.endsWith("_redlined") || stem.endsWith("_processed")) {
     return input_path;
   }
-  return join(dirname(input_path), `${stem}_redlined${ext}`);
+  // The extension is REPLACED, not inherited (`with_name(f"{stem}_redlined.docx")`,
+  // text_revision.py:246): what gets written is a DOCX, so `contract` and
+  // `contract.DOCX` both become contract_redlined.docx — inheriting the input's
+  // extension would write a DOCX to an extensionless path.
+  return join(dirname(input_path), `${stem}_redlined.docx`);
 }
 
 /** `<target stem>.unverified.docx`, the diagnostic sibling's path. */

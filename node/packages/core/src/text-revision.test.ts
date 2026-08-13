@@ -319,6 +319,9 @@ describe("apply_text_revision_core — verification gate", () => {
       "The document structure could not fully realize the requested text " +
         "(e.g. headings or table cells cannot be deleted via text replacement).",
     );
+    // The quoted excerpt is repr()-escaped: no raw newline leaks into the
+    // single-line failure message (the emptied row reads "\n |").
+    expect(err.message).toContain("applied reads '\\n |'");
     expect(err.message).toContain(`Nothing was written to '${out}'`);
     expect(err.message).toContain(
       `a diagnostic copy was kept at '${unverified}' — it is NOT the requested document.`,
@@ -357,6 +360,26 @@ describe("apply_text_revision_core — verification gate", () => {
     expect(ok).toBe(false);
     expect(msg).toContain("first divergence at character 0");
   });
+
+  it("6c. quotes the diverging text the way Python's repr() does", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Plain body paragraph.");
+    const loaded = await loadDoc(await doc.save());
+    const [, msg] = verify_clean_text(loaded, "Different body paragraph.");
+    // repr('Plain body paragraph.') is single-quoted, not JSON's "…".
+    expect(msg).toContain("applied reads 'Plain body paragraph.'");
+    expect(msg).toContain("supplied text reads 'Different body paragraph.'");
+  });
+
+  it("6d. matches repr()'s quote choice and escapes for awkward text", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Don't stop.");
+    const loaded = await loadDoc(await doc.save());
+    // repr() switches to double quotes when the text holds ' but no ".
+    const [, msg] = verify_clean_text(loaded, "Won't stop.");
+    expect(msg).toContain(`applied reads "Don't stop."`);
+    expect(msg).toContain(`supplied text reads "Won't stop."`);
+  });
 });
 
 describe("apply_text_revision_core — default output path", () => {
@@ -381,6 +404,21 @@ describe("apply_text_revision_core — default output path", () => {
         revised_text: await cleanTextOf(bytes),
       });
       expect(res.output_path).toBe(input);
+    }
+  });
+
+  it("7c. the default output is a .docx whatever the input's extension", async () => {
+    const bytes = await sampleBytes();
+    // Parity with with_name(f"{stem}_redlined.docx"): the extension is
+    // replaced, never inherited — an extensionless input must not produce an
+    // extensionless DOCX.
+    for (const name of ["contract", "contract.DOCX", "contract.doc"]) {
+      const res = await apply_text_revision_core({
+        doc: await loadDoc(bytes),
+        input_path: join(tmpdir(), name),
+        revised_text: await cleanTextOf(bytes),
+      });
+      expect(res.output_path).toBe(join(tmpdir(), "contract_redlined.docx"));
     }
   });
 });
