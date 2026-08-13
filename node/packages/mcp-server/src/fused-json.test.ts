@@ -143,6 +143,7 @@ describe("fused-JSON hint on unrecognized type", () => {
 
     expect(res.isError).toBe(true);
     const text: string = res.content[0].text;
+    expect(text).toContain(FUSED_JSON_HINT);
     expect(text.toLowerCase()).not.toContain("smaller");
     expect(text.toLowerCase()).not.toContain("fewer edits");
   });

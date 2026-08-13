@@ -1717,9 +1717,11 @@ reversible and flagged in the receipt.
 
 ## Task 14 — B7: fused-JSON hint on unrecognised `type`
 - **Status**: COMPLETED
-- **Failed Verify Cycles**: 0
+- **Failed Verify Cycles**: 1
 - **Attempt Ledger**:
-  - attempt 1: change CHANGE_ITEM_SCHEMA type to z.string().optional(), append fused hint in typeErrors loop when has_fused_json_marker(c.type) is true, and add fused-json.test.ts -> PASS
+  - attempt 1: change CHANGE_ITEM_SCHEMA type to z.string().optional() and append FUSED_JSON_HINT -> FAIL (verifier audit: fused-json.test.ts case 5 needs to assert that FUSED_JSON_HINT is in the error message alongside checking no smaller/fewer edits wording)
+  - attempt 2: added assertion in fused-json.test.ts test case 5 that res.content[0].text includes FUSED_JSON_HINT -> PASS
+
 
 
 
