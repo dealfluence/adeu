@@ -43,7 +43,7 @@ Applies a whole-text revised document against an original DOCX file by computing
 **Key parameters:**
 - `file_path` (required): absolute path to original `.docx` file
 - `revised_text` (required): full text of the revised document
-- `author`: optional Track Changes attribution string. Python resolves `author` from parameter -> `ADEU_AUTHOR` -> OS machine account name -> `"Adeu AI"`. Node resolves from parameter -> `ADEU_AUTHOR` -> `"Adeu AI (TS)"`.
+- `author`: optional Track Changes attribution string. Python resolves author from parameter -> ADEU_AUTHOR -> OS user name from getpass.getuser() (machine account names such as root/admin/administrator/system/daemon/nobody excluded) -> "Adeu AI". Node resolves from parameter -> ADEU_AUTHOR -> "Adeu AI (TS)".
 
 ### `accept_all_changes`
 Accepts every tracked change in one operation, producing a finalized clean document. Use only when review is fully complete.
