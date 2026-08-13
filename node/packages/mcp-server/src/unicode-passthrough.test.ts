@@ -1,12 +1,24 @@
-import { describe, it, expect } from "vitest";
-import { failure_envelope } from "@adeu/core";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { formatBatchResult } from "./index.js";
 import { build_changes_response } from "./ledger.js";
 import { projectFixture } from "./conformance-utils.js";
+import { startTestServer, TestServer } from "./test-rpc.js";
 
 const textOf = (r: { content: { text: string }[] }) => r.content[0].text;
 
 describe("unicode passthrough (B6 regression guard)", () => {
+  let server: TestServer;
+  let docPath: string;
+
+  beforeAll(async () => {
+    server = await startTestServer("unicode_passthrough");
+    docPath = await server.buildDoc([
+      "The Supplier shall deliver the goods within thirty days.",
+    ]);
+  }, 30000);
+
+  afterAll(() => server?.stop());
+
   it("renders non-ASCII characters literally in formatBatchResult", () => {
     const stats = {
       actions_applied: 0,
@@ -33,27 +45,36 @@ describe("unicode passthrough (B6 regression guard)", () => {
     expect(!/\\u[0-9a-fA-F]{4}/.test(text)).toBe(true);
   });
 
-  it("Task 6 failure envelope JSON block contains literal non-ASCII characters without \\u escapes", () => {
-    const env = failure_envelope(
-      "batch_validation_failed",
-      [[0, "Target text '’ “ ” — €' not found"]],
-      "Batch rejected. Some edits failed validation.",
-      ["- Edit 1 Failed: Target text '’ “ ” — €' not found"],
-    );
-    const jsonStr = JSON.stringify(env);
-    const rawBlock = `\`\`\`json\n${jsonStr}\n\`\`\``;
+  it("Task 6 failure envelope JSON block contains literal non-ASCII characters without \\u escapes", async () => {
+    const res = await server.callTool("process_document_batch", {
+      reasoning: "test unicode in failure envelope",
+      original_docx_path: docPath,
+      author_name: "Unicode Tester",
+      changes: [
+        {
+          type: "modify",
+          target_text: "Non-ASCII ’ “ ” — € target",
+          new_text: "replacement",
+        },
+      ],
+      output_path: server.tempOut("failing_unicode"),
+    });
 
-    expect(!/\\u[0-9a-fA-F]{4}/.test(rawBlock)).toBe(true);
+    expect(res.isError).toBe(true);
+    const text: string = res.content[0].text;
+    expect(text).toContain("Non-ASCII ’ “ ” — € target");
 
-    const match = /```json\n([\s\S]*?)\n```/.exec(rawBlock);
+    const match = /```json\n([\s\S]*?)\n```/.exec(text);
     expect(match).toBeTruthy();
-    const parsed = JSON.parse(match![1]);
+    const jsonBlock = match![1];
 
-    expect(parsed.failed[0].reason).toContain("’ “ ” — €");
-    expect(parsed.errors[0]).toContain("’ “ ” — €");
+    expect(!/\\u[0-9a-fA-F]{4}/.test(jsonBlock)).toBe(true);
+
+    const parsed = JSON.parse(jsonBlock);
+    expect(parsed.failed[0].reason).toContain("Non-ASCII ’ “ ” — € target");
   });
 
-  it("build_changes_response renders a smart-quoted comment body literally using unicode.docx", async () => {
+  it("build_changes_response renders comment body literally using unicode.docx", async () => {
     const fx = await projectFixture("unicode");
     const res = build_changes_response(fx.text, fx.filePath, {
       comments_data: fx.commentsData,
@@ -62,20 +83,21 @@ describe("unicode passthrough (B6 regression guard)", () => {
     });
     const text = textOf(res);
 
+    expect(text.includes("Add a five-year tail — see §12.3.")).toBe(true);
     expect(!/\\u[0-9a-fA-F]{4}/.test(text)).toBe(true);
-    // Assert that text includes smart quotes / smart-quoted comment content
-    expect(text).toMatch(/[’“”—]/);
   });
 
-  it("a non-ASCII author name survives into the ledger's Authors — roster", async () => {
+  it("a non-ASCII author name appears literally on entry lines when filtered by author", async () => {
     const fx = await projectFixture("unicode");
     const res = build_changes_response(fx.text, fx.filePath, {
       comments_data: fx.commentsData,
       existing_change_ids: fx.changeIds,
       bundle: fx.bundle,
+      changes_author: "Åsa",
     });
     const text = textOf(res);
 
-    expect(text).toContain("> Authors — Åsa Öberg");
+    expect(text).toContain("Com:1  Åsa Öberg");
+    expect(!/\\u[0-9a-fA-F]{4}/.test(text)).toBe(true);
   });
 });

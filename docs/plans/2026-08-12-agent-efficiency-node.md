@@ -1813,8 +1813,12 @@ reversible and flagged in the receipt.
   - `cd node/packages/core && npx vitest run src/engine.guard-message.test.ts` â€”
     seven cases pass.
 
-## Task 16 â€” B6: pin the non-escaping of non-ASCII (regression guard only)
+## Task 16 — B6: pin the non-escaping of non-ASCII (regression guard only)
 - **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: create unicode-passthrough.test.ts -> FAIL (verifier audit: test 2 should test failure envelope text from server call rather than direct JSON.stringify, test 3 should assert comment body text "Add a five-year tail — see §12.3.", and test 4 should assert author name without duplicating ledger.test.ts)
+
 
 - **Goal**: prove Node never `\uXXXX`-escapes legal text, so the Python fix stays
   parity-checked from both sides.
