@@ -1905,6 +1905,10 @@ reversible and flagged in the receipt.
 
 ## Task 18 â€” C2: author-impersonation warning
 - **Status**: COMPLETED
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: implement get_pending_revision_authors in engine.ts and add engine.impersonation.test.ts -> FAIL (verifier audit: engine.impersonation.test.ts in @adeu/core imported formatBatchResult from ../../mcp-server/src/index.js causing cross-package import and booting stdio server)
+
 
 - **Goal**: setting the acting author to a name that already has pending
   revisions no longer silently bypasses the multi-author guard.

@@ -93,7 +93,7 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
 
   it("renders author_impersonation_warning immediately after Saved to: line", () => {
     const stats = {
-      author_impersonation_warning: "Caller identity 'Alice' does not match session author 'Bob'",
+      author_impersonation_warning: "[!] Warning: acting author 'Jane Doe' matches an author with pending revisions in this document.",
       actions_applied: 0,
       actions_skipped: 0,
       edits_applied: 1,
@@ -101,7 +101,7 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
       edits: []
     };
     const res = formatBatchResult(stats, "output.docx");
-    expect(res).toContain("Batch complete. Saved to: output.docx\n\n*Warning:* Caller identity 'Alice' does not match session author 'Bob'\nActions: 0 applied");
+    expect(res).toContain("Batch complete. Saved to: output.docx\n\n*Warning:* [!] Warning: acting author 'Jane Doe' matches an author with pending revisions in this document.\nActions: 0 applied");
   });
 
   // Measured on the shape the MCP tool actually emits: RAW engine stats, never

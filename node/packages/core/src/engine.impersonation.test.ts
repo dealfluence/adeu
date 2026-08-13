@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { DocumentObject } from "./docx/bridge.js";
 import { RedlineEngine } from "./engine.js";
-import { formatBatchResult } from "../../mcp-server/src/index.js";
 
 const WORD_XMLNS =
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
@@ -147,7 +146,7 @@ describe("Author impersonation warning", () => {
     );
   });
 
-  it("renders formatBatchResult with Warning prefix", async () => {
+  it("includes author_impersonation_warning on batch stats", async () => {
     const doc = await buildDoc(`
       <w:p w14:paraId="00000001">
         <w:ins w:id="1" w:author="Jane Doe" w:date="2026-01-01T00:00:00Z"><w:r><w:t>INSERTED</w:t></w:r></w:ins>
@@ -157,7 +156,8 @@ describe("Author impersonation warning", () => {
     const stats = engine.process_batch([
       { type: "modify", target_text: "INSERTED", new_text: "REPLACED" },
     ]);
-    const rendered = formatBatchResult(stats, "output.docx");
-    expect(rendered).toContain("*Warning:* [!] Warning: acting author 'Jane Doe' matches an author with pending revisions in this document.");
+    expect(stats.author_impersonation_warning).toBe(
+      "[!] Warning: acting author 'Jane Doe' matches an author with pending revisions in this document.",
+    );
   });
 });
