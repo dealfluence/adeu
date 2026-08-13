@@ -8,17 +8,9 @@
 // fixtures from shared/conformance/build_fixtures.mjs. Both are committed —
 // see shared/conformance/README.md to regenerate.
 //
-// Which task turns each case green:
-//   range_*            → Task 3  (build_page_range_response)
-//   ledger_*           → Task 4  (build_changes_response)
-//   search_*           → Task 12 (max_matches / match_offset / full_paragraph)
-//   guard_long5        → Task 13 (build_budget_guard_message)
-//   outline_l1         → Task 17 (outline parity)
-//
-// GATE: the whole file is skipped unless ADEU_CONFORMANCE is set, so `npm test`
-// stays green while the ports land one task at a time. Task 22 REMOVES the
-// gate. Run it deliberately with:
-//   cd node/packages/mcp-server && ADEU_CONFORMANCE=1 npx vitest run src/conformance.test.ts
+// Declared cosmetic differences (spec §8.3 allowlist):
+// - apply_text_revision default author: "Adeu AI (TS)" (Node) vs "Adeu AI" (Python)
+// - Absence of CLI output flavours in Node (MCP builders only)
 //
 // Node builders are called below with PYTHON'S positional argument order, with
 // Python's keyword arguments in a trailing options object. That is the only
@@ -107,7 +99,7 @@ async function expectMatchesGolden(caseName: string, produce: () => unknown): Pr
   );
 }
 
-describe.skipIf(!process.env.ADEU_CONFORMANCE)("conformance: Node builders match the Python goldens", () => {
+describe("conformance: Node builders match the Python goldens", () => {
   // --- ledger (mode='changes') --------------------------------------------
 
   const ledgerCase = (
@@ -215,7 +207,7 @@ describe.skipIf(!process.env.ADEU_CONFORMANCE)("conformance: Node builders match
 // matches a blown golden.
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!process.env.ADEU_CONFORMANCE)("conformance: token budgets", () => {
+describe("conformance: token budgets", () => {
   it("ledger costs <= 18 tokens per change on dense_175", () => {
     const ledger = golden("ledger_dense_offset0");
     if (ledger === null) {

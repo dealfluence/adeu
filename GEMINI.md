@@ -16,9 +16,19 @@ Reads a DOCX file and returns its content as CriticMarkup-annotated text:
 - `mode="outline"`: returns a heading map only — start here on large documents before reading in full
 - `mode="appendix"`: returns defined terms and cross-reference anchors — consult before editing legal docs
 - `page=N`: navigate paginated full-text output
+- `search_query="text"`: search document for specific text matches
+- `max_matches=N`: cap number of search matches returned (default 10)
+- `match_offset=N`: 0-indexed pagination offset for search matches
+- `full_paragraph=true`: expand search match snippets to complete paragraphs
+- `force=true`: bypass whole-document token budget guard refusal for large files
 
 ### `process_document_batch`
-Applies a list of edits to a DOCX. Edits apply **sequentially** — each one evaluates against the document state produced by the edits before it, so dependent edits may be chained in one batch (a later edit must target the text as it reads after the earlier edits). If any edit fails validation, the whole batch is rejected transactionally.
+Applies a list of edits to a DOCX. Edits apply **sequentially** — each one evaluates against the document state produced by the edits before it, so dependent edits may be chained in one batch (a later edit must target the text as it reads after the earlier edits). If any edit fails validation, the whole batch is rejected transactionally unless `partial=true` is set.
+
+**Key parameters:**
+- `file_path` (required): absolute path to the `.docx` file
+- `changes` (required): list of change objects
+- `partial=true`: non-transactional batch execution — valid edits apply while failing edits return detailed error reports
 
 **Change types:**
 - `modify`: search-and-replace. `target_text` must uniquely identify the passage. `new_text` supports Markdown headings, bold, italic, and `\n\n` for paragraph breaks. Empty `new_text` deletes the passage.
@@ -26,6 +36,14 @@ Applies a list of edits to a DOCX. Edits apply **sequentially** — each one eva
 - `reply`: reply to a comment by `target_id` (e.g. `Com:5`)
 
 Always call `read_docx` immediately before any `accept`/`reject`/`reply` — IDs shift between document states.
+
+### `apply_text_revision`
+Applies a whole-text revised document against an original DOCX file by computing paragraph and line diffs automatically and converting them to native Track Changes.
+
+**Key parameters:**
+- `file_path` (required): absolute path to original `.docx` file
+- `revised_text` (required): full text of the revised document
+- `author`: optional Track Changes attribution string (defaults to `"Adeu AI (TS)"` on Node / `"Adeu AI"` on Python)
 
 ### `accept_all_changes`
 Accepts every tracked change in one operation, producing a finalized clean document. Use only when review is fully complete.

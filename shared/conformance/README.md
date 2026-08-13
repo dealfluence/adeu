@@ -19,10 +19,10 @@ leaves `git status` clean. `file_path` is always the placeholder
 `/fixtures/<name>.docx`, never a real path — the Node tests pass the same
 string.
 
-The suite is gated on `ADEU_CONFORMANCE` until Task 22 removes the gate:
+The suite runs as part of standard Node testing:
 
 ```sh
-cd node/packages/mcp-server && ADEU_CONFORMANCE=1 npx vitest run src/conformance.test.ts
+cd node && npm run test
 ```
 
 | golden | fixture | builder call |
