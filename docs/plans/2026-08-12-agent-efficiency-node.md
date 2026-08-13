@@ -2207,6 +2207,11 @@ reversible and flagged in the receipt.
     cases pass.
 
 ## Task 22 â€” Release: ungate conformance, bump to 2.3.0, docs
+- **Status**: IN_PROGRESS
+- **Failed Verify Cycles**: 1
+- **Attempt Ledger**:
+  - attempt 1: ungate conformance.test.ts, update docs -> FAIL (verifier audit: GEMINI.md max_matches default should say 20 not 10, partial default should say true not false, and python apply_text_revision author default should match README.md)
+
 
 - **Goal**: turn the conformance suite on permanently, ship the version lockstep,
   and leave the repo's own documentation truthful.
