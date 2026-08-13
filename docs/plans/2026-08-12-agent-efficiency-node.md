@@ -1908,6 +1908,8 @@ reversible and flagged in the receipt.
 - **Failed Verify Cycles**: 1
 - **Attempt Ledger**:
   - attempt 1: implement get_pending_revision_authors in engine.ts and add engine.impersonation.test.ts -> FAIL (verifier audit: engine.impersonation.test.ts in @adeu/core imported formatBatchResult from ../../mcp-server/src/index.js causing cross-package import and booting stdio server)
+  - attempt 2: remove cross-package import in engine.impersonation.test.ts, assert stats directly in core, and test formatBatchResult in report-minimal.test.ts -> PASS
+
 
 
 - **Goal**: setting the acting author to a name that already has pending
@@ -1960,6 +1962,17 @@ reversible and flagged in the receipt.
     six cases pass.
 
 ## Task 19 â€” C3: `apply_text_revision` MCP tool on Node
+- **Status**: COMPLETED
+- **Failed Verify Cycles**: 3
+- **Attempt Ledger**:
+  - attempt 1: implement text-revision.ts and apply_text_revision tool -> FAIL (verifier audit: default output path should always append .docx extension e.g. stem_redlined.docx, and _repr helper should single-quote string representations to match Python's repr())
+  - attempt 2 (fix cycle 1): fix default output path to always use .docx extension (stem_redlined.docx) and fix _repr helper to single-quote Python repr() format with C0/C1 control escaping -> FAIL (verifier audit: _repr helper should escape non-printable Unicode characters like NBSP \xa0 and ZWSP \u200b matching Python repr())
+  - attempt 3 (fix cycle 2): escape all non-printable Unicode characters in \p{C}|\p{Z} (except U+0020) using \xNN, \uNNNN, \UNNNNNNNN widths matching Python repr() -> FAIL (verifier audit: verify_clean_text divergence index and 40-char excerpt window should slice by code points rather than UTF-16 code units to avoid cutting astral characters)
+  - attempt 4 (fix cycle 3): slice verify_clean_text clean-text excerpts by code point (Array.from) so 40-char divergence window keeps astral code points whole -> PASS
+
+
+
+
 
 - **Goal**: expose the strongest bulk primitive (whole-text diff â†’ tracked
   changes with a post-apply verification gate) over MCP, with the same interlocks
@@ -2084,6 +2097,7 @@ reversible and flagged in the receipt.
     â€” four cases pass.
 
 ## Task 20 â€” A5: audit the structured-diff payload for default-valued fields
+- **Status**: COMPLETED
 
 - **Goal**: make sure Node's ready-to-apply edit payloads do not carry
   default-valued fields that inflate the agent's next tool call by 25â€“40%.
