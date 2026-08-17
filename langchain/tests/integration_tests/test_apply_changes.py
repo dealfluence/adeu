@@ -275,3 +275,86 @@ class TestAdeuApplyChangesBehavior:
         blob = msg.content + repr(msg.artifact.get("validation_errors"))
         assert "adeu_read_docx" in blob, "engine error still advertises the CLI; id_discovery_hint was not passed"
         assert "adeu extract" not in blob
+
+    def test_partial_success_salvages_valid_edits(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuApplyChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_apply_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "author_name": "AI Reviewer",
+                    "changes": [
+                        {"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT},
+                        {"type": "modify", "target_text": "PHRASE_NOT_IN_DOCUMENT_xyz123", "new_text": "x"},
+                    ],
+                    "output_path": str(output_path),
+                },
+                "id": "test-partial",
+                "type": "tool_call",
+            }
+        )
+        assert msg.artifact["success"] is True
+        assert msg.artifact["status"] == "partial"
+        assert msg.artifact["edits_applied"] == 1
+        assert len(msg.artifact["failed"]) == 1
+        assert msg.artifact["failed"][0]["index"] == 1
+        assert output_path.exists()
+        assert msg.content.startswith("PARTIAL:")
+
+    def test_partial_false_is_transactional(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuApplyChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_apply_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "author_name": "AI Reviewer",
+                    "changes": [
+                        {"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT},
+                        {"type": "modify", "target_text": "PHRASE_NOT_IN_DOCUMENT_xyz123", "new_text": "x"},
+                    ],
+                    "output_path": str(output_path),
+                    "partial": False,
+                },
+                "id": "test-transactional",
+                "type": "tool_call",
+            }
+        )
+        assert msg.artifact["success"] is False
+        assert not output_path.exists()
+        assert "Batch rejected" in msg.content
+
+    def test_report_carries_page_and_heading_context(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuApplyChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_apply_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "author_name": "AI Reviewer",
+                    "changes": [
+                        {
+                            "type": "modify",
+                            "target_text": _UNIQUE_TARGET,
+                            "new_text": _REPLACEMENT,
+                            "comment": "Why this changed.",
+                        }
+                    ],
+                    "output_path": str(output_path),
+                },
+                "id": "test-rich-report",
+                "type": "tool_call",
+            }
+        )
+        first = msg.artifact["edits"][0]
+        for key in ("pages", "heading_path", "match_mode", "occurrences_modified", "comment"):
+            assert key in first, f"per-edit report dropped engine field {key!r}"
+        assert first["comment"] == "Why this changed."
+        assert "Mode: `strict`" in msg.content
+        assert 'Comment: "Why this changed."' in msg.content
+        assert msg.artifact["occurrences_modified"] >= 1
+        assert "actions_already_resolved" in msg.artifact

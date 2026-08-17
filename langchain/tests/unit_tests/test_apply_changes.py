@@ -77,6 +77,13 @@ class TestAdeuApplyChangesSchema:
         tool = AdeuApplyChanges()
         assert tool.response_format == "content_and_artifact"
 
+    def test_partial_defaults_to_true(self) -> None:
+        # Parity with process_document_batch (document.py:1511-1514).
+        data = AdeuApplyChangesInput(
+            reasoning="t", file_path="/a.docx", author_name="AI", changes=[{"type": "accept", "target_id": "Chg:1"}]
+        )
+        assert data.partial is True
+
 
 class TestAdeuApplyChangesValidation:
     def test_rejects_nonexistent_input(self) -> None:

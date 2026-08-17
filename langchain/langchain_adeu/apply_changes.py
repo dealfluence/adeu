@@ -93,8 +93,9 @@ class AdeuApplyChangesInput(BaseModel):
             "evaluated against the document state produced by the changes "
             "before it, so dependent edits may be chained in one batch (e.g. "
             "rename X to Y, then modify Y — the second edit must target Y, "
-            "the text as it reads after the rename). Any validation failure "
-            "rejects the whole batch transactionally."
+            "the text as it reads after the rename). By default (partial=True) "
+            "a validation failure only drops the failing change; with "
+            "partial=False any failure rejects the whole batch transactionally."
         ),
     )
     output_path: str | None = Field(
@@ -105,6 +106,15 @@ class AdeuApplyChangesInput(BaseModel):
             "(or overwrites the input if its stem already ends in '_processed' "
             "or '_redlined'). Must differ from input_path unless the input is "
             "already a processed/redlined file."
+        ),
+    )
+    partial: bool = Field(
+        default=True,
+        description=(
+            "Salvage mode. When True (default), edits that pass validation are applied "
+            "and written even if others in the batch fail; the response lists the "
+            "failures so you can resubmit just those. Set False for all-or-nothing "
+            "semantics: any failure rejects the whole batch and nothing is written."
         ),
     )
 
@@ -120,19 +130,22 @@ _DESCRIPTION = (
     "Changes in a batch apply SEQUENTIALLY: each change is evaluated against "
     "the document state produced by the changes before it, so dependent edits "
     "may be chained in one batch (e.g. rename X to Y, then modify Y — the "
-    "second edit must target Y, the text as it reads after the rename). If "
-    "any change fails validation, the whole batch is rejected "
-    "transactionally.\n\n"
+    "second edit must target Y, the text as it reads after the rename).\n\n"
+    "FAILURE MODES: by default (partial=True) the batch is salvaged — every "
+    "change that passes validation is applied and written, and the response "
+    "opens with a 'PARTIAL:' header listing the changes that failed so you "
+    "can resubmit just those. Pass partial=False for all-or-nothing "
+    "semantics: any single validation failure rejects the whole batch and "
+    "nothing is written. Either way, if NOTHING applied the batch counts as "
+    "rejected: no file is written and the artifact carries success=False with "
+    "the per-edit error list, so you can correct the errors and retry.\n\n"
     "ID VOLATILITY: 'Chg:N' and 'Com:N' identifiers shift between document "
     "states. Always call adeu_read_docx immediately before any "
     "accept/reject/reply action to get fresh IDs — do not reuse IDs from "
     "earlier in the conversation.\n\n"
-    "If validation fails (e.g. target_text doesn't uniquely match), the "
-    "whole batch is rejected transactionally and the tool returns the "
-    "per-edit error list as content with success=False in the artifact, so "
-    "you can correct the errors and retry. Edits can still be skipped for "
-    "non-validation reasons at apply time — check "
-    "artifact['edits_applied'] vs artifact['edits_skipped']."
+    "Edits can still be skipped for non-validation reasons at apply time — "
+    "check artifact['edits_applied'] vs artifact['edits_skipped'], and "
+    "artifact['status'] ('ok' or 'partial')."
 )
 
 
@@ -152,6 +165,7 @@ class AdeuApplyChanges(BaseTool):
         author_name: str,
         changes: list[dict[str, Any]],
         output_path: str | None = None,
+        partial: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         if not author_name.strip():
             raise ToolException(
@@ -192,10 +206,20 @@ class AdeuApplyChanges(BaseTool):
         engine = RedlineEngine(stream, author=author_name, id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT)
 
         try:
-            stats = engine.process_batch(validated_changes)
+            stats = engine.process_batch(validated_changes, partial=partial)
         except BatchValidationError as e:
             content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(e.errors)
             return content, _failure_artifact(source, output_path, author_name, e.errors)
+
+        applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+        engine_failed = list(stats.get("failed", []))
+        if applied_count == 0 and engine_failed:
+            # Nothing landed: report it as a rejection and write no file, so a
+            # failed salvage run is indistinguishable from a transactional one
+            # (document.py:645-661).
+            errors = [str(item.get("reason", item)) for item in engine_failed]
+            content = "Batch rejected. Some edits failed validation:\n\n" + "\n\n".join(errors)
+            return content, _failure_artifact(source, output_path, author_name, errors)
 
         # Success path: write the output and return per-edit stats.
         result_stream = engine.save_to_stream()
@@ -203,20 +227,28 @@ class AdeuApplyChanges(BaseTool):
         with open(target, "wb") as f:
             f.write(result_stream.getvalue())
 
-        content_lines = _build_success_content(stats, target)
+        content_lines = _build_success_content(stats, target, engine_failed, len(validated_changes), partial)
 
         artifact: dict[str, Any] = {
             "input_path": str(source),
             "output_path": str(target),
             "author_name": author_name,
             "success": True,
+            "status": stats.get("status", "ok"),
+            "partial": partial,
             "validation_errors": None,
+            "failed": engine_failed,
             "actions_applied": stats["actions_applied"],
             "actions_skipped": stats["actions_skipped"],
+            "actions_already_resolved": stats.get("actions_already_resolved", 0),
             "edits_applied": stats["edits_applied"],
             "edits_skipped": stats["edits_skipped"],
+            "occurrences_modified": stats.get("occurrences_modified", 0),
+            "author_impersonation_warning": stats.get("author_impersonation_warning"),
             "skipped_details": stats.get("skipped_details", []),
             "edits": stats.get("edits", []),
+            "engine": stats.get("engine"),
+            "engine_version": stats.get("version"),
         }
         return "\n".join(content_lines), artifact
 
@@ -227,8 +259,9 @@ class AdeuApplyChanges(BaseTool):
         author_name: str,
         changes: list[dict[str, Any]],
         output_path: str | None = None,
+        partial: bool = True,
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(self._run, reasoning, file_path, author_name, changes, output_path)
+        return await asyncio.to_thread(self._run, reasoning, file_path, author_name, changes, output_path, partial)
 
 
 def _resolve_output_path(source: Path, requested: str | None) -> Path:
@@ -264,50 +297,97 @@ def _failure_artifact(
     author_name: str,
     errors: list[str],
 ) -> dict[str, Any]:
-    """Build an artifact for a rejected batch — no output file was written."""
+    """Build an artifact for a rejected batch — no output file was written.
+
+    Returns the same key set as the success artifact so a downstream
+    LangGraph node can read `artifact["status"]` (or any other field)
+    without first working out which branch produced the artifact.
+    """
     return {
         "input_path": str(source),
         "output_path": None,
         "requested_output_path": output_path,
         "author_name": author_name,
         "success": False,
+        "status": "error",
+        "partial": None,
         "validation_errors": errors,
+        "failed": [],
         "actions_applied": 0,
         "actions_skipped": 0,
+        "actions_already_resolved": 0,
         "edits_applied": 0,
         "edits_skipped": 0,
+        "occurrences_modified": 0,
+        "author_impersonation_warning": None,
         "skipped_details": [],
         "edits": [],
+        "engine": None,
+        "engine_version": None,
     }
 
 
 def _build_success_content(
     stats: dict[str, Any],
     target: Path,
+    engine_failed: list[dict[str, Any]],
+    total_changes: int,
+    partial: bool,
 ) -> list[str]:
     """Assemble the human-readable content block for a successful batch.
 
-    Mirrors the per-edit detail format used by the MCP server's
-    `process_document_batch` path so behavior is consistent across
-    surfaces. Each per-edit report carries enough preview context (CriticMarkup
-    string, clean text, warnings) for an LLM to self-review and decide whether
-    to retry or rewrite ambiguous edits on a follow-up batch.
+    Mirrors the report the MCP server's `process_document_batch` renders
+    (`document.py:749-825`) so behavior is consistent across surfaces: the
+    salvage header first (a partial success is a SUCCESS response, and the
+    failures must be readable above the path that was written), then the
+    counts, then per-edit reports carrying enough context (page, heading
+    path, match mode, comment, CriticMarkup preview) for an LLM to
+    self-review and decide what to resubmit.
     """
-    lines = [f"Batch complete. Saved to: {target}"]
+    applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
+    lines: list[str] = []
 
-    lines.append(f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped.")
-    lines.append(f"Edits: {stats['edits_applied']} applied, {stats['edits_skipped']} skipped.")
+    is_partial_success = partial and bool(engine_failed) and applied_count > 0
+    if is_partial_success:
+        lines.append(
+            f"PARTIAL: applied {applied_count} of {total_changes} changes. {len(engine_failed)} failed validation:"
+        )
+        lines.append("")
+        for item in sorted(engine_failed, key=lambda i: i.get("index", 0)):
+            lines.append(f"- Change #{item.get('index', 0) + 1} Failed: {item.get('reason', '')}")
+        lines.append("")
+
+    lines.append(f"Batch complete. Saved to: {target}")
+
+    if stats.get("author_impersonation_warning"):
+        lines.append(f"*Warning:* {stats['author_impersonation_warning']}")
+
+    already = stats.get("actions_already_resolved", 0)
+    already_text = f", {already} already resolved (no effect)" if already else ""
+    occurrences = stats.get("occurrences_modified", 0)
+    occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
+    lines.append(f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.")
+    lines.append(f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.")
 
     edit_reports = stats.get("edits") or []
     if edit_reports:
         lines.append("")
         lines.append("Detailed Edit Reports:")
         for i, report in enumerate(edit_reports, start=1):
-            status = "applied" if report.get("status") == "applied" else "failed"
-            indicator = "[applied]" if status == "applied" else "[failed]"
-            lines.append(f"Edit {i} {indicator}:")
+            indicator = "[applied]" if report.get("status") == "applied" else "[failed]"
+            pages = ", ".join(f"p{p}" for p in report.get("pages") or [])
+            page_suffix = f" ({pages})" if pages else ""
+            lines.append(f"Edit {i} {indicator}{page_suffix}:")
+            if report.get("heading_path"):
+                lines.append(f"  Path: `{report['heading_path']}`")
+            occ = report.get("occurrences_modified", 0)
+            lines.append(
+                f"  Mode: `{report.get('match_mode', 'strict')}` ({occ} occurrence{'s' if occ != 1 else ''} modified)"
+            )
             lines.append(f"  Target: '{report.get('target_text', '')}'")
             lines.append(f"  New text: '{report.get('new_text', '')}'")
+            if report.get("comment"):
+                lines.append(f'  Comment: "{report["comment"]}"')
             if report.get("warning"):
                 lines.append(f"  Warning: {report['warning']}")
             if report.get("error"):
