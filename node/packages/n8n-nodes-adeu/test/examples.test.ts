@@ -5,6 +5,14 @@
 // against the node's own description object, so a renamed parameter, a stale
 // operation value, or a hand-edited node `type` fails the build instead of
 // failing silently in a user's n8n.
+//
+// Test findings on baseline example workflows:
+// - Sequential_workflow.json passes all 5 assertions.
+// - AI_Agent_workflow.json fails on:
+//   1. Unrecognized `CUSTOM.adeuTool` / `CUSTOM.adeu` types (expected `n8n-nodes-adeu.adeu` / `n8n-nodes-adeu.adeuTool`).
+//   2. Missing explicit `operation` on `extract_markdown`.
+//   3. Port wiring mismatch (which triggers because nodes with `CUSTOM.adeuTool` default to expecting main ports in the assertion until the type is fixed).
+//   Note: `descriptionType`/`toolDescription` checks will execute once types are corrected in Task 3.
 
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
