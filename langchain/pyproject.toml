@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "langchain-core>=0.3.0,<2.0.0",
-    "adeu>=1.17.0",
+    "adeu>=2.4.0",
     "pydantic>=2.0.0",
 ]
 

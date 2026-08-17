@@ -126,3 +126,31 @@ class TestWrapToolErrors:
 
         with pytest.raises(KeyboardInterrupt):
             raises_ki()
+
+
+class TestAdeuFloor:
+    def test_declared_adeu_floor_covers_the_apis_we_call(self) -> None:
+        """The engine APIs this package needs, all added after adeu 1.17."""
+        import inspect
+        import tomllib
+        from pathlib import Path
+
+        from adeu.mcp_components._response_builders import (
+            build_budget_guard_message,
+            build_changes_response,
+            build_page_range_response,
+        )
+        from adeu.pagination import parse_page_arg
+        from adeu.redline.engine import RedlineEngine
+
+        assert callable(parse_page_arg)
+        assert callable(build_changes_response)
+        assert callable(build_page_range_response)
+        assert callable(build_budget_guard_message)
+        assert "partial" in inspect.signature(RedlineEngine.process_batch).parameters
+        assert "id_discovery_hint" in inspect.signature(RedlineEngine.__init__).parameters
+
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+        adeu_req = next(d for d in deps if d.startswith("adeu"))
+        assert adeu_req == "adeu>=2.4.0", f"stale adeu floor: {adeu_req}"
