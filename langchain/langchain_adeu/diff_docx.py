@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from io import BytesIO
-from typing import Literal
+from typing import Any, Literal
 
 from adeu.diff import (
     collect_media_difference_warnings,
@@ -66,8 +66,9 @@ class AdeuDiffDocxInput(BaseModel):
         description=(
             "Format of the output diff. 'word_patch' (default) returns Adeu's sub-word "
             "@@ Word Patch @@ format. 'unified' returns a standard Git-style unified diff. "
-            "'structured_changes' returns a JSON array of DocumentChange objects suitable "
-            "for feeding directly into adeu_apply_changes."
+            "'structured_changes' returns a JSON object {'changes': [...], 'warnings': [...]} "
+            "whose 'changes' array holds DocumentChange objects suitable for feeding "
+            "directly into adeu_apply_changes."
         ),
     )
 
@@ -138,13 +139,27 @@ class AdeuDiffDocx(BaseTool):
                 include_appendix=False,
                 return_structure=True,
             )
-            res = generate_structured_edits(text_orig, struct_orig, text_mod, struct_mod)
-            edits_data = [e.model_dump(exclude_unset=True) for e in res["edits"]]
+            # generate_structured_edits returns (edits, warnings), not a dict
+            # (diff.py:961-966).
+            edits, diff_warnings = generate_structured_edits(text_orig, struct_orig, text_mod, struct_mod)
+            # Same serialization as `adeu diff --json` (cli.py:1183-1188): the
+            # payload must validate as DocumentChange for adeu_apply_changes,
+            # and the engine's own "Diff: …" labels are diagnostics — replaying
+            # them would write junk comment bubbles into the document.
+            edits_data: list[dict[str, Any]] = []
+            for edit in edits:
+                d = edit.model_dump(exclude_defaults=True)
+                if isinstance(d.get("comment"), str) and d["comment"].startswith("Diff:"):
+                    del d["comment"]
+                edits_data.append({"type": edit.type, **d})
             output_obj = {
                 "changes": edits_data,
-                "warnings": media_warnings + res.get("warnings", []),
+                "warnings": media_warnings + diff_warnings,
             }
-            return warning_prefix + json.dumps(output_obj, indent=2)
+            # No warning_prefix here: this branch's whole output must stay
+            # json.loads-able, and the media warnings already ride along in
+            # output_obj["warnings"].
+            return json.dumps(output_obj, indent=2)
 
         text_orig = extract_text_from_stream(
             BytesIO(orig_bytes),

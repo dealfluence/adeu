@@ -8,6 +8,7 @@ copy to verify a real diff round-trips correctly.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,56 @@ class TestAdeuDiffDocxBehavior:
         assert "- document" in diff_result or "-document" in diff_result
         # The replacement should appear as an addition line.
         assert "+ agreement" in diff_result or "+agreement" in diff_result
+
+    def test_structured_changes_returns_appliable_json(
+        self,
+        working_docx: Path,
+        golden_docx_path: Path,
+        tmp_path: Path,
+    ) -> None:
+        # diff_format='structured_changes' is documented (README.md:145) as
+        # returning JSON suitable for feeding straight into adeu_apply_changes.
+        # The branch had no coverage and raised a TypeError at runtime.
+        modified = tmp_path / "modified.docx"
+        apply_result = AdeuApplyChanges().invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "author_name": "Integration Test",
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "agreement"}],
+                "output_path": str(modified),
+            }
+        )
+        if "Batch rejected" in apply_result:
+            pytest.skip(f"apply_changes precondition failed: {apply_result[:200]} — cannot run diff behavior test.")
+
+        diff_result = AdeuDiffDocx().invoke(
+            {
+                "reasoning": "test",
+                "original_path": str(golden_docx_path),
+                "modified_path": str(modified),
+                "diff_format": "structured_changes",
+            }
+        )
+
+        payload = json.loads(diff_result)
+        assert payload["changes"], f"expected at least one structured change. Got:\n{diff_result[:500]}"
+        assert all("type" in c for c in payload["changes"])
+        assert isinstance(payload["warnings"], list)
+
+        # "suitable for feeding directly into adeu_apply_changes": prove it.
+        replayed = tmp_path / "replayed.docx"
+        replay_result = AdeuApplyChanges().invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "author_name": "Integration Test",
+                "changes": payload["changes"],
+                "output_path": str(replayed),
+            }
+        )
+        assert "Batch rejected" not in replay_result, replay_result[:500]
+        assert "Edits: 0 applied" not in replay_result, replay_result[:500]
 
     def test_raw_diff_never_emits_orphaned_criticmarkup(self, working_docx: Path, output_path: Path) -> None:
         # Build a second version whose tracked-change markup differs, then diff
