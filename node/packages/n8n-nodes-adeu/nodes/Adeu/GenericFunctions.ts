@@ -480,6 +480,30 @@ export function mapAdeuErrorToNodeApiError(
     );
   }
 
+  if (errorName === "TextRevisionVerificationError") {
+    return new NodeApiError(this.getNode(), { message } as JsonObject, {
+      message:
+        "The revised text could not be realized in the document, so nothing was applied.",
+      description:
+        `${message}\n\n` +
+        "No file is written by this node — ignore the paths named above; the input document is returned unchanged and no binary is produced. " +
+        "Structure such as headings, table rows, and footnotes cannot be removed by text replacement. " +
+        "Re-read the document with the Extract Markdown operation (Clean View on, Page 0), edit that exact text, and resend it in 'Revised Text'.",
+      itemIndex,
+    });
+  }
+
+  if (errorName === "TextRevisionError") {
+    return new NodeApiError(this.getNode(), { message } as JsonObject, {
+      message: "The revised text was refused before anything was applied.",
+      description:
+        `${message}\n\n` +
+        "Send the COMPLETE clean text of the document in 'Revised Text' — read it with the Extract Markdown operation using Clean View on and Page 0 — with no CriticMarkup tags. " +
+        "If the revision is genuinely meant to delete most of the document, switch 'Allow Major Deletions' on.",
+      itemIndex,
+    });
+  }
+
   if (
     lower.includes("invalid docx") ||
     lower.includes("missing word/document.xml")

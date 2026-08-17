@@ -11,6 +11,7 @@ import { documentDescription } from "./descriptions";
 import { executeExtractMarkdown } from "./descriptions/extractMarkdown.operation";
 import { executeExtractOutline } from "./descriptions/extractOutline.operation";
 import { executeApplyEdits } from "./descriptions/applyEdits.operation";
+import { executeApplyTextRevision } from "./descriptions/applyTextRevision.operation";
 import { executeGenerateDiff } from "./descriptions/generateDiff.operation";
 import { executeFinalizeDocument } from "./descriptions/finalizeDocument.operation";
 import { mapAdeuErrorToNodeApiError } from "./GenericFunctions";
@@ -25,12 +26,13 @@ export class Adeu implements INodeType {
     subtitle: '={{$parameter["operation"]}}',
     description:
       "Operate on Microsoft Word (.docx) files: extract LLM-friendly Markdown with CriticMarkup, navigate large documents via a structural outline, apply tracked changes and comments, generate sub-word diffs, and sanitize/finalize documents. " +
-      "Five operations on the Document resource: " +
+      "Six operations on the Document resource: " +
       "(1) Extract Markdown — project a .docx into Markdown plus a Semantic Appendix; toggle Clean View to simulate Accept All; pass an optional Page number to fetch only one page of a large document. " +
       "(2) Extract Outline — return a token-cheap structural map (headings with level, page number, paragraph style, has_table, footnote IDs) plus total_pages. Pair with Extract Markdown to navigate large documents. " +
       "(3) Apply Edits — apply a JSON array of DocumentChange objects as native Word tracked changes; modify edits support match_mode ('strict'|'first'|'all') and regex (boolean); the entire batch is pre-validated atomically and rejected if any single edit is invalid. " +
-      "(4) Generate Diff — produce a @@ Word Patch @@ sub-word level diff between two .docx files. " +
-      "(5) Finalize Document — strip metadata, optionally accept all pending markup, and optionally lock the file read-only. " +
+      "(4) Apply Text Revision — hand back the COMPLETE revised clean text of the document and let the engine diff it against the clean view and write the tracked changes; it refuses CriticMarkup and partial-page text, and fails without returning a document when the applied result's clean text does not match the text supplied. " +
+      "(5) Generate Diff — produce a @@ Word Patch @@ sub-word level diff between two .docx files. " +
+      "(6) Finalize Document — strip metadata, optionally accept all pending markup, and optionally lock the file read-only. " +
       "DocumentChange schema (used by Apply Edits): each object has a 'type' field discriminator. " +
       "type='modify' requires target_text (string, copied EXACTLY from the source including punctuation, spacing, and case) and new_text (string); optional comment (string); optional match_mode ('strict'|'first'|'all', default 'strict'); optional regex (boolean, default false — when true, target_text is an ES2022 RegExp pattern and new_text may reference $1, $2 capture groups). " +
       "type='accept' or type='reject' requires target_id (string like 'Chg:12' from the Markdown projection); optional 'comment'. " +
@@ -86,6 +88,9 @@ export class Adeu implements INodeType {
               break;
             case "applyEdits":
               result = await executeApplyEdits.call(this, i);
+              break;
+            case "applyTextRevision":
+              result = await executeApplyTextRevision.call(this, i);
               break;
             case "generateDiff":
               result = await executeGenerateDiff.call(this, i);

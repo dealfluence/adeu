@@ -4,6 +4,7 @@ import type { INodeProperties } from "n8n-workflow";
 import { extractMarkdownDescription } from "./extractMarkdown.operation";
 import { extractOutlineDescription } from "./extractOutline.operation";
 import { applyEditsDescription } from "./applyEdits.operation";
+import { applyTextRevisionDescription } from "./applyTextRevision.operation";
 import { generateDiffDescription } from "./generateDiff.operation";
 import { finalizeDocumentDescription } from "./finalizeDocument.operation";
 import { hydrateToolOutputDescription } from "./hydrateToolOutput.operation";
@@ -26,6 +27,13 @@ export const documentDescription: INodeProperties[] = [
         action: "Apply tracked changes to document",
         description:
           "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. modify edits support match_mode ('strict'|'first'|'all') and regex (boolean) for targeted multi-occurrence writes. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected with a per-edit error report and the document is left untouched. Set 'Allow Partial Application' to apply the changes that validate and report the rest in 'stats.failed' with 0-based indices; the output 'status' then reads 'partial'.",
+      },
+      {
+        name: "Apply Text Revision",
+        value: "applyTextRevision",
+        action: "Apply a whole revised text as tracked changes",
+        description:
+          "Diff the complete revised clean text of a document against the document's own clean view and apply the difference as native Word tracked changes. Use this when an AI rewrote the whole document instead of producing a list of targeted edits. A post-apply gate re-reads the result and fails the operation if its clean text does not match the text supplied, so a document that cannot realize the revision is never returned.",
       },
       {
         name: "Extract Markdown",
@@ -96,6 +104,7 @@ export const documentDescription: INodeProperties[] = [
           "extractMarkdown",
           "extractOutline",
           "finalizeDocument",
+          "applyTextRevision",
         ],
       },
     },
@@ -117,6 +126,7 @@ export const documentDescription: INodeProperties[] = [
           "extractMarkdown",
           "extractOutline",
           "finalizeDocument",
+          "applyTextRevision",
         ],
         documentSource: ["fromNode"],
       },
@@ -138,6 +148,7 @@ export const documentDescription: INodeProperties[] = [
           "extractMarkdown",
           "extractOutline",
           "finalizeDocument",
+          "applyTextRevision",
         ],
         documentSource: ["fromNode"],
       },
@@ -146,6 +157,7 @@ export const documentDescription: INodeProperties[] = [
   ...extractMarkdownDescription,
   ...extractOutlineDescription,
   ...applyEditsDescription,
+  ...applyTextRevisionDescription,
   ...generateDiffDescription,
   ...finalizeDocumentDescription,
   ...hydrateToolOutputDescription,

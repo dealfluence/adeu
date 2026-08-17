@@ -602,6 +602,97 @@ describe("Test Adeu n8n Node", () => {
     });
   });
 
+  describe("Operation: Apply Text Revision", () => {
+    const initialBuffer = readFileSync(INITIAL_FIXTURE);
+
+    beforeEach(() => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        { json: {}, binary: { data: { fileName: "contract.docx" } } },
+      ]);
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<
+          typeof vi.fn
+        >
+      ).mockResolvedValue(initialBuffer);
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "applyTextRevision";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "author") return "n8n AI";
+        if (paramName === "revisedText")
+          return "This is the revised initial document";
+        if (paramName === "allowMajorDeletions") return false;
+        return fallback;
+      });
+    });
+
+    it("should redline the document from revised text and verify the result", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+      const stats = item.json.stats as Record<string, any>;
+
+      expect(item.json).toHaveProperty("fileName", "contract_redlined.docx");
+      expect(item.json).toHaveProperty("author", "n8n AI");
+      expect(stats.verified).toBe(true);
+      expect(stats.edits_applied).toBe(1);
+      // No filesystem in n8n: path-shaped fields must not be echoed.
+      expect(stats).not.toHaveProperty("output_path");
+      expect(item.binary?.data).toBeDefined();
+    });
+
+    it("should refuse revised text containing CriticMarkup", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "applyTextRevision";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "author") return "n8n AI";
+        if (paramName === "revisedText")
+          return "This is the {++revised++} initial document";
+        if (paramName === "allowMajorDeletions") return false;
+        return fallback;
+      });
+
+      const err = await node.execute
+        .call(mockExecuteFunctions)
+        .catch((e: Error & { description?: string }) => e);
+
+      expect(err.name).toBe("NodeApiError");
+      expect(`${err.message}\n${err.description}`).toContain("CriticMarkup");
+    });
+
+    it("should refuse a revision that deletes most of the document", async () => {
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "applyTextRevision";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "author") return "n8n AI";
+        if (paramName === "revisedText") return "This";
+        if (paramName === "allowMajorDeletions") return false;
+        return fallback;
+      });
+
+      const err = await node.execute
+        .call(mockExecuteFunctions)
+        .catch((e: Error & { description?: string }) => e);
+
+      expect(err.name).toBe("NodeApiError");
+      expect(`${err.message}\n${err.description}`).toContain(
+        "Allow Major Deletions",
+      );
+    });
+  });
+
   describe("continueOnFail logic", () => {
     beforeEach(() => {
       (

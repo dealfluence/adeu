@@ -38,6 +38,10 @@ export default defineConfig({
   define: {
     "process.browser": "false",
     "process.env.NODE_ENV": '"production"',
+    // core's text-revision author fallback reads ADEU_AUTHOR; the node always
+    // passes an explicit author, so inline it away rather than shipping an
+    // environment read (n8n verification forbids env access in nodes).
+    "process.env.ADEU_AUTHOR": '""',
   },
   noExternal: ["@adeu/core", "diff-match-patch", "fflate"],
   external: ["n8n-workflow"],
