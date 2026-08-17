@@ -29,6 +29,10 @@ from langchain_adeu.accept_all_changes import (
     AdeuAcceptAllChangesInput,
 )
 from langchain_adeu.apply_changes import AdeuApplyChanges, AdeuApplyChangesInput
+from langchain_adeu.apply_text_revision import (
+    AdeuApplyTextRevision,
+    AdeuApplyTextRevisionInput,
+)
 from langchain_adeu.diff_docx import AdeuDiffDocx, AdeuDiffDocxInput
 from langchain_adeu.read_docx import AdeuReadDocx, AdeuReadDocxInput
 from langchain_adeu.sanitize_docx import AdeuSanitizeDocx, AdeuSanitizeDocxInput
@@ -44,6 +48,8 @@ __all__ = [
     "AdeuAcceptAllChangesInput",
     "AdeuApplyChanges",
     "AdeuApplyChangesInput",
+    "AdeuApplyTextRevision",
+    "AdeuApplyTextRevisionInput",
     "AdeuDiffDocx",
     "AdeuDiffDocxInput",
     "AdeuReadDocx",

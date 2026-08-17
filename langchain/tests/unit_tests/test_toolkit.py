@@ -15,6 +15,7 @@ from langchain_core.tools import BaseTool, BaseToolkit
 from langchain_adeu import (
     AdeuAcceptAllChanges,
     AdeuApplyChanges,
+    AdeuApplyTextRevision,
     AdeuDiffDocx,
     AdeuReadDocx,
     AdeuSanitizeDocx,
@@ -25,6 +26,7 @@ from langchain_adeu import (
 EXPECTED_TOOL_CLASSES = {
     AdeuReadDocx,
     AdeuApplyChanges,
+    AdeuApplyTextRevision,
     AdeuDiffDocx,
     AdeuAcceptAllChanges,
     AdeuSanitizeDocx,
@@ -33,6 +35,7 @@ EXPECTED_TOOL_CLASSES = {
 EXPECTED_TOOL_NAMES = {
     "adeu_read_docx",
     "adeu_apply_changes",
+    "adeu_apply_text_revision",
     "adeu_diff_docx",
     "adeu_accept_all_changes",
     "adeu_sanitize_docx",

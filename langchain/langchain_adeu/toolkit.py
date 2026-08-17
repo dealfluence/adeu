@@ -26,6 +26,7 @@ from langchain_core.tools import BaseTool, BaseToolkit
 
 from langchain_adeu.accept_all_changes import AdeuAcceptAllChanges
 from langchain_adeu.apply_changes import AdeuApplyChanges
+from langchain_adeu.apply_text_revision import AdeuApplyTextRevision
 from langchain_adeu.diff_docx import AdeuDiffDocx
 from langchain_adeu.read_docx import AdeuReadDocx
 from langchain_adeu.sanitize_docx import AdeuSanitizeDocx
@@ -37,6 +38,7 @@ class AdeuToolkit(BaseToolkit):
     Includes:
       - AdeuReadDocx        — read .docx → Markdown with CriticMarkup
       - AdeuApplyChanges    — apply tracked-change batch edits
+      - AdeuApplyTextRevision — apply revised whole-document text as tracked changes
       - AdeuDiffDocx        — word-level diff between two .docx files
       - AdeuAcceptAllChanges — finalize all tracked changes
       - AdeuSanitizeDocx    — strip metadata + audit report
@@ -58,6 +60,7 @@ class AdeuToolkit(BaseToolkit):
         return [
             AdeuReadDocx(),
             AdeuApplyChanges(),
+            AdeuApplyTextRevision(),
             AdeuDiffDocx(),
             AdeuAcceptAllChanges(),
             AdeuSanitizeDocx(),
