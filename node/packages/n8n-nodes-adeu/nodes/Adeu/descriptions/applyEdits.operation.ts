@@ -179,6 +179,23 @@ export const applyEditsDescription: INodeProperties[] = [
       },
     },
   },
+  {
+    displayName: "Allow Partial Application",
+    name: "allowPartial",
+    type: "boolean",
+    default: false,
+    description:
+      "Whether to keep the changes that validate and report the ones that fail, instead of rejecting the whole batch. " +
+      "False (default) is transactional: if any single change is invalid, nothing is applied and the document is returned untouched. " +
+      "True is salvage mode: valid changes are applied and saved, 'status' on the output JSON reads 'partial', and 'stats.failed' lists each failure with its 0-based index in the submitted array. " +
+      "Salvage mode is for AI Agent loops that will fix and resubmit the rejected changes; do not use it where a half-applied redline would be shipped as final.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
+      },
+    },
+  },
 ];
 export async function executeApplyEdits(
   this: IExecuteFunctions,
@@ -197,6 +214,11 @@ export async function executeApplyEdits(
   const returnMarkdown = this.getNodeParameter(
     "returnMarkdown",
     itemIndex,
+  ) as boolean;
+  const allowPartial = this.getNodeParameter(
+    "allowPartial",
+    itemIndex,
+    false,
   ) as boolean;
   const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
 
@@ -261,6 +283,8 @@ export async function executeApplyEdits(
   });
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],
+    undefined,
+    allowPartial,
   );
 
   const incomingBinary = this.getInputData()[itemIndex].binary ?? {};
@@ -310,6 +334,7 @@ export async function executeApplyEdits(
       json: {
         fileName: outName,
         author,
+        status: (stats as { status?: string }).status ?? "ok",
         stats,
         ...(reasoning !== "" ? { reasoning } : {}),
         ...(markdown !== undefined ? { markdown } : {}),

@@ -543,6 +543,63 @@ describe("Test Adeu n8n Node", () => {
       expect(err.description).toContain("[1]");
       expect(err.description).toContain("Recover in two calls");
     });
+
+    it("should reject the whole batch when Allow Partial Application is off", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              { type: "modify", target_text: "document", new_text: "instrument" },
+              { type: "modify", target_text: "NOT_IN_DOC_ZZZ", new_text: "x" },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow();
+    });
+
+    it("should apply the valid change and report the failure when Allow Partial Application is on", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              { type: "modify", target_text: "document", new_text: "instrument" },
+              { type: "modify", target_text: "NOT_IN_DOC_ZZZ", new_text: "x" },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+      (
+        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
+      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
+        if (paramName === "resource") return "document";
+        if (paramName === "operation") return "applyEdits";
+        if (paramName === "binaryPropertyName") return "data";
+        if (paramName === "outputBinaryPropertyName") return "data";
+        if (paramName === "author") return "n8n AI";
+        if (paramName === "editsSource") return "fromInputJson";
+        if (paramName === "editsJsonPath") return "changes";
+        if (paramName === "allowPartial") return true;
+        return fallback;
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+      const stats = item.json.stats as Record<string, any>;
+
+      expect(item.json).toHaveProperty("status", "partial");
+      expect(stats.edits_applied).toBe(1);
+      expect(stats.edits_skipped).toBe(1);
+      expect(stats.failed.map((f: any) => f.index)).toEqual([1]);
+      expect(item.binary?.data).toBeDefined();
+    });
   });
 
   describe("continueOnFail logic", () => {

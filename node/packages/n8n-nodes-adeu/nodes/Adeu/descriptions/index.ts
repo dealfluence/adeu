@@ -25,7 +25,7 @@ export const documentDescription: INodeProperties[] = [
         value: "applyEdits",
         action: "Apply tracked changes to document",
         description:
-          "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. modify edits support match_mode ('strict'|'first'|'all') and regex (boolean) for targeted multi-occurrence writes. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected with a per-edit error report and the document is left untouched.",
+          "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. modify edits support match_mode ('strict'|'first'|'all') and regex (boolean) for targeted multi-occurrence writes. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected with a per-edit error report and the document is left untouched. Set 'Allow Partial Application' to apply the changes that validate and report the rest in 'stats.failed' with 0-based indices; the output 'status' then reads 'partial'.",
       },
       {
         name: "Extract Markdown",
