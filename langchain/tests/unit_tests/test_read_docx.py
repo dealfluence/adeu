@@ -40,7 +40,6 @@ class TestAdeuReadDocxSchema:
         assert schema["required"] == ["reasoning", "file_path"]
 
     def test_args_schema_rejects_extra_fields(self) -> None:
-
         with pytest.raises(ValueError):
             AdeuReadDocxInput.model_validate({"reasoning": "test", "file_path": "/tmp/x.docx", "bogus_param": True})
 
@@ -113,3 +112,17 @@ class TestAdeuReadDocxValidation:
             page="all",
         )
         assert input_data.page == "all"
+
+    def test_page_range_string_is_accepted(self) -> None:
+        data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx", page="2-6")
+        assert data.page == "2-6"
+
+    def test_page_garbage_string_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx", page="banana")
+
+    def test_page_defaults_to_none_so_search_spans_all_pages(self) -> None:
+        # document.py:1388-1389 — `page=None` means "all pages" for search and
+        # mode='changes'; only the non-search read paths coerce it to 1.
+        data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx")
+        assert data.page is None

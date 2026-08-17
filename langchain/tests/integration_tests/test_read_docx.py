@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from langchain_tests.integration_tests import ToolsIntegrationTests
 
 from langchain_adeu import AdeuReadDocx
@@ -28,7 +28,6 @@ class TestAdeuReadDocxStandard(ToolsIntegrationTests):
 
     @pytest.fixture
     def golden_docx_path(self, request: pytest.FixtureRequest) -> Path:
-
         repo_root = Path(__file__).resolve().parents[3]
         p = repo_root / "shared" / "fixtures" / "golden.docx"
         if not p.exists():
@@ -45,7 +44,6 @@ class TestAdeuReadDocxStandard(ToolsIntegrationTests):
 
     @property
     def tool_invoke_params_example(self) -> dict[str, Any]:
-
         repo_root = Path(__file__).resolve().parents[3]
         return {
             "reasoning": "Reading the golden fixture for the integration suite.",
@@ -105,7 +103,6 @@ class TestAdeuReadDocxBehavior:
             )
 
     def test_raw_view_includes_critic_markup_when_present(self, golden_docx_path: Path) -> None:
-
         tool = AdeuReadDocx()
         raw = tool.invoke(
             {
@@ -125,6 +122,34 @@ class TestAdeuReadDocxBehavior:
         tool = AdeuReadDocx()
         result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "outline"})
         assert "Outline view" in result, "Expected the outline banner to appear in mode='outline' output."
+
+    def test_search_without_page_spans_whole_document(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "search_query": "the"})
+        assert "Search Results" in result
+        assert "on document page" not in result, (
+            "search defaulted to a single-page filter; page must default to None "
+            "so matches on every page are returned (document.py:1388)"
+        )
+
+    def test_page_range_is_served(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "1-2"})
+        assert "This is the" in result
+
+    def test_appendix_mode_refuses_page_all(self, golden_docx_path: Path) -> None:
+        # document.py:478-479 — 'all' in appendix mode is reported as an invalid
+        # page, not as a range restriction. The wording is copied from the engine
+        # so both surfaces refuse identically.
+        tool = AdeuReadDocx()
+        with pytest.raises(ToolException, match="Invalid page parameter: 'all'"):
+            tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "appendix", "page": "all"})
+
+    def test_appendix_mode_refuses_page_range(self, golden_docx_path: Path) -> None:
+        # document.py:476-477 — page ranges are a 'full'-mode-only feature.
+        tool = AdeuReadDocx()
+        with pytest.raises(ToolException, match="only supported in 'full' mode"):
+            tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "appendix", "page": "1-2"})
 
     @pytest.mark.asyncio
     async def test_ainvoke_matches_invoke(self, golden_docx_path: Path) -> None:

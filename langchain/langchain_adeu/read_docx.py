@@ -9,6 +9,10 @@ and the `mcp_components._response_builders`). The tool returns a two-tuple
   - `artifact`: dict with `markdown`, `title`, `file_path`, plus the page /
     total_pages metadata so downstream LangGraph nodes can paginate or
     reason about document structure without re-parsing the content.
+
+`page` accepts a single page number, a page range such as `"2-6"` (capped at
+8 pages by the engine), or `"all"`; the grammar is parsed by
+`adeu.pagination.parse_page_arg` so it cannot drift from the engine.
 """
 
 from __future__ import annotations
@@ -22,12 +26,14 @@ from adeu.mcp_components._response_builders import (
     build_appendix_response,
     build_full_document_response,
     build_outline_response,
+    build_page_range_response,
     build_paginated_response,
     build_search_response,
 )
+from adeu.pagination import parse_page_arg
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
@@ -69,32 +75,27 @@ class AdeuReadDocxInput(BaseModel):
             "breaking references."
         ),
     )
-    page: int | str = Field(
-        default=1,
+    page: int | str | None = Field(
+        default=None,
         description=(
-            "1-indexed page number for mode='full' or mode='appendix', or 'all' "
-            "to return the full document without page boundaries. Defaults to 1. "
-            "Ignored for mode='outline'. Pages are virtual: bounded by content "
-            "size (~19k chars each), not by visual Word page breaks."
+            "1-indexed page number, a page range such as '2-6', or 'all'. "
+            "For mode='full' and mode='appendix' an omitted page means page 1; "
+            "'all' (mode='full' only) returns the whole document in one response "
+            "without page banners. With search_query, page restricts matches to that "
+            "document page and an omitted page searches every page. Pages are "
+            "virtual: bounded by content size (~19k chars), not by Word page breaks."
         ),
     )
 
     @field_validator("page")
     @classmethod
-    def _validate_page(cls, v: int | str) -> int | str:
-        if isinstance(v, int):
-            if v < 1:
-                raise ValueError("page must be an integer >= 1, or 'all'")
-            return v
-        s = str(v).strip().lower()
-        if s == "all":
-            return "all"
-        if s.isdigit() or (s.startswith(("-", "+")) and s[1:].isdigit()):
-            val = int(s)
-            if val < 1:
-                raise ValueError("page must be an integer >= 1, or 'all'")
-            return val
-        raise ValueError("page must be an integer >= 1, or 'all'")
+    def _validate_page(cls, v: int | str | None) -> int | str | None:
+        # Delegate to the engine's parser so the accepted grammar (int, 'N-M',
+        # 'all') can never drift from adeu.pagination.parse_page_arg
+        # (python/src/adeu/pagination.py:26). The value is passed through
+        # unchanged; _run re-parses it for dispatch, exactly like document.py.
+        parse_page_arg(v)
+        return v
 
     outline_max_level: int = Field(
         default=2,
@@ -168,7 +169,7 @@ class AdeuReadDocx(BaseTool):
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
-        page: int | str = 1,
+        page: int | str | None = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -176,6 +177,11 @@ class AdeuReadDocx(BaseTool):
         search_case_sensitive: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
+
+        # `page` means "document page" and defaults to 1 everywhere EXCEPT search
+        # mode, where None means "search every page" (document.py:1388-1389).
+        if search_query is None and page is None:
+            page = 1
 
         raw_bytes = path.read_bytes()
         sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
@@ -196,33 +202,35 @@ class AdeuReadDocx(BaseTool):
             text = extract_result
             paragraph_offsets = None
 
-        page_str = str(page).strip().lower() if page is not None else "1"
-
         if search_query is not None:
             result = build_search_response(text, search_query, search_regex, search_case_sensitive, page, str(path))
-        elif mode == "full" and page_str == "all":
-            result = build_full_document_response(text, str(path))
+        elif mode == "outline":
+            result = build_outline_response(
+                doc,
+                text,
+                str(path),
+                outline_max_level=outline_max_level,
+                outline_verbose=outline_verbose,
+                paragraph_offsets=paragraph_offsets,
+            )
         else:
-            page_num = 1
-            if page is not None:
-                s_page = str(page).strip()
-                is_signed = s_page.startswith(("-", "+")) and s_page[1:].isdigit()
-                if s_page.isdigit() or is_signed:
-                    page_num = int(s_page)
-
-            if mode == "outline":
-                result = build_outline_response(
-                    doc,
-                    text,
-                    str(path),
-                    outline_max_level=outline_max_level,
-                    outline_verbose=outline_verbose,
-                    paragraph_offsets=paragraph_offsets,
-                )
-            elif mode == "appendix":
-                result = build_appendix_response(text, page_num, str(path))
+            kind, page_val = parse_page_arg(page)
+            if mode == "appendix":
+                if kind == "range":
+                    raise ToolException("Page range pagination is only supported in 'full' mode, not 'appendix' mode.")
+                if kind == "all":
+                    raise ToolException(f"Invalid page parameter: '{page}'. Provide a positive integer.")
+                assert isinstance(page_val, int)
+                result = build_appendix_response(text, page_val, str(path))
+            elif kind == "all":
+                result = build_full_document_response(text, str(path))
+            elif kind == "range":
+                assert isinstance(page_val, tuple)
+                start_p, end_p = page_val
+                result = build_page_range_response(text, start_p, end_p, str(path))
             else:
-                result = build_paginated_response(text, page_num, str(path))
+                assert isinstance(page_val, int)
+                result = build_paginated_response(text, page_val, str(path))
 
         artifact = dict(result.structured_content) if result.structured_content else {}
         ui_markdown = artifact.get("markdown")
@@ -241,14 +249,13 @@ class AdeuReadDocx(BaseTool):
         file_path: str,
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix"] = "full",
-        page: int | str = 1,
+        page: int | str | None = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
         search_regex: bool = False,
         search_case_sensitive: bool = True,
     ) -> tuple[str, dict[str, Any]]:
-
         return await asyncio.to_thread(
             self._run,
             reasoning,
