@@ -312,6 +312,19 @@ export async function executeGenerateDiff(
           modifiedName,
         );
 
+  // An empty result must never be indistinguishable from "the diff engine
+  // produced nothing": both formats collapse to header-only/empty output when
+  // the documents match. Mirrors the MCP surface (QA 2026-07-23 F14).
+  const hasHunks =
+    diffFormat === "unified"
+      ? diff.trim() !== ""
+      : diff.includes("@@ Word Patch @@");
+  if (!hasHunks) {
+    diff =
+      `--- ${originalName}\n+++ ${modifiedName}\n\n` +
+      "No textual differences found between the documents.";
+  }
+
   // A text diff cannot see image bytes: when embedded media differ, an empty
   // diff must never read as "the documents are identical" (QA 2026-07-19 F-04).
   if (mediaWarnings.length > 0) {

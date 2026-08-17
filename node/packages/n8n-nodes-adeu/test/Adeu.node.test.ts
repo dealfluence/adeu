@@ -971,6 +971,15 @@ describe("Test Adeu n8n Node", () => {
       expect(item.json).toHaveProperty("changes");
       expect(Array.isArray(item.json.changes)).toBe(true);
     });
+
+    it("should state that identical documents have no textual differences", async () => {
+      const result = await node.execute.call(mockExecuteFunctions);
+      const diff = result[0][0].json.diff as string;
+
+      expect(diff).toContain("No textual differences found between the documents");
+      expect(diff).toContain("--- orig.docx");
+      expect(diff).toContain("+++ mod.docx");
+    });
   });
 
   describe("Operation: Hydrate Tool Output", () => {
