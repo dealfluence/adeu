@@ -11,14 +11,15 @@
     },
     {
       "parameters": {
-        "fileSelector": "YOUR_PATH_TO_FOLDER/contract.docx",
+        "fileSelector": "/absolute/path/to/your/contract.docx",
         "options": {}
       },
       "type": "n8n-nodes-base.readWriteFile",
-      "typeVersion": 1,
+      "typeVersion": 1.1,
       "position": [-1000, 100],
       "id": "e4a27521-729f-43b9-a477-dcb8299a9cfc",
-      "name": "Read Baseline Doc"
+      "name": "Read Baseline Doc",
+      "notes": "EDIT this path before running. Use forward slashes even on Windows (e.g. C:/Users/you/contract.docx) — this node globs the selector with fast-glob and backslashes are escape characters."
     },
     {
       "parameters": {
@@ -26,7 +27,8 @@
         "documentSource": "fromInput",
         "binaryPropertyName": "data",
         "cleanView": true,
-        "page": 0
+        "page": 0,
+        "includeAppendix": true
       },
       "type": "n8n-nodes-adeu.adeu",
       "typeVersion": 1,
@@ -47,7 +49,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=YOUR_GEMINI_API_KEY",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=YOUR_GEMINI_API_KEY",
         "sendHeaders": false,
         "sendBody": true,
         "specifyBody": "json",
@@ -57,7 +59,8 @@
       "typeVersion": 4.1,
       "position": [-400, 100],
       "id": "aa15de2c-cf0e-437b-aba4-6fa69c0d16bf",
-      "name": "LLM Turn 1: Generate Redlines"
+      "name": "LLM Turn 1: Generate Redlines",
+      "notes": "Replace YOUR_GEMINI_API_KEY and, if needed, the model id in the URL with a model your key can call."
     },
     {
       "parameters": {
@@ -74,8 +77,10 @@
         "operation": "applyEdits",
         "documentSource": "fromInput",
         "binaryPropertyName": "data",
+        "outputBinaryPropertyName": "data",
         "editsSource": "fromInputJson",
         "editsJsonPath": "changes",
+        "allowPartial": false,
         "returnMarkdown": true,
         "author": "Adeu AI"
       },
@@ -90,8 +95,10 @@
         "operation": "extractMarkdown",
         "documentSource": "fromNode",
         "sourceNodeName": "Apply Turn 1 Edits",
+        "binaryPropertyName": "data",
         "cleanView": false,
-        "page": 0
+        "page": 0,
+        "includeAppendix": true
       },
       "type": "n8n-nodes-adeu.adeu",
       "typeVersion": 1,
@@ -112,7 +119,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=YOUR_GEMINI_API_KEY",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=YOUR_GEMINI_API_KEY",
         "sendHeaders": false,
         "sendBody": true,
         "specifyBody": "json",
@@ -122,7 +129,8 @@
       "typeVersion": 4.1,
       "position": [600, 100],
       "id": "ccf5e92c-15a0-482d-864a-2fa94cb10da1",
-      "name": "LLM Turn 2: Accept & Reply"
+      "name": "LLM Turn 2: Accept & Reply",
+      "notes": "Replace YOUR_GEMINI_API_KEY and, if needed, the model id in the URL with a model your key can call."
     },
     {
       "parameters": {
@@ -139,8 +147,11 @@
         "operation": "applyEdits",
         "documentSource": "fromNode",
         "sourceNodeName": "Apply Turn 1 Edits",
+        "binaryPropertyName": "data",
+        "outputBinaryPropertyName": "data",
         "editsSource": "fromInputJson",
         "editsJsonPath": "changes",
+        "allowPartial": false,
         "returnMarkdown": false,
         "author": "Adeu AI"
       },
@@ -148,16 +159,18 @@
       "typeVersion": 1,
       "position": [1000, 100],
       "id": "e93d844a-9bcf-4f5c-89a1-cb03c2bb0de5",
-      "name": "Apply Turn 2 Edits"
+      "name": "Apply Turn 2 Edits",
+      "notes": "Loads from 'Apply Turn 1 Edits' (not the baseline) so turn 2 builds on turn 1's tracked changes. In an AI Agent workflow the equivalent is passing the previous call's redlinedBinaryId as Source Binary ID."
     },
     {
       "parameters": {
         "operation": "write",
-        "fileName": "YOUR_PATH_TO_FOLDER/contract_sequential_final.docx",
+        "fileName": "/absolute/path/to/your/contract_sequential_final.docx",
+        "dataPropertyName": "data",
         "options": {}
       },
       "type": "n8n-nodes-base.readWriteFile",
-      "typeVersion": 1,
+      "typeVersion": 1.1,
       "position": [1200, 100],
       "id": "1e15de2c-cf0e-437b-aba4-6fa69c0d16bf",
       "name": "Write Final Doc"
@@ -300,7 +313,6 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1",
-    "binaryMode": "separate"
+    "executionOrder": "v1"
   }
 }
