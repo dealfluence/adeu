@@ -15,7 +15,14 @@ can correct its input and retry:
     the result's clean view and compares it against the supplied text. On a
     mismatch it writes a `<stem>.unverified.docx` diagnostic copy and does
     NOT write the requested output file. That is a failure, and the tool
-    reports it as one (`status="verification_failed"`).
+    reports it as one (`status="verification_failed"`). The engine attaches
+    its own post-gate stats to the exception — every edit re-reported as
+    `status="failed"`, `edits_applied` zeroed and rolled into
+    `edits_skipped` (`text_revision.py:259-273`) — and the artifact relays
+    them verbatim, so the agent sees what the engine actually reported
+    rather than a synthesized blank. Only `status` is overridden
+    (the engine's batch status stays `"ok"`/`"partial"` because the batch
+    itself applied; the run as a whole did not).
   - **Major-deletion guard.** Text that is >50% shorter than the document's
     clean text (>75% for documents under 2000 characters) is refused
     unless `allow_major_deletions=True`, because it is nearly always a
@@ -36,16 +43,12 @@ from typing import Any, Literal
 from adeu.text_revision import (
     TextRevisionVerificationError,
     apply_text_revision_core,
+    check_criticmarkup,
 )
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
-
-# Only the OPEN tokens, mirroring `adeu.text_revision._CRITICMARKUP_TOKENS`
-# (python/src/adeu/text_revision.py:18): a bare closing token is ordinary
-# prose far more often than it is markup ("A ~> B", "rate++}").
-_CRITICMARKUP_TOKENS = ("{++", "{--", "{~~", "{==", "{>>")
 
 
 class AdeuApplyTextRevisionInput(BaseModel):
@@ -153,14 +156,16 @@ class AdeuApplyTextRevision(BaseTool):
                 "revised_text cannot be empty. Provide the complete revised clean text of the document."
             )
 
-        if any(token in revised_text for token in _CRITICMARKUP_TOKENS):
-            raise ToolException(
-                "revised_text contains CriticMarkup syntax ({++..++}, {--..--}, "
-                "{~~..~>..~~}, {==..==}, {>>..<<}). This tool compares your text "
-                "against the document's CLEAN view, so the markup tokens would be "
-                "diffed into the document as literal prose. Re-read the document "
-                "with clean_view=True and revise that text instead."
-            )
+        # The engine owns the token set (`check_criticmarkup`,
+        # python/src/adeu/text_revision.py:66-73) — call it rather than copying
+        # it, so a change to the tokens can never silently diverge here. It is
+        # re-checked inside the engine call; running it up front turns the
+        # failure into a raised ToolException (an input-shape problem the agent
+        # must fix) instead of a success=False payload.
+        try:
+            check_criticmarkup(revised_text)
+        except ValueError as e:
+            raise ToolException(str(e)) from e
 
         # No default is computed here: the engine owns the '<stem>_redlined.docx'
         # convention, including updating an already-redlined input in place
@@ -180,16 +185,41 @@ class AdeuApplyTextRevision(BaseTool):
             )
         except TextRevisionVerificationError as e:
             # The engine wrote the '.unverified.docx' diagnostic copy and did NOT
-            # write the requested file (text_revision.py:250-277). Report the
-            # failure verbatim rather than papering over it.
-            failure = _failure_artifact(source, author, status="verification_failed", error=str(e))
-            failure["unverified_output_path"] = str(e.unverified_path)
+            # write the requested file (text_revision.py:250-277). Relay its own
+            # post-gate stats — the per-edit `status="failed"` reports, the
+            # zeroed counters, `verification_error` — and overlay only what the
+            # engine cannot know (input_path, author) or states differently:
+            # `status` is the run's outcome here, not the batch's ("ok").
+            engine_stats: dict[str, Any] = getattr(e, "stats", {}) or {}
+            failure: dict[str, Any] = {
+                **engine_stats,
+                "input_path": str(source),
+                "output_path": None,
+                "success": False,
+                "verified": False,
+                "author": author,
+                "status": "verification_failed",
+                "error": str(e),
+                "unverified_output_path": str(e.unverified_path),
+            }
             return str(e), failure
         except ValueError as e:
             # Major-deletion guard, paginated-extract input, or a CriticMarkup
-            # token our pre-check does not cover. Nothing was written; the agent
-            # can fix the text (or pass allow_major_deletions=True) and retry.
-            return str(e), _failure_artifact(source, author, status="error", error=str(e))
+            # token our pre-check does not cover. Nothing was written and the
+            # engine produced no stats; the agent can fix the text (or pass
+            # allow_major_deletions=True) and retry.
+            return str(e), {
+                "input_path": str(source),
+                "output_path": None,
+                "success": False,
+                "verified": False,
+                "author": author,
+                "edits_applied": 0,
+                "edits_skipped": 0,
+                "edits": [],
+                "status": "error",
+                "error": str(e),
+            }
 
         applied = stats.get("edits_applied", 0)
         content = f"Text revision complete. Saved to: {out_path}\nEdits: {applied} applied."
@@ -224,22 +254,6 @@ class AdeuApplyTextRevision(BaseTool):
             author,
             allow_major_deletions,
         )
-
-
-def _failure_artifact(source: Path, author: str | None, *, status: str, error: str) -> dict[str, Any]:
-    """Build the artifact for a refused revision — no file was written."""
-    return {
-        "input_path": str(source),
-        "output_path": None,
-        "success": False,
-        "verified": False,
-        "author": author,
-        "edits_applied": 0,
-        "edits_skipped": 0,
-        "edits": [],
-        "status": status,
-        "error": error,
-    }
 
 
 __all__ = ["AdeuApplyTextRevision", "AdeuApplyTextRevisionInput"]

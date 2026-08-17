@@ -88,6 +88,13 @@ class TestApplyTextRevisionBehavior:
         assert msg.artifact["status"] == "verification_failed"
         assert msg.artifact["output_path"] is None
         assert msg.artifact["edits_applied"] == 0
+        # The engine's own post-gate stats must survive into the artifact, not be
+        # replaced by zeros: every attempted edit is re-reported as failed and
+        # rolled into edits_skipped (python/src/adeu/text_revision.py:259-273).
+        assert msg.artifact["edits_skipped"] >= 1
+        assert msg.artifact["edits"], "engine edit reports were discarded"
+        assert {e["status"] for e in msg.artifact["edits"]} == {"failed"}
+        assert "verification failed" in msg.artifact["verification_error"]
         # The requested file was NOT written; only the diagnostic copy exists.
         assert not output_path.exists()
         unverified = Path(msg.artifact["unverified_output_path"])
