@@ -125,6 +125,58 @@ class TestAdeuAcceptAllChangesBehavior:
                 f"Output still contains {token!r} after accept_all_changes. Tracked changes were not fully accepted."
             )
 
+    def test_reports_counts_and_deleted_comments(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuAcceptAllChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_accept_all_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "output_path": str(output_path),
+                },
+                "id": "test-accept-counts",
+                "type": "tool_call",
+            }
+        )
+        # golden.docx carries 1 insertion, 1 deletion and 3 comments.
+        assert msg.artifact["accepted_insertions"] >= 1
+        assert msg.artifact["accepted_deletions"] >= 1
+        assert msg.artifact["removed_comments"] >= 1
+        assert msg.artifact["remove_comments"] is True
+        assert "Insertions accepted:" in msg.content
+        assert "Comments removed:" in msg.content
+        assert "Comments deleted:" in msg.content
+
+    def test_remove_comments_false_keeps_comments(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuAcceptAllChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_accept_all_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "output_path": str(output_path),
+                    "remove_comments": False,
+                },
+                "id": "test-accept-keep-comments",
+                "type": "tool_call",
+            }
+        )
+        assert msg.artifact["remove_comments"] is False
+        assert output_path.exists()
+        read_tool = AdeuReadDocx()
+        raw = read_tool.invoke({"reasoning": "test", "file_path": str(output_path), "clean_view": False})
+        assert "{>>" in raw, "comments were removed despite remove_comments=False"
+
+    def test_already_clean_document_reports_no_op(self, working_docx: Path, tmp_path: Path) -> None:
+        first = tmp_path / "clean_once.docx"
+        second = tmp_path / "clean_twice.docx"
+        tool = AdeuAcceptAllChanges()
+        tool.invoke({"reasoning": "test", "file_path": str(working_docx), "output_path": str(first)})
+        result = tool.invoke({"reasoning": "test", "file_path": str(first), "output_path": str(second)})
+        assert "already clean" in result
+
     @pytest.mark.asyncio
     async def test_ainvoke_writes_file(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuAcceptAllChanges()

@@ -32,8 +32,13 @@ class TestAdeuAcceptAllChangesSchema:
         schema = AdeuAcceptAllChangesInput.model_json_schema()
         assert schema["required"] == ["reasoning", "file_path"]
 
-    def test_args_schema_rejects_extra_fields(self) -> None:
+    def test_remove_comments_defaults_to_true(self) -> None:
+        # Parity with accept_all_changes (document.py:1052-1056): this surface
+        # produces a distributable clean document, so comments go by default.
+        data = AdeuAcceptAllChangesInput(reasoning="t", file_path="/a.docx")
+        assert data.remove_comments is True
 
+    def test_args_schema_rejects_extra_fields(self) -> None:
         with pytest.raises(ValueError):
             AdeuAcceptAllChangesInput.model_validate({"reasoning": "test", "file_path": "/a.docx", "policy": "auto"})
 
