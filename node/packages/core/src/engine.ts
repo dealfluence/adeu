@@ -2117,7 +2117,19 @@ export class RedlineEngine {
     // Inspect the first line for heading/list markers.
     const [first_clean, first_style] = this._parse_markdown_style(lines[0]);
     const have_paragraph_context = current_p !== null;
-    const block_mode = first_style !== null && have_paragraph_context;
+    // Block conversion additionally requires a REAL line break in the source
+    // text. Without one the text is by construction a fragment spliced into an
+    // existing paragraph, and a leading "- "/"* "/"# " is literal content, not
+    // a block marker. Word-diffing makes this routine: modify
+    // "Product" -> "Product - Draft" trims the common prefix and hands us the
+    // fragment " - Draft", which _parse_markdown_style reads as a bullet. Left
+    // ungated, that silently split the paragraph, minted a numbered
+    // ListParagraph, ate the "- " as a fabricated marker, and still reported
+    // status "applied". Note the em-dash spelling was never affected, so the
+    // corruption tracked the punctuation an author chose.
+    const have_line_break = /[\r\n]/.test(text);
+    const block_mode =
+      first_style !== null && have_paragraph_context && have_line_break;
 
     let first_node: Element | null = null;
     let inline_ins: Element | null = null;
@@ -5693,6 +5705,52 @@ export class RedlineEngine {
     return false;
   }
 
+  /**
+   * True when [start_idx, start_idx + match_len) covers exactly one whole
+   * paragraph's projected span.
+   *
+   * A markdown block marker only means "block" when the edit governs the whole
+   * block. Gating the restyle on this is what stops a mid-paragraph fragment
+   * from restyling its host: modify("Gamma", "- Delta") against "Alpha Gamma"
+   * used to bullet the entire paragraph AND corrupt the deletion — the anchor
+   * resolution split the run without rebuilding the map, so the <w:del> came
+   * out empty and "Gamma" survived, projecting "* Alpha DeltaGamma". Mirrors
+   * the Python engine's bounds test in _maybe_paragraph_replace.
+   */
+  private _match_spans_whole_paragraph(
+    active_mapper: any,
+    start_idx: number,
+    match_len: number,
+  ): boolean {
+    const end_idx = start_idx + match_len;
+    // Per paragraph: [lo, hi] over every span, plus real_lo over spans backed
+    // by an actual run. They differ when the projection prepends a virtual
+    // marker — a Heading 1 paragraph "2. Confidentiality" projects as
+    // "# 2. Confidentiality", so an edit targeting the bare heading text
+    // starts at real_lo, not lo. That is still a whole-paragraph edit, so
+    // either start is admissible (repro_heading_bug TC-4).
+    const bounds = new Map<any, [number, number, number]>();
+    for (const s of active_mapper.spans as any[]) {
+      if (s.paragraph === null || s.paragraph === undefined) continue;
+      // Skip the inter-paragraph "\n\n" virtual separator.
+      if (s.run === null && s.text === "\n\n") continue;
+      const cur = bounds.get(s.paragraph);
+      const real_lo = s.run !== null && s.run !== undefined ? s.start : Infinity;
+      if (cur === undefined) {
+        bounds.set(s.paragraph, [s.start, s.end, real_lo]);
+      } else {
+        if (s.start < cur[0]) cur[0] = s.start;
+        if (s.end > cur[1]) cur[1] = s.end;
+        if (real_lo < cur[2]) cur[2] = real_lo;
+      }
+    }
+    for (const [lo, hi, real_lo] of bounds.values()) {
+      if (hi !== end_idx) continue;
+      if (lo === start_idx || real_lo === start_idx) return true;
+    }
+    return false;
+  }
+
   private _pre_resolve_heuristic_edit(edit: any): any {
     if (!edit.target_text) return null;
 
@@ -5869,7 +5927,10 @@ export class RedlineEngine {
         current_effective_new_text,
       );
 
-      if (edit_target_style !== edit_new_style) {
+      if (
+        edit_target_style !== edit_new_style &&
+        this._match_spans_whole_paragraph(active_mapper, start_idx, match_len)
+      ) {
         const [actual_clean] = this._parse_markdown_style(actual_doc_text);
         const final_target = actual_clean;
         const final_new = edit_new_clean;

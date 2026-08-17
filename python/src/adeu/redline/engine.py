@@ -1138,7 +1138,19 @@ class RedlineEngine:
         # 0. Check if FIRST line implies a block element (Header)
         first_clean, first_style = self._parse_markdown_style(lines[0])
 
-        if first_style:
+        # Block conversion additionally requires a REAL line break in the source
+        # text. Without one the text is by construction a fragment spliced into
+        # an existing paragraph, and a leading "- "/"* "/"# " is literal
+        # content, not a block marker. Word-diffing makes this routine: modify
+        # "Product" -> "Product - Draft" trims the common prefix and hands us
+        # the fragment " - Draft", which _parse_markdown_style reads as a
+        # bullet. Left ungated, that silently split the paragraph, minted a
+        # numbered ListParagraph, ate the "- " as a fabricated marker, and still
+        # reported status "applied". Note the em-dash spelling was never
+        # affected, so the corruption tracked the punctuation an author chose.
+        has_line_break = re.search(r"[\r\n]", text) is not None
+
+        if first_style and has_line_break:
             if current_p is None:
                 return None, None
 
@@ -3597,12 +3609,22 @@ class RedlineEngine:
         # We only consider spans that are tagged with a paragraph (real or
         # virtual prefix), and we require coverage by both endpoints.
 
+        # Per paragraph: [lo, hi] over every span, plus real_lo over spans
+        # backed by an actual run. They differ when the projection prepends a
+        # virtual marker — a Heading 1 paragraph "2. Confidentiality" projects
+        # as "# 2. Confidentiality", so an edit targeting the BARE heading text
+        # starts at real_lo, not lo. That is still a whole-paragraph edit.
+        # Requiring lo alone rejected it, and the edit fell through to the
+        # inline path, which wrote the replacement marker into the document as
+        # literal text ("{++## ++}2. Confidentiality", style left untouched).
+        # The TypeScript engine accepted it, so this was also a parity gap.
         bounds: Dict[Any, List[Optional[int]]] = defaultdict(_empty_bounds)
+        real_lows: Dict[Any, int] = {}
         for s in active_mapper.spans:
             if s.paragraph is None:
                 continue
             # Skip the inter-paragraph "\n\n" virtual separator
-            # (run is None and text == "\n\n" with paragraph != None means
+            # (run is None and text == "\n\n" means
             # the separator was attached to s.paragraph as the trailing
             # newline; we exclude it from the boundary calculation).
             if s.run is None and s.text == "\n\n":
@@ -3613,9 +3635,15 @@ class RedlineEngine:
             if hi is None or s.end > hi:
                 hi = s.end
             bounds[s.paragraph] = [lo, hi]
+            if s.run is not None:
+                prev_real = real_lows.get(s.paragraph)
+                if prev_real is None or s.start < prev_real:
+                    real_lows[s.paragraph] = s.start
 
         for p, (lo, hi) in bounds.items():
-            if lo == start_idx and hi == end_idx:
+            if hi != end_idx:
+                continue
+            if lo == start_idx or real_lows.get(p) == start_idx:
                 target_para = p
 
                 break
@@ -3623,18 +3651,26 @@ class RedlineEngine:
         if target_para is None:
             return None
 
-        # At least one side must be a heading. If neither the source
-        # paragraph nor the new_text is heading-styled, the existing
+        # At least one side must carry a block marker. If the source paragraph
+        # is unstyled and new_text names no block style, the existing
         # inline-edit path handles it correctly — don't intercept.
+        #
+        # This gate used to admit HEADINGS ONLY, which broke dual-engine
+        # parity: for a whole-paragraph replace like modify("Alpha", "- Beta")
+        # the TypeScript engine consumed the "- " and restyled the paragraph to
+        # a bullet, while Python fell through to the inline path and inserted a
+        # literal "- Beta" with no style. The marker leaked into the document as
+        # text. "* ", "- " and "1. " are block markers exactly as "# " is, so
+        # every style _parse_markdown_style recognises is admitted here.
         from adeu.utils.docx import is_heading_paragraph
 
         source_is_heading = is_heading_paragraph(target_para)
 
-        # Detect whether new_text starts with a heading marker.
+        # Detect whether new_text starts with any block marker (heading,
+        # bullet or numbered), not just a heading one.
         new_clean, new_style = self._parse_markdown_style(new_text)
-        new_is_heading = new_style is not None and (new_style.startswith("Heading") or new_style == "Title")
 
-        if not source_is_heading and not new_is_heading:
+        if not source_is_heading and new_style is None:
             return None
 
         # Synthesize a proxy edit pointing at the original paragraph.

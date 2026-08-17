@@ -96,3 +96,44 @@ class TestReproHeadingBug:
 
         # Paragraph 3 text remains untouched (not demoted, nor modified)
         assert "section 2. Confidentiality above." in res.paragraphs[3].text
+
+    def test_tc4_bare_target_no_duplicate(self):
+        """
+        TC-4: Bare target, no duplicate — mirror of the Node engine's TC-4 in
+        node/packages/core/src/repro_heading_bug.test.ts.
+
+        Target: "2. Confidentiality" (WITHOUT the projected "# " prefix),
+        new_text: "## 2. Confidentiality".
+        Expected: demoted to Heading 2, and no literal "##" in the text.
+
+        This case used to be Python-only broken. `_maybe_paragraph_replace`
+        identified the target paragraph by requiring the match to start at the
+        paragraph's FIRST span, but a Heading 1 paragraph projects as
+        "# 2. Confidentiality", so a bare target starts two characters later
+        and the paragraph was never found. The edit fell through to the inline
+        path, which left the style at Heading 1 and inserted the replacement
+        marker as literal text ("# {++## ++}2. Confidentiality"). Node applied
+        it correctly, so this was a dual-engine parity gap as well as a
+        marker leak.
+        """
+        doc = Document()
+        p = doc.add_paragraph("2. Confidentiality")
+        p.style = "Heading 1"
+        doc.add_paragraph("As defined in Section 1, the Recipient shall...")
+
+        stream = io.BytesIO()
+        doc.save(stream)
+        stream.seek(0)
+
+        engine = RedlineEngine(stream)
+        stats = engine.process_batch([ModifyText(target_text="2. Confidentiality", new_text="## 2. Confidentiality")])
+        assert stats["edits_applied"] == 1
+        assert stats["edits_skipped"] == 0
+
+        engine.accept_all_revisions()
+        res = Document(engine.save_to_stream())
+
+        assert res.paragraphs[0].style.name == "Heading 2"
+        assert "2. Confidentiality" in res.paragraphs[0].text
+        # The marker must be consumed as a style, never written as text.
+        assert "##" not in res.paragraphs[0].text
