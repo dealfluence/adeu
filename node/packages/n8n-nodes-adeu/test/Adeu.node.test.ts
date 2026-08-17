@@ -410,6 +410,26 @@ describe("Test Adeu n8n Node", () => {
       expect(item.json).not.toHaveProperty("reasoning");
     });
 
+    it("should point stale-id failures at Extract Markdown, not read_docx", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: { changes: [{ type: "accept", target_id: "Chg:999" }] },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+
+      await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow();
+
+      const err = await node.execute
+        .call(mockExecuteFunctions)
+        .catch((e: Error & { description?: string }) => e);
+      const text = `${err.message}\n${(err as { description?: string }).description ?? ""}`;
+      expect(text).toContain("Extract Markdown");
+      expect(text).not.toContain("read_docx");
+    });
+
     it("should successfully apply edits and output binary data", async () => {
       const result = await node.execute.call(mockExecuteFunctions);
 

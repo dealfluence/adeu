@@ -7,6 +7,15 @@ export const DOCX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 /**
+ * Where a caller of THIS package re-reads Chg:/Com: ids from. Core's default
+ * hint names the MCP tool `read_docx`, which does not exist in n8n — passing
+ * this into every RedlineEngine keeps stale-id errors actionable on the
+ * canvas. See node/packages/core/src/engine.ts:5162 for the substitution.
+ */
+export const N8N_ID_DISCOVERY_HINT =
+  "Run the Extract Markdown operation on the current document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.";
+
+/**
  * Resolves a dot-notation JSON path (e.g., "body.data.changes") safely.
  */
 export function getNestedProperty(

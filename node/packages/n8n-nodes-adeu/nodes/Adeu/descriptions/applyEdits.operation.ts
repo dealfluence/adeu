@@ -14,6 +14,7 @@ import {
 import {
   type BinarySource,
   DOCX_MIME_TYPE,
+  N8N_ID_DISCOVERY_HINT,
   buildOutputFileName,
   coerceChangesArray,
   getDocxBufferFromSource,
@@ -255,7 +256,9 @@ export async function executeApplyEdits(
   );
 
   const doc = await DocumentObject.load(buffer);
-  const engine = new RedlineEngine(doc, author);
+  const engine = new RedlineEngine(doc, author, {
+    id_discovery_hint: N8N_ID_DISCOVERY_HINT,
+  });
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],
   );
