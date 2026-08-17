@@ -51,7 +51,6 @@ class TestAdeuDiffDocxStandard(ToolsIntegrationTests):
 
 class TestAdeuDiffDocxBehavior:
     def test_identical_files_returns_no_differences(self, working_docx: Path, golden_docx_path: Path) -> None:
-
         tool = AdeuDiffDocx()
         result = tool.invoke(
             {
@@ -63,7 +62,6 @@ class TestAdeuDiffDocxBehavior:
         assert "No text differences found" in result
 
     def test_identity_short_circuit(self, golden_docx_path: Path) -> None:
-
         tool = AdeuDiffDocx()
         result = tool.invoke(
             {
@@ -80,7 +78,6 @@ class TestAdeuDiffDocxBehavior:
         golden_docx_path: Path,
         tmp_path: Path,
     ) -> None:
-
         modified = tmp_path / "modified.docx"
         apply_tool = AdeuApplyChanges()
 
@@ -124,6 +121,37 @@ class TestAdeuDiffDocxBehavior:
         assert "- document" in diff_result or "-document" in diff_result
         # The replacement should appear as an addition line.
         assert "+ agreement" in diff_result or "+agreement" in diff_result
+
+    def test_raw_diff_never_emits_orphaned_criticmarkup(self, working_docx: Path, output_path: Path) -> None:
+        # Build a second version whose tracked-change markup differs, then diff
+        # the RAW projections. Every CriticMarkup delimiter in a hunk payload
+        # line must be paired (document.py:881-883).
+        from langchain_adeu import AdeuApplyChanges
+
+        AdeuApplyChanges().invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(working_docx),
+                "author_name": "AI Reviewer",
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "agreement"}],
+                "output_path": str(output_path),
+            }
+        )
+        diff = AdeuDiffDocx().invoke(
+            {
+                "reasoning": "test",
+                "original_path": str(working_docx),
+                "modified_path": str(output_path),
+                "compare_clean": False,
+            }
+        )
+        for line in diff.splitlines():
+            if not line.startswith(("+", "-")):
+                continue
+            payload = line[1:]
+            openers = payload.count("{++") + payload.count("{--") + payload.count("{==") + payload.count("{>>")
+            closers = payload.count("++}") + payload.count("--}") + payload.count("==}") + payload.count("<<}")
+            assert openers == closers, f"unbalanced CriticMarkup in hunk line: {line!r}"
 
     @pytest.mark.asyncio
     async def test_ainvoke_matches_invoke(self, working_docx: Path, golden_docx_path: Path) -> None:

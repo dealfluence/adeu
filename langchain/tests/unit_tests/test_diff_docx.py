@@ -99,7 +99,6 @@ class TestAdeuDiffDocxValidation:
             )
 
     def test_identical_paths_short_circuit(self, tmp_path: Path) -> None:
-
         same = tmp_path / "same.docx"
         same.write_bytes(b"PK")
         tool = AdeuDiffDocx()
@@ -120,3 +119,9 @@ class TestAdeuDiffDocxValidation:
             diff_format="unified",
         )
         assert input_data.diff_format == "unified"
+
+
+def test_dead_helper_is_gone() -> None:
+    import langchain_adeu.diff_docx as mod
+
+    assert not hasattr(mod, "_read_text"), "unused helper still present"

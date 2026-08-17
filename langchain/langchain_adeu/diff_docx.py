@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 from io import BytesIO
-from pathlib import Path
 from typing import Literal
 
 from adeu.diff import (
@@ -166,7 +165,8 @@ class AdeuDiffDocx(BaseTool):
                 return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
             return warning_prefix + diff_str
 
-        edits = generate_edits_from_text(text_orig, text_mod)
+        # atomic_criticmarkup=True ensures hunks never cut inside CriticMarkup delimiters (document.py:881-883)
+        edits = generate_edits_from_text(text_orig, text_mod, atomic_criticmarkup=True)
         if not edits:
             return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
 
@@ -189,23 +189,6 @@ class AdeuDiffDocx(BaseTool):
             compare_clean,
             diff_format,
         )
-
-
-def _read_text(path: Path, clean_view: bool) -> str:
-    """Extract text from a .docx for diffing.
-
-    Reads the file into memory once (the engine needs a stream, not a path).
-    `extract_text_from_stream` is the same entry point `diff_docx_files`
-    uses in the MCP server, so behavior is identical across surfaces.
-    """
-    from io import BytesIO
-
-    with open(path, "rb") as f:
-        stream = BytesIO(f.read())
-    # include_appendix=False: the generated structural appendix ("used N
-    # times", diagnostics) is not document content — diffing it produces
-    # phantom edits (QA 2026-07-18 H1). Mirrors the MCP diff_docx_files fix.
-    return extract_text_from_stream(stream, filename=path.name, clean_view=clean_view, include_appendix=False)
 
 
 __all__ = ["AdeuDiffDocx", "AdeuDiffDocxInput"]
