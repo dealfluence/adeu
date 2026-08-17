@@ -24,6 +24,7 @@ from typing import Any, Literal
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
+    build_budget_guard_message,
     build_changes_response,
     build_full_document_response,
     build_outline_response,
@@ -32,6 +33,7 @@ from adeu.mcp_components._response_builders import (
     build_search_response,
 )
 from adeu.pagination import parse_page_arg
+from adeu.payloads import response_budget_limit
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
@@ -106,6 +108,15 @@ class AdeuReadDocxInput(BaseModel):
         # unchanged; _run re-parses it for dispatch, exactly like document.py.
         parse_page_arg(v)
         return v
+
+    force: bool = Field(
+        default=False,
+        description=(
+            "Only for page='all': return the whole document even when it exceeds the "
+            "response budget. Without this, an oversized unbounded read is refused with "
+            "a list of bounded alternatives (page ranges, search, outline)."
+        ),
+    )
 
     outline_max_level: int = Field(
         default=2,
@@ -187,6 +198,9 @@ _DESCRIPTION = (
     "- 'changes': a concise ledger of every tracked change and comment with its "
     "id, author, page, and text. Use this before any accept/reject/reply, and "
     "instead of reading full pages just to find ids."
+    "\n\n"
+    "page='all' returns the whole document, and is refused with a recipe of bounded "
+    "alternatives when the document exceeds the response budget — pass force=True to override."
 )
 
 
@@ -212,6 +226,7 @@ class AdeuReadDocx(BaseTool):
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix", "changes"] = "full",
         page: int | str | None = None,
+        force: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -314,6 +329,8 @@ class AdeuReadDocx(BaseTool):
                 assert isinstance(page_val, int)
                 result = build_appendix_response(text, page_val, str(path))
             elif kind == "all":
+                if not force and len(text) > response_budget_limit():
+                    raise ToolException(build_budget_guard_message(text, str(path), doc=doc))
                 result = build_full_document_response(text, str(path))
             elif kind == "range":
                 assert isinstance(page_val, tuple)
@@ -341,6 +358,7 @@ class AdeuReadDocx(BaseTool):
         clean_view: bool = False,
         mode: Literal["full", "outline", "appendix", "changes"] = "full",
         page: int | str | None = None,
+        force: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -359,6 +377,7 @@ class AdeuReadDocx(BaseTool):
             clean_view,
             mode,
             page,
+            force,
             outline_max_level,
             outline_verbose,
             search_query,

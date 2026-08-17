@@ -163,6 +163,27 @@ class TestAdeuReadDocxBehavior:
         result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "1-2"})
         assert "This is the" in result
 
+    def test_page_all_refuses_when_over_response_budget(
+        self, golden_docx_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # response_budget_limit() reads ADEU_MAX_RESPONSE_CHARS (payloads.py:398-409);
+        # golden.docx projects to ~353 chars, so a 10-char budget trips the guard.
+        monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
+        tool = AdeuReadDocx()
+        with pytest.raises(ToolException, match="Refused unbounded full document read"):
+            tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "all"})
+
+    def test_force_overrides_the_response_budget(self, golden_docx_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "all", "force": True})
+        assert "This is the" in result
+
+    def test_page_all_under_budget_is_unchanged(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "all"})
+        assert "This is the" in result
+
     def test_appendix_mode_refuses_page_all(self, golden_docx_path: Path) -> None:
         # document.py:478-479 — 'all' in appendix mode is reported as an invalid
         # page, not as a range restriction. The wording is copied from the engine
