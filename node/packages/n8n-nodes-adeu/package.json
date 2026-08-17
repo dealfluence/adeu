@@ -52,7 +52,7 @@
     "@adeu/core": "^2.4.0",
     "@n8n/eslint-plugin-community-nodes": "^0.29.0",
     "@types/node": "^26.2.0",
-    "@typescript-eslint/parser": "^8.66.0",
+    "@typescript-eslint/parser": "^8.67.0",
     "copyfiles": "^2.4.1",
     "eslint": "^10.8.0",
     "n8n-workflow": "^2.34.1",
