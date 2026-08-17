@@ -135,7 +135,6 @@ The `modify` edit type now supports two optional fields:
 #### 🔍 Transactional Batches (Self-Correction for AI Agents)
 By default (`Allow Partial Application` off), `Apply Edits` is all-or-nothing: if any single edit fails validation (target text not found, ambiguous match, read-only target, overlapping another author's change), the engine throws a `BatchValidationError` atomically and the document is left untouched. The error message names the failing edit and explains why it failed, so an agent can correct just that edit and re-call — no separate preview round trip is needed.
 
-- **Salvage mode (`Allow Partial Application`)**: Off by default. When on, the valid changes are applied and saved, the output JSON `status` reads `partial`, and `stats.failed` lists every failure as `{ index, reason }` where `index` is the 0-based position in the array you submitted. Use it for AI Agent loops that will fix and resubmit the rejected changes; keep it off wherever a half-applied redline could be shipped as final.
 - **Failure blame**: When a batch is rejected, the thrown error's description names each failing change by its 0-based index and repeats the two-call recovery protocol (re-apply the batch without the failing changes, then fix those separately in a small batch).
 - **Author impersonation warning**: `stats.author_impersonation_warning` is set when the `Author` you configured matches an author who already has pending revisions in the document — a redline that would be indistinguishable from theirs in Word's review pane.
 - **Stale ids**: If an `accept`/`reject`/`reply` names an id that no longer exists, the error lists the ids the document actually has and tells you to re-run **Extract Markdown**, because ids shift between document states.
@@ -154,7 +153,7 @@ Use it for AI Agent loops that will read `stats.failed`, fix the rejected edits,
 ### 4. Apply Text Revision 🆕
 Applies a whole revised document text as tracked changes.
 - **Input**: `.docx` binary + `Revised Text` — the **complete** clean text of the document.
-- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats }`.
+- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats, redlinedBinaryId? }` (under AI Agent tool execution, `redlinedBinaryId` is returned for cumulative multi-turn editing).
 - **How to produce `Revised Text`**: Call **Extract Markdown** with `Clean View` on and `Page` `0`, edit that text, and send all of it back. The engine diffs it against the document's own clean view and writes the difference as native Word tracked changes.
 - **Refusals (nothing is applied)**:
   - CriticMarkup tags (`{++ ++}`, `{-- --}`, `{>> <<}`) in the text — the tool compares against the clean view, so markup would land as literal prose.
@@ -168,7 +167,7 @@ Produces a sub-word level `@@ Word Patch @@` diff between two versions of a docu
 - **Input**: Two `.docx` binaries on the same item (e.g., `data` and `data2`).
 - **Output**: JSON `{ diff, originalFileName, modifiedFileName }`.
 
-### 6. Finalize Document
+### 6. Finalize
 Prepares a document for signature or external distribution.
 - **Modes**:
   - `Full`: Strips all metadata and requires all tracked changes/comments to be resolved (or auto-accepted).
@@ -178,7 +177,7 @@ Prepares a document for signature or external distribution.
 
 ### 7. Hydrate Tool Output (The "Hydration" Note)
 Because n8n's AI Agent tool wrapper intercepts and **strips all binary data** from tool outputs, files generated inside an AI loop cannot reach downstream nodes directly.
-- **What it does**: This operation is placed immediately downstream of the AI Agent on the main workflow execution line. It reads the stashed metadata pointer left by the last execution of `apply_edits`, retrieves the raw file stream directly from n8n's secure binary storage, and attaches a fresh binary buffer onto the outgoing item.
+- **What it does**: This operation is placed immediately downstream of the AI Agent on the main workflow execution line. It reads the stashed metadata pointer (`adeu_last_redlined`) left by the last execution of a redline operation (`Apply Edits` or `Apply Text Revision`), retrieves the raw file stream directly from n8n's secure binary storage, and attaches a fresh binary buffer onto the outgoing item.
 - **Output Path Construction**: It supports an optional output path template (e.g., `C:\path\to\folder\{baseName}_{timestamp}.docx`) to resolve path strings inside TypeScript. This avoids expression-parsing and escape issues when configuring downstream Write File nodes on Windows.
 
 ---
@@ -227,9 +226,9 @@ To use the **Apply Edits** operation, your LLM must output a JSON array of objec
 When an AI Agent applies edits, receives feedback, and needs to make *another* round of changes, loading from the original node name (e.g., `'Read Binary File'`) would discard the modifications just made. To allow the model to chain consecutive edits seamlessly, the node utilizes an **explicit state pointer pipeline**:
 
 1. **First Tool Call**: The LLM loads from the baseline. It sets `Source_Node_Name` to the canvas node (e.g., `'Read Binary File'`) and leaves `Source_Binary_Id` blank.
-2. **Intermediate Output**: The `apply_edits` tool applies changes and returns a unique `redlinedBinaryId` (representing the immutable state of that edit) back in the JSON payload to the LLM.
+2. **Intermediate Output**: The redline tools (`Apply Edits` and `Apply Text Revision`) apply changes and return a unique `redlinedBinaryId` (representing the immutable state of that edit) back in the JSON payload to the LLM.
 3. **Subsequent Tool Calls**: If the LLM needs to make further changes on top of its prior work, it must set `Source_Binary_Id` to the ID string returned by the previous call. The node's backend dynamically detects this ID, bypasses the upstream node name, and pulls the intermediate document directly from storage to apply the new changes cumulatively.
-4. **Handoff**: On every successful execution, the node overwrites a global static pointer (`adeu_last_redlined`) with the newest ID. When the AI Agent finishes its entire chat turn, the downstream `Hydrate Tool Output` node reads this pointer to output the final, fully-cumulative document.
+4. **Handoff**: On every successful execution of a redline operation (`Apply Edits` or `Apply Text Revision`), the node overwrites a global static pointer (`adeu_last_redlined`) with the newest ID. When the AI Agent finishes its entire chat turn, the downstream `Hydrate Tool Output` node reads this pointer to output the final, fully-cumulative document.
 
 ---
 
@@ -290,7 +289,7 @@ Some fields are **plumbing** — they configure which input/output port the node
 
 - **`Document Source`** (`fromInput` vs `fromNode`) — workflow topology decision.
 - **`Input Binary Property`** — wiring decision; downstream of the source node, not per-call.
-- **`Output Binary Property`** (Apply Edits, Apply Text Revision, Finalize Document) — names where the outgoing binary lands on the workflow item. Downstream nodes need this fixed; an LLM picking `output_data` one call and `result` the next would break the pipeline. Default `'data'` is almost always correct.
+- **`Output Binary Property`** (Apply Edits, Apply Text Revision, Finalize) — names where the outgoing binary lands on the workflow item. Downstream nodes need this fixed; an LLM picking `output_data` one call and `result` the next would break the pipeline. Default `'data'` is almost always correct.
 - **`Edits Source`** (Apply Edits) — controls whether the node reads the changes array from the `Changes (JSON)` field on the node itself (`defineBelow`) or from a property on the upstream item (`fromInputJson`). For AI Agent workflows, **set this to `Define Below` in the editor**. This is what activates the `Changes (JSON)` field as the LLM's entry point — the recipe in the Apply Edits section below populates that field via `$fromAI`, and the LLM hands its generated `Changes_JSON` string directly to the tool as a call argument. The `fromInputJson` branch is only for deterministic pipelines where an upstream non-AI node has pre-populated a `changes` property on the item.
 - **`Allow Partial Application`** (Apply Edits) — decides whether a flawed batch is rejected wholesale or half-applied. That is your risk policy for the workflow, not a per-call choice; an LLM that can switch it on will switch it on to make its own errors disappear. Leave it `false` unless the workflow is an agent loop that resubmits the failures.
 - **`Allow Major Deletions`** (Apply Text Revision) — decides whether a revision deleting >50% of the document is allowed. That is your risk policy for the workflow, not a per-call choice. Leave it `false` unless whole-document truncation is intended.
@@ -414,7 +413,7 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 
 ---
 
-### Finalize Document
+### Finalize
 
 **Reasoning** (fill this FIRST):
 ```
