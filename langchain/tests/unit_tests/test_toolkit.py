@@ -41,11 +41,9 @@ EXPECTED_TOOL_NAMES = {
 
 class TestAdeuToolkitContract:
     def test_subclasses_base_toolkit(self) -> None:
-
         assert issubclass(AdeuToolkit, BaseToolkit)
 
     def test_constructs_without_arguments(self) -> None:
-
         toolkit = AdeuToolkit()
         assert isinstance(toolkit, BaseToolkit)
 
@@ -55,19 +53,16 @@ class TestAdeuToolkitContract:
         assert all(isinstance(t, BaseTool) for t in tools)
 
     def test_exposes_exactly_the_expected_tool_classes(self) -> None:
-
         tools = AdeuToolkit().get_tools()
         got_classes = {type(t) for t in tools}
         assert got_classes == EXPECTED_TOOL_CLASSES
 
     def test_tool_names_are_stable(self) -> None:
-
         tools = AdeuToolkit().get_tools()
         got_names = {t.name for t in tools}
         assert got_names == EXPECTED_TOOL_NAMES
 
     def test_tool_names_are_unique(self) -> None:
-
         tools = AdeuToolkit().get_tools()
         names = [t.name for t in tools]
         assert len(names) == len(set(names))
@@ -75,7 +70,6 @@ class TestAdeuToolkitContract:
 
 class TestAdeuToolkitInstancing:
     def test_get_tools_returns_fresh_instances_each_call(self) -> None:
-
         first = AdeuToolkit().get_tools()
         second = AdeuToolkit().get_tools()
 
@@ -91,7 +85,6 @@ class TestAdeuToolkitInstancing:
             )
 
     def test_same_toolkit_instance_also_returns_fresh_tools(self) -> None:
-
         toolkit = AdeuToolkit()
         first = toolkit.get_tools()
         second = toolkit.get_tools()
@@ -101,8 +94,22 @@ class TestAdeuToolkitInstancing:
 
 class TestGetToolsConvenienceFunction:
     def test_returns_same_tool_set_as_toolkit(self) -> None:
-
         toolkit_tools = AdeuToolkit().get_tools()
         function_tools = get_tools()
         assert {type(t) for t in toolkit_tools} == {type(t) for t in function_tools}
         assert {t.name for t in toolkit_tools} == {t.name for t in function_tools}
+
+
+def test_readme_documents_every_tool_parameter() -> None:
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
+    for tool in AdeuToolkit().get_tools():
+        assert tool.name in readme, f"README does not mention tool {tool.name}"
+        schema = tool.args_schema.model_json_schema()  # type: ignore[union-attr]
+        for field_name in schema["properties"]:
+            if field_name == "reasoning":
+                continue
+            assert field_name in readme, (
+                f"README does not document {tool.name}.{field_name} — add it to the per-tool table"
+            )

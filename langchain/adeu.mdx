@@ -19,6 +19,7 @@ Adeu acts as a Virtual DOM for Microsoft Word (.docx) documents, translating com
 
 - **Lossless Translation**: Converts `.docx` documents into clean Markdown on read, and back into native OpenXML on write.
 - **Granular Redlining**: Commits edits as standard tracked changes and comment bubbles using native Microsoft Word nodes (`w:ins`/`w:del`).
+- **Tracked-Changes Ledger**: Inspects active revisions, insertions, deletions, and comment threads with stable IDs across multi-turn workflows (`mode="changes"`).
 - **Metadata Sanitization**: Strips dangerous hidden tracking fields, rsids, DMS metadata, and template paths before distributing documents.
 - **Fuzzy Anchor Protection**: Automatically protects document boundaries by catching and rejecting ambiguous search-and-replace matches.
 
@@ -61,13 +62,11 @@ You can invoke individual tools directly using a dictionary of standard keyword 
 ```python Call tool directly
 read_tool = [t for t in tools if t.name == "adeu_read_docx"][0]
 
-# Read document body with active tracked changes visible
-markdown_content = read_tool.invoke({
-    "reasoning": "Reading the agreement body with tracked changes visible.",
+# Inspect active tracked changes and comment threads with stable IDs
+changes_ledger = read_tool.invoke({
+    "reasoning": "Collecting active tracked-change IDs before resolving revisions.",
     "file_path": "path/to/agreement.docx",
-    "clean_view": False,
-    "mode": "full",
-    "page": 1
+    "mode": "changes",
 })
 ```
 

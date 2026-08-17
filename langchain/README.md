@@ -120,17 +120,31 @@ sanitize_result = sanitize_tool.invoke({
 print("\n--- Sanitization Report ---\n", sanitize_result)
 ```
 
+### Reading Large Documents & Navigation Ladder
+
+When working with long documents (e.g. 50+ pages), avoid loading the entire text into the LLM context at once. Follow this progressive navigation ladder:
+
+1. **Plan structure (`mode="outline"`)**: Inspect document hierarchy (headings, sections, tables) with optional depth limits via `outline_max_level` and detailed metadata with `outline_verbose=True`.
+2. **Read by slice (`page=N` or `page="2-6"`)**: Load targeted page ranges or specific sections rather than the full document (`page="all"`). Use `force=True` if page count estimates should bypass pagination caches, and `paragraph_offsets=True` to include paragraph indices.
+3. **Locate exact clauses (`search_query`)**: Find specific terms or phrases with pagination support (`max_matches`, `match_offset`), regex support (`search_regex=True`), case sensitivity (`search_case_sensitive=True`), and full-paragraph context (`full_paragraph=True`).
+4. **Collect tracked-change IDs (`mode="changes"`)**: Retrieve the ledger of active revisions and comment threads with fresh IDs (filtered optionally by `changes_author` or paginated via `changes_offset`) before executing `accept_change`, `reject_change`, or `reply` operations.
+
+### Transactional vs. Partial Edits & Sanitization Safety
+
+- **Transactional vs. Salvage Edits (`partial`)**: By default, `adeu_apply_changes` operates strictly transactionally—if any single edit in the `changes` list fails (e.g., target text not found or ambiguous match), the entire batch rolls back and no output file is written. Setting `partial=True` enables salvage mode: valid edits are committed while failing ones are recorded in the artifact and report.
+- **Sanitization Baseline Safety (`status="blocked"`)**: When `baseline_path` is provided to `adeu_sanitize_docx`, it verifies structural and textual similarity between the cleaned document and the baseline. If text similarity falls below the safety threshold (e.g., unexpected content deletion), sanitization returns `status="blocked"` and aborts without writing `output_path` unless `allow_low_similarity_baseline=True` is explicitly passed.
+
 ---
 
 ## Per-Tool Reference
 
 | Tool Name | Purpose / When to Use | Key Input Parameters | Response Format / Output Shape |
 | :--- | :--- | :--- | :--- |
-| `adeu_read_docx` | Reads a `.docx` file into Markdown. Use `clean_view=False` to audit active track-changes. | `file_path` (str), `clean_view` (bool), `mode` (Literal), `page` (int) | `content_and_artifact` (Returns projected Markdown text + structured metadata artifact) |
-| `adeu_apply_changes` | Commits a transactional batch of edits as native track-changes and comment threads. | `file_path` (str), `author_name` (str), `changes` (list[dict]), `output_path` (str) | `content_and_artifact` (Returns completion text + structured change stats) |
-| `adeu_diff_docx` | Generates a word-level patch showing insertions and deletions between two files. | `original_path` (str), `modified_path` (str), `compare_clean` (bool) | `content` (Returns free-form `@@ Word Patch @@` visual text) |
-| `adeu_accept_all_changes` | Resolves and bakes all tracked changes and format modifications into plain text. | `file_path` (str), `output_path` (str) | `content_and_artifact` (Returns completion text + artifact mapping paths) |
-| `adeu_sanitize_docx` | Cleans document properties (author names, RSIDs, Custom XML, DMS traces). | `file_path` (str), `output_path` (str), `keep_markup` (bool), `accept_all` (bool) | `content_and_artifact` (Returns human-readable report text + structured cleanup stats) |
+| `adeu_read_docx` | Reads a `.docx` file into Markdown. Use `clean_view=False` to audit active track-changes, or inspect document structure with specialized modes and search. | `file_path` (str), `clean_view` (bool), `mode` (`"full"`, `"outline"`, `"appendix"`, `"changes"`), `page` (int, str e.g. `'2-6'`, `'all'`), `force` (bool), `outline_max_level` (int), `outline_verbose` (bool), `paragraph_offsets` (bool), `search_query` (str), `search_regex` (bool), `search_case_sensitive` (bool), `max_matches` (int), `match_offset` (int), `full_paragraph` (bool), `changes_author` (str), `changes_offset` (int) | `content_and_artifact` (Returns projected Markdown text + structured metadata artifact) |
+| `adeu_apply_changes` | Commits a transactional batch of edits as native track-changes and comment threads. Set `partial=True` to salvage valid edits. | `file_path` (str), `author_name` (str), `changes` (list[dict]), `output_path` (str), `partial` (bool) | `content_and_artifact` (Returns completion text + structured change stats) |
+| `adeu_diff_docx` | Generates a word-level patch or unified diff showing insertions and deletions between two files. | `original_path` (str), `modified_path` (str), `compare_clean` (bool), `diff_format` (`"patch"`, `"unified"`) | `content` (Returns free-form `@@ Word Patch @@` visual text or unified diff) |
+| `adeu_accept_all_changes` | Resolves and bakes all tracked changes and format modifications into plain text. Optionally removes comments. | `file_path` (str), `output_path` (str), `remove_comments` (bool) | `content_and_artifact` (Returns completion text + artifact mapping paths) |
+| `adeu_sanitize_docx` | Cleans document properties (author names, RSIDs, Custom XML, DMS traces). Validates against an optional baseline document. | `file_path` (str), `output_path` (str), `keep_markup` (bool), `baseline_path` (str), `author` (str), `accept_all` (bool), `allow_low_similarity_baseline` (bool) | `content_and_artifact` (Returns human-readable report text + structured cleanup stats) |
 
 ---
 
