@@ -132,6 +132,32 @@ class TestAdeuReadDocxBehavior:
             "so matches on every page are returned (document.py:1388)"
         )
 
+    def test_max_matches_limits_shown_snippets(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "search_query": "the",
+                "max_matches": 1,
+            }
+        )
+        assert "(2 total, 1 shown)" in result
+        assert "max_matches=1" in result
+
+    def test_match_offset_skips_earlier_matches(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "search_query": "the",
+                "match_offset": 1,
+            }
+        )
+        assert "### Match 2" in result
+        assert "### Match 1" not in result
+
     def test_page_range_is_served(self, golden_docx_path: Path) -> None:
         tool = AdeuReadDocx()
         result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "1-2"})

@@ -129,6 +129,27 @@ class AdeuReadDocxInput(BaseModel):
         default=True,
         description="Set to False to perform case-insensitive matching.",
     )
+    max_matches: int = Field(
+        default=20,
+        description=(
+            "For search queries only: maximum number of match snippets to return "
+            "(default 20). 0 returns the counts header with no snippets."
+        ),
+    )
+    match_offset: int = Field(
+        default=0,
+        description=(
+            "For search queries only: 0-based match index to start from, for paging "
+            "through a large result set (default 0)."
+        ),
+    )
+    full_paragraph: bool = Field(
+        default=False,
+        description=(
+            "For search queries only: return the full paragraph around each match "
+            "instead of clamping the snippet to +/-120 characters."
+        ),
+    )
 
 
 _DESCRIPTION = (
@@ -175,6 +196,9 @@ class AdeuReadDocx(BaseTool):
         search_query: str | None = None,
         search_regex: bool = False,
         search_case_sensitive: bool = True,
+        max_matches: int = 20,
+        match_offset: int = 0,
+        full_paragraph: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
 
@@ -203,7 +227,17 @@ class AdeuReadDocx(BaseTool):
             paragraph_offsets = None
 
         if search_query is not None:
-            result = build_search_response(text, search_query, search_regex, search_case_sensitive, page, str(path))
+            result = build_search_response(
+                text,
+                search_query,
+                search_regex,
+                search_case_sensitive,
+                page,
+                str(path),
+                max_matches=max_matches,
+                match_offset=match_offset,
+                full_paragraph=full_paragraph,
+            )
         elif mode == "outline":
             result = build_outline_response(
                 doc,
@@ -255,6 +289,9 @@ class AdeuReadDocx(BaseTool):
         search_query: str | None = None,
         search_regex: bool = False,
         search_case_sensitive: bool = True,
+        max_matches: int = 20,
+        match_offset: int = 0,
+        full_paragraph: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
             self._run,
@@ -268,6 +305,9 @@ class AdeuReadDocx(BaseTool):
             search_query,
             search_regex,
             search_case_sensitive,
+            max_matches,
+            match_offset,
+            full_paragraph,
         )
 
 
