@@ -4175,8 +4175,16 @@ class RedlineEngine:
             proxy_edit._active_mapper_ref = active_mapper
             return proxy_edit
 
-        if effective_new_text.startswith(actual_doc_text.rstrip()):
-            # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space)
+        if effective_new_text.startswith(actual_doc_text.rstrip()) and len(effective_new_text) > len(
+            actual_doc_text.rstrip()
+        ):
+            # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space).
+            # It only applies when the new text genuinely EXTENDS the rstripped target: when the
+            # remainder is empty the caller asked to DELETE the target's trailing whitespace (most
+            # importantly a "\n\n" paragraph mark, the shape make_edits_self_contained emits for a
+            # paragraph merge), and an insertion of "" would silently drop that deletion while the
+            # batch still reported the edit as applied. Fall through to the trimming path instead,
+            # which resolves it as the DELETION validate_edits already predicted.
             proxy_edit = ModifyText(
                 type="modify",
                 target_text="",
