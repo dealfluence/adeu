@@ -177,6 +177,40 @@ class TestAdeuReadDocxBehavior:
         with pytest.raises(ToolException, match="only supported in 'full' mode"):
             tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "appendix", "page": "1-2"})
 
+    def test_changes_mode_lists_change_and_comment_ids(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "mode": "changes"})
+        assert "Changes ledger" in result
+        # golden.docx carries Chg:3/Chg:4 and Com:0..Com:2.
+        assert "Chg:3" in result
+        assert "Com:0" in result
+        # comments_data must be supplied, or reply threading is not rendered.
+        assert "reply to Com:0" in result
+
+    def test_changes_mode_author_filter(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "mode": "changes",
+                "changes_author": "Nobody At All",
+            }
+        )
+        assert "0 change(s), 0 comment(s)" in result
+
+    def test_changes_mode_rejects_clean_view(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        with pytest.raises(ToolException, match="clean_view"):
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": str(golden_docx_path),
+                    "mode": "changes",
+                    "clean_view": True,
+                }
+            )
+
     @pytest.mark.asyncio
     async def test_ainvoke_matches_invoke(self, golden_docx_path: Path) -> None:
         # The async path must produce the same content as sync (it just

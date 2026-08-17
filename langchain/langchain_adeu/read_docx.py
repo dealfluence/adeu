@@ -24,6 +24,7 @@ from typing import Any, Literal
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
+    build_changes_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -31,12 +32,17 @@ from adeu.mcp_components._response_builders import (
     build_search_response,
 )
 from adeu.pagination import parse_page_arg
+from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import (
+    LANGCHAIN_ID_DISCOVERY_HINT,
+    validate_docx_path,
+    wrap_tool_errors,
+)
 
 
 class AdeuReadDocxInput(BaseModel):
@@ -63,7 +69,7 @@ class AdeuReadDocxInput(BaseModel):
             "'Accepted' text without any markup."
         ),
     )
-    mode: Literal["full", "outline", "appendix"] = Field(
+    mode: Literal["full", "outline", "appendix", "changes"] = Field(
         default="full",
         description=(
             "Read mode. 'full' (default) returns paginated body content. "
@@ -72,7 +78,11 @@ class AdeuReadDocxInput(BaseModel):
             "'appendix' returns defined terms, named anchors, cross-references, "
             "and semantic diagnostics (e.g. likely typos, unresolved references) "
             "— consult before editing legal or technical documents to avoid "
-            "breaking references."
+            "breaking references. "
+            "'changes' returns a concise ledger of every tracked change and "
+            "comment with its id, author, page, and text — use this before any "
+            "accept/reject/reply, and instead of reading full pages just to "
+            "find ids."
         ),
     )
     page: int | str | None = Field(
@@ -150,6 +160,14 @@ class AdeuReadDocxInput(BaseModel):
             "instead of clamping the snippet to +/-120 characters."
         ),
     )
+    changes_author: str | None = Field(
+        default=None,
+        description="For mode='changes' only: only list changes and comments by this author.",
+    )
+    changes_offset: int = Field(
+        default=0,
+        description="For mode='changes' only: 0-based entry offset for paging through a long ledger.",
+    )
 
 
 _DESCRIPTION = (
@@ -165,7 +183,10 @@ _DESCRIPTION = (
     "targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 "
     "to see deeper structure.\n"
     "- 'appendix': defined terms, anchors, and cross-reference targets. "
-    "Consult before editing legal/technical docs to avoid breaking references."
+    "Consult before editing legal/technical docs to avoid breaking references.\n"
+    "- 'changes': a concise ledger of every tracked change and comment with its "
+    "id, author, page, and text. Use this before any accept/reject/reply, and "
+    "instead of reading full pages just to find ids."
 )
 
 
@@ -189,7 +210,7 @@ class AdeuReadDocx(BaseTool):
         reasoning: str,
         file_path: str,
         clean_view: bool = False,
-        mode: Literal["full", "outline", "appendix"] = "full",
+        mode: Literal["full", "outline", "appendix", "changes"] = "full",
         page: int | str | None = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
@@ -199,12 +220,22 @@ class AdeuReadDocx(BaseTool):
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,
+        changes_author: str | None = None,
+        changes_offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
 
+        if mode == "changes":
+            if clean_view:
+                raise ToolException(
+                    "clean_view=True cannot be used with mode='changes': the ledger is built "
+                    "from the raw tracked-change projection. Drop clean_view or pick another mode."
+                )
+
         # `page` means "document page" and defaults to 1 everywhere EXCEPT search
-        # mode, where None means "search every page" (document.py:1388-1389).
-        if search_query is None and page is None:
+        # and mode='changes', where None means "every page" — the response builder
+        # needs to tell "omitted" from an explicit 1 (document.py:1384-1389).
+        if search_query is None and mode != "changes" and page is None:
             page = 1
 
         raw_bytes = path.read_bytes()
@@ -237,6 +268,32 @@ class AdeuReadDocx(BaseTool):
                 max_matches=max_matches,
                 match_offset=match_offset,
                 full_paragraph=full_paragraph,
+            )
+        elif mode == "changes":
+            # One engine load serves both enrichments the ledger wants:
+            # comments_data (author + reply threading) and the authoritative set
+            # of change ids still present in the XML, which filters ids that only
+            # survive in the projection (document.py:436-465). `_existing_change_ids`
+            # is private, but it is the same call the MCP layer makes (:447).
+            comments_data: dict[str, Any] | None
+            existing_change_ids: set[str] | None
+            try:
+                engine = RedlineEngine(BytesIO(sanitized_bytes), id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT)
+                comments_data = engine.comments_manager.extract_comments_data()
+                existing_change_ids = set(engine._existing_change_ids())
+            except Exception:
+                # The ledger degrades gracefully without them (both parameters
+                # are Optional); a broken comments part must not fail the read.
+                comments_data = None
+                existing_change_ids = None
+            result = build_changes_response(
+                text,
+                str(path),
+                comments_data=comments_data,
+                author_filter=changes_author,
+                page=page,
+                offset=changes_offset,
+                existing_change_ids=existing_change_ids,
             )
         elif mode == "outline":
             result = build_outline_response(
@@ -282,7 +339,7 @@ class AdeuReadDocx(BaseTool):
         reasoning: str,
         file_path: str,
         clean_view: bool = False,
-        mode: Literal["full", "outline", "appendix"] = "full",
+        mode: Literal["full", "outline", "appendix", "changes"] = "full",
         page: int | str | None = None,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
@@ -292,6 +349,8 @@ class AdeuReadDocx(BaseTool):
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,
+        changes_author: str | None = None,
+        changes_offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
             self._run,
@@ -308,6 +367,8 @@ class AdeuReadDocx(BaseTool):
             max_matches,
             match_offset,
             full_paragraph,
+            changes_author,
+            changes_offset,
         )
 
 

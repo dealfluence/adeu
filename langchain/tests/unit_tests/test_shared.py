@@ -128,6 +128,16 @@ class TestWrapToolErrors:
             raises_ki()
 
 
+def test_id_discovery_hint_names_the_langchain_tool() -> None:
+    from langchain_adeu._shared import LANGCHAIN_ID_DISCOVERY_HINT
+
+    # A LangChain agent cannot run the CLI, so the engine's default hint
+    # ("Run `adeu extract ...`", engine.py:5229-5231) is useless to it.
+    assert "adeu_read_docx" in LANGCHAIN_ID_DISCOVERY_HINT
+    assert "mode='changes'" in LANGCHAIN_ID_DISCOVERY_HINT
+    assert "adeu extract" not in LANGCHAIN_ID_DISCOVERY_HINT
+
+
 class TestAdeuFloor:
     def test_declared_adeu_floor_covers_the_apis_we_call(self) -> None:
         """The engine APIs this package needs, all added after adeu 1.17."""

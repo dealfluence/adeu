@@ -24,6 +24,17 @@ from langchain_core.tools import ToolException
 
 _DOCX_SUFFIX = ".docx"
 
+# The engine's default id-discovery advice points at the CLI
+# (RedlineEngine, python/src/adeu/redline/engine.py:5229-5231) and the MCP
+# server overrides it with MCP_ID_DISCOVERY_HINT
+# (python/src/adeu/mcp_components/shared.py:15-18). A LangChain agent can run
+# neither, so this package supplies its own tool-named hint and passes it to
+# every RedlineEngine it constructs.
+LANGCHAIN_ID_DISCOVERY_HINT = (
+    "Call `adeu_read_docx` with `mode='changes'` on the document again to list the "
+    "current change (Chg:) and comment (Com:) ids — ids shift between document states."
+)
+
 
 def validate_path(path_str: str, *, must_exist: bool = True, label: str = "path") -> Path:
     """Validate a filesystem path string and return a resolved `Path`.

@@ -126,3 +126,7 @@ class TestAdeuReadDocxValidation:
         # mode='changes'; only the non-search read paths coerce it to 1.
         data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx")
         assert data.page is None
+
+    def test_changes_mode_is_a_valid_literal(self) -> None:
+        data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx", mode="changes")
+        assert data.mode == "changes"
