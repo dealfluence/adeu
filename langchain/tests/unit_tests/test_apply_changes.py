@@ -11,12 +11,13 @@ engine is touched).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langchain_core.tools import ToolException
 
 from langchain_adeu import AdeuApplyChanges, AdeuApplyChangesInput
-from langchain_adeu.apply_changes import _resolve_output_path
+from langchain_adeu.apply_changes import _failure_artifact, _resolve_output_path, _success_artifact
 
 
 class TestAdeuApplyChangesSchema:
@@ -199,6 +200,36 @@ class TestAdeuApplyChangesValidation:
         assert msg.artifact["validation_errors"] is not None
         assert len(msg.artifact["validation_errors"]) > 0
         assert "Batch rejected" in msg.content
+
+
+class TestAdeuApplyChangesArtifactParity:
+    """Both branches of `AdeuApplyChanges` must expose the same artifact keys.
+
+    A downstream LangGraph node reads `artifact["<field>"]` without first
+    branching on `success`, so a field present on only one branch is a
+    latent `KeyError` in the caller.
+    """
+
+    def _stats(self) -> dict[str, Any]:
+        return {"actions_applied": 0, "actions_skipped": 0, "edits_applied": 1, "edits_skipped": 0}
+
+    def test_success_and_failure_artifacts_share_key_set(self, tmp_path: Path) -> None:
+        src = tmp_path / "draft.docx"
+        target = tmp_path / "custom_out.docx"
+        success = _success_artifact(src, str(target), target, "AI", True, self._stats(), [])
+        failure = _failure_artifact(src, str(target), "AI", ["boom"])
+        assert set(success) == set(failure)
+
+    def test_requested_output_path_is_the_caller_string_on_both_branches(self, tmp_path: Path) -> None:
+        # Same field, same meaning on both branches: what the caller asked
+        # for (None when it let the tool pick the default).
+        src = tmp_path / "draft.docx"
+        target = tmp_path / "draft_processed.docx"
+        assert _success_artifact(src, None, target, "AI", True, self._stats(), [])["requested_output_path"] is None
+        assert _failure_artifact(src, None, "AI", ["boom"])["requested_output_path"] is None
+        assert _success_artifact(src, str(target), target, "AI", True, self._stats(), [])[
+            "requested_output_path"
+        ] == str(target)
 
 
 class TestAdeuApplyChangesOutputPathLogic:

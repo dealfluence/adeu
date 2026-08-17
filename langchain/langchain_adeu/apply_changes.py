@@ -229,27 +229,7 @@ class AdeuApplyChanges(BaseTool):
 
         content_lines = _build_success_content(stats, target, engine_failed, len(validated_changes), partial)
 
-        artifact: dict[str, Any] = {
-            "input_path": str(source),
-            "output_path": str(target),
-            "author_name": author_name,
-            "success": True,
-            "status": stats.get("status", "ok"),
-            "partial": partial,
-            "validation_errors": None,
-            "failed": engine_failed,
-            "actions_applied": stats["actions_applied"],
-            "actions_skipped": stats["actions_skipped"],
-            "actions_already_resolved": stats.get("actions_already_resolved", 0),
-            "edits_applied": stats["edits_applied"],
-            "edits_skipped": stats["edits_skipped"],
-            "occurrences_modified": stats.get("occurrences_modified", 0),
-            "author_impersonation_warning": stats.get("author_impersonation_warning"),
-            "skipped_details": stats.get("skipped_details", []),
-            "edits": stats.get("edits", []),
-            "engine": stats.get("engine"),
-            "engine_version": stats.get("version"),
-        }
+        artifact = _success_artifact(source, output_path, target, author_name, partial, stats, engine_failed)
         return "\n".join(content_lines), artifact
 
     async def _arun(
@@ -289,6 +269,45 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
             f"omit output_path to use the default '<stem>_processed.docx'."
         )
     return target
+
+
+def _success_artifact(
+    source: Path,
+    output_path: str | None,
+    target: Path,
+    author_name: str,
+    partial: bool,
+    stats: dict[str, Any],
+    engine_failed: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build an artifact for a batch that wrote an output file.
+
+    Keys must match `_failure_artifact` exactly — the two builders are kept
+    side by side and `test_success_and_failure_artifacts_share_key_set`
+    fails the build if they drift.
+    """
+    return {
+        "input_path": str(source),
+        "output_path": str(target),
+        "requested_output_path": output_path,
+        "author_name": author_name,
+        "success": True,
+        "status": stats.get("status", "ok"),
+        "partial": partial,
+        "validation_errors": None,
+        "failed": engine_failed,
+        "actions_applied": stats["actions_applied"],
+        "actions_skipped": stats["actions_skipped"],
+        "actions_already_resolved": stats.get("actions_already_resolved", 0),
+        "edits_applied": stats["edits_applied"],
+        "edits_skipped": stats["edits_skipped"],
+        "occurrences_modified": stats.get("occurrences_modified", 0),
+        "author_impersonation_warning": stats.get("author_impersonation_warning"),
+        "skipped_details": stats.get("skipped_details", []),
+        "edits": stats.get("edits", []),
+        "engine": stats.get("engine"),
+        "engine_version": stats.get("version"),
+    }
 
 
 def _failure_artifact(
