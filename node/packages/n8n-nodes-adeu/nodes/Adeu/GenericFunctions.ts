@@ -2,6 +2,7 @@
 
 import type { IExecuteFunctions, IBinaryData, JsonObject } from "n8n-workflow";
 import { NodeApiError, NodeOperationError } from "n8n-workflow";
+import { BATCH_RECOVERY_PROTOCOL, failure_envelope } from "@adeu/core";
 
 export const DOCX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -450,12 +451,30 @@ export function mapAdeuErrorToNodeApiError(
         joined;
     }
 
+    // 0-based blame + the two-call recovery the engine teaches. `failed` is
+    // populated by BatchValidationError itself (core engine.ts:240-245), so
+    // the index reported is the caller's own position in `changes`.
+    const failed =
+      (error as unknown as { failed?: [number, string][] }).failed ?? [];
+    const envelope = failure_envelope(
+      "batch_validation_failed",
+      failed,
+      joined,
+      errors,
+    );
+    const blame = envelope.failed.length
+      ? "\n\nFailed changes (0-based index into the submitted array):\n" +
+        envelope.failed
+          .map((f) => `  [${f.index}] ${f.reason}`)
+          .join("\n")
+      : "";
+
     return new NodeApiError(
       this.getNode(),
-      { message: joined, errors } as JsonObject,
+      envelope as unknown as JsonObject,
       {
         message: messageContext,
-        description: descriptionContext,
+        description: `${descriptionContext}${blame}\n\n${BATCH_RECOVERY_PROTOCOL}`,
         itemIndex, // Applied to pass node-operation-error-itemindex rule
       },
     );

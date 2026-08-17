@@ -518,6 +518,31 @@ describe("Test Adeu n8n Node", () => {
       expect(edits[0]).toHaveProperty("status", "applied");
       expect(edits[0]).toHaveProperty("match_mode", "all");
     });
+
+    it("should name the failing change index and the recovery protocol", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              { type: "modify", target_text: "document", new_text: "instrument" },
+              { type: "modify", target_text: "NOT_IN_DOC_ZZZ", new_text: "x" },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+
+      const err = await node.execute
+        .call(mockExecuteFunctions)
+        .catch((e: Error & { description?: string }) => e);
+
+      expect(err.name).toBe("NodeApiError");
+      expect(err.message).toContain("target text not found");
+      expect(err.description).toContain("[1]");
+      expect(err.description).toContain("Recover in two calls");
+    });
   });
 
   describe("continueOnFail logic", () => {
