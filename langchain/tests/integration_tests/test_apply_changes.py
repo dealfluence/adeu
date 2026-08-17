@@ -254,3 +254,24 @@ class TestAdeuApplyChangesBehavior:
 
         # Content should announce the committed write explicitly.
         assert "Batch complete" in msg.content
+
+    def test_stale_id_error_points_at_the_langchain_read_tool(self, working_docx: Path, output_path: Path) -> None:
+        tool = AdeuApplyChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_apply_changes",
+                "args": {
+                    "reasoning": "test",
+                    "file_path": str(working_docx),
+                    "author_name": "AI Reviewer",
+                    "changes": [{"type": "reply", "target_id": "Com:9999", "text": "hello"}],
+                    "output_path": str(output_path),
+                },
+                "id": "test-stale-id",
+                "type": "tool_call",
+            }
+        )
+        assert msg.artifact["success"] is False
+        blob = msg.content + repr(msg.artifact.get("validation_errors"))
+        assert "adeu_read_docx" in blob, "engine error still advertises the CLI; id_discovery_hint was not passed"
+        assert "adeu extract" not in blob

@@ -34,12 +34,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from adeu.models import BatchChanges
-from adeu.redline.engine import BatchValidationError, RedlineEngine
+from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import LANGCHAIN_ID_DISCOVERY_HINT, validate_docx_path, wrap_tool_errors
 
 
 class AdeuApplyChangesInput(BaseModel):
@@ -153,10 +153,16 @@ class AdeuApplyChanges(BaseTool):
         changes: list[dict[str, Any]],
         output_path: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-
         if not author_name.strip():
             raise ToolException(
                 "author_name cannot be empty or whitespace-only. Provide a non-blank identifier such as 'AI Reviewer'."
+            )
+
+        author_ctrl = describe_illegal_control_chars(author_name)
+        if author_ctrl:
+            raise ToolException(
+                f"author_name contains control character(s) ({author_ctrl}) that cannot be "
+                "stored in a DOCX. Remove them and retry."
             )
 
         if not changes:
@@ -183,7 +189,7 @@ class AdeuApplyChanges(BaseTool):
         sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
         stream = BytesIO(sanitized_bytes)
 
-        engine = RedlineEngine(stream, author=author_name)
+        engine = RedlineEngine(stream, author=author_name, id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT)
 
         try:
             stats = engine.process_batch(validated_changes)

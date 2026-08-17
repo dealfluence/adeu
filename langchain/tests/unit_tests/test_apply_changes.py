@@ -119,6 +119,20 @@ class TestAdeuApplyChangesValidation:
                 }
             )
 
+    def test_rejects_author_with_control_characters(self, tmp_path: Path) -> None:
+        src = tmp_path / "doc.docx"
+        src.write_bytes(b"PK")
+        tool = AdeuApplyChanges()
+        with pytest.raises(ToolException, match="control character"):
+            tool.invoke(
+                {
+                    "reasoning": "test",
+                    "file_path": str(src),
+                    "author_name": "AI\x07Reviewer",
+                    "changes": [{"type": "modify", "target_text": "x", "new_text": "y"}],
+                }
+            )
+
     def test_rejects_empty_changes_list(self, tmp_path: Path) -> None:
         src = tmp_path / "doc.docx"
         src.write_bytes(b"PK")
@@ -182,7 +196,6 @@ class TestAdeuApplyChangesValidation:
 
 class TestAdeuApplyChangesOutputPathLogic:
     def test_default_output_for_plain_stem(self, tmp_path: Path) -> None:
-
         src = tmp_path / "draft.docx"
         src.write_bytes(b"PK")
         target = _resolve_output_path(src, None)
@@ -198,7 +211,6 @@ class TestAdeuApplyChangesOutputPathLogic:
         assert target == src
 
     def test_default_output_for_redlined_stem_overwrites(self, tmp_path: Path) -> None:
-
         src = tmp_path / "contract_redlined.docx"
         src.write_bytes(b"PK")
         target = _resolve_output_path(src, None)
