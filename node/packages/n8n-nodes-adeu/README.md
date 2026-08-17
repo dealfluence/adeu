@@ -6,9 +6,11 @@
 An [n8n](https://n8n.io) community node for **[Adeu](https://adeu.ai)** — the AI-native Virtual DOM for Microsoft Word.
 
 > **🆕 New in this release:**
-> - **`Extract Outline`** — a new operation returning a token-cheap structural map (headings + page numbers + table flags) for navigating large documents.
+> - **`Extract Outline`** — a new operation returning a token-cheap structural map (headings + page numbers + table flags) for navigating large documents. Each heading also carries `end_page`, the last page it owns, so you can read a whole section with one `page`–`end_page` range instead of guessing.
+> - **`Apply Text Revision`** — a new operation that takes the **complete** revised clean text of a document and writes the difference against its own clean view as native Word tracked changes, for when an LLM rewrote the document wholesale and no per-change anchors are left.
 > - **`Page` parameter on `Extract Markdown`** — fetch only one page of a paginated projection instead of the whole document.
 > - **`match_mode` and `regex` on `modify` edits** — `Apply Edits` now supports targeted multi-occurrence writes. Set `match_mode: "all"` to replace every occurrence, `"first"` to anchor to the first hit silently, or omit/`"strict"` to fail on ambiguity. Set `regex: true` to interpret `target_text` as an ES2022 RegExp (with `$1`, `$2` capture-group references in `new_text`).
+> - **`Allow Partial Application` on `Apply Edits`** — opt-in salvage batches: valid edits are applied and saved, the item's `status` reads `"partial"`, and rejected edits come back in `stats.failed` for an agent to fix and resubmit.
 >
 > **Existing workflows must hand-update their `$fromAI` expressions** to expose the new fields — n8n caches `$fromAI` expressions per workflow and does not retroactively update them on package upgrades.
 
@@ -153,7 +155,7 @@ Use it for AI Agent loops that will read `stats.failed`, fix the rejected edits,
 ### 4. Apply Text Revision 🆕
 Applies a whole revised document text as tracked changes.
 - **Input**: `.docx` binary + `Revised Text` — the **complete** clean text of the document.
-- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats, redlinedBinaryId? }` (under AI Agent tool execution, `redlinedBinaryId` is returned for cumulative multi-turn editing).
+- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats, reasoning?, redlinedBinaryId? }`. Both trailing keys are conditional: `reasoning` is echoed back verbatim whenever the **Reasoning** field is non-empty (the `$fromAI` recipe below binds it, so agent calls normally receive it) and is omitted when it is blank; `redlinedBinaryId` is present only under AI Agent tool execution, for cumulative multi-turn editing.
 - **How to produce `Revised Text`**: Call **Extract Markdown** with `Clean View` on and `Page` `0`, edit that text, and send all of it back. The engine diffs it against the document's own clean view and writes the difference as native Word tracked changes.
 - **Refusals (nothing is applied)**:
   - CriticMarkup tags (`{++ ++}`, `{-- --}`, `{>> <<}`) in the text — the tool compares against the clean view, so markup would land as literal prose.
