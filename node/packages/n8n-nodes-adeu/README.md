@@ -57,6 +57,7 @@ Restart your n8n instance after installation.
 - **Pagination**: Drill into a single page of a large document instead of blasting the full body into LLM context.
 - **Native Redlining**: Apply `modify`, `accept`, `reject`, and `reply` actions directly to the OOXML tree.
 - **Whole-Text Revision**: Hand back the complete revised clean text and let the engine diff it against the document and write the tracked changes, behind a post-apply verification gate.
+- **Structured Diffs**: emit a diff as a ready-to-apply `DocumentChange` array, not just text.
 - **Salvage Batches**: Optionally keep the changes that validate and get every failure reported with its 0-based index, instead of an all-or-nothing rejection.
 - **Targeted Multi-Occurrence Writes**: `match_mode` (`strict`/`first`/`all`) and `regex` support for surgical or sweeping replacements.
 - **Document Sanitization**: Strip metadata, auto-accept markup, and apply read-only locks before sending to counterparties.
@@ -74,6 +75,7 @@ Projects a `.docx` file into LLM-friendly Markdown.
 - **Clean View toggle**:
   - `False` (Raw View): Shows all pending tracked changes via CriticMarkup. Best for resolving counterparty edits.
   - `True` (Clean View): Simulates an "Accept All" state, hiding markup. Best for generating net-new redlines on a clean baseline.
+- **Include Appendix** (boolean, default `true`): whether to append the Structural Appendix (defined terms, cross-reference anchors, potential typos). Turn it off to save context when you only need body text.
 - **🆕 Page parameter**: Optional 1-based page number. When `0` (default), the full document is returned. When `>= 1`, only that page's content is returned and the JSON includes `{ page, total_pages, has_next, has_prev, tracked_change_count }`. Pages are ~19,000-character chunks of the projected body; the Structural Appendix is appended to every page. Use **Extract Outline** first to discover how many pages exist.
 
 ### 2. Extract Outline 🆕
@@ -155,7 +157,9 @@ Use it for AI Agent loops that will read `stats.failed`, fix the rejected edits,
 ### 4. Apply Text Revision 🆕
 Applies a whole revised document text as tracked changes.
 - **Input**: `.docx` binary + `Revised Text` — the **complete** clean text of the document.
-- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats, reasoning?, redlinedBinaryId? }`. Both trailing keys are conditional: `reasoning` is echoed back verbatim whenever the **Reasoning** field is non-empty (the `$fromAI` recipe below binds it, so agent calls normally receive it) and is omitted when it is blank; `redlinedBinaryId` is present only under AI Agent tool execution, for cumulative multi-turn editing.
+- **Author** (default `Adeu AI`): author name attached to every tracked change produced by this revision.
+- **Output Binary Property** (default `data`): property name on the outgoing item to receive the redlined `.docx` file.
+- **Output**: A new redlined `.docx` binary on `Output Binary Property` + JSON `{ fileName, author, stats, reasoning?, redlinedBinaryId? }`. Both trailing keys are conditional: `reasoning` is echoed back verbatim whenever the **Reasoning** field is non-empty (the `$fromAI` recipe below binds it, so agent calls normally receive it) and is omitted when it is blank; `redlinedBinaryId` is present only under AI Agent tool execution, for cumulative multi-turn editing.
 - **How to produce `Revised Text`**: Call **Extract Markdown** with `Clean View` on and `Page` `0`, edit that text, and send all of it back. The engine diffs it against the document's own clean view and writes the difference as native Word tracked changes.
 - **Refusals (nothing is applied)**:
   - CriticMarkup tags (`{++ ++}`, `{-- --}`, `{>> <<}`) in the text — the tool compares against the clean view, so markup would land as literal prose.
@@ -165,22 +169,40 @@ Applies a whole revised document text as tracked changes.
 - **Apply Edits vs Apply Text Revision**: use Apply Edits when you have targeted changes with anchors; use Apply Text Revision when an LLM rewrote the document wholesale and you no longer have per-change anchors.
 
 ### 5. Generate Diff
-Produces a sub-word level `@@ Word Patch @@` diff between two versions of a document.
-- **Input**: Two `.docx` binaries on the same item (e.g., `data` and `data2`).
-- **Output**: JSON `{ diff, originalFileName, modifiedFileName }`.
+Produces a sub-word level `@@ Word Patch @@` diff, a unified diff, or structured changes between two versions of a document.
+- **Input**: two `.docx` binaries. Each side has its own source: `Original Document Source` / `Original Source Node Name` / `Original Binary Property` (default `data`) and `Modified Document Source` / `Modified Source Node Name` / `Modified Binary Property` (default `data2`). In `From Connected Input` mode the two binary property names must differ.
+- **Clean View** (boolean, default `true`, unlike Extract Markdown's `false`): compare the Accept-All view of both documents. Set `false` to diff the CriticMarkup projection and audit the tracked changes themselves.
+- **Diff Format** (default `Word Patch`):
+  - `Word Patch` (`wordPatch`) — Adeu `@@ Word Patch @@` sub-word text diff. Output JSON `{ originalFileName, modifiedFileName, cleanView, diffFormat, diff, warnings? }`.
+  - `Unified Diff` (`unified`) — Git-style unified text diff, same output shape.
+  - `Structured Changes (JSON)` (`structuredChanges`) — a JSON array of `DocumentChange` objects that transform original into modified, returned on `changes` (**not** `diff`) so it can be piped straight into **Apply Edits**. Output JSON `{ originalFileName, modifiedFileName, cleanView, diffFormat, changes, warnings? }`.
+- **Identical documents**: both text formats return an explicit `No textual differences found between the documents.` body rather than an empty string.
+- **Media warning**: a text diff cannot see image bytes, so when embedded media differ the `warnings` array is populated and the warning text is prefixed onto `diff`.
 
 ### 6. Finalize
 Prepares a document for signature or external distribution.
+- **Input**: `.docx` binary.
+- **Output**: A new finalized `.docx` binary on `Output Binary Property` (default `data`) + JSON `{ fileName, sanitizeMode, report, reasoning? }`.
+- **Reasoning**: Optional audit-only text explaining why the document is being finalized now. Never forwarded to the engine.
 - **Modes**:
-  - `Full`: Strips all metadata and requires all tracked changes/comments to be resolved (or auto-accepted).
-  - `Keep Markup`: Strips metadata but preserves visible tracked changes. Allows you to override the `Author` name (e.g., change "Adeu AI" to "My Law Firm").
+  - `Full`: Strips all metadata and requires all tracked changes/comments to be resolved (or auto-accepted via `Accept All Tracked Changes`). If `acceptAll` is `false` and pending changes exist, the operation **throws** rather than producing a file.
+  - `Keep Markup`: Strips metadata but preserves visible tracked changes and comments. Allows you to override the `Author` name via `Author Override` (e.g., change "Adeu AI" to "My Law Firm").
   - `Baseline`: Only strips background noise (RSIDs, proof errors) without touching metadata.
-- **Protection**: Can inject a native Word "Read-Only" lock into the document settings.
+- **Accept All Tracked Changes**: (boolean, default `false`) only shows and applies under `Sanitize Mode: full`.
+- **Author Override**: (string, optional) only shows and applies under `Sanitize Mode: keep-markup`.
+- **Protection**: Can inject a native Word "Read-Only" lock into the document settings (`none` or `read_only`).
 
 ### 7. Hydrate Tool Output (The "Hydration" Note)
 Because n8n's AI Agent tool wrapper intercepts and **strips all binary data** from tool outputs, files generated inside an AI loop cannot reach downstream nodes directly.
 - **What it does**: This operation is placed immediately downstream of the AI Agent on the main workflow execution line. It reads the stashed metadata pointer (`adeu_last_redlined`) left by the last execution of a redline operation (`Apply Edits` or `Apply Text Revision`), retrieves the raw file stream directly from n8n's secure binary storage, and attaches a fresh binary buffer onto the outgoing item.
-- **Output Path Construction**: It supports an optional output path template (e.g., `C:\path\to\folder\{baseName}_{timestamp}.docx`) to resolve path strings inside TypeScript. This avoids expression-parsing and escape issues when configuring downstream Write File nodes on Windows.
+- **Parameters**:
+  - **Static Data Key** (default `adeu_last_redlined`): key in workflow global static data to read the stashed binary metadata pointer from.
+  - **Output Binary Property** (default `data`): property name on the outgoing item to receive the hydrated binary.
+  - **On Missing** (`Emit Empty` | `Throw`, default `Emit Empty`): `Emit Empty` emits `{ hydrated: false }` with no binary so a downstream **If** node can gate the write; `Throw` raises a `NodeOperationError` (for deterministic pipelines where the stash must be present).
+  - **Clear After Read** (boolean, default `true`): deletes the stash entry after successful hydration so it cannot leak into the next run.
+  - **Output Path Template** (optional string): template to compute the final write path on disk, returned on the output JSON as `outputPath`. Supports placeholders: `{baseName}` (filename with extension stripped), `{timestamp}` (ISO 8601 with `:` and `.` replaced by `-`), `{fileName}` (full filename), and `{ext}` (e.g. `.docx`).
+- **Output**: JSON `{ hydrated: true, fileName, sourceBinaryId, mimeType, outputPath? }` (or `{ hydrated: false }` when missing under `Emit Empty`) + hydrated binary on `Output Binary Property`.
+- **Note**: This operation is never used as an AI Agent tool, so it has no `$fromAI` recipes — configure it in the node editor.
 
 ---
 
@@ -467,6 +489,6 @@ Because Adeu enforces **Atomic Batch Validation** by default, any error in the L
 * **"Modification targets an active insertion..."**: The LLM tried to `modify` text that another author is currently tracking. Adeu explicitly blocks this to maintain virtual DOM integrity and clean redline threading. You must `accept` or `reject` that prior change first. (Editing plain text that merely sits under another author's *comment* is allowed — the comment anchor survives the tracked change.)
 * **"...would sweep through a comment range from another author..."**: A `match_mode: "all"` bulk replacement crossed a colleague's comment range. Blind fan-outs are blocked to protect foreign annotations; target the commented text deliberately with `match_mode: "strict"` or `"first"`, or scope the edit outside the comment.
 * **"Read-only elements"**: The LLM tried to modify structural items like cross-references or footnotes.
-* **"Page N exceeds total_pages"**: The LLM requested a page beyond what the document has. Have it call `Extract Outline` first to discover the page count.
+* **"Requested page N exceeds total_pages (M). Call extractOutline to discover the page count first."**: The LLM requested a page beyond what the document has. Have it call `Extract Outline` first to discover the page count.
 
 **Tip**: If you are running bulk processing workflows, you can enable n8n's **"Continue On Fail"** setting on the `Apply Edits` node. If the LLM generates a flawed batch, n8n will catch the error, output an `{ "error": "..." }` JSON object for that specific document, and continue processing the rest of the files in your queue. If you would rather keep the good edits from a flawed batch than lose the document entirely, enable **Allow Partial Application** instead (see *Salvage Mode* above) — you then get a redlined file plus `stats.failed` rather than an error object.
