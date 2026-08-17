@@ -101,6 +101,7 @@ class TestGetToolsConvenienceFunction:
 
 
 def test_readme_documents_every_tool_parameter() -> None:
+    import re
     from pathlib import Path
 
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
@@ -110,6 +111,6 @@ def test_readme_documents_every_tool_parameter() -> None:
         for field_name in schema["properties"]:
             if field_name == "reasoning":
                 continue
-            assert field_name in readme, (
+            assert re.search(rf"\b{re.escape(field_name)}\b", readme), (
                 f"README does not document {tool.name}.{field_name} — add it to the per-tool table"
             )
