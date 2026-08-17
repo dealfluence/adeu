@@ -54,6 +54,8 @@ Restart your n8n instance after installation.
 - **Structural Outline**: Lightweight headings-and-pages map of any document, with table/footnote flags per section.
 - **Pagination**: Drill into a single page of a large document instead of blasting the full body into LLM context.
 - **Native Redlining**: Apply `modify`, `accept`, `reject`, and `reply` actions directly to the OOXML tree.
+- **Whole-Text Revision**: Hand back the complete revised clean text and let the engine diff it against the document and write the tracked changes, behind a post-apply verification gate.
+- **Salvage Batches**: Optionally keep the changes that validate and get every failure reported with its 0-based index, instead of an all-or-nothing rejection.
 - **Targeted Multi-Occurrence Writes**: `match_mode` (`strict`/`first`/`all`) and `regex` support for surgical or sweeping replacements.
 - **Document Sanitization**: Strip metadata, auto-accept markup, and apply read-only locks before sending to counterparties.
 
@@ -61,7 +63,7 @@ Restart your n8n instance after installation.
 
 ## ⚙️ Operations
 
-The node exposes one resource (**Document**) with six operations:
+The node exposes one resource (**Document**) with seven operations:
 
 ### 1. Extract Markdown
 Projects a `.docx` file into LLM-friendly Markdown.
@@ -81,6 +83,7 @@ Returns a token-cheap structural map of the document — essentially a table of 
     "level": 2,
     "text": "Confidentiality",
     "page": 1,
+    "end_page": 3,
     "style": "Heading 2",
     "has_table": false,
     "footnote_ids": ["fn-1", "fn-3"]
@@ -89,6 +92,7 @@ Returns a token-cheap structural map of the document — essentially a table of 
   - `level` (1–6): Heading depth.
   - `text`: Heading text with markdown/CriticMarkup stripped.
   - `page`: Which Extract Markdown page this heading lands on.
+  - `end_page`: Last Extract Markdown page this heading owns — the page before the next heading of the same or shallower level (equal to `page` for single-page sections). Use `page`–`end_page` to read a whole section without guessing.
   - `style`: Word style name (e.g. `Heading 1`, `Title`) or `(heuristic)` for headings detected purely by typography.
   - `has_table`: Whether the section directly contains a Word table (does not bubble up to ancestor headings).
   - `footnote_ids`: Footnote/endnote markers scoped to this section, in document order, e.g. `fn-1`, `en-2`.
@@ -131,6 +135,11 @@ The `modify` edit type now supports two optional fields:
 #### 🔍 Transactional Batches (Self-Correction for AI Agents)
 By default (`Allow Partial Application` off), `Apply Edits` is all-or-nothing: if any single edit fails validation (target text not found, ambiguous match, read-only target, overlapping another author's change), the engine throws a `BatchValidationError` atomically and the document is left untouched. The error message names the failing edit and explains why it failed, so an agent can correct just that edit and re-call — no separate preview round trip is needed.
 
+- **Salvage mode (`Allow Partial Application`)**: Off by default. When on, the valid changes are applied and saved, the output JSON `status` reads `partial`, and `stats.failed` lists every failure as `{ index, reason }` where `index` is the 0-based position in the array you submitted. Use it for AI Agent loops that will fix and resubmit the rejected changes; keep it off wherever a half-applied redline could be shipped as final.
+- **Failure blame**: When a batch is rejected, the thrown error's description names each failing change by its 0-based index and repeats the two-call recovery protocol (re-apply the batch without the failing changes, then fix those separately in a small batch).
+- **Author impersonation warning**: `stats.author_impersonation_warning` is set when the `Author` you configured matches an author who already has pending revisions in the document — a redline that would be indistinguishable from theirs in Word's review pane.
+- **Stale ids**: If an `accept`/`reject`/`reply` names an id that no longer exists, the error lists the ids the document actually has and tells you to re-run **Extract Markdown**, because ids shift between document states.
+
 #### 🩹 Salvage Mode (`Allow Partial Application`) 🆕
 Turning the node's **Allow Partial Application** boolean on deliberately suspends that transactional guarantee for the call:
 
@@ -142,12 +151,24 @@ Turning the node's **Allow Partial Application** boolean on deliberately suspend
 
 Use it for AI Agent loops that will read `stats.failed`, fix the rejected edits, and resubmit them against the returned draft (pass `redlinedBinaryId` back in as `Source Binary ID`). Do **not** use it where a half-applied redline could be shipped as final — leave the default off and let the batch fail loudly instead.
 
-### 4. Generate Diff
+### 4. Apply Text Revision 🆕
+Applies a whole revised document text as tracked changes.
+- **Input**: `.docx` binary + `Revised Text` — the **complete** clean text of the document.
+- **Output**: A new redlined `.docx` binary + JSON `{ fileName, author, stats }`.
+- **How to produce `Revised Text`**: Call **Extract Markdown** with `Clean View` on and `Page` `0`, edit that text, and send all of it back. The engine diffs it against the document's own clean view and writes the difference as native Word tracked changes.
+- **Refusals (nothing is applied)**:
+  - CriticMarkup tags (`{++ ++}`, `{-- --}`, `{>> <<}`) in the text — the tool compares against the clean view, so markup would land as literal prose.
+  - A single page of a paginated extract — everything absent from the text would be applied as a tracked deletion.
+  - A revision deleting more than 50% of the characters (75% under 2,000 characters), unless `Allow Major Deletions` is on.
+- **Verification gate**: after applying, the engine re-reads the document's clean text and compares it with what you sent. If they differ, the operation fails and **no** binary is returned — structure such as headings, table rows, and footnotes cannot be removed by text replacement.
+- **Apply Edits vs Apply Text Revision**: use Apply Edits when you have targeted changes with anchors; use Apply Text Revision when an LLM rewrote the document wholesale and you no longer have per-change anchors.
+
+### 5. Generate Diff
 Produces a sub-word level `@@ Word Patch @@` diff between two versions of a document.
 - **Input**: Two `.docx` binaries on the same item (e.g., `data` and `data2`).
 - **Output**: JSON `{ diff, originalFileName, modifiedFileName }`.
 
-### 5. Finalize Document
+### 6. Finalize Document
 Prepares a document for signature or external distribution.
 - **Modes**:
   - `Full`: Strips all metadata and requires all tracked changes/comments to be resolved (or auto-accepted).
@@ -155,7 +176,7 @@ Prepares a document for signature or external distribution.
   - `Baseline`: Only strips background noise (RSIDs, proof errors) without touching metadata.
 - **Protection**: Can inject a native Word "Read-Only" lock into the document settings.
 
-### 6. Hydrate Tool Output (The "Hydration" Note)
+### 7. Hydrate Tool Output (The "Hydration" Note)
 Because n8n's AI Agent tool wrapper intercepts and **strips all binary data** from tool outputs, files generated inside an AI loop cannot reach downstream nodes directly.
 - **What it does**: This operation is placed immediately downstream of the AI Agent on the main workflow execution line. It reads the stashed metadata pointer left by the last execution of `apply_edits`, retrieves the raw file stream directly from n8n's secure binary storage, and attaches a fresh binary buffer onto the outgoing item.
 - **Output Path Construction**: It supports an optional output path template (e.g., `C:\path\to\folder\{baseName}_{timestamp}.docx`) to resolve path strings inside TypeScript. This avoids expression-parsing and escape issues when configuring downstream Write File nodes on Windows.
@@ -269,9 +290,10 @@ Some fields are **plumbing** — they configure which input/output port the node
 
 - **`Document Source`** (`fromInput` vs `fromNode`) — workflow topology decision.
 - **`Input Binary Property`** — wiring decision; downstream of the source node, not per-call.
-- **`Output Binary Property`** (Apply Edits, Finalize Document) — names where the outgoing binary lands on the workflow item. Downstream nodes need this fixed; an LLM picking `output_data` one call and `result` the next would break the pipeline. Default `'data'` is almost always correct.
+- **`Output Binary Property`** (Apply Edits, Apply Text Revision, Finalize Document) — names where the outgoing binary lands on the workflow item. Downstream nodes need this fixed; an LLM picking `output_data` one call and `result` the next would break the pipeline. Default `'data'` is almost always correct.
 - **`Edits Source`** (Apply Edits) — controls whether the node reads the changes array from the `Changes (JSON)` field on the node itself (`defineBelow`) or from a property on the upstream item (`fromInputJson`). For AI Agent workflows, **set this to `Define Below` in the editor**. This is what activates the `Changes (JSON)` field as the LLM's entry point — the recipe in the Apply Edits section below populates that field via `$fromAI`, and the LLM hands its generated `Changes_JSON` string directly to the tool as a call argument. The `fromInputJson` branch is only for deterministic pipelines where an upstream non-AI node has pre-populated a `changes` property on the item.
 - **`Allow Partial Application`** (Apply Edits) — decides whether a flawed batch is rejected wholesale or half-applied. That is your risk policy for the workflow, not a per-call choice; an LLM that can switch it on will switch it on to make its own errors disappear. Leave it `false` unless the workflow is an agent loop that resubmits the failures.
+- **`Allow Major Deletions`** (Apply Text Revision) — decides whether a revision deleting >50% of the document is allowed. That is your risk policy for the workflow, not a per-call choice. Leave it `false` unless whole-document truncation is intended.
 
 AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that's why `fromNode` exists: it resolves the binary from a named upstream node (e.g. `Read Binary File`, `Gmail Trigger`) at execution time. The trigger source is `$fromAI`-bindable below because a system prompt can legitimately offer the LLM a choice between multiple binary-producing nodes.
 
@@ -345,6 +367,30 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 **Return Markdown Output:**
 ```
 ={{ $fromAI('Return_Markdown', `Boolean. When true (default), the tool returns the post-edit document as Markdown with CriticMarkup so you can verify what changed and reason about follow-up edits. Set false only to skip extraction when you are confident no follow-up review is needed.`, 'boolean', true) }}
+```
+
+---
+
+### Apply Text Revision 🆕
+
+**Reasoning** (fill this FIRST):
+```
+={{ $fromAI('Reasoning', `State your reasoning for this revision BEFORE providing the revised text: what you intend to change, why the changes are being made, and which sections or clauses are affected. Always write this field first. This text is captured for audit only and does not alter engine behavior. One to three sentences is enough.`, 'string', '') }}
+```
+
+**Source Node Name** (when `Document Source` is `From Another Node`):
+```
+={{ $fromAI('Source_Node_Name', `Exact name of the workflow node that produced the .docx binary (string, case-sensitive). Must match the node label in the canvas exactly. If your system prompt specifies which node holds the document, always use that name.`, 'string', 'Read Binary File') }}
+```
+
+**Source Binary ID** (when `Document Source` is `From Another Node`):
+```
+={{ $fromAI('Source_Binary_Id', `Optional string. If you are doing consecutive revisions on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}
+```
+
+**Revised Text:**
+```
+={{ $fromAI('Revised_Text', `The COMPLETE revised clean text of the document. Read it first with Extract Markdown using Clean View on and Page 0 (whole document), edit that text, then send all of it back — the engine diffs this against the document's clean view and turns the difference into tracked changes. Never include CriticMarkup tags like {++ or {-- in the text — they are rejected. Never send a single page of a paginated extract — everything missing from this text is applied as a tracked deletion. A revision deleting more than 50% of the characters (75% under 2,000 characters) is refused unless Allow Major Deletions is on. After applying, the engine verifies that the document's clean text matches this value; if they differ, the operation fails.`, 'string') }}
 ```
 
 ---
