@@ -104,6 +104,7 @@ export async function executeExtractOutline(
           level: node.level,
           text: node.text,
           page: node.page,
+          end_page: node.end_page,
           style: node.style,
           has_table: node.has_table,
           footnote_ids: node.footnote_ids,

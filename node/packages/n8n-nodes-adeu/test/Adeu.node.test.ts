@@ -57,9 +57,46 @@ vi.mock("n8n-workflow", () => {
 // Node import MUST come after vi.mock() in source order. Vitest hoists
 // vi.mock() calls to the top of the file, so this ordering is safe.
 import { Adeu } from "../nodes/Adeu/Adeu.node";
-import { extractTextFromBuffer } from "@adeu/core";
+import { DocumentObject, extractTextFromBuffer } from "@adeu/core";
 
 const GOLDEN_FIXTURE = resolve(process.env.ADEU_FIXTURES!, "golden.docx");
+const INITIAL_FIXTURE = resolve(process.env.ADEU_FIXTURES!, "initial.docx");
+
+/**
+ * A .docx whose body is two Heading 1 sections with one body paragraph each.
+ * Built from initial.docx (which has no headings, tracked changes, or
+ * comments) so outline assertions do not depend on fixture content.
+ */
+async function buildHeadingsDocx(): Promise<Buffer> {
+  const doc = await DocumentObject.load(readFileSync(INITIAL_FIXTURE));
+  const body = doc.element;
+  while (body.firstChild) body.removeChild(body.firstChild);
+  const xml = body.ownerDocument!;
+
+  const para = (text: string, style: string | null) => {
+    const p = xml.createElement("w:p");
+    if (style) {
+      const pPr = xml.createElement("w:pPr");
+      const st = xml.createElement("w:pStyle");
+      st.setAttribute("w:val", style);
+      pPr.appendChild(st);
+      p.appendChild(pPr);
+    }
+    const r = xml.createElement("w:r");
+    const t = xml.createElement("w:t");
+    t.textContent = text;
+    t.setAttribute("xml:space", "preserve");
+    r.appendChild(t);
+    p.appendChild(r);
+    return p;
+  };
+
+  body.appendChild(para("Article 1 Definitions", "Heading1"));
+  body.appendChild(para("The term 'Agreement' means this document.", null));
+  body.appendChild(para("Article 2 Term", "Heading1"));
+  body.appendChild(para("This Agreement runs for twelve months.", null));
+  return Buffer.from(await doc.save());
+}
 
 function createMockExecuteFunctions(): IExecuteFunctions {
   return {
@@ -240,6 +277,31 @@ describe("Test Adeu n8n Node", () => {
         expect(typeof node.page).toBe("number");
         expect(typeof node.has_table).toBe("boolean");
         expect(Array.isArray(node.footnote_ids)).toBe(true);
+      }
+    });
+
+    it("should return end_page on every outline node", async () => {
+      const headingsBuffer = await buildHeadingsDocx();
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<
+          typeof vi.fn
+        >
+      ).mockResolvedValue(headingsBuffer);
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const outline = result[0][0].json.outline as Array<
+        Record<string, unknown>
+      >;
+
+      expect(outline.map((n) => n.text)).toEqual([
+        "Article 1 Definitions",
+        "Article 2 Term",
+      ]);
+      for (const entry of outline) {
+        expect(typeof entry.end_page).toBe("number");
+        expect(entry.end_page as number).toBeGreaterThanOrEqual(
+          entry.page as number,
+        );
       }
     });
   });

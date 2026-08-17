@@ -39,7 +39,7 @@ export const documentDescription: INodeProperties[] = [
         value: "extractOutline",
         action: "Extract a structural outline of the document",
         description:
-          "Return a token-cheap structural map of the .docx: a JSON array of headings with their level (1-6), text, page number, paragraph style, whether the section directly contains a table, and any footnote/endnote IDs scoped to that section. Also returns total_pages. Use this as a navigation primitive for large documents — call it first to discover structure, then call Extract Markdown with a specific Page to drill into the relevant section.",
+          "Return a token-cheap structural map of the .docx: a JSON array of headings with their level (1-6), text, page number (`page`), last page of the range the heading owns (`end_page`), paragraph style, whether the section directly contains a table, and any footnote/endnote IDs scoped to that section. Also returns total_pages. Use this as a navigation primitive for large documents — call it first to discover structure, then call Extract Markdown with a specific Page to drill into the relevant section.",
       },
       {
         name: "Finalize",
