@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import BaseTool
 from langchain_tests.integration_tests import ToolsIntegrationTests
 
 from langchain_adeu import AdeuSanitizeDocx
@@ -62,23 +62,30 @@ class TestAdeuSanitizeDocxBehavior:
         assert msg.artifact["status"] in {"clean", "clean_with_warnings"}
         assert msg.artifact["output_path"] == str(output_path)
 
-    def test_full_sanitize_without_accept_all_blocks_with_tool_exception(
+    def test_full_sanitize_without_accept_all_returns_blocked_payload(
         self, working_docx: Path, output_path: Path
     ) -> None:
-        # golden.docx has unresolved tracked changes. Without
-        # accept_all=True, SanitizeError fires → ToolException.
+        # golden.docx has unresolved tracked changes. A refusal is a normal
+        # payload with status="blocked" (sanitize.py:125-137), not a tool
+        # failure — the agent must be able to read the reason and retry with
+        # accept_all=True or keep_markup=True.
         tool = AdeuSanitizeDocx()
-        with pytest.raises(ToolException, match="SanitizeError"):
-            tool.invoke(
-                {
+        msg = tool.invoke(
+            {
+                "name": "adeu_sanitize_docx",
+                "args": {
                     "reasoning": "test",
                     "file_path": str(working_docx),
                     "output_path": str(output_path),
-                }
-            )
-        assert not output_path.exists(), (
-            "Output file was written despite SanitizeError — sanitize engine failed but artifact still leaked."
+                },
+                "id": "test-sanitize-blocked",
+                "type": "tool_call",
+            }
         )
+        assert msg.artifact["status"] == "blocked"
+        assert msg.artifact["output_path"] is None
+        assert "unresolved tracked changes" in msg.content
+        assert not output_path.exists()
 
     def test_keep_markup_mode_writes_redline(self, working_docx: Path, output_path: Path) -> None:
         # keep_markup=True doesn't require accept_all because tracked

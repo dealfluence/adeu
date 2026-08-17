@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from adeu.sanitize import sanitize_docx as _sanitize_docx
+from adeu.sanitize.core import SanitizeError
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -110,7 +111,7 @@ _DESCRIPTION = (
     "Three modes via parameter combination:\n"
     "- Full sanitize (default): strip everything. Use accept_all=True if "
     "the document has unresolved tracked changes — otherwise the tool will "
-    "block and tell you what's pending.\n"
+    "return status='blocked' with the reason instead of writing a file.\n"
     "- keep_markup=True: preserve open tracked changes and unresolved "
     "comments; strip resolved comments and all metadata. Use when sending a "
     "redline to counterparty. Pair with author='...' to normalize identity.\n"
@@ -141,7 +142,6 @@ class AdeuSanitizeDocx(BaseTool):
         accept_all: bool = False,
         allow_low_similarity_baseline: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-
         source = validate_docx_path(file_path, label="DOCX file")
         target = _resolve_output_path(source, output_path)
 
@@ -150,15 +150,29 @@ class AdeuSanitizeDocx(BaseTool):
             baseline_resolved = validate_docx_path(baseline_path, label="baseline document")
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = _sanitize_docx(
-            input_path=str(source),
-            output_path=str(target),
-            keep_markup=keep_markup,
-            baseline_path=str(baseline_resolved) if baseline_resolved else None,
-            author=author,
-            accept_all=accept_all,
-            allow_low_similarity_baseline=allow_low_similarity_baseline,
-        )
+        try:
+            result = _sanitize_docx(
+                input_path=str(source),
+                output_path=str(target),
+                keep_markup=keep_markup,
+                baseline_path=str(baseline_resolved) if baseline_resolved else None,
+                author=author,
+                accept_all=accept_all,
+                allow_low_similarity_baseline=allow_low_similarity_baseline,
+            )
+        except SanitizeError as e:
+            # A refused-but-understood operation travels on the same channel as a
+            # successful one: the agent reads the reason and retries with
+            # accept_all=True / keep_markup=True (sanitize.py:125-137).
+            blocked: dict[str, Any] = {
+                "input_path": str(source),
+                "output_path": None,
+                "status": "blocked",
+                "report_text": str(e),
+            }
+            if baseline_resolved is not None:
+                blocked["baseline_path"] = str(baseline_resolved)
+            return str(e), blocked
 
         artifact: dict[str, Any] = {
             "input_path": str(source),
