@@ -13,6 +13,8 @@ An [n8n](https://n8n.io) community node for **[Adeu](https://adeu.ai)** — the 
 > - **`Allow Partial Application` on `Apply Edits`** — opt-in salvage batches: valid edits are applied and saved, the item's `status` reads `"partial"`, and rejected edits come back in `stats.failed` for an agent to fix and resubmit.
 >
 > **Existing workflows must hand-update their `$fromAI` expressions** to expose the new fields — n8n caches `$fromAI` expressions per workflow and does not retroactively update them on package upgrades.
+>
+> The shipped example workflows in `examples/` are kept in sync with these recipes — re-import them after upgrading rather than hand-patching an old copy.
 
 This node bridges the gap between Large Language Models (LLMs) and Microsoft Word. It translates complex OpenXML (`.docx`) files into token-efficient Markdown, allows AI models to reason over legal or technical text, and translates the AI's JSON output back into **native Word Tracked Changes and Comments** — all completely in-process, without your documents ever leaving the n8n runtime.
 
@@ -293,6 +295,15 @@ To achieve the highest batch success rate when prompting models like Gemini, GPT
 
 ## 🤖 AI Agent Tool Setup: `$fromAI` Recipes
 
+### How the tool node is created
+
+This package ships exactly one node class. Because it declares `usableAsTool: true`, n8n generates the AI-tool variant itself at load time: it appends `Tool` to the node's name, empties its main input, and gives it a single `ai_tool` output. There is **no** source file, no separate export, and nothing to install for the tool version. Consequences worth knowing:
+
+- In an exported workflow JSON the two legal `type` values are `n8n-nodes-adeu.adeu` (main line) and `n8n-nodes-adeu.adeuTool` (connected to an AI Agent's `ai_tool` port). Both are `typeVersion: 1`.
+- n8n also injects two parameters that exist only on the tool variant: **Tool Description** (`descriptionType`, `auto` | `manual`, default `auto`) and **Description** (`toolDescription`). Leave `descriptionType` on `auto` and the model receives only a stub like *"Apply tracked changes to document in Adeu"*. Set it to **Set Manually** and write a real description — the tool description is what makes the model choose the right tool at all, and it is separate from the per-parameter `$fromAI` descriptions below.
+- Every tool node must keep at least one `$fromAI()` binding. Google Gemini rejects a tool with zero dynamic parameters outright ("Google Gemini requires at least one dynamic parameter when using tools").
+- `Hydrate Tool Output` is the exception: it is never a tool. It runs on the main line after the Agent.
+
 When wiring this node into an AI Agent as a tool, n8n auto-generates `$fromAI()` expressions for AI-bindable fields. The **second argument** of `$fromAI` is the only per-parameter schema description the LLM actually receives — but n8n does **not** propagate node-source `description` metadata into that slot. Auto-generated stubs look like:
 
 ```
@@ -317,6 +328,9 @@ Some fields are **plumbing** — they configure which input/output port the node
 - **`Edits Source`** (Apply Edits) — controls whether the node reads the changes array from the `Changes (JSON)` field on the node itself (`defineBelow`) or from a property on the upstream item (`fromInputJson`). For AI Agent workflows, **set this to `Define Below` in the editor**. This is what activates the `Changes (JSON)` field as the LLM's entry point — the recipe in the Apply Edits section below populates that field via `$fromAI`, and the LLM hands its generated `Changes_JSON` string directly to the tool as a call argument. The `fromInputJson` branch is only for deterministic pipelines where an upstream non-AI node has pre-populated a `changes` property on the item.
 - **`Allow Partial Application`** (Apply Edits) — decides whether a flawed batch is rejected wholesale or half-applied. That is your risk policy for the workflow, not a per-call choice; an LLM that can switch it on will switch it on to make its own errors disappear. Leave it `false` unless the workflow is an agent loop that resubmits the failures.
 - **`Allow Major Deletions`** (Apply Text Revision) — decides whether a revision deleting >50% of the document is allowed. That is your risk policy for the workflow, not a per-call choice. Leave it `false` unless whole-document truncation is intended.
+- **`Original Binary Property`** / **`Modified Binary Property`** (Generate Diff) — wiring, same reasoning as `Input Binary Property`.
+- **`Static Data Key`**, **`On Missing`**, **`Clear After Read`**, **`Output Path Template`** (Hydrate Tool Output) — the whole operation is main-line only.
+- **`Tool Description`** / **`Description`** (`descriptionType` / `toolDescription`) — these describe the tool *to* the model; binding them to the model is circular.
 
 AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that's why `fromNode` exists: it resolves the binary from a named upstream node (e.g. `Read Binary File`, `Gmail Trigger`) at execution time. The trigger source is `$fromAI`-bindable below because a system prompt can legitimately offer the LLM a choice between multiple binary-producing nodes.
 
@@ -337,6 +351,11 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 **Clean View:**
 ```
 ={{ $fromAI('Clean_View', `Boolean. Set false (default) to surface all pending tracked changes as CriticMarkup tags {++ins++}, {--del--}, {>>comment<<} — use when reviewing counterparty edits or any document with pending markup. Set true to project the document as if all tracked changes were accepted (simulates Accept All) — use only when generating net-new redlines against a clean baseline.`, 'boolean', false) }}
+```
+
+**Include Appendix:**
+```
+={{ $fromAI('Include_Appendix', `Boolean, default true. Whether to append the Structural Appendix — the list of defined terms, cross-reference anchors, and likely typos found in the document. Keep true when you need to reason about definitions or internal references. Set false only to save context when you want body text alone.`, 'boolean', true) }}
 ```
 
 **Page** 🆕:
@@ -411,6 +430,11 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 ={{ $fromAI('Source_Binary_Id', `Optional string. If you are doing consecutive revisions on the same document during this conversation, pass the 'redlinedBinaryId' from the previous tool output here to continue editing the updated draft. Leave blank on your first tool call.`, 'string', '') }}
 ```
 
+**Author:**
+```
+={{ $fromAI('Author', `Author name attached to every tracked change this revision produces (string, e.g. 'AI Reviewer' or 'Acme Legal AI'). Appears in Word's review pane as the author of each redline.`, 'string', 'Adeu AI') }}
+```
+
 **Revised Text:**
 ```
 ={{ $fromAI('Revised_Text', `The COMPLETE revised clean text of the document. Read it first with Extract Markdown using Clean View on and Page 0 (whole document), edit that text, then send all of it back — the engine diffs this against the document's clean view and turns the difference into tracked changes. Never include CriticMarkup tags like {++ or {-- in the text — they are rejected. Never send a single page of a paginated extract — everything missing from this text is applied as a tracked deletion. A revision deleting more than 50% of the characters (75% under 2,000 characters) is refused unless Allow Major Deletions is on. After applying, the engine verifies that the document's clean text matches this value; if they differ, the operation fails.`, 'string') }}
@@ -433,6 +457,11 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 **Clean View:**
 ```
 ={{ $fromAI('Clean_View', `Boolean. Set true (recommended default) to compare the Accept All clean view of both documents — diffs reflect final content as if all tracked changes were accepted. Set false to diff the raw CriticMarkup-projected text including pending change markers — useful for auditing tracked-change differences themselves.`, 'boolean', true) }}
+```
+
+**Diff Format:**
+```
+={{ $fromAI('Diff_Format', `One of 'wordPatch', 'unified', or 'structuredChanges'. 'wordPatch' (default) returns an Adeu @@ Word Patch @@ sub-word text diff on the 'diff' field — best for reading and explaining what changed. 'unified' returns a Git-style unified text diff on 'diff'. 'structuredChanges' returns a JSON array of DocumentChange objects on the 'changes' field instead of 'diff' — use it when you intend to feed the difference straight into apply_edits rather than describe it.`, 'string', 'wordPatch') }}
 ```
 
 ---
@@ -477,6 +506,22 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 ---
 
 > **Tip:** The default-value (4th) argument of `$fromAI()` lets the LLM omit the parameter entirely and fall back to a sensible default. Use defaults aggressively on optional fields so the LLM only has to specify what actually varies per call.
+
+---
+
+## 📂 Example Workflows
+
+Two importable workflows ship in [`examples/`](./examples). Neither can be run outside n8n: download the JSON, then in n8n use **Workflows → Import from File**.
+
+**`Sequential_workflow.json` — deterministic two-turn redline.**
+Manual Trigger → Read/Write Files (read) → Adeu *Extract Markdown* (Clean View on) → Code (build Gemini payload) → HTTP Request → Code (parse the `DocumentChange` array) → Adeu *Apply Edits* (`Edits Source: From Input JSON`) → Adeu *Extract Markdown* (raw view, reading from the previous Adeu node by name) → Code → HTTP Request → Code → Adeu *Apply Edits* (`accept`/`reply` actions) → Read/Write Files (write). No AI Agent, no tool nodes — this is the pattern to copy when you want a repeatable pipeline instead of an agent. **Before running:** set the two file paths and your Gemini API key and model id.
+
+**`AI_Agent_workflow.json` — conversational agent with three tools.**
+Chat Trigger → Read/Write Files (read) → Set (*Restore Chat Context*, because the file-read node drops `chatInput`/`sessionId`) → AI Agent, with `extract_outline`, `extract_markdown` and `apply_edits` on the `ai_tool` port and a Gemini chat model plus a buffer-window memory attached. After the Agent: Adeu *Hydrate Tool Output* → If (`{{ $json.hydrated }}`) → Read/Write Files (write). **Before running:** set the input file path, the output directory in `Output Path Template`, and pick your Gemini credential and model.
+
+**What the examples deliberately do not cover:** `Apply Text Revision`, `Generate Diff`, and `Finalize`. Their `$fromAI` recipes above are complete; wire them the same way as the three tools in the agent example (`Document Source: From Another Node`, `descriptionType: Set Manually`).
+
+**Node names are load-bearing.** The agent example's tools resolve the document with `Source_Node_Name: 'Read Binary File'`. Rename that node on the canvas and every tool call fails until you update the `$fromAI` default and the system message. The tool names the model sees are the canvas node names themselves.
 
 ---
 
