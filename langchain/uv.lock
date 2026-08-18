@@ -15,7 +15,7 @@ constraints = [{ name = "fastmcp-slim", specifier = "==4.0.0b1" }]
 
 [[package]]
 name = "adeu"
-version = "2.4.0"
+version = "2.4.1"
 source = { editable = "../python" }
 dependencies = [
     { name = "diff-match-patch" },
@@ -814,7 +814,7 @@ wheels = [
 
 [[package]]
 name = "langchain-adeu"
-version = "2.4.0"
+version = "2.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "adeu" },
