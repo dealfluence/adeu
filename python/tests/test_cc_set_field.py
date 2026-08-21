@@ -726,3 +726,60 @@ class TestA49TemporaryUnwrap:
         _raw, result = _fill_variant("preparer", "Jane Roe", body_xml=_TEMPORARY_BODY)
         note = result["edits"][0].get("warning") or ""
         assert "temporary" in note and "unwrapped" in note
+
+
+class TestA410TextFirstParity:
+    """A4.10 — typing between the anchors must equal calling set_field.
+
+    Two routes to one outcome. They agree because they run the same fill
+    code, not because someone compared them once.
+    """
+
+    @staticmethod
+    def _text_first(tmp_path):
+        import io
+
+        from adeu.ingest import extract_text_from_stream
+        from adeu.text_revision import apply_text_revision_core
+
+        src = tmp_path / "cc.docx"
+        src.write_bytes(cc_fixture_bytes())
+        clean = extract_text_from_stream(io.BytesIO(src.read_bytes()), clean_view=True, include_appendix=False)
+        if isinstance(clean, tuple):
+            clean = clean[0]
+        assert "{#cc:2}{#/cc:2}" in clean, "the empty pair is the edit surface A4.10 describes"
+        revised = clean.replace("{#cc:2}{#/cc:2}", "{#cc:2}Acme Legal Services Ltd.{#/cc:2}")
+        _res, out = apply_text_revision_core(src, revised, output_path=tmp_path / "out.docx", author="Test Author")
+        return out.read_bytes()
+
+    def test_the_value_lands_inside_the_control(self, tmp_path):
+        """Without fill semantics this inserts BESIDE the field, leaving the
+        control empty and the document reading `Acme Ltd.{#cc:2}{#/cc:2}`."""
+        sdt = _saved_sdt(self._text_first(tmp_path), 2)
+        ins = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins == "Acme Legal Services Ltd."
+
+    def test_the_placeholder_state_is_cleared_exactly_as_set_field_clears_it(self, tmp_path):
+        sdt = _saved_sdt(self._text_first(tmp_path), 2)
+        assert sdt.find(f".//{W}showingPlcHdr") is None
+        styles = [s.get(f"{W}val") for s in sdt.iter(f"{W}rStyle")]
+        assert "PlaceholderText" not in styles
+
+    def test_no_deletion_is_emitted_for_the_ghost_run(self, tmp_path):
+        sdt = _saved_sdt(self._text_first(tmp_path), 2)
+        assert sdt.find(f".//{W}del") is None
+
+    def test_both_routes_agree_on_the_control_state(self, tmp_path):
+        """The assertion A4.10 is actually about: same field, same result."""
+        text_first = _saved_sdt(self._text_first(tmp_path), 2)
+        explicit = _saved_sdt(_fill("client_name", "Acme Legal Services Ltd.")[0], 2)
+
+        def state(sdt):
+            return (
+                sdt.find(f".//{W}showingPlcHdr") is None,
+                sdt.find(f".//{W}del") is None,
+                "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t")),
+                [s.get(f"{W}val") for s in sdt.iter(f"{W}rStyle") if s.get(f"{W}val") == "PlaceholderText"],
+            )
+
+        assert state(text_first) == state(explicit)

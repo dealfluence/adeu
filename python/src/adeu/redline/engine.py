@@ -3570,6 +3570,48 @@ class RedlineEngine:
         edit._occurrences_modified = (edit._occurrences_modified or 0) + 1
         return True
 
+    def _empty_control_fill_host(self, mapper: Any, offset: int) -> Optional[Any]:
+        """`w:sdtContent` when `offset` is the content position of an EMPTY control.
+
+        This is the "empty-pair insertion" surface (A4.10): the sanctioned way
+        to fill a field with a text-first edit is to type between its anchors,
+        which produces an insertion at the exact offset where the pair's open
+        and close tokens meet. Offsets alone cannot express "inside" there -
+        the control contains no run to anchor to - so without this the value
+        lands NEXT TO the field, and the document reads
+        `Acme Ltd.{#cc:2}{#/cc:2}` with the control still empty.
+
+        Shared with `set_field` deliberately: A4.10 requires the two routes to
+        produce identical XML, and the only way to guarantee that is for them
+        to run the same code rather than to agree by inspection.
+        """
+        from adeu.utils.field_write import clear_placeholder, sdt_content
+
+        text = getattr(mapper, "full_text", "") or ""
+        if not text:
+            return None
+        opens: dict = {}
+        for m in _CC_ANCHOR_SCAN_RE.finditer(text):
+            ordinal = int(m.group(2))
+            if m.group(1):
+                if ordinal in opens:
+                    _s, open_end = opens.pop(ordinal)
+                    if open_end == m.start() == offset:
+                        info = self._sdt_info_for_ordinal(ordinal)
+                        if info is None:
+                            return None
+                        # Same untracked teardown Word performs, so a
+                        # text-first fill of a placeholder control does not
+                        # leave the ghost styling behind (CC-6(a)).
+                        if info.showing_placeholder and clear_placeholder(info):
+                            self._mutated_since_load = True
+                            self._cc_anchor_pairs = None
+                            self._field_entries_cache = None
+                        return sdt_content(info.element)
+            else:
+                opens[ordinal] = (m.start(), m.end())
+        return None
+
     def _invalidate_projection_caches(self) -> None:
         """Drop everything keyed on the projection after an untracked write."""
         self.mapper._build_map()
@@ -3648,6 +3690,17 @@ class RedlineEngine:
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
                     edit._active_mapper_ref = self.clean_mapper
+                # A pure insertion landing exactly between an empty control's
+                # anchors is a field fill expressed as text (A4.10).
+                if (
+                    isinstance(edit, ModifyText)
+                    and not edit.target_text
+                    and edit.new_text
+                    and edit._insert_host_el is None
+                ):
+                    host = self._empty_control_fill_host(edit._active_mapper_ref, edit._resolved_start_idx or 0)
+                    if host is not None:
+                        edit._insert_host_el = host
                 resolved_edits.append((edit, getattr(edit, "new_text", None)))
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
                 # Simplified resolution for structural edits
