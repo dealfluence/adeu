@@ -151,15 +151,35 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   and node agree on `fedramp_ssp_rev4`'s clean-view character count (unblocks A5.1's
   parity assertion). Regression file:
   `python/tests/test_repro_raw_ooxml_in_projection.py` + node twin.
-- Scope: python projects a `w:br` element as the literal text `<w:br w:type="page"/>`.
+- Scope: python projects a page break as the literal text `<w:br w:type="page"/>`.
   Repro: a `w:p` containing `<w:r><w:t>A</w:t><w:br w:type="page"/><w:t>B</w:t></w:r>`
-  projects as `A<w:br w:type="page"/>B`; node projects a blank line. 17 occurrences in
+  projects as `A<w:br w:type="page"/>B`; node projects `\n`. 17 occurrences in
   `fedramp_ssp_rev4`. Ingest and mapper agree, so the Virtual Text contract holds and
   offsets are intact — this is an output-quality and parity defect, not corruption, but
   an LLM reads the markup as prose and a `target_text` spanning the break must include
-  the XML. Sweep for other elements taking the same path (`w:tab`, `w:cr`, `w:noBreakHyphen`,
-  `w:softHyphen`, `w:sym`) rather than special-casing `w:br`; decide the projected form
-  for each (blank line vs `\n` vs dropped) and pin both engines to it.
+  the XML.
+- **Corrected diagnosis (2026-08-21, was mis-scoped when filed as "a leak").** This is
+  not accidental serialization. `_PAGE_BREAK_TOKEN` (`utils/docx.py:95`) is a deliberate
+  **in-band sentinel**, and it is load-bearing: `pagination.py:262-272` splits blocks on
+  it to honour manual page breaks. Node has no equivalent — `pagination.ts:131` is
+  density-only and ignores manual breaks. So the engines diverge in two coupled places,
+  and deleting the token alone would regress
+  `test_cli_bug_repro.py::test_manual_page_breaks_pagination` / `_outline` and lose a
+  real capability. `docs/FIDELITY.md:36` already settles the projection question —
+  "Both project as a newline" — so **python violates its own documented contract** and
+  node is correct. Fix = emit `\n` and route the page-break signal **out of band**
+  (offsets alongside the text), preserving python's pagination.
+- Three python sites duplicate the branch chain and must move together
+  (`utils/docx.py:944`, `:1179`, `:1204` — the third inlines the literal instead of the
+  constant). `tests/test_run_fusion_equivalence.py` hardcodes the token in its oracle and
+  must be updated in the same commit; `pagination.py:270`'s offset arithmetic assumes the
+  token occupies real text space.
+- Split out, NOT in this task: node pagination ignoring manual page breaks is a separate
+  capability gap (own row when someone wants it). Removing the token makes the two
+  projections identical, which is all A5.1 needs.
+- Also silently dropped by BOTH engines, so not parity-visible but real content loss:
+  `w:sym` (a symbol glyph vanishes), `w:noBreakHyphen`, `w:softHyphen`, `w:ptab`. Worth
+  its own row; `w:sym` matters most since FedRAMP-class templates use it for checkboxes.
 - Also in the same parity gap, not necessarily this task: python coalesces adjacent
   italic runs into one emphasis span where node marks each run; node projects header
   lines python omits. Together 138 chars / 78 lines on `fedramp_ssp_rev4`.
