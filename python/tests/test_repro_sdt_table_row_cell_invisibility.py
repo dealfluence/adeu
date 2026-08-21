@@ -221,9 +221,10 @@ def test_rows_project_in_document_order_exactly_once(sdt_table_bytes):
 def test_block_level_sdt_inside_a_cell_is_projected(sdt_table_bytes, clean_view):
     """
     A BLOCK-level w:sdt (a content control wrapping a w:p rather than a w:tr or
-    w:tc) is handled separately from the row/cell walk here, by
-    utils.docx._iter_block_children. Word emits this shape for rich-text
-    controls and template placeholders.
+    w:tc) is handled separately from the row/cell walk, by the block-level
+    content-control descent in utils.docx._iter_block_children (Python) and
+    iter_block_items (Node). Word emits this shape for rich-text controls and
+    template placeholders.
     """
     line = _row_line(_project(sdt_table_bytes, clean_view), "Notes")
     assert "Block Level Note" in line, f"block-level sdt still dropped: {line}"

@@ -24,6 +24,9 @@ _CUSTOM_HEADING_NAME_RE = re.compile(r"Heading[ ]?([1-6])(?![0-9])")
 # Guards against a malformed document whose vMerge="continue" chain loops.
 _MAX_VMERGE_DEPTH = 100
 
+# Guards against unbounded recursion on pathologically nested content controls.
+_MAX_SDT_NESTING_DEPTH = 100
+
 # Cache qn() strings for massive performance gains in the extraction hot loop
 QN_W_P = qn("w:p")
 QN_W_R = qn("w:r")
@@ -1429,10 +1432,11 @@ def _normalize_table(table: Table):
                     _normalize_table(item)
 
 
-def _iter_sdt_transparent_children(parent_elm, tag: str) -> Iterator[Any]:
+def _iter_sdt_transparent_children(parent_elm, tag: Union[str, tuple], _depth: int = 0) -> Iterator[Any]:
     """
-    Yields the direct children of `parent_elm` whose tag is `tag`, descending
-    transparently through any number of w:sdt / w:sdtContent wrapper levels.
+    Yields the direct children of `parent_elm` whose tag is (or is in) `tag`,
+    descending transparently through any number of w:sdt / w:sdtContent
+    wrapper levels.
 
     Word wraps table structure in structured document tags (content controls)
     whenever a template uses them, producing
@@ -1451,17 +1455,25 @@ def _iter_sdt_transparent_children(parent_elm, tag: str) -> Iterator[Any]:
     shapes was invisible to the Python projection while the Node engine
     traversed them. Descent stops at `tag`: a nested w:tbl inside a w:tc keeps
     its own rows to itself.
+
+    Mirrors findChildrenSdtTransparent() in node/packages/core/src/docx/dom.ts.
     """
+    if _depth > _MAX_SDT_NESTING_DEPTH:
+        # Defensive: real content controls nest a couple of levels deep
+        # (repeating sections). Anything past this is malformed or hostile,
+        # and we must not blow the interpreter stack on untrusted input.
+        return
+    wanted = (tag,) if isinstance(tag, str) else tag
     for child in parent_elm.iterchildren():
         child_tag = child.tag
-        if child_tag == tag:
+        if child_tag in wanted:
             yield child
         elif child_tag == QN_W_SDT:
             for content in child.iterchildren(QN_W_SDTCONTENT):
-                yield from _iter_sdt_transparent_children(content, tag)
+                yield from _iter_sdt_transparent_children(content, tag, _depth + 1)
         elif child_tag == QN_W_SDTCONTENT:
             # Defensive: a bare w:sdtContent without its w:sdt parent.
-            yield from _iter_sdt_transparent_children(child, tag)
+            yield from _iter_sdt_transparent_children(child, tag, _depth + 1)
 
 
 def iter_table_row_elements(tbl_elem) -> Iterator[Any]:

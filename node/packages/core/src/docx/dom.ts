@@ -36,6 +36,50 @@ export function findChildren(element: Element, tagName: string): Element[] {
 }
 
 /**
+ * Direct children of `element` named `tagName` (or any of `tagName`),
+ * transparently descending through structured document tags (content
+ * controls).
+ *
+ * Word wraps table rows/cells in `w:sdt > w:sdtContent` whenever a template
+ * uses content controls, and nests a second level for repeating sections
+ * (`w15:repeatingSection > w15:repeatingSectionItem`). Those wrappers are
+ * pure containers: the `w:tr`/`w:tc` inside belongs to the enclosing
+ * `w:tbl`/`w:tr` exactly as if the wrapper were not there.
+ *
+ * Recursion stops at `tagName`, so a nested `w:tbl` inside a `w:tc` keeps its
+ * own rows instead of donating them to the outer table.
+ *
+ * Mirrors `_iter_sdt_transparent_children` in python/src/adeu/utils/docx.py.
+ */
+export function findChildrenSdtTransparent(
+  element: Element,
+  tagName: string | readonly string[],
+): Element[] {
+  const wanted = typeof tagName === "string" ? [tagName] : tagName;
+  const result: Element[] = [];
+  const visit = (parent: Element, depth: number): void => {
+    // Defensive: content controls nest a couple of levels deep in practice
+    // (repeating sections). Anything beyond this is malformed or hostile,
+    // and we must not blow the stack on untrusted input.
+    if (depth > MAX_SDT_NESTING_DEPTH) return;
+    for (let i = 0; i < parent.childNodes.length; i++) {
+      const child = parent.childNodes[i];
+      if (child.nodeType !== 1) continue;
+      const el = child as Element;
+      if (wanted.includes(el.tagName)) {
+        result.push(el);
+      } else if (el.tagName === "w:sdt" || el.tagName === "w:sdtContent") {
+        visit(el, depth + 1);
+      }
+    }
+  };
+  visit(element, 0);
+  return result;
+}
+
+const MAX_SDT_NESTING_DEPTH = 100;
+
+/**
  * Simulates lxml element.findall(".//w:tag") - searches ALL descendants.
  */
 export function findAllDescendants(

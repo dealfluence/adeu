@@ -772,6 +772,11 @@ def _build_merged_meta_block(states_list, comments_map) -> str:
         header = f"[{sig}] {data['author']}"
         if data["date"]:
             header += f" @ {data['date']}"
+        # Parity with DocumentMapper._map_comments and both Node projections,
+        # all three of which mark resolved threads. Without it the agent cannot
+        # tell a settled comment from an open one.
+        if data.get("resolved"):
+            header += "(RESOLVED)"
 
         comment_lines.append(f"{header}: {escape_critic_tokens(data['text'])}")
         seen_sigs.add(sig)
