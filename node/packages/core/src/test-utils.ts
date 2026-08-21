@@ -573,3 +573,30 @@ export function ccFixtureBytes(
   };
   return zipSync(files);
 }
+
+/**
+ * Extract a fenced golden block from the frozen acceptance fixture document.
+ *
+ * `fixture-standard.md` is normative down to its spacing, so the goldens are
+ * read from it rather than copied into tests, where a copy would drift.
+ *
+ * Normalising CRLF is load-bearing, not cosmetic: git's autocrlf can hand
+ * `readFileSync` CRLF, the fence in `\n```\n` then never matches, `exec`
+ * returns null, and the golden tests die in `m![1]` with a bare TypeError that
+ * looks like a projection bug and is not one. The python twin has no such
+ * problem because `Path.read_text()` does universal-newline translation.
+ */
+export function ccGolden(section: string): string {
+  const md = readFileSync(
+    resolve(
+      __dirname,
+      "../../../../specs/content-controls/acceptance/fixture-standard.md",
+    ),
+    "utf-8",
+  ).replace(/\r\n/g, "\n");
+  const m = new RegExp(
+    `## ${section}[\\s\\S]*?\\n\`\`\`\\n([\\s\\S]*?)\`\`\``,
+  ).exec(md);
+  if (!m) throw new Error(`golden section not found: ${section}`);
+  return m[1].replace(/\n+$/, "");
+}

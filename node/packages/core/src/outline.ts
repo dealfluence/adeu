@@ -605,6 +605,62 @@ function _collect_footnote_ids(owned_blocks: _BlockRecord[]): string[] {
   return ordered;
 }
 
+/**
+ * Render one projection fragment as plain prose for a breadcrumb.
+ *
+ * Breadcrumbs show CLEAN-view heading text: a heading carrying a pending
+ * tracked change must not leak raw CriticMarkup into the Path line (QA
+ * 2026-07-23 F22b). Deletions vanish, insertions/highlights unwrap, meta
+ * bubbles drop. Because callers operate on ONE line of the projection, a
+ * multi-line `{>>…<<}` bubble can be clipped by the line break — drop the
+ * unterminated tail too, then sweep leftover fragments.
+ *
+ * Hoisted from `build_search_response` for CC-2: the fields ledger renders the
+ * same breadcrumbs from the same projection, and two copies of these
+ * substitutions would be two dialects of "clean".
+ */
+export function clean_breadcrumb(raw: string): string {
+  return raw
+    .replace(/\{--.*?--\}/g, "")
+    .replace(/\{\+\+(.*?)\+\+\}/g, "$1")
+    .replace(/\{==(.*?)==\}/g, "$1")
+    .replace(/\{>>.*?<<\}/g, "")
+    .replace(/\{(?:>>|--).*$/g, "")
+    .replace(/\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}/g, "")
+    .replace(/\*\*|__|[*_]/g, "")
+    .replace(/\{#[^}]+\}/g, "")
+    .trim();
+}
+
+/**
+ * The heading breadcrumb for position `idx` in projection `txt`.
+ *
+ * Scans through the END of the line containing `idx`: slicing at the offset
+ * itself cuts the line in half, so a hit INSIDE a heading reported a truncated
+ * path ("Master" for a match on "Services" in "# Master Services Agreement",
+ * QA 2026-07-19 F-17).
+ */
+export function heading_path_at(idx: number, txt: string): string {
+  const path: string[] = [];
+  let current_level = 999;
+  const nl = txt.indexOf("\n", idx);
+  const line_end = nl === -1 ? txt.length : nl;
+  const lines = txt.slice(0, line_end).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^(#{1,6})\s+(.*)/);
+    if (!m) continue;
+    const level = m[1].length;
+    if (level >= current_level) continue;
+    let clean_heading = clean_breadcrumb(m[2]);
+    if (clean_heading.length > 80)
+      clean_heading = clean_heading.slice(0, 80) + "...";
+    path.unshift(clean_heading);
+    current_level = level;
+    if (level === 1) break;
+  }
+  return path.join(" > ");
+}
+
 export function offset_to_page(offset: number, body_page_offsets: number[]): number {
   if (!body_page_offsets || body_page_offsets.length === 0) return 1;
   let page = 1;

@@ -15,34 +15,13 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ccFixtureBytes } from "./test-utils.js";
+import { ccFixtureBytes, ccGolden } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
 
 const GHOST = "Click or tap here to enter text.";
 
-/**
- * The normative golden block from the frozen acceptance fixture.
- *
- * The CRLF normalisation is load-bearing on Windows and is why this helper
- * cannot use `readFileSync`'s output directly. Git checks the file out with
- * CRLF there, so the fence in `\n```\n` never matches, `exec` returns null and
- * both golden tests die in `m![1]` with a bare TypeError — a failure that looks
- * like a projection bug and is not one. The python twin has no such problem
- * because `Path.read_text()` does universal-newline translation; node's
- * `readFileSync` hands back the bytes as they are. Normalising also keeps the
- * extracted golden comparable with a projection, which is always LF.
- */
-function golden(section: string): string {
-  const md = readFileSync(
-    resolve(__dirname, "../../../../specs/content-controls/acceptance/fixture-standard.md"),
-    "utf-8",
-  ).replace(/\r\n/g, "\n");
-  const m = new RegExp(`## ${section}[\\s\\S]*?\\n\`\`\`\\n([\\s\\S]*?)\`\`\``).exec(md);
-  if (!m) throw new Error(`golden section not found: ${section}`);
-  return m[1].replace(/\n+$/, "");
-}
 
 const fixture: Uint8Array = ccFixtureBytes();
 
@@ -133,19 +112,19 @@ describe("inline content-control projection (CC-1b)", () => {
     // for CC:6, which still projected the raw glyph; the golden always
     // expected the token, and the code caught up.
     expect((await project(false)).replace(/\n+$/, "")).toBe(
-      golden("GOLDEN-RAW"),
+      ccGolden("GOLDEN-RAW"),
     );
   });
 
   it("A1.2 — clean view matches GOLDEN-CLEAN", async () => {
-    const expected = golden("GOLDEN-RAW")
+    const expected = ccGolden("GOLDEN-RAW")
       .replace(
         `{#cc:2}{>>placeholder: ${GHOST}<<}{#/cc:2}`,
         "{#cc:2}{#/cc:2}",
       );
     const clean = await project(true);
     expect(clean.replace(/\n+$/, "")).toBe(expected);
-    expect(clean).toContain(golden("GOLDEN-CLEAN"));
+    expect(clean).toContain(ccGolden("GOLDEN-CLEAN"));
   });
 
   it("a block-level control anchors on its own lines (spec §3)", async () => {

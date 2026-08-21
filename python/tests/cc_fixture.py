@@ -38,7 +38,11 @@ def cc_fixture_body_xml() -> str:
 
 @lru_cache(maxsize=1)
 def _document_xml() -> str:
-    return _HEADER + cc_fixture_body_xml() + _FOOTER
+    return _wrap_body(cc_fixture_body_xml())
+
+
+def _wrap_body(body_xml: str) -> str:
+    return _HEADER + body_xml + _FOOTER
 
 
 def cc_fixture_body_element():
@@ -50,11 +54,15 @@ def cc_fixture_body_element():
     return parse_xml(_document_xml()).find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
 
 
-def cc_fixture_bytes(protection: str | None = None) -> bytes:
+def cc_fixture_bytes(protection: str | None = None, body_xml: str | None = None) -> bytes:
     """A complete minimal package, for projection-level tests.
 
     ``protection`` mirrors the ``cc_fixture_forms`` variant: pass ``"forms"``
     for ``<w:documentProtection w:edit="forms" w:enforcement="1"/>``.
+
+    ``body_xml`` replaces the 16-control body, which A2.2 (a protected document
+    with NO controls) and A2.3 (250 controls) both need. Mirrors the ``bodyXml``
+    parameter the node twin already accepts.
     """
     import zipfile
 
@@ -85,7 +93,8 @@ def cc_fixture_bytes(protection: str | None = None) -> bytes:
         )
         z.writestr(
             "word/document.xml",
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + _document_xml(),
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            + (_document_xml() if body_xml is None else _wrap_body(body_xml)),
         )
         z.writestr(
             "word/_rels/document.xml.rels",

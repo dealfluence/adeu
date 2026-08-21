@@ -9,6 +9,7 @@ import {
   PAGE_RANGE_MAX_PAGES,
   response_budget_limit,
   whole_doc_guard_message,
+  heading_path_at,
 } from "@adeu/core";
 import { split_projection } from "./shared.js";
 
@@ -1180,43 +1181,10 @@ export function build_search_response(
   // text, meta bubbles drop. Because we operate on ONE line of the projection,
   // a multi-line `{>>…<<}` bubble can be clipped by the line break — drop the
   // unterminated tail too, then sweep any leftover delimiter fragments.
-  function clean_breadcrumb(raw: string): string {
-    return raw
-      .replace(/\{--.*?--\}/g, "")
-      .replace(/\{\+\+(.*?)\+\+\}/g, "$1")
-      .replace(/\{==(.*?)==\}/g, "$1")
-      .replace(/\{>>.*?<<\}/g, "")
-      .replace(/\{(?:>>|--).*$/g, "")
-      .replace(/\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}/g, "")
-      .replace(/\*\*|__|[*_]/g, "")
-      .replace(/\{#[^}]+\}/g, "")
-      .trim();
-  }
-
-  function get_heading(idx: number, txt: string): string {
-    const path: string[] = [];
-    let current_level = 999;
-    // Scan through the END of the line containing the match: slicing at the
-    // match offset cuts the line in half, so a hit INSIDE a heading reported a
-    // truncated path ("Master" for a match on "Services" in "# Master Services
-    // Agreement", QA 2026-07-19 F-17).
-    const nl = txt.indexOf("\n", idx);
-    const line_end = nl === -1 ? txt.length : nl;
-    const lines = txt.slice(0, line_end).split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const m = lines[i].match(/^(#{1,6})\s+(.*)/);
-      if (!m) continue;
-      const level = m[1].length;
-      if (level >= current_level) continue;
-      let clean_heading = clean_breadcrumb(m[2]);
-      if (clean_heading.length > 80)
-        clean_heading = clean_heading.slice(0, 80) + "...";
-      path.unshift(clean_heading);
-      current_level = level;
-      if (level === 1) break;
-    }
-    return path.join(" > ");
-  }
+  // Hoisted to @adeu/core's outline module for CC-2 so the fields ledger
+  // renders identical breadcrumbs from the same projection rather than a
+  // second dialect.
+  const get_heading = heading_path_at;
 
   /**
    * Groups hits by their containing projection line: one paragraph renders as
