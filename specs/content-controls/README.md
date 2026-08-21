@@ -1,5 +1,7 @@
 # Content Controls (`w:sdt`) — Initiative Workspace
 
+*Operator order*: This task is distributed to two machines. Windows and OSX. You know which you are. The task is to be worked on only content-controls-specs branch. Use explicitly unsigned commits while working. Commit and push and pull often. Communicate with the other agent.
+
 Status: **specs frozen for v1** (sections tagged `[COM-PENDING]` await Word COM verification, task CC-6).
 Driver: Template-heavy legal workflows run on Word
 content controls, and Adeu currently flattens them into invisible plumbing.
