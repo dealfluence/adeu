@@ -3281,6 +3281,7 @@ class RedlineEngine:
         from adeu.fields import FieldResolutionError
         from adeu.utils.field_write import (
             clear_placeholder,
+            find_bound_store,
             option_is_listed,
             parse_iso_date,
             refuse_class,
@@ -3290,6 +3291,7 @@ class RedlineEngine:
             sdt_content,
             set_dropdown_last_value,
             set_full_date,
+            write_bound_value,
         )
 
         try:
@@ -3440,10 +3442,47 @@ class RedlineEngine:
                     parts = parse_iso_date(edit.value)
                     if parts is not None:
                         set_full_date(info, parts)
+            # A bound control dual-writes: the tracked content change above,
+            # and the CustomXML node it mirrors. The store WINS ON OPEN
+            # (CC-6(e)), so content-only writing to a bound control is data
+            # loss with extra steps - Word silently rewrites the content back
+            # from the store, discarding the edit with no revision to show
+            # for it. A store that cannot be resolved downgrades to
+            # content-only plus a warning, because dangling bindings exist in
+            # the wild and refusing the edit would be worse than disclosing.
+            if info is not None and info.bound:
+                store = find_bound_store(self.doc, info.store_item_id)
+                wrote = store is not None and write_bound_value(store, info.binding_xpath, value)
+                if wrote:
+                    notes[entry.ordinal] = f"bound store {info.binding_xpath} updated to match" + (
+                        f"; {notes[entry.ordinal]}" if entry.ordinal in notes else ""
+                    )
+                else:
+                    notes[entry.ordinal] = (
+                        f"WARNING: this field is bound to {info.binding_xpath} but the data store "
+                        "could not be resolved, so only the visible text was updated. If the store "
+                        "is restored later, Word will overwrite this edit from it."
+                        + (f"; {notes[entry.ordinal]}" if entry.ordinal in notes else "")
+                    )
+
             note = notes.get(entry.ordinal)
             if note:
                 existing = edit._warning
                 edit._warning = f"{existing}; {note}" if existing else note
+            # A `w:temporary` control does not survive being edited: Word
+            # unwraps it on ANY content change, tracked or not (CC-6(c)). The
+            # unwrap is one-way - the revision outlives the wrapper, so
+            # rejecting the fill restores the old text but not the control -
+            # and matching Word here is what keeps a round trip stable.
+            if info is not None and info.temporary:
+                sub._unwrap_sdt_after = info.element
+                existing_note = notes.get(entry.ordinal)
+                unwrap_note = "this control was temporary and has been unwrapped, as Word does on any edit"
+                notes[entry.ordinal] = f"{existing_note}; {unwrap_note}" if existing_note else unwrap_note
+                note = notes.get(entry.ordinal)
+                if note:
+                    edit._warning = note
+
             resolved_edits.append((sub, value))
 
     def _apply_checkbox_set_field(self, edit: "SetField", entry: Any, info: Any) -> bool:
@@ -3802,6 +3841,15 @@ class RedlineEngine:
                 # made regex + match_mode="all" O(occurrences × document):
                 # 500 matches took 78s instead of ~2s (QA 2026-07-19 F-06).
                 success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
+
+            if success and edit._unwrap_sdt_after is not None:
+                # After the content change, never before: the edit resolves
+                # against offsets inside the control, and dissolving the
+                # wrapper first would move them.
+                from adeu.utils.content_controls import SdtInfo as _SdtInfo
+                from adeu.utils.field_write import unwrap_sdt
+
+                unwrap_sdt(_SdtInfo(element=edit._unwrap_sdt_after, cls="text"))
 
             if success:
                 # A balanced multi-paragraph split fans one logical edit into

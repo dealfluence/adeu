@@ -389,3 +389,86 @@ def set_full_date(info: SdtInfo, parts: tuple) -> None:
         return
     y, mo, d = parts
     node.set(qn("w:fullDate"), f"{y:04d}-{mo:02d}-{d:02d}T00:00:00Z")
+
+
+# ---------------------------------------------------------------------------
+# Bound controls (spec-set-field.md §6)
+# ---------------------------------------------------------------------------
+
+_DS_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/customXml}"
+
+
+def find_bound_store(doc: Any, store_item_id: Optional[str]) -> Optional[Any]:
+    """The CustomXML part element for `store_item_id`, or `None`.
+
+    Resolved by item id rather than by trying each store in turn: a package
+    may carry several, and writing the caller's value into whichever one
+    happened to match the xpath would corrupt an unrelated data island.
+    """
+    if not store_item_id:
+        return None
+    want = store_item_id.strip("{}").lower()
+    try:
+        parts = list(doc.part.package.parts)
+    except Exception:
+        return None
+
+    props: dict = {}
+    items: dict = {}
+    for part in parts:
+        name = str(part.partname)
+        if "/customXml/itemProps" in name:
+            props[name] = part
+        elif "/customXml/item" in name:
+            items[name] = part
+
+    from lxml import etree
+
+    for name, part in props.items():
+        try:
+            root = etree.fromstring(part.blob)
+        except Exception:
+            continue
+        item_id = root.get(f"{_DS_NS}itemID") or root.get("itemID")
+        if not item_id or item_id.strip("{}").lower() != want:
+            continue
+        # itemProps1.xml describes item1.xml: the trailing digits pair them,
+        # which is the convention every producer follows and is cheaper than
+        # walking relationships for a part that may not expose them.
+        digits = "".join(ch for ch in name.rsplit("/", 1)[-1] if ch.isdigit())
+        for iname, ipart in items.items():
+            if "".join(ch for ch in iname.rsplit("/", 1)[-1] if ch.isdigit()) == digits:
+                return ipart
+    return None
+
+
+def write_bound_value(part: Any, xpath: Optional[str], value: str) -> bool:
+    """Set the bound node's text to `value`. True when the node was found.
+
+    Mandatory rather than tidy (CC-6(e)): when `sdtContent` and the bound node
+    disagree, Word rewrites the CONTENT from the store on open, with no
+    revision. A tracked edit written to the content alone is not merely
+    inconsistent - it is destroyed the next time anyone opens the document.
+    """
+    if not xpath:
+        return False
+    from lxml import etree
+
+    try:
+        root = etree.fromstring(part.blob)
+        nodes = root.xpath(xpath)
+    except Exception:
+        return False
+    if not nodes:
+        return False
+    node = nodes[0]
+    if isinstance(node, str):
+        return False
+    for child in list(node):
+        node.remove(child)
+    node.text = value
+    try:
+        part._blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+    except Exception:
+        return False
+    return True

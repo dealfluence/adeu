@@ -122,6 +122,10 @@ class _EditState(BaseModel):
     # express it. Set only for a fill into an emptied content control, whose
     # `w:sdtContent` holds no run to anchor against (CC-5, spec-set-field §4).
     _insert_host_el: Optional[Any] = PrivateAttr(default=None)
+    # The `w:sdt` to dissolve once this edit has applied. Set for a fill into
+    # a `w:temporary` control, which Word unwraps on any content edit
+    # (CC-6(c), spec-set-field §4.4).
+    _unwrap_sdt_after: Optional[Any] = PrivateAttr(default=None)
 
 
 class ModifyText(_EditState):
@@ -209,7 +213,7 @@ class ReplyComment(BaseModel):
     text: str = Field(..., description="The content of the reply body.")
 
 
-class InsertTableRow(BaseModel):
+class InsertTableRow(_EditState):
     type: Literal["insert_row"] = Field("insert_row", json_schema_extra=const_to_enum)
 
     target_text: str = Field(
@@ -240,29 +244,9 @@ class InsertTableRow(BaseModel):
     )
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
-    _match_start_index: Optional[int] = PrivateAttr(default=None)
-    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
-    # The mapper whose coordinate space _resolved_start_idx belongs to (the
-    # clean-view mapper when the anchor row carries pending tracked changes).
-    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
-    _applied_status: bool = PrivateAttr(default=False)
-    _error_msg: Optional[str] = PrivateAttr(default=None)
-    _any_sub_failure: bool = PrivateAttr(default=False)
-    # A match_mode="all" fan-out deep-copies this edit once per matching row;
-    # each copy points back here so the batch report counts ONE applied edit
-    # and accumulates occurrences on the parent (mirrors ModifyText).
-    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
-    _pages: list[int] = PrivateAttr(default_factory=list)
-    _heading_path: Optional[str] = PrivateAttr(default=None)
-    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
-    # content control (spec-fields-ledger §6).
-    _field: Optional[str] = PrivateAttr(default=None)
-    _occurrences_modified: int = PrivateAttr(default=0)
-    # See ModifyText._reserved_ins_id (F20, QA 2026-07-23).
-    _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
 
 
-class DeleteTableRow(BaseModel):
+class DeleteTableRow(_EditState):
     type: Literal["delete_row"] = Field("delete_row", json_schema_extra=const_to_enum)
 
     target_text: str = Field(
@@ -283,28 +267,8 @@ class DeleteTableRow(BaseModel):
     )
 
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
-    _match_start_index: Optional[int] = PrivateAttr(default=None)
-    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
-    # The mapper whose coordinate space _resolved_start_idx belongs to (the
-    # clean-view mapper when the anchor row carries pending tracked changes).
-    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
-    _applied_status: bool = PrivateAttr(default=False)
-    _error_msg: Optional[str] = PrivateAttr(default=None)
-    _any_sub_failure: bool = PrivateAttr(default=False)
-    # See InsertTableRow._parent_edit_ref.
-    _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
-    _pages: list[int] = PrivateAttr(default_factory=list)
-    _heading_path: Optional[str] = PrivateAttr(default=None)
-    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
-    # content control (spec-fields-ledger §6).
-    _field: Optional[str] = PrivateAttr(default=None)
-    _occurrences_modified: int = PrivateAttr(default=0)
-    # See ModifyText._reserved_del_id (F20, QA 2026-07-23).
-    _reserved_del_id: Optional[str] = PrivateAttr(default=None)
 
 
-# Either structural row operation. Both fan out the same way under
-# match_mode="all", so a sub-edit's parent is one of these two.
 TableRowChange = Union[InsertTableRow, DeleteTableRow]
 
 

@@ -54,7 +54,15 @@ def cc_fixture_body_element():
     return parse_xml(_document_xml()).find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}body")
 
 
-def cc_fixture_bytes(protection: str | None = None, body_xml: str | None = None) -> bytes:
+#: The store item id CC:10's `w:dataBinding` names in the shared body XML.
+BOUND_STORE_ITEM_ID = "{A1B2C3D4-0000-0000-0000-000000000001}"
+
+
+def cc_fixture_bytes(
+    protection: str | None = None,
+    body_xml: str | None = None,
+    custom_xml: str | None = None,
+) -> bytes:
     """A complete minimal package, for projection-level tests.
 
     ``protection`` mirrors the ``cc_fixture_forms`` variant: pass ``"forms"``
@@ -63,6 +71,11 @@ def cc_fixture_bytes(protection: str | None = None, body_xml: str | None = None)
     ``body_xml`` replaces the 16-control body, which A2.2 (a protected document
     with NO controls) and A2.3 (250 controls) both need. Mirrors the ``bodyXml``
     parameter the node twin already accepts.
+
+    ``custom_xml`` adds a CustomXML data store carrying that root element,
+    registered under the store item id CC:10's binding names. Without it the
+    fixture's binding DANGLES by design (spec-set-field §6 wants both states
+    tested), so A4.8's resolving half needs this variant.
     """
     import zipfile
 
@@ -80,7 +93,13 @@ def cc_fixture_bytes(protection: str | None = None, body_xml: str | None = None)
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
             '<Override PartName="/word/settings.xml" ContentType="'
             'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
-            "</Types>",
+            + (
+                '<Override PartName="/customXml/itemProps1.xml" ContentType="'
+                'application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>'
+                if custom_xml is not None
+                else ""
+            )
+            + "</Types>",
         )
         z.writestr(
             "_rels/.rels",
@@ -103,10 +122,38 @@ def cc_fixture_bytes(protection: str | None = None, body_xml: str | None = None)
             '<Relationship Id="rId1" Type="'
             'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"'
             ' Target="settings.xml"/>'
-            "</Relationships>",
+            + (
+                '<Relationship Id="rId2" Type="'
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml"
+                '" Target="../customXml/item1.xml"/>'
+                if custom_xml is not None
+                else ""
+            )
+            + "</Relationships>",
         )
         z.writestr(
             "word/settings.xml",
             f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings {w}>{prot}</w:settings>',
         )
+        if custom_xml is not None:
+            z.writestr(
+                "customXml/item1.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + custom_xml,
+            )
+            z.writestr(
+                "customXml/itemProps1.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"'
+                f' ds:itemID="{BOUND_STORE_ITEM_ID}">'
+                "<ds:schemaRefs/></ds:datastoreItem>",
+            )
+            z.writestr(
+                "customXml/_rels/item1.xml.rels",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="'
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps"
+                '" Target="itemProps1.xml"/>'
+                "</Relationships>",
+            )
     return buf.getvalue()

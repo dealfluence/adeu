@@ -607,3 +607,122 @@ class TestDateFormatRendering:
         text, unsupported = render_date((2026, 3, 1), fmt)
         assert unsupported is True
         assert text == "2026-03-01"
+
+
+def _fill_variant(field, value, **fixture_kw):
+    """As `_fill`, against a fixture variant."""
+    import io
+
+    from adeu.models import SetField
+    from adeu.redline.engine import RedlineEngine
+
+    engine = RedlineEngine(io.BytesIO(cc_fixture_bytes(**fixture_kw)), author="Test Author")
+    result = engine.process_batch([SetField(field=field, value=value)])
+    return engine.save_to_stream().getvalue(), result
+
+
+class TestA48BoundControls:
+    """A4.8 — the dual-write, and the disclosure when it cannot happen."""
+
+    STORE = "<root><matter>M-2026-001</matter></root>"
+
+    def test_a_resolving_binding_updates_the_store_silently(self):
+        """CC-6(e): the store WINS ON OPEN. A content-only write to a bound
+        control is destroyed the next time anyone opens the document."""
+        import io
+        import zipfile
+
+        raw, result = _fill_variant("matter_number", "M-2026-002", custom_xml=self.STORE)
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            store = z.read("customXml/item1.xml").decode("utf-8")
+        assert "M-2026-002" in store
+        assert "M-2026-001" not in store
+
+    def test_the_content_change_is_still_tracked(self):
+        raw, _ = _fill_variant("matter_number", "M-2026-002", custom_xml=self.STORE)
+        sdt = _saved_sdt(raw, 10)
+        ins = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins == "M-2026-002"
+
+    def test_the_report_discloses_the_store_write(self):
+        _raw, result = _fill_variant("matter_number", "M-2026-002", custom_xml=self.STORE)
+        note = result["edits"][0].get("warning") or ""
+        assert "bound store" in note and "/root[1]/matter[1]" in note
+
+    def test_a_dangling_binding_applies_content_only_with_a_warning(self):
+        """Dangling bindings exist in the wild - sanitize's scrub is one
+        producer - so refusing would be worse than disclosing."""
+        _raw, result = _fill("matter_number", "M-2026-002")
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        note = result["edits"][0].get("warning") or ""
+        assert "WARNING" in note and "could not be resolved" in note
+
+    def test_the_dangling_warning_says_what_will_happen_later(self):
+        _raw, result = _fill("matter_number", "M-2026-002")
+        note = result["edits"][0].get("warning") or ""
+        assert "overwrite" in note.lower()
+
+
+_TEMPORARY_BODY = (
+    '<w:p><w:r><w:t xml:space="preserve">Prepared by </w:t></w:r>'
+    "<w:sdt><w:sdtPr>"
+    '<w:alias w:val="Preparer"/><w:tag w:val="preparer"/><w:id w:val="900"/>'
+    "<w:temporary/><w:showingPlcHdr/><w:text/>"
+    "</w:sdtPr><w:sdtContent>"
+    '<w:r><w:rPr><w:rStyle w:val="PlaceholderText"/></w:rPr>'
+    "<w:t>Click here to enter a name.</w:t></w:r>"
+    "</w:sdtContent></w:sdt>"
+    '<w:r><w:t xml:space="preserve">.</w:t></w:r></w:p>'
+)
+
+
+class TestA49TemporaryUnwrap:
+    """A4.9 — Word dissolves a temporary control on any content edit."""
+
+    def test_the_sdt_wrapper_is_gone_from_the_saved_xml(self):
+        import io
+        import zipfile
+
+        from lxml import etree
+
+        raw, result = _fill_variant("preparer", "Jane Roe", body_xml=_TEMPORARY_BODY)
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            tree = etree.fromstring(z.read("word/document.xml"))
+        assert not list(tree.iter(f"{W}sdt")), "the temporary control survived the edit"
+
+    def test_the_inserted_text_stands_as_a_tracked_insertion(self):
+        """The revision outlives the wrapper (CC-6(c)), so the value is still
+        reviewable even though the control is gone."""
+        import io
+        import zipfile
+
+        from lxml import etree
+
+        raw, _ = _fill_variant("preparer", "Jane Roe", body_xml=_TEMPORARY_BODY)
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            tree = etree.fromstring(z.read("word/document.xml"))
+        ins = "".join(t.text or "" for i in tree.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins == "Jane Roe"
+
+    def test_the_ledger_no_longer_lists_it(self):
+        import io
+
+        from docx import Document
+
+        from adeu.fields import collect_fields
+        from adeu.ingest import _extract_text_from_doc
+
+        raw, _ = _fill_variant("preparer", "Jane Roe", body_xml=_TEMPORARY_BODY)
+        doc = Document(io.BytesIO(raw))
+        text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        assert collect_fields(doc, text, None) == []
+
+    def test_the_report_discloses_the_unwrap(self):
+        """The control vanishing is a surprise unless the report says so."""
+        _raw, result = _fill_variant("preparer", "Jane Roe", body_xml=_TEMPORARY_BODY)
+        note = result["edits"][0].get("warning") or ""
+        assert "temporary" in note and "unwrapped" in note

@@ -103,6 +103,9 @@ class SdtInfo:
     delete_locked: bool = False
     bound: bool = False
     binding_xpath: Optional[str] = None
+    #: `w:dataBinding/@w:storeItemID` - which CustomXML store the xpath is
+    #: relative to. Needed to write the store back (spec-set-field §6).
+    store_item_id: Optional[str] = None
     showing_placeholder: bool = False
     placeholder_text: Optional[str] = None
     temporary: bool = False
@@ -229,6 +232,7 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
     binding = _first_child(sdtPr, _w("dataBinding"))
     bound = binding is not None
     binding_xpath = binding.get(_w("xpath")) if binding is not None else None
+    store_item_id = binding.get(_w("storeItemID")) if binding is not None else None
 
     showing_placeholder = _first_child(sdtPr, _w("showingPlcHdr")) is not None
 
@@ -293,6 +297,7 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
         delete_locked=delete_locked,
         bound=bound,
         binding_xpath=binding_xpath,
+        store_item_id=store_item_id,
         showing_placeholder=showing_placeholder,
         placeholder_text=placeholder_text,
         temporary=temporary,
