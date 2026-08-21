@@ -143,7 +143,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-2 — Fields ledger, appendix summary, banner (P1)
 
-- Status: `pending` — **claimable now, CC-1 is `done`.**
+- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
 - Depends on: CC-1 (`done`)
 - Acceptance: [A2](acceptance/A2-fields-ledger.md) (all examples), **plus A1.9 (the
   protection/fields banner), reassigned here from CC-1f by Mikko 2026-08-21** — it
