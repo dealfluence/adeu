@@ -20,6 +20,8 @@ import {
   summaryCounts,
   protectionLabel,
   HeadingIndex,
+  fieldSummary,
+  bannerForDocument,
 } from "./fields.js";
 
 const PLAIN_BODY = "<w:p><w:r><w:t>Plain paragraph.</w:t></w:r></w:p>";
@@ -351,5 +353,36 @@ describe("A2.6 — per-edit reports name the field", () => {
     const r = await report("Approved without conditions.", "Approved.");
     expect(r.status).toBe("applied");
     expect(r.field).toBe("CC:16 (tag: cell_notes)");
+  });
+});
+
+describe("cheap summary agrees with the ledger", () => {
+  /**
+   * `fieldSummary` walks the DOM only — no projection, no value previews, no
+   * breadcrumbs — because the banner and the appendix render four numbers and
+   * computing the whole ledger for them cost 115ms per read on a
+   * control-heavy document. Two ways of counting is two chances to disagree,
+   * and a banner that contradicts the ledger it advertises is worse than no
+   * banner, so the agreement is pinned rather than assumed.
+   */
+  it("agrees on the standard fixture", async () => {
+    const { doc, text } = await load();
+    expect(fieldSummary(doc)).toEqual(summaryCounts(collectFields(doc, text, null)));
+  });
+
+  it.each([
+    "<w:p><w:r><w:t>No controls at all.</w:t></w:r></w:p>",
+    '<w:p><w:sdt><w:sdtPr><w:tag w:val="e"/><w:text/></w:sdtPr>' +
+      "<w:sdtContent><w:r><w:t></w:t></w:r></w:sdtContent></w:sdt></w:p>",
+    '<w:p><w:sdt><w:sdtPr><w:tag w:val="f"/><w:text/></w:sdtPr>' +
+      "<w:sdtContent><w:r><w:t>Filled</w:t></w:r></w:sdtContent></w:sdt></w:p>",
+  ])("agrees on edge shape %#", async (body) => {
+    const { doc, text } = await load(undefined, body);
+    expect(fieldSummary(doc)).toEqual(summaryCounts(collectFields(doc, text, null)));
+  });
+
+  it("renders GOLDEN-BANNER via the cheap path", async () => {
+    const { doc } = await load();
+    expect(bannerForDocument(doc)).toBe(ccGolden("GOLDEN-BANNER"));
   });
 });

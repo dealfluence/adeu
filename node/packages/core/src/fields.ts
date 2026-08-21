@@ -315,6 +315,60 @@ function statesFor(info: SdtInfo, empty: boolean): string[] {
   return states;
 }
 
+function hasText(sdtElement: any): boolean {
+  const content = findChild(sdtElement, QN_W_SDTCONTENT);
+  if (!content) return false;
+  return findAllDescendants(content, "w:t").some(
+    (t: any) => (t.textContent ?? "").trim().length > 0,
+  );
+}
+
+/**
+ * `[total, empty, locked, bound]` from the DOM alone.
+ *
+ * The banner and the appendix summary need only these four numbers, and paying
+ * for the full ledger to get them is what made this expensive: on FedRAMP rev4
+ * the appendix would have carried 115ms of value previews, breadcrumbs and
+ * page lookups that nothing rendered. This walks the ordinal pre-pass and
+ * stops.
+ *
+ * `empty` is derived structurally here (placeholder shown, or no text in the
+ * content) rather than from the projection. A test pins that it agrees with
+ * the ledger's own count, because a banner that disagrees with the ledger it
+ * advertises is worse than no banner.
+ */
+export function fieldSummary(doc: any): [number, number, number, number] {
+  const infos = assignOrdinals(
+    Array.from(iter_document_parts_with_kind(doc)).map(([part]) =>
+      partElement(part),
+    ),
+  );
+  let total = 0;
+  let empty = 0;
+  let locked = 0;
+  let bound = 0;
+  for (const info of infos.values()) {
+    total += 1;
+    if (CONTAINER_CLASSES.has(info.cls) || info.cls === "checkbox") {
+      // containers and checkboxes are never "empty" for the count
+    } else if (info.showingPlaceholder || !hasText(info.element)) {
+      empty += 1;
+    }
+    if (info.cls === "group" || info.contentLocked) locked += 1;
+    if (info.bound) bound += 1;
+  }
+  return [total, empty, locked, bound];
+}
+
+/** The full-view banner, computed without projecting values (spec §7). */
+export function bannerForDocument(doc: any, hint = ""): string | null {
+  const counts = fieldSummary(doc);
+  const protection = readDocumentProtection(doc);
+  if (counts[0] === 0 && protection.mode === "none") return null;
+  const line = `> **Protection:** ${protectionLabel(protection)} \u00b7 **Fields:** ${summaryText(counts)}`;
+  return hint ? `${line}${hint}` : line;
+}
+
 /** Build every ledger row for `doc`, in ordinal order. */
 export function collectFields(
   doc: any,
@@ -429,10 +483,14 @@ export function summaryCounts(
   ];
 }
 
-function fieldsSummary(entries: readonly FieldEntry[]): string {
-  const [total, empty, locked, bound] = summaryCounts(entries);
+function summaryText(counts: readonly [number, number, number, number]): string {
+  const [total, empty, locked, bound] = counts;
   if (total === 0) return "no content controls";
   return `${total} content controls \u2014 ${empty} empty \u00b7 ${locked} locked \u00b7 ${bound} bound`;
+}
+
+function fieldsSummary(entries: readonly FieldEntry[]): string {
+  return summaryText(summaryCounts(entries));
 }
 
 /**
@@ -523,15 +581,15 @@ export function renderLine(entry: FieldEntry, width: number): string {
  * is bounded and a 5,007-line ledger would swallow it.
  */
 export function renderAppendixSection(
-  entries: readonly FieldEntry[],
+  counts: readonly [number, number, number, number],
   protection: DocumentProtection,
   hint = "",
 ): string[] {
-  if (entries.length === 0 && protection.mode === "none") return [];
+  if (counts[0] === 0 && protection.mode === "none") return [];
   const lines = [
     "## Content Controls",
     "",
-    `Protection: ${protectionLabel(protection)} \u00b7 ${fieldsSummary(entries)}`,
+    `Protection: ${protectionLabel(protection)} \u00b7 ${summaryText(counts)}`,
   ];
   if (hint) lines.push(hint);
   return lines;

@@ -144,3 +144,64 @@ class TestA24AppendixSummary:
         assert proc.returncode == 0, proc.stderr
         assert "## Content Controls" in proc.stdout
         assert not re.search(r"^CC:\d", proc.stdout, re.M)
+
+
+class TestA19Banner:
+    """The banner appears exactly when warranted (A1.9)."""
+
+    def test_fixture_yields_the_golden_banner(self, fixture_docx):
+        from tests.test_cc_fields_ledger import golden
+
+        proc = run_cli("extract", str(fixture_docx))
+        assert proc.returncode == 0, proc.stderr
+        banner = next(line for line in proc.stdout.splitlines() if line.startswith("> **Protection:**"))
+        # The golden plus the CLI's own surface-aware hint, which the golden
+        # explicitly excludes.
+        assert banner.startswith(golden("GOLDEN-BANNER"))
+        assert banner.endswith("--mode fields` for the field ledger")
+
+    def test_forms_protected_variant(self, tmp_path):
+        path = tmp_path / "forms.docx"
+        path.write_bytes(cc_fixture_bytes(protection="forms"))
+        proc = run_cli("extract", str(path))
+        assert proc.returncode == 0
+        assert "> **Protection:** fill-in-forms only (enforced) \u00b7 **Fields:**" in proc.stdout
+
+    def test_plain_document_has_no_banner_at_all(self, tmp_path):
+        path = tmp_path / "plain.docx"
+        path.write_bytes(cc_fixture_bytes(body_xml=PLAIN_BODY))
+        proc = run_cli("extract", str(path))
+        assert proc.returncode == 0
+        assert "**Protection:**" not in proc.stdout
+
+    def test_no_chrome_suppresses_the_banner(self, fixture_docx):
+        # no_chrome exists so the projection can round-trip; a banner would
+        # corrupt the artifact exactly as the File Path line would.
+        proc = run_cli("extract", str(fixture_docx), "--no-chrome")
+        assert proc.returncode == 0
+        assert "**Protection:**" not in proc.stdout
+        assert "**File Path:**" not in proc.stdout
+
+    def test_banner_precedes_the_body_and_follows_the_path(self, fixture_docx):
+        proc = run_cli("extract", str(fixture_docx))
+        lines = proc.stdout.splitlines()
+        assert lines[0].startswith("> **File Path:**")
+        assert lines[1].startswith("> **Protection:**")
+
+    def test_memo_returns_a_fresh_banner_after_the_file_changes(self, tmp_path):
+        # The memo is keyed on the stat signature; an edited file must not
+        # serve the previous document's counts.
+        from adeu.fields import banner_for_path
+
+        path = tmp_path / "evolving.docx"
+        path.write_bytes(cc_fixture_bytes(body_xml=PLAIN_BODY))
+        assert banner_for_path(str(path)) is None
+
+        import os
+        import time
+
+        time.sleep(0.01)
+        path.write_bytes(cc_fixture_bytes())
+        os.utime(path, None)
+        again = banner_for_path(str(path))
+        assert again is not None and "16 content controls" in again

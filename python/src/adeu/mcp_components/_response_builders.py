@@ -428,7 +428,22 @@ def render_outline_tree(
     return "\n".join(lines)
 
 
-def build_full_document_response(text: str, file_path: str, no_chrome: bool = False) -> BuilderResult:
+def _with_path_header(file_path: str, fields_banner: str | None, ui_markdown: str) -> str:
+    """The LLM-only header block: File Path, then the fields banner.
+
+    spec-projection §7 puts the banner immediately after the File Path line, so
+    the two render as one blockquote. Both are chrome and both vanish under
+    `no_chrome`, which exists so the projection can round-trip.
+    """
+    header = f"> **File Path:** `{file_path}`"
+    if fields_banner:
+        header += f"\n{fields_banner}"
+    return f"{header}\n\n{ui_markdown}"
+
+
+def build_full_document_response(
+    text: str, file_path: str, no_chrome: bool = False, fields_banner: str | None = None
+) -> BuilderResult:
     """
     Returns the ENTIRE document body in one response, with no page banner,
     continuation footer, or appendix pointer.
@@ -440,7 +455,7 @@ def build_full_document_response(text: str, file_path: str, no_chrome: bool = Fa
     """
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
-    llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    llm_content = ui_markdown if no_chrome else _with_path_header(file_path, fields_banner, ui_markdown)
     return BuilderResult(
         content=llm_content,
         structured_content={
@@ -458,6 +473,7 @@ def build_paginated_response(
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
     no_chrome: bool = False,
+    fields_banner: str | None = None,
 ) -> BuilderResult:
     """
     Splits projected Markdown into pages and returns the requested page.
@@ -496,7 +512,7 @@ def build_paginated_response(
         ui_markdown = banner + selected.page_content + footer + appendix_pointer
 
         # Prepend the path ONLY for the LLM
-        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+        llm_content = _with_path_header(file_path, fields_banner, ui_markdown)
 
     return BuilderResult(
         content=llm_content,

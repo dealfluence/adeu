@@ -42,6 +42,8 @@ import {
   render_outline_response,
   build_changes_response,
   build_fields_response,
+  banner_for_path,
+  fields_discovery_hint,
 } from "./response-builders.js";
 import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
@@ -248,6 +250,18 @@ const READ_DOCX_COMMON_DESC =
 // `page` guidance lives HERE, not only on the parameter: real MCP clients
 // drop optional-parameter descriptions in transit, so the tool description is
 // the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
+/**
+ * The A1.9 banner for an MCP full-view read, or null.
+ *
+ * Surface-aware hint (QA F11): an MCP client cannot run a shell command, so it
+ * is pointed at the read mode rather than the CLI flag.
+ */
+async function mcpFieldsBanner(file_path: string): Promise<string | null> {
+  return banner_for_path(file_path, fields_discovery_hint(), async (p) =>
+    loadDocxOrThrow(readFileSync(p), p),
+  );
+}
+
 const READ_DOCX_TAIL =
   "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n- 'fields' (mode='fields'): a ledger of every content control (ordinal, class, alias/tag, location, lock/binding state, current value) — start here to discover fillable fields. Paginate with fields_offset; `page` and `search_query` do not apply.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome; oversized documents are refused with an outline and a bounded-read recipe unless force=true. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
@@ -743,7 +757,9 @@ registerAppTool(
               ],
             } as any;
           }
-          const res = build_full_document_response(text, file_path, bundle);
+          const res = build_full_document_response(text, file_path, bundle, {
+            fields_banner: await mcpFieldsBanner(file_path),
+          });
           return res as any;
         }
         if (pageKind === "range") {
@@ -765,6 +781,7 @@ registerAppTool(
         resolvedPage,
         file_path,
         bundle,
+        { fields_banner: await mcpFieldsBanner(file_path) },
       );
       return res as any;
     } catch (e: any) {

@@ -376,3 +376,65 @@ class TestA26PerEditReportsNameTheField:
         report = self._report("Approved without conditions.", "Approved.")
         assert report["status"] == "applied"
         assert report["field"] == "CC:16 (tag: cell_notes)"
+
+
+class TestSummaryAgreesWithLedger:
+    """The cheap banner counts must equal the ledger's own counts.
+
+    `field_summary` walks the DOM only — no projection, no value previews, no
+    breadcrumbs — because the banner and the appendix render four numbers and
+    computing the whole ledger for them cost 115ms per read on a control-heavy
+    document. Two ways of counting is two chances to disagree, and a banner
+    that contradicts the ledger it advertises is worse than no banner, so the
+    agreement is pinned rather than assumed.
+    """
+
+    def test_agrees_on_the_standard_fixture(self):
+        from adeu.fields import field_summary
+
+        doc, text = _load()
+        assert field_summary(doc) == summary_counts(collect_fields(doc, text, None))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "<w:p><w:r><w:t>No controls at all.</w:t></w:r></w:p>",
+            (
+                '<w:p><w:sdt><w:sdtPr><w:tag w:val="e"/><w:text/></w:sdtPr>'
+                "<w:sdtContent><w:r><w:t></w:t></w:r></w:sdtContent></w:sdt></w:p>"
+            ),
+            (
+                '<w:p><w:sdt><w:sdtPr><w:tag w:val="f"/><w:text/></w:sdtPr>'
+                "<w:sdtContent><w:r><w:t>Filled</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+            ),
+        ],
+    )
+    def test_agrees_on_edge_shapes(self, body):
+        from adeu.fields import field_summary
+
+        doc, text = _load(body_xml=body)
+        assert field_summary(doc) == summary_counts(collect_fields(doc, text, None))
+
+    def test_agrees_on_a_real_corpus_document(self):
+        from tests.utils import corpus_path
+
+        path = corpus_path("odot_uic_drywell")
+        if path is None:
+            pytest.skip("corpus not fetched")
+
+        # load_document, not docx.Document: this corpus entry is a .dotx and
+        # python-docx refuses the template content type outright (CC-11).
+        from adeu.fields import field_summary
+        from adeu.utils.opc import load_document
+
+        doc = load_document(str(path))
+        text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        assert field_summary(doc) == summary_counts(collect_fields(doc, text, None))
+
+    def test_banner_matches_the_golden_via_the_cheap_path(self):
+        from adeu.fields import banner_for_document
+
+        doc, _ = _load()
+        assert banner_for_document(doc) == golden("GOLDEN-BANNER")

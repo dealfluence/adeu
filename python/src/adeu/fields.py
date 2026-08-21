@@ -19,8 +19,11 @@ is editing.
 """
 
 import bisect
+import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .outline import clean_breadcrumb, offset_to_page
@@ -320,6 +323,97 @@ def _states_for(info: SdtInfo, empty: bool) -> Tuple[str, ...]:
     return tuple(states)
 
 
+def _has_text(sdt_element: Any) -> bool:
+    content = sdt_element.find(QN_W_SDTCONTENT)
+    if content is None:
+        return False
+    return any((t.text or "").strip() for t in content.iter(_W + "t"))
+
+
+def field_summary(doc: Any) -> Tuple[int, int, int, int]:
+    """``(total, empty, locked, bound)`` from the DOM alone.
+
+    The banner and the appendix summary need only these four numbers, and
+    paying for the full ledger to get them is what made this expensive: on
+    FedRAMP rev4 the appendix would have carried 115ms of value previews,
+    breadcrumbs and page lookups that nothing rendered. This walks the ordinal
+    pre-pass and stops.
+
+    ``empty`` is derived structurally here (placeholder shown, or no text in
+    the content) rather than from the projection. A test pins that it agrees
+    with the ledger's own count, because a banner that disagrees with the
+    ledger it advertises is worse than no banner.
+    """
+    infos = assign_ordinals(part_element(p) for p, _kind in iter_document_parts_with_kind(doc))
+    total = empty = locked = bound = 0
+    for info in infos.values():
+        total += 1
+        if info.cls in _CONTAINER_CLASSES or info.cls == "checkbox":
+            pass  # containers and checkboxes are never "empty" for the count
+        elif info.showing_placeholder or not _has_text(info.element):
+            empty += 1
+        if info.cls == "group" or info.content_locked:
+            locked += 1
+        if info.bound:
+            bound += 1
+    return total, empty, locked, bound
+
+
+def banner_for_document(doc: Any, hint: str = "") -> Optional[str]:
+    """The full-view banner, computed without projecting values (spec §7)."""
+    counts = field_summary(doc)
+    protection = read_document_protection(doc)
+    if counts[0] == 0 and protection.mode == "none":
+        return None
+    line = f"> **Protection:** {protection.label} \u00b7 **Fields:** {_summary_text(counts)}"
+    return f"{line}{hint}" if hint else line
+
+
+#: (path, mtime_ns, size) -> banner. The banner is a pure function of the file
+#: bytes, and the agent loop is read → edit → read, so the same version is
+#: asked for repeatedly. Bounded because a long-lived server must not grow a
+#: map keyed by every file it has ever seen.
+_BANNER_MEMO: "OrderedDict[Tuple[str, int, int], Optional[str]]" = OrderedDict()
+_BANNER_MEMO_MAX = 32
+
+
+def banner_for_path(path: str, hint: str = "", loader: Any = None) -> Optional[str]:
+    """:func:`banner_for_document` for a file, memoised on its stat key.
+
+    Measured on fedramp_ssp_rev4 (5,007 controls): 68ms to load the package and
+    82ms to classify every control — 150ms that a full-view read would
+    otherwise repeat on every call, for four numbers that cannot change while
+    the bytes do not. Typical documents are far below this; the memo exists for
+    the outlier, which is exactly the document an agent pages through most.
+    """
+    try:
+        st = os.stat(path)
+        key = (str(Path(path).resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+    if key in _BANNER_MEMO:
+        _BANNER_MEMO.move_to_end(key)
+        cached = _BANNER_MEMO[key]
+        return f"{cached}{hint}" if cached and hint else cached
+
+    try:
+        if loader is None:
+            from .utils.opc import load_document
+
+            loader = load_document
+        banner = banner_for_document(loader(path))
+    except Exception:
+        # Advisory chrome. A malformed settings part, or a package python-docx
+        # refuses, must not fail the read it decorates.
+        banner = None
+
+    _BANNER_MEMO[key] = banner
+    if len(_BANNER_MEMO) > _BANNER_MEMO_MAX:
+        _BANNER_MEMO.popitem(last=False)
+    return f"{banner}{hint}" if banner and hint else banner
+
+
 def collect_fields(
     doc: Any,
     raw_text: str,
@@ -440,11 +534,15 @@ def summary_counts(entries: Sequence[FieldEntry]) -> Tuple[int, int, int, int]:
     )
 
 
-def _fields_summary(entries: Sequence[FieldEntry]) -> str:
-    total, empty, locked, bound = summary_counts(entries)
+def _summary_text(counts: Tuple[int, int, int, int]) -> str:
+    total, empty, locked, bound = counts
     if total == 0:
         return "no content controls"
     return f"{total} content controls \u2014 {empty} empty \u00b7 {locked} locked \u00b7 {bound} bound"
+
+
+def _fields_summary(entries: Sequence[FieldEntry]) -> str:
+    return _summary_text(summary_counts(entries))
 
 
 def render_banner(
@@ -533,7 +631,7 @@ def render_line(entry: FieldEntry, width: int) -> str:
 
 
 def render_appendix_section(
-    entries: Sequence[FieldEntry],
+    counts: Tuple[int, int, int, int],
     protection: DocumentProtection,
     hint: str = "",
 ) -> List[str]:
@@ -542,12 +640,12 @@ def render_appendix_section(
     Header lines only: the full ledger never renders here, because the appendix
     is bounded and a 5,007-line ledger would swallow it.
     """
-    if not entries and protection.mode == "none":
+    if counts[0] == 0 and protection.mode == "none":
         return []
     lines = [
         "## Content Controls",
         "",
-        f"Protection: {protection.label} \u00b7 {_fields_summary(entries)}",
+        f"Protection: {protection.label} \u00b7 {_summary_text(counts)}",
     ]
     if hint:
         lines.append(hint)

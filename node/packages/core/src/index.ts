@@ -12,6 +12,8 @@ export { paginate, split_structural_appendix, parse_page_arg, PAGE_RANGE_MAX_PAG
 export { extract_outline, offset_to_page, clean_breadcrumb, heading_path_at, OutlineNode } from './outline.js';
 export {
   collectFields,
+  fieldSummary,
+  bannerForDocument,
   readDocumentProtection,
   renderBanner,
   renderLedger,

@@ -11,6 +11,7 @@
 // package has no CLI.
 
 import { resolve, basename } from "node:path";
+import { statSync } from "node:fs";
 import {
   offset_to_page,
   paginate,
@@ -18,6 +19,7 @@ import {
   collectFields,
   readDocumentProtection,
   renderLedger,
+  bannerForDocument,
 } from "@adeu/core";
 import type { ProjectionBundle, ToolResult } from "./response-builders.js";
 import { split_projection } from "./shared.js";
@@ -145,6 +147,54 @@ function addPair(pair_map: Map<string, string[]>, from: string, to: string): voi
  * command, or a CLI user to call a tool, is advice they cannot act on. Node
  * has no CLI, so this is the MCP wording only.
  */
+/**
+ * (path, mtimeMs, size) -> banner. The banner is a pure function of the file
+ * bytes, and the agent loop is read → edit → read, so the same version is
+ * asked for repeatedly. Bounded because a long-lived server must not grow a
+ * map keyed by every file it has ever seen.
+ *
+ * Measured on fedramp_ssp_rev4 (5,007 controls): 68ms to load the package and
+ * 82ms to classify every control — 150ms a full-view read would otherwise
+ * repeat every call, for four numbers that cannot change while the bytes do
+ * not.
+ */
+const BANNER_MEMO = new Map<string, string | null>();
+const BANNER_MEMO_MAX = 32;
+
+export async function banner_for_path(
+  path: string,
+  hint: string,
+  load: (p: string) => Promise<any>,
+): Promise<string | null> {
+  let key: string;
+  try {
+    const st = statSync(path);
+    key = `${resolve(path)}|${st.mtimeMs}|${st.size}`;
+  } catch {
+    return null;
+  }
+
+  if (BANNER_MEMO.has(key)) {
+    const cached = BANNER_MEMO.get(key)!;
+    return cached && hint ? `${cached}${hint}` : cached;
+  }
+
+  let banner: string | null = null;
+  try {
+    banner = bannerForDocument(await load(path));
+  } catch {
+    // Advisory chrome. A malformed settings part must not fail the read it
+    // decorates.
+    banner = null;
+  }
+
+  BANNER_MEMO.set(key, banner);
+  if (BANNER_MEMO.size > BANNER_MEMO_MAX) {
+    BANNER_MEMO.delete(BANNER_MEMO.keys().next().value as string);
+  }
+  return banner && hint ? `${banner}${hint}` : banner;
+}
+
 export function fields_discovery_hint(): string {
   return ' \u00b7 read mode="fields" for the field ledger';
 }

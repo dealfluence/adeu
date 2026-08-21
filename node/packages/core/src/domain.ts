@@ -4,7 +4,7 @@ import { iter_block_items, get_run_text } from "./utils/docx.js";
 import { findAllDescendants } from "./docx/dom.js";
 import { findDescendantsByLocalName } from "./sanitize/transforms.js";
 import {
-  collectFields,
+  fieldSummary,
   readDocumentProtection,
   renderAppendixSection,
 } from "./fields.js";
@@ -372,10 +372,13 @@ function content_controls_appendix_section(
   base_text: string,
 ): string[] {
   try {
-    const entries = collectFields(doc, base_text, null);
+    // Counts only. The appendix renders four numbers, and computing the full
+    // ledger to get them added 115ms of unrendered value previews and
+    // breadcrumbs to every read of a control-heavy document.
+    const counts = fieldSummary(doc);
     const protection = readDocumentProtection(doc);
     return renderAppendixSection(
-      entries,
+      counts,
       protection,
       'Read with mode="fields" for the full field ledger.',
     );

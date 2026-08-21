@@ -39,6 +39,7 @@ export {
   build_changes_response,
   build_fields_response,
   fields_discovery_hint,
+  banner_for_path,
 } from "./ledger.js";
 
 // Projection style markers: `**bold**` always; `_italic_` only where the
@@ -404,12 +405,37 @@ function snapCodePointBoundary(
   return [start, end];
 }
 
+/**
+ * The LLM-only header block: File Path, then the fields banner.
+ *
+ * spec-projection §7 puts the banner immediately after the File Path line, so
+ * the two render as one blockquote. Both are chrome and both vanish under
+ * `no_chrome`, which exists so the projection can round-trip.
+ */
+function with_path_header(
+  file_path: string,
+  fields_banner: string | null | undefined,
+  ui_markdown: string,
+): string {
+  let header = `> **File Path:** \`${resolve(file_path)}\``;
+  if (fields_banner) header += `\n${fields_banner}`;
+  return `${header}\n\n${ui_markdown}`;
+}
+
 function parseBundleAndOptions(
-  arg3?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  arg4?: boolean | { no_chrome?: boolean },
-): { bundle?: ProjectionBundle; no_chrome: boolean } {
+  arg3?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  arg4?: boolean | { no_chrome?: boolean; fields_banner?: string | null },
+): {
+  bundle?: ProjectionBundle;
+  no_chrome: boolean;
+  fields_banner?: string | null;
+} {
   let bundle: ProjectionBundle | undefined;
   let no_chrome = false;
+  let fields_banner: string | null | undefined;
 
   if (typeof arg3 === "boolean") {
     no_chrome = arg3;
@@ -419,15 +445,19 @@ function parseBundleAndOptions(
     if ("no_chrome" in arg3 && arg3.no_chrome !== undefined) {
       no_chrome = Boolean(arg3.no_chrome);
     }
+    if ("fields_banner" in arg3) fields_banner = arg3.fields_banner;
   }
 
   if (typeof arg4 === "boolean") {
     no_chrome = arg4;
-  } else if (arg4 && typeof arg4 === "object" && "no_chrome" in arg4 && arg4.no_chrome !== undefined) {
-    no_chrome = Boolean(arg4.no_chrome);
+  } else if (arg4 && typeof arg4 === "object") {
+    if ("no_chrome" in arg4 && arg4.no_chrome !== undefined) {
+      no_chrome = Boolean(arg4.no_chrome);
+    }
+    if ("fields_banner" in arg4) fields_banner = arg4.fields_banner;
   }
 
-  return { bundle, no_chrome };
+  return { bundle, no_chrome, fields_banner };
 }
 
 function _build_appendix_pointer(has_appendix: boolean): string {
@@ -496,13 +526,18 @@ export function render_outline_tree(
 export function build_full_document_response(
   text: string,
   file_path: string,
-  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  no_chrome_param?: boolean | { no_chrome?: boolean },
+  bundleOrOpts?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  no_chrome_param?:
+    | boolean
+    | { no_chrome?: boolean; fields_banner?: string | null },
 ): ToolResult {
   // The ENTIRE document body with no page banner, continuation footer, or
   // appendix pointer — the round-trip artifact for text-based apply/diff
   // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
-  const { bundle, no_chrome } = parseBundleAndOptions(
+  const { bundle, no_chrome, fields_banner } = parseBundleAndOptions(
     bundleOrOpts,
     no_chrome_param,
   );
@@ -510,7 +545,7 @@ export function build_full_document_response(
   const ui_markdown = body;
   const llm_content = no_chrome
     ? ui_markdown
-    : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    : with_path_header(file_path, fields_banner, ui_markdown);
   return {
     content: [{ type: "text", text: llm_content }],
     structuredContent: {
@@ -564,10 +599,15 @@ export function build_paginated_response(
   text: string,
   page: number,
   file_path: string,
-  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  no_chrome_param?: boolean | { no_chrome?: boolean },
+  bundleOrOpts?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  no_chrome_param?:
+    | boolean
+    | { no_chrome?: boolean; fields_banner?: string | null },
 ): ToolResult {
-  const { bundle, no_chrome } = parseBundleAndOptions(
+  const { bundle, no_chrome, fields_banner } = parseBundleAndOptions(
     bundleOrOpts,
     no_chrome_param,
   );
@@ -606,7 +646,7 @@ export function build_paginated_response(
     const appendix_pointer = _build_appendix_pointer(has_appendix);
 
     ui_markdown = banner + selected.page_content + footer + appendix_pointer;
-    llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    llm_content = with_path_header(file_path, fields_banner, ui_markdown);
   }
 
   return {

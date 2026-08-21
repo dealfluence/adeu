@@ -685,6 +685,36 @@ def _warn_ignored_extract_flags(args) -> None:
         )
 
 
+def _fields_banner_for(doc, args, no_chrome: bool) -> "str | None":
+    """The A1.9 banner for a CLI full-view read, or None.
+
+    Returns None when there is nothing to say (no controls, no protection) so a
+    plain document gains zero noise, and under `no_chrome`, which exists so the
+    projection can round-trip.
+
+    Counts come from `field_summary`, which walks the DOM only — this runs on
+    the hot read path and must not pay for value previews nothing renders.
+    """
+    if no_chrome:
+        return None
+    try:
+        from adeu.fields import banner_for_document, banner_for_path
+
+        live = getattr(args, "live", False)
+        target = "Active Document" if live else str(args.input)
+        hint = f" \u00b7 run `adeu extract {target} --mode fields` for the field ledger"
+        if doc is not None:
+            return banner_for_document(doc, hint=hint)
+        if live or not getattr(args, "input", None):
+            return None
+        # Not loaded on this path: go through the stat-keyed memo rather than
+        # re-opening the package on every read.
+        return banner_for_path(str(args.input), hint=hint)
+    except Exception:
+        # Advisory chrome. A malformed settings part must not fail the read.
+        return None
+
+
 def handle_extract(args):
     _set_json_mode(args.json)
     if args.mode == "changes" and args.clean_view:
@@ -1009,6 +1039,7 @@ def handle_extract(args):
                 text,
                 "Active Document" if args.live else str(args.input),
                 no_chrome=no_chrome,
+                fields_banner=_fields_banner_for(doc, args, no_chrome),
             )
         else:
             res = build_paginated_response(
@@ -1017,6 +1048,7 @@ def handle_extract(args):
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
                 no_chrome=no_chrome,
+                fields_banner=_fields_banner_for(doc, args, no_chrome),
             )
 
         if isinstance(res.content, list):

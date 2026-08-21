@@ -327,19 +327,22 @@ def _content_controls_appendix_section(doc, base_text: str) -> List[str]:
     """
     try:
         from adeu.fields import (
-            collect_fields,
+            field_summary,
             read_document_protection,
             render_appendix_section,
         )
 
-        entries = collect_fields(doc, base_text, None)
+        # Counts only. The appendix renders four numbers, and computing the
+        # full ledger to get them added 115ms of unrendered value previews and
+        # breadcrumbs to every read of a control-heavy document.
+        counts = field_summary(doc)
         protection = read_document_protection(doc)
     except Exception:
         # The appendix is advisory. A malformed settings part or an exotic
         # control must not take down every read of the document.
         return []
     return render_appendix_section(
-        entries,
+        counts,
         protection,
         hint='Read with mode="fields" for the full field ledger.',
     )

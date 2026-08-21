@@ -339,6 +339,17 @@ def _schedule_background_fill(entry, clean_view: bool) -> None:
             entry.clean_fill_scheduled = False
 
 
+def _mcp_fields_banner(file_path: str) -> "str | None":
+    """The A1.9 banner for an MCP full-view read, or None.
+
+    Surface-aware hint (QA F11): an MCP client cannot run a shell command, so
+    it is pointed at the read mode instead of the CLI flag.
+    """
+    from adeu.fields import banner_for_path
+
+    return banner_for_path(file_path, hint=' \u00b7 read mode="fields" for the field ledger')
+
+
 async def _read_docx_disk(
     file_path: str,
     ctx: Context,
@@ -550,7 +561,9 @@ async def _read_docx_disk(
                                 pagination_result=pagination,
                             )
                         )
-                    return _as_tool_result(build_full_document_response(text, file_path))
+                    return _as_tool_result(
+                        build_full_document_response(text, file_path, fields_banner=_mcp_fields_banner(file_path))
+                    )
                 if kind == "range":
                     assert isinstance(page_val, tuple)
                     start_p, end_p = page_val
@@ -565,7 +578,15 @@ async def _read_docx_disk(
                     )
                 assert isinstance(page_val, int)
                 page_num = page_val
-            return _as_tool_result(build_paginated_response(text, page_num, file_path, pagination_result=pagination))
+            return _as_tool_result(
+                build_paginated_response(
+                    text,
+                    page_num,
+                    file_path,
+                    pagination_result=pagination,
+                    fields_banner=_mcp_fields_banner(file_path),
+                )
+            )
         finally:
             await relay.finish()
             # Warm the clean view in the background after a cold RAW ingest —

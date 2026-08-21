@@ -10,10 +10,17 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ccFixtureBytes } from "../../core/src/test-utils.js";
-import { DocumentObject, extractTextFromBuffer } from "@adeu/core";
+import { ccFixtureBytes, ccGolden } from "../../core/src/test-utils.js";
+import {
+  DocumentObject,
+  extractTextFromBuffer,
+  bannerForDocument,
+} from "@adeu/core";
 import { build_fields_response } from "./ledger.js";
-import { build_appendix_response } from "./response-builders.js";
+import {
+  build_appendix_response,
+  build_full_document_response,
+} from "./response-builders.js";
 
 let workDir: string;
 let fixturePath: string;
@@ -132,5 +139,62 @@ describe("A2.4 — appendix carries the summary, never the detail", () => {
     const raw = await extractTextFromBuffer(buf, false, true);
     // No controls and no protection: a plain document gains zero noise.
     expect(raw).not.toContain("## Content Controls");
+  });
+});
+
+describe("A1.9 — the banner appears exactly when warranted", () => {
+  async function fullView(bytes: Uint8Array, name: string, no_chrome = false) {
+    const path = join(workDir, name);
+    writeFileSync(path, Buffer.from(bytes));
+    const buf = Buffer.from(bytes);
+    const doc = await DocumentObject.load(buf);
+    const raw = await extractTextFromBuffer(buf, false, false);
+    const banner = no_chrome
+      ? null
+      : bannerForDocument(doc, ' \u00b7 read mode="fields" for the field ledger');
+    const res: any = build_full_document_response(raw, path, {
+      no_chrome,
+      fields_banner: banner,
+    });
+    return res.content[0].text as string;
+  }
+
+  it("renders GOLDEN-BANNER plus the MCP hint for the fixture", async () => {
+    const text = await fullView(ccFixtureBytes(), "banner_fixture.docx");
+    const line = text.split("\n").find((l) => l.startsWith("> **Protection:**"))!;
+    // The golden plus the surface-aware hint, which the golden excludes.
+    expect(line.startsWith(ccGolden("GOLDEN-BANNER"))).toBe(true);
+    expect(line.endsWith('read mode="fields" for the field ledger')).toBe(true);
+  });
+
+  it("reports forms protection", async () => {
+    const text = await fullView(ccFixtureBytes("forms"), "banner_forms.docx");
+    expect(text).toContain(
+      "> **Protection:** fill-in-forms only (enforced) \u00b7 **Fields:**",
+    );
+  });
+
+  it("emits no banner at all for a plain document", async () => {
+    const plain = "<w:p><w:r><w:t>Plain paragraph.</w:t></w:r></w:p>";
+    const text = await fullView(
+      ccFixtureBytes(undefined, plain),
+      "banner_plain.docx",
+    );
+    expect(text).not.toContain("**Protection:**");
+  });
+
+  it("suppresses the banner under no_chrome", async () => {
+    // no_chrome exists so the projection can round-trip; a banner would
+    // corrupt the artifact exactly as the File Path line would.
+    const text = await fullView(ccFixtureBytes(), "banner_nc.docx", true);
+    expect(text).not.toContain("**Protection:**");
+    expect(text).not.toContain("**File Path:**");
+  });
+
+  it("places the banner directly after the File Path line", async () => {
+    const text = await fullView(ccFixtureBytes(), "banner_order.docx");
+    const lines = text.split("\n");
+    expect(lines[0].startsWith("> **File Path:**")).toBe(true);
+    expect(lines[1].startsWith("> **Protection:**")).toBe(true);
   });
 });
