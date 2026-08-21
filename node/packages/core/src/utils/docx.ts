@@ -1,6 +1,8 @@
 import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
 import {
+  BALLOT_GLYPHS,
   BlockSdt,
+  checkboxMark,
   isAnchored,
   type SdtEvent,
   type SdtInfo,
@@ -632,6 +634,9 @@ export function get_run_style_markers(
   run: Run,
   is_heading: boolean | null = null,
 ): [string, string] {
+  // The checkbox mark is chrome, not prose: emphasis on it would project
+  // `[**x**]` and hand every marker-stripping pass something to mangle.
+  if (run.projTextOverride !== undefined) return ["", ""];
   let prefix = "";
   let suffix = "";
 
@@ -791,7 +796,50 @@ export function apply_formatting_to_segments(
   return parts.map((p) => (p ? wrap(p) : "")).join("\n");
 }
 
+/** Does this control contain a ballot-glyph run to hang the mark on? */
+function hasBallotRun(sdtEl: Element): boolean {
+  const content = findChild(sdtEl, QN_W_SDTCONTENT);
+  if (!content) return false;
+  for (const r of findAllDescendants(content, QN_W_R)) {
+    let text = "";
+    for (const t of findAllDescendants(r, QN_W_T)) text += t.textContent || "";
+    if (BALLOT_GLYPHS.has(text)) return true;
+  }
+  return false;
+}
+
+/**
+ * The checkbox control this run is the glyph of, or `undefined`.
+ *
+ * Gated on the run's text being a ballot glyph FIRST, which is what keeps this
+ * affordable: the walk runs for roughly 7,700 runs in the largest corpus
+ * document rather than for all 559,000 of them.
+ *
+ * The gate is also the correctness boundary. `odot_uic_drywell` carries two
+ * bare `U+2610` runs in ordinary prose, and the nearest enclosing `w:sdt`
+ * decides their fate: no control, or a control that is not a checkbox, means
+ * the glyph is prose and stays a glyph.
+ */
+function enclosingCheckbox(
+  rElement: Element,
+  text: string,
+  sdtInfos?: Map<Element, SdtInfo>,
+): SdtInfo | undefined {
+  if (!sdtInfos || !BALLOT_GLYPHS.has(text)) return undefined;
+  let node = rElement.parentNode as Element | null;
+  while (node && node.nodeType === 1) {
+    if (node.tagName === QN_W_SDT) {
+      const info = sdtInfos.get(node);
+      return info && info.cls === "checkbox" ? info : undefined;
+    }
+    node = node.parentNode as Element | null;
+  }
+  return undefined;
+}
+
 export function get_run_text(run: Run): string {
+  // A checkbox mark projects its own character, not the glyph in `w:t`.
+  if (run.projTextOverride !== undefined) return run.projTextOverride;
   let text = "";
   for (let i = 0; i < run._element.childNodes.length; i++) {
     const child = run._element.childNodes[i] as Element;
@@ -1036,7 +1084,7 @@ export function* iter_paragraph_content(
 
   function* process_run_element(
     r_element: Element,
-  ): Generator<Run | DocxEvent> {
+  ): Generator<Run | DocxEvent | SdtEvent> {
     let c_id: string | null = null;
     const rPr = findChild(r_element, QN_W_RPR);
     if (rPr) {
@@ -1118,7 +1166,27 @@ export function* iter_paragraph_content(
       }
     }
 
-    if (!hide_result) yield new Run(r_element, paragraph);
+    if (!hide_result) {
+      const run = new Run(r_element, paragraph);
+      const cbInfo = enclosingCheckbox(r_element, get_run_text(run), sdtInfos);
+      if (cbInfo) {
+        // Spec §4, twin of the python branch. `[` and `]` are virtual chrome;
+        // the mark is a REAL run-backed span. One character replaces one
+        // character (U+2612 -> `x`), so no offset arithmetic downstream has to
+        // learn about a width difference.
+        //
+        // Done HERE, at run emission, rather than in the `w:sdt` branch,
+        // because a checkbox control is not always inline: 11 of
+        // `odot_uic_drywell`'s 19 checkboxes wrap a whole `w:tc` (a checkbox
+        // column in a form table), and that path never reaches the sdt branch.
+        run.projTextOverride = checkboxMark(cbInfo);
+        yield { type: "checkbox_start", info: cbInfo } as SdtEvent;
+        yield run;
+        yield { type: "checkbox_end", info: cbInfo } as SdtEvent;
+      } else {
+        yield run;
+      }
+    }
     if (c_id !== null) yield { type: "fmt_end", id: c_id };
   }
 
@@ -1186,7 +1254,16 @@ export function* iter_paragraph_content(
         // deliberately do not) the boundary becomes visible as a pair of
         // events, and an ANCHORED control's contents are bracketed by them.
         const info = sdtInfos ? sdtInfos.get(child) : undefined;
-        if (!info || !isAnchored(info)) {
+        if (info && info.cls === "checkbox" && !hasBallotRun(child)) {
+          // Degenerate control: Word always writes the glyph run, but a
+          // generator might not. Emit the token virtually so it stays three
+          // characters wide instead of collapsing to `[]`. The NORMAL case is
+          // absent by design — the glyph run substitutes itself at run
+          // emission, which covers every path that reaches a run.
+          yield { type: "checkbox_start", info } as SdtEvent;
+          yield { type: "checkbox_mark", info } as SdtEvent;
+          yield { type: "checkbox_end", info } as SdtEvent;
+        } else if (!info || !isAnchored(info)) {
           yield* traverse_node(child);
         } else {
           yield { type: "sdt_start", info } as SdtEvent;

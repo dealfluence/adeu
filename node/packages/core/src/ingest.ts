@@ -18,6 +18,9 @@ import { findChild } from "./docx/dom.js";
 import {
   assignOrdinals,
   BlockSdt,
+  CHECKBOX_CLOSE,
+  CHECKBOX_OPEN,
+  checkboxMark,
   closeToken,
   isAnchored,
   isSdtEvent,
@@ -659,6 +662,16 @@ export function build_paragraph_text(
         if (!cleanView && info.showingPlaceholder && info.placeholderText) {
           parts.push(`{>>placeholder: ${info.placeholderText}<<}`);
         }
+      } else if (item.type === "checkbox_start") {
+        // Checkbox tokens persist in the clean view: they are structural
+        // (spec §6), like the anchors, not commentary.
+        parts.push(CHECKBOX_OPEN);
+      } else if (item.type === "checkbox_mark") {
+        // Fallback only — the mark is normally a real run emitted by the
+        // traversal, and arrives through the Run branch.
+        parts.push(checkboxMark(info));
+      } else if (item.type === "checkbox_end") {
+        parts.push(CHECKBOX_CLOSE);
       } else {
         parts.push(closeToken(info));
       }

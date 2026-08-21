@@ -65,6 +65,20 @@ _CLASS_PROBES: Tuple[Tuple[str, str], ...] = (
 #: consume an ordinal (A1.3) and still appear in the ledger.
 _UNANCHORED_CLASSES = frozenset({"checkbox", "picture", "building-block", "repeating", "repeating-item"})
 
+#: The ballot glyphs Word writes as a checkbox's visible content. Substituted
+#: for the ``[x]``/``[ ]`` mark ONLY inside a checkbox control: the corpus has
+#: bare ``U+2610`` runs sitting in ordinary prose outside any control
+#: (``odot_uic_drywell`` has two), and rewriting those would invent checkboxes
+#: in a document that has 19 real ones for them to hide among.
+#:
+#: Word writes the glyph as literal ``w:t`` text, not ``w:sym`` — verified
+#: against Word 16.0 — which is what lets a 1-char run back a 1-char span.
+BALLOT_GLYPHS = frozenset({"\u2610", "\u2611", "\u2612"})
+
+#: Bracket halves of the checkbox token. Virtual: they map to no run.
+CHECKBOX_OPEN = "["
+CHECKBOX_CLOSE = "]"
+
 #: Content-lock values that make a control's CONTENTS read-only. ``sdtLocked``
 #: is deliberately absent: it forbids deleting the control but leaves the
 #: contents editable, so it is a ledger detail and never an inline flag
@@ -122,6 +136,18 @@ class SdtInfo:
     def close_token(self) -> str:
         return f"{{#/cc:{self.ordinal}}}"
 
+    @property
+    def checkbox_mark(self) -> str:
+        """The middle character of the ``[x]`` / ``[ ]`` token (spec §4).
+
+        Read from ``w14:checked``, NOT from the glyph, and the COM battery is
+        why. Word restores ``w14:checked`` when a toggle is rejected, so the
+        attribute is the value the user will see once the review is settled;
+        the glyph run can lag it inside a tracked change. Projecting the glyph
+        would render a confident ``[x]`` for a tick that is pending rejection.
+        """
+        return "x" if self.checked else " "
+
 
 class SdtEvent(NamedTuple):
     """A control boundary in the traversal stream.
@@ -132,7 +158,7 @@ class SdtEvent(NamedTuple):
     rather than coincidental.
     """
 
-    type: str  # "sdt_start" | "sdt_end"
+    type: str  # "sdt_start" | "sdt_end" | "checkbox_start" | "checkbox_mark" | "checkbox_end"
     info: SdtInfo
 
 

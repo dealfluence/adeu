@@ -484,7 +484,13 @@ export function ccFixtureBodyXml(): string {
   if (!existsSync(CC_FIXTURE_BODY)) {
     throw new Error(`shared content-control fixture missing: ${CC_FIXTURE_BODY}`);
   }
-  return readFileSync(CC_FIXTURE_BODY, 'utf-8').trim();
+  // Normalise EOLs before trimming: python reads this same file through
+  // `Path.read_text()`, which translates CRLF to LF, so on a Windows checkout
+  // the two engines would otherwise build their fixture from DIFFERENT bytes.
+  // Today the file is one line and `trim()` hides it; the day someone
+  // reformats it to multi-line, that becomes a silent cross-engine parity
+  // divergence visible only on Windows. Cheaper to close now than to diagnose.
+  return readFileSync(CC_FIXTURE_BODY, 'utf-8').replace(/\r\n/g, '\n').trim();
 }
 
 export function ccFixtureDocumentXml(): string {
@@ -508,8 +514,18 @@ export function ccFixtureBodyElement(): any {
  * Mirrors `python/tests/cc_fixture.py::cc_fixture_bytes` and
  * `scripts/make_cc_fixture.py` part-for-part, so the two engines are handed
  * byte-comparable input. `protection` selects the `cc_fixture_forms` variant.
+ *
+ * `bodyXml` swaps the 16-control body for a synthetic one, which is how the
+ * node twin of `python/tests/sdt_fixtures.py::build_sdt_docx` is spelled: the
+ * checkbox suite needs shapes the shared fixture deliberately does not carry
+ * (a control whose `w14:checked` contradicts its glyph, a control with no
+ * glyph run at all). The package around it stays identical, so a synthetic
+ * body is exercised through exactly the same load path as the real fixture.
  */
-export function ccFixtureBytes(protection?: 'forms' | 'readOnly' | 'comments'): Uint8Array {
+export function ccFixtureBytes(
+  protection?: 'forms' | 'readOnly' | 'comments',
+  bodyXml?: string,
+): Uint8Array {
   const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
   const prot = protection
     ? `<w:documentProtection w:edit="${protection}" w:enforcement="1"/>`
@@ -534,7 +550,13 @@ export function ccFixtureBytes(protection?: 'forms' | 'readOnly' | 'comments'): 
         'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"' +
         ' Target="word/document.xml"/></Relationships>',
     ),
-    'word/document.xml': strToU8(decl + '\n' + ccFixtureDocumentXml()),
+    'word/document.xml': strToU8(
+      decl +
+        '\n' +
+        (bodyXml === undefined
+          ? ccFixtureDocumentXml()
+          : CC_FIXTURE_HEADER + bodyXml + CC_FIXTURE_FOOTER),
+    ),
     'word/_rels/document.xml.rels': strToU8(
       decl +
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +

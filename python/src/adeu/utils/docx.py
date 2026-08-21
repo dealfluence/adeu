@@ -16,7 +16,7 @@ from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.utils.content_controls import BlockSdt, SdtEvent
+from adeu.utils.content_controls import BALLOT_GLYPHS, BlockSdt, SdtEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -910,6 +910,42 @@ def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     return "\n".join(wrap(p) if p else "" for p in parts)
 
 
+def _has_ballot_run(sdt_el) -> bool:
+    """Does this control contain a ballot-glyph run to hang the mark on?"""
+    content = sdt_el.find(QN_W_SDTCONTENT)
+    if content is None:
+        return False
+    for r in content.iter(QN_W_R):
+        if "".join(t.text or "" for t in r.iter(QN_W_T)) in BALLOT_GLYPHS:
+            return True
+    return False
+
+
+def _enclosing_checkbox(r_element, text: str, sdt_infos: Optional[dict]):
+    """The checkbox control this run is the glyph of, or ``None``.
+
+    Gated on the run's text being a ballot glyph FIRST, which is what keeps
+    this affordable: the walk runs for roughly 7,700 runs in the largest
+    corpus document rather than for all 559,000 of them.
+
+    The gate is also the correctness boundary. `odot_uic_drywell` carries two
+    bare ``U+2610`` runs in ordinary prose, outside any control, and the
+    nearest enclosing ``w:sdt`` decides their fate: no control, or a control
+    that is not a checkbox, means the glyph is prose and stays a glyph.
+    Substituting on the character alone would fabricate two checkboxes in a
+    document that has 19 real ones for them to hide among.
+    """
+    if not sdt_infos or text not in BALLOT_GLYPHS:
+        return None
+    node = r_element.getparent()
+    while node is not None:
+        if node.tag == QN_W_SDT:
+            info = sdt_infos.get(id(node))
+            return info if info is not None and info.cls == "checkbox" else None
+        node = node.getparent()
+    return None
+
+
 def iter_paragraph_content(
     paragraph: Any, part: Any = None, sdt_infos: Optional[dict] = None
 ) -> Iterator[ParagraphItem]:
@@ -1044,7 +1080,31 @@ def iter_paragraph_content(
                 text = text_parts[0]
             else:
                 text = "".join(text_parts)
-            yield ProjectedRun(r_element, text, is_bold, is_italic)
+            cb_info = _enclosing_checkbox(r_element, text, sdt_infos)
+            if cb_info is not None:
+                # Spec §4. `[` and `]` are virtual chrome; the mark is a REAL
+                # run-backed span, which is what "virtual + real span mix"
+                # means. The substitution is one character for one character
+                # (U+2612 -> `x`), so no offset arithmetic anywhere has to
+                # learn about a width difference: the mapper already builds
+                # spans from `proj_text`, so a run projecting `x` while its
+                # `w:t` holds the glyph needs no new invariant.
+                #
+                # Done HERE, at run emission, rather than in the `w:sdt`
+                # branch, because a checkbox control is not always inline. In
+                # the corpus, 11 of `odot_uic_drywell`'s 19 checkboxes wrap a
+                # whole `w:tc` (a checkbox column in a form table), and that
+                # path never passes through the sdt branch. Substituting where
+                # the run is emitted covers every path by construction.
+                #
+                # Emphasis is forced off: the mark is chrome, and a bold glyph
+                # run would otherwise project `[**x**]` for the marker-
+                # stripping passes to mangle (the QA F4/F22b class).
+                yield SdtEvent("checkbox_start", cb_info)
+                yield ProjectedRun(r_element, cb_info.checkbox_mark, False, False)
+                yield SdtEvent("checkbox_end", cb_info)
+            else:
+                yield ProjectedRun(r_element, text, is_bold, is_italic)
 
         if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
@@ -1118,7 +1178,20 @@ def iter_paragraph_content(
                 # visible as a pair of events, and an ANCHORED control's
                 # contents are bracketed by them.
                 info = sdt_infos.get(id(child)) if sdt_infos is not None else None
-                if info is None or not info.anchored:
+                if info is not None and info.cls == "checkbox" and not _has_ballot_run(child):
+                    # Degenerate control: Word always writes the glyph run, but
+                    # a generator might not. Emit the whole token virtually so
+                    # it stays three characters wide instead of collapsing to
+                    # `[]`, which no edit surface expects.
+                    #
+                    # The NORMAL case is deliberately absent from this branch:
+                    # a checkbox's glyph run substitutes itself where runs are
+                    # emitted, so it works on every path that reaches a run —
+                    # inline, in a cell, or wrapping one. See the run branch.
+                    yield SdtEvent("checkbox_start", info)
+                    yield SdtEvent("checkbox_mark", info)
+                    yield SdtEvent("checkbox_end", info)
+                elif info is None or not info.anchored:
                     yield from traverse_node(child)
                 else:
                     yield SdtEvent("sdt_start", info)

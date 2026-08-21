@@ -134,6 +134,39 @@ export function closeToken(info: SdtInfo): string {
   return `{#/cc:${info.ordinal}}`;
 }
 
+/**
+ * The ballot glyphs Word writes as a checkbox's visible content.
+ *
+ * Substituted ONLY inside a checkbox control: the corpus has bare `U+2610`
+ * runs sitting in ordinary prose outside any control (`odot_uic_drywell` has
+ * two), and rewriting those would invent checkboxes in a document that has 19
+ * real ones for them to hide among.
+ *
+ * Word writes the glyph as literal `w:t` text, not `w:sym` — verified against
+ * Word 16.0 — which is what lets a one-character run back a one-character span.
+ */
+export const BALLOT_GLYPHS: ReadonlySet<string> = new Set([
+  "\u2610",
+  "\u2611",
+  "\u2612",
+]);
+
+/** Bracket halves of the checkbox token. Virtual: they map to no run. */
+export const CHECKBOX_OPEN = "[";
+export const CHECKBOX_CLOSE = "]";
+
+/**
+ * The middle character of the `[x]` / `[ ]` token (spec-projection.md §4).
+ *
+ * Read from `w14:checked`, NOT from the glyph, and the COM battery is why:
+ * Word restores `w14:checked` when a toggle is rejected, so the attribute is
+ * the value that survives the review, while the glyph run can lag it inside a
+ * pending revision.
+ */
+export function checkboxMark(info: SdtInfo): string {
+  return info.checked ? "x" : " ";
+}
+
 /** Classify one `w:sdt` from its `w:sdtPr`. Never mutates the element. */
 export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
   const sdtPr = findChild(sdtElement, QN_W_SDTPR);
@@ -278,9 +311,31 @@ export function assignOrdinals(partElements: Iterable<any>): Map<any, SdtInfo> {
 
 /** A control boundary in the traversal stream. */
 export interface SdtEvent {
-  type: "sdt_start" | "sdt_end";
+  type: SdtEventType;
   info: SdtInfo;
 }
+
+/**
+ * The boundary kinds. The `checkbox_*` trio is chrome around a checkbox's
+ * three-character token (spec-projection.md §4): `checkbox_start` and
+ * `checkbox_end` are the virtual brackets, while `checkbox_mark` is a
+ * FALLBACK for the degenerate control that has no glyph run to carry the mark
+ * as a real span.
+ */
+export type SdtEventType =
+  | "sdt_start"
+  | "sdt_end"
+  | "checkbox_start"
+  | "checkbox_mark"
+  | "checkbox_end";
+
+const SDT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "sdt_start",
+  "sdt_end",
+  "checkbox_start",
+  "checkbox_mark",
+  "checkbox_end",
+]);
 
 /**
  * Narrow a traversal item to a control boundary.
@@ -291,11 +346,7 @@ export interface SdtEvent {
  * producer emits a like-named event.
  */
 export function isSdtEvent(item: any): item is SdtEvent {
-  return (
-    !!item &&
-    (item.type === "sdt_start" || item.type === "sdt_end") &&
-    "info" in item
-  );
+  return !!item && SDT_EVENT_TYPES.has(item.type) && "info" in item;
 }
 
 /**

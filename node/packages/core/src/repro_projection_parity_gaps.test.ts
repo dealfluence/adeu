@@ -298,7 +298,11 @@ describe("run-level elements project their glyph", () => {
 // ---------------------------------------------------------------------------
 const CORPUS_PROJECTION_SIZES: Record<string, [number, number]> = {
   // key: [raw_view_chars, clean_view_chars]
-  fedramp_ssp_rev4: [612_913, 512_962],
+  // CC-1c moved both views by +7,762 = 3,881 checkboxes x 2, the width a
+  // `w14:checkbox` gains going from a one-character ballot glyph to the
+  // three-character `[ ]` token. No emphasis markers are involved here,
+  // unlike odot_uic_drywell below.
+  fedramp_ssp_rev4: [620_675, 520_724],
   dau_acquisition_plan: [19_611, 17_254],
   wawd_esi_agreement: [15_978, 15_891],
   on_juries_form1: [5_505, 3_199],
@@ -306,7 +310,15 @@ const CORPUS_PROJECTION_SIZES: Record<string, [number, number]> = {
   // A .dotx. Absent from this table until CC-11, because python could not open
   // one at all and there was nothing to pin against; both engines project the
   // same 7,221 chars in both views (verified 2026-08-21).
-  odot_uic_drywell: [7_449, 7_449],
+  //
+  // CC-1c then moved it DOWN, 7,449 -> 7,435, which looks wrong for a change
+  // that widens glyphs into tokens and is not. Attributed exactly: of this
+  // document's 21 ballot glyphs, 19 sit in controls and 13 of those arrived
+  // wrapped in emphasis markers, projecting as `**<glyph>**`. The mark is
+  // chrome, so it now carries no markers: -52 for the 13 x 4 dropped marker
+  // characters, +38 for 19 x 2 of token width, net -14. The two surviving
+  // glyphs are bare prose outside any control and are deliberately untouched.
+  odot_uic_drywell: [7_435, 7_435],
 };
 
 describe("corpus projection sizes are pinned to the python engine", () => {

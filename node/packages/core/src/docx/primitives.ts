@@ -14,6 +14,22 @@ export class Paragraph {
 }
 
 export class Run {
+  /**
+   * Projected text that OVERRIDES the run's own `w:t` content.
+   *
+   * Set for exactly one thing today: the mark inside a checkbox control's
+   * `[x]` / `[ ]` token (spec-projection.md §4), where a `U+2612` glyph run
+   * projects as `x`. The substitution is one character for one character, so
+   * every offset and span-splitting calculation downstream is unaffected.
+   *
+   * The python twin reaches this through `ProjectedRun.proj_text`, which is
+   * computed during traversal; node's `Run` is a lazy wrapper, so the override
+   * rides on the instance instead. `get_run_text` honours it, and
+   * `get_run_style_markers` returns no markers for it — the mark is chrome and
+   * a bold glyph run must not project `[**x**]`.
+   */
+  public projTextOverride?: string;
+
   constructor(public _element: Element, public _parent: any) {}
 }
 

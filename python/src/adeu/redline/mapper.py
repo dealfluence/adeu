@@ -13,6 +13,8 @@ from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
 from adeu.utils.content_controls import (
+    CHECKBOX_CLOSE,
+    CHECKBOX_OPEN,
     QN_W_SDTCONTENT,
     BlockSdt,
     SdtEvent,
@@ -939,6 +941,14 @@ class DocumentMapper:
                     txt = info.open_token
                     if not self.clean_view and info.showing_placeholder and info.placeholder_text:
                         txt += f"{{>>placeholder: {info.placeholder_text}<<}}"
+                elif item.type == "checkbox_start":
+                    txt = CHECKBOX_OPEN
+                elif item.type == "checkbox_mark":
+                    # Fallback only; normally the mark is a real run-backed span
+                    # emitted through the ProjectedRun branch (spec §4).
+                    txt = info.checkbox_mark
+                elif item.type == "checkbox_end":
+                    txt = CHECKBOX_CLOSE
                 else:
                     txt = info.close_token
                 self._add_virtual_text(txt, current, paragraph)

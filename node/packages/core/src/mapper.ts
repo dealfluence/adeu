@@ -5,6 +5,9 @@ import { resolve_cell_anchor } from "./docx/cell-anchor.js";
 import {
   assignOrdinals,
   BlockSdt,
+  CHECKBOX_CLOSE,
+  CHECKBOX_OPEN,
+  checkboxMark,
   closeToken,
   isAnchored,
   isSdtEvent,
@@ -979,6 +982,14 @@ export class DocumentMapper {
           ) {
             txt += `{>>placeholder: ${info.placeholderText}<<}`;
           }
+        } else if (item.type === "checkbox_start") {
+          txt = CHECKBOX_OPEN;
+        } else if (item.type === "checkbox_mark") {
+          // Fallback only; normally the mark is a real run-backed span
+          // emitted through the Run branch (spec §4).
+          txt = checkboxMark(info);
+        } else if (item.type === "checkbox_end") {
+          txt = CHECKBOX_CLOSE;
         } else {
           txt = closeToken(info);
         }

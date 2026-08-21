@@ -123,29 +123,21 @@ def _golden(section: str) -> str:
     return re.search(rf"## {section}.*?\n```\n(.*?)```", md, re.S).group(1).rstrip("\n")
 
 
-# The one known gap: CC:6 still projects the raw glyph instead of the [x] token.
-# That is CC-1c (checkboxes), owned separately. Rather than weaken the golden
-# comparison to "mostly equal", the checkbox line is substituted explicitly, so
-# the assertion below is exact for all 15 other controls and this constant is
-# what has to be deleted when CC-1c lands.
-_CC1C_PENDING = ("Confidentiality applies: [x]", "Confidentiality applies: \u2612")
-
-
 def test_a1_1_raw_view_matches_golden_raw(fixture_bytes):
-    """A1.1 — full-document raw golden, exact but for the CC-1c checkbox."""
-    expected = _golden("GOLDEN-RAW").replace(*_CC1C_PENDING)
-    assert _project(fixture_bytes).rstrip("\n") == expected
+    """A1.1 — full-document raw golden, now exact for all 16 controls.
+
+    Until CC-1c this assertion carried a substitution for CC:6, which still
+    projected the raw glyph. The golden always expected the token; the code
+    caught up.
+    """
+    assert _project(fixture_bytes).rstrip("\n") == _golden("GOLDEN-RAW")
 
 
 def test_a1_2_clean_view_matches_golden_clean(fixture_bytes):
     """A1.2 — clean view: anchors persist, the CC:2 bubble is gone."""
-    expected = (
-        _golden("GOLDEN-RAW")
-        .replace(*_CC1C_PENDING)
-        .replace(
-            f"{{#cc:2}}{{>>placeholder: {GHOST}<<}}{{#/cc:2}}",
-            "{#cc:2}{#/cc:2}",
-        )
+    expected = _golden("GOLDEN-RAW").replace(
+        f"{{#cc:2}}{{>>placeholder: {GHOST}<<}}{{#/cc:2}}",
+        "{#cc:2}{#/cc:2}",
     )
     assert _project(fixture_bytes, clean_view=True).rstrip("\n") == expected
     # ...and that is exactly the GOLDEN-CLEAN line the spec calls out.

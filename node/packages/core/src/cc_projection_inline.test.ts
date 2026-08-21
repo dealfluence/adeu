@@ -22,14 +22,26 @@ import { DocumentMapper } from "./mapper.js";
 
 const GHOST = "Click or tap here to enter text.";
 
-/** The normative golden block from the frozen acceptance fixture. */
+/**
+ * The normative golden block from the frozen acceptance fixture.
+ *
+ * The CRLF normalisation is load-bearing on Windows and is why this helper
+ * cannot use `readFileSync`'s output directly. Git checks the file out with
+ * CRLF there, so the fence in `\n```\n` never matches, `exec` returns null and
+ * both golden tests die in `m![1]` with a bare TypeError — a failure that looks
+ * like a projection bug and is not one. The python twin has no such problem
+ * because `Path.read_text()` does universal-newline translation; node's
+ * `readFileSync` hands back the bytes as they are. Normalising also keeps the
+ * extracted golden comparable with a projection, which is always LF.
+ */
 function golden(section: string): string {
   const md = readFileSync(
     resolve(__dirname, "../../../../specs/content-controls/acceptance/fixture-standard.md"),
     "utf-8",
-  );
+  ).replace(/\r\n/g, "\n");
   const m = new RegExp(`## ${section}[\\s\\S]*?\\n\`\`\`\\n([\\s\\S]*?)\`\`\``).exec(md);
-  return m![1].replace(/\n+$/, "");
+  if (!m) throw new Error(`golden section not found: ${section}`);
+  return m[1].replace(/\n+$/, "");
 }
 
 const fixture: Uint8Array = ccFixtureBytes();
@@ -117,21 +129,16 @@ describe("inline content-control projection (CC-1b)", () => {
   });
 
   it("A1.1 — raw view matches GOLDEN-RAW", async () => {
-    // Exact but for the CC-1c checkbox: CC:6 still projects the raw glyph
-    // instead of [x]. Rather than weaken this to "mostly equal", the checkbox
-    // line is substituted explicitly, so the assertion is exact for the other
-    // 15 controls and the constant is what gets deleted when CC-1c lands.
+    // Now exact for all 16 controls. Until CC-1c this carried a substitution
+    // for CC:6, which still projected the raw glyph; the golden always
+    // expected the token, and the code caught up.
     expect((await project(false)).replace(/\n+$/, "")).toBe(
-      golden("GOLDEN-RAW").replace(
-        "Confidentiality applies: [x]",
-        "Confidentiality applies: \u2612",
-      ),
+      golden("GOLDEN-RAW"),
     );
   });
 
   it("A1.2 — clean view matches GOLDEN-CLEAN", async () => {
     const expected = golden("GOLDEN-RAW")
-      .replace("Confidentiality applies: [x]", "Confidentiality applies: \u2612")
       .replace(
         `{#cc:2}{>>placeholder: ${GHOST}<<}{#/cc:2}`,
         "{#cc:2}{#/cc:2}",

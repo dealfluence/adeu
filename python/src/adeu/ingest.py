@@ -12,6 +12,8 @@ from docx.text.paragraph import Paragraph
 from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
 from adeu.utils.content_controls import (
+    CHECKBOX_CLOSE,
+    CHECKBOX_OPEN,
     QN_W_SDTCONTENT,
     BlockSdt,
     SdtEvent,
@@ -744,6 +746,16 @@ def build_paragraph_text(
                 # accepted-state content (spec §6).
                 if not clean_view and info.showing_placeholder and info.placeholder_text:
                     parts.append(f"{{>>placeholder: {info.placeholder_text}<<}}")
+            elif item.type == "checkbox_start":
+                # Checkbox tokens persist in the clean view: they are structural
+                # (spec §6), like the anchors, not commentary.
+                parts.append(CHECKBOX_OPEN)
+            elif item.type == "checkbox_mark":
+                # Fallback only — the mark is normally a real run emitted by the
+                # traversal, and arrives through the ProjectedRun branch.
+                parts.append(info.checkbox_mark)
+            elif item.type == "checkbox_end":
+                parts.append(CHECKBOX_CLOSE)
             else:
                 parts.append(info.close_token)
 
