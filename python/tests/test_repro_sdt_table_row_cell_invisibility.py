@@ -29,6 +29,7 @@ Virtual Text contract, so every assertion below is made against both.
 """
 
 import io
+import pathlib
 
 import pytest
 from docx import Document
@@ -327,6 +328,36 @@ def test_accepting_the_row_level_sdt_edit_keeps_the_control(sdt_table_bytes):
     text = _project(accepted, clean_view=True)
     assert _row_line(text, "Approver").startswith("Approver | John Roe")
     assert "Jane Roe" not in text
+
+
+# ---------------------------------------------------------------------------
+# A0.5 — corpus scale check (skips cleanly when the document is absent).
+#
+# `corpus_path()` proper is CC-3's deliverable (it lands in tests/utils.py
+# alongside the A5 suite); this local resolver exists only so A0.5 is a real
+# test today, because CC-3 depends on CC-0 and cannot ship first. CC-3 should
+# delete this and use the shared helper.
+#
+# Measured 2026-08-21 on the real template: 498,800 chars, floor comfortably
+# cleared. But see PROGRESS.md — this example does NOT discriminate the bug it
+# guards: with row/cell sdt descent disabled the same document still projects
+# 490,345 chars, so the 400,000 floor passes either way.
+# ---------------------------------------------------------------------------
+def _corpus_path(key: str) -> "pathlib.Path | None":
+    p = pathlib.Path(__file__).resolve().parents[2] / "shared" / "corpus" / f"{key}.docx"
+    return p if p.is_file() else None
+
+
+def test_fedramp_corpus_projects_at_full_scale():
+    path = _corpus_path("fedramp_ssp_rev4")
+    if path is None:
+        pytest.skip("corpus document absent; run `python scripts/fetch_corpus.py --only fedramp_ssp_rev4`")
+
+    text = _project(path.read_bytes(), clean_view=True)
+    assert len(text) > 400_000, f"clean view projected only {len(text):,} chars"
+
+    # The shape CC-0 actually repaired: 371 cell-level SDTs in this template.
+    assert "Information System Abbreviation" in text
 
 
 # ---------------------------------------------------------------------------

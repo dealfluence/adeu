@@ -129,3 +129,98 @@ code was touched; CC-6 ships knowledge and tests only.
   Python suite green on top of it (1532 passed, 7 skipped) plus ruff and mypy.
 - Not verified, deliberately out of CC-6 scope: repeating-section item operations and
   Word's behaviour on `w:sdt` in headers/footers. Flagged for CC-9 if it needs them.
+
+---
+
+## 2026-08-21 — CC-0 Python SDT table row/cell parity (opencode-osx)
+
+Engine fix landed on `main` before the board existed (`61bc00a`, `d4e967f`; merged here
+as `845afb3`) and converged independently on the same diagnosis the bootstrap filed as
+CC-0. Python's row/cell walk now descends sdt wrappers via element-level
+`iter_table_row_elements` / `iter_row_cell_elements` in `utils/docx.py`, retargeted in
+both `ingest.py` and `redline/mapper.py`. This entry covers closing the acceptance gap.
+
+### What A0 now pins
+
+A0.1, A0.2, A0.4 were already covered as visibility tests in both engines. Added here:
+
+- **A0.3's apply half**, which nothing asserted — both repro files were explicitly
+  "visibility only". A `ModifyText` of `Jane Roe` → `John Roe` inside the CC:15
+  row-level control must resolve, and its `w:ins`/`w:del` must be *descendants of the
+  sdt-wrapped `w:tr`* rather than hoisted out of the control; `w:tr` count unchanged;
+  `accept_all_revisions` keeps the control. Mirrored in both engines. Both redline only
+  the differing token (`{--Jane--}{++John++} Roe`), so assertions target that, not the
+  whole phrase.
+- **A0.5**, against the real template (see the caveat below).
+- Both engines' table fixtures now reproduce the normative fixture-standard.md table
+  verbatim (tags `cell_role`/`row_approver`/`cell_notes`, `w:id` 201-203, CC:16 text
+  "Approved without conditions.") so CC-1 can layer `{#cc:N}` onto the same shape. The
+  nested `w15:repeatingSectionItem` row A0.4 demands has no counterpart in the fixture
+  (which carries repeating sections only at block level, CC:11-13) and stays appended as
+  row 4 rather than mutating the frozen fixture.
+
+### Deviation: A0.5 needs a CC-3 deliverable (needs a decision)
+
+A0.5 calls `corpus_path()`, which CC-3 owns — but **CC-3 depends on CC-0**, so it cannot
+ship first, and A5's preamble says corpus tests "run after CC-0". The graph is circular.
+Resolved locally with a private `_corpus_path()` in the CC-0 repro file, marked for CC-3
+to delete in favour of the shared helper. Cleaner alternative, for Mikko: **move A0.5 out
+of A0 and into A5**, where the corpus machinery and every other corpus example already
+live. Nothing else in A0 needs a downloaded document.
+
+### A0.5 does not discriminate the bug it guards (spec weakness)
+
+Measured on the real `fedramp_ssp_rev4` template, clean view, unpaginated:
+
+| | chars |
+| --- | --- |
+| Python, sdt descent enabled (post-fix) | 498,800 |
+| Python, row/cell sdt descent disabled (simulated pre-fix) | 490,345 |
+| Node | 498,662 |
+
+The fix recovers ~8,455 chars (1.7%) — real, and consistent with 371 cell-level SDTs of
+short field values, but **both numbers clear A0.5's 400,000 floor**, so the example
+passes with the bug present. A0.5's premise that "pre-fix Python projects a fraction of
+it" holds for the *paginated* `read_docx` path it cites (45 pages), not for the
+unpaginated engine-level extraction it actually asserts on. The floor cannot fail for
+this bug. Recommend CC-3 replace it with the cross-engine parity assertion A5.1 already
+implies (identical counts) — that one *is* discriminating: it separates 490,345 from
+498,662 immediately. Not amended here; A0 is frozen (rule 7).
+
+### Cross-engine parity gaps on the corpus — blocking for CC-3, not CC-0
+
+Running the real template surfaced a 138-char Python/Node divergence, 78 differing
+lines, **none of them sdt-related**. CC-3's A5.1 parity assertion will fail on these:
+
+1. **Python leaks raw OOXML into the text projection.** The template has 17 real
+   `<w:br w:type="page"/>` elements and zero literal occurrences in any `w:t`; Python's
+   projection emits the literal string `<w:br w:type="page"/>` 17 times. Node emits
+   blank lines. Three-line repro: a `w:p` containing
+   `<w:r><w:t>A</w:t><w:br w:type="page"/><w:t>B</w:t></w:r>` projects as
+   `A<w:br w:type="page"/>B`. Ingest and mapper *agree*, so the Virtual Text contract
+   holds and offsets are not corrupted — but an LLM reads markup as prose, and any
+   `target_text` spanning the break would have to include the XML. Not CC-0 scope;
+   needs its own board row.
+2. **Emphasis-marker coalescing differs.** Python merges adjacent italic runs into one
+   span (`_Version #.#,  Date_`); Node marks each run (`_Version_ _#.#,_  _Date_`).
+   Affects CC-1, which extends the same marker-stripping passes.
+3. **Header/footer block ordering differs** — Node projects header lines Python omits at
+   the top of the document.
+
+### Board correction
+
+CC-0's scope line says "Node already behaves correctly — pin it with a test". True for
+row/cell sdts; **false in general**. `Table`/`Row` in `node/packages/core/src/docx/
+primitives.ts` enumerated with recursive `getElementsByTagName`, so nested-table rows and
+cells leaked into the outer table. Fixed in the same merge via `findChildrenSdtTransparent`
+(`docx/dom.ts`); reverting it turns 6 of 24 guards red. CC-1 builds `sdt_start`/`sdt_end`
+on this traversal and should not assume the Node side was sound.
+
+### Verification
+
+`python/`: ruff + `ruff format --check` (202 files) clean, mypy clean (36 files), pytest
+1474 passed / 67 skipped. The single failure,
+`test_repro_qa_2026_07_18.py::TestC1FooterBoundary::test_applied_output_loads_in_libreoffice`,
+is a pre-existing environment flake reproduced on unmodified `origin/main` in an isolated
+worktree before this work started. `node/`: build clean, 717 + 296 + 42 tests pass, lint
+clean.

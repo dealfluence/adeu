@@ -17,16 +17,28 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-0 — Python parity: SDT-wrapped table rows/cells are invisible (P0, data loss)
 
-- Status: `in-progress (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)`
+- Status: `review` (agent: opencode-osx, 2026-08-21) — A0.1-A0.5 green in both engines;
+  one spec decision for Mikko before `done`: A0.5 is non-discriminating and depends on
+  CC-3's `corpus_path()` (see PROGRESS.md; recommend moving A0.5 into A5)
 - Depends on: —
-- Acceptance: [A0](acceptance/A0-table-sdt-visibility.md) (all examples)
+- Acceptance: [A0](acceptance/A0-table-sdt-visibility.md) (all examples). **Met:**
+  engine fix `61bc00a`+`d4e967f` (merged `845afb3`); acceptance closed by `257a5bd`
+  (A0.3 apply half in both engines, fixture aligned to fixture-standard.md) and A0.5.
 - Scope: Python traversal must descend into row-level (`sdtContent > w:tr`) and
   cell-level (`sdtContent > w:tc`) content controls in ingest AND mapper (Virtual Text
   contract); Node already behaves correctly — pin it with a test. Include nested
   SDT-in-SDT rows and `w15:repeatingSectionItem`-wrapped rows. Visibility only — no
   edit-semantics changes. Regression file: `python/tests/test_repro_sdt_table_row_cell_invisibility.py`.
+  **Correction:** "Node already behaves correctly" held only for row/cell sdts —
+  `docx/primitives.ts` leaked nested-table rows/cells via recursive
+  `getElementsByTagName`; fixed in the same merge. A0.3 also required apply semantics,
+  not visibility alone.
 - Note: a prepared task chip with the full repro exists (filed 2026-08-21); this row is
   the authoritative tracker. Ship independently of P1 — this is a straight bug.
+- Downstream must-reads: CC-1 — Node's traversal was *not* sound before this work, don't
+  assume it; Python and Node still disagree on emphasis-marker coalescing. CC-3 — three
+  non-sdt corpus parity gaps will fail A5.1's identical-counts assertion, incl. Python
+  emitting literal `<w:br w:type="page"/>` into the projection (PROGRESS.md).
 
 ## CC-1 — Projection: sdt events, anchors, flags, checkboxes, placeholder bubbles (P1)
 
