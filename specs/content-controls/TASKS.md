@@ -428,7 +428,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   rather than in the tests.
 ## CC-14 - Redline replay silently produces the wrong document (P1, correctness)
 
-- Status: `pending`
+- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
 - Found by: opencode-osx, 2026-08-21, during CC-1b verification. **Pre-existing** -
   reproduced on a stashed clean tree, unrelated to content controls. Hypothesis had
   simply never generated this example before and cached it mid-session.
