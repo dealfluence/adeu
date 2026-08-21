@@ -601,3 +601,103 @@ def render_appendix_section(
     if hint:
         lines.append(hint)
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Resolution (CC-5)
+# ---------------------------------------------------------------------------
+
+
+class FieldResolutionError(ValueError):
+    """A `set_field` target that could not be resolved to exactly one control.
+
+    Carries the teaching text rather than a bare message: every one of these
+    is recoverable by the caller, but only if the error says what the valid
+    answers are (the invalid-action-id error class, spec-set-field §1).
+    """
+
+
+#: How many tags/aliases an unresolvable-field error lists before truncating.
+#: A 5,000-control document would otherwise emit an error larger than the
+#: document, and past ~30 the list stops being readable anyway.
+_FIELD_SUGGESTION_CAP = 30
+
+
+def _field_names(entry: "FieldEntry") -> Tuple[str, ...]:
+    """Every string that resolves to this entry, in resolution order."""
+    names = [f"CC:{entry.ordinal}"]
+    if entry.tag:
+        names.append(entry.tag)
+    if entry.alias:
+        names.append(entry.alias)
+    return tuple(names)
+
+
+def resolve_field(
+    entries: Sequence["FieldEntry"],
+    field: str,
+    match_mode: str = "strict",
+) -> List["FieldEntry"]:
+    """Resolve a `set_field` target to the entries it names (spec §1).
+
+    Order is ordinal, then exact `w:tag`, then exact `w:alias`, and it is an
+    order rather than a merged lookup on purpose: tags and aliases are author
+    strings, so a document may legally use `CC:2` as someone's tag. The
+    documented id has to win, or the addressing scheme this engine publishes
+    could be shadowed by the document it addresses.
+
+    Matching is case-sensitive per spec — these are identifiers, and a
+    case-insensitive match would make `Total` and `total` the same field in a
+    document that deliberately uses both.
+    """
+    if not field or not field.strip():
+        raise FieldResolutionError(
+            "set_field requires 'field': the 'CC:<N>' id, tag, or alias of the control to fill. "
+            "Run read_docx with mode='fields' to list them."
+        )
+
+    m = re.fullmatch(r"CC:(\d+)", field.strip())
+    if m:
+        ordinal = int(m.group(1))
+        hits = [e for e in entries if e.ordinal == ordinal]
+        if hits:
+            return hits
+        raise FieldResolutionError(f"No content control with id 'CC:{ordinal}'. {_available_summary(entries)}")
+
+    hits = [e for e in entries if e.tag == field]
+    if not hits:
+        hits = [e for e in entries if e.alias == field]
+    if not hits:
+        raise FieldResolutionError(f"No content control matches field {field!r}. {_available_summary(entries)}")
+
+    if len(hits) == 1 or match_mode == "all":
+        return hits
+    if match_mode == "first":
+        return hits[:1]
+
+    ids = ", ".join(f"CC:{e.ordinal}" for e in hits)
+    raise FieldResolutionError(
+        f"Field {field!r} matches {len(hits)} controls ({ids}). "
+        "Target one by its 'CC:<N>' id, or set match_mode='first' to take the first "
+        "or match_mode='all' to fill every occurrence."
+    )
+
+
+def _available_summary(entries: Sequence["FieldEntry"]) -> str:
+    """The self-service tail of an unresolvable-field error."""
+    if not entries:
+        return "This document has no content controls."
+    names: List[str] = []
+    for entry in entries:
+        for name in _field_names(entry)[1:]:  # skip the CC: id; shown separately
+            if name not in names:
+                names.append(name)
+    shown = names[:_FIELD_SUGGESTION_CAP]
+    tail = f" (+{len(names) - len(shown)} more)" if len(names) > len(shown) else ""
+    if not shown:
+        return (
+            f"This document's {len(entries)} controls have no tags or aliases; "
+            "target them by id, CC:1 .. CC:%d. Run read_docx with mode='fields' for the list."
+            % max(e.ordinal for e in entries)
+        )
+    return "Available: " + ", ".join(shown) + tail + ". Run read_docx with mode='fields' for the full list with ids."

@@ -55,7 +55,76 @@ class EditOperationType:
     PARAGRAPH_REPLACE = "PARAGRAPH_REPLACE"
 
 
-class ModifyText(BaseModel):
+class _EditState(BaseModel):
+    """The engine's per-edit scratch space, shared by every edit-like change.
+
+    Extracted rather than duplicated: `set_field` travels through the same
+    resolve/apply/report pipeline as `modify` (it desugars into pinned
+    `ModifyText` sub-edits that report through it as their parent), so it
+    needs the identical private surface. Two copies of a thirty-field block
+    would drift the first time anyone added a thirty-first.
+    """
+
+    # Internal use only. PrivateAttr is invisible to the MCP API schema.
+    _match_start_index: Optional[int] = PrivateAttr(default=None)
+    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    # Non-fatal advisory surfaced as the edit report's "warning" field (e.g.
+    # a JS-style $N backreference that Python's re engine left as literal
+    # text — QA 2026-07-23 customer C2).
+    _warning: Optional[str] = PrivateAttr(default=None)
+    _internal_op: Optional[str] = PrivateAttr(default=None)
+    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
+    _applied_status: bool = PrivateAttr(default=False)
+    _error_msg: Optional[str] = PrivateAttr(default=None)
+    # Typed on the shared base, not on ModifyText: a `set_field` is the parent
+    # of the sub-edits it desugars into, and they report through it.
+    _parent_edit_ref: Optional["_EditState"] = PrivateAttr(default=None)
+    _resolved_proxy_edit: Optional["ModifyText"] = PrivateAttr(default=None)
+    # Sub-edits produced by splitting one balanced multi-paragraph modification
+    # share this id so the batch report counts them as a single applied edit.
+    _split_group_id: Optional[int] = PrivateAttr(default=None)
+    # True when any resolved sub-edit of this edit failed or was skipped, so
+    # partially-applied fan-outs still count as skipped (all-or-nothing).
+    _any_sub_failure: bool = PrivateAttr(default=False)
+    _pages: list[int] = PrivateAttr(default_factory=list)
+    _heading_path: Optional[str] = PrivateAttr(default=None)
+    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
+    # content control (spec-fields-ledger §6).
+    _field: Optional[str] = PrivateAttr(default=None)
+    _occurrences_modified: int = PrivateAttr(default=0)
+    _is_table_edit: bool = PrivateAttr(default=False)
+    _has_markdown: bool = PrivateAttr(default=False)
+    _original_target_text: Optional[str] = PrivateAttr(default=None)
+    # (before, after) document text around the resolved match, snapshotted
+    # before the batch mutates the DOM. Consumed by the preview builder.
+    _preview_context: Optional[tuple] = PrivateAttr(default=None)
+    # Full-match preview data stashed on the ORIGINAL edit at resolve time:
+    # the (start, length) of the first matched occurrence, the exact document
+    # text it matched, and the effective replacement. Lets the report preview
+    # show the complete logical change instead of just the first word-diff
+    # sub-edit of a compound modification.
+    _preview_span: Optional[tuple] = PrivateAttr(default=None)
+    _preview_matched_text: Optional[str] = PrivateAttr(default=None)
+    _preview_new_text: Optional[str] = PrivateAttr(default=None)
+    _preview_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
+    # Revision ids reserved in ASCENDING document order before the engine's
+    # descending apply sweep, so a match_mode="all" fan-out numbers its
+    # occurrences first-to-last instead of bottom-up (F20, QA 2026-07-23).
+    _reserved_del_id: Optional[str] = PrivateAttr(default=None)
+    _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
+    # Every revision id this edit actually wrote into the document (fan-out
+    # sub-edits bubble theirs up to the parent). The report preview builder
+    # locates the edit's modified spans in the POST-apply raw projection by
+    # these ids, so previews show what the document really looks like
+    # (F6, QA 2026-07-23).
+    _used_revision_ids: list = PrivateAttr(default_factory=list)
+    # The element that MUST host this edit's insertion, when position cannot
+    # express it. Set only for a fill into an emptied content control, whose
+    # `w:sdtContent` holds no run to anchor against (CC-5, spec-set-field §4).
+    _insert_host_el: Optional[Any] = PrivateAttr(default=None)
+
+
+class ModifyText(_EditState):
     """
     Represents a single atomic edit suggested by the LLM.
     The engine treats this as a "Search and Replace" operation.
@@ -108,58 +177,6 @@ class ModifyText(BaseModel):
             "JavaScript-style $1 is NOT expanded here — it stays literal text."
         ),
     )
-
-    # Internal use only. PrivateAttr is invisible to the MCP API schema.
-    _match_start_index: Optional[int] = PrivateAttr(default=None)
-    _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
-    # Non-fatal advisory surfaced as the edit report's "warning" field (e.g.
-    # a JS-style $N backreference that Python's re engine left as literal
-    # text — QA 2026-07-23 customer C2).
-    _warning: Optional[str] = PrivateAttr(default=None)
-    _internal_op: Optional[str] = PrivateAttr(default=None)
-    _active_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
-    _applied_status: bool = PrivateAttr(default=False)
-    _error_msg: Optional[str] = PrivateAttr(default=None)
-    _parent_edit_ref: Optional["ModifyText"] = PrivateAttr(default=None)
-    _resolved_proxy_edit: Optional["ModifyText"] = PrivateAttr(default=None)
-    # Sub-edits produced by splitting one balanced multi-paragraph modification
-    # share this id so the batch report counts them as a single applied edit.
-    _split_group_id: Optional[int] = PrivateAttr(default=None)
-    # True when any resolved sub-edit of this edit failed or was skipped, so
-    # partially-applied fan-outs still count as skipped (all-or-nothing).
-    _any_sub_failure: bool = PrivateAttr(default=False)
-    _pages: list[int] = PrivateAttr(default_factory=list)
-    _heading_path: Optional[str] = PrivateAttr(default=None)
-    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
-    # content control (spec-fields-ledger §6).
-    _field: Optional[str] = PrivateAttr(default=None)
-    _occurrences_modified: int = PrivateAttr(default=0)
-    _is_table_edit: bool = PrivateAttr(default=False)
-    _has_markdown: bool = PrivateAttr(default=False)
-    _original_target_text: Optional[str] = PrivateAttr(default=None)
-    # (before, after) document text around the resolved match, snapshotted
-    # before the batch mutates the DOM. Consumed by the preview builder.
-    _preview_context: Optional[tuple] = PrivateAttr(default=None)
-    # Full-match preview data stashed on the ORIGINAL edit at resolve time:
-    # the (start, length) of the first matched occurrence, the exact document
-    # text it matched, and the effective replacement. Lets the report preview
-    # show the complete logical change instead of just the first word-diff
-    # sub-edit of a compound modification.
-    _preview_span: Optional[tuple] = PrivateAttr(default=None)
-    _preview_matched_text: Optional[str] = PrivateAttr(default=None)
-    _preview_new_text: Optional[str] = PrivateAttr(default=None)
-    _preview_mapper_ref: Optional[DocumentMapper] = PrivateAttr(default=None)
-    # Revision ids reserved in ASCENDING document order before the engine's
-    # descending apply sweep, so a match_mode="all" fan-out numbers its
-    # occurrences first-to-last instead of bottom-up (F20, QA 2026-07-23).
-    _reserved_del_id: Optional[str] = PrivateAttr(default=None)
-    _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
-    # Every revision id this edit actually wrote into the document (fan-out
-    # sub-edits bubble theirs up to the parent). The report preview builder
-    # locates the edit's modified spans in the POST-apply raw projection by
-    # these ids, so previews show what the document really looks like
-    # (F6, QA 2026-07-23).
-    _used_revision_ids: list = PrivateAttr(default_factory=list)
 
 
 class AcceptChange(BaseModel):
@@ -297,7 +314,7 @@ class FlatDocumentChange(BaseModel):
     avoiding complex oneOf/anyOf unions which break some MCP hosts.
     """
 
-    type: Literal["accept", "reject", "reply", "modify", "insert_row", "delete_row"] = Field(
+    type: Literal["accept", "reject", "reply", "modify", "insert_row", "delete_row", "set_field"] = Field(
         ...,
         description="The type of document change operation.",
         json_schema_extra=const_to_enum,
@@ -316,6 +333,20 @@ class FlatDocumentChange(BaseModel):
             "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
             "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
             "To add a comment, use the 'comment' parameter instead."
+        ),
+    )
+    field: Optional[str] = Field(
+        None,
+        description=(
+            "set_field only: which control to fill - the 'CC:<N>' id, its tag, or its alias. "
+            "Run read_docx with mode='fields' to list them."
+        ),
+    )
+    value: Optional[str] = Field(
+        None,
+        description=(
+            "set_field only: the value to write. Checkboxes take true/false; dates take "
+            "YYYY-MM-DD; dropdowns must match a listed option. Empty string clears the field."
         ),
     )
     target_id: Optional[str] = Field(
@@ -358,6 +389,53 @@ class FlatDocumentChange(BaseModel):
     )
 
 
+class SetField(_EditState):
+    """Fill a content control the way Word fills it (spec-set-field.md).
+
+    The explicit, batchable form of what a text-first edit at a control's
+    sanctioned surface already does. Both routes desugar to the same tracked
+    replacement, so `set_field` gets no special pass through the gates and
+    needs no parallel writer.
+    """
+
+    type: Literal["set_field"] = Field(
+        "set_field",
+        description="Must be 'set_field' to fill a content control (form field).",
+        json_schema_extra=const_to_enum,
+    )
+
+    field: str = Field(
+        ...,
+        description=(
+            "Which control to fill: the 'CC:<N>' id, its tag, or its alias. "
+            "Run read_docx with mode='fields' to list them."
+        ),
+    )
+
+    value: str = Field(
+        ...,
+        description=(
+            "The value to write. Checkboxes take true/false (also x, [x], 1, 0); "
+            "dates take YYYY-MM-DD; dropdowns must match one of the listed options. "
+            "An empty string clears the field."
+        ),
+    )
+
+    match_mode: Literal["strict", "first", "all"] = Field(
+        "strict",
+        description=(
+            "How to resolve a tag or alias shared by several controls. "
+            "'strict' (default): error listing the candidates. "
+            "'first': the first in document order. 'all': every occurrence."
+        ),
+    )
+
+    comment: Optional[str] = Field(
+        None,
+        description="Optional comment to attach to the change, explaining the fill.",
+    )
+
+
 DocumentChange = Annotated[
     Union[
         AcceptChange,
@@ -366,6 +444,7 @@ DocumentChange = Annotated[
         ModifyText,
         InsertTableRow,
         DeleteTableRow,
+        SetField,
     ],
     Field(discriminator="type"),
 ]

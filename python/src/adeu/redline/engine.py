@@ -23,6 +23,7 @@ from adeu.models import (
     ModifyText,
     RejectChange,
     ReplyComment,
+    SetField,
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
@@ -226,7 +227,7 @@ def validate_review_action_batch(
 
 
 def validate_edit_strings(
-    edits: List[Union["ModifyText", "InsertTableRow", "DeleteTableRow"]],
+    edits: List[Union["ModifyText", "InsertTableRow", "DeleteTableRow", "SetField"]],
     index_offset: int = 0,
 ) -> List[str]:
     """
@@ -263,8 +264,17 @@ def validate_edit_strings(
     errors: List[str] = []
 
     for i, edit in enumerate(edits, start=index_offset):
-        t_text = edit.target_text or ""
-        n_text = getattr(edit, "new_text", "") or ""
+        # `set_field` has no target_text - it addresses a control by id rather
+        # than by content - but its `value` is written into the document and
+        # must clear exactly the same bar as any other inserted string. A
+        # value containing `{#cc:3}` or raw CriticMarkup would fabricate
+        # anchors and reviewer names as prose (CC-1e), and routing it here is
+        # what stops `set_field` becoming a hole in that check.
+        t_text = getattr(edit, "target_text", None) or ""
+        n_text = getattr(edit, "new_text", None)
+        if n_text is None:
+            n_text = getattr(edit, "value", None)
+        n_text = n_text or ""
 
         # VAL-CRIT-8: XML-illegal control characters. These can never be
         # written into a DOCX (lxml refuses), so reject them here with a clean
@@ -506,6 +516,8 @@ class RedlineEngine:
         self.mapper = DocumentMapper(self.doc)
         # Offsets into mapper.full_text; rebuilt whenever the mapper is.
         self._cc_anchor_pairs: "list[tuple[int, int, int]] | None" = None
+        # (projection text, ledger rows) - see _field_entries.
+        self._field_entries_cache: Optional[Tuple[str, List[Any]]] = None
         self.comments_manager = CommentsManager(self.doc)
         self.clean_mapper: Optional[DocumentMapper] = None
         self.original_mapper: Optional[DocumentMapper] = None
@@ -2099,7 +2111,7 @@ class RedlineEngine:
 
     def validate_edits(
         self,
-        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]],
+        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
         index_offset: int = 0,
     ) -> List[str]:
         """
@@ -2129,6 +2141,18 @@ class RedlineEngine:
             # are meaningless for them and false-positive whenever the target
             # coincidentally matches unrelated text (a comment timestamp, an
             # earlier redline). The string-shape checks above still apply.
+            if isinstance(edit, SetField):
+                from adeu.fields import FieldResolutionError
+
+                # Resolve the field NOW, before anything is written. An
+                # unresolvable or ambiguous target is the recoverable half of
+                # A4.2, and the batch contract promises those fail the whole
+                # run without touching the document.
+                try:
+                    self._resolve_set_field_targets(edit)
+                except FieldResolutionError as fe:
+                    errors.append(f"- Edit {i + 1} Failed: {fe}")
+                continue
             if (
                 getattr(edit, "_match_start_index", None) is not None
                 or getattr(edit, "_resolved_start_idx", None) is not None
@@ -2881,7 +2905,7 @@ class RedlineEngine:
         edits_with_idx = [
             (original_indices[i] if original_indices else i, c)
             for i, c in enumerate(changes)
-            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
+            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow, SetField))
         ]
 
         actions = [c for _, c in actions_with_idx]
@@ -3193,9 +3217,143 @@ class RedlineEngine:
                 edit._reserved_ins_id = self._get_next_id()
             # COMMENT_ONLY / URL_RETARGET consume no revision ids.
 
+    # ------------------------------------------------------------------
+    # set_field (CC-5, spec-set-field.md)
+    # ------------------------------------------------------------------
+
+    def _field_entries(self) -> List[Any]:
+        """The ledger rows for the CURRENT document state.
+
+        Deliberately re-collected whenever the projection has been rebuilt: a
+        `set_field` earlier in the batch may have filled, cleared or unwrapped
+        a control, and resolving a later one against a stale ledger would
+        target an offset that no longer means what it did.
+        """
+        from adeu.fields import collect_fields
+
+        cached: Optional[Tuple[str, List[Any]]] = self._field_entries_cache
+        if cached is not None and cached[0] is self.mapper.full_text:
+            return cached[1]
+        entries = collect_fields(self.doc, self.mapper.full_text, None)
+        self._field_entries_cache = (self.mapper.full_text, entries)
+        return entries
+
+    def _resolve_set_field_targets(self, edit: "SetField") -> List[Any]:
+        """The controls this `set_field` names, or a FieldResolutionError."""
+        from adeu.fields import resolve_field
+
+        return resolve_field(self._field_entries(), edit.field, edit.match_mode)
+
+    def _sdt_info_for_ordinal(self, ordinal: int) -> Any:
+        return next(
+            (i for i in getattr(self.mapper, "_sdt_infos", {}).values() if i.ordinal == ordinal),
+            None,
+        )
+
+    def _cc_content_range(self, ordinal: int) -> Optional[Tuple[int, int]]:
+        """The projection offsets BETWEEN this control's anchor pair.
+
+        `None` when the control does not anchor (spec §1 leaves groups,
+        repeating sections and nested-rich-text ledger-only), which is the
+        signal that it has no single editable content span.
+        """
+        self._field_label_at(0)  # builds _cc_anchor_pairs if cold
+        for start, end, ord_ in self._cc_anchor_pairs or []:
+            if ord_ == ordinal:
+                return (start, end)
+        return None
+
+    def _resolve_set_field(
+        self,
+        edit: "SetField",
+        resolved_edits: List[Tuple[Union[ModifyText, InsertTableRow, DeleteTableRow], Any]],
+    ) -> None:
+        """Desugar one `set_field` into pinned `ModifyText` sub-edits.
+
+        This is the whole design of CC-5 in one method. `set_field` writes
+        nothing itself: it performs the untracked teardown Word performs
+        (placeholder state, §4.1-4.2), then hands the actual content change to
+        the ordinary edit pipeline as a position-pinned `ModifyText`. That is
+        what makes A4.12 true by construction — the gates, atomicity, author
+        resolution and reporting all see a normal edit, so `set_field` cannot
+        acquire a special pass through any of them by accident.
+        """
+        from adeu.fields import FieldResolutionError
+        from adeu.utils.field_write import clear_placeholder, sdt_content
+
+        try:
+            hits = self._resolve_set_field_targets(edit)
+        except FieldResolutionError as fe:
+            edit._applied_status = False
+            edit._error_msg = str(fe)
+            self.skipped_details.append(f"- {fe}")
+            return
+
+        # Phase 1: the untracked teardown, for every target, before any
+        # offsets are read. Clearing a placeholder deletes the ghost text from
+        # the projection, so ranges computed before it would be stale by
+        # exactly the length of the prompt.
+        touched = False
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is not None and info.showing_placeholder:
+                if clear_placeholder(info):
+                    touched = True
+        if touched:
+            self._mutated_since_load = True
+            self._invalidate_projection_caches()
+
+        # Phase 2: one pinned sub-edit per target.
+        for entry in hits:
+            span = self._cc_content_range(entry.ordinal)
+            if span is None:
+                msg = (
+                    f"CC:{entry.ordinal} is a {entry.cls_word} and is not a value-bearing field. "
+                    "set_field fills text, rich-text, dropdown, combobox, date and checkbox controls."
+                )
+                edit._applied_status = False
+                edit._error_msg = msg
+                self.skipped_details.append(f"- {msg}")
+                return
+
+            start, end = span
+            current = self.mapper.full_text[start:end]
+            sub = ModifyText(
+                type="modify",
+                target_text=current,
+                new_text=edit.value,
+                comment=edit.comment,
+            )
+            # Always atomic, comment or not (spec §3): a fill is one logical
+            # act, and word-splitting it would scatter a single field update
+            # across several review entries.
+            sub._internal_op = (
+                EditOperationType.INSERTION
+                if not current
+                else (EditOperationType.DELETION if not edit.value else EditOperationType.MODIFICATION)
+            )
+            sub._resolved_start_idx = start
+            sub._active_mapper_ref = self.mapper
+            sub._parent_edit_ref = edit
+            if not current:
+                # Nothing left inside the control to anchor to; name the host.
+                info = self._sdt_info_for_ordinal(entry.ordinal)
+                if info is not None:
+                    sub._insert_host_el = sdt_content(info.element)
+            if edit._resolved_start_idx is None:
+                edit._resolved_start_idx = start
+                edit._resolved_proxy_edit = sub
+            resolved_edits.append((sub, edit.value))
+
+    def _invalidate_projection_caches(self) -> None:
+        """Drop everything keyed on the projection after an untracked write."""
+        self.mapper._build_map()
+        self._cc_anchor_pairs = None
+        self._field_entries_cache = None
+
     def apply_edits(
         self,
-        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]],
+        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
         page_offsets: Optional[List[int]] = None,
         index_offset: int = 0,
     ) -> tuple[int, int]:
@@ -3220,12 +3378,24 @@ class RedlineEngine:
             edit._error_msg = None
             edit._any_sub_failure = False
 
-        resolved_edits = []
+        # SetField is absent from this union on purpose: it resolves INTO
+        # pinned ModifyText sub-edits and never reaches the apply layer
+        # itself, which is what lets the gates and the reporting treat a fill
+        # as the ordinary edit it becomes.
+        resolved_edits: List[Tuple[Union[ModifyText, InsertTableRow, DeleteTableRow], Any]] = []
 
         # Pre-resolve phase: locate all edits against initial clean state
         for idx, edit in enumerate(edits):
             edit_idx = index_offset + idx
-            if edit._resolved_start_idx is not None or edit._match_start_index is not None:
+            if isinstance(edit, SetField):
+                # Before the pinned branch: `set_field` addresses its target
+                # by id, so a caller-supplied offset would be meaningless -
+                # and taking the pinned path would hand the apply layer a
+                # change with no target_text at all.
+                self._resolve_set_field(edit, resolved_edits)
+                if edit._error_msg:
+                    skipped += 1
+            elif edit._resolved_start_idx is not None or edit._match_start_index is not None:
                 if edit._resolved_start_idx is None:
                     edit._resolved_start_idx = edit._match_start_index
                 # CC-14: caller-pinned edits skip resolution entirely and go
@@ -4649,9 +4819,20 @@ class RedlineEngine:
                 anchor_run, anchor_paragraph = boundary_anchor.run, boundary_anchor.paragraph
                 if not final_new_text.startswith("\n"):
                     final_new_text = "\n\n" + final_new_text
+            elif edit._insert_host_el is not None:
+                # An empty content control names its host explicitly, because
+                # position alone can no longer reach it: once the ghost run is
+                # gone there is no run inside `w:sdtContent` to anchor to, and
+                # the nearest run by offset lives OUTSIDE the control. The
+                # insertion would then land next to the field instead of in
+                # it - a filled-looking document whose control is still empty,
+                # and whose value Word will not treat as the field's content.
+                # Same shape as the OPC part boundary: a wall that offsets
+                # cannot see, so the container is carried explicitly.
+                anchor_run, anchor_paragraph = None, None
             else:
                 anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
-            if not anchor_run and not anchor_paragraph:
+            if not anchor_run and not anchor_paragraph and edit._insert_host_el is None:
                 return False
 
             insert_before = False
@@ -4662,7 +4843,10 @@ class RedlineEngine:
 
             parent = None
             index = 0
-            if anchor_run:
+            if edit._insert_host_el is not None:
+                parent = edit._insert_host_el
+                index = len(parent)
+            elif anchor_run:
                 parent = anchor_run._element.getparent()
                 index = parent.index(anchor_run._element)
                 # A tracked-deleted anchor (run inside <w:del>) cannot host

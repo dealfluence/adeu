@@ -51,6 +51,7 @@ def test_document_change_discriminators_use_enum_not_const():
         "ModifyText",
         "InsertTableRow",
         "DeleteTableRow",
+        "SetField",
     }
     for name, definition in schema["$defs"].items():
         type_field = definition["properties"]["type"]
@@ -81,6 +82,7 @@ def test_flat_schema_variant_is_a_single_object_without_const():
         "modify",
         "insert_row",
         "delete_row",
+        "set_field",
     }
     assert not _find_const(schema)
 
