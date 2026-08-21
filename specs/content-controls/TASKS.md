@@ -188,8 +188,12 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-4 — Write gates: locks, groups, document protection, placeholder targets (P2)
 
-- Status: `pending`
-- Depends on: CC-1
+- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch:
+  content-controls-specs) — taken on the Windows side deliberately: this row is mostly
+  questions about what Word actually permits, and the answers are COM-checkable here.
+  CC-6 already resolved G7/G9 and Mikko settled G5, so the gate matrix is now fully
+  specified and this is implementation rather than discovery.
+- Depends on: CC-1 (`done`)
 - Acceptance: [A3](acceptance/A3-gates.md) (all examples)
 - Scope: load-time protection state; gate matrix + teaching-error contracts per
   spec-gates.md; `ignore_control_locks` / `ignore_document_protection` batch params
