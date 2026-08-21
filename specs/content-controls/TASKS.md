@@ -48,7 +48,10 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   **1a then 1b** (they are one design and splitting them would mean writing the event
   payload twice). The rest are independently claimable once 1a lands — claim by
   editing the sub-item, not this Status line:
-  - **1a — foundation** (`pending`→osx): shared `classify_sdt` helper (class, flags,
+  - **1a — foundation** (`done (38444d2)`, osx): classification + ordinal pre-pass
+    landed in both engines, 26 tests each against the fixture-standard table; the
+    16-control fixture body is now ONE file (`shared/fixtures/cc_fixture.body.xml`)
+    read by the script and both suites. Events/plumbing are 1b. Original scope: shared `classify_sdt` helper (class, flags,
     alias, tag, placeholder, options) + the ordinal pre-pass + `sdt_start`/`sdt_end`
     events from `traverse_node` and the block iterators, both engines. Per
     spec-projection.md §9 the ordinal pre-pass MUST be one shared helper consumed by
