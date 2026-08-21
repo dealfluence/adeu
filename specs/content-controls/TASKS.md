@@ -57,14 +57,17 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     spec-projection.md §9 the ordinal pre-pass MUST be one shared helper consumed by
     ingest AND mapper, so the Virtual Text contract holds by construction rather than
     by two implementations agreeing.
-  - **1b — anchored leaves + groups + clean view** (osx, `in-progress`): A1.1-A1.5,
-    A1.10. **INLINE half landed** (`sdt_start`/`sdt_end` events through both engines'
-    traversal, ingest + mapper emitting anchors, flags, the empty pair and the
-    placeholder bubble; A1.4 fixed). Remaining: block-level anchors (CC:1), group
-    boundary tokens (CC:8), and the table cases (CC:14 cell, CC:15 row, CC:16 in-cell
-    block), which need the boundary surfaced from `_iter_block_children` and from
-    `_iter_sdt_transparent_children`/`findChildrenSdtTransparent` - those currently
-    discard the wrapper entirely and return only the `w:tr`/`w:tc`.
+  - **1b — anchored leaves + groups + clean view** (`done (eb0a141)`, osx): A1.1-A1.5,
+    A1.10. Inline half `5b1454a`, block/group/table half `eb0a141`. `sdt_start`/`sdt_end`
+    events through both engines' traversal; block-level controls surfaced as one
+    undescended `BlockSdt` from `iter_block_items(..., emit_sdt=True)` (opt-in, so
+    outline/domain/sanitize keep the sdt-transparent behaviour); row/cell controls
+    resolved with `wrapping_sdt` rather than by changing the CC-0 iterators.
+    A1.1/A1.2 now assert the full golden read out of `fixture-standard.md`, exact but
+    for one explicit substitution: the CC:6 checkbox glyph, which is **1c's** to
+    remove. Verified 14/14 projections byte-identical py↔node with zero mapper drift.
+    Two node-only defects found by that comparison and fixed here (hyperlinks losing
+    their OPC part inside block controls; see PROGRESS.md).
   - **1c — checkboxes** (`in-progress`, agent: opencode-windows, since: 2026-08-21): A1.8.
     Needs 1a only. Taking the COM + corpus reconnaissance half FIRST, while 1a is in
     flight: what glyph/font pairs Word actually writes, whether `w14:checked` and the

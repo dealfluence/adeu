@@ -836,3 +836,54 @@ failure mode the property exists to forbid: the engine may refuse an edit, but
 it may not accept one and produce a different document. `.hypothesis` is
 gitignored, so CI will not rediscover it deterministically; CC-14 says to pin
 the example.
+
+## 2026-08-21 — CC-1b complete: block, group and table anchors (`eb0a141`, osx)
+
+Block-level controls, groups and table row/cell controls now project their
+anchors in both engines. CC-1b is `done`.
+
+**Structure.** `iter_block_items(parent, emit_sdt=True)` yields a block-level
+control as one *undescended* `BlockSdt`; the consumer recurses into
+`w:sdtContent` exactly as it already does for a `Table`. Paired boundary events
+were the alternative and were rejected — they would have forced every consumer
+to grow a nesting stack and to re-derive the block separators inside it. The
+flag is opt-in so outline, domain, sanitize and `_normalize_table` keep the
+historical sdt-transparent behaviour; the outline in particular must not grow
+anchor tokens. Row and cell controls resolve through `wrapping_sdt`/`wrappingSdt`
+(one hop) rather than by changing the CC-0 sdt-transparent iterators.
+
+**Spec §3 exception.** Inside a table cell, a block-level anchor renders inline.
+A row is one projected line; token lines would break the `|` grammar and
+desynchronise the column count. The row-level anchor is the *inner* wrapper
+relative to CriticMarkup: `{++ {#cc:N}...{#/cc:N} ++}`.
+
+**GOLDEN-RAW divider — resolved, and it was the document, not the engine.**
+Flagged during CC-1a. GOLDEN-RAW omitted the `--- | ---` line. Both engines have
+emitted a GFM divider after the first row of every table since long before this
+initiative; without it the projection is not a markdown table, just lines
+containing pipes. Transcription error in the acceptance document, corrected in
+place with a dated note. Authorised by Mikko.
+
+**A node defect only the parity harness could find.** Hyperlinks inside *any*
+block-level control degraded from `[text](mailto:...)` to bare text — 611 bytes
+of `fedramp_ssp_rev4`. The node engine derives the OPC part from
+`container.part`, and I handed the recursion a raw `w:sdtContent` element, which
+silently lost it. Python takes `part=` as an explicit argument and so never had
+the hazard. This is the third time a defect has lived in a place where both of
+that engine's own producers agreed with each other and were both wrong, or where
+one engine's API shape hid a trap the other does not have. A test written
+against the other implementation by the same author is not independent evidence;
+14/14 byte-identical projections across six corpus documents is.
+
+**Tests.** A1.1/A1.2 now parse the golden out of `fixture-standard.md` and
+compare the whole document, so the spec is the oracle instead of a hand-copied
+constant. Exactly one substitution is applied — the CC:6 checkbox glyph, still
+`☒` rather than `[x]` — and that constant, `_CC1C_PENDING`, is what CC-1c
+deletes. The deliberately-failing CC-1b scope marker is gone, replaced by these.
+The CC-0 row/cell/nested-table suites now strip anchors before asserting, since
+their subject is whether wrapped rows are visible *at all*; each gained an
+explicit anchor assertion so nothing can restore visibility while quietly
+dropping the anchors.
+
+**Left for others.** CC:6 renders `☒`; that is 1c (windows). 1d, 1e and 1f are
+unclaimed and now unblocked — 1b was their dependency.
