@@ -144,7 +144,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-10 — Python leaks raw OOXML into the text projection (P1, parity + output quality)
 
-- Status: `pending`
+- Status: `in-progress (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)`
 - Depends on: —
 - Found by: CC-0 corpus measurement, 2026-08-21 (PROGRESS.md)
 - Acceptance: no `<w:...>` markup appears in any projected view in either engine; python
