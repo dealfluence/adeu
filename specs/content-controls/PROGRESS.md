@@ -465,3 +465,53 @@ CC-12 lands by deleting the skips.
 Verification: python ruff + format + mypy clean, 1498 passed / 67 skipped, 0
 failed; node build clean, lint clean, 744 passed + 4 skipped (the CC-12 guards) +
 296 + 42.
+
+### 2026-08-21 - CC-12 closed: node's block-separator discipline (opencode-osx)
+
+Took CC-12 ahead of CC-1 deliberately: CC-1 introduces sdt anchors, which are
+exactly the zero-width anchor spans that trigger the drift, so landing
+projection on top of a broken separator discipline would have multiplied the
+failures rather than exposed them.
+
+The filed bug fixed as diagnosed. Python emits the block separator BEFORE each
+block and rolls it back when the block projects nothing; node appended after and
+stripped trailing ones. The task note said not to half-port it and that was
+right - moving the whole discipline through `_map_blocks` and the part loop
+together fixed two of the four failing documents immediately. Node had a second
+fault in the same area worth recording: it used `is_first_para` as the separator
+gate, but that is a DIFFERENT flag from python's `emitted_any_block`.
+`is_first_para` places the footnote definition label and is flipped by tables and
+by empty paragraphs; `emitted_any_block` is the reader's `blocks.length > 0`.
+Conflating them makes the separator decision wrong for every container whose
+first block projects nothing.
+
+Chasing the last two documents surfaced two divergences the corpus cannot reach,
+both of which had been sitting in node since before this initiative.
+
+**Node's ingest was missing the clean-view skip for deleted paragraph marks.**
+Accepting a tracked paragraph-mark deletion merges the paragraph away, so when
+nothing visible survives inside it the accepted view must render no container -
+an empty one costs a whole block separator. Node projected
+`"Alpha\n\n\n\nBeta"` where python projects `"Alpha\n\nBeta"`. Ported python's
+shared `paragraph_mark_is_deleted` predicate and applied it in both node
+producers.
+
+**Empty styled runs emitted their markers.** A bold run whose only child is a
+drawing or a footnote reference left a dangling `****`, the exact case python
+documents in its own comment. Python's branch is `elif text:`; node's was an
+unconditional `else` that pushed prefix and suffix regardless.
+
+The uncomfortable part is worth stating plainly. On the deleted-mark case node's
+ingest and mapper were consistently wrong TOGETHER - they agreed with each other,
+so the Virtual Text contract test was green while both were wrong. Only
+cross-engine comparison caught it, and the corpus could not have: published
+documents carry no tracked changes. My "16/16 byte-identical" claim from earlier
+today was true for the documents measured and blind to that whole class of shape.
+Section 5 of both parity suites now covers tracked-change shapes explicitly, and
+the honest lesson is that a contract test between two implementations that share
+an author is not independent evidence.
+
+Verification: 10/10 views byte-identical python<->node (4 corpus documents plus
+the tracked-change fixture, raw and clean), zero mapper drift in either engine.
+python ruff + format + mypy clean, 1517 passed / 70 skipped. node build + lint
+clean, 758 passed / 1 skipped, 296, 42.

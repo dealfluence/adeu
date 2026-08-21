@@ -218,7 +218,17 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-12 - Node's DocumentMapper drifts from its own ingest on real documents (P1)
 
-- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
+- Status: `done (121f0a6)` (agent: opencode-osx, 2026-08-21) - separator discipline
+  ported through `_map_blocks` and the part loop in one change; the 4 corpus
+  ingest-vs-mapper guards are un-skipped and green. Scope grew by two divergences
+  the corpus could not reach, both now pinned in section 5 of the parity suites:
+  node's **ingest** was missing the clean-view skip for a deleted paragraph mark
+  (projected `"Alpha\n\n\n\nBeta"` where python projects `"Alpha\n\nBeta"`), and
+  node's mapper emitted style markers for empty styled runs (dangling `****`
+  after a drawing or footnote reference). Note for later readers: on the
+  deleted-mark case node's ingest and mapper were consistently wrong TOGETHER,
+  so the contract test agreed with itself and stayed green - only cross-engine
+  comparison caught it. 10/10 views byte-identical python<->node.
 - Depends on: -
 - Found by: CC-10 follow-up parity sweep, 2026-08-21 (PROGRESS.md)
 - Acceptance: for every corpus document and both views, node's
