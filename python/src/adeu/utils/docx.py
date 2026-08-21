@@ -16,7 +16,7 @@ from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from adeu.utils.content_controls import SdtEvent
+from adeu.utils.content_controls import BlockSdt, SdtEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -1607,11 +1607,16 @@ def iter_row_cells(row: _Row) -> list:
     return cells
 
 
-def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
+def iter_block_items(parent, emit_sdt: bool = False) -> Iterator[Union[Paragraph, Table, FootnoteItem, "BlockSdt"]]:
     """
     Yields Paragraph or Table objects in the order they appear in the XML.
     Supports Document, Header, Footer, and Cell objects.
     Recursion is left to the caller.
+
+    With ``emit_sdt`` a block-level content control arrives as a
+    :class:`BlockSdt` instead of being flattened into its contents, so the
+    caller can bracket it. Opt-in for the reason given on
+    ``_iter_block_children``.
     """
     if isinstance(parent, DocumentObject):
         parent_elm = parent.element.body
@@ -1643,18 +1648,30 @@ def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
         else:
             parent_elm = parent
 
-    for kind, child_elm in _iter_block_children(parent_elm):
+    for kind, child_elm in _iter_block_children(parent_elm, emit_sdt):
         if kind == "p":
             yield Paragraph(child_elm, parent)
         elif kind == "tbl":
             yield Table(child_elm, parent)
+        elif kind == "sdt":
+            # A block-level control, undescended. Callers that do not opt in
+            # never see this (emit_sdt defaults False), so outline, domain,
+            # sanitize and _normalize_table keep the historical transparent
+            # behaviour.
+            yield BlockSdt(child_elm)
 
 
-def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
+def _iter_block_children(parent_elm, emit_sdt: bool = False) -> Iterator[Tuple[str, Any]]:
     """
     Yields (kind, child_elem) tuples among `parent_elm`'s children, descending
     into block-level w:sdt content controls.
-    kind is "p" or "tbl".
+    kind is "p", "tbl", or — only when `emit_sdt` — "sdt" for a block-level
+    content control, yielded UNDESCENDED so the caller can wrap it.
+
+    The boundary is opt-in because every other consumer of this iterator
+    (outline, domain, sanitize, _normalize_table) treats block children as a
+    flat list of paragraphs and tables; handing them a third kind unannounced
+    would silently drop content in whichever branch fell through.
     """
     for child in parent_elm.iterchildren():
         tag = child.tag
@@ -1665,7 +1682,17 @@ def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
         elif tag == qn("w:sdt"):
             sdt_content = child.find(qn("w:sdtContent"))
             if sdt_content is not None:
-                yield from _iter_block_children(sdt_content)
+                if emit_sdt:
+                    # Yield the control as ONE unit and do NOT descend: the
+                    # consumer recurses into sdtContent itself, exactly as it
+                    # already does for a Table. That is what makes a
+                    # block-level control a single block that can be wrapped in
+                    # its token lines — paired boundary events would instead
+                    # have forced every consumer to grow a nesting stack and to
+                    # re-derive the block separators inside it.
+                    yield ("sdt", child)
+                else:
+                    yield from _iter_block_children(sdt_content, emit_sdt)
 
 
 def suggest_sibling_docx(path: Union[str, Path], limit: int = 5) -> Tuple[list[str], int]:

@@ -108,26 +108,90 @@ def test_ordinals_survive_into_the_projection_unchanged(fixture_bytes):
     raw_ids = re.findall(r"\{#cc:(\d+)", _project(fixture_bytes))
     clean_ids = re.findall(r"\{#cc:(\d+)", _project(fixture_bytes, clean_view=True))
     assert raw_ids == clean_ids
-    assert raw_ids == ["2", "3", "4", "5", "7", "9", "10"]
+    assert raw_ids == ["1", "2", "3", "4", "5", "7", "8", "9", "10", "14", "15", "16"]
     assert raw_ids == sorted(raw_ids, key=int), "anchors must appear in ordinal order"
 
 
-def test_block_and_table_controls_are_not_yet_anchored(fixture_bytes):
-    """Scope marker for the rest of CC-1b — NOT an endorsement.
-
-    Block-level (CC:1), group (CC:8) and the three table controls (CC:14-16)
-    still project transparently. Their content is visible and correct; only the
-    anchors are missing. This test exists so the gap is impossible to miss and
-    fails loudly the moment block anchors land, forcing the golden comparison
-    to be updated deliberately.
-    """
+def _golden(section: str) -> str:
+    """The normative golden block from the frozen acceptance fixture."""
     import re
+    from pathlib import Path
 
-    # Match on the parsed ordinal, not on a token prefix: "{#cc:1" is also a
-    # prefix of "{#cc:10 bound}", so a substring check silently passes.
+    md = (
+        Path(__file__).resolve().parents[2] / "specs" / "content-controls" / "acceptance" / "fixture-standard.md"
+    ).read_text(encoding="utf-8")
+    return re.search(rf"## {section}.*?\n```\n(.*?)```", md, re.S).group(1).rstrip("\n")
+
+
+# The one known gap: CC:6 still projects the raw glyph instead of the [x] token.
+# That is CC-1c (checkboxes), owned separately. Rather than weaken the golden
+# comparison to "mostly equal", the checkbox line is substituted explicitly, so
+# the assertion below is exact for all 15 other controls and this constant is
+# what has to be deleted when CC-1c lands.
+_CC1C_PENDING = ("Confidentiality applies: [x]", "Confidentiality applies: \u2612")
+
+
+def test_a1_1_raw_view_matches_golden_raw(fixture_bytes):
+    """A1.1 — full-document raw golden, exact but for the CC-1c checkbox."""
+    expected = _golden("GOLDEN-RAW").replace(*_CC1C_PENDING)
+    assert _project(fixture_bytes).rstrip("\n") == expected
+
+
+def test_a1_2_clean_view_matches_golden_clean(fixture_bytes):
+    """A1.2 — clean view: anchors persist, the CC:2 bubble is gone."""
+    expected = (
+        _golden("GOLDEN-RAW")
+        .replace(*_CC1C_PENDING)
+        .replace(
+            f"{{#cc:2}}{{>>placeholder: {GHOST}<<}}{{#/cc:2}}",
+            "{#cc:2}{#/cc:2}",
+        )
+    )
+    assert _project(fixture_bytes, clean_view=True).rstrip("\n") == expected
+    # ...and that is exactly the GOLDEN-CLEAN line the spec calls out.
+    assert _golden("GOLDEN-CLEAN") in _project(fixture_bytes, clean_view=True)
+
+
+def test_block_level_control_anchors_on_its_own_lines(fixture_bytes):
+    """Spec §3: open token on its own line, single "\n" to the wrapped block."""
     raw = _project(fixture_bytes)
-    anchored = {int(n) for n in re.findall(r"\{#cc:(\d+)[ }]", raw)}
-    for ordinal in (1, 8, 14, 15, 16):
-        assert ordinal not in anchored, f"CC:{ordinal} now anchors — update this test and the A1.1 golden"
-    assert "The Supplier shall indemnify the Client against all third-party claims." in raw
-    assert "Role | Contracting Officer" in raw
+    assert "{#cc:1}\nThe Supplier shall indemnify the Client against all third-party claims.\n{#/cc:1}" in raw
+
+
+def test_group_wraps_its_blocks_and_the_nested_control_keeps_its_own_anchor(
+    fixture_bytes,
+):
+    """Spec §5 — a group brackets its blocks; nested controls anchor normally."""
+    raw = _project(fixture_bytes)
+    assert (
+        "{#cc:8 group}\n"
+        "These standard terms are approved boilerplate and must not be modified.\n\n"
+        "Notices to: {#cc:9}123 Main Street, Ottawa{#/cc:9}\n"
+        "{#/cc:8}" in raw
+    ), "group must bracket BOTH blocks, with the inner control still anchored"
+
+
+def test_table_controls_anchor_inline_never_on_token_lines(fixture_bytes):
+    """Spec §3 exception — a row is one projected line.
+
+    Token lines inside a table would break the `|` grammar and desynchronise
+    the column count, so cell-level, row-level and in-cell block controls all
+    render their anchors inline.
+    """
+    raw = _project(fixture_bytes)
+    assert "Role | {#cc:14}Contracting Officer{#/cc:14}" in raw
+    assert "{#cc:15}Approver | Jane Roe{#/cc:15}" in raw
+    # CC:16 is a BLOCK-level control that happens to sit in a cell: inline.
+    assert "Notes | {#cc:16}Approved without conditions.{#/cc:16}" in raw
+    assert "{#cc:16}\n" not in raw, "in-cell block control must not emit token lines"
+
+
+def test_the_gfm_divider_survives_between_anchored_rows(fixture_bytes):
+    """Regression for the golden defect corrected on 2026-08-21.
+
+    GOLDEN-RAW originally omitted this line. It is emitted after the first row
+    of every table and is what makes the projection a markdown table rather
+    than lines containing pipes.
+    """
+    raw = _project(fixture_bytes)
+    assert "Role | {#cc:14}Contracting Officer{#/cc:14}\n--- | ---\n" in raw

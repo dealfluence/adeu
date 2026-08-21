@@ -155,9 +155,25 @@ async function buildSdtTableDoc(): Promise<Buffer> {
   return doc.save();
 }
 
-/** Projected line whose first cell is `firstCell`. */
+const CC_TOKEN_RE = /\{#\/?cc:\d+[^}]*\}/g;
+
+/**
+ * Drop content-control anchors. CC-1b projects `{#cc:N}` pairs around the very
+ * controls these fixtures wrap. This suite's subject is whether the wrapped
+ * rows and cells are VISIBLE AT ALL — a question that must read the same
+ * however much chrome CC-1 adds around them. The anchors are asserted
+ * separately, both below and in the CC-1 suites.
+ */
+function stripCc(text: string): string {
+  return text.replace(CC_TOKEN_RE, "");
+}
+
+/** Projected line whose first cell is `firstCell`, anchors stripped. */
 function rowLine(text: string, firstCell: string): string {
-  const line = text.split("\n").find((l) => l.startsWith(firstCell));
+  const line = text
+    .split("\n")
+    .map(stripCc)
+    .find((l) => l.startsWith(firstCell));
   expect(line, `no projected row starting with "${firstCell}" in:\n${text}`).toBeTruthy();
   return line!;
 }
@@ -206,7 +222,7 @@ describe("SDT-wrapped table rows and cells stay visible", () => {
 
   it("projects every row once, in document order", async () => {
     const text = await extractTextFromBuffer(await buildSdtTableDoc(), true, false);
-    const lines = text.split("\n").filter((l) => l.trim().length > 0);
+    const lines = text.split("\n").filter((l) => l.trim().length > 0).map(stripCc);
     expect(lines[0]).toBe("Intro paragraph.");
     expect(lines[1]).toBe("Role | Contracting Officer");
     expect(lines[2]).toBe("--- | ---");
@@ -330,5 +346,23 @@ describe("edits inside a row-level content control (A0.3)", () => {
     const text = await extractTextFromBuffer(finalBuf, true, false);
     expect(rowLine(text, "Approver")).toBe("Approver | John Roe");
     expect(text).not.toContain("Jane Roe");
+  });
+
+  // CC-1b — the same controls now carry anchors. Asserted here, next to the
+  // visibility guarantees, so a future change cannot restore visibility while
+  // silently dropping the anchors (or vice versa).
+  it("row and cell controls carry anchors", async () => {
+    const data = await buildSdtTableDoc();
+    const text = await extractTextFromBuffer(data, false, false);
+    expect(text, "cell-level control lost its inline anchors").toContain(
+      "Role | {#cc:1}Contracting Officer{#/cc:1}",
+    );
+    expect(text, "row-level control must bracket the whole row line").toContain(
+      "{#cc:2}Approver | Jane Roe{#/cc:2}",
+    );
+    // A block-level control inside a cell anchors INLINE, not on its own
+    // lines — token lines would break the "|" row grammar.
+    expect(text).toContain("Notes | {#cc:3}Approved without conditions.{#/cc:3}");
+    expect(new DocumentMapper(await DocumentObject.load(data), false).full_text).toBe(text);
   });
 });

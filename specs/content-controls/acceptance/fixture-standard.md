@@ -10,6 +10,16 @@ probing — never into the repo).
 **The goldens in this file are normative**, including spacing. If an implementation
 detail forces a deviation, stop and flag it in PROGRESS.md (README rule 4).
 
+> **Correction, 2026-08-21 (Mikko, in response to a CC-1b flag).** GOLDEN-RAW
+> originally omitted the `--- | ---` line from the table. That was a transcription
+> error in this document, not an engine defect: both engines emit a GFM header
+> divider after the first row of EVERY table (`ingest.py` `extract_table`, and its
+> node twin), and have long before this initiative — without it the output is not a
+> markdown table, just lines containing pipes. The divider is now present in
+> GOLDEN-RAW. It sits after the header row and BEFORE the row-level CC:15 anchor
+> line, because CC:15 wraps the second `w:tr` and the divider is synthetic chrome
+> belonging to the table, not to any row.
+
 ## document.xml (body children, in order)
 
 Root: `w:document` with namespaces `w`, `w14`, `w15`, `mc` (`mc:Ignorable="w14 w15"`).
@@ -131,6 +141,7 @@ Deliverable: Initial report, due 2026-02-01.
 Deliverable: Final report, due 2026-06-30.
 
 Role | {#cc:14}Contracting Officer{#/cc:14}
+--- | ---
 {#cc:15}Approver | Jane Roe{#/cc:15}
 Notes | {#cc:16}Approved without conditions.{#/cc:16}
 

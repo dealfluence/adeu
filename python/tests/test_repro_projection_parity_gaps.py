@@ -222,16 +222,16 @@ def test_symbol_runs_are_still_dropped_deliberately():
 # ---------------------------------------------------------------------------
 CORPUS_PROJECTION_SIZES = {
     # key: (raw_view_chars, clean_view_chars)
-    "fedramp_ssp_rev4": (605_489, 505_540),
-    "dau_acquisition_plan": (17_711, 15_354),
+    "fedramp_ssp_rev4": (612_913, 512_962),
+    "dau_acquisition_plan": (19_611, 17_254),
     "wawd_esi_agreement": (15_978, 15_891),
     "on_juries_form1": (5_505, 3_199),
-    "ca_talent_recruitment": (5_461, 4_957),
+    "ca_talent_recruitment": (5_613, 5_109),
     # A .dotx. Absent from this table until CC-11, because python could not open
     # one at all and there was nothing to pin against. Both views are identical
     # because the template carries no tracked changes; the count rose from 7,221
     # when CC-1b started projecting content-control anchors.
-    "odot_uic_drywell": (7_434, 7_434),
+    "odot_uic_drywell": (7_449, 7_449),
 }
 
 

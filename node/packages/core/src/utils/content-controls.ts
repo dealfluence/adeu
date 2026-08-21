@@ -310,3 +310,37 @@ export function isSdtEvent(item: any): item is SdtEvent {
 export function partElement(part: any): any {
   return part?.element ?? part?._element ?? part;
 }
+
+/**
+ * A block-level content control, yielded undescended by the block iterator.
+ *
+ * Distinct from `SdtEvent`, which lives in the *inline* stream. A block-level
+ * control has to be visible to the BLOCK loop, because the "\n\n" separators
+ * around it — and the rollback when it projects nothing — are decided there.
+ *
+ * Carries the raw element, not an `SdtInfo`: `iter_block_items` has no ordinal
+ * map, so the consumer resolves it against the one pre-pass. That keeps the
+ * pre-pass the single source of numbering.
+ */
+export class BlockSdt {
+  constructor(public readonly element: any) {}
+}
+
+/**
+ * The `w:sdt` that directly wraps this `w:tr`/`w:tc`, or null.
+ *
+ * Row- and cell-level controls are invisible to the row/cell walkers by
+ * design — `findChildrenSdtTransparent` exists precisely to see THROUGH them
+ * so the rows stay visible (CC-0). Rather than change that contract and every
+ * caller with it, projection asks the element which control encloses it. One
+ * hop up, not a search: a row-level control is exactly
+ * `w:sdt > w:sdtContent > w:tr`.
+ */
+export function wrappingSdt(element: any): any {
+  const parent = element?.parentNode;
+  if (parent && parent.tagName === QN_W_SDTCONTENT) {
+    const grandparent = parent.parentNode;
+    if (grandparent && grandparent.tagName === QN_W_SDT) return grandparent;
+  }
+  return null;
+}

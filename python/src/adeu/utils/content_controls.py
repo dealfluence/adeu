@@ -136,6 +136,22 @@ class SdtEvent(NamedTuple):
     info: SdtInfo
 
 
+class BlockSdt(NamedTuple):
+    """A block-level content control, yielded undescended by the block iterator.
+
+    Distinct from :class:`SdtEvent`, which lives in the *inline* stream. A
+    block-level control has to be visible to the BLOCK loop, because the
+    "\n\n" separators around it — and the rollback when it projects nothing —
+    are decided there.
+
+    Carries the raw element, not an :class:`SdtInfo`: ``iter_block_items`` has
+    no ordinal map, so the consumer resolves it against the one pre-pass. That
+    keeps the pre-pass the single source of numbering.
+    """
+
+    element: Any
+
+
 def _first_child(parent: Any, qname: str) -> Any:
     if parent is None:
         return None
@@ -266,6 +282,24 @@ def iter_sdt_elements_in_order(part_element: Any) -> Iterator[Any]:
         return
     for el in part_element.iter(QN_W_SDT):
         yield el
+
+
+def wrapping_sdt(element: Any) -> Any:
+    """The ``w:sdt`` that directly wraps this ``w:tr``/``w:tc``, or None.
+
+    Row- and cell-level controls are invisible to the row/cell iterators by
+    design — ``_iter_sdt_transparent_children`` exists precisely to see THROUGH
+    them so the rows stay visible (CC-0). Rather than change that iterator's
+    contract and every caller with it, projection asks the element which
+    control encloses it. One hop up, not a search: a row-level control is
+    exactly ``w:sdt > w:sdtContent > w:tr``.
+    """
+    parent = element.getparent() if hasattr(element, "getparent") else None
+    if parent is not None and parent.tag == QN_W_SDTCONTENT:
+        grandparent = parent.getparent()
+        if grandparent is not None and grandparent.tag == QN_W_SDT:
+            return grandparent
+    return None
 
 
 def part_element(part: Any) -> Any:

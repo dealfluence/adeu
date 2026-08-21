@@ -12,7 +12,14 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
-from adeu.utils.content_controls import SdtEvent, assign_ordinals, part_element
+from adeu.utils.content_controls import (
+    QN_W_SDTCONTENT,
+    BlockSdt,
+    SdtEvent,
+    assign_ordinals,
+    part_element,
+    wrapping_sdt,
+)
 from adeu.utils.docx import (
     DocxEvent,
     ProjectedRun,
@@ -324,6 +331,7 @@ class DocumentMapper:
         style_cache: Optional[dict] = None,
         default_pstyle: Optional[str] = None,
         part: Any = None,
+        in_cell: bool = False,
     ) -> int:
         current = offset
         c_type = type(container).__name__
@@ -356,10 +364,54 @@ class DocumentMapper:
         is_first_para = True
 
         previous_item: Any = None
-        for item in iter_block_items(container):
+        for item in iter_block_items(container, emit_sdt=True):
             i_type = type(item).__name__
 
-            if i_type == "FootnoteItem":
+            if isinstance(item, BlockSdt):
+                # Twin of the ingest branch: recurse into sdtContent as a Table
+                # recurses into its rows, then bracket with token lines.
+                spans_mark = len(self.spans)
+                chunks_mark = len(self._text_chunks)
+                offset_mark = current
+                if emitted_any_block:
+                    prev_para = previous_item if isinstance(previous_item, Paragraph) else None
+                    self._add_virtual_text("\n\n", current, prev_para)
+                    current += 2
+
+                info = self._sdt_infos.get(id(item.element))
+                # Spec §3 exception: inside a table cell the anchors render
+                # inline, because a row is one projected line.
+                joiner = "" if in_cell else "\n"
+                close_tok = ""
+                if info is not None and info.anchored:
+                    close_tok = f"{joiner}{info.close_token}"
+                    tok = f"{info.open_token}{joiner}"
+                    self._add_virtual_text(tok, current, None)
+                    current += len(tok)
+
+                inner_start = current
+                current = self._map_blocks(
+                    item.element.find(QN_W_SDTCONTENT),
+                    current,
+                    style_cache,
+                    default_pstyle,
+                    part=part,
+                    in_cell=in_cell,
+                )
+                if current == inner_start:
+                    # Projects nothing: roll back the open token AND the
+                    # separator, same contract as an empty table.
+                    del self.spans[spans_mark:]
+                    del self._text_chunks[chunks_mark:]
+                    current = offset_mark
+                else:
+                    if close_tok:
+                        self._add_virtual_text(close_tok, current, None)
+                        current += len(close_tok)
+                    emitted_any_block = True
+                is_first_para = False
+
+            elif i_type == "FootnoteItem":
                 spans_mark = len(self.spans)
                 chunks_mark = len(self._text_chunks)
                 offset_mark = current
@@ -450,6 +502,14 @@ class DocumentMapper:
 
         return current
 
+    def _anchored_wrapper(self, element: Any):
+        """The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors."""
+        sdt = wrapping_sdt(element)
+        if sdt is None:
+            return None
+        info = self._sdt_infos.get(id(sdt))
+        return info if info is not None and info.anchored else None
+
     def _map_table(
         self,
         table: Any,
@@ -486,6 +546,14 @@ class DocumentMapper:
                 self._add_virtual_text("{-- ", current, None)
                 current += 4
 
+            # Row-level control (sdtContent > w:tr): the anchor is the INNER
+            # of the two wrappers — CriticMarkup is about the row's existence,
+            # the anchor about its identity. Twin of ingest.extract_table.
+            row_info = self._anchored_wrapper(tr)
+            if row_info is not None:
+                self._add_virtual_text(row_info.open_token, current, None)
+                current += len(row_info.open_token)
+
             seen_cells = set()
             cells_processed = 0
 
@@ -498,8 +566,17 @@ class DocumentMapper:
                     self._add_virtual_text(" | ", current, None)
                     current += 3
 
+                cell_info = self._anchored_wrapper(tc)
+                if cell_info is not None:
+                    # Cell-level control: anchors inline in this cell's segment.
+                    self._add_virtual_text(cell_info.open_token, current, None)
+                    current += len(cell_info.open_token)
+
                 cell_start = current
-                current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part)
+                current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part, in_cell=True)
+                if cell_info is not None:
+                    self._add_virtual_text(cell_info.close_token, current, None)
+                    current += len(cell_info.close_token)
 
                 if not self.clean_view and not self.original_view:
                     first_p_list = tc.findall(".//" + qn("w:p"))
@@ -526,6 +603,10 @@ class DocumentMapper:
                         current += len(anchor)
 
                 cells_processed += 1
+
+            if row_info is not None:
+                self._add_virtual_text(row_info.close_token, current, None)
+                current += len(row_info.close_token)
 
             # Change bubble SEPARATED from cell content, byte-identical to
             # ingest._extract_table's rendering (QA 2026-07-23 F21a; Virtual

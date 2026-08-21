@@ -11,7 +11,14 @@ from docx.text.paragraph import Paragraph
 
 from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
-from adeu.utils.content_controls import SdtEvent, assign_ordinals, part_element
+from adeu.utils.content_controls import (
+    QN_W_SDTCONTENT,
+    BlockSdt,
+    SdtEvent,
+    assign_ordinals,
+    part_element,
+    wrapping_sdt,
+)
 from adeu.utils.docx import (
     DocxEvent,
     ProjectedRun,
@@ -66,6 +73,17 @@ class ExtractStructure:
 
     part_ranges: List[Tuple[int, int, str]] = field(default_factory=list)  # (start, end, kind)
     tables: List[TableGeometry] = field(default_factory=list)
+
+
+def _anchored_wrapper(element: Any, sdt_infos: dict | None):
+    """The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors."""
+    if not sdt_infos:
+        return None
+    sdt = wrapping_sdt(element)
+    if sdt is None:
+        return None
+    info = sdt_infos.get(id(sdt))
+    return info if info is not None and info.anchored else None
 
 
 def extract_text_from_stream(
@@ -200,6 +218,7 @@ def _extract_blocks(
     default_pstyle: str | None = None,
     part: Any = None,
     sdt_infos: dict | None = None,
+    in_cell: bool = False,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
@@ -232,7 +251,7 @@ def _extract_blocks(
     is_first_block = len(blocks) == 0
 
     is_first_para = True
-    for item in iter_block_items(container):
+    for item in iter_block_items(container, emit_sdt=sdt_infos is not None):
         i_type = type(item).__name__
 
         if not is_first_block:
@@ -240,7 +259,46 @@ def _extract_blocks(
 
         block_start = local_cursor
 
-        if i_type == "FootnoteItem":
+        if isinstance(item, BlockSdt):
+            # A block-level content control. Recurse into its contents exactly
+            # as a Table recurses into its rows, then bracket the result with
+            # token lines: open token on its own line, a single "\n" joining it
+            # to the wrapped content, close token on its own line (spec §3/§5).
+            # The surrounding "\n\n" comes from the block join, as for any
+            # other block.
+            info = sdt_infos.get(id(item.element)) if sdt_infos else None
+            # Spec §3 exception: inside a table cell a block-level anchor
+            # renders INLINE. A row is one projected line, so token lines would
+            # break the "|" grammar and desynchronise the column count.
+            joiner = "" if in_cell else "\n"
+            open_tok = close_tok = ""
+            if info is not None and info.anchored:
+                open_tok = f"{info.open_token}{joiner}"
+                close_tok = f"{joiner}{info.close_token}"
+            inner = _extract_blocks(
+                item.element.find(QN_W_SDTCONTENT),
+                comments_map,
+                clean_view,
+                offset_map=offset_map,
+                cursor=block_start + len(open_tok),
+                sdt_infos=sdt_infos,
+                style_cache=style_cache,
+                default_pstyle=default_pstyle,
+                part=part,
+                in_cell=in_cell,
+            )
+            if inner:
+                full = f"{open_tok}{inner}{close_tok}"
+                blocks.append(full)
+                local_cursor = block_start + len(full)
+                is_first_block = False
+            elif not is_first_block:
+                # Projects nothing: the reader drops the block AND its
+                # separator, same contract as an empty table.
+                local_cursor -= 2
+            is_first_para = False
+
+        elif i_type == "FootnoteItem":
             fn_text = _extract_blocks(
                 item,
                 comments_map,
@@ -388,17 +446,24 @@ def extract_table(
             if not first_cell:
                 cell_cursor += 3  # " | " between cells
 
+            cell_info = _anchored_wrapper(tc, sdt_infos)
+            cell_open = cell_info.open_token if cell_info else ""
             cell_content = _extract_blocks(
                 tc,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
-                cursor=cell_cursor,
+                cursor=cell_cursor + len(cell_open),
                 sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
+                in_cell=True,
             )
+            if cell_info is not None:
+                # Cell-level control (sdtContent > w:tc): anchors render inline
+                # inside this cell's segment (spec §3).
+                cell_content = f"{cell_open}{cell_content}{cell_info.close_token}"
             if not clean_view:
                 first_p_list = tc.findall(".//" + qn("w:p"))
                 firstP = first_p_list[0] if first_p_list else None
@@ -412,6 +477,16 @@ def extract_table(
             first_cell = False
 
         row_str = " | ".join(cell_texts)
+
+        # Row-level control (sdtContent > w:tr): open token before the first
+        # cell's text, close after the last, on the row's line (spec §3).
+        # Applied before the tracked-change wrapper below so a row that is both
+        # controlled and inserted reads "{++ {#cc:N}...{#/cc:N} ++}" — the
+        # CriticMarkup is about the row's existence, the anchor about its
+        # identity, and the anchor is the inner of the two.
+        row_info = _anchored_wrapper(tr, sdt_infos)
+        if row_info is not None:
+            row_str = f"{row_info.open_token}{row_str}{row_info.close_token}"
 
         if not clean_view:
             # The change bubble is SEPARATED from cell content, mirroring the

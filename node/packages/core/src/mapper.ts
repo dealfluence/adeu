@@ -4,10 +4,13 @@ import { findAllDescendants, findChild } from "./docx/dom.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
 import {
   assignOrdinals,
+  BlockSdt,
   closeToken,
+  isAnchored,
   isSdtEvent,
   openToken,
   partElement,
+  wrappingSdt,
   type SdtInfo,
 } from "./utils/content-controls.js";
 import { extract_comments_data } from "./comments.js";
@@ -270,7 +273,7 @@ export class DocumentMapper {
     return null;
   }
 
-  private _map_blocks(container: any, offset: number): number {
+  private _map_blocks(container: any, offset: number, inCell = false): number {
     let current = offset;
     const c_type = container.constructor.name;
     const part = container.part || container;
@@ -302,7 +305,7 @@ export class DocumentMapper {
     let is_first_para = true;
     let previous_item: any = null;
 
-    for (const item of iter_block_items(container)) {
+    for (const item of iter_block_items(container, true)) {
       const i_type = item.constructor.name;
       // Marks for rolling back a tentative separator (plus any zero-width
       // anchor spans) when the block turns out to project nothing.
@@ -310,7 +313,53 @@ export class DocumentMapper {
       const chunks_mark = this._text_chunks.length;
       const offset_mark = current;
 
-      if (i_type === "FootnoteItem") {
+      if (item instanceof BlockSdt) {
+        // Twin of the ingest branch: recurse into sdtContent as a Table
+        // recurses into its rows, then bracket with token lines.
+        if (emitted_any_block) {
+          const prev_para =
+            previous_item instanceof Paragraph ? previous_item : null;
+          this._add_virtual_text("\n\n", current, prev_para);
+          current += 2;
+        }
+        const info = this._sdt_infos.get(item.element);
+        const anchored = !!info && isAnchored(info);
+        // Spec §3 exception: inside a table cell the anchors render inline,
+        // because a row is one projected line.
+        const joiner = inCell ? "" : "\n";
+        if (anchored) {
+          const tok = `${openToken(info!)}${joiner}`;
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
+        const inner_start = current;
+        // Container SHIM, not the bare element — see the ingest twin: this
+        // engine derives the OPC part from `container.part`, and a raw element
+        // loses it, breaking hyperlink resolution inside the control.
+        current = this._map_blocks(
+          {
+            _element: findChild(item.element, "w:sdtContent"),
+            part: (container as any).part || container,
+          },
+          current,
+          inCell,
+        );
+        if (current === inner_start) {
+          // Projects nothing: roll back the open token AND the separator,
+          // same contract as an empty table.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          if (anchored) {
+            const tok = `${joiner}${closeToken(info!)}`;
+            this._add_virtual_text(tok, current, null);
+            current += tok.length;
+          }
+          emitted_any_block = true;
+        }
+        is_first_para = false;
+      } else if (i_type === "FootnoteItem") {
         if (emitted_any_block) {
           const prev_para =
             previous_item instanceof Paragraph ? previous_item : null;
@@ -406,6 +455,14 @@ export class DocumentMapper {
     return current;
   }
 
+  /** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
+  private _anchoredWrapper(element: any): SdtInfo | null {
+    const sdt = wrappingSdt(element);
+    if (!sdt) return null;
+    const info = this._sdt_infos.get(sdt);
+    return info && isAnchored(info) ? info : null;
+  }
+
   private _map_table(table: Table, offset: number): number {
     let current = offset;
     let rows_processed = 0;
@@ -432,6 +489,16 @@ export class DocumentMapper {
         current += 4;
       }
 
+      // Row-level control (sdtContent > w:tr): the anchor is the INNER of the
+      // two wrappers — CriticMarkup is about the row's existence, the anchor
+      // about its identity. Twin of ingest.extract_table.
+      const rowInfo = this._anchoredWrapper(tr);
+      if (rowInfo) {
+        const tok = openToken(rowInfo);
+        this._add_virtual_text(tok, current, null);
+        current += tok.length;
+      }
+
       const seen_cells = new Set();
       let cells_processed = 0;
 
@@ -444,8 +511,21 @@ export class DocumentMapper {
           current += 3;
         }
 
+        const cellInfo = this._anchoredWrapper(cell._element);
+        if (cellInfo) {
+          // Cell-level control: anchors inline in this cell's segment.
+          const tok = openToken(cellInfo);
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
+
         const cell_start = current;
-        current = this._map_blocks(cell, current);
+        current = this._map_blocks(cell, current, true);
+        if (cellInfo) {
+          const tok = closeToken(cellInfo);
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
 
         // Parity with ingest.extract_table: emit a {#cell:<paraId>} anchor and
         // bind a zero-width span to the cell's first paragraph so the engine
@@ -490,6 +570,12 @@ export class DocumentMapper {
           }
         }
         cells_processed += 1;
+      }
+
+      if (rowInfo) {
+        const tok = closeToken(rowInfo);
+        this._add_virtual_text(tok, current, null);
+        current += tok.length;
       }
 
       if (ins && !this.clean_view && !this.original_view) {

@@ -29,6 +29,7 @@ Virtual Text contract, so every assertion below is made against both.
 """
 
 import io
+import re
 
 import pytest
 from docx import Document
@@ -157,10 +158,24 @@ def _mapper_text(data: bytes, clean_view: bool) -> str:
     return DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
 
 
+_CC_TOKEN_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
+
+
+def _strip_cc(text: str) -> str:
+    """Drop content-control anchors so CC-0's assertions stay about ROWS.
+
+    CC-1b started projecting `{#cc:N}` pairs around these very controls. That
+    is correct and asserted separately below; this suite's subject is whether
+    the wrapped rows and cells are VISIBLE AT ALL, which must keep reading the
+    same way regardless of how much chrome CC-1 adds around them.
+    """
+    return _CC_TOKEN_RE.sub("", text)
+
+
 def _row_line(text: str, first_cell: str) -> str:
     for line in text.splitlines():
-        if line.startswith(first_cell):
-            return line
+        if _strip_cc(line).startswith(first_cell):
+            return _strip_cc(line)
     raise AssertionError(f"no projected row starting with {first_cell!r} in:\n{text}")
 
 
@@ -217,6 +232,7 @@ def test_nested_repeating_section_row_is_projected(sdt_table_bytes, clean_view):
 def test_rows_project_in_document_order_exactly_once(sdt_table_bytes):
     text = _project(sdt_table_bytes, clean_view=True)
     lines = [ln for ln in text.splitlines() if ln.strip()]
+    lines = [_strip_cc(ln) for ln in lines]
     assert lines[0] == "Intro paragraph."
     assert lines[1] == "Role | Contracting Officer"
     assert lines[2] == "--- | ---"
@@ -426,3 +442,19 @@ def test_merged_cells_still_deduplicate():
         assert text.count(token) == 1, f"{token!r} projected {text.count(token)} times:\n{text}"
     assert "R0C2" in text.split("\n---")[0], f"merged row lost its trailing cell:\n{text}"
     assert _mapper_text(data, clean_view=True) == text
+
+
+# ---------------------------------------------------------------------------
+# CC-1b — the same controls now carry anchors. Asserted here, next to the
+# visibility guarantees, so a future change cannot restore visibility while
+# silently dropping the anchors (or vice versa).
+# ---------------------------------------------------------------------------
+def test_row_and_cell_controls_carry_anchors(sdt_table_bytes):
+    text = _project(sdt_table_bytes, clean_view=False)
+    assert "Role | {#cc:1}Contracting Officer{#/cc:1}" in text, "cell-level control lost its inline anchors"
+    assert "{#cc:2}Approver | Jane Roe{#/cc:2}" in text, "row-level control must bracket the whole row line"
+    assert "Notes | {#cc:3}Approved without conditions.{#/cc:3}" in text, (
+        "a block-level control inside a cell must anchor INLINE, not on its "
+        "own lines — token lines would break the '|' row grammar"
+    )
+    assert _mapper_text(sdt_table_bytes, clean_view=False) == text

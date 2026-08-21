@@ -13,12 +13,24 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ccFixtureBytes } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
 
 const GHOST = "Click or tap here to enter text.";
+
+/** The normative golden block from the frozen acceptance fixture. */
+function golden(section: string): string {
+  const md = readFileSync(
+    resolve(__dirname, "../../../../specs/content-controls/acceptance/fixture-standard.md"),
+    "utf-8",
+  );
+  const m = new RegExp(`## ${section}[\\s\\S]*?\\n\`\`\`\\n([\\s\\S]*?)\`\`\``).exec(md);
+  return m![1].replace(/\n+$/, "");
+}
 
 const fixture: Uint8Array = ccFixtureBytes();
 
@@ -100,32 +112,69 @@ describe("inline content-control projection (CC-1b)", () => {
       Array.from(t.matchAll(/\{#cc:(\d+)/g)).map((m) => m[1]);
     const raw = ids(await project(false));
     expect(raw).toEqual(ids(await project(true)));
-    expect(raw).toEqual(["2", "3", "4", "5", "7", "9", "10"]);
+    expect(raw).toEqual(["1","2","3","4","5","7","8","9","10","14","15","16"]);
     expect(raw).toEqual([...raw].sort((a, b) => Number(a) - Number(b)));
   });
 
-  it("block and table controls are not yet anchored", async () => {
-    // Scope marker for the rest of CC-1b — NOT an endorsement. Block-level
-    // (CC:1), group (CC:8) and the three table controls (CC:14-16) still
-    // project transparently; their content is visible and correct, only the
-    // anchors are missing. Fails loudly the moment block anchors land, forcing
-    // the golden comparison to be updated deliberately.
-    //
-    // Match on the parsed ordinal, not a token prefix: "{#cc:1" is also a
-    // prefix of "{#cc:10 bound}", so a substring check silently passes.
+  it("A1.1 — raw view matches GOLDEN-RAW", async () => {
+    // Exact but for the CC-1c checkbox: CC:6 still projects the raw glyph
+    // instead of [x]. Rather than weaken this to "mostly equal", the checkbox
+    // line is substituted explicitly, so the assertion is exact for the other
+    // 15 controls and the constant is what gets deleted when CC-1c lands.
+    expect((await project(false)).replace(/\n+$/, "")).toBe(
+      golden("GOLDEN-RAW").replace(
+        "Confidentiality applies: [x]",
+        "Confidentiality applies: \u2612",
+      ),
+    );
+  });
+
+  it("A1.2 — clean view matches GOLDEN-CLEAN", async () => {
+    const expected = golden("GOLDEN-RAW")
+      .replace("Confidentiality applies: [x]", "Confidentiality applies: \u2612")
+      .replace(
+        `{#cc:2}{>>placeholder: ${GHOST}<<}{#/cc:2}`,
+        "{#cc:2}{#/cc:2}",
+      );
+    const clean = await project(true);
+    expect(clean.replace(/\n+$/, "")).toBe(expected);
+    expect(clean).toContain(golden("GOLDEN-CLEAN"));
+  });
+
+  it("a block-level control anchors on its own lines (spec §3)", async () => {
+    expect(await project(false)).toContain(
+      "{#cc:1}\nThe Supplier shall indemnify the Client against all " +
+        "third-party claims.\n{#/cc:1}",
+    );
+  });
+
+  it("a group wraps its blocks and the nested control keeps its anchor", async () => {
+    expect(await project(false)).toContain(
+      "{#cc:8 group}\n" +
+        "These standard terms are approved boilerplate and must not be modified.\n\n" +
+        "Notices to: {#cc:9}123 Main Street, Ottawa{#/cc:9}\n" +
+        "{#/cc:8}",
+    );
+  });
+
+  it("table controls anchor inline, never on token lines (spec §3)", async () => {
+    // A row is one projected line: token lines would break the "|" grammar and
+    // desynchronise the column count.
     const raw = await project(false);
-    const anchored = new Set(
-      Array.from(raw.matchAll(/\{#cc:(\d+)[ }]/g)).map((m) => Number(m[1])),
+    expect(raw).toContain("Role | {#cc:14}Contracting Officer{#/cc:14}");
+    expect(raw).toContain("{#cc:15}Approver | Jane Roe{#/cc:15}");
+    // CC:16 is a BLOCK-level control that happens to sit in a cell: inline.
+    expect(raw).toContain("Notes | {#cc:16}Approved without conditions.{#/cc:16}");
+    expect(raw, "in-cell block control must not emit token lines").not.toContain(
+      "{#cc:16}\n",
     );
-    for (const ordinal of [1, 8, 14, 15, 16]) {
-      expect(
-        anchored.has(ordinal),
-        `CC:${ordinal} now anchors — update this test and the A1.1 golden`,
-      ).toBe(false);
-    }
-    expect(raw).toContain(
-      "The Supplier shall indemnify the Client against all third-party claims.",
+  });
+
+  it("the GFM divider survives between anchored rows", async () => {
+    // Regression for the golden defect corrected on 2026-08-21: GOLDEN-RAW
+    // originally omitted this line.
+    expect(await project(false)).toContain(
+      "Role | {#cc:14}Contracting Officer{#/cc:14}\n--- | ---\n",
     );
-    expect(raw).toContain("Role | Contracting Officer");
   });
 });

@@ -17,10 +17,13 @@ import {
 import { findChild } from "./docx/dom.js";
 import {
   assignOrdinals,
+  BlockSdt,
   closeToken,
+  isAnchored,
   isSdtEvent,
   openToken,
   partElement,
+  wrappingSdt,
   type SdtInfo,
 } from "./utils/content-controls.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
@@ -143,6 +146,7 @@ function _extract_blocks(
   paragraph_offsets?: Map<any, [number, number]>,
   table_acc?: TableGeometry[],
   sdtInfos?: Map<any, SdtInfo>,
+  inCell = false,
 ): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
@@ -161,11 +165,56 @@ function _extract_blocks(
     is_first_block = false;
   }
 
-  for (const item of iter_block_items(container)) {
+  for (const item of iter_block_items(container, !!sdtInfos)) {
     if (!is_first_block) local_cursor += 2;
     const block_start = local_cursor;
 
-    if (item.constructor.name === "FootnoteItem") {
+    if (item instanceof BlockSdt) {
+      // A block-level content control. Recurse into its contents exactly as a
+      // Table recurses into its rows, then bracket the result with token
+      // lines: open token on its own line, a single "\n" joining it to the
+      // wrapped content, close token on its own line (spec §3/§5). The
+      // surrounding "\n\n" comes from the block join, as for any other block.
+      const info = sdtInfos ? sdtInfos.get(item.element) : undefined;
+      const anchored = !!info && isAnchored(info);
+      // Spec §3 exception: inside a table cell a block-level anchor renders
+      // INLINE. A row is one projected line, so token lines would break the
+      // "|" grammar and desynchronise the column count.
+      const joiner = inCell ? "" : "\n";
+      const open_tok = anchored ? `${openToken(info!)}${joiner}` : "";
+      // Pass a container SHIM, not the bare sdtContent element: this engine
+      // derives the OPC part via `container.part`, and handing it a raw
+      // element silently lost the part — which broke hyperlink relationship
+      // resolution inside every block-level control ("[text](mailto:...)"
+      // degraded to bare text). Python takes `part=` as an explicit argument
+      // and so never had the hazard.
+      const inner = _extract_blocks(
+        {
+          _element: findChild(item.element, "w:sdtContent"),
+          part: (container as any).part || container,
+        },
+        comments_map,
+        cleanView,
+        block_start + open_tok.length,
+        paragraph_offsets,
+        undefined,
+        sdtInfos,
+        inCell,
+      );
+      if (inner) {
+        const full = anchored
+          ? `${open_tok}${inner}${joiner}${closeToken(info!)}`
+          : inner;
+        blocks.push(full);
+        local_cursor = block_start + full.length;
+        is_first_block = false;
+      } else if (!is_first_block) {
+        // Projects nothing: the reader drops the block AND its separator,
+        // same contract as an empty table.
+        local_cursor -= 2;
+      }
+      is_first_para = false;
+    } else if (item.constructor.name === "FootnoteItem") {
       const fn_text = _extract_blocks(
         item,
         comments_map,
@@ -245,6 +294,18 @@ function _extract_blocks(
   return blocks.join("\n\n");
 }
 
+/** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
+function anchoredWrapper(
+  element: any,
+  sdtInfos?: Map<any, SdtInfo>,
+): SdtInfo | null {
+  if (!sdtInfos) return null;
+  const sdt = wrappingSdt(element);
+  if (!sdt) return null;
+  const info = sdtInfos.get(sdt);
+  return info && isAnchored(info) ? info : null;
+}
+
 export function extract_table(
   table: Table,
   comments_map: any,
@@ -281,15 +342,23 @@ export function extract_table(
 
       if (!first_cell) cell_cursor += 3;
 
+      const cellInfo = anchoredWrapper(cell._element, sdtInfos);
+      const cellOpen = cellInfo ? openToken(cellInfo) : "";
       let cell_content = _extract_blocks(
         cell,
         comments_map,
         cleanView,
-        cell_cursor,
+        cell_cursor + cellOpen.length,
         paragraph_offsets,
         undefined,
         sdtInfos,
+        true,
       );
+      if (cellInfo) {
+        // Cell-level control (sdtContent > w:tc): anchors render inline inside
+        // this cell's segment (spec §3).
+        cell_content = `${cellOpen}${cell_content}${closeToken(cellInfo)}`;
+      }
       // Emit a stable, document-native anchor for this cell so empty/short
       // value cells are addressable by the engine. Reuses the {#...} bookmark
       // projection (already protected by validate_edit_strings and resolvable
@@ -320,6 +389,16 @@ export function extract_table(
     }
 
     let row_str = cell_texts.join(" | ");
+
+    // Row-level control (sdtContent > w:tr): open token before the first
+    // cell's text, close after the last, on the row's line (spec §3). Applied
+    // before the tracked-change wrapper below so a row that is both controlled
+    // and inserted reads "{++ {#cc:N}...{#/cc:N} ++}" — the CriticMarkup is
+    // about the row's existence, the anchor about its identity.
+    const rowInfo = anchoredWrapper(row._element, sdtInfos);
+    if (rowInfo) {
+      row_str = `${openToken(rowInfo)}${row_str}${closeToken(rowInfo)}`;
+    }
 
     if (!cleanView) {
       // The change bubble is SEPARATED from the cell content (mirroring the

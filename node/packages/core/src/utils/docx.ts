@@ -1,5 +1,10 @@
 import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
-import { isAnchored, type SdtEvent, type SdtInfo } from "./content-controls.js";
+import {
+  BlockSdt,
+  isAnchored,
+  type SdtEvent,
+  type SdtInfo,
+} from "./content-controls.js";
 import {
   Paragraph,
   Table,
@@ -819,7 +824,8 @@ export function get_run_text(run: Run): string {
 
 export function* iter_block_items(
   parent: any,
-): Generator<Paragraph | Table | FootnoteItem> {
+  emit_sdt = false,
+): Generator<Paragraph | Table | FootnoteItem | BlockSdt> {
   const parent_elm = parent._element || parent.element || parent;
 
   if (parent.constructor.name === "NotesPart") {
@@ -847,7 +853,7 @@ export function* iter_block_items(
     return;
   }
 
-  yield* _iter_block_children(parent_elm, parent);
+  yield* _iter_block_children(parent_elm, parent, emit_sdt);
 }
 
 /**
@@ -860,7 +866,8 @@ export function* iter_block_items(
 function* _iter_block_children(
   parent_elm: Element,
   parent: any,
-): Generator<Paragraph | Table> {
+  emit_sdt = false,
+): Generator<Paragraph | Table | BlockSdt> {
   for (let i = 0; i < parent_elm.childNodes.length; i++) {
     const child = parent_elm.childNodes[i] as Element;
     if (child.nodeType !== 1) continue;
@@ -872,7 +879,17 @@ function* _iter_block_children(
     } else if (child.tagName === QN_W_SDT) {
       const sdt_content = findChild(child, QN_W_SDTCONTENT);
       if (sdt_content) {
-        yield* _iter_block_children(sdt_content, parent);
+        if (emit_sdt) {
+          // Yield the control as ONE unit and do NOT descend: the consumer
+          // recurses into sdtContent itself, exactly as it already does for a
+          // Table. That is what makes a block-level control a single block
+          // that can be wrapped in its token lines — paired boundary events
+          // would instead have forced every consumer to grow a nesting stack
+          // and to re-derive the block separators inside it.
+          yield new BlockSdt(child);
+        } else {
+          yield* _iter_block_children(sdt_content, parent, emit_sdt);
+        }
       }
     }
   }
