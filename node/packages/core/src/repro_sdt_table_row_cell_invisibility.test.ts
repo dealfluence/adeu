@@ -22,15 +22,22 @@
  * Real-world blast radius: the FedRAMP SSP Moderate rev4 template carries
  * 371 cell-level SDTs.
  *
- * Visibility only — no edit/apply semantics are exercised here.
+ * Covers acceptance A0.1-A0.4
+ * (specs/content-controls/acceptance/A0-table-sdt-visibility.md). Mostly
+ * visibility; the final block additionally exercises A0.3's apply half — an
+ * edit inside a row-level control must resolve and keep its tracked change
+ * inside the wrapper.
  */
 
 import { describe, it, expect } from "vitest";
 import { parseFastXml } from "./docx/fast-xml.js";
 import { createTestDocument, addParagraph } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
+import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
+import { RedlineEngine } from "./engine.js";
+import { ModifyText } from "./models.js";
 
 const NS =
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
@@ -44,10 +51,18 @@ const tc = (text: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`;
 
 /**
- * Row 1: plain cell + a CELL-level sdt.
- * Row 2: the whole row behind a ROW-level sdt.
- * Row 3: a plain row whose second cell holds a BLOCK-level sdt around a w:p.
- * Row 4: a row behind two nested sdt levels (FedRAMP repeating-section shape).
+ * The table portion of the normative standard fixture
+ * (specs/content-controls/acceptance/fixture-standard.md), which A0 declares
+ * sufficient for A0.1-A0.4. Tags and w:id values are reproduced verbatim so
+ * CC-1 can layer {#cc:N} anchors onto this same shape.
+ *
+ * Row 1: plain cell + a CELL-level sdt          (fixture CC:14, tag cell_role)
+ * Row 2: the whole row behind a ROW-level sdt   (fixture CC:15, tag row_approver)
+ * Row 3: plain row, BLOCK-level sdt in cell 2   (fixture CC:16, tag cell_notes)
+ *
+ * Row 4 has no counterpart in the standard fixture: A0.4 requires a
+ * w15:repeatingSectionItem row nested one level inside another sdt, and the
+ * fixture only carries repeating sections at block level (CC:11-13).
  */
 const TABLE_XML = `<w:tbl ${NS}>
   <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
@@ -56,13 +71,13 @@ const TABLE_XML = `<w:tbl ${NS}>
   <w:tr>
     ${tc("Role")}
     <w:sdt>
-      <w:sdtPr><w:alias w:val="OfficerCell"/><w:id w:val="101"/></w:sdtPr>
+      <w:sdtPr><w:tag w:val="cell_role"/><w:id w:val="201"/><w:text/></w:sdtPr>
       <w:sdtContent>${tc("Contracting Officer")}</w:sdtContent>
     </w:sdt>
   </w:tr>
 
   <w:sdt>
-    <w:sdtPr><w:alias w:val="ApproverRow"/><w:id w:val="102"/></w:sdtPr>
+    <w:sdtPr><w:tag w:val="row_approver"/><w:id w:val="202"/></w:sdtPr>
     <w:sdtContent>
       <w:tr>${tc("Approver")}${tc("Jane Roe")}</w:tr>
     </w:sdtContent>
@@ -72,20 +87,20 @@ const TABLE_XML = `<w:tbl ${NS}>
     ${tc("Notes")}
     <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
       <w:sdt>
-        <w:sdtPr><w:alias w:val="NoteBlock"/><w:id w:val="103"/></w:sdtPr>
-        <w:sdtContent>${p("Block Level Note")}</w:sdtContent>
+        <w:sdtPr><w:tag w:val="cell_notes"/><w:id w:val="203"/></w:sdtPr>
+        <w:sdtContent>${p("Approved without conditions.")}</w:sdtContent>
       </w:sdt>
     </w:tc>
   </w:tr>
 
   <w:sdt>
     <w:sdtPr>
-      <w:alias w:val="RepeatSection"/><w:id w:val="104"/>
+      <w:tag w:val="deliverable_rows"/><w:id w:val="204"/>
       <w15:repeatingSection/>
     </w:sdtPr>
     <w:sdtContent>
       <w:sdt>
-        <w:sdtPr><w:id w:val="105"/><w15:repeatingSectionItem/></w:sdtPr>
+        <w:sdtPr><w:id w:val="205"/><w15:repeatingSectionItem/></w:sdtPr>
         <w:sdtContent>
           <w:tr>${tc("Repeated")}${tc("Item One")}</w:tr>
         </w:sdtContent>
@@ -180,7 +195,7 @@ describe("SDT-wrapped table rows and cells stay visible", () => {
       // A w:sdt wrapping a w:p rather than a w:tr/w:tc. iter_block_items used
       // to accept only direct w:p / w:tbl children and dropped this outright.
       const text = await extractTextFromBuffer(await buildSdtTableDoc(), cleanView, false);
-      expect(rowLine(text, "Notes")).toContain("Block Level Note");
+      expect(rowLine(text, "Notes")).toContain("Approved without conditions.");
     },
   );
 
@@ -196,7 +211,7 @@ describe("SDT-wrapped table rows and cells stay visible", () => {
     expect(lines[1]).toBe("Role | Contracting Officer");
     expect(lines[2]).toBe("--- | ---");
     expect(lines[3]).toBe("Approver | Jane Roe");
-    expect(lines[4]).toBe("Notes | Block Level Note");
+    expect(lines[4]).toBe("Notes | Approved without conditions.");
     expect(lines[5]).toBe("Repeated | Item One");
     expect(lines[6]).toBe("Outro paragraph.");
 
@@ -204,7 +219,7 @@ describe("SDT-wrapped table rows and cells stay visible", () => {
       "Contracting Officer",
       "Approver",
       "Jane Roe",
-      "Block Level Note",
+      "Approved without conditions.",
       "Repeated",
       "Item One",
     ]) {
@@ -237,4 +252,83 @@ describe("SDT-wrapped table rows and cells stay visible", () => {
       expect(covering.map((s) => s.text).join("")).toBe(target);
     },
   );
+});
+
+/** Every w:tr in the tree, including sdt-wrapped ones. */
+function trCount(doc: DocumentObject): number {
+  return findAllDescendants((doc as any).element, "w:tr").length;
+}
+
+/** The sdt-wrapped w:tr whose cells mention `needle`. */
+function wrappedRow(doc: DocumentObject, needle: string): Element | null {
+  for (const sdt of findAllDescendants((doc as any).element, "w:sdt")) {
+    const content = findChild(sdt, "w:sdtContent");
+    const tr = content && findChild(content, "w:tr");
+    if (tr && (tr.textContent ?? "").includes(needle)) return tr;
+  }
+  return null;
+}
+
+describe("edits inside a row-level content control (A0.3)", () => {
+  it("applies as a tracked change that stays inside the wrapper", async () => {
+    const before = await DocumentObject.load(await buildSdtTableDoc());
+    const rowsBefore = trCount(before);
+
+    const doc = await DocumentObject.load(await buildSdtTableDoc());
+    const engine = new RedlineEngine(doc, "A0 Reviewer");
+    const stats: any = engine.process_batch([
+      { type: "modify", target_text: "Jane Roe", new_text: "John Roe" } as ModifyText,
+    ]);
+    expect(stats.edits_applied, `edit did not resolve: ${JSON.stringify(stats)}`).toBe(1);
+    expect(stats.edits_skipped).toBe(0);
+
+    const out = await doc.save();
+    const reloaded = await DocumentObject.load(out);
+
+    const row = wrappedRow(reloaded, "Approver");
+    expect(row, "the row-level content control no longer wraps a w:tr").toBeTruthy();
+
+    // Token-level diff: "Jane Roe" -> "John Roe" shares " Roe", so only the
+    // differing token is redlined.
+    const ins = findAllDescendants(row!, "w:ins")
+      .flatMap((n) => findAllDescendants(n, "w:t"))
+      .map((n) => n.textContent ?? "")
+      .join("");
+    const del = findAllDescendants(row!, "w:del")
+      .flatMap((n) => findAllDescendants(n, "w:delText"))
+      .map((n) => n.textContent ?? "")
+      .join("");
+    expect(ins, `insertion did not land inside the control (got "${ins}")`).toContain("John");
+    expect(del, `deletion did not land inside the control (got "${del}")`).toContain("Jane");
+
+    expect(trCount(reloaded), "table row count changed").toBe(rowsBefore);
+
+    expect(await extractTextFromBuffer(out, false, false)).toContain("{--Jane--}{++John++}");
+    expect(rowLine(await extractTextFromBuffer(out, true, false), "Approver")).toBe(
+      "Approver | John Roe",
+    );
+  });
+
+  it("keeps the control in place when the revision is accepted", async () => {
+    const rowsBefore = trCount(await DocumentObject.load(await buildSdtTableDoc()));
+
+    const doc = await DocumentObject.load(await buildSdtTableDoc());
+    const engine = new RedlineEngine(doc, "A0 Reviewer");
+    engine.process_batch([
+      { type: "modify", target_text: "Jane Roe", new_text: "John Roe" } as ModifyText,
+    ]);
+
+    const accepted = await DocumentObject.load(await doc.save());
+    const acceptEngine = new RedlineEngine(accepted, "A0 Reviewer");
+    (acceptEngine as any).accept_all_revisions();
+    const finalBuf = await accepted.save();
+    const finalDoc = await DocumentObject.load(finalBuf);
+
+    expect(wrappedRow(finalDoc, "Approver"), "accept dissolved the content control").toBeTruthy();
+    expect(trCount(finalDoc), "accept changed the table row count").toBe(rowsBefore);
+
+    const text = await extractTextFromBuffer(finalBuf, true, false);
+    expect(rowLine(text, "Approver")).toBe("Approver | John Roe");
+    expect(text).not.toContain("Jane Roe");
+  });
 });
