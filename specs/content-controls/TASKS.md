@@ -96,7 +96,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     likely. Suites: `test_cc_anchor_chrome_protection.py` (38),
     `cc_anchor_chrome_protection.test.ts` in core (9, outline) and mcp-server
     (10, search); each verified to FAIL against the unfixed code.
-  - **1e — anchor fabrication refusal** (`done (PENDING)`, osx): A1.7. Two of the three
+  - **1e — anchor fabrication refusal** (`done (c532d5b)`, osx): A1.7. Two of the three
     named cases were ALREADY refused by VAL-OBS-9 (fabrication and flag-rewriting), which
     counts anchors that gained copies. The hole was deletion: that loop iterates
     `new_text`'s anchors, so a target covering `{#/cc:3}` whose `new_text` omits it had
