@@ -224,3 +224,18 @@ on this traversal and should not assume the Node side was sound.
 is a pre-existing environment flake reproduced on unmodified `origin/main` in an isolated
 worktree before this work started. `node/`: build clean, 717 + 296 + 42 tests pass, lint
 clean.
+
+### 2026-08-21 — CC-0 closed; A0.5 moved (Mikko's sign-off)
+
+Mikko approved the recommendation. A0.5 is now **A5.0** in A5-corpus-validation.md, with
+the non-discrimination caveat attached so nobody reads a green run as proof that sdt
+traversal works. A0 no longer requires a downloaded document — every remaining example
+runs on the synthetic fixture. The test itself stays in the CC-0 repro file (with its
+private `_corpus_path`) until CC-3 builds the A5 suite and adopts both. CC-0 → `done`.
+
+The three corpus parity divergences are filed as **CC-10** (P1) rather than left as prose
+in this log, since they block CC-3's A5.1 identical-counts assertion. Scoped to sweep the
+whole class of run-level elements that take the same path (`w:tab`, `w:cr`,
+`w:noBreakHyphen`, `w:softHyphen`, `w:sym`) instead of special-casing `w:br` — the
+projected form for each needs deciding once and pinning in both engines. A5.1 now carries
+a pointer to the blockers.

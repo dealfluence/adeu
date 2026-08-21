@@ -331,17 +331,17 @@ def test_accepting_the_row_level_sdt_edit_keeps_the_control(sdt_table_bytes):
 
 
 # ---------------------------------------------------------------------------
-# A0.5 — corpus scale check (skips cleanly when the document is absent).
+# A5.0 — corpus scale check (skips cleanly when the document is absent).
 #
-# `corpus_path()` proper is CC-3's deliverable (it lands in tests/utils.py
-# alongside the A5 suite); this local resolver exists only so A0.5 is a real
-# test today, because CC-3 depends on CC-0 and cannot ship first. CC-3 should
-# delete this and use the shared helper.
+# Was A0.5; moved into A5 on 2026-08-21 because it needs `corpus_path()`, a
+# CC-3 deliverable, while CC-3 depends on CC-0. It lives here until CC-3 builds
+# the A5 suite, which should take it over along with the shared helper below.
 #
 # Measured 2026-08-21 on the real template: 498,800 chars, floor comfortably
-# cleared. But see PROGRESS.md — this example does NOT discriminate the bug it
-# guards: with row/cell sdt descent disabled the same document still projects
-# 490,345 chars, so the 400,000 floor passes either way.
+# cleared. Do NOT read a green run as proof that sdt traversal works — with
+# row/cell sdt descent disabled the same document still projects 490,345 chars,
+# so this floor passes with the bug present. The discriminating check is A5.1's
+# python/node identical-count assertion. See PROGRESS.md.
 # ---------------------------------------------------------------------------
 def _corpus_path(key: str) -> "pathlib.Path | None":
     p = pathlib.Path(__file__).resolve().parents[2] / "shared" / "corpus" / f"{key}.docx"

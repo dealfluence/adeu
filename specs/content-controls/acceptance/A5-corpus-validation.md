@@ -6,12 +6,30 @@ scan facts (manifest `sdt_facts`) to absorb upstream drift. These run after CC-0
 ledger/anchor assertions activate with CC-1/CC-2 (structure the tests so the pre-CC-1
 subset is green on CC-0 alone).
 
+### A5.0 — fedramp_ssp_rev4: projection scale (pre-CC-1 subset)
+*Moved here from A0.5 on 2026-08-21 (Mikko's sign-off, PROGRESS.md): the example needs
+`corpus_path()`, a CC-3 deliverable, but CC-3 depends on CC-0 — the graph was circular.*
+- **Then** the unpaginated clean view exceeds 400,000 characters
+  (measured 2026-08-21: python 498,800, node 498,662).
+- **Caveat, and the reason this example is not sufficient on its own:** the floor does
+  **not** discriminate the CC-0 bug. With row/cell sdt descent disabled the same
+  document still projects 490,345 characters. The discriminating assertion is the
+  python/node identical-count parity check in A5.1 — that separates 490,345 from
+  498,662 at once. Do not treat a green A5.0 as evidence that sdt traversal works.
+- Engines: python + node.
+
 ### A5.1 — fedramp_ssp_rev4: scale, classes, geometry
 - **Then** ledger lists ≥ 4,750 controls; per-class floors: checkbox ≥ 3,690,
   text ≥ 430, date ≥ 315, richtext ≥ 260, combobox ≥ 25, dropdown ≥ 19, picture ≥ 4;
   BOUND ≥ 89; EMPTY ≥ 680; ≥ 350 controls marked `table cell`; ≥ 2 `TEMPORARY`.
   Full raw view contains ≥ 3,690 `[x]`/`[ ]` tokens and zero `☒`/`☐` characters.
 - Engines: python + node (identical counts — parity assertion).
+- **Known blockers (measured 2026-08-21, PROGRESS.md).** The parity assertion fails
+  today on three non-sdt divergences worth 138 chars / 78 lines: python emits the
+  literal string `<w:br w:type="page"/>` into the projection (17 occurrences, CC-10);
+  python coalesces adjacent italic runs into one emphasis span where node marks each
+  run; node projects header lines python omits. Fix or quarantine these before
+  asserting identical counts.
 
 ### A5.2 — dau_acquisition_plan: locks and anonymity
 - **Then** ledger lists ≥ 154 controls with ≥ 45 `LOCKED (contents)` lines; at least

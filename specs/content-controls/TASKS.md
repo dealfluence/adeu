@@ -17,9 +17,9 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-0 — Python parity: SDT-wrapped table rows/cells are invisible (P0, data loss)
 
-- Status: `review` (agent: opencode-osx, 2026-08-21) — A0.1-A0.5 green in both engines;
-  one spec decision for Mikko before `done`: A0.5 is non-discriminating and depends on
-  CC-3's `corpus_path()` (see PROGRESS.md; recommend moving A0.5 into A5)
+- Status: `done (d4e967f + 257a5bd)` (agent: opencode-osx, 2026-08-21) — A0.1-A0.4 green
+  in both engines. A0.5 moved to A5.0 with Mikko's sign-off (circular dependency on
+  CC-3's `corpus_path()`); the test ships here until CC-3 adopts it.
 - Depends on: —
 - Acceptance: [A0](acceptance/A0-table-sdt-visibility.md) (all examples). **Met:**
   engine fix `61bc00a`+`d4e967f` (merged `845afb3`); acceptance closed by `257a5bd`
@@ -141,6 +141,28 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 - Acceptance: FIDELITY.md gains a "Content controls" row set (preserved / normalized /
   omitted per element); AI_CONTEXT.md §13 documents the new tokens next to the existing
   anchor family; GEMINI.md documents `mode="fields"`, override params, `set_field`.
+
+## CC-10 — Python leaks raw OOXML into the text projection (P1, parity + output quality)
+
+- Status: `pending`
+- Depends on: —
+- Found by: CC-0 corpus measurement, 2026-08-21 (PROGRESS.md)
+- Acceptance: no `<w:...>` markup appears in any projected view in either engine; python
+  and node agree on `fedramp_ssp_rev4`'s clean-view character count (unblocks A5.1's
+  parity assertion). Regression file:
+  `python/tests/test_repro_raw_ooxml_in_projection.py` + node twin.
+- Scope: python projects a `w:br` element as the literal text `<w:br w:type="page"/>`.
+  Repro: a `w:p` containing `<w:r><w:t>A</w:t><w:br w:type="page"/><w:t>B</w:t></w:r>`
+  projects as `A<w:br w:type="page"/>B`; node projects a blank line. 17 occurrences in
+  `fedramp_ssp_rev4`. Ingest and mapper agree, so the Virtual Text contract holds and
+  offsets are intact — this is an output-quality and parity defect, not corruption, but
+  an LLM reads the markup as prose and a `target_text` spanning the break must include
+  the XML. Sweep for other elements taking the same path (`w:tab`, `w:cr`, `w:noBreakHyphen`,
+  `w:softHyphen`, `w:sym`) rather than special-casing `w:br`; decide the projected form
+  for each (blank line vs `\n` vs dropped) and pin both engines to it.
+- Also in the same parity gap, not necessarily this task: python coalesces adjacent
+  italic runs into one emphasis span where node marks each run; node projects header
+  lines python omits. Together 138 chars / 78 lines on `fedramp_ssp_rev4`.
 
 ## CC-9 — P3 seeds: bound dual-write hardening, repeating-section ops, field-labeled diff (P3)
 

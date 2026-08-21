@@ -39,10 +39,10 @@ portion alone is sufficient for A0.1–A0.4).
   traversal, no loss).
 - Surfaces: both engines.
 
-### A0.5 — Corpus scale check (skip-if-missing)
-- **Given** corpus `fedramp_ssp_rev4` is present (`corpus_path` helper, else skip).
-- **When** the clean view is extracted.
-- **Then** total projected character count exceeds 400,000 (the document holds ~462k
-  chars of `w:t` text; pre-fix Python projects a fraction of it via 45 paginated pages —
-  assert on the unpaginated engine-level extraction).
-- Surfaces: python (node optional).
+### A0.5 — *moved to [A5.0](A5-corpus-validation.md) on 2026-08-21*
+The corpus scale check needed `corpus_path()`, a CC-3 deliverable, while CC-3 depends on
+CC-0 — a circular dependency. Moved to A5 with Mikko's sign-off, where the corpus
+machinery and every other corpus-backed example already live (PROGRESS.md, CC-0 entry).
+It also turned out not to discriminate the bug it guarded; see the caveat on A5.0.
+**A0 therefore requires no downloaded document** — every example above runs on the
+synthetic fixture.
