@@ -837,6 +837,56 @@ it may not accept one and produce a different document. `.hypothesis` is
 gitignored, so CI will not rediscover it deterministically; CC-14 says to pin
 the example.
 
+
+## 2026-08-21 - CC-13 measured: the live-Word suite stopped lying (windows)
+
+CC-13 goes to `review`. **15 consecutive runs of all three live-Word files (43
+tests), zero failures, every run with 4 stray documents left open and activated
+in Word.** That is the poisoned half of the acceptance criterion, exceeded. The
+baseline it replaces: the same suites gave `5 passed`, `3 failed`, `5 failed`,
+`5 passed` on one unchanged commit.
+
+Two defects, both real, both in the fixture rather than in the tests that were
+failing:
+
+1. `active_word_app` activated the *application* (`app.Activate()`) and never the
+   *document*. `Documents.Add()` usually makes the new document active, which is
+   why this survived so long.
+2. The verification checked the fixture's own `Dispatch` handle. That is the
+   wrong object. The tools under test resolve Word through
+   `GetActiveObject("Word.Application")`, and when two `WINWORD.EXE` processes
+   are alive the two calls return **different applications** - so the check could
+   agree while the code under test disagreed. `_await_active_document` now polls
+   the production lookup path, and polls rather than asserts once because
+   `Document.Activate()` is asynchronous and a bare assert after it is a race
+   that usually passes.
+
+**The clock is the interesting part.** Cold Word runs the suite in 29s; with 4
+strays open it takes 103s, reproducibly, scaling with stray count. Those 74
+seconds are the retry loop losing the race and re-activating. Contamination is
+therefore still occurring on every single run - it is now being corrected
+instead of silently mis-measured. Document accumulation has been converted from
+a correctness problem into a performance problem. Worth the trade, and worth
+being explicit that it is a trade.
+
+**A dead end, recorded so nobody repeats it.** I tried closing every document
+that appeared during a test, scoped to spare a developer's own open documents.
+It makes things worse: the live-Word tools hand back Ranges into documents they
+opened, so reaping them yields `(-2147417848) The object invoked has
+disconnected from its clients` and `Object has been deleted`. That is a *worse*
+failure than the one being fixed, because it reads as a COM fault rather than a
+test-isolation bug. Reverted, with the reason left in the teardown comment.
+
+**Residual, stated plainly:** one uncharacterised failure in ~21 runs, mid-streak,
+not captured; 12 further runs with output capture armed did not reproduce it. So
+`review`, not `done`. Observed rate ~5%, down from >50% - the difference between
+"pushing from Windows is a coin flip" and "pushing works".
+
+Method note, since it cost me the most time and would cost the next person the
+same: **reproduce from a cold Word** (`Stop-Process -Name WINWORD -Force`) before
+believing any live-Word result. Run-to-run state lives in the Word instance, not
+in the tests, so an uncontrolled Word makes every measurement meaningless -
+including the measurements that make a fix look like it worked.
 ## 2026-08-21 — CC-1b complete: block, group and table anchors (`eb0a141`, osx)
 
 Block-level controls, groups and table row/cell controls now project their

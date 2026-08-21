@@ -319,8 +319,10 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-13 — The live-Word suite is nondeterministic and blocks `git push` (P1, tooling)
 
-- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch:
-  content-controls-specs) — found while verifying CC-1c. Taken ahead of CC-1c's
+- Status: `review` (agent: opencode-windows, since: 2026-08-21, branch:
+  content-controls-specs) — acceptance met with one honest residual, see the
+  measurement block below. Pushing from Windows is no longer a coin flip.
+  Found while verifying CC-1c. Taken ahead of CC-1c's
   implementation half for two reasons: 1c's wiring lands in the same traversal code
   osx is editing for 1b right now, and this row is what makes any Windows push
   reliable, mine included.
@@ -376,6 +378,27 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     remaining suspect is that the *tools* change the active document mid-test
     (`_get_word_doc` opens by path) and nothing re-establishes it before the next
     assertion.
+- **Measurement 2026-08-21 (windows), 43 tests across all three live-Word files.**
+  **15 consecutive runs, zero failures, every one of them with 4 stray documents
+  left open and activated in Word** — the poisoned half of the acceptance
+  criterion, exceeded. Baseline for comparison: the same suites previously gave
+  `5 passed` / `3 failed` / `5 failed` / `5 passed` on an unchanged commit, and a
+  poisoned Word failed immediately.
+- **The retry loop is doing real work, and the clock proves it.** Cold Word: 29s.
+  With 4 strays open: 103s, reproducibly, scaling with the stray count. That 74s is
+  `_await_active_document` losing the race and re-activating — i.e. contamination
+  is still happening on every run, and is now being *corrected* rather than
+  silently mis-measured. This is the useful diagnostic: **document accumulation now
+  costs time instead of correctness.** A 4x slowdown in a hook is a fair trade for
+  a suite that no longer lies, but it also means the accumulation problem itself
+  (the reverted reaping approach above) is unfixed, merely defanged.
+- **Residual, stated plainly: one uncharacterised failure in ~21 runs.** It
+  occurred mid-streak and was not captured; 12 subsequent runs with output capture
+  armed failed to reproduce it. So this is `review`, not `done`: the *observed*
+  rate is ~5% of runs, down from >50%, which is the difference between "pushing is
+  a coin flip" and "pushing works". Whoever closes this row should either catch
+  that failure or run long enough to argue it away. Options 1 and 3 below remain
+  the principled fixes; what landed is option 2, done properly.
 - Scope: make the live-Word suite deterministic. Options worth weighing, roughly in
   order of appeal:
   1. Give the live-Word tools an injectable Word/document handle for tests, so they
