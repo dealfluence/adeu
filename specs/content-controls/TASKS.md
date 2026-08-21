@@ -65,8 +65,8 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-3 — Corpus fetch mechanism + corpus validation tests (P1)
 
-- Status: `pending`
-- Depends on: CC-0 (cell-level counts require Python parity)
+- Status: `in-progress (agent: opencode-windows, since: 2026-08-21, branch: content-controls-specs)`
+- Depends on: CC-0 (cell-level counts require Python parity) — `review`, engine fix merged
 - Acceptance: [A5](acceptance/A5-corpus-validation.md) (all examples)
 - Scope: `scripts/fetch_corpus.py` + `shared/corpus/manifest.json` are committed by this
   initiative's bootstrap; this task wires test helpers (`corpus_path()` skip-if-missing
