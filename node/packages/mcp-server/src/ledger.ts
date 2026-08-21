@@ -11,7 +11,14 @@
 // package has no CLI.
 
 import { resolve, basename } from "node:path";
-import { offset_to_page, paginate, parse_page_arg } from "@adeu/core";
+import {
+  offset_to_page,
+  paginate,
+  parse_page_arg,
+  collectFields,
+  readDocumentProtection,
+  renderLedger,
+} from "@adeu/core";
 import type { ProjectionBundle, ToolResult } from "./response-builders.js";
 import { split_projection } from "./shared.js";
 
@@ -129,6 +136,62 @@ function addPair(pair_map: Map<string, string[]>, from: string, to: string): voi
   } else if (!partners.includes(to)) {
     partners.push(to);
   }
+}
+
+/**
+ * The surface-aware pointer at the fields ledger (spec-projection §7).
+ *
+ * Surface-aware for the QA F11 reason: telling an MCP client to run a shell
+ * command, or a CLI user to call a tool, is advice they cannot act on. Node
+ * has no CLI, so this is the MCP wording only.
+ */
+export function fields_discovery_hint(): string {
+  return ' \u00b7 read mode="fields" for the field ledger';
+}
+
+/**
+ * Render `mode="fields"` — the content-control ledger (spec §2-§4).
+ *
+ * `text` must be the RAW projection: the ledger previews values by reading the
+ * text between a control's anchors, so a clean view (which drops placeholder
+ * bubbles) would report a different document than the one the agent edits.
+ */
+export function build_fields_response(
+  doc: any,
+  text: string,
+  file_path: string,
+  opts: {
+    offset?: number;
+    bundle?: ProjectionBundle;
+    no_chrome?: boolean;
+  } = {},
+): ToolResult {
+  const { offset = 0, bundle = undefined, no_chrome = false } = opts;
+
+  const body = bundle ? bundle.body : split_projection(text)[0];
+  const pag_res = bundle ? bundle.pagination : paginate(body, "");
+
+  const entries = collectFields(doc, body, pag_res.body_page_offsets);
+  const protection = readDocumentProtection(doc);
+  const ledger = renderLedger(
+    basename(file_path) || file_path,
+    entries,
+    protection,
+    offset,
+  );
+
+  const llm_content = no_chrome
+    ? ledger
+    : `> **File Path:** \`${file_path}\`\n\n${ledger}`;
+
+  return {
+    content: [{ type: "text", text: llm_content }],
+    structuredContent: {
+      markdown: ledger,
+      file_path: resolve(file_path),
+      title: basename(file_path),
+    },
+  };
 }
 
 export function build_changes_response(

@@ -41,6 +41,7 @@ import {
   build_search_response,
   render_outline_response,
   build_changes_response,
+  build_fields_response,
 } from "./response-builders.js";
 import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
@@ -399,10 +400,10 @@ registerAppTool(
           "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ),
       mode: z
-        .enum(["full", "outline", "appendix", "changes"])
+        .enum(["full", "outline", "appendix", "changes", "fields"])
         .default("full")
         .describe(
-          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms. 'changes' returns tracked changes and comments ledger.",
+          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms. 'changes' returns tracked changes and comments ledger. 'fields' returns the content-control ledger.",
         ),
       // ONE published JSON type (string) — real MCP clients strip
       // property-level anyOf/oneOf to {}, losing the type and docs entirely
@@ -447,6 +448,13 @@ registerAppTool(
         .default(0)
         .describe(
           "For mode='changes' only: entry offset for paginating tracked changes ledger.",
+        ),
+      fields_offset: z.coerce
+        .number()
+        .int()
+        .default(0)
+        .describe(
+          "For mode='fields' only: entry offset for paginating the content-control ledger.",
         ),
       search_query: z
         .string()
@@ -506,6 +514,7 @@ registerAppTool(
       full_paragraph,
       changes_author,
       changes_offset,
+      fields_offset,
     },
     extra?: any,
   ) => {
@@ -632,6 +641,19 @@ registerAppTool(
           offset: changes_offset,
           bundle: entry2.raw_bundle,
           existing_change_ids,
+        });
+        return res as any;
+      }
+
+      if (mode === "fields") {
+        // RAW projection: the ledger previews values from the text between a
+        // control's anchors, and the clean view drops the placeholder bubbles
+        // that distinguish an empty control.
+        const entryF = await getEntry();
+        const docF = await loadDocxOrThrow(readBytes(), file_path);
+        const res = build_fields_response(docF, entryF.raw_text, file_path, {
+          offset: fields_offset,
+          bundle: entryF.raw_bundle,
         });
         return res as any;
       }

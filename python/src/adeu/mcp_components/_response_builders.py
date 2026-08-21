@@ -49,12 +49,14 @@ appendix text passed AS the body input.
 
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, List, Tuple
 
+from adeu.fields import collect_fields, read_document_protection, render_ledger
 from adeu.outline import _offset_to_page, extract_outline, heading_path_at
 from adeu.pagination import (
     PAGE_RANGE_MAX_PAGES,
@@ -1373,6 +1375,55 @@ def _parse_com_header(slice_text: str) -> tuple[str, str, int]:
         return author, body, delim_offset
 
     return "", slice_text.strip(), -1
+
+
+def fields_discovery_hint(file_path: str, is_cli: bool = False) -> str:
+    """The surface-aware pointer at the fields ledger (spec-projection §7).
+
+    Surface-aware for the QA F11 reason: telling an MCP client to run a shell
+    command, or a CLI user to call a tool, is advice they cannot act on.
+    """
+    if is_cli:
+        return f" \u00b7 run `adeu extract {file_path} --mode fields` for the field ledger"
+    return ' \u00b7 read mode="fields" for the field ledger'
+
+
+def build_fields_response(
+    doc: Any,
+    text: str,
+    file_path: str,
+    offset: int = 0,
+    is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+    no_chrome: bool = False,
+) -> BuilderResult:
+    """Render ``mode="fields"`` — the content-control ledger (spec §2-§4).
+
+    ``text`` must be the RAW projection: the ledger previews values by reading
+    the text between a control's anchors, so a clean view (which drops the
+    placeholder bubbles) would report a different document than the one the
+    agent edits.
+    """
+    body, _appendix = split_structural_appendix(text)
+    pag_res = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
+
+    entries = collect_fields(doc, body, pag_res.body_page_offsets)
+    protection = read_document_protection(doc)
+    ledger = render_ledger(os.path.basename(file_path) or file_path, entries, protection, offset=offset)
+
+    if no_chrome:
+        llm_content = ledger
+    else:
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ledger}"
+
+    return BuilderResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ledger,
+            "title": os.path.basename(file_path),
+            "file_path": file_path,
+        },
+    )
 
 
 def build_changes_response(

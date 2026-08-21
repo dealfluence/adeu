@@ -21,6 +21,7 @@ from adeu.mcp_components._response_builders import (
     BuilderResult,
     build_appendix_response,
     build_changes_response,
+    build_fields_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -352,6 +353,7 @@ async def _read_docx_disk(
     search_case_sensitive: bool = True,
     changes_author: Optional[str] = None,
     changes_offset: int = 0,
+    fields_offset: int = 0,
     max_matches: int = 20,
     match_offset: int = 0,
     full_paragraph: bool = False,
@@ -461,6 +463,28 @@ async def _read_docx_disk(
                         is_cli=False,
                         pagination_result=pagination,
                         existing_change_ids=existing_change_ids,
+                    )
+                )
+
+            if mode == "fields":
+                # RAW projection: the ledger previews values from the text
+                # between a control's anchors, and the clean view drops the
+                # placeholder bubbles that distinguish an empty control.
+                text, pagination = await asyncio.to_thread(
+                    doc_cache.get_pagination, entry, clean_view=False, cb=relay.callback
+                )
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                from adeu.cli import _load_docx_or_exit
+
+                doc = await asyncio.to_thread(_load_docx_or_exit, Path(file_path))
+                return _as_tool_result(
+                    build_fields_response(
+                        doc,
+                        text,
+                        file_path,
+                        offset=fields_offset,
+                        is_cli=False,
+                        pagination_result=pagination,
                     )
                 )
 
@@ -1317,10 +1341,11 @@ if sys.platform == "win32":
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix", "changes"],
+            Literal["full", "outline", "appendix", "changes", "fields"],
             "'full' returns body content (paginated). 'outline' returns a structural "
             "heading map. 'appendix' returns defined terms, anchors, and diagnostics. "
-            "'changes' returns a tracked changes & comments ledger.",
+            "'changes' returns a tracked changes & comments ledger. 'fields' returns "
+            "the content-control ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1374,6 +1399,10 @@ if sys.platform == "win32":
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        fields_offset: Annotated[
+            int,
+            "For mode='fields' only: entry offset for paginating the content-control ledger.",
+        ] = 0,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to read this docx document? State this reason before any other parameter.",
@@ -1403,6 +1432,7 @@ if sys.platform == "win32":
                 search_case_sensitive=search_case_sensitive,
                 changes_author=changes_author,
                 changes_offset=changes_offset,
+                fields_offset=fields_offset,
                 max_matches=max_matches,
                 match_offset=match_offset,
                 full_paragraph=full_paragraph,
@@ -1432,6 +1462,7 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        fields_offset=fields_offset,
                         max_matches=max_matches,
                         match_offset=match_offset,
                         full_paragraph=full_paragraph,
@@ -1460,6 +1491,7 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        fields_offset=fields_offset,
                         max_matches=max_matches,
                         match_offset=match_offset,
                         full_paragraph=full_paragraph,
@@ -1479,6 +1511,7 @@ if sys.platform == "win32":
                     search_case_sensitive=search_case_sensitive,
                     changes_author=changes_author,
                     changes_offset=changes_offset,
+                    fields_offset=fields_offset,
                     max_matches=max_matches,
                     match_offset=match_offset,
                     full_paragraph=full_paragraph,
@@ -1710,11 +1743,12 @@ else:
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix", "changes"],
+            Literal["full", "outline", "appendix", "changes", "fields"],
             "'full' returns body content (paginated for large docs). 'outline' returns "
             "a structural heading map with page numbers; body content is omitted. "
             "'appendix' returns defined terms, anchors, and diagnostics — consult before "
-            "editing. 'changes' returns a tracked changes & comments ledger.",
+            "editing. 'changes' returns a tracked changes & comments ledger. 'fields' "
+            "returns the content-control ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1768,6 +1802,10 @@ else:
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        fields_offset: Annotated[
+            int,
+            "For mode='fields' only: entry offset for paginating the content-control ledger.",
+        ] = 0,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to read this docx document? State this reason before any other parameter.",
@@ -1791,6 +1829,7 @@ else:
             search_case_sensitive=search_case_sensitive,
             changes_author=changes_author,
             changes_offset=changes_offset,
+            fields_offset=fields_offset,
             max_matches=max_matches,
             match_offset=match_offset,
             full_paragraph=full_paragraph,

@@ -23,6 +23,7 @@ from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
     build_changes_response,
+    build_fields_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -78,7 +79,7 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
 
     clean_view = bool(req.get("clean_view", False))
     mode = req.get("mode", "full")
-    if mode not in ("full", "outline", "appendix", "changes"):
+    if mode not in ("full", "outline", "appendix", "changes", "fields"):
         _emit_error("invalid_input", f"Invalid mode: '{mode}'")
         return
 
@@ -164,6 +165,18 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
                 outline_verbose=bool(req.get("outline_verbose", False)),
                 is_cli=True,
                 outline_nodes=outline_nodes,
+                no_chrome=no_chrome,
+            )
+        elif mode == "fields":
+            # RAW projection: the ledger previews values from the text between a
+            # control's anchors, which the clean view rewrites.
+            text, _ = doc_cache.get_pagination(entry, clean_view=False)
+            res = build_fields_response(
+                _load_docx_or_exit(path),
+                text,
+                str(path),
+                offset=int(req.get("fields_offset", 0)),
+                is_cli=True,
                 no_chrome=no_chrome,
             )
         elif mode == "changes":

@@ -318,6 +318,33 @@ def extract_all_domain_metadata(
     return definitions, diagnostics, raw_anchors
 
 
+def _content_controls_appendix_section(doc, base_text: str) -> List[str]:
+    """The appendix's ``## Content Controls`` block, or [] when unwarranted.
+
+    Imported lazily: ``adeu.fields`` pulls in the ordinal pre-pass, and the
+    appendix is built during ingest for every read, including documents with no
+    controls at all.
+    """
+    try:
+        from adeu.fields import (
+            collect_fields,
+            read_document_protection,
+            render_appendix_section,
+        )
+
+        entries = collect_fields(doc, base_text, None)
+        protection = read_document_protection(doc)
+    except Exception:
+        # The appendix is advisory. A malformed settings part or an exotic
+        # control must not take down every read of the document.
+        return []
+    return render_appendix_section(
+        entries,
+        protection,
+        hint='Read with mode="fields" for the full field ledger.',
+    )
+
+
 def build_structural_appendix(doc, base_text: str) -> str:
     """
     Compiles the Read-Only Structural Appendix block for the agent.
@@ -344,6 +371,15 @@ def build_structural_appendix(doc, base_text: str) -> str:
         lines.append("\n## Document Settings")
         for warning in settings_warnings:
             lines.append(f"- {warning}")
+
+    # Spec-fields-ledger §5: the HEADER LINES ONLY. The full ledger never
+    # renders here — FedRAMP rev4 has 5,007 controls and the appendix is
+    # bounded, so a ledger would swallow every other section.
+    cc_lines = _content_controls_appendix_section(doc, base_text)
+    if cc_lines:
+        has_content = True
+        lines.append("")
+        lines.extend(cc_lines)
 
     if defs:
         has_content = True

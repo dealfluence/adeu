@@ -35,7 +35,11 @@ export interface ProjectionBundle {
 // The changes ledger lives in its own module (440 lines of bubble parsing) but
 // belongs to this module's public surface: every caller — index.ts and the
 // conformance suite — reaches the builders through here.
-export { build_changes_response } from "./ledger.js";
+export {
+  build_changes_response,
+  build_fields_response,
+  fields_discovery_hint,
+} from "./ledger.js";
 
 // Projection style markers: `**bold**` always; `_italic_` only where the
 // underscore is not intra-word (identifiers like snake_case are literal text —

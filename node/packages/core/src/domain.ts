@@ -3,6 +3,11 @@ import { Paragraph, Run } from "./docx/primitives.js";
 import { iter_block_items, get_run_text } from "./utils/docx.js";
 import { findAllDescendants } from "./docx/dom.js";
 import { findDescendantsByLocalName } from "./sanitize/transforms.js";
+import {
+  collectFields,
+  readDocumentProtection,
+  renderAppendixSection,
+} from "./fields.js";
 
 function boundedLevenshtein(a: string, b: string, maxDist: number = 2): number {
   if (a === b) return 0;
@@ -356,6 +361,29 @@ export function extract_document_settings_warnings(
   return warnings;
 }
 
+/**
+ * The appendix's `## Content Controls` block, or [] when unwarranted.
+ *
+ * Defensive: the appendix is advisory, so a malformed settings part or an
+ * exotic control must not take down every read of the document.
+ */
+function content_controls_appendix_section(
+  doc: DocumentObject,
+  base_text: string,
+): string[] {
+  try {
+    const entries = collectFields(doc, base_text, null);
+    const protection = readDocumentProtection(doc);
+    return renderAppendixSection(
+      entries,
+      protection,
+      'Read with mode="fields" for the full field ledger.',
+    );
+  } catch {
+    return [];
+  }
+}
+
 export function build_structural_appendix(
   doc: DocumentObject,
   base_text: string,
@@ -382,6 +410,16 @@ export function build_structural_appendix(
     for (const warning of settings_warnings) {
       lines.push(`- ${warning}`);
     }
+  }
+
+  // Spec-fields-ledger §5: the HEADER LINES ONLY. The full ledger never
+  // renders here — FedRAMP rev4 has 5,007 controls and the appendix is
+  // bounded, so a ledger would swallow every other section.
+  const cc_lines = content_controls_appendix_section(doc, base_text);
+  if (cc_lines.length > 0) {
+    has_content = true;
+    lines.push("");
+    lines.push(...cc_lines);
   }
 
   if (Object.keys(defs).length > 0) {

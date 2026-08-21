@@ -673,6 +673,16 @@ def _warn_ignored_extract_flags(args) -> None:
             print(f"⚠️  --changes-author is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
         if getattr(args, "changes_offset", 0) != 0:
             print(f"⚠️  --changes-offset is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
+    if args.mode != "fields":
+        if getattr(args, "fields_offset", 0) != 0:
+            print(f"⚠️  --fields-offset is ignored with --mode {args.mode} (fields mode only).", file=sys.stderr)
+    elif args.page is not None:
+        # spec-fields-ledger §1: `page` does not apply to the ledger, which
+        # paginates by entry count via --fields-offset instead.
+        print(
+            "⚠️  --page is ignored with --mode fields (use --fields-offset to paginate the ledger).",
+            file=sys.stderr,
+        )
 
 
 def handle_extract(args):
@@ -881,6 +891,19 @@ def handle_extract(args):
                 outline_nodes=cached_outline_nodes,
                 no_chrome=no_chrome,
             )
+        elif args.mode == "fields":
+            from adeu.mcp_components._response_builders import build_fields_response
+
+            if doc is None:
+                doc = _load_docx_or_exit(input_path)
+            res = build_fields_response(
+                doc,
+                text,
+                str(input_path),
+                offset=args.fields_offset,
+                is_cli=True,
+            )
+
         elif args.mode == "changes":
             from adeu.mcp_components._response_builders import build_changes_response
             from adeu.redline.comments import CommentsManager
@@ -2041,11 +2064,12 @@ def _main_impl():
     p_extract.add_argument(
         "--mode",
         type=str,
-        choices=["full", "outline", "appendix", "changes"],
+        choices=["full", "outline", "appendix", "changes", "fields"],
         default="full",
         help=(
             "Extraction mode: 'full' for body text, 'outline' for headings, "
-            "'appendix' for defined terms, 'changes' for tracked change ledger."
+            "'appendix' for defined terms, 'changes' for tracked change ledger, "
+            "'fields' for the content-control ledger."
         ),
     )
     p_extract.add_argument(
@@ -2059,6 +2083,12 @@ def _main_impl():
         type=int,
         default=0,
         help="For mode='changes' only: entry offset for paginating tracked changes ledger.",
+    )
+    p_extract.add_argument(
+        "--fields-offset",
+        type=int,
+        default=0,
+        help="For mode='fields' only: entry offset for paginating the content-control ledger.",
     )
     p_extract.add_argument(
         "--page",
