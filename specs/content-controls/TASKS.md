@@ -218,7 +218,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-12 - Node's DocumentMapper drifts from its own ingest on real documents (P1)
 
-- Status: `pending`
+- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
 - Depends on: -
 - Found by: CC-10 follow-up parity sweep, 2026-08-21 (PROGRESS.md)
 - Acceptance: for every corpus document and both views, node's
