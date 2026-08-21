@@ -17,10 +17,10 @@ from docx import Document
 
 from adeu.fields import (
     collect_fields,
-    render_line,
     read_document_protection,
     render_banner,
     render_ledger,
+    render_line,
     summary_counts,
 )
 from adeu.ingest import _extract_text_from_doc
