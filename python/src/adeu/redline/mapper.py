@@ -67,6 +67,18 @@ class TextSpan:
     # as core + trailing-space spans, and only the first starts at run
     # offset 0. All span->run local-offset arithmetic must add this.
     run_offset: int = 0
+    # Which content controls (w:sdt) enclose this span, outermost first.
+    # The CC-4 write gates are all one question — "does this edit's text sit
+    # inside control X, and what does X permit?" — and this is the field that
+    # answers it, exactly as part_index answers it for OPC part walls.
+    #
+    # Block-level controls come from the mapper's own cursor and inline ones
+    # ride in on ProjectedRun.sdt_stack, so the tuple spans both nesting
+    # kinds. It tracks UN-anchored controls too (checkbox, picture, repeating
+    # …), which project no {#cc:N} token: anchoring decides whether a token
+    # appears in the text, enclosure decides which gates apply, and a
+    # sdtContentLocked picture control is locked while projecting nothing.
+    sdt_stack: Tuple[Any, ...] = ()
 
 
 def _append_wrapped_run_part(
@@ -250,6 +262,20 @@ class DocumentMapper:
         # engine refuse or re-anchor edits at OPC part boundaries (QA C1).
         self.part_ranges: List[Tuple[int, int, str]] = []
         self._current_part_index = 0
+        # Block-level controls enclosing the block currently being walked,
+        # outermost first. Inline controls are NOT tracked here: they arrive
+        # per-run on ProjectedRun.sdt_stack, because only the run walk knows
+        # where inside a paragraph they open and close. Spans concatenate the
+        # two (see _current_sdt_stack_for).
+        self._current_block_sdt_stack: List[Any] = []
+        # (start, end, SdtInfo) per control that projected any text, in
+        # projection order — the control-wall twin of part_ranges. Derived
+        # from the stamped spans in one post-pass (_build_control_ranges)
+        # rather than bookkept at each branch: block controls, inline
+        # controls and table-cell controls open in three different places,
+        # and three separate range calculations is three chances to disagree
+        # about where a wall is. The spans already know.
+        self.control_ranges: List[Tuple[int, int, Any]] = []
 
         # THE SAME pre-pass ingest runs, over the same parts in the same order.
         # Not a second implementation of ordinal assignment: spec-projection.md
@@ -289,9 +315,69 @@ class DocumentMapper:
                 self.part_ranges.append((part_start, current_offset, part_kind))
 
         self.full_text = "".join(self._text_chunks)
+        self._build_control_ranges()
         # The appendix is not part of the mapping engine's projection —
         # an O(N) calculation redlining never needs.
         self.appendix_start_index = -1
+
+    def _span_sdt_stack(self, run_obj: Any = None) -> Tuple[Any, ...]:
+        """The controls enclosing a span being emitted right now, outermost first.
+
+        Two sources, concatenated in nesting order. Block-level controls come
+        from this mapper's own cursor, because a block control wraps whole
+        paragraphs and only ``_map_blocks`` sees it open. Inline controls ride
+        in on the ``ProjectedRun``, because only the run walk knows where
+        inside a paragraph they open and close. A block control always
+        encloses an inline one, never the reverse, so plain concatenation is
+        the correct nesting order.
+        """
+        block = tuple(self._current_block_sdt_stack)
+        inline = getattr(run_obj, "sdt_stack", ()) if run_obj is not None else ()
+        return block + inline if inline else block
+
+    def _build_control_ranges(self) -> None:
+        """Collapse the per-span stacks into one (start, end, info) per control.
+
+        A control's range is the extent of the CONTENT it encloses, not
+        including its own ``{#cc:N}`` anchor chrome — the anchors are already
+        protected by the CC-1e tampering gate, and gates ask about content.
+        Controls that projected no text get no range at all, matching
+        ``part_ranges``' treatment of empty parts.
+        """
+        bounds: dict[int, List[Any]] = {}
+        for s in self.spans:
+            if not s.sdt_stack:
+                continue
+            for info in s.sdt_stack:
+                key = id(info)
+                cur = bounds.get(key)
+                if cur is None:
+                    bounds[key] = [s.start, s.end, info]
+                else:
+                    if s.start < cur[0]:
+                        cur[0] = s.start
+                    if s.end > cur[1]:
+                        cur[1] = s.end
+        self.control_ranges = sorted(
+            ((b[0], b[1], b[2]) for b in bounds.values()),
+            key=lambda r: (r[0], -r[1]),
+        )
+
+    def controls_at(self, index: int) -> List[Any]:
+        """The controls whose content contains ``index``, outermost first."""
+        return [info for start, end, info in self.control_ranges if start <= index < end]
+
+    def controls_intersecting(self, start: int, length: int) -> List[Any]:
+        """Controls whose content overlaps ``[start, start+length)``.
+
+        Real text only: the caller decides what to do about zero-length
+        ranges, so an insertion point exactly on a wall reports nothing and
+        is handled by the boundary logic rather than by a lock refusal.
+        """
+        if length <= 0:
+            return []
+        end = start + length
+        return [info for c_start, c_end, info in self.control_ranges if c_end > start and c_start < end]
 
     def _nonempty_part_ranges(self) -> List[Tuple[int, int, int, str]]:
         """(part_index, start, end, kind) for parts that projected any text."""
@@ -392,14 +478,25 @@ class DocumentMapper:
                     current += len(tok)
 
                 inner_start = current
-                current = self._map_blocks(
-                    item.element.find(QN_W_SDTCONTENT),
-                    current,
-                    style_cache,
-                    default_pstyle,
-                    part=part,
-                    in_cell=in_cell,
-                )
+                # Enclose the recursion, not just the runs: a block control
+                # wraps whole paragraphs, so every span the walk emits below
+                # belongs to it. try/finally because _map_blocks can raise on
+                # malformed XML and a leaked stack would mis-attribute the
+                # REST of the document to a control it already left.
+                if info is not None:
+                    self._current_block_sdt_stack.append(info)
+                try:
+                    current = self._map_blocks(
+                        item.element.find(QN_W_SDTCONTENT),
+                        current,
+                        style_cache,
+                        default_pstyle,
+                        part=part,
+                        in_cell=in_cell,
+                    )
+                finally:
+                    if info is not None:
+                        self._current_block_sdt_stack.pop()
                 if current == inner_start:
                     # Projects nothing: roll back the open token AND the
                     # separator, same contract as an empty table.
@@ -504,12 +601,21 @@ class DocumentMapper:
 
         return current
 
-    def _anchored_wrapper(self, element: Any):
-        """The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors."""
+    def _wrapping_control(self, element: Any):
+        """The SdtInfo of the control wrapping this w:tr/w:tc, anchored or not.
+
+        Gates ask about enclosure, which is independent of whether the control
+        projects a `{#cc:N}` token — the same distinction `_span_sdt_stack`
+        draws for inline controls.
+        """
         sdt = wrapping_sdt(element)
         if sdt is None:
             return None
-        info = self._sdt_infos.get(id(sdt))
+        return self._sdt_infos.get(id(sdt))
+
+    def _anchored_wrapper(self, element: Any):
+        """The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors."""
+        info = self._wrapping_control(element)
         return info if info is not None and info.anchored else None
 
     def _map_table(
@@ -551,6 +657,7 @@ class DocumentMapper:
             # Row-level control (sdtContent > w:tr): the anchor is the INNER
             # of the two wrappers — CriticMarkup is about the row's existence,
             # the anchor about its identity. Twin of ingest.extract_table.
+            row_control = self._wrapping_control(tr)
             row_info = self._anchored_wrapper(tr)
             if row_info is not None:
                 self._add_virtual_text(row_info.open_token, current, None)
@@ -568,6 +675,7 @@ class DocumentMapper:
                     self._add_virtual_text(" | ", current, None)
                     current += 3
 
+                cell_control = self._wrapping_control(tc)
                 cell_info = self._anchored_wrapper(tc)
                 if cell_info is not None:
                     # Cell-level control: anchors inline in this cell's segment.
@@ -575,7 +683,18 @@ class DocumentMapper:
                     current += len(cell_info.open_token)
 
                 cell_start = current
-                current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part, in_cell=True)
+                # Row- and cell-level controls are pushed together HERE rather
+                # than at their own structural levels because every span a row
+                # emits comes from this call: the rest is virtual chrome
+                # (separators, anchors, change bubbles), which by design sits
+                # outside content ranges. One push site, one unwind.
+                enclosing = [c for c in (row_control, cell_control) if c is not None]
+                self._current_block_sdt_stack.extend(enclosing)
+                try:
+                    current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part, in_cell=True)
+                finally:
+                    for _ in enclosing:
+                        self._current_block_sdt_stack.pop()
                 if cell_info is not None:
                     self._add_virtual_text(cell_info.close_token, current, None)
                     current += len(cell_info.close_token)
@@ -686,6 +805,7 @@ class DocumentMapper:
             run=None,
             paragraph=paragraph,
             part_index=self._current_part_index,
+            sdt_stack=self._span_sdt_stack(),
         )
         self.spans.append(span)
 
@@ -726,6 +846,7 @@ class DocumentMapper:
                         comment_ids=c_ids if c_ids else None,
                         part_index=self._current_part_index,
                         run_offset=r_off,
+                        sdt_stack=self._span_sdt_stack(r_obj),
                     )
                     self.spans.append(span)
                     self._text_chunks.append(txt)
@@ -1153,6 +1274,7 @@ class DocumentMapper:
             hyperlink_id=hyperlink_id,
             part_index=self._current_part_index,
             is_image_marker=is_image_marker,
+            sdt_stack=self._span_sdt_stack(),
         )
         self.spans.append(span)
         self._text_chunks.append(text)

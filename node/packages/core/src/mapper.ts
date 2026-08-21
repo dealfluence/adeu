@@ -56,6 +56,18 @@ export interface TextSpan {
   // as core + trailing-space spans, and only the first starts at run
   // offset 0. All span->run local-offset arithmetic must add this.
   run_offset?: number;
+  // Which content controls (w:sdt) enclose this span, outermost first.
+  // The CC-4 write gates are all one question — "does this edit's text sit
+  // inside control X, and what does X permit?" — and this is the field that
+  // answers it, exactly as part_index answers it for OPC part walls.
+  //
+  // Block-level controls come from the mapper's own cursor and inline ones
+  // ride in on Run.sdtStack, so the array spans both nesting kinds. It
+  // tracks UN-anchored controls too (checkbox, picture, repeating …), which
+  // project no {#cc:N} token: anchoring decides whether a token appears in
+  // the text, enclosure decides which gates apply, and a sdtContentLocked
+  // picture control is locked while projecting nothing.
+  sdt_stack?: readonly SdtInfo[];
 }
 
 export function renumber_snapshot_ids(
@@ -156,6 +168,18 @@ export class DocumentMapper {
   // or re-anchor edits at OPC part boundaries (QA 2026-07-18 C1).
   public part_ranges: [number, number, string][] = [];
   private _current_part_index = 0;
+  // Block-level controls enclosing the block currently being walked,
+  // outermost first. Inline controls are NOT tracked here: they arrive
+  // per-run on Run.sdtStack, because only the run walk knows where inside a
+  // paragraph they open and close. Spans concatenate the two (_spanSdtStack).
+  private _current_block_sdt_stack: SdtInfo[] = [];
+  // (start, end, SdtInfo) per control that projected any text, in projection
+  // order — the control-wall twin of part_ranges. Derived from the stamped
+  // spans in one post-pass (_buildControlRanges) rather than bookkept at each
+  // branch: block controls, inline controls and table-cell controls open in
+  // three different places, and three separate range calculations is three
+  // chances to disagree about where a wall is. The spans already know.
+  public control_ranges: [number, number, SdtInfo][] = [];
   private _sdt_infos: Map<any, SdtInfo> = new Map();
   private _text_chunks: string[] = [];
   private _plain_projection: [string, number[]] | null = null;
@@ -180,6 +204,8 @@ export class DocumentMapper {
     this._plain_projection = null;
     this.part_ranges = [];
     this._current_part_index = 0;
+    this._current_block_sdt_stack = [];
+    this.control_ranges = [];
 
     // Parts join with "\n\n" the same way blocks do: emit the separator
     // BEFORE a part (once something has been emitted) and roll it back if the
@@ -228,7 +254,75 @@ export class DocumentMapper {
     }
 
     this.full_text = this._text_chunks.join("");
+    this._buildControlRanges();
     this.appendix_start_index = -1;
+  }
+
+  /**
+   * The controls enclosing a span being emitted right now, outermost first.
+   *
+   * Two sources, concatenated in nesting order. Block-level controls come
+   * from this mapper's own cursor, because a block control wraps whole
+   * paragraphs and only `_map_blocks` sees it open. Inline controls ride in
+   * on the Run, because only the run walk knows where inside a paragraph
+   * they open and close. A block control always encloses an inline one,
+   * never the reverse, so plain concatenation is the correct nesting order.
+   */
+  private _spanSdtStack(run?: Run | null): readonly SdtInfo[] {
+    const block = this._current_block_sdt_stack;
+    const inline = (run?.sdtStack ?? []) as readonly SdtInfo[];
+    if (block.length === 0) return inline;
+    if (inline.length === 0) return block.slice();
+    return [...block, ...inline];
+  }
+
+  /**
+   * Collapse the per-span stacks into one [start, end, info] per control.
+   *
+   * A control's range is the extent of the CONTENT it encloses, not its own
+   * `{#cc:N}` anchor chrome — the anchors are already protected by the CC-1e
+   * tampering gate, and gates ask about content. Controls that projected no
+   * text get no range, matching part_ranges' treatment of empty parts.
+   */
+  private _buildControlRanges(): void {
+    const bounds = new Map<SdtInfo, [number, number]>();
+    for (const s of this.spans) {
+      if (!s.sdt_stack || s.sdt_stack.length === 0) continue;
+      for (const info of s.sdt_stack) {
+        const cur = bounds.get(info);
+        if (cur === undefined) {
+          bounds.set(info, [s.start, s.end]);
+        } else {
+          if (s.start < cur[0]) cur[0] = s.start;
+          if (s.end > cur[1]) cur[1] = s.end;
+        }
+      }
+    }
+    this.control_ranges = Array.from(bounds.entries())
+      .map(([info, [start, end]]) => [start, end, info] as [number, number, SdtInfo])
+      .sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  }
+
+  /** The controls whose content contains `index`, outermost first. */
+  public controls_at(index: number): SdtInfo[] {
+    return this.control_ranges
+      .filter(([start, end]) => start <= index && index < end)
+      .map(([, , info]) => info);
+  }
+
+  /**
+   * Controls whose content overlaps `[start, start+length)`.
+   *
+   * Real text only: the caller decides what to do about zero-length ranges,
+   * so an insertion point exactly on a wall reports nothing and is handled
+   * by the boundary logic rather than by a lock refusal.
+   */
+  public controls_intersecting(start: number, length: number): SdtInfo[] {
+    if (length <= 0) return [];
+    const end = start + length;
+    return this.control_ranges
+      .filter(([cs, ce]) => ce > start && cs < end)
+      .map(([, , info]) => info);
   }
 
   /** [part_index, start, end, kind] for parts that projected any text. */
@@ -339,14 +433,25 @@ export class DocumentMapper {
         // Container SHIM, not the bare element — see the ingest twin: this
         // engine derives the OPC part from `container.part`, and a raw element
         // loses it, breaking hyperlink resolution inside the control.
-        current = this._map_blocks(
-          {
-            _element: findChild(item.element, "w:sdtContent"),
-            part: (container as any).part || container,
-          },
-          current,
-          inCell,
-        );
+        //
+        // Enclose the recursion, not just the runs: a block control wraps
+        // whole paragraphs, so every span emitted below belongs to it.
+        // try/finally because _map_blocks can throw on malformed XML and a
+        // leaked stack would mis-attribute the REST of the document to a
+        // control it already left.
+        if (info) this._current_block_sdt_stack.push(info);
+        try {
+          current = this._map_blocks(
+            {
+              _element: findChild(item.element, "w:sdtContent"),
+              part: (container as any).part || container,
+            },
+            current,
+            inCell,
+          );
+        } finally {
+          if (info) this._current_block_sdt_stack.pop();
+        }
         if (current === inner_start) {
           // Projects nothing: roll back the open token AND the separator,
           // same contract as an empty table.
@@ -458,11 +563,22 @@ export class DocumentMapper {
     return current;
   }
 
-  /** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
-  private _anchoredWrapper(element: any): SdtInfo | null {
+  /**
+   * The SdtInfo of the control wrapping this w:tr/w:tc, anchored or not.
+   *
+   * Gates ask about enclosure, which is independent of whether the control
+   * projects a `{#cc:N}` token — the same distinction _spanSdtStack draws
+   * for inline controls.
+   */
+  private _wrappingControl(element: any): SdtInfo | null {
     const sdt = wrappingSdt(element);
     if (!sdt) return null;
-    const info = this._sdt_infos.get(sdt);
+    return this._sdt_infos.get(sdt) ?? null;
+  }
+
+  /** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
+  private _anchoredWrapper(element: any): SdtInfo | null {
+    const info = this._wrappingControl(element);
     return info && isAnchored(info) ? info : null;
   }
 
@@ -495,6 +611,7 @@ export class DocumentMapper {
       // Row-level control (sdtContent > w:tr): the anchor is the INNER of the
       // two wrappers — CriticMarkup is about the row's existence, the anchor
       // about its identity. Twin of ingest.extract_table.
+      const rowControl = this._wrappingControl(tr);
       const rowInfo = this._anchoredWrapper(tr);
       if (rowInfo) {
         const tok = openToken(rowInfo);
@@ -514,6 +631,7 @@ export class DocumentMapper {
           current += 3;
         }
 
+        const cellControl = this._wrappingControl(cell._element);
         const cellInfo = this._anchoredWrapper(cell._element);
         if (cellInfo) {
           // Cell-level control: anchors inline in this cell's segment.
@@ -523,7 +641,22 @@ export class DocumentMapper {
         }
 
         const cell_start = current;
-        current = this._map_blocks(cell, current, true);
+        // Row- and cell-level controls are pushed together HERE rather than
+        // at their own structural levels because every span a row emits comes
+        // from this call: the rest is virtual chrome (separators, anchors,
+        // change bubbles), which by design sits outside content ranges. One
+        // push site, one unwind.
+        const enclosing = [rowControl, cellControl].filter(
+          (c): c is SdtInfo => c !== null,
+        );
+        this._current_block_sdt_stack.push(...enclosing);
+        try {
+          current = this._map_blocks(cell, current, true);
+        } finally {
+          for (let n = 0; n < enclosing.length; n++) {
+            this._current_block_sdt_stack.pop();
+          }
+        }
         if (cellInfo) {
           const tok = closeToken(cellInfo);
           this._add_virtual_text(tok, current, null);
@@ -642,6 +775,7 @@ export class DocumentMapper {
       run: null,
       paragraph,
       part_index: this._current_part_index,
+      sdt_stack: this._spanSdtStack(),
     };
     this.spans.push(span);
 
@@ -688,6 +822,7 @@ export class DocumentMapper {
             comment_ids: c_ids.length > 0 ? c_ids : undefined,
             part_index: this._current_part_index,
             run_offset: r_off,
+            sdt_stack: this._spanSdtStack(r_obj),
           };
           this.spans.push(s);
           this._text_chunks.push(txt);
@@ -1176,6 +1311,7 @@ export class DocumentMapper {
       hyperlink_id: hyperlink_id || undefined,
       part_index: this._current_part_index,
       is_image_marker: is_image_marker || undefined,
+      sdt_stack: this._spanSdtStack(),
     };
     this.spans.push(span);
     this._text_chunks.push(text);
