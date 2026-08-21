@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { unzipSync, strFromU8 } from 'fflate';
@@ -287,4 +287,68 @@ export function outOfRangeIdReport(
     `ids � collapsing comment threads and invalidating every {#cell:paraId} anchor. See ` +
     `BUG_paraId_signed_int32_thread_collapse.md.`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Real-document corpus (specs/content-controls/spec-corpus.md, task CC-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Manifest of the fetch-on-demand corpus. The documents are real government
+ * files that are deliberately NOT committed, so every corpus test has to
+ * tolerate their absence: CI runs green without ever downloading one.
+ *
+ * Twin of `corpus_path()` / `corpus_dir()` in python/tests/utils.py. The two
+ * engines must resolve the same file for the same key, or an "identical
+ * counts" parity assertion is comparing two different documents.
+ */
+const CORPUS_MANIFEST = resolve(__dirname, '../../../../shared/corpus/manifest.json');
+
+let manifestCache: Record<string, { file: string }> | undefined;
+
+function corpusManifest(): Record<string, { file: string }> {
+  if (!manifestCache) {
+    manifestCache = JSON.parse(readFileSync(CORPUS_MANIFEST, 'utf-8')).documents;
+  }
+  return manifestCache!;
+}
+
+/** Where corpus documents live. `ADEU_CORPUS_DIR` relocates it. */
+export function corpusDir(): string {
+  return process.env.ADEU_CORPUS_DIR ?? dirname(CORPUS_MANIFEST);
+}
+
+/**
+ * Path to corpus document `key`, or `null` when it is not on disk.
+ *
+ * Returns null rather than skipping so the caller can decide: vitest's skip is
+ * only reachable from inside a test body (`ctx.skip()`), while the decision to
+ * emit a test at all often has to happen at collection time.
+ *
+ * An **unknown key** throws instead of returning null. The two are not the same
+ * failure: an absent document is normal (fetch-on-demand), but a typo'd key
+ * that quietly returned null would make the test vacuously green forever.
+ *
+ * Never downloads — a test that fetched would depend on government web servers.
+ */
+export function corpusPath(key: string): string | null {
+  const documents = corpusManifest();
+  if (!(key in documents)) {
+    throw new Error(
+      `unknown corpus key '${key}'; manifest defines: ${Object.keys(documents).sort().join(', ')}`,
+    );
+  }
+  const path = resolve(corpusDir(), documents[key].file);
+  return existsSync(path) ? path : null;
+}
+
+/** The message a skipped corpus test should carry: it names the fix. */
+export function corpusSkipReason(key: string): string {
+  return `corpus document '${key}' absent - run \`python scripts/fetch_corpus.py --only ${key}\``;
+}
+
+/** Bytes of corpus document `key`, or null when absent. */
+export function corpusBuffer(key: string): Buffer | null {
+  const path = corpusPath(key);
+  return path ? readFileSync(path) : null;
 }

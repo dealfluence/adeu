@@ -29,7 +29,6 @@ Virtual Text contract, so every assertion below is made against both.
 """
 
 import io
-import pathlib
 
 import pytest
 from docx import Document
@@ -41,7 +40,7 @@ from adeu.models import ModifyText
 from adeu.outline import extract_outline
 from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
-from tests.utils import assert_word_readable_ids
+from tests.utils import assert_word_readable_ids, corpus_path
 
 NS = (
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -334,26 +333,20 @@ def test_accepting_the_row_level_sdt_edit_keeps_the_control(sdt_table_bytes):
 # A5.0 — corpus scale check (skips cleanly when the document is absent).
 #
 # Was A0.5; moved into A5 on 2026-08-21 because it needs `corpus_path()`, a
-# CC-3 deliverable, while CC-3 depends on CC-0. It lives here until CC-3 builds
-# the A5 suite, which should take it over along with the shared helper below.
+# CC-3 deliverable, while CC-3 depends on CC-0. Now on that shared helper (the
+# local resolver this file carried has been removed, as its author asked).
 #
 # Measured 2026-08-21 on the real template: 498,800 chars, floor comfortably
 # cleared. Do NOT read a green run as proof that sdt traversal works — with
 # row/cell sdt descent disabled the same document still projects 490,345 chars,
-# so this floor passes with the bug present. The discriminating check is A5.1's
-# python/node identical-count assertion. See PROGRESS.md.
+# so this floor passes with the bug present. The discriminating check is CC-3's
+# tests/test_corpus_validation.py::test_a5_1_cell_level_sdt_content_is_visible
+# _at_scale, which asserts on text reachable ONLY through a cell-level sdt and
+# derives it from the document rather than hardcoding it. Keep both: this one
+# guards scale, that one guards the repair. See PROGRESS.md.
 # ---------------------------------------------------------------------------
-def _corpus_path(key: str) -> "pathlib.Path | None":
-    p = pathlib.Path(__file__).resolve().parents[2] / "shared" / "corpus" / f"{key}.docx"
-    return p if p.is_file() else None
-
-
 def test_fedramp_corpus_projects_at_full_scale():
-    path = _corpus_path("fedramp_ssp_rev4")
-    if path is None:
-        pytest.skip("corpus document absent; run `python scripts/fetch_corpus.py --only fedramp_ssp_rev4`")
-
-    text = _project(path.read_bytes(), clean_view=True)
+    text = _project(corpus_path("fedramp_ssp_rev4").read_bytes(), clean_view=True)
     assert len(text) > 400_000, f"clean view projected only {len(text):,} chars"
 
     # The shape CC-0 actually repaired: 371 cell-level SDTs in this template.
