@@ -3281,9 +3281,15 @@ class RedlineEngine:
         from adeu.fields import FieldResolutionError
         from adeu.utils.field_write import (
             clear_placeholder,
+            option_is_listed,
+            parse_iso_date,
             refuse_class,
             refuse_value,
+            render_date,
+            resolve_option,
             sdt_content,
+            set_dropdown_last_value,
+            set_full_date,
         )
 
         try:
@@ -3324,6 +3330,47 @@ class RedlineEngine:
             self._mutated_since_load = True
             self._invalidate_projection_caches()
 
+        # Phase 1b: per-class value translation. The caller's string is not
+        # always what gets written: a dropdown's `w:value` resolves to its
+        # display text, and a date renders through the control's own format.
+        # Computed per target because two controls sharing a tag may declare
+        # different formats or option lists.
+        effective: dict = {}
+        notes: dict = {}
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is None:
+                continue
+            if info.cls in ("dropdown", "combobox"):
+                display, err = resolve_option(info, edit.value)
+                if err is not None:
+                    msg = f"CC:{entry.ordinal}: {err}"
+                    edit._applied_status = False
+                    edit._error_msg = msg
+                    self.skipped_details.append(f"- {msg}")
+                    return
+                effective[entry.ordinal] = display
+                if info.cls == "combobox" and not option_is_listed(info, display):
+                    notes[entry.ordinal] = f"'{display}' is not in the option list"
+            elif info.cls == "date":
+                parts = parse_iso_date(edit.value)
+                if parts is None:
+                    msg = (
+                        f"CC:{entry.ordinal} is a date control; '{edit.value}' is not a date. "
+                        "Use the canonical YYYY-MM-DD form (e.g. 2026-03-01)."
+                    )
+                    edit._applied_status = False
+                    edit._error_msg = msg
+                    self.skipped_details.append(f"- {msg}")
+                    return
+                text, unsupported = render_date(parts, info.date_format)
+                effective[entry.ordinal] = text
+                if unsupported:
+                    notes[entry.ordinal] = (
+                        f"the control's date format '{info.date_format}' is not supported in v1; "
+                        f"wrote the canonical {text}"
+                    )
+
         # Phase 2: checkboxes are written directly; everything else desugars.
         def _cls_of(e: Any) -> str:
             info = self._sdt_info_for_ordinal(e.ordinal)
@@ -3355,10 +3402,11 @@ class RedlineEngine:
 
             start, end = span
             current = self.mapper.full_text[start:end]
+            value = effective.get(entry.ordinal, edit.value)
             sub = ModifyText(
                 type="modify",
                 target_text=current,
-                new_text=edit.value,
+                new_text=value,
                 comment=edit.comment,
             )
             # Always atomic, comment or not (spec §3): a fill is one logical
@@ -3380,7 +3428,23 @@ class RedlineEngine:
             if edit._resolved_start_idx is None:
                 edit._resolved_start_idx = start
                 edit._resolved_proxy_edit = sub
-            resolved_edits.append((sub, edit.value))
+            # The attribute syncs ride along with the content change and take
+            # no revision of their own (spec §5, the URL_RETARGET class): the
+            # visible text carries the redline, and a second revision for the
+            # attribute would show a reviewer two changes for one act.
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is not None:
+                if info.cls in ("dropdown", "combobox"):
+                    set_dropdown_last_value(info, value)
+                elif info.cls == "date":
+                    parts = parse_iso_date(edit.value)
+                    if parts is not None:
+                        set_full_date(info, parts)
+            note = notes.get(entry.ordinal)
+            if note:
+                existing = edit._warning
+                edit._warning = f"{existing}; {note}" if existing else note
+            resolved_edits.append((sub, value))
 
     def _apply_checkbox_set_field(self, edit: "SetField", entry: Any, info: Any) -> bool:
         """The checkbox fill (A4.6), which cannot desugar into a ModifyText.

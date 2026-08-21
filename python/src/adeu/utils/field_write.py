@@ -268,3 +268,124 @@ def glyph_run(info: SdtInfo) -> Optional[Any]:
     """The run carrying the checkbox's visible character."""
     runs = content_runs(info.element)
     return runs[0] if runs else None
+
+
+# ---------------------------------------------------------------------------
+# Dropdown / combobox (G10) and date (G12)
+# ---------------------------------------------------------------------------
+
+
+def resolve_option(info: SdtInfo, value: str) -> tuple:
+    """Map a caller's string onto a list item: `(display_text, error)`.
+
+    A `displayText` match wins; a `w:value` match resolves to that item's
+    displayText, because the display text is what the document shows and what
+    the next reader will diff against. Only one of the two can be written, and
+    writing the machine value would make the document say `BC` where every
+    other row says `British Columbia`.
+    """
+    options = list(info.options)
+    if not options:
+        return (value, None)
+    for display, _val in options:
+        if display == value:
+            return (display, None)
+    for display, val in options:
+        if val and val == value:
+            return (display, None)
+    if info.cls == "combobox":
+        # Free text is legal here; the report says so rather than the engine
+        # refusing something Word permits.
+        return (value, None)
+    listed = " | ".join(display for display, _v in options)
+    return (
+        None,
+        f"'{value}' is not one of this dropdown's options. Choose one of: {listed}.",
+    )
+
+
+def option_is_listed(info: SdtInfo, value: str) -> bool:
+    return any(display == value or (val and val == value) for display, val in info.options)
+
+
+def set_dropdown_last_value(info: SdtInfo, display_text: str) -> None:
+    """Update `w:dropDownList/@w:lastValue` to match the written text.
+
+    Silent, like the checkbox attribute: Word records the last selection here
+    and a stale value re-selects the old option in the dropdown UI while the
+    document text says something else.
+    """
+    pr = sdt_pr(info.element)
+    if pr is None:
+        return
+    for name in ("w:dropDownList", "w:comboBox"):
+        node = pr.find(qn(name))
+        if node is not None:
+            node.set(qn("w:lastValue"), display_text)
+            return
+
+
+#: The `w:dateFormat` letter-runs this engine renders in v1. Deliberately a
+#: set of whole RUNS, not substrings: `dddd` is the day NAME and `MMMM` the
+#: month name, and a substring test sees the supported `dd`/`MM` inside them.
+#: Testing substrings turned `dddd, MMMM d` into `0101, 0303 1` - a date that
+#: is not merely misformatted but unreadable, written silently.
+_SUPPORTED_DATE_RUNS = {"yyyy", "MM", "M", "dd", "d"}
+
+
+def parse_iso_date(value: str) -> Optional[tuple]:
+    """`(y, m, d)` for a canonical `YYYY-MM-DD`, else `None`."""
+    import re as _re
+
+    m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value.strip())
+    if not m:
+        return None
+    y, mo, d = (int(g) for g in m.groups())
+    try:
+        import datetime
+
+        datetime.date(y, mo, d)
+    except ValueError:
+        return None
+    return (y, mo, d)
+
+
+def render_date(parts: tuple, date_format: Optional[str]) -> tuple:
+    """`(text, unsupported_format)` for the control's own `w:dateFormat`.
+
+    ISO when the control declares no format, or when it declares one this
+    engine cannot render faithfully - with the flag set so the caller's report
+    says so. Writing an approximation of a format the document asked for is
+    worse than writing the canonical form and admitting it.
+    """
+    import re as _re
+
+    y, mo, d = parts
+    iso = f"{y:04d}-{mo:02d}-{d:02d}"
+    if not date_format:
+        return (iso, False)
+
+    runs = _re.findall(r"[A-Za-z]+", date_format)
+    if not runs or any(run not in _SUPPORTED_DATE_RUNS for run in runs):
+        return (iso, True)
+
+    values = {
+        "yyyy": f"{y:04d}",
+        "MM": f"{mo:02d}",
+        "M": str(mo),
+        "dd": f"{d:02d}",
+        "d": str(d),
+    }
+    return (_re.sub(r"[A-Za-z]+", lambda m: values[m.group(0)], date_format), False)
+
+
+def set_full_date(info: SdtInfo, parts: tuple) -> None:
+    """Sync `w:date/@w:fullDate`, silently (spec §5, URL_RETARGET class)."""
+    pr = sdt_pr(info.element)
+    if pr is None:
+        return
+    node = pr.find(qn("w:date"))
+    if node is None:
+        return
+    y, mo, d = parts
+    node.set(qn("w:fullDate"), f"{y:04d}-{mo:02d}-{d:02d}T00:00:00Z")

@@ -521,3 +521,89 @@ class TestA46Checkbox:
             line_i = next(ln for ln in text.split("\n") if "Confidentiality" in ln)
             line_m = next(ln for ln in mapper.full_text.split("\n") if "Confidentiality" in ln)
             assert line_i == line_m, f"clean_view={clean}"
+
+
+class TestA43Dropdown:
+    """A4.3 — G10 option validation."""
+
+    def test_a_listed_display_text_replaces_the_current_selection(self):
+        raw, result = _fill("governing_law", "British Columbia")
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        sdt = _saved_sdt(raw, 4)
+        ins = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        dele = "".join(t.text or "" for d in sdt.iter(f"{W}del") for t in d.iter(f"{W}delText"))
+        assert ins == "British Columbia" and dele == "Ontario"
+
+    def test_the_last_value_attribute_follows_the_selection(self):
+        raw, _ = _fill("governing_law", "British Columbia")
+        sdt = _saved_sdt(raw, 4)
+        node = sdt.find(f".//{W}dropDownList")
+        assert node is not None and node.get(f"{W}lastValue") == "British Columbia"
+
+    def test_a_machine_value_resolves_to_its_display_text(self):
+        """The document must read like every other row, not like a database."""
+        raw, result = _fill("governing_law", "BC")
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        sdt = _saved_sdt(raw, 4)
+        ins = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins == "British Columbia"
+
+    def test_an_unlisted_option_is_refused_with_the_list(self):
+        msg = _expect_refusal("governing_law", "Manitoba")
+        assert "Ontario" in msg and "British Columbia" in msg and "Federal" in msg
+
+
+class TestA45Date:
+    """A4.5 — G12 format handling and the silent fullDate sync."""
+
+    def test_a_canonical_date_is_written_and_tracked(self):
+        raw, result = _fill("effective_date", "2026-03-01")
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        sdt = _saved_sdt(raw, 5)
+        ins = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins == "2026-03-01"
+
+    def test_full_date_syncs_with_no_revision_of_its_own(self):
+        raw, _ = _fill("effective_date", "2026-03-01")
+        sdt = _saved_sdt(raw, 5)
+        date_el = sdt.find(f".//{W}date")
+        assert date_el is not None
+        assert date_el.get(f"{W}fullDate") == "2026-03-01T00:00:00Z"
+        assert len(sdt.findall(f".//{W}ins")) == 1
+
+    def test_a_non_canonical_date_is_refused_naming_the_format(self):
+        msg = _expect_refusal("effective_date", "01.03.2026")
+        assert "YYYY-MM-DD" in msg
+
+    def test_an_impossible_date_is_refused(self):
+        """A regex-only check would accept 2026-02-30 and write it."""
+        msg = _expect_refusal("effective_date", "2026-02-30")
+        assert "date" in msg.lower()
+
+
+class TestDateFormatRendering:
+    """spec §5 — the `yyyy/MM/dd/d/M` subset, and honesty beyond it."""
+
+    @pytest.mark.parametrize(
+        "fmt,expected",
+        [
+            (None, "2026-03-01"),
+            ("yyyy-MM-dd", "2026-03-01"),
+            ("MM/dd/yyyy", "03/01/2026"),
+            ("d/M/yyyy", "1/3/2026"),
+        ],
+    )
+    def test_supported_formats_render(self, fmt, expected):
+        from adeu.utils.field_write import render_date
+
+        assert render_date((2026, 3, 1), fmt) == (expected, False)
+
+    @pytest.mark.parametrize("fmt", ["dddd, MMMM d", "EEE dd", "MMM yyyy"])
+    def test_name_bearing_formats_fall_back_and_say_so(self, fmt):
+        """`dddd` is the day NAME. A substring test sees the supported `dd`
+        inside it and rendered `dddd, MMMM d` as `0101, 0303 1`."""
+        from adeu.utils.field_write import render_date
+
+        text, unsupported = render_date((2026, 3, 1), fmt)
+        assert unsupported is True
+        assert text == "2026-03-01"
