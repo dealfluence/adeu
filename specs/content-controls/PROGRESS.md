@@ -887,3 +887,57 @@ dropping the anchors.
 
 **Left for others.** CC:6 renders `☒`; that is 1c (windows). 1d, 1e and 1f are
 unclaimed and now unblocked — 1b was their dependency.
+
+## 2026-08-21 — CC-1d: anchors survive chrome-stripping (A1.6, osx)
+
+A1.6 names two passes, and neither turned out to be the defect.
+
+**What was already right.** Both marker strippers — the outline's
+`_strip_inline_formatting` and search's `_emphasized_snippet` — protect
+`{#...}` tokens from emphasis pairing, added by QA 2026-07-23 F4 for
+`{#_Ref…}` bookmark anchors. That protection covers `{#cc:N}` unchanged, so
+CC-1d pins it rather than rewriting it. Worth stating plainly because the task
+scope predicted work here and there was none: `_{#cc:3}_` still strips to
+`{#cc:3}`, correctly, since those underscores are real markers around the
+token rather than part of it.
+
+**What was wrong.** The passes that *cut* text knew nothing about tokens.
+Outline truncation at 200 chars sliced straight through an anchor and emitted
+`{#cc:`; the search snippet's radius windows did the same. A split anchor is
+worse than a missing one — `{#cc:` is a plausible target an agent will copy
+that resolves to nothing — which is exactly why A1.6 words the rule as "the
+whole token, or omitted, never split". Both are pre-existing and hit
+`{#_Ref…}` too; CC-1 only made them likely, by putting anchors in far more
+headings and snippets.
+
+The snippet half is reachable in production, not theoretical: the radius ladder
+clamps whenever a result set exceeds the response budget. Windows now widen to
+the token edge, which is the behaviour `_balance_snippet_window` already had
+for CriticMarkup, so the fix follows the function's existing contract instead
+of inventing a second one.
+
+**Two things the fixtures taught.**
+
+The outline has two heading-text derivations and only one can exhibit the bug.
+The legacy path rebuilds text with `build_paragraph_text`, which carries no sdt
+anchors at all; the fast path slices the projected body, which does. Production
+— both MCP servers and the CLI — takes the fast path, because it passes
+`paragraph_offsets`. A first cut of the node suite drove the legacy path and
+went green over the one code path that is structurally incapable of failing.
+Both suites now assert the projection contains `{#cc:` before they begin.
+
+The two engines needed *different* fixtures to produce one heading: Python
+needs a `Heading1` pStyle, Node accepts a bare `w:outlineLvl`. That is a real
+cross-engine divergence, filed as **CC-15**. It is a consequence of a
+documented `python-docx` 1.2 gap, already pinned internally, but the
+cross-engine half was untracked. Not fixed here — adding headings changes every
+outline consumer and deserves a corpus sweep, not a drive-by.
+
+**Also aligned:** node's `_truncate_outline_text` now `trimEnd()`s like
+Python's `.rstrip()`. That divergence pre-dates this task, but trimming a
+dangling anchor makes trailing whitespace common rather than rare, so leaving
+it would have amplified a latent parity bug.
+
+Every one of the three new suites was run against the unfixed code first:
+13/30, 2/9 and 6/10 failed respectively. A regression test that does not fail
+on the bug is decoration.

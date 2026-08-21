@@ -48,6 +48,12 @@ const STYLE_MARKER_RE = /\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])/g;
 // (QA 2026-07-23 F4).
 const PROTECTED_TOKEN_RE = /\{#[^}]+\}|_{3,}/g;
 
+// `{#anchor}` tokens — bookmark anchors and CC-1's `{#cc:N}` content-control
+// anchors. A snippet window that lands inside one must not emit the fragment
+// (CC-1 A1.6). Source form: the matcher is rebuilt per use because it is
+// stateful under /g.
+const ANCHOR_TOKEN_SRC = "\\{#[^}\\n]*\\}";
+
 /**
  * Renders `prefix **match** suffix` with the document's own bold/italic
  * projection markers stripped first, so the highlight cannot collide with
@@ -210,6 +216,29 @@ export function balanceSnippetWindow(
     const depth: Record<string, number> = {};
     for (const opener of Object.keys(SNIPPET_CLOSER_OF)) depth[opener] = 0;
     let widened = false;
+
+    // `{#anchor}` tokens are kept whole on the same terms (CC-1 A1.6). They
+    // are not a paired construct, so they need no depth counter — a window
+    // edge landing strictly inside one just moves out to the token's own edge.
+    // A split anchor is worse than a missing one: `{#cc:` is a
+    // plausible-looking target an agent will copy, and the radius ladder makes
+    // it reachable whenever a result set exceeds the response budget.
+    const anchor_re = new RegExp(ANCHOR_TOKEN_SRC, "g");
+    let a: RegExpExecArray | null;
+    while ((a = anchor_re.exec(body)) !== null) {
+      const a_start = a.index;
+      const a_end = a.index + a[0].length;
+      if (a_start < start && start < a_end) {
+        start = a_start;
+        widened = true;
+      }
+      if (a_start < end && end < a_end) {
+        end = a_end;
+        widened = true;
+      }
+      if (a_start >= end) break;
+    }
+    if (widened) continue;
 
     const token_re = new RegExp(SNIPPET_MARKUP_TOKEN_SRC, "g");
     token_re.lastIndex = start;

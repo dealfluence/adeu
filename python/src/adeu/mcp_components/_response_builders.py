@@ -207,6 +207,11 @@ _SNIPPET_CLOSER_OF = dict(_SNIPPET_MARKUP_PAIRS)
 _SNIPPET_OPENER_OF = {closer: opener for opener, closer in _SNIPPET_MARKUP_PAIRS}
 _SNIPPET_MARKUP_TOKEN_RE = re.compile("|".join(re.escape(t) for t in (*_SNIPPET_CLOSER_OF, *_SNIPPET_OPENER_OF)))
 
+# `{#anchor}` tokens — bookmark anchors and CC-1's `{#cc:N}` content-control
+# anchors. A snippet window or an outline truncation that lands inside one must
+# not emit the fragment (CC-1 A1.6).
+_ANCHOR_TOKEN_RE = re.compile(r"\{#[^}\n]*\}")
+
 
 def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
     """
@@ -231,10 +236,29 @@ def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
     Widening past a line break is safe: the snippet renderer quotes each line
     it spans, and the response budget drops trailing entries if the wider
     window costs too much.
+
+    `{#anchor}` tokens are kept whole on the same terms (CC-1 A1.6). They are
+    not a paired construct, so they need no depth counter — a window edge
+    landing strictly inside one just moves out to the token's own edge. A split
+    anchor is worse than a missing one: `{#cc:` is a plausible-looking target
+    an agent will copy, and the radius ladder makes it reachable in production
+    whenever a result set exceeds the response budget.
     """
     while True:
         depth = dict.fromkeys(_SNIPPET_CLOSER_OF, 0)
         widened = False
+
+        for tok in _ANCHOR_TOKEN_RE.finditer(body):
+            if tok.start() < start < tok.end():
+                start = tok.start()
+                widened = True
+            if tok.start() < end < tok.end():
+                end = tok.end()
+                widened = True
+            if tok.start() >= end:
+                break
+        if widened:
+            continue
 
         for tok in _SNIPPET_MARKUP_TOKEN_RE.finditer(body, start, end):
             token = tok.group(0)

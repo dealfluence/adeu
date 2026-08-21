@@ -86,8 +86,16 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     `odot_uic_drywell` has 2 bare `☐` in prose outside any control that must stay
     `☐` — substitute on the character and you invent two checkboxes. Still to do:
     the projection itself, both engines, once 1a lands.
-  - **1d — chrome-stripping protection** (unclaimed): A1.6, outline
-    `_strip_inline_formatting` + search `_emphasizedSnippet`. Needs 1b.
+  - **1d — chrome-stripping protection** (`done (PENDING)`, osx): A1.6. The marker
+    STRIPPERS already protected `{#...}` (QA 2026-07-23 F4) and that covered `{#cc:N}`
+    unchanged — pinned, not rewritten. The real gap was the two passes that CUT text
+    and knew nothing about tokens: outline truncation at 200 chars and the search
+    radius ladder both sliced through an anchor and emitted `{#cc:`. Fixed in both
+    engines (outline drops a token that will not fit; snippet windows widen to the
+    token edge). Pre-existing for `{#_Ref…}` bookmark anchors too — CC-1 only made it
+    likely. Suites: `test_cc_anchor_chrome_protection.py` (38),
+    `cc_anchor_chrome_protection.test.ts` in core (9, outline) and mcp-server
+    (10, search); each verified to FAIL against the unfixed code.
   - **1e — anchor fabrication refusal** (unclaimed): A1.7, validation layer. Needs 1b.
   - **1f — banner** (unclaimed): A1.9. Touches CLI + both MCP servers and overlaps
     CC-2's surface work — probably belongs WITH CC-2 rather than here; whoever takes
@@ -461,3 +469,27 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   becomes a real `DocumentPart` while keeping its own content type. `.dotx` in, `.dotx`
   out, and the save-side question disappears rather than being traded off. All nine
   `docx.Document` call sites now import `adeu.utils.opc.load_document`.
+
+## CC-15 — Node reports outline headings from a bare `w:outlineLvl`; Python does not (P3)
+
+- Status: `pending` — filed by opencode-osx, 2026-08-21, while building CC-1d's outline
+  fixture. **Pre-existing**, unrelated to content controls; found because the two
+  engines needed different fixtures to produce the same heading.
+- Depends on: —
+- Symptom: for a paragraph carrying `<w:outlineLvl w:val="0"/>` and NO heading `pStyle`,
+  `@adeu/core` returns one outline node (style `"(outline_level)"`, `outline.ts:538`)
+  and `adeu` returns none. Word treats such a paragraph as an outline-level heading, so
+  Node is right and the Python outline silently omits real headings.
+- Cause: not a logic bug — `python-docx` 1.2 has no `paragraph_format.outline_level`,
+  the `AttributeError` is swallowed by the existing try/except, and step 1 of
+  `_determine_heading_style` is therefore dead code. This is already documented at
+  `python/src/adeu/outline.py:1102-1109` and pinned INTERNALLY by
+  `tests/test_outline_fast_equivalence.py` (fast mirror vs original). What is not
+  tracked anywhere is the CROSS-ENGINE consequence, which is what this row is for.
+- Scope: read `w:outlineLvl` off the `pPr` element directly instead of through the
+  missing python-docx property, in both `_determine_heading_style` and its
+  cache-backed `_fast` mirror. Note the fast mirror's docstring promises "identical
+  observable behavior", so both must move together or that pin fails.
+- Acceptance: a paragraph with only `w:outlineLvl` yields the same outline node in both
+  engines. Worth a corpus sweep first to size the blast radius: adding headings changes
+  every outline consumer, so this is not obviously a safe drive-by.

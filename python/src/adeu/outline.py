@@ -954,7 +954,16 @@ _PROTECTED_UNDERSCORE_RE = re.compile(r"\{#[^}]+\}|_{3,}")
 
 def _truncate_outline_text(text: str) -> str:
     if len(text) > _OUTLINE_TEXT_MAX_CHARS:
-        return text[:_OUTLINE_TEXT_MAX_CHARS].rstrip() + "…"
+        cut = text[:_OUTLINE_TEXT_MAX_CHARS]
+        # Never ship a SPLIT anchor token. The cut can land inside `{#cc:3}` or
+        # `{#_Ref444615940}` and emit `{#cc:`, which is not obviously broken to
+        # an agent reading the outline — it is a plausible target that resolves
+        # to nothing. A1.6 allows dropping the token entirely but never
+        # splitting it, so a dangling opener is trimmed back to its `{#`.
+        # Only an UNCLOSED fragment matches: a whole token keeps its `}`.
+        if (dangling := re.search(r"\{#[^}\n]*$", cut)) is not None:
+            cut = cut[: dangling.start()]
+        return cut.rstrip() + "…"
     return text
 
 

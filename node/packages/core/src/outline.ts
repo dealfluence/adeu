@@ -439,7 +439,19 @@ function _heading_text(paragraph: Paragraph, comments_map: any): string {
 
 function _truncate_outline_text(text: string): string {
   if (text.length <= _OUTLINE_TEXT_MAX_CHARS) return text;
-  return text.substring(0, _OUTLINE_TEXT_MAX_CHARS) + "…";
+  let cut = text.substring(0, _OUTLINE_TEXT_MAX_CHARS);
+  // Never ship a SPLIT anchor token. The cut can land inside `{#cc:3}` or
+  // `{#_Ref444615940}` and emit `{#cc:`, which is not obviously broken to an
+  // agent reading the outline — it is a plausible target that resolves to
+  // nothing. A1.6 allows dropping the token entirely but never splitting it,
+  // so a dangling opener is trimmed back to its `{#`. Only an UNCLOSED
+  // fragment matches: a whole token keeps its `}`.
+  const dangling = /\{#[^}\n]*$/.exec(cut);
+  if (dangling !== null) cut = cut.substring(0, dangling.index);
+  // trimEnd() matches Python's .rstrip(). That was a live parity divergence
+  // before this change and trimming a dangling anchor makes trailing
+  // whitespace the common case rather than the rare one.
+  return cut.trimEnd() + "…";
 }
 
 function _strip_critic_markup(text: string): string {
