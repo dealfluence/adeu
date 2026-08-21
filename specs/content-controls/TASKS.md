@@ -147,6 +147,16 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   met, both engines, all surfaces. **Two frozen-spec deviations, both recorded below
   and needing Mikko's ruling** (README rule 4); neither blocks the row, and both were
   resolved toward the implemented convention rather than the literal text.
+- **Follow-up found on Windows during CC-4/CC-5 integration, 2026-08-22, needs a
+  decision (windows).** `mode="fields"` is exposed on the win32 `read_docx` schema but
+  the Live Word reader has no `fields` branch, so a document open in Word fell through
+  to `mode="full"` and returned the WHOLE DOCUMENT to a caller who asked for the
+  ledger — silently. It now raises a teaching error naming the file-based path
+  instead, so the wrong output is gone; what is undecided is whether live fields mode
+  should be *implemented*. It is not a drive-by: the ledger reads the `w:sdt` tree and
+  that path holds only a COM snapshot. Invisible from macOS — both the caller and the
+  reader sit under `if sys.platform == "win32"`, which mypy skips there (the same
+  branch also carried two type errors that report clean off Windows).
   - **§1 `--json` shape.** The spec says the CLI wraps the ledger as `{"content": …}`
     "per CLI stream conventions". There is no `{"content": …}` anywhere in the
     codebase: every CLI mode emits `{markdown, title, file_path}`, pinned by

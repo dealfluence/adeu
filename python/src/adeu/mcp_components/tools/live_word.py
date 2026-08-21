@@ -212,6 +212,7 @@ if sys.platform == "win32":
         ModifyText,
         RejectChange,
         ReplyComment,
+        SetField,
     )
 
     def is_document_open_in_word(file_path: Optional[str]) -> bool:
@@ -338,6 +339,7 @@ if sys.platform == "win32":
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,
@@ -455,6 +457,25 @@ if sys.platform == "win32":
                         assert isinstance(page_val, int)
                         page_num = page_val
                     res = build_appendix_response(final_text, page_num, actual_path)
+                elif mode == "fields":
+                    # CC-2 added mode="fields" to the disk path and to this
+                    # tool's schema, but the live path never grew a branch for
+                    # it — so it fell through to `full` below and returned the
+                    # WHOLE DOCUMENT to a caller who asked for the ledger, with
+                    # nothing anywhere saying so.
+                    #
+                    # Refused loudly instead of guessed at. Not implemented
+                    # here rather than wired up because the ledger needs the
+                    # w:sdt tree and this path holds a COM snapshot; doing it
+                    # properly is CC-2's call, not a drive-by. Found on
+                    # Windows only: both the caller and this branch live under
+                    # `if sys.platform == "win32"`, which mypy skips on macOS.
+                    raise ToolError(
+                        "mode='fields' is not available for a document open in Word. "
+                        "The fields ledger is built from the file's content-control tree, "
+                        "which the live canvas does not expose. Close the document, or pass "
+                        "original_docx_path to read the file on disk instead."
+                    )
                 else:
                     # mode == "full"
                     page_num = 1
@@ -649,7 +670,29 @@ if sys.platform == "win32":
             cached_mapping = None
 
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
-        edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
+        edits: list = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
+
+        # `set_field` is not implemented on the Live Word path: it applies
+        # changes through COM, not through the engine's apply layer, and the
+        # fill writers (attribute syncs, bound-store dual-writes, placeholder
+        # clearing) exist only in the latter.
+        #
+        # Refused explicitly rather than filtered out. Both of the lists above
+        # exclude SetField, so a fill sent here would otherwise be neither an
+        # action nor an edit — silently dropped, reported as a successful
+        # batch, with the field never filled. That is the exact failure class
+        # spec-gates §7 calls the most expensive bug an agent can consume, and
+        # it is invisible to the non-Windows engine because this whole branch
+        # is `if sys.platform == "win32"`.
+        unsupported = [c for c in changes if isinstance(c, SetField)]
+        if unsupported:
+            stats["failed"] = len(unsupported)
+            stats["skipped_details"].append(
+                f"- {len(unsupported)} set_field change(s) cannot be applied to the live Word "
+                "document: fills are implemented on the file-based path only. Close the document "
+                "in Word, or pass original_docx_path to edit the file on disk instead."
+            )
+            return stats
 
         # Category A: document-context-free string-shape validation — the same
         # checks the disk pipeline runs (blank replies and duplicate/conflicting
@@ -1353,6 +1396,7 @@ else:
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,

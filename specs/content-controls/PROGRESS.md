@@ -1414,3 +1414,54 @@ only text, and deriving the walls from that same text makes it impossible for
 the wall list to describe a different document than the one being widened. Node
 has no `make_edits_self_contained` (its diff is per-part and structural), so
 there is nothing to clamp on that side.
+
+### 2026-08-22 — CC-4/CC-5 integration: three Windows-only defects (windows)
+
+CC-4 and CC-5 were developed in parallel by the two agents and had never run
+against each other. The code rebased cleanly — no textual conflict in either
+engine, only in this file and TASKS.md — but the merged tree failed three ways.
+All three were invisible to the osx side, and two of them structurally so.
+
+**1. G13's apply backstop refused `set_field` — the very operation G13
+recommends.** CC-4's bound-control gate tells the caller "use set_field, which
+writes the control and its bound store together". CC-5 implements a fill as
+pinned `ModifyText` sub-edits, which reach the apply layer, where CC-4's
+backstop saw a text edit landing inside a bound control and refused it. So the
+teaching error pointed at a dead end. Three A4.8 tests caught it.
+
+The backstop now exempts sub-edits whose `_parent_edit_ref` is a `SetField`.
+The exemption is safe for exactly the reason the gate exists: `set_field`
+dual-writes the store, which is what the text path cannot do. Worth stating
+plainly because it is the general shape of the risk here — a gate and the
+alternative it recommends are one contract, and they were written by different
+agents on different machines.
+
+**2. `set_field` was silently dropped on the Live Word path.**
+`_process_active_word_batch_core` splits `changes` into `actions` and `edits`
+by isinstance, and `SetField` is in neither list. A fill sent to a document
+open in Word was therefore neither applied nor reported — the batch came back
+successful and the field was never filled. It now refuses explicitly, naming
+the file-based path as the alternative.
+
+**3. `mode="fields"` returned the whole document on the Live Word path.** CC-2
+added the ledger mode to the disk path and to the win32 tool's schema, but the
+live reader has no `fields` branch, so it fell through to `mode == "full"`. The
+caller asked for a ledger and got the entire document with nothing indicating
+the substitution. Now refused with a teaching error. Left unimplemented rather
+than wired up: the ledger needs the `w:sdt` tree and that path holds a COM
+snapshot, so doing it properly is CC-2's call, not a drive-by. **Flagged for
+osx** — the row is closed, so this needs a decision about whether live fields
+mode is in scope at all.
+
+Defects 2 and 3 could not have been found on macOS, and not for want of care:
+both the call sites and the implementations live under
+`if sys.platform == "win32"`, which mypy does not analyse off Windows. `uv run
+mypy src` reports 4 errors here and 0 there, on identical source. That is worth
+remembering as a standing property of this codebase rather than a one-off:
+**the win32 branches are type-checked and executed on exactly one of the two
+development machines.** Anything either agent adds to a signature that the
+Live Word twins also carry will pass review, pass CI on macOS, and fail here.
+
+Merged tree after the fixes: python 1,945 passed / 16 skipped including the
+full live-Word battery, node 962 + 321 + 42, langchain 212, ruff/mypy/eslint
+clean, release consistency clean.

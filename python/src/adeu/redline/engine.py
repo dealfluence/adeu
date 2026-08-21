@@ -2173,7 +2173,7 @@ class RedlineEngine:
         reaches_outside = start < c_start or start + length > c_end
         return covers_all and reaches_outside
 
-    def _apply_gate_refusal(self, mapper: Any, start: int, length: int) -> Optional[str]:
+    def _apply_gate_refusal(self, mapper: Any, start: int, length: int, edit: Any = None) -> Optional[str]:
         """The apply-path subset of the gate matrix; a reason string, or None.
 
         Only the document-property gates run here — content locks, group
@@ -2189,8 +2189,15 @@ class RedlineEngine:
         controls = mapper.controls_intersecting(start, length) if hasattr(mapper, "controls_intersecting") else []
         if not controls:
             return None
+        # G13 refuses TEXT edits to bound content and points the caller at
+        # set_field. A fill desugars into pinned ModifyText sub-edits, so
+        # without this exemption the backstop would refuse the very operation
+        # the error recommends — and the recommendation would be a dead end.
+        # set_field is safe here precisely because it dual-writes the store,
+        # which is the whole reason the text path is not.
+        from_set_field = isinstance(getattr(edit, "_parent_edit_ref", None), SetField)
         info = next((i for i in controls if getattr(i, "bound", False)), None)
-        if info is not None:
+        if info is not None and not from_set_field:
             return f"{describe_control(info)} is data-bound"
         if overrides.ignore_control_locks:
             return None
@@ -5513,7 +5520,7 @@ class RedlineEngine:
         # binding and protection are properties of the document, not of the
         # match, so re-deriving them here is cheap and cannot disagree.
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and length:
-            blocked = self._apply_gate_refusal(active_mapper, start_idx, length)
+            blocked = self._apply_gate_refusal(active_mapper, start_idx, length, edit)
             if blocked:
                 logger.warning(
                     "Refusing edit inside a gated content control",
