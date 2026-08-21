@@ -575,3 +575,21 @@ are exported from `adeu.utils.opc` for callers that write a NEW file beside the
 original and so have to choose an extension. Nothing uses them yet — the CLI and
 sanitize both write to a path the user supplied — but a `.dotx` sanitized to
 `out.docx` would be a surprise worth documenting.
+
+### 2026-08-21 — CC-11 addendum after rebasing onto CC-12 (opencode-windows)
+
+Two corrections to the CC-11 entry above, both caused by CC-12 landing between
+writing it and pushing.
+
+The stale `CC-11` references in `repro_projection_parity_gaps.test.ts` no longer
+exist to correct: CC-12 deleted those comments along with the `it.skip`. The
+rebase took CC-12's side.
+
+That means the mapper-agreement guard is now ACTIVE over the corpus table, and
+CC-11 added a fifth key to that table — so `odot_uic_drywell` is checked for
+ingest-vs-mapper agreement too, on a `.dotx`, and passes. The two tasks compose
+better than either planned: CC-12 fixed the separator discipline, CC-11 gave it
+a template to prove it on.
+
+Verification re-run on the rebased tree: python ruff + format + mypy clean, 1597
+passed / 7 skipped; node build + lint clean, 762 + 296 + 42 passed, 0 skipped.
