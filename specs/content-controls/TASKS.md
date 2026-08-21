@@ -71,7 +71,9 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   spec-gates.md; `ignore_control_locks` / `ignore_document_protection` batch params
   (MCP both servers, CLI flags `--ignore-control-locks` / `--ignore-document-protection`);
   boundary auto-segmentation at control walls; block-merge refusal across SDT boundaries;
-  review-action gating `[COM-PENDING]` per spec.
+  review-action gating per spec — resolved by CC-6: G9 is now *allow* (Word permits
+  Accept/Reject inside locked controls), G7 confirmed. One open question for G5, in
+  PROGRESS.md, needs Mikko's answer before this task's error contracts are final.
 
 ## CC-5 — `set_field` change type + fill semantics (P2)
 
@@ -86,12 +88,21 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-6 — Word COM verification battery (P2, informs CC-4/CC-5)
 
-- Status: `in-progress (agent: opencode-windows, since: 2026-08-21, branch: content-controls-specs)`
-- Depends on: CC-1 (fixture builders reused); runs on Windows + real Word
+- Status: `review` (agent: opencode-windows, 2026-08-21) — findings landed, tests green;
+  two items need Mikko's sign-off before `done`: the G5 forms-protection question and
+  the CC-9 bound-store reject-resync scope (both in PROGRESS.md)
+- Depends on: CC-1 (fixture builders reused) — started ahead of it; deviation disclosed
+  in PROGRESS.md. Ran on Windows + real Word (16.0)
   (`python/tests/word_com.py` harness, `xdist_group("live_word")`)
 - Acceptance: findings appended to PROGRESS.md and every `[COM-PENDING]` spec section
   resolved (amended or confirmed) — this task's deliverable is *knowledge*, pinned as
-  COM-backed tests where feasible.
+  COM-backed tests where feasible. **Met:** all `[COM-PENDING]` tags removed from
+  spec-gates.md, spec-set-field.md and A4; 15 COM-backed tests in
+  `python/tests/test_live_word_content_controls.py`.
+- Downstream must-reads: CC-1 — `w:showingPlcHdr` is the only reliable placeholder
+  signal and placeholder prose resolves through the glossary part. CC-4 — G9 is now
+  *allow*, G7 confirmed, G5 has an open sign-off question. CC-5 — checkbox is ins-then-
+  del, `w:temporary` unwraps on any edit, bound controls are store-authoritative.
 - Verify: (a) placeholder clearing under track changes — is ghost removal redlined?
   (b) checkbox toggle redline shape under track changes; (c) `w:temporary` unwrap
   behavior; (d) can Word's review UI accept/reject inside `sdtContentLocked`?

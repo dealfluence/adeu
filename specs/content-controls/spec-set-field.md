@@ -1,6 +1,9 @@
 # Spec: `set_field` Change Type
 
-Status: frozen v1 (three `[COM-PENDING]` items) · Task: CC-5 · Acceptance: [A4](acceptance/A4-set-field.md)
+Status: frozen v1 · Task: CC-5 · Acceptance: [A4](acceptance/A4-set-field.md)
+`[COM-PENDING]` items resolved by CC-6 on 2026-08-21: (a) and (c) confirmed,
+(b) amended (Word writes ins-before-del), (e) and (f) amended — see PROGRESS.md
+and `python/tests/test_live_word_content_controls.py`, which pins each finding.
 
 One new member of the `DocumentChange` union (both engines), designed to fill a content
 control the way Word fills it. Text-first editing (ModifyText at the sanctioned
@@ -52,20 +55,40 @@ When the target control is in placeholder state (`w:showingPlcHdr`):
 
 1. Remove `w:showingPlcHdr` from `sdtPr`.
 2. Remove the ghost run(s) UNTRACKED — Word does not redline placeholder removal
-   `[COM-PENDING: CC-6(a) confirms; if Word tracks it, mirror Word]`.
+   (CONFIRMED, CC-6(a): filling an empty control produces exactly one revision, the
+   insertion; `w:showingPlcHdr` and the ghost run simply vanish).
 3. Insert `value` as a tracked `w:ins` whose `rPr` derives from `sdtPr/w:rPr` when
    present, else from the ghost run's rPr MINUS `rStyle PlaceholderText`, else from
-   paragraph context (Formatting Inheritance rule).
-4. `w:temporary` controls: after the fill, unwrap the sdt shell (content stays, wrapper
-   goes) `[COM-PENDING: CC-6(c) confirms unwrap+track interplay]`.
+   paragraph context (Formatting Inheritance rule). The stripping is not optional:
+   CC-6(a) shows Word's own fill carries no `rStyle PlaceholderText` at all.
+4. `w:temporary` controls: unwrap the sdt shell (content stays, wrapper goes).
+   CONFIRMED and BROADENED by CC-6(c): Word unwraps on ANY content edit — tracked or
+   untracked, placeholder or already-filled — and an untouched temporary control
+   survives a round trip intact. The revision outlives the wrapper, so rejecting a
+   `set_field` on a temporary control restores the old text but NOT the control; the
+   unwrap is one-way. Adeu matches Word (unwrap on the edit, do not restore on reject);
+   the per-edit report note is the disclosure.
 
 When the control already has content: standard atomic tracked replacement of the full
 current content with `value` (affix trimming applies; `restore_matched_typography`
 applies).
 
 Clearing: `value: ""` deletes content (tracked) and leaves the empty pair; placeholder
-is NOT re-instated in v1 `[COM-PENDING: CC-6(f) — if Word re-shows placeholder on
-emptying, follow Word in v1.1]`.
+is NOT re-instated in v1 — which CC-6(f) CONFIRMS for the state Adeu produces: while a
+deletion is still pending Word leaves `w:showingPlcHdr` off too, across save and reopen,
+because a control full of `w:delText` is not yet empty.
+
+Word does re-instate the placeholder the moment the emptying becomes real — an untracked
+delete, or **accepting** a tracked one — resolving the prose from the `w:placeholder`
+doc part in the glossary. Two consequences, both deferred to v1.1/CC-9 rather than
+smuggled into v1:
+
+- `accept_all_changes` over a control emptied by tracked deletion yields a document that
+  DIFFERS from what Word yields from the same input (Word re-shows the placeholder,
+  Adeu leaves an empty control). Divergence, not corruption.
+- The regenerated ghost run carries NO `rStyle PlaceholderText`. `w:showingPlcHdr` is
+  therefore the *only* reliable placeholder signal — detection by ghost style would miss
+  every control Word itself emptied. Binding on CC-1's projection.
 
 ## 5. Per-class value handling
 
@@ -76,7 +99,7 @@ emptying, follow Word in v1.1]`.
 | `dropdown` | must equal a `listItem` `displayText` (preferred) or `w:value` (then the displayText is written) — else G10 error listing options | content run + `w:dropDownList w:lastValue` |
 | `combobox` | as dropdown but free text permitted; report notes "not in the option list" when applicable | content run |
 | `date` | `YYYY-MM-DD` (canonical) or exact current-format rendering; writes text formatted per `w:dateFormat` (v1 supports the format's `yyyy/MM/dd/d/M` token subset; unsupported patterns fall back to writing the value verbatim + report note) | content run + `w:date w:fullDate` attribute updated SILENTLY (URL_RETARGET precedent — attribute sync is not a redline) |
-| `checkbox` | truthy: `true/x/[x]/checked/1` · falsy: `false/[ ]/unchecked/0/""` — else G11 error | `w14:checked w14:val` + glyph run swapped per `w14:checkedState`/`w14:uncheckedState` (char + font), as ONE tracked del+ins `[COM-PENDING: CC-6(b) confirms Word's toggle redline shape]` |
+| `checkbox` | truthy: `true/x/[x]/checked/1` · falsy: `false/[ ]/unchecked/0/""` — else G11 error | `w14:checked w14:val` + glyph run swapped per `w14:checkedState`/`w14:uncheckedState` (char + font), as ONE tracked ins+del pair — **`w:ins` FIRST, `w:del` after** (amended by CC-6(b): that is Word's order, and order is visible, since the projection reads document order and would otherwise render `{--☒--}{++☐++}` where Word renders `{++☐++}{--☒--}`). `w14:checked` flips SILENTLY, with no revision of its own — attribute sync, the URL_RETARGET class |
 
 ## 6. Bound controls (`w:dataBinding`)
 
@@ -89,10 +112,22 @@ emptying, follow Word in v1.1]`.
 3. A missing/unresolvable store item downgrades to content-only write + WARNING note
    (dangling bindings exist in the wild; sanitize's scrub is one producer).
 
-Known asymmetry (accepted for v1, revisit in CC-9): accepting the tracked change
-converges (content == store); REJECTING it leaves the store holding the new value.
-The report note is the disclosure. `[COM-PENDING: CC-6(e) measures what Word itself
-does to sdtContent + store on open/reject before CC-9 picks a resync policy.]`
+Why the dual-write is mandatory rather than merely tidy (CC-6(e)): **the store wins on
+open.** When `sdtContent` and the bound node disagree, Word silently rewrites the content
+from the store at load time, with no revision. A tracked edit written to the content
+alone is not "inconsistent" — it is *destroyed the next time anyone opens the document*.
+Content-only writing to a bound control is data loss with extra steps, which is what G13
+exists to prevent.
+
+Known asymmetry (accepted for v1, revisit in CC-9) — **amended by CC-6(e), and it points
+the other way from the frozen text.** Word does NOT leave a rejected edit's value in the
+store: rejecting restores the content and its binding engine pushes the restored value
+back, so both converge. The asymmetry is Adeu's, not Word's: a HEADLESS reject
+(`reject_all_changes`, no binding engine) leaves the store holding the rejected value —
+and because the store wins on open, Word then *re-applies the rejected value to the
+content*. A reject that silently un-rejects itself is the expensive shape of this bug,
+so CC-9's resync policy must cover the reject path specifically. The report note remains
+the v1 disclosure.
 
 ## 7. Reports
 

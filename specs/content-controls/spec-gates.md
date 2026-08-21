@@ -1,6 +1,8 @@
 # Spec: Write-Path Gates
 
-Status: frozen v1 (two `[COM-PENDING]` items) · Task: CC-4 · Acceptance: [A3](acceptance/A3-gates.md)
+Status: frozen v1 · Task: CC-4 · Acceptance: [A3](acceptance/A3-gates.md)
+`[COM-PENDING]` items resolved by CC-6 on 2026-08-21 (G9 downgraded to allow, G7
+confirmed); findings and the two open sign-off items in PROGRESS.md.
 
 Design principle (house doctrine): **a silent no-op — or a silently doomed op — is the
 most expensive bug an agent can consume.** Every gate rejects transactionally
@@ -36,9 +38,9 @@ substrings, not full strings.
 | G4 | `w:documentProtection w:edit="readOnly"` | Reject all mutating operations (edits, set_field, review actions, row ops) |
 | G5 | `w:edit="forms"` | Allow only: `set_field`, edits fully inside leaf-control content, checkbox toggles. Reject any body/table edit outside controls (and legacy-form-field regions are out of v1 scope — reject with that stated) |
 | G6 | `w:edit="comments"` | Allow only comment-only changes (`target == new` + comment) and `ReplyComment`; reject text mutations |
-| G7 | `w:edit="trackedChanges"` | Text edits proceed (Adeu always writes tracked changes); `AcceptChange`/`RejectChange` are rejected (resolving revisions is exactly what this protection forbids) |
+| G7 | `w:edit="trackedChanges"` | Text edits proceed (Adeu always writes tracked changes); `AcceptChange`/`RejectChange` are rejected (resolving revisions is exactly what this protection forbids). Confirmed against Word by CC-6(d): Accept and Reject both fail with "This command is not available", document-wide, while tracked editing stays allowed |
 | G8 | `ModifyText` target overlaps placeholder ghost text | Reject; point to `set_field` and to inserting at the empty pair `{#cc:N}{#/cc:N}`. Never editable "as text" — ghost runs are not content |
-| G9 | Review action (`AcceptChange`/`RejectChange`) on a revision inside a content-locked control | Reject `[COM-PENDING: CC-6 verifies Word's own behavior; if Word permits interactive resolution inside locked controls, downgrade to allow]` |
+| G9 | Review action (`AcceptChange`/`RejectChange`) on a revision inside a content-locked control | **Allow** (downgraded by CC-6(d), 2026-08-21). Word permits Accept and Reject inside `sdtContentLocked` — the lock stops *typing*, not *review*. Rejecting would make Adeu stricter than Word for no protective benefit and strand revisions a user can resolve in two clicks. Revision resolution inside locked controls is therefore ungated, consistent with §4's accept-all doctrine. Protection, not locks, is what gates review: see G7 |
 | G10 | `set_field` value not in a dropdown's `listItem`s | Reject; error lists display texts (first 8). Combobox: free text allowed |
 | G11 | Checkbox content edited as text other than the exact `[ ]`↔`[x]` swap | Reject; point to the toggle or `set_field` |
 | G12 | Date `set_field` value that is neither ISO (`YYYY-MM-DD`) nor an exact match of the control's `w:dateFormat` rendering | Reject naming the expected format |

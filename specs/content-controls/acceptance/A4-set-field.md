@@ -7,7 +7,7 @@ All against the standard fixture unless noted. XML assertions read the saved pac
 - **When** `{"type":"set_field","field":"client_name","value":"Acme Legal Services Ltd."}`.
 - **Then** in the saved XML for CC:2: `w:showingPlcHdr` is ABSENT; no run carries
   `rStyle PlaceholderText`; the ghost run is gone WITHOUT a `w:del` wrapping it
-  `[COM-PENDING CC-6(a)]`; a `w:ins` contains `Acme Legal Services Ltd.`.
+  (CONFIRMED CC-6(a)); a `w:ins` contains `Acme Legal Services Ltd.`.
   Raw view: `{#cc:2}{++Acme Legal Services Ltd.++}{>>…<<}{#/cc:2}`. Clean view:
   `{#cc:2}Acme Legal Services Ltd.{#/cc:2}`. Report block carries
   `field: CC:2 "Client Name" (tag: client_name)` and the old→new preview.
@@ -48,7 +48,8 @@ All against the standard fixture unless noted. XML assertions read the saved pac
 ### A4.6 — Checkbox via set_field
 - **When** `field:"confidential","value":"false"`.
 - **Then** `w14:checked w14:val` → `0`; content glyph swaps to `☐` with the
-  `w14:uncheckedState` font, as ONE tracked del+ins pair `[COM-PENDING CC-6(b)]`;
+  `w14:uncheckedState` font, as ONE tracked pair with the `w:ins` BEFORE the `w:del`
+  (CC-6(b): Word's order), and `w14:checked` changing with no revision of its own;
   raw view shows the pending toggle, clean view shows `[ ]`.
 - Surfaces: both engines.
 
@@ -73,8 +74,10 @@ All against the standard fixture unless noted. XML assertions read the saved pac
 - **Given** a control with `<w:temporary/>` and placeholder state.
 - **When** `set_field` fills it.
 - **Then** the saved XML has NO `w:sdt` wrapper at that location; the inserted text
-  stands as a tracked insertion in the paragraph `[COM-PENDING CC-6(c)]`; the ledger no
-  longer lists it on re-read.
+  stands as a tracked insertion in the paragraph (CONFIRMED CC-6(c)); the ledger no
+  longer lists it on re-read. Word unwraps on ANY content edit, so an already-filled
+  temporary control unwraps on replacement too — and the unwrap is not undone by
+  rejecting the revision.
 - Surfaces: both engines.
 
 ### A4.10 — Text-first fill parity (`apply_text_revision` / empty-pair insertion)
