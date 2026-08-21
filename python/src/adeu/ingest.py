@@ -24,6 +24,8 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts_with_kind,
     iter_paragraph_content,
+    iter_row_cell_elements,
+    iter_table_row_elements,
     markers_from_flags,
     paragraph_mark_is_deleted,
     strip_bom_from_docx_bytes,
@@ -337,7 +339,7 @@ def extract_table(
 
     tbl_elem = table._element if hasattr(table, "_element") else table
 
-    for tr in tbl_elem.iterchildren(qn("w:tr")):
+    for tr in iter_table_row_elements(tbl_elem):
         cell_texts: list[str] = []
         seen_cells: set = set()
 
@@ -364,7 +366,7 @@ def extract_table(
         cell_cursor = row_start + wrapper_prefix_len
         first_cell = True
 
-        for tc in tr.iterchildren(qn("w:tc")):
+        for tc in iter_row_cell_elements(tr):
             if tc in seen_cells:
                 continue
             seen_cells.add(tc)

@@ -12,7 +12,7 @@ import structlog
 from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.table import Table, _Cell
+from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -20,6 +20,9 @@ logger = structlog.get_logger(__name__)
 
 
 _CUSTOM_HEADING_NAME_RE = re.compile(r"Heading[ ]?([1-6])(?![0-9])")
+
+# Guards against a malformed document whose vMerge="continue" chain loops.
+_MAX_VMERGE_DEPTH = 100
 
 # Cache qn() strings for massive performance gains in the extraction hot loop
 QN_W_P = qn("w:p")
@@ -65,6 +68,7 @@ QN_W_NUMID = qn("w:numId")
 QN_W_ILVL = qn("w:ilvl")
 QN_W_DRAWING = qn("w:drawing")
 QN_W_TC = qn("w:tc")
+QN_W_TR = qn("w:tr")
 QN_W_OBJECT = qn("w:object")
 QN_W_PICT = qn("w:pict")
 QN_WP_DOCPR = qn("wp:docPr")
@@ -1416,13 +1420,128 @@ def normalize_docx(doc: DocumentObject):
 
 
 def _normalize_table(table: Table):
-    for row in table.rows:
-        for cell in row.cells:
+    for row in iter_table_rows(table):
+        for cell in iter_row_cells(row):
             for item in iter_block_items(cell):
                 if isinstance(item, Paragraph):
                     _coalesce_runs_in_paragraph(item)
                 elif isinstance(item, Table):
                     _normalize_table(item)
+
+
+def _iter_sdt_transparent_children(parent_elm, tag: str) -> Iterator[Any]:
+    """
+    Yields the direct children of `parent_elm` whose tag is `tag`, descending
+    transparently through any number of w:sdt / w:sdtContent wrapper levels.
+
+    Word wraps table structure in structured document tags (content controls)
+    whenever a template uses them, producing
+
+        <w:tbl><w:sdt><w:sdtContent><w:tr>...          (row-level control)
+        <w:tr><w:sdt><w:sdtContent><w:tc>...           (cell-level control)
+
+    and, for repeating sections, an extra nesting level
+
+        <w:sdt w15:repeatingSection>
+          <w:sdtContent>
+            <w:sdt w15:repeatingSectionItem><w:sdtContent><w:tr>...
+
+    python-docx resolves Table.rows / _Row.cells with direct-child lookups
+    (CT_Tbl.tr_lst = "./w:tr", CT_Row.tc_lst = "./w:tc"), so every one of these
+    shapes was invisible to the Python projection while the Node engine
+    traversed them. Descent stops at `tag`: a nested w:tbl inside a w:tc keeps
+    its own rows to itself.
+    """
+    for child in parent_elm.iterchildren():
+        child_tag = child.tag
+        if child_tag == tag:
+            yield child
+        elif child_tag == QN_W_SDT:
+            for content in child.iterchildren(QN_W_SDTCONTENT):
+                yield from _iter_sdt_transparent_children(content, tag)
+        elif child_tag == QN_W_SDTCONTENT:
+            # Defensive: a bare w:sdtContent without its w:sdt parent.
+            yield from _iter_sdt_transparent_children(child, tag)
+
+
+def iter_table_row_elements(tbl_elem) -> Iterator[Any]:
+    """
+    `w:tr` children of `tbl_elem` in document order, including rows wrapped in
+    content controls. Drop-in replacement for `tbl_elem.iterchildren(w:tr)`.
+
+    CRITICAL: ingest.extract_table, DocumentMapper._map_table and the outline
+    offset replays must all enumerate rows through this helper (or its
+    object-level twin below) or their offset arithmetic drifts apart
+    (Virtual Text contract).
+    """
+    return _iter_sdt_transparent_children(tbl_elem, QN_W_TR)
+
+
+def iter_row_cell_elements(tr_elem) -> Iterator[Any]:
+    """
+    `w:tc` children of `tr_elem` in document order, including cells wrapped in
+    content controls. Drop-in replacement for `tr_elem.iterchildren(w:tc)`.
+
+    Unlike `iter_row_cells` this does NOT expand the python-docx layout grid
+    (no gridSpan duplication, no vMerge resolution): it is the element-level
+    projection path, matching the Node engine's one-entry-per-w:tc walk.
+    """
+    return _iter_sdt_transparent_children(tr_elem, QN_W_TC)
+
+
+def iter_table_rows(table: Table) -> list:
+    """
+    Rows of `table` in document order, including rows wrapped in content
+    controls. Drop-in replacement for `table.rows`.
+
+    Object-level twin of `iter_table_row_elements`, for the callers that still
+    work with python-docx wrappers (outline replay, normalization).
+    """
+    tbl = table._tbl
+    if tbl.find(QN_W_SDT) is None:
+        # Fast path — no content controls, defer to python-docx verbatim.
+        return list(table.rows)
+    return [_Row(tr, table) for tr in _iter_sdt_transparent_children(tbl, QN_W_TR)]
+
+
+def iter_row_cells(row: _Row) -> list:
+    """
+    Cells of `row` in document order, including cells wrapped in content
+    controls. Drop-in replacement for `row.cells`.
+
+    Mirrors python-docx `_Row.cells` semantics exactly for the layout grid:
+    a horizontally spanned cell is yielded once per grid column it covers, and
+    a vertically merged continuation cell resolves to the content-bearing cell
+    above it. Callers rely on that (they de-duplicate by cell identity).
+    """
+    tr = row._tr
+    if tr.find(QN_W_SDT) is None:
+        # Fast path — no content controls, defer to python-docx verbatim.
+        return list(row.cells)
+
+    table = row.table
+    cells: list = []
+
+    def _emit(tc, depth: int = 0) -> None:
+        if tc.vMerge == "continue" and depth < _MAX_VMERGE_DEPTH:
+            try:
+                above = tc._tc_above
+            except (ValueError, IndexError):
+                # python-docx resolves the cell above via
+                # "preceding-sibling::w:tr", which cannot see a row behind an
+                # sdt wrapper. Rather than lose the cell (the very bug this
+                # helper exists to fix), fall through and project it directly.
+                above = None
+            if above is not None:
+                _emit(above, depth + 1)
+                return
+        cell = _Cell(tc, table)
+        for _ in range(tc.grid_span):
+            cells.append(cell)
+
+    for tc in _iter_sdt_transparent_children(tr, QN_W_TC):
+        _emit(tc)
+    return cells
 
 
 def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:

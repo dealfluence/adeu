@@ -34,6 +34,8 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts,
     iter_paragraph_content,
+    iter_row_cells,
+    iter_table_rows,
 )
 
 
@@ -236,8 +238,8 @@ def _extract_outline_fast(
                 paragraphs_and_tables.append(("p", item))
             elif isinstance(item, Table):
                 paragraphs_and_tables.append(("t", item))
-                for row in item.rows:
-                    for cell in row.cells:
+                for row in iter_table_rows(item):
+                    for cell in iter_row_cells(row):
                         cid = id(cell._tc)
                         if cid in seen_cells:
                             continue
@@ -608,7 +610,9 @@ def _compute_inner_block_offset(
     cursor = table_start_offset
     rows_processed = 0
 
-    for row in table.rows:
+    rows = iter_table_rows(table)
+
+    for row in rows:
         # Skip rows that ingest would skip in clean_view; outline runs against
         # the non-clean projection, so do NOT skip clean_view-deleted rows here.
         # extract_table only skips a row when clean_view=True AND trPr/del exists.
@@ -616,10 +620,10 @@ def _compute_inner_block_offset(
 
         if rows_processed > 0:
             if rows_processed == 1:
-                first_row = table.rows[0]
+                first_row = rows[0]
                 seen_cells_first = set()
                 num_cols = 0
-                for cell in first_row.cells:
+                for cell in iter_row_cells(first_row):
                     cell_id = id(cell._tc)
                     if cell_id in seen_cells_first:
                         continue
@@ -633,7 +637,7 @@ def _compute_inner_block_offset(
         seen_cells: set = set()
         cells_in_row = 0
 
-        for cell in row.cells:
+        for cell in iter_row_cells(row):
             cell_id = id(cell._tc)
             if cell_id in seen_cells:
                 continue
@@ -744,8 +748,8 @@ def _record_table_inner_blocks_lite(
     nested headings/tables.
     """
     seen_cells: set = set()
-    for row in table.rows:
-        for cell in row.cells:
+    for row in iter_table_rows(table):
+        for cell in iter_row_cells(row):
             cell_id = id(cell._tc)
             if cell_id in seen_cells:
                 continue
