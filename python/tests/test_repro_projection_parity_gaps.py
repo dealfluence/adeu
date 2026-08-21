@@ -203,3 +203,59 @@ def test_symbol_runs_are_still_dropped_deliberately():
     """
     text = _project(_docx(f'<w:p {NS}><w:r><w:sym w:font="Wingdings" w:char="F0FE"/></w:r></w:p>'))
     assert text.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# 4. The regression guard for all of the above: python and node must project
+#    real documents identically, character for character.
+#
+#    This is the assertion A5.1 specifies ("Engines: python + node — identical
+#    counts"). Character counts are recorded here as a python-side tripwire:
+#    the true cross-engine comparison needs both runtimes, so it lives in the
+#    parity harness, but any python-side drift moves these numbers and fails
+#    here first.
+#
+#    Every value was verified byte-identical against the node engine on
+#    2026-08-21 across 4 fixtures x 2 views and 4 corpus documents x 2 views
+#    (16/16), with zero DocumentMapper drift.
+# ---------------------------------------------------------------------------
+CORPUS_PROJECTION_SIZES = {
+    # key: (raw_view_chars, clean_view_chars)
+    "fedramp_ssp_rev4": (583_407, 498_507),
+    "dau_acquisition_plan": (15_651, 15_090),
+    "wawd_esi_agreement": (15_858, 15_858),
+    "on_juries_form1": (5_505, 3_199),
+}
+
+
+@pytest.mark.parametrize("key", sorted(CORPUS_PROJECTION_SIZES))
+@pytest.mark.parametrize("clean_view", [False, True])
+def test_corpus_projection_size_is_pinned_to_the_node_engine(key, clean_view):
+    from tests.utils import corpus_path
+
+    path = corpus_path(key)  # skips cleanly when the document is absent
+    data = path.read_bytes()
+
+    text = extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
+    expected = CORPUS_PROJECTION_SIZES[key][1 if clean_view else 0]
+    assert len(text) == expected, (
+        f"{key} {'clean' if clean_view else 'raw'} view projects {len(text):,} chars, "
+        f"expected {expected:,}. If this change is intentional, re-run the parity "
+        f"harness against the node engine and update BOTH engines' pinned values — "
+        f"a python-only change here re-opens the divergence."
+    )
+
+    # No markup may reach the character stream (CC-10).
+    assert "<w:" not in text
+
+
+@pytest.mark.parametrize("key", sorted(CORPUS_PROJECTION_SIZES))
+def test_corpus_ingest_and_mapper_agree(key):
+    """The Virtual Text contract, on real documents rather than fixtures."""
+    from tests.utils import corpus_path
+
+    data = corpus_path(key).read_bytes()
+    for clean_view in (False, True):
+        projected = extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
+        mapped = DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
+        assert mapped == projected, f"{key}: mapper drifted from ingest (clean={clean_view})"

@@ -165,6 +165,16 @@ export class DocumentMapper {
     this.part_ranges = [];
     this._current_part_index = 0;
 
+    // NOTE (known divergence, see TASKS.md CC-11): python's DocumentMapper
+    // emits the "\n\n" separator BEFORE each part and rolls it back when the
+    // part projects nothing; this loop appends after each part and strips
+    // trailing separators at the end. The two are not equivalent for parts
+    // that emit only zero-width anchor spans, and the difference is systemic —
+    // python applies the emit-before/roll-back discipline throughout
+    // _map_blocks (NotesPart header, FootnoteItem, Paragraph), not just here.
+    // Porting only this loop fixes the leading stray "\n\n" but unmasks a
+    // trailing one from the notes sections, so the whole discipline has to
+    // move together. Left as-is deliberately rather than half-ported.
     let part_idx = 0;
     for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
       this._current_part_index = part_idx;

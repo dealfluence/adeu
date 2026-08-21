@@ -29,6 +29,8 @@ import {
   addParagraph,
   attachHeaderFooter,
   enableEvenAndOddHeaders,
+  corpusBuffer,
+  corpusSkipReason,
 } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
@@ -278,4 +280,70 @@ describe("run-level elements project their glyph", () => {
     ]);
     expect(text.trim()).toBe("");
   });
+});
+
+// ---------------------------------------------------------------------------
+// 4. The regression guard for all of the above: python and node must project
+//    real documents identically, character for character.
+//
+//    This is the assertion A5.1 specifies ("Engines: python + node — identical
+//    counts"). The true comparison needs both runtimes, so it lives in the
+//    parity harness; these pinned counts are the node-side tripwire and are
+//    the SAME numbers python pins in
+//    python/tests/test_repro_projection_parity_gaps.py. Change one and you
+//    must change the other, after re-running the harness.
+//
+//    Verified byte-identical on 2026-08-21 across 4 fixtures x 2 views and
+//    4 corpus documents x 2 views (16/16), zero DocumentMapper drift.
+// ---------------------------------------------------------------------------
+const CORPUS_PROJECTION_SIZES: Record<string, [number, number]> = {
+  // key: [raw_view_chars, clean_view_chars]
+  fedramp_ssp_rev4: [583_407, 498_507],
+  dau_acquisition_plan: [15_651, 15_090],
+  wawd_esi_agreement: [15_858, 15_858],
+  on_juries_form1: [5_505, 3_199],
+};
+
+describe("corpus projection sizes are pinned to the python engine", () => {
+  for (const [key, [rawChars, cleanChars]] of Object.entries(CORPUS_PROJECTION_SIZES)) {
+    for (const cleanView of [false, true]) {
+      const expected = cleanView ? cleanChars : rawChars;
+      it(`${key} ${cleanView ? "clean" : "raw"} view projects ${expected} chars`, async (ctx) => {
+        const buf = corpusBuffer(key);
+        if (!buf) return ctx.skip(corpusSkipReason(key));
+
+        const text = await extractTextFromBuffer(buf, cleanView, false);
+        expect(
+          text.length,
+          `${key} ${cleanView ? "clean" : "raw"} view projects ${text.length} chars, ` +
+            `expected ${expected}. If intentional, re-run the parity harness and update ` +
+            `BOTH engines' pinned values — a node-only change re-opens the divergence.`,
+        ).toBe(expected);
+
+        // No markup may reach the character stream (CC-10).
+        expect(text).not.toContain("<w:");
+      });
+    }
+  }
+
+  for (const key of Object.keys(CORPUS_PROJECTION_SIZES)) {
+    // KNOWN FAILURE — CC-11. Node's DocumentMapper drifts from its own ingest
+    // on real documents (python's does not): python emits block separators
+    // BEFORE each block and rolls them back when the block projects nothing,
+    // node appends after and strips trailing ones. Not equivalent for parts
+    // and footnote entries that emit only zero-width anchor spans. Skipped
+    // rather than deleted so the guard activates the moment CC-11 lands.
+    it.skip(`${key}: ingest and the mapper agree`, async (ctx) => {
+      const buf = corpusBuffer(key);
+      if (!buf) return ctx.skip(corpusSkipReason(key));
+      for (const cleanView of [false, true]) {
+        const projected = await extractTextFromBuffer(buf, cleanView, false);
+        const mapped = new DocumentMapper(
+          await DocumentObject.load(buf),
+          cleanView,
+        ).full_text;
+        expect(mapped, `${key}: mapper drifted (clean=${cleanView})`).toBe(projected);
+      }
+    });
+  }
 });

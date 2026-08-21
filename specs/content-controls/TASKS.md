@@ -216,6 +216,40 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   italic runs into one emphasis span where node marks each run; node projects header
   lines python omits. Together 138 chars / 78 lines on `fedramp_ssp_rev4`.
 
+## CC-12 - Node's DocumentMapper drifts from its own ingest on real documents (P1)
+
+- Status: `pending`
+- Depends on: -
+- Found by: CC-10 follow-up parity sweep, 2026-08-21 (PROGRESS.md)
+- Acceptance: for every corpus document and both views, node's
+  `new DocumentMapper(doc, cleanView).full_text === extractTextFromBuffer(...)`.
+  The guards already exist and are `it.skip`-ed in
+  `node/packages/core/src/repro_projection_parity_gaps.test.ts` - un-skip them.
+  Python's equivalent (`python/tests/test_repro_projection_parity_gaps.py`)
+  already passes and must stay passing.
+- Scope: the engines use different separator disciplines. **Python** emits the
+  `"\n\n"` block separator BEFORE each block and rolls it back - spans, text
+  chunks and offset - when the block turns out to project nothing, tracking it
+  with `emitted_any_part` / `emitted_any_block`, and applies this at every level
+  of `_map_blocks` (NotesPart header, FootnoteItem, Paragraph). **Node** appends
+  the separator AFTER each block and strips trailing ones at the end. Not
+  equivalent for blocks that emit only zero-width anchor spans: such a block is
+  empty to ingest (`if (part_text)` skips it) but leaves node's loop believing
+  it emitted.
+- Observed on `wawd_esi_agreement` (clean view): ingest 15,858 chars, mapper
+  15,862 - a stray `"\n\n"` between `## Footnotes` and `## Endnotes` plus a
+  trailing one. On `on_juries_form1`: a stray leading `"\n\n"` from an empty
+  header part, and a spurious `****` after an image alt-text line.
+- **Do not half-port it.** Moving only the top-level part loop fixes the leading
+  separator and unmasks the trailing one from the notes sections - 2 failing
+  documents becomes 4, verified. The discipline has to move through
+  `_map_blocks` in one change.
+- Severity: a Virtual Text contract violation in node. Ingest and the mapper
+  must be byte-identical, or every offset the redline engine computes against
+  mapper text is wrong for documents with these shapes. It stayed hidden because
+  no test compared node's mapper against node's ingest on a real document - the
+  synthetic fixtures never produce empty parts.
+
 ## CC-9 â€” P3 seeds: bound dual-write hardening, repeating-section ops, field-labeled diff (P3)
 
 - Status: `blocked` (until CC-6 findings + sample templates)

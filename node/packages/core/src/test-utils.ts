@@ -351,6 +351,7 @@ export function corpusSkipReason(key: string): string {
 export function corpusBuffer(key: string): Buffer | null {
   const path = corpusPath(key);
   return path ? readFileSync(path) : null;
+}
 
 const W_NS_URI = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const REL_BASE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
