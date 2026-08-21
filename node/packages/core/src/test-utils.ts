@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { unzipSync, strFromU8 } from 'fflate';
 import { DocumentObject } from './docx/bridge.js';
+import { parseFastXml } from './docx/fast-xml.js';
 import { isWordReadableLongHexNumber } from './docx/long-hex-number.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -447,4 +448,56 @@ export function enableEvenAndOddHeaders(doc: DocumentObject): void {
       settings._element.ownerDocument!.createElement('w:evenAndOddHeaders'),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Content-control fixture (CC-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The normative 16-control fixture body.
+ *
+ * The XML lives in ONE place — `shared/fixtures/cc_fixture.body.xml` — read by
+ * `scripts/make_cc_fixture.py`, by python's `tests/cc_fixture.py`, and here. It
+ * is deliberately NOT transcribed into either engine's tests: hand-copied OOXML
+ * is precisely how the two engines drift apart (PROGRESS.md 2026-08-21, the
+ * duplicated table XML in the two `repro_sdt_table_row_cell_invisibility`
+ * suites).
+ *
+ * Canonical listing and normative goldens:
+ * `specs/content-controls/acceptance/fixture-standard.md`.
+ */
+const CC_FIXTURE_BODY = resolve(
+  __dirname,
+  '../../../../shared/fixtures/cc_fixture.body.xml',
+);
+
+const CC_FIXTURE_HEADER =
+  '<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" ' +
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" ' +
+  'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" ' +
+  'mc:Ignorable="w14 w15"><w:body>';
+const CC_FIXTURE_FOOTER = '<w:sectPr/></w:body></w:document>';
+
+export function ccFixtureBodyXml(): string {
+  if (!existsSync(CC_FIXTURE_BODY)) {
+    throw new Error(`shared content-control fixture missing: ${CC_FIXTURE_BODY}`);
+  }
+  return readFileSync(CC_FIXTURE_BODY, 'utf-8').trim();
+}
+
+export function ccFixtureDocumentXml(): string {
+  return CC_FIXTURE_HEADER + ccFixtureBodyXml() + CC_FIXTURE_FOOTER;
+}
+
+/**
+ * The parsed `w:body` element — enough for classification tests.
+ *
+ * Returns a FRESH tree per call: the ordinal-stability test needs two
+ * independent loads, and a cached element would make it assert nothing.
+ */
+export function ccFixtureBodyElement(): any {
+  const doc = parseFastXml(ccFixtureDocumentXml());
+  return findChildTag(doc.documentElement, 'w:body');
 }

@@ -226,6 +226,7 @@ CORPUS_PROJECTION_SIZES = {
     "dau_acquisition_plan": (15_651, 15_090),
     "wawd_esi_agreement": (15_858, 15_858),
     "on_juries_form1": (5_505, 3_199),
+    "ca_talent_recruitment": (5_461, 4_957),
     # A .dotx. Absent from this table until CC-11, because python could not open
     # one at all and there was nothing to pin against; both engines project the
     # same 7,221 chars in both views (verified 2026-08-21).

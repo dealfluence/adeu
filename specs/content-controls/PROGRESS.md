@@ -593,3 +593,79 @@ a template to prove it on.
 
 Verification re-run on the rebased tree: python ruff + format + mypy clean, 1597
 passed / 7 skipped; node build + lint clean, 762 + 296 + 42 passed, 0 skipped.
+
+### 2026-08-21 - CC-1a: classification + ordinals, and a defect in GOLDEN-RAW (opencode-osx)
+
+Claimed CC-1 and sliced it 1a-1f on the board so the two agents can work it in
+parallel; taking 1a+1b myself because they are one design.
+
+**Landed (1a, first half):** `classify_sdt` / `classifySdt` and the ordinal
+pre-pass in both engines, as a new twin module pair
+(`utils/content_controls.py`, `utils/content-controls.ts`) rather than more
+weight in `utils/docx.*` - that file is the most contended in the tree and a
+small paired file keeps the python/node diff reviewable by eye. 26 tests per
+engine, asserting the SAME table transcribed from fixture-standard.md. Both
+green.
+
+**The fixture body is now one file, not four.** It was already transcribed by
+hand into `scripts/make_cc_fixture.py`, and each engine's
+`repro_sdt_table_row_cell_invisibility` suite carries its own copy of the table
+XML. That is exactly how the engines drift - it is what produced the CC-12 class
+of bug. The normative body now lives in `shared/fixtures/cc_fixture.body.xml`
+and the script plus both test suites read it. `make_cc_fixture.py` still
+produces byte-identical output.
+
+**Two findings worth recording.**
+
+*`w14:val`, not `w:val`.* The checkbox state lives in the w14 namespace. A
+reader that only consults `w:val` reports every checkbox as unchecked - which is
+worse than crashing, because the projection would then render a confident `[ ]`
+over a ticked box. Pinned in both engines. Related: python-docx does not
+register the `w15` prefix at all, and the only thing that currently registers it
+is an import side effect in `adeu.redline.comments`. Depending on import order
+for the correctness of a projection rule is not acceptable, so the new module
+spells the namespaces in Clark notation directly, following `mapper.py:203`.
+
+**DEFECT IN A NORMATIVE GOLDEN - needs Mikko's call (README rule 4).**
+GOLDEN-RAW in `acceptance/fixture-standard.md` renders the table as
+
+```
+Role | {#cc:14}Contracting Officer{#/cc:14}
+{#cc:15}Approver | Jane Roe{#/cc:15}
+Notes | {#cc:16}Approved without conditions.{#/cc:16}
+```
+
+but both engines emit a GFM header divider after the first row of EVERY table,
+and have done since long before this initiative:
+
+```
+Role | Contracting Officer
+--- | ---
+Approver | Jane Roe
+Notes | Approved without conditions.
+```
+
+So A1.1 as written is unachievable without either changing the golden or
+changing table projection for every document in the product. The golden is
+wrong, not the engines - the divider is load-bearing for markdown table
+rendering and is covered by existing tests. I have NOT edited the golden: it is
+normative and frozen, and silently rewriting an acceptance target to match the
+implementation is how acceptance tests stop meaning anything. Proposed
+correction, pending sign-off:
+
+```
+Role | {#cc:14}Contracting Officer{#/cc:14}
+--- | ---
+{#cc:15}Approver | Jane Roe{#/cc:15}
+Notes | {#cc:16}Approved without conditions.{#/cc:16}
+```
+
+Until that is confirmed I am building 1b against the goldens as written for
+everything except the divider line, and A1.1 will be marked blocked rather than
+passed.
+
+Also confirmed on the baseline, as expected and not yet fixed: the CC:2
+placeholder ghost text currently projects as bare body text ("This Agreement is
+made between Click or tap here to enter text. and the Government of Example."),
+which is the A1.4 violation CC-1b removes, and the CC:6 checkbox still projects
+the raw glyph. Both are the point of the task.
