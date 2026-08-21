@@ -342,6 +342,29 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   intermittently and the guard never fires, which means activation is correct at
   fixture setup and is being lost *later*, between setup and the tool's
   `GetActiveObject` call.
+- **Progress 2026-08-21 (windows).** Two mitigations landed, one approach tried and
+  reverted, root cause still open. Failure rate on
+  `test_live_word_structured_insertion.py` went from 5/5 and 3/5 failing to 0-1/5,
+  which is better and is not fixed.
+  - Landed: `doc.Activate()` (the fixture previously activated only the
+    *application*), and `_await_active_document`, which verifies the claim through
+    `GetActiveObject` — the production lookup path — instead of through the
+    fixture's own `Dispatch` handle, and retries, because activation is
+    asynchronous. Checking the `Dispatch` handle verifies the wrong object: with
+    two `WINWORD.EXE` processes alive the two calls resolve to *different*
+    applications.
+  - **Tried and reverted — do not re-attempt without reading this.** Closing every
+    document that appeared during a test (to stop the tools' un-closed
+    `_get_word_doc` opens from accumulating) makes things *worse*: the tools hand
+    back Ranges into those documents, so reaping them produces
+    `(-2147417848) The object invoked has disconnected from its clients` and
+    `Object has been deleted`. That is a worse failure than the one being fixed,
+    because it reads as a COM fault rather than a test-isolation problem.
+  - Still open: documents genuinely do accumulate, and the guard has never fired,
+    so activation is correct when the fixture yields and is lost afterwards. The
+    remaining suspect is that the *tools* change the active document mid-test
+    (`_get_word_doc` opens by path) and nothing re-establishes it before the next
+    assertion.
 - Scope: make the live-Word suite deterministic. Options worth weighing, roughly in
   order of appeal:
   1. Give the live-Word tools an injectable Word/document handle for tests, so they

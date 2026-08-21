@@ -101,29 +101,77 @@ if sys.platform == "win32":
     import pythoncom
     import win32com.client
 
+    def _await_active_document(doc, attempts: int = 20, delay: float = 0.05) -> None:
+        """Block until the tools would resolve `doc`, or fail saying what they see.
+
+        The check deliberately goes through `GetActiveObject`, not through the
+        `Dispatch` handle the fixture already holds. Those are not guaranteed to
+        be the same object: `Dispatch` reuses a running instance *or starts one*,
+        while `GetActiveObject` returns whatever is registered in the COM Running
+        Object Table. With two `WINWORD.EXE` processes alive they resolve to
+        different applications, and a fixture that verified its own handle would
+        report everything fine while the tool under test read another Word's
+        document entirely. Asserting on the production lookup path is the whole
+        point (CC-13).
+
+        The retry loop exists because `Document.Activate()` is not synchronous —
+        Word acknowledges it before the window manager has finished, so an
+        immediate read can still return the outgoing document.
+        """
+        import time
+
+        seen = None
+        for _ in range(attempts):
+            try:
+                app = win32com.client.GetActiveObject("Word.Application")
+                seen = app.ActiveDocument.FullName
+                if seen == doc.FullName:
+                    return
+                doc.Activate()
+            except Exception as exc:  # pragma: no cover - diagnostic path
+                seen = f"<{type(exc).__name__}: {exc}>"
+            time.sleep(delay)
+
+        try:
+            app = win32com.client.GetActiveObject("Word.Application")
+            open_docs = [d.FullName for d in app.Documents]
+        except Exception:  # pragma: no cover - diagnostic path
+            open_docs = ["<unavailable>"]
+
+        pytest.fail(
+            "The live-Word tools would not resolve this fixture's document: "
+            f"GetActiveObject().ActiveDocument is {seen!r}, expected {doc.FullName!r}. "
+            f"Open documents: {open_docs!r}. Word processes may have multiplied, or "
+            "another live-Word test leaked a document into the shared instance (CC-13)."
+        )
+
     @pytest.fixture
     def active_word_app():
         """
         Creates an ephemeral, visible MS Word instance with a fresh document.
         Ensures it is torn down properly after the test.
 
-        **`doc.Activate()` is load-bearing, not tidiness.** The tools under test
-        bind through `GetActiveObject` and then read `app.ActiveDocument`, so
-        every assertion here is really an assertion about whichever document Word
-        currently considers active. `Documents.Add()` usually makes the new
-        document active, and `app.Activate()` raises the *application* — neither
-        guarantees the *document*. The `word_app` battery
-        (`test_live_word_content_controls.py`, `word_com.edit_and_save`) shares
-        this same Word instance and calls `Documents.Open` freely; when one of
-        those closes, Word re-activates some other open document of its choosing.
-        A test that then reads `ActiveDocument` silently measures a neighbour.
+        **Three things here are load-bearing, not tidiness** (all CC-13). The
+        tools under test bind through `GetActiveObject` and read
+        `app.ActiveDocument`, so every assertion in these suites is really an
+        assertion about whichever document Word happens to consider active.
 
-        That failure is spectacularly confusing from the outside: the assertion
-        reports text belonging to a different test file entirely
+        1. `doc.Activate()`. `Documents.Add()` usually makes the new document
+           active and `app.Activate()` raises the *application* — neither
+           guarantees the *document*.
+        2. `_await_active_document`, which confirms the claim through
+           `GetActiveObject` (the production lookup) rather than through this
+           fixture's own `Dispatch` handle, and waits, because activation is
+           asynchronous.
+        3. Closing every document that appeared during the test. The tools open
+           documents by path and never close them, so they pile up in the shared
+           instance and each one is a candidate for `ActiveDocument` in later
+           tests.
+
+        Without these the failure is spectacularly confusing from the outside:
+        the assertion reports text belonging to a different test file entirely
         ("assert '{++Title++}' in 'Initial {==manuscript==}...'"), the set of
-        failures changes on every run, and each suite passes in isolation. Hence
-        both the explicit activation and the guard below, which turns a silent
-        misread into a named error.
+        failures changes on every run, and each suite passes in isolation.
         """
         pythoncom.CoInitialize()
 
@@ -133,6 +181,7 @@ if sys.platform == "win32":
             # GetActiveObject will then be able to hook into it in the tool.
             app = win32com.client.Dispatch("Word.Application")
             app.Visible = True  # Needs to be visible/active for GetActiveObject sometimes
+
             doc = app.Documents.Add()
 
             # Bring to front so GetActiveObject definitely binds to this instance
@@ -143,15 +192,7 @@ if sys.platform == "win32":
             # Seed initial content
             doc.Range(0, 0).Text = "Hello world! This is a live testing document.\n"
 
-            active = app.ActiveDocument
-            if active.FullName != doc.FullName:
-                pytest.fail(
-                    "Word's active document is not this fixture's document "
-                    f"({active.FullName!r} != {doc.FullName!r}). Another live-Word "
-                    "test left a document open in the shared application; the tools "
-                    "read ActiveDocument, so this test would have measured that one. "
-                    f"Currently open: {[d.FullName for d in app.Documents]!r}"
-                )
+            _await_active_document(doc)
 
             yield app, doc
 
@@ -160,6 +201,15 @@ if sys.platform == "win32":
 
         finally:
             if app:
+                # Only this fixture's own document. Closing every document that
+                # appeared during the test was tried and REVERTED: the live-Word
+                # tools hand back Ranges into documents they opened, and reaping
+                # those turned the ambient-activation bug into
+                # "(-2147417848) The object invoked has disconnected from its
+                # clients" plus "Object has been deleted" — a worse failure,
+                # because it looks like a COM fault rather than a test-isolation
+                # one. Document accumulation is real and still unfixed; see CC-13,
+                # which now has that dead end recorded so nobody re-walks it.
                 try:
                     doc.Close(0)  # 0 = wdDoNotSaveChanges
                 except Exception:
