@@ -143,7 +143,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-2 — Fields ledger, appendix summary, banner (P1)
 
-- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21) — A2.1-A2.7 and A1.9 all
+- Status: `done (224aefc)` (agent: opencode-osx, 2026-08-21) — A2.1-A2.7 and A1.9 all
   met, both engines, all surfaces. **Two frozen-spec deviations, both recorded below
   and needing Mikko's ruling** (README rule 4); neither blocks the row, and both were
   resolved toward the implemented convention rather than the literal text.
