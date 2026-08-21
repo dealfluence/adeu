@@ -86,7 +86,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     `odot_uic_drywell` has 2 bare `☐` in prose outside any control that must stay
     `☐` — substitute on the character and you invent two checkboxes. Still to do:
     the projection itself, both engines, once 1a lands.
-  - **1d — chrome-stripping protection** (`done (PENDING)`, osx): A1.6. The marker
+  - **1d — chrome-stripping protection** (`done (a576f34)`, osx): A1.6. The marker
     STRIPPERS already protected `{#...}` (QA 2026-07-23 F4) and that covered `{#cc:N}`
     unchanged — pinned, not rewritten. The real gap was the two passes that CUT text
     and knew nothing about tokens: outline truncation at 200 chars and the search
