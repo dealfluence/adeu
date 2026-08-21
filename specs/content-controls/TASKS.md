@@ -86,7 +86,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-6 — Word COM verification battery (P2, informs CC-4/CC-5)
 
-- Status: `pending`
+- Status: `in-progress (agent: opencode-windows, since: 2026-08-21, branch: content-controls-specs)`
 - Depends on: CC-1 (fixture builders reused); runs on Windows + real Word
   (`python/tests/word_com.py` harness, `xdist_group("live_word")`)
 - Acceptance: findings appended to PROGRESS.md and every `[COM-PENDING]` spec section
