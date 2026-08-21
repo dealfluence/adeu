@@ -89,6 +89,7 @@ def build_sdt_docx(
     body: str,
     *,
     protection: str | None = None,
+    protection_enforcement: str | None = "1",
     custom_xml: str | None = None,
     store_item_id: str | None = None,
     glossary: dict[str, str] | None = None,
@@ -97,7 +98,10 @@ def build_sdt_docx(
     """Write a Word-openable package whose `w:body` is `body`.
 
     `protection` is a `w:documentProtection w:edit` value ("forms",
-    "trackedChanges", "readOnly", "comments"). `custom_xml` + `store_item_id`
+    "trackedChanges", "readOnly", "comments"); `protection_enforcement` is its
+    `w:enforcement` attribute, where `None` omits the attribute (which OOXML
+    reads as true) and `"0"` writes a configured-but-switched-off restriction.
+    `custom_xml` + `store_item_id`
     wire a data store for `w:dataBinding`; pass `custom_xml=None` while leaving
     a `w:storeItemID` in the body to get a DANGLING binding. `glossary` maps
     doc-part name -> placeholder prose.
@@ -131,7 +135,14 @@ def build_sdt_docx(
             f'<Override PartName="/word/glossary/document.xml" ContentType="{_CT}.document.glossary+xml"/>'
         )
 
-    prot = f'<w:documentProtection w:edit="{protection}" w:enforcement="1"/>' if protection else ""
+    # `protection_enforcement=None` omits the attribute entirely, which is a
+    # real Word shape and NOT the same as "0": the OOXML boolean rule makes an
+    # absent attribute mean true. CC-4's reader is tested against all three.
+    if protection:
+        enforcement_attr = f' w:enforcement="{protection_enforcement}"' if protection_enforcement is not None else ""
+        prot = f'<w:documentProtection w:edit="{protection}"{enforcement_attr}/>'
+    else:
+        prot = ""
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(

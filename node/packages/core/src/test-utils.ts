@@ -523,12 +523,17 @@ export function ccFixtureBodyElement(): any {
  * body is exercised through exactly the same load path as the real fixture.
  */
 export function ccFixtureBytes(
-  protection?: 'forms' | 'readOnly' | 'comments',
+  protection?: 'forms' | 'readOnly' | 'comments' | 'trackedChanges',
   bodyXml?: string,
+  // `null` omits `w:enforcement` entirely, which is a real Word shape and NOT
+  // the same as '0': the OOXML boolean rule makes an absent attribute mean
+  // true. CC-4's protection reader is tested against all three states.
+  enforcement: string | null = '1',
 ): Uint8Array {
   const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const enforcementAttr = enforcement === null ? '' : ` w:enforcement="${enforcement}"`;
   const prot = protection
-    ? `<w:documentProtection w:edit="${protection}" w:enforcement="1"/>`
+    ? `<w:documentProtection w:edit="${protection}"${enforcementAttr}/>`
     : '';
   const decl = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   const files: Record<string, Uint8Array> = {
