@@ -229,8 +229,21 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-5 — `set_field` change type + fill semantics (P2)
 
-- Status: `pending`
-- Depends on: CC-4; CC-6 findings must be recorded before this task's PR merges
+- Status: `in-progress` (agent: opencode-osx, since: 2026-08-22, branch:
+  content-controls-specs) — **started while CC-4 is still in flight, deliberately.**
+  The dependency is real but narrow: only A4.12 (set_field is refused by G1 like any
+  other edit) needs the gate matrix. Everything else — the union member, field
+  resolution, fill semantics, the per-class writers, the surfaces — is independent,
+  and CC-4 has already landed the two pieces of plumbing this row actually consumes
+  (`read_document_protection`, and `sdt_stack` on every run, 56aabeb). Sequencing
+  strictly behind CC-4 would idle this side for no gain and leave CC-7, which depends
+  on BOTH, waiting on a serial chain.
+  Coordination: this row does not touch the gate matrix or `ignore_*` params — those
+  are CC-4's. `set_field` calls whatever gate entry point CC-4 publishes; until it
+  exists the call site is one function, and A4.12 lands as the last commit of this row.
+- Depends on: CC-4 (A4.12 only, see above); CC-6 findings must be recorded before this
+  task's PR merges — done, CC-6 is closed and `test_live_word_content_controls.py` pins
+  each finding
 - **Scope grew, Mikko 2026-08-21: the bound-control reject path is now v1, not CC-9.**
   CC-6(e) found that Word rewrites a bound control's content from its XML store on open,
   and that a headless reject leaves the store holding the *rejected* value — so the next
