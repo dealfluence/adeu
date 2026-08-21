@@ -1197,3 +1197,56 @@ shared doc is suspect.**
 CC-3, CC-6 and CC-13 all moved to `done`. Verification at `7ab331f`: python
 1,733 passed / 7 skipped including all 43 live-Word tests on a cold Word, ruff and mypy
 clean; node 853 + 306 + 42 passed, build and lint clean.
+
+## 2026-08-21 — CC-16: the LibreOffice interop harness was reporting scheduling (osx)
+
+Filed and fixed the flake noted at the end of the CC-14 entry. It deserved a row
+rather than a footnote, because the visible symptom was the *less* important half.
+
+**The measurement changed the diagnosis.** My hypothesis was the 5-second
+timeout. Wrong: a single conversion takes ~0.9s warm, and every failing worker
+in an 8-way run reported a clean, fast completion — no timeouts at all. The
+process exits 0 and simply writes no PDF. Concurrent `soffice` invocations that
+share a user profile do not both convert; the second finds the first one's lock,
+hands its request over and exits successfully having done nothing. `lo_loads`
+only checks whether the PDF appeared, so "another worker held the profile" and
+"LibreOffice rejected this document" are the same observation. At 8-way, sharing
+converted a known-good file 4/8 times; a private profile per process, 8/8.
+
+**The quiet face is the one that mattered.** `soffice_can_convert` caches per
+process, so a probe that loses the race marks LibreOffice unavailable for that
+entire xdist worker and every interop assertion on it skips. Five full-suite
+runs unfixed: interop tests skipped in four of them (1, 0, 2, 1, 2). Fixed: zero
+skips and zero failures, five for five, identical counts. So the QA C1 and H4
+interop regressions — a body edit landing in `word/footer1.xml`, a comment
+anchored in a footnote, both real shipped bugs this file exists to pin — were
+usually not being checked at all, and the suite said green. A test that fails
+randomly is annoying; one that silently stops running is how a regression ships.
+
+**Checking the fix hadn't neutered the tests found a second defect.** I ran the
+repaired helper against deliberately broken files. Truncated and malformed-XML
+inputs were correctly rejected — but a `.docx` whose entire content was the
+bytes `this is definitely not a zip` came back as loading *fine*. With no input
+filter pinned, LibreOffice sniffs the content, falls back to a plain-text
+importer, and produces a perfectly good PDF of the garbage. The interop
+assertions could therefore have passed on a file Word would refuse outright.
+Pinning `--infilter=MS Word 2007 XML` gives the right answer on all four cases.
+
+**The timeout still moved, for a different reason than I first thought.** Not
+because 5s was too tight for a conversion, but because with private profiles the
+first run in each worker also *builds* one: ~3.5s at 8-way, and past 5s at
+12-way, where all twelve workers then timed out together. A private profile
+alone would have traded one flake for another on a wider machine. Raised to
+120s and reframed as a hang guard, not a performance assertion. Profiles are
+built once per worker and reused (~1.7s warm) rather than per conversion.
+
+**Note on the regression test.** It spawns real subprocesses. Threads would not
+reproduce it: the profile is per-process *by design*, so in-process concurrency
+shares it legitimately, and a thread-based test would fail against the fixed
+code. Three processes is the cheapest reliable reproduction — sharing gave 2/3
+on every trial, while 2-way only failed 2 of 3 times. 5 of the 9 new tests fail
+against the unfixed harness, including both behavioural ones.
+
+Scope note: this is the cross-platform LibreOffice twin of CC-13 (Windows,
+live-Word COM). Same class — a suite asserting about the environment rather than
+the code — different mechanism, and the two fixes do not overlap.

@@ -625,3 +625,46 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 - Acceptance: a paragraph with only `w:outlineLvl` yields the same outline node in both
   engines. Worth a corpus sweep first to size the blast radius: adding headings changes
   every outline consumer, so this is not obviously a safe drive-by.
+
+## CC-16 — The LibreOffice interop harness reports scheduling, not documents (P1, tooling)
+
+- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21, branch: content-controls-specs)
+  — found while verifying CC-14; filed and fixed rather than left as a note, because
+  the quiet half of it means QA C1/H4 interop coverage mostly was not running.
+- Depends on: — (pure test infrastructure; no spec surface)
+- Symptom: `test_repro_qa_2026_07_18.py::TestC1FooterBoundary::test_applied_output_loads_in_libreoffice`
+  and `TestH4FootnoteInterop::test_footnote_edit_output_loads_in_libreoffice` fail
+  intermittently under `pytest -n auto` — a different one each run, sometimes neither,
+  55/55 serially. Reproduced on a clean tree, so pre-existing.
+- Cause: **concurrent `soffice` invocations that share a user profile do not both
+  convert.** The second finds the first one's lock, hands its request over, and exits
+  **0 having written nothing**. `lo_loads` only checks that the PDF appeared, so a
+  clean exit plus a missing file is indistinguishable from "LibreOffice rejected this
+  document". `-n auto` on a 28-core machine runs these in separate worker processes,
+  all racing on the one default profile. Measured at 8-way: sharing converted a
+  known-good file 4/8 times, a private profile per process 8/8.
+- **The dangerous face is the silent one.** `soffice_can_convert` caches its result per
+  process, so a probe that loses the race marks LibreOffice unavailable for that whole
+  worker and every interop assertion on it **skips**. Five full-suite runs, unfixed:
+  interop tests skipped in four of them (1, 0, 2, 1, 2 skips). Fixed: zero skips, zero
+  failures, identical counts, five of five. The visible flake was the rarer outcome;
+  usually the coverage just quietly vanished while the suite reported green.
+- Second defect, found while checking the fix had not neutered the tests: with no input
+  filter pinned, LibreOffice sniffs content and falls back to a **plain-text** import.
+  A `.docx` whose entire content was the bytes `this is definitely not a zip` imported,
+  converted to a valid PDF, and was reported as loading correctly — so the interop
+  tests could have passed on a file Word would refuse outright. Fixed by pinning
+  `--infilter=MS Word 2007 XML`, which accepts the real DOCX and rejects non-zip,
+  truncated and malformed-XML inputs.
+- Fix: a private `-env:UserInstallation` profile per worker process, created once and
+  reused (~3.5s to build, ~1.7s warm); `--infilter` pinned; timeout raised 5s → 120s.
+  The timeout was not the root cause — every failing worker exited cleanly well inside
+  5s — but at 12-way concurrency fresh profile builds did cross it and failed every
+  worker at once, so a private profile alone would have traded one flake for another
+  on a wider machine. It is a hang guard, not a performance assertion.
+- Tests: `python/tests/test_libreoffice_probe_isolation.py` (9), pinning per-worker
+  isolation, harness honesty, and no-silent-skip. 5/9 fail against the unfixed harness,
+  including both behavioural ones. The race test spawns real subprocesses — threads
+  would not do, since the profile is per-process by design and in-process concurrency
+  shares it legitimately; three processes is the cheapest reliable reproduction (2/3
+  converted on every trial, where 2-way only failed 2 of 3 times).

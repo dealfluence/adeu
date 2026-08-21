@@ -28,12 +28,15 @@ Every LibreOffice interop assertion is skipped when soffice (with the Writer
 import filter) is unavailable.
 """
 
+import atexit
 import json
+import os
 import re
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 from io import BytesIO
 from pathlib import Path
@@ -72,6 +75,43 @@ def run_cli(args, capsys):
 
 _SOFFICE_STATE = {"probed": False, "ok": False}
 
+# A LibreOffice conversion is a full application start. 5s was enough for a
+# warm single run (~0.9s measured) but not for the first run in a process,
+# which also builds the user profile below: 3.5s at 8-way concurrency, and
+# past 5s at 12-way, where every worker then failed at once. The timeout is a
+# safety net against a hung soffice, not a performance assertion, so it is set
+# far above the worst measured conversion rather than just above the best.
+LO_TIMEOUT_SECONDS = 120
+
+_SOFFICE_PROFILE: "Path | None" = None
+
+
+def _soffice_profile_dir() -> Path:
+    """A private LibreOffice user profile for this process, created once.
+
+    Concurrent `soffice` invocations that share a user profile do not both
+    convert. The second instance finds the first one's lock, hands its request
+    over to it, and **exits 0 having written nothing**. The caller sees a clean
+    exit and a missing PDF, which is indistinguishable from "LibreOffice could
+    not load this document" -- so a pure concurrency artefact was reported as a
+    document-corruption failure.
+
+    That is exactly what xdist produced: `-n auto` on a 28-core machine runs
+    these tests in separate worker processes that raced on the one default
+    profile. Measured at 8-way concurrency, sharing gave 4/8 successful
+    conversions of a known-good file while a private profile per process gave
+    8/8.
+
+    Scoped per process rather than per call so each xdist worker pays the
+    profile build once (~3.5s) and reuses it (~1.7s) for later conversions.
+    """
+    global _SOFFICE_PROFILE
+    if _SOFFICE_PROFILE is None:
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        _SOFFICE_PROFILE = Path(tempfile.mkdtemp(prefix=f"adeu-soffice-{worker}-"))
+        atexit.register(shutil.rmtree, _SOFFICE_PROFILE, True)
+    return _SOFFICE_PROFILE
+
 
 def soffice_can_convert(tmp_dir: Path) -> bool:
     """True when a working LibreOffice Writer import filter is available."""
@@ -97,9 +137,26 @@ def lo_loads(path: Path, out_dir: Path) -> bool:
         expected.unlink()
     try:
         subprocess.run(
-            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(path)],
+            [
+                "soffice",
+                f"-env:UserInstallation={_soffice_profile_dir().as_uri()}",
+                # Pin the Word filter. Left to sniff the content, LibreOffice
+                # falls back to a plain-text import for anything it cannot
+                # parse as OOXML, converts THAT to a PDF, and the helper reads
+                # the resulting file as "loads fine" -- it reported success for
+                # a .docx whose entire content was the bytes "this is
+                # definitely not a zip". With the filter pinned, only a file
+                # the Word importer actually accepts produces a PDF.
+                "--infilter=MS Word 2007 XML",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(pdf_dir),
+                str(path),
+            ],
             capture_output=True,
-            timeout=5,
+            timeout=LO_TIMEOUT_SECONDS,
         )
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
         return False
