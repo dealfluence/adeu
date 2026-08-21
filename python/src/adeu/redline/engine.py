@@ -3279,7 +3279,12 @@ class RedlineEngine:
         acquire a special pass through any of them by accident.
         """
         from adeu.fields import FieldResolutionError
-        from adeu.utils.field_write import clear_placeholder, sdt_content
+        from adeu.utils.field_write import (
+            clear_placeholder,
+            refuse_class,
+            refuse_value,
+            sdt_content,
+        )
 
         try:
             hits = self._resolve_set_field_targets(edit)
@@ -3288,6 +3293,22 @@ class RedlineEngine:
             edit._error_msg = str(fe)
             self.skipped_details.append(f"- {fe}")
             return
+
+        # Phase 0: refuse before touching anything. Class first (A4.11), then
+        # the structure rules (A4.7). Both are checked for EVERY target before
+        # any is written, so a match_mode="all" fan-out cannot half-apply and
+        # leave the document in a state no single call could have produced.
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            cls = info.cls if info is not None else entry.cls_word
+            msg = refuse_class(cls, entry.ordinal)
+            if msg is None and info is not None:
+                msg = refuse_value(info, entry.ordinal, edit.value)
+            if msg is not None:
+                edit._applied_status = False
+                edit._error_msg = msg
+                self.skipped_details.append(f"- {msg}")
+                return
 
         # Phase 1: the untracked teardown, for every target, before any
         # offsets are read. Clearing a placeholder deletes the ghost text from
@@ -3303,7 +3324,23 @@ class RedlineEngine:
             self._mutated_since_load = True
             self._invalidate_projection_caches()
 
-        # Phase 2: one pinned sub-edit per target.
+        # Phase 2: checkboxes are written directly; everything else desugars.
+        def _cls_of(e: Any) -> str:
+            info = self._sdt_info_for_ordinal(e.ordinal)
+            return info.cls if info is not None else e.cls_word
+
+        direct = [e for e in hits if _cls_of(e) == "checkbox"]
+        if direct:
+            ok = True
+            for entry in direct:
+                info = self._sdt_info_for_ordinal(entry.ordinal)
+                if info is None or not self._apply_checkbox_set_field(edit, entry, info):
+                    ok = False
+            if ok:
+                self._invalidate_projection_caches()
+            return
+
+        # Phase 2b: one pinned sub-edit per target.
         for entry in hits:
             span = self._cc_content_range(entry.ordinal)
             if span is None:
@@ -3344,6 +3381,91 @@ class RedlineEngine:
                 edit._resolved_start_idx = start
                 edit._resolved_proxy_edit = sub
             resolved_edits.append((sub, edit.value))
+
+    def _apply_checkbox_set_field(self, edit: "SetField", entry: Any, info: Any) -> bool:
+        """The checkbox fill (A4.6), which cannot desugar into a ModifyText.
+
+        A checkbox has no anchor pair and no editable content span - it
+        projects as virtual `[x]` text - so there is no offset for a pinned
+        edit to target. It is written directly instead: the state attribute
+        flips silently, and the glyph swap carries the redline.
+
+        `w:ins` goes BEFORE `w:del`, which is Word's own order (CC-6(b)) and
+        is visible rather than cosmetic: the projection reads document order,
+        so the reverse would render `{--Y--}{++N++}` where Word renders
+        `{++N++}{--Y--}`.
+        """
+        from copy import deepcopy
+
+        from adeu.utils.field_write import (
+            checkbox_glyph,
+            glyph_run,
+            parse_checkbox_value,
+            set_checkbox_checked,
+        )
+
+        checked = parse_checkbox_value(edit.value)
+        if checked is None:
+            msg = (
+                f"CC:{entry.ordinal} is a checkbox; '{edit.value}' is neither checked nor unchecked. "
+                "Use true/false (also accepted: x, [x], 1, 0, yes, no)."
+            )
+            edit._applied_status = False
+            edit._error_msg = msg
+            self.skipped_details.append(f"- {msg}")
+            return False
+
+        old_run = glyph_run(info)
+        char, font = checkbox_glyph(info, checked)
+
+        new_run = deepcopy(old_run) if old_run is not None else create_element("w:r")
+        assert new_run is not None
+        for t in new_run.findall(qn("w:t")):
+            new_run.remove(t)
+        t_el = create_element("w:t")
+        t_el.text = char
+        new_run.append(t_el)
+        if font:
+            rpr = new_run.find(qn("w:rPr"))
+            if rpr is None:
+                rpr = create_element("w:rPr")
+                new_run.insert(0, rpr)
+            for existing in rpr.findall(qn("w:rFonts")):
+                rpr.remove(existing)
+            fonts = create_element("w:rFonts")
+            for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+                fonts.set(qn(attr), font)
+            rpr.insert(0, fonts)
+
+        ins = self._create_track_change_tag("w:ins", reuse_id=self._get_next_id())
+        ins.append(new_run)
+
+        parent = old_run.getparent() if old_run is not None else None
+        if parent is None:
+            from adeu.utils.field_write import sdt_content
+
+            parent = sdt_content(info.element)
+            if parent is None:
+                return False
+            parent.append(ins)
+        else:
+            # `parent` is non-None only when old_run is, so the old glyph is
+            # always available to wrap as the deletion half of the pair.
+            assert old_run is not None
+            index = list(parent).index(old_run)
+            parent.insert(index, ins)
+            del_tag = self._create_track_change_tag("w:del", reuse_id=self._get_next_id())
+            del_run = deepcopy(old_run)
+            for t in del_run.findall(qn("w:t")):
+                t.tag = qn("w:delText")
+            del_tag.append(del_run)
+            parent.replace(old_run, del_tag)
+
+        set_checkbox_checked(info, checked)
+        self._mutated_since_load = True
+        edit._applied_status = True
+        edit._occurrences_modified = (edit._occurrences_modified or 0) + 1
+        return True
 
     def _invalidate_projection_caches(self) -> None:
         """Drop everything keyed on the projection after an untracked write."""

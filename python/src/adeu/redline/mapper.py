@@ -942,13 +942,20 @@ class DocumentMapper:
                     if not self.clean_view and info.showing_placeholder and info.placeholder_text:
                         txt += f"{{>>placeholder: {info.placeholder_text}<<}}"
                 elif item.type == "checkbox_start":
-                    txt = CHECKBOX_OPEN
+                    # The deleted half of a tracked toggle contributes no
+                    # brackets to the clean view - its content is dropped, so
+                    # the chrome around it would render a second, permanently
+                    # empty checkbox. Mirrors ingest.py exactly: the two
+                    # projections are twins, and a divergence here is the
+                    # CC-12 defect class (offsets that disagree with the text
+                    # the caller was shown).
+                    txt = "" if (self.clean_view and active_del) else CHECKBOX_OPEN
                 elif item.type == "checkbox_mark":
                     # Fallback only; normally the mark is a real run-backed span
                     # emitted through the ProjectedRun branch (spec §4).
                     txt = info.checkbox_mark
                 elif item.type == "checkbox_end":
-                    txt = CHECKBOX_CLOSE
+                    txt = "" if (self.clean_view and active_del) else CHECKBOX_CLOSE
                 else:
                     txt = info.close_token
                 self._add_virtual_text(txt, current, paragraph)

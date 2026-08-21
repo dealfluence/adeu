@@ -124,3 +124,147 @@ def unwrap_sdt(info: SdtInfo) -> bool:
         parent.insert(index, child)
     parent.remove(sdt)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Per-class value rules (spec-set-field.md §2, §5)
+# ---------------------------------------------------------------------------
+
+#: Classes `set_field` can write in v1.
+VALUE_BEARING = frozenset({"text", "richtext", "dropdown", "combobox", "date", "checkbox"})
+
+#: Classes that hold no single value. Refusing these is not a limitation, it
+#: is data protection: a group's "content" is the other controls inside it, so
+#: replacing it with a string would delete every field it contains.
+NON_VALUE = frozenset({"group", "repeating", "repeating-item", "picture", "building-block"})
+
+_NON_VALUE_ADVICE = {
+    "group": "Edit the fields nested inside it individually - each has its own CC: id.",
+    "repeating": (
+        "Fill the fields inside a specific item instead; repeating-section operations "
+        "(add/remove item) are not supported in v1."
+    ),
+    "repeating-item": (
+        "Fill the fields inside the item instead; repeating-section operations "
+        "(add/remove item) are not supported in v1."
+    ),
+    "picture": "Picture controls hold an image, which set_field cannot write.",
+    "building-block": "Building-block galleries insert document parts, not text.",
+}
+
+
+def is_multiline(info: SdtInfo) -> bool:
+    """Does this plain-text control permit `w:br` (a `w:text w:multiLine`)?"""
+    pr = sdt_pr(info.element)
+    if pr is None:
+        return False
+    text_el = pr.find(qn("w:text"))
+    if text_el is None:
+        return False
+    val = text_el.get(qn("w:multiLine"))
+    return val is not None and val.lower() not in ("0", "false", "off")
+
+
+def refuse_class(cls: str, ordinal: int) -> Optional[str]:
+    """The A4.11 refusal for a control that holds no single value."""
+    if cls in VALUE_BEARING:
+        return None
+    advice = _NON_VALUE_ADVICE.get(cls, "set_field fills value-bearing fields only.")
+    return (
+        f"CC:{ordinal} is a {cls} and is not a value-bearing field. {advice} "
+        "set_field fills text, rich-text, dropdown, combobox, date and checkbox controls."
+    )
+
+
+def refuse_value(info: SdtInfo, ordinal: int, value: str) -> Optional[str]:
+    """The A4.7 structure rules: what this class cannot physically hold.
+
+    A `w:text` control has no paragraphs to put a paragraph in. Writing one
+    anyway produces a control whose XML Word will not round-trip, so the
+    refusal is the only non-destructive answer.
+    """
+    if info.cls != "text":
+        return None
+    if "\n\n" in value:
+        return (
+            f"CC:{ordinal} is a plain-text control and cannot hold paragraphs. "
+            "Remove the blank line, or use a rich-text control for multi-paragraph content."
+        )
+    if "\n" in value and not is_multiline(info):
+        return (
+            f"CC:{ordinal} is a single-line plain-text control and cannot hold a line break. "
+            "Remove the newline, or set the control's multiLine property in Word."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Checkbox (spec-set-field.md §5)
+# ---------------------------------------------------------------------------
+
+#: Accepted truthy/falsy spellings. Generous on input because the caller is a
+#: language model reading a checkbox rendered as `[x]`, and strict rejection
+#: of "checked" would be pedantry rather than safety.
+_TRUTHY = frozenset({"true", "x", "[x]", "checked", "1", "yes", "on"})
+_FALSY = frozenset({"false", "[ ]", "[]", "unchecked", "0", "no", "off", ""})
+
+
+def parse_checkbox_value(value: str) -> Optional[bool]:
+    """`True`/`False`, or `None` when the string names neither state (G11)."""
+    v = value.strip().lower()
+    if v in _TRUTHY:
+        return True
+    if v in _FALSY:
+        return False
+    return None
+
+
+def checkbox_glyph(info: SdtInfo, checked: bool) -> tuple:
+    """The (character, font) this control uses for the given state.
+
+    Read from `w14:checkedState` / `w14:uncheckedState` rather than assumed:
+    a control may use any character in any symbol font, and hardcoding the
+    common Segoe UI Symbol pair would silently change the document's glyph on
+    every checkbox that used something else.
+    """
+    pr = sdt_pr(info.element)
+    default = ("\u2612", None) if checked else ("\u2610", None)
+    if pr is None:
+        return default
+    checkbox = pr.find(f"{W14}checkbox")
+    if checkbox is None:
+        return default
+    state = checkbox.find(f"{W14}checkedState" if checked else f"{W14}uncheckedState")
+    if state is None:
+        return default
+    raw = state.get(f"{W14}val")
+    font = state.get(f"{W14}font")
+    char = chr(int(raw, 16)) if raw else default[0]
+    return (char, font)
+
+
+def set_checkbox_checked(info: SdtInfo, checked: bool) -> None:
+    """Flip `w14:checked/@w14:val`.
+
+    SILENTLY, with no revision of its own: this is the URL_RETARGET class of
+    change (spec §5). The visible glyph swap carries the redline; a revision
+    on the attribute too would show the reviewer two changes for one act.
+    """
+    pr = sdt_pr(info.element)
+    if pr is None:
+        return
+    checkbox = pr.find(f"{W14}checkbox")
+    if checkbox is None:
+        return
+    node = checkbox.find(f"{W14}checked")
+    if node is None:
+        from lxml import etree
+
+        node = etree.SubElement(checkbox, f"{W14}checked")
+    node.set(f"{W14}val", "1" if checked else "0")
+
+
+def glyph_run(info: SdtInfo) -> Optional[Any]:
+    """The run carrying the checkbox's visible character."""
+    runs = content_runs(info.element)
+    return runs[0] if runs else None

@@ -361,3 +361,163 @@ class TestSetFieldThroughTheCli:
         res = run_cli("apply", str(docx), str(changes), "-o", str(tmp_path / "o.docx"))
         assert res.returncode != 0
         assert "nope" in (res.stdout + res.stderr)
+
+
+# ---------------------------------------------------------------------------
+# A4.11 / A4.7 — the refusals
+# ---------------------------------------------------------------------------
+
+
+def _expect_refusal(field, value, **kw):
+    """Run a set_field expected to be rejected; return the combined message."""
+    from adeu.redline.engine import BatchValidationError
+
+    try:
+        _raw, result = _fill(field, value, **kw)
+    except BatchValidationError as exc:
+        return str(exc)
+    assert result["edits_applied"] == 0, f"expected a refusal, got {result['edits_applied']} applied"
+    return " ".join(result.get("skipped_details") or []) + " " + str((result["edits"][0] or {}).get("error") or "")
+
+
+class TestA411NonValueClasses:
+    """A4.11 — classes that hold no single value refuse the whole operation.
+
+    Writing to these is not merely unsupported, it is destructive: a group's
+    "content" is other controls, and replacing it with a string would delete
+    every field inside it.
+    """
+
+    def test_a_group_is_refused_and_named(self):
+        msg = _expect_refusal("std_terms", "anything")
+        assert "not a value-bearing field" in msg
+        assert "group" in msg
+
+    def test_a_repeating_section_is_refused_and_named(self):
+        msg = _expect_refusal("deliverables", "x")
+        assert "not a value-bearing field" in msg
+        assert "repeating" in msg
+
+    def test_the_group_refusal_points_at_the_nested_fields(self):
+        """A refusal that does not say what to do instead just costs a turn."""
+        msg = _expect_refusal("std_terms", "anything")
+        assert "nested" in msg.lower() or "inside" in msg.lower()
+
+
+class TestA47StructureRules:
+    """A4.7 — a plain-text control cannot hold structure."""
+
+    def test_paragraphs_are_refused_in_a_plain_text_control(self):
+        msg = _expect_refusal("counterparty", "Line1\n\nLine2")
+        assert "paragraph" in msg.lower()
+        assert "CC:3" in msg or "counterparty" in msg
+
+    def test_a_line_break_is_refused_without_multiline(self):
+        msg = _expect_refusal("counterparty", "Line1\nLine2")
+        assert "multiline" in msg.lower().replace(" ", "") or "line break" in msg.lower()
+
+    def test_a_richtext_control_accepts_paragraphs(self):
+        """The same value that a w:text control must refuse."""
+        raw, result = _fill("indemnity", "Line1\n\nLine2")
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        sdt = _saved_sdt(raw, 1)
+        inserted = "".join(t.text or "" for ins in sdt.iter(f"{W}ins") for t in ins.iter(f"{W}t"))
+        assert "Line1" in inserted and "Line2" in inserted
+
+
+class TestA46Checkbox:
+    """A4.6 — the toggle, which has no anchor pair to edit."""
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def unchecked(cls):
+        return _fill("confidential", "false")
+
+    def test_the_edit_applies(self, unchecked):
+        _raw, result = unchecked
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+
+    def test_the_state_attribute_flips(self, unchecked):
+        raw, _ = unchecked
+        sdt = _saved_sdt(raw, 6)
+        W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+        checked = sdt.find(f".//{W14}checked")
+        assert checked is not None and checked.get(f"{W14}val") == "0"
+
+    def test_the_attribute_flip_carries_no_revision_of_its_own(self, unchecked):
+        """URL_RETARGET precedent: one act, one redline."""
+        raw, _ = unchecked
+        sdt = _saved_sdt(raw, 6)
+        assert len(sdt.findall(f".//{W}ins")) == 1
+        assert len(sdt.findall(f".//{W}del")) == 1
+
+    def test_the_insertion_precedes_the_deletion(self, unchecked):
+        """CC-6(b): Word's order, and visible - the projection reads document
+        order, so the reverse renders the toggle backwards."""
+        raw, _ = unchecked
+        sdt = _saved_sdt(raw, 6)
+        tags = [el.tag for el in sdt.iter() if el.tag in (f"{W}ins", f"{W}del")]
+        assert tags == [f"{W}ins", f"{W}del"]
+
+    def test_the_glyph_swaps_to_the_controls_own_unchecked_character(self, unchecked):
+        raw, _ = unchecked
+        sdt = _saved_sdt(raw, 6)
+        ins_text = "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+        assert ins_text == "\u2610"
+
+    def test_a_value_that_names_neither_state_is_refused(self):
+        msg = _expect_refusal("confidential", "maybe")
+        assert "checkbox" in msg and "true/false" in msg
+
+    @pytest.mark.parametrize("value", ["true", "x", "[x]", "1", "yes", "checked"])
+    def test_truthy_spellings_all_check_the_box(self, value):
+        raw, result = _fill("confidential", value)
+        assert result["edits_applied"] == 1
+        W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+        assert _saved_sdt(raw, 6).find(f".//{W14}checked").get(f"{W14}val") == "1"
+
+    def test_raw_view_shows_the_pending_toggle(self, unchecked):
+        import io
+
+        raw, _ = unchecked
+        from adeu.ingest import extract_text_from_stream
+
+        text = extract_text_from_stream(io.BytesIO(raw), clean_view=False, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        line = next(ln for ln in text.split("\n") if "Confidentiality" in ln)
+        assert "{++ ++}" in line and "{--x--}" in line
+
+    def test_clean_view_shows_exactly_one_checkbox(self, unchecked):
+        """The deleted half must not leave a second, permanently empty box."""
+        import io
+
+        raw, _ = unchecked
+        from adeu.ingest import extract_text_from_stream
+
+        text = extract_text_from_stream(io.BytesIO(raw), clean_view=True, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        line = next(ln for ln in text.split("\n") if "Confidentiality" in ln)
+        assert line.count("[") == 1 and line.count("]") == 1
+        assert line.endswith("[ ]")
+
+    def test_the_two_projections_agree_on_the_toggled_document(self, unchecked):
+        """Mapper and ingest are twins; CC-12 was them disagreeing."""
+        import io
+
+        from docx import Document
+
+        from adeu.ingest import extract_text_from_stream
+        from adeu.redline.mapper import DocumentMapper
+
+        raw, _ = unchecked
+        for clean in (False, True):
+            text = extract_text_from_stream(io.BytesIO(raw), clean_view=clean, include_appendix=False)
+            if isinstance(text, tuple):
+                text = text[0]
+            mapper = DocumentMapper(Document(io.BytesIO(raw)), clean_view=clean)
+            mapper._build_map()
+            line_i = next(ln for ln in text.split("\n") if "Confidentiality" in ln)
+            line_m = next(ln for ln in mapper.full_text.split("\n") if "Confidentiality" in ln)
+            assert line_i == line_m, f"clean_view={clean}"

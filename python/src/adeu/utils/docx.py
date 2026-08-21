@@ -924,6 +924,20 @@ def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     return "\n".join(wrap(p) if p else "" for p in parts)
 
 
+def _revision_ballot_mark(r_element, text: str) -> Optional[str]:
+    """The mark for a ballot run that sits inside a tracked revision.
+
+    `None` when the run is not inside one, which is the ordinary case and
+    keeps `w14:checked` authoritative.
+    """
+    node = r_element.getparent()
+    while node is not None:
+        if node.tag in (QN_W_INS, QN_W_DEL):
+            return "x" if text in ("\u2611", "\u2612") else " "
+        node = node.getparent()
+    return None
+
+
 def _has_ballot_run(sdt_el) -> bool:
     """Does this control contain a ballot-glyph run to hang the mark on?"""
     content = sdt_el.find(QN_W_SDTCONTENT)
@@ -1119,8 +1133,22 @@ def iter_paragraph_content(
                 # Emphasis is forced off: the mark is chrome, and a bold glyph
                 # run would otherwise project `[**x**]` for the marker-
                 # stripping passes to mangle (the QA F4/F22b class).
+                #
+                # The mark normally comes from `w14:checked` (the settled
+                # value - see SdtInfo.checkbox_mark), but a run inside a
+                # revision projects ITS OWN glyph instead. A tracked toggle
+                # writes two glyph runs, an inserted new state and a deleted
+                # old one, and the attribute can only describe one of them:
+                # taking it for both rendered `{++[ ]++}{--[ ]--}`, a toggle
+                # that appears to change nothing. Reading each revision run's
+                # own glyph makes the pending change legible as
+                # `{++[ ]++}{--[x]--}`, and the clean view keeps exactly one
+                # box because the deleted half never reaches it (A4.6).
+                mark = _revision_ballot_mark(r_element, text)
+                if mark is None:
+                    mark = cb_info.checkbox_mark
                 yield SdtEvent("checkbox_start", cb_info)
-                yield ProjectedRun(r_element, cb_info.checkbox_mark, False, False, tuple(sdt_stack))
+                yield ProjectedRun(r_element, mark, False, False, tuple(sdt_stack))
                 yield SdtEvent("checkbox_end", cb_info)
             else:
                 yield ProjectedRun(r_element, text, is_bold, is_italic, tuple(sdt_stack))

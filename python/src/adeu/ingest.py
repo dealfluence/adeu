@@ -749,12 +749,22 @@ def build_paragraph_text(
             elif item.type == "checkbox_start":
                 # Checkbox tokens persist in the clean view: they are structural
                 # (spec §6), like the anchors, not commentary.
+                #
+                # The DELETED half of a tracked toggle is the exception. Its
+                # brackets are chrome around content the clean view drops, so
+                # keeping them rendered `[ ][]` - two checkboxes where the
+                # document has one, the second permanently empty. Same rule
+                # the image branch already applies to deleted content.
+                if clean_view and active_del:
+                    continue
                 parts.append(CHECKBOX_OPEN)
             elif item.type == "checkbox_mark":
                 # Fallback only — the mark is normally a real run emitted by the
                 # traversal, and arrives through the ProjectedRun branch.
                 parts.append(info.checkbox_mark)
             elif item.type == "checkbox_end":
+                if clean_view and active_del:
+                    continue
                 parts.append(CHECKBOX_CLOSE)
             else:
                 parts.append(info.close_token)
