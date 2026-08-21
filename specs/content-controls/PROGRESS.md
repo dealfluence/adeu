@@ -1250,3 +1250,66 @@ against the unfixed harness, including both behavioural ones.
 Scope note: this is the cross-platform LibreOffice twin of CC-13 (Windows,
 live-Word COM). Same class — a suite asserting about the environment rather than
 the code — different mechanism, and the two fixes do not overlap.
+
+## 2026-08-21 — CC-2: fields ledger, banner, appendix summary, edit labels (osx)
+
+A2.1-A2.7 and A1.9 met in both engines across CLI, both MCP servers, the serve
+daemon and the appendix. The renderer lives in the engine (`adeu/fields.py`,
+`@adeu/core/fields.ts`) because four surfaces emit the same text and spec §7
+calls the line format an output contract — a second implementation would be a
+second dialect. Both engines render GOLDEN-LEDGER and GOLDEN-BANNER
+byte-for-byte.
+
+**The ledger reads the projection, not the DOM.** A control's rendered value
+has already survived table flattening, CriticMarkup and the placeholder rules,
+so re-deriving it from `w:t` would produce a ledger that disagrees with the
+text the agent is editing. The proof is CC:15, a row-level control whose value
+is the markdown row `Approver | Jane Roe` — a DOM walk gives `ApproverJane Roe`.
+
+**Benchmarking before wiring the banner caught two quadratics of my own
+making.** Collecting fields on fedramp_ssp_rev4 took **8,776ms** against 452ms
+for the whole projection: the ledger was twenty times more expensive than
+producing the document it describes. Anchor lookup ran a regex over the entire
+text once per control (5,007 controls × 600 KB), and `heading_path_at`
+re-splits the projection on every call — fine for a handful of search hits,
+quadratic for thousands of rows. One `finditer` pass and a precomputed
+binary-searched heading index took it to **115ms**, a 76x speedup. A faster
+answer is only worth having if it is the same answer, so both engines pin the
+new index against the function it replaced at *every offset* of a multi-level
+document, and python also over every anchor offset of a real corpus file.
+
+**Then the banner turned out not to need any of that.** It renders four
+numbers. Getting them from the full ledger meant 115ms of value previews and
+breadcrumbs that nothing displays, so `field_summary` walks the ordinal
+pre-pass and stops. That leaves two ways of counting, which is two chances to
+disagree — and a banner contradicting the ledger it advertises is worse than no
+banner — so the agreement is pinned on the fixture, on edge shapes, and on a
+real 19-checkbox corpus template. Even the cheap path is 68ms to load plus 82ms
+to classify 5,007 controls, repeated on every full-view read for values that
+cannot change while the bytes do not, so it is memoised on the stat signature
+and bounded at 32 entries. A test pins that an edited file gets fresh counts
+rather than the previous document's.
+
+**Two frozen-spec contradictions, both flagged on the board.** §1 says `--json`
+wraps the ledger as `{"content": …}` "per CLI stream conventions", but no such
+shape exists anywhere — every mode emits `{markdown, title, file_path}`. And
+A2.7 wants `fields_offset` to both "mirror `changes_offset`" and publish
+`type: number`, which it cannot, because `changes_offset` publishes `integer`.
+Both resolved toward the implemented convention; the offset assertion is
+written AS parity so it tracks `changes_offset` rather than freezing a literal.
+
+**Duplicate work caught at rebase.** Windows landed `utils/protection.py` for
+CC-4's gates while this was in flight, so `w:documentProtection` briefly had two
+parsers. CC-4's won — it runs on every engine load and is the more defensive.
+The wordings genuinely differ and both are pinned (`describeProtection()` says
+"read-only, enforced" for gate errors per A3.4; the banner says "read-only
+(enforced)" per spec §7), so the parse is shared and only the rendering differs.
+
+Smaller things worth knowing: `w:temporary` was extracted nowhere despite being
+in the frozen line format; `clean_breadcrumb`/`heading_path_at` and the node
+golden-block reader were hoisted so the ledger and search cannot drift;
+`cc_fixture_bytes` gained the `body_xml` parameter node already had, without
+which A2.2 (protected, zero controls) and A2.3 (250 controls) were not
+constructible in python. Per-edit reports now name the innermost containing
+control, not the outermost — CC:9's own lock governs the edit, not the group
+CC:8 that wraps it.

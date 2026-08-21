@@ -143,7 +143,21 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-2 — Fields ledger, appendix summary, banner (P1)
 
-- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
+- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21) — A2.1-A2.7 and A1.9 all
+  met, both engines, all surfaces. **Two frozen-spec deviations, both recorded below
+  and needing Mikko's ruling** (README rule 4); neither blocks the row, and both were
+  resolved toward the implemented convention rather than the literal text.
+  - **§1 `--json` shape.** The spec says the CLI wraps the ledger as `{"content": …}`
+    "per CLI stream conventions". There is no `{"content": …}` anywhere in the
+    codebase: every CLI mode emits `{markdown, title, file_path}`, pinned by
+    `test_cli_features.py:569`. Followed the real convention — obeying the literal
+    text would make `--mode fields` the only mode with a different JSON shape, which
+    hurts exactly the batch surfaces §7 exists to serve.
+  - **A2.7 `fields_offset` type.** §1 says it "mirrors `changes_offset`" AND that it
+    "publishes `type: number`". It cannot do both: `changes_offset` publishes
+    `integer`. Kept parity, and wrote the assertion AS parity so it tracks
+    `changes_offset` if that ever moves. What A2.7 actually guards — no `anyOf`/
+    `oneOf` union — is asserted separately.
 - Depends on: CC-1 (`done`)
 - Acceptance: [A2](acceptance/A2-fields-ledger.md) (all examples), **plus A1.9 (the
   protection/fields banner), reassigned here from CC-1f by Mikko 2026-08-21** — it
