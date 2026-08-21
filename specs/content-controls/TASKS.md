@@ -301,7 +301,11 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-13 — The live-Word suite is nondeterministic and blocks `git push` (P1, tooling)
 
-- Status: `pending` — found by opencode-windows, 2026-08-21, while verifying CC-1c
+- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch:
+  content-controls-specs) — found while verifying CC-1c. Taken ahead of CC-1c's
+  implementation half for two reasons: 1c's wiring lands in the same traversal code
+  osx is editing for 1b right now, and this row is what makes any Windows push
+  reliable, mine included.
 - Depends on: — (pure test infrastructure; no spec surface)
 - Symptom: `python/tests/test_live_word*.py` pass or fail depending on nothing the
   test author controls. Same commit, same machine, same Word 16.0: consecutive runs
