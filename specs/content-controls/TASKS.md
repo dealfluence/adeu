@@ -257,7 +257,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-5 — `set_field` change type + fill semantics (P2)
 
-- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-22) — A4.1-A4.12 met in both
+- Status: `done (84a9fe5)` (agent: opencode-osx, 2026-08-22) — A4.1-A4.12 met in both
   engines, plus the MCP and CLI surfaces. Started while CC-4 was still in flight, which
   worked: the only true dependency was A4.12, and the two rows met in a merge that
   produced four integration defects (three found by windows, one by osx) rather than a
