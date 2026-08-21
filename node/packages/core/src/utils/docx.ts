@@ -392,6 +392,23 @@ function _detect_heading_level_from_name(name: string): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
+/**
+ * True when the paragraph's own break is a pending tracked deletion
+ * (`<w:del>` inside pPr/rPr) — accepting it removes the paragraph container.
+ *
+ * Twin of python `adeu.utils.docx.paragraph_mark_is_deleted`. Shared by both
+ * Virtual Text producers: `_extract_blocks` drops such a paragraph from the
+ * clean view when nothing visible survives inside it, and
+ * `DocumentMapper._map_blocks` must drop it identically. Keeping ONE predicate
+ * is what keeps the twins byte-identical.
+ */
+export function paragraph_mark_is_deleted(p_element: any): boolean {
+  const pPr = findChild(p_element, QN_W_PPR);
+  if (!pPr) return false;
+  const rPr = findChild(pPr, QN_W_RPR);
+  return !!rPr && !!findChild(rPr, QN_W_DEL);
+}
+
 export function is_native_heading(
   paragraph: Paragraph,
   style_cache?: Record<string, any>,

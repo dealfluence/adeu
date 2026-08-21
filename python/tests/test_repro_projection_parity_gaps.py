@@ -259,3 +259,75 @@ def test_corpus_ingest_and_mapper_agree(key):
         projected = extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
         mapped = DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
         assert mapped == projected, f"{key}: mapper drifted from ingest (clean={clean_view})"
+
+
+# ---------------------------------------------------------------------------
+# 5 — shapes the corpus cannot reach
+#
+# The corpus is published documents: no tracked changes, so a whole class of
+# clean-view behaviour never gets exercised by the size pins above. Both cases
+# below were already correct in python and both were WRONG in node (node's
+# ingest and mapper were consistently wrong together, so they agreed with each
+# other and only cross-engine comparison caught them). Pinned here so the
+# python side stays the oracle.
+# ---------------------------------------------------------------------------
+
+_DEL_ATTRS = 'w:id="900" w:author="A" w:date="2026-01-01T00:00:00Z"'
+
+
+def _doc_with_deleted_paragraph_mark() -> bytes:
+    """Alpha / a paragraph whose mark AND content are tracked deletions / Beta."""
+    d = Document()
+    d.add_paragraph("Alpha")
+    p = d.add_paragraph()
+    p._element.append(parse_xml(f"<w:del {NS} {_DEL_ATTRS}><w:r><w:delText>gone</w:delText></w:r></w:del>"))
+    p._element.get_or_add_pPr().append(parse_xml(f"<w:rPr {NS}><w:del {_DEL_ATTRS}/></w:rPr>"))
+    d.add_paragraph("Beta")
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def test_clean_view_drops_paragraph_whose_mark_is_deleted():
+    """Accepting a paragraph-mark deletion merges the paragraph away.
+
+    When nothing visible survives inside it the accepted view must render no
+    container at all — not an empty one. An empty container costs a whole
+    "\\n\\n" block separator, so the bug shows up as a doubled blank line.
+    """
+    data = _doc_with_deleted_paragraph_mark()
+
+    clean = extract_text_from_stream(io.BytesIO(data), clean_view=True, include_appendix=False)
+    assert clean == "Alpha\n\nBeta", f"clean view kept an empty container for a deleted paragraph mark: {clean!r}"
+
+    # The raw view still shows the deletion — this is a clean-view-only skip.
+    raw = extract_text_from_stream(io.BytesIO(data), clean_view=False, include_appendix=False)
+    assert "{--gone--}" in raw
+
+    for clean_view in (False, True):
+        mapped = DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
+        projected = extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
+        assert mapped == projected, f"mapper drifted from ingest (clean={clean_view})"
+
+
+def test_empty_styled_run_contributes_no_style_markers():
+    """A styled run with no projected text emits nothing — not even markers.
+
+    A bold run whose only child is a drawing or a footnote reference would
+    otherwise leave a dangling "****" pair that the reader never emits, since
+    apply_formatting_to_segments("") is "".
+    """
+    d = Document()
+    p = d.add_paragraph()
+    p._element.append(parse_xml(f'<w:r {NS}><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="2"/></w:r>'))
+    run = p.add_run("Visible")
+    run.bold = True
+    buf = io.BytesIO()
+    d.save(buf)
+    data = buf.getvalue()
+
+    text = extract_text_from_stream(io.BytesIO(data), clean_view=False, include_appendix=False)
+    assert "****" not in text, f"empty styled run emitted a dangling marker pair: {text!r}"
+
+    mapped = DocumentMapper(Document(io.BytesIO(data)), clean_view=False).full_text
+    assert mapped == text, f"mapper drifted from ingest: {mapped!r} != {text!r}"

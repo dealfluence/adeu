@@ -4,6 +4,7 @@ import {
   _get_style_cache,
   compute_change_pair_map,
   get_paragraph_prefix,
+  paragraph_mark_is_deleted,
   is_heading_paragraph,
   is_native_heading,
   get_run_style_markers,
@@ -170,6 +171,17 @@ function _extract_blocks(
         style_cache,
         default_pstyle,
       );
+      if (cleanView && !p_text && paragraph_mark_is_deleted(item._element)) {
+        // Accepting a tracked paragraph-mark deletion merges the paragraph
+        // away; when nothing visible survives inside it, the accepted view
+        // must not render an empty container. Twin of python
+        // ingest._extract_blocks (QA round 3, finding 2.4) — without it the
+        // clean view grew a stray blank line per deleted-mark paragraph
+        // ("Alpha\n\n\n\nBeta" where python gives "Alpha\n\nBeta").
+        if (!is_first_block) local_cursor -= 2;
+        is_first_para = false;
+        continue;
+      }
       const full_block = prefix + p_text;
       blocks.push(full_block);
       if (paragraph_offsets) {

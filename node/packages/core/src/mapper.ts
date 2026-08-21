@@ -17,6 +17,7 @@ import {
   iter_block_items,
   iter_document_parts_with_kind,
   iter_paragraph_content,
+  paragraph_mark_is_deleted,
 } from "./utils/docx.js";
 
 export interface TextSpan {
@@ -165,39 +166,40 @@ export class DocumentMapper {
     this.part_ranges = [];
     this._current_part_index = 0;
 
-    // NOTE (known divergence, see TASKS.md CC-11): python's DocumentMapper
-    // emits the "\n\n" separator BEFORE each part and rolls it back when the
-    // part projects nothing; this loop appends after each part and strips
-    // trailing separators at the end. The two are not equivalent for parts
-    // that emit only zero-width anchor spans, and the difference is systemic —
-    // python applies the emit-before/roll-back discipline throughout
-    // _map_blocks (NotesPart header, FootnoteItem, Paragraph), not just here.
-    // Porting only this loop fixes the leading stray "\n\n" but unmasks a
-    // trailing one from the notes sections, so the whole discipline has to
-    // move together. Left as-is deliberately rather than half-ported.
+    // Parts join with "\n\n" the same way blocks do: emit the separator
+    // BEFORE a part (once something has been emitted) and roll it back if the
+    // part projects nothing.
+    //
+    // Appending after each part and stripping trailing separators is NOT
+    // equivalent. A part that emits only zero-width anchor spans is empty to
+    // the reader, but a non-empty `spans` array made the old check believe it
+    // had emitted, so an empty header put a stray "\n\n" at the front of the
+    // mapper's text.
     let part_idx = 0;
+    let emitted_any_part = false;
     for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
       this._current_part_index = part_idx;
-      const part_start = current_offset;
-      current_offset = this._map_blocks(part, current_offset);
-      this.part_ranges.push([part_start, current_offset, part_kind]);
+      const spans_mark = this.spans.length;
+      const chunks_mark = this._text_chunks.length;
+      const offset_mark = current_offset;
 
-      if (
-        this.spans.length > 0 &&
-        this.spans[this.spans.length - 1].text !== "\n\n"
-      ) {
+      if (emitted_any_part) {
         this._add_virtual_text("\n\n", current_offset, null);
         current_offset += 2;
       }
-      part_idx++;
-    }
+      const part_start = current_offset;
+      current_offset = this._map_blocks(part, current_offset);
 
-    while (
-      this.spans.length > 0 &&
-      this.spans[this.spans.length - 1].text === "\n\n"
-    ) {
-      this.spans.pop();
-      this._text_chunks.pop();
+      if (current_offset === part_start) {
+        this.spans.length = spans_mark;
+        this._text_chunks.length = chunks_mark;
+        current_offset = offset_mark;
+        this.part_ranges.push([current_offset, current_offset, part_kind]);
+      } else {
+        emitted_any_part = true;
+        this.part_ranges.push([part_start, current_offset, part_kind]);
+      }
+      part_idx++;
     }
 
     this.full_text = this._text_chunks.join("");
@@ -255,14 +257,27 @@ export class DocumentMapper {
     const part = container.part || container;
     const [style_cache, default_pstyle] = _get_style_cache(part);
 
+    // Block-join semantics mirror _extract_blocks exactly:
+    // "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when it
+    // projects empty text), a Table or FootnoteItem is a block only when it
+    // projects text, and the NotesPart header is that container's first block
+    // (the "\n\n" after it comes from the join, never eagerly).
+    //
+    // `emitted_any_block` is the reader's blocks.length > 0. It is NOT the
+    // same flag as `is_first_para`, which the reader keeps separately to place
+    // the footnote definition label and which is flipped by paragraphs AND
+    // tables (even empty ones) but not by footnote entries. Conflating the two
+    // — as this method used to — makes the separator decision wrong for every
+    // container whose first block projects nothing.
+    let emitted_any_block = false;
+
     if (c_type === "NotesPart") {
       const header =
         container.note_type === "fn" ? "## Footnotes" : "## Endnotes";
       const sep = `---\n${header}`;
       this._add_virtual_text(sep, current, null);
       current += sep.length;
-      this._add_virtual_text("\n\n", current, null);
-      current += 2;
+      emitted_any_block = true;
     }
 
     let is_first_para = true;
@@ -270,18 +285,46 @@ export class DocumentMapper {
 
     for (const item of iter_block_items(container)) {
       const i_type = item.constructor.name;
+      // Marks for rolling back a tentative separator (plus any zero-width
+      // anchor spans) when the block turns out to project nothing.
+      const spans_mark = this.spans.length;
+      const chunks_mark = this._text_chunks.length;
+      const offset_mark = current;
 
       if (i_type === "FootnoteItem") {
+        if (emitted_any_block) {
+          const prev_para =
+            previous_item instanceof Paragraph ? previous_item : null;
+          this._add_virtual_text("\n\n", current, prev_para);
+          current += 2;
+        }
+        const block_start = current;
         current = this._map_blocks(item, current);
+        if (current === block_start) {
+          // Empty footnote entry: the reader drops the block, so roll back
+          // the separator and any zero-width spans.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          emitted_any_block = true;
+        }
       } else if (item instanceof Paragraph) {
-        if (!is_first_para) {
+        if (emitted_any_block) {
+          // Attach the newline to the previous paragraph so merges work
+          // correctly.
           const prev_para =
             previous_item instanceof Paragraph ? previous_item : null;
           this._add_virtual_text("\n\n", current, prev_para);
           current += 2;
         }
 
-        let prefix = get_paragraph_prefix(item, style_cache, default_pstyle);
+        const style_prefix = get_paragraph_prefix(
+          item,
+          style_cache,
+          default_pstyle,
+        );
+        let prefix = style_prefix;
         if (is_first_para && c_type === "FootnoteItem") {
           prefix = `[^${container.note_type}-${container.id}]: ` + prefix;
         }
@@ -290,22 +333,52 @@ export class DocumentMapper {
           current += prefix.length;
         }
 
+        const content_start = current;
         current = this._map_paragraph_content(
           item,
           current,
           style_cache,
           default_pstyle,
         );
+        if (
+          this.clean_view &&
+          current === content_start &&
+          paragraph_mark_is_deleted(item._element)
+        ) {
+          // Twin of the reader's skip in _extract_blocks: accepting a tracked
+          // paragraph-mark deletion merges the paragraph away, so when nothing
+          // visible survives inside it the accepted view renders no container
+          // at all. The reader drops the whole `prefix + p_text` block, so the
+          // rollback must undo the prefix and the separator too — and the
+          // paragraph must NOT count as a block, or the next separator lands
+          // twice.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+          is_first_para = false;
+          continue;
+        }
         is_first_para = false;
+        emitted_any_block = true;
         previous_item = item;
       } else if (item instanceof Table) {
-        if (!is_first_para) {
+        if (emitted_any_block) {
           const prev_para =
             previous_item instanceof Paragraph ? previous_item : null;
           this._add_virtual_text("\n\n", current, prev_para);
           current += 2;
         }
+        const block_start = current;
         current = this._map_table(item, current);
+        if (current === block_start) {
+          // Empty table (e.g. every row skipped in this view): the reader
+          // drops the block AND its separator.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          emitted_any_block = true;
+        }
         is_first_para = false;
         previous_item = item;
       }
@@ -587,11 +660,14 @@ export class DocumentMapper {
           }
         } else if ((prefix || suffix) && text) {
           append_wrapped(text);
-        } else {
-          if (prefix) run_parts.push(["virtual", prefix, null, 0]);
-          if (text) run_parts.push(["real", text, item, 0]);
-          if (suffix) run_parts.push(["virtual", suffix, null, 0]);
+        } else if (text) {
+          run_parts.push(["real", text, item, 0]);
         }
+        // An EMPTY-text run contributes nothing — not even its style markers.
+        // A styled run whose only child is a footnote reference or a drawing
+        // otherwise leaves a dangling marker pair ("[^fn-5]__",
+        // "(docx-image:1)****") that the reader never emits, because
+        // apply_formatting_to_segments("") is "".
 
         if (this.clean_view && Object.keys(active_del).length > 0) {
           // pass

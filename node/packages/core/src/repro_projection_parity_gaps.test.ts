@@ -327,13 +327,7 @@ describe("corpus projection sizes are pinned to the python engine", () => {
   }
 
   for (const key of Object.keys(CORPUS_PROJECTION_SIZES)) {
-    // KNOWN FAILURE — CC-11. Node's DocumentMapper drifts from its own ingest
-    // on real documents (python's does not): python emits block separators
-    // BEFORE each block and rolls them back when the block projects nothing,
-    // node appends after and strips trailing ones. Not equivalent for parts
-    // and footnote entries that emit only zero-width anchor spans. Skipped
-    // rather than deleted so the guard activates the moment CC-11 lands.
-    it.skip(`${key}: ingest and the mapper agree`, async (ctx) => {
+    it(`${key}: ingest and the mapper agree`, async (ctx) => {
       const buf = corpusBuffer(key);
       if (!buf) return ctx.skip(corpusSkipReason(key));
       for (const cleanView of [false, true]) {
@@ -347,3 +341,80 @@ describe("corpus projection sizes are pinned to the python engine", () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 5 — shapes the corpus cannot reach
+//
+// The corpus is published documents: no tracked changes, so a whole class of
+// clean-view behaviour never gets exercised by the size pins above. Both cases
+// below were already correct in python and both were WRONG here — node's
+// ingest and mapper were consistently wrong TOGETHER, so they agreed with each
+// other and only cross-engine comparison caught them. Pinned against python's
+// output.
+// ---------------------------------------------------------------------------
+
+const DEL_ATTRS = 'w:id="900" w:author="A" w:date="2026-01-01T00:00:00Z"';
+
+async function docWithDeletedParagraphMark(): Promise<Uint8Array> {
+  const doc = await createTestDocument();
+  appendRawXml(doc, `<w:p ${NS}><w:r><w:t>Alpha</w:t></w:r></w:p>`);
+  appendRawXml(
+    doc,
+    `<w:p ${NS}><w:pPr><w:rPr><w:del ${DEL_ATTRS}/></w:rPr></w:pPr>` +
+      `<w:del ${DEL_ATTRS}><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>`,
+  );
+  appendRawXml(doc, `<w:p ${NS}><w:r><w:t>Beta</w:t></w:r></w:p>`);
+  return doc.save();
+}
+
+describe("shapes the corpus cannot reach", () => {
+  it("clean view drops a paragraph whose mark is deleted", async () => {
+    const buf = await docWithDeletedParagraphMark();
+
+    // Accepting a paragraph-mark deletion merges the paragraph away. When
+    // nothing visible survives inside it the accepted view must render no
+    // container at all — not an empty one. An empty container costs a whole
+    // "\n\n" block separator, so the bug showed up as a doubled blank line
+    // ("Alpha\n\n\n\nBeta").
+    const clean = await extractTextFromBuffer(buf, true, false);
+    expect(clean, "clean view kept an empty container for a deleted mark").toBe(
+      "Alpha\n\nBeta",
+    );
+
+    // The raw view still shows the deletion — this is a clean-view-only skip.
+    const raw = await extractTextFromBuffer(buf, false, false);
+    expect(raw).toContain("{--gone--}");
+
+    for (const cleanView of [false, true]) {
+      const projected = await extractTextFromBuffer(buf, cleanView, false);
+      const mapped = new DocumentMapper(
+        await DocumentObject.load(buf),
+        cleanView,
+      ).full_text;
+      expect(mapped, `mapper drifted (clean=${cleanView})`).toBe(projected);
+    }
+  });
+
+  it("an empty styled run contributes no style markers", async () => {
+    // A bold run whose only child is a footnote reference or a drawing would
+    // otherwise leave a dangling "****" pair that the reader never emits,
+    // since apply_formatting_to_segments("") is "".
+    const doc = await createTestDocument();
+    appendRawXml(
+      doc,
+      `<w:p ${NS}><w:r><w:rPr><w:b/></w:rPr><w:footnoteReference w:id="2"/></w:r>` +
+        `<w:r><w:rPr><w:b/></w:rPr><w:t>Visible</w:t></w:r></w:p>`,
+    );
+    const buf = await doc.save();
+
+    const text = await extractTextFromBuffer(buf, false, false);
+    expect(text, `empty styled run emitted a dangling marker pair`).not.toContain(
+      "****",
+    );
+
+    const mapped = new DocumentMapper(await DocumentObject.load(buf), false)
+      .full_text;
+    expect(mapped, "mapper drifted from ingest").toBe(text);
+  });
+});
+
