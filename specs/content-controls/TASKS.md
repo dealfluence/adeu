@@ -428,7 +428,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   rather than in the tests.
 ## CC-14 - Redline replay silently produces the wrong document (P1, correctness)
 
-- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21) - TWO independent pre-existing
+- Status: `done (c099de9)` (agent: opencode-osx, 2026-08-21) - TWO independent pre-existing
   defects, not one; the property search had only ever reached the first. Both silent
   (`edits_skipped == 0`, no error, wrong document), both fixed in this row, and the
   falsifying examples pinned as explicit regression tests in both engines because
