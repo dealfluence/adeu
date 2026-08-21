@@ -738,3 +738,43 @@ Remaining for CC-1c, once 1a lands: the projection itself (`[x]`/`[ ]` from
 
 Verification: python ruff + format + mypy clean, 1614 passed / 7 skipped, of
 which 18 are live-Word COM tests on real Word 16.0.
+
+## 2026-08-21 — CC-13 filed: the live-Word suite is nondeterministic (opencode-windows)
+
+Filed while trying to get a clean pre-push run for CC-1c. `python/tests/test_live_word*.py`
+fail an arbitrary, different subset on every run of the same commit — observed
+`5 passed`, `3 failed`, `5 failed`, `5 passed` back to back on
+`test_live_word_structured_insertion.py` alone. Since `.githooks/pre-push` runs the
+python suite, this blocks pushing at random, from Windows, for work unrelated to Word.
+
+**Checked whether the content-controls COM battery caused it. It did not.** CC-6 added
+15 live-Word tests and CC-1c added 3, all of which call `Documents.Open` in the shared
+Word instance, so the suspicion was reasonable. A detached worktree at `f3aadb7` —
+before CC-1c's tests and before any conftest change — failed 5/5 on the same file, and
+a combined run there gave `4 failed, 21 passed` followed by `25 passed`. Pre-existing.
+
+The failures are cross-document contamination rather than wrong expectations, and the
+tell is unmistakable once seen: a failing assertion reports text belonging to a
+*different test file*, e.g. `assert '{++Title++}' in 'Initial {==manuscript==}...'`
+where the actual value is `test_live_word.py`'s fixture document and the expectation is
+`test_live_word_structured_insertion.py`'s. The tools under test resolve Word via
+`GetActiveObject` and read `app.ActiveDocument` at call time; the fixture hands the test
+a specific `doc`; nothing holds the two together.
+
+One real defect fixed on the way past: `active_word_app` called `app.Activate()`, which
+raises the *application* window and says nothing about which *document* is active. It
+never called `doc.Activate()`. Added, along with a setup guard that fails with the list
+of currently-open documents instead of silently measuring a neighbour. Against a
+deliberately poisoned Word — a stray document left open and activated, which is exactly
+what a crashed earlier run leaves behind — the suite went from failing to `5 passed`.
+
+Recorded honestly as a mitigation, not a fix. Runs still fail intermittently, and the
+new guard has never once fired, which localises the remaining problem: activation is
+correct when the fixture yields and is lost *afterwards*, between setup and the tool's
+`GetActiveObject` call. CC-13 carries four candidate approaches and an acceptance bar of
+10 consecutive clean full-suite runs, including 10 against a poisoned Word.
+
+Practical note for the other agent and for future me: a live-Word failure should be
+reproduced from a cold Word (`Stop-Process -Name WINWORD -Force`) before it is believed.
+That killing Word between runs changes the outcome is itself the evidence that the state
+lives in the Word instance and not in the tests.

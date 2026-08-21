@@ -299,6 +299,56 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   no test compared node's mapper against node's ingest on a real document - the
   synthetic fixtures never produce empty parts.
 
+## CC-13 — The live-Word suite is nondeterministic and blocks `git push` (P1, tooling)
+
+- Status: `pending` — found by opencode-windows, 2026-08-21, while verifying CC-1c
+- Depends on: — (pure test infrastructure; no spec surface)
+- Symptom: `python/tests/test_live_word*.py` pass or fail depending on nothing the
+  test author controls. Same commit, same machine, same Word 16.0: consecutive runs
+  of `test_live_word_structured_insertion.py` gave `5 passed`, then `3 failed`, then
+  `5 failed`, then `5 passed`. Because `.githooks/pre-push` runs `uv run pytest`, this
+  **blocks pushing** at random, on Windows, for changes that have nothing to do with
+  Word.
+- **Not caused by the content-controls work.** Verified in a detached worktree at
+  `f3aadb7` — before CC-1c's COM tests and before any conftest change — where
+  `test_live_word_structured_insertion.py` failed 5/5 and a combined live-Word run
+  gave `4 failed, 21 passed` then `25 passed`. Pre-existing.
+- Diagnosis so far: the failures are **cross-document contamination**, not wrong
+  assertions. A failing test reports text belonging to a different test file
+  (`assert '{++Title++}' in 'Initial {==manuscript==}...'`, which is
+  `test_live_word.py`'s fixture document). The tools under test resolve Word through
+  `GetActiveObject` and then read `app.ActiveDocument`, so every such test is really
+  asserting about whichever document Word considers active at tool-call time. The
+  `active_word_app` and session-scoped `word_app` fixtures deliberately share ONE Word
+  instance, and `word_com.edit_and_save` opens and closes documents in it freely; when
+  a document closes, Word re-activates one of its choosing.
+- Partial fix already landed (CC-1c commit): `active_word_app` now calls
+  `doc.Activate()` — it previously called only `app.Activate()`, which raises the
+  *application*, not the *document* — plus a guard that fails with a named error
+  listing the open documents when `ActiveDocument` is not the fixture's own. With a
+  deliberately poisoned Word (a stray document left open and activated) the suite went
+  from failing to `5 passed`. **This is a mitigation, not the fix:** runs still fail
+  intermittently and the guard never fires, which means activation is correct at
+  fixture setup and is being lost *later*, between setup and the tool's
+  `GetActiveObject` call.
+- Scope: make the live-Word suite deterministic. Options worth weighing, roughly in
+  order of appeal:
+  1. Give the live-Word tools an injectable Word/document handle for tests, so they
+     stop resolving through `ActiveDocument` at all. Removes the shared-state race by
+     construction; largest change, and it alters production code for testability.
+  2. Re-activate the fixture's document immediately before each tool call (a helper
+     the tests route through), narrowing the window rather than closing it.
+  3. Give the `word_app` battery its OWN Word instance so `Documents.Open` traffic
+     cannot disturb the `active_word_app` tests. Note the existing docstring's reason
+     for sharing — attaching to a developer's running Word — which this would change.
+  4. Failing all that, quarantine: mark them `flaky`/opt-in and take them out of the
+     pre-push hook, so a known-nondeterministic suite stops gating unrelated work.
+- Acceptance: 10 consecutive full-suite runs on Windows with zero live-Word failures,
+  and the same 10 with a deliberately poisoned Word (stray document open and active).
+- Note for whoever takes it: `Stop-Process -Name WINWORD -Force` between runs changes
+  the outcome, which is itself evidence that the state lives in the Word instance
+  rather than in the tests.
+
 ## CC-9 â€” P3 seeds: bound dual-write hardening, repeating-section ops, field-labeled diff (P3)
 
 - Status: `blocked` (until CC-6 findings + sample templates)

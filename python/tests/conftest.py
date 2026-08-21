@@ -106,6 +106,24 @@ if sys.platform == "win32":
         """
         Creates an ephemeral, visible MS Word instance with a fresh document.
         Ensures it is torn down properly after the test.
+
+        **`doc.Activate()` is load-bearing, not tidiness.** The tools under test
+        bind through `GetActiveObject` and then read `app.ActiveDocument`, so
+        every assertion here is really an assertion about whichever document Word
+        currently considers active. `Documents.Add()` usually makes the new
+        document active, and `app.Activate()` raises the *application* — neither
+        guarantees the *document*. The `word_app` battery
+        (`test_live_word_content_controls.py`, `word_com.edit_and_save`) shares
+        this same Word instance and calls `Documents.Open` freely; when one of
+        those closes, Word re-activates some other open document of its choosing.
+        A test that then reads `ActiveDocument` silently measures a neighbour.
+
+        That failure is spectacularly confusing from the outside: the assertion
+        reports text belonging to a different test file entirely
+        ("assert '{++Title++}' in 'Initial {==manuscript==}...'"), the set of
+        failures changes on every run, and each suite passes in isolation. Hence
+        both the explicit activation and the guard below, which turns a silent
+        misread into a named error.
         """
         pythoncom.CoInitialize()
 
@@ -119,9 +137,21 @@ if sys.platform == "win32":
 
             # Bring to front so GetActiveObject definitely binds to this instance
             app.Activate()
+            # ...and make OUR document the one GetActiveObject will resolve to.
+            doc.Activate()
 
             # Seed initial content
             doc.Range(0, 0).Text = "Hello world! This is a live testing document.\n"
+
+            active = app.ActiveDocument
+            if active.FullName != doc.FullName:
+                pytest.fail(
+                    "Word's active document is not this fixture's document "
+                    f"({active.FullName!r} != {doc.FullName!r}). Another live-Word "
+                    "test left a document open in the shared application; the tools "
+                    "read ActiveDocument, so this test would have measured that one. "
+                    f"Currently open: {[d.FullName for d in app.Documents]!r}"
+                )
 
             yield app, doc
 
