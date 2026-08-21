@@ -1,32 +1,27 @@
 // FILE: src/repro_issue_114_cross_part_revisions.test.ts
 //
-// Regression tests for GitHub issue #114: RedlineEngine WRITES tracked
+// Regression tests for GitHub issue #114: RedlineEngine WROTE tracked
 // changes across the whole package (the mapper projects headers/footers/
 // notes, apply edits them, accept_all/reject_all traverse every
-// wordprocessingml part), but every path that READS revision state is
-// rooted at `this.doc.element` — the main part's w:body only:
+// wordprocessingml part) while every path that READ revision state was
+// rooted at the main part's w:body only. Four defects followed:
 //
-//   _scan_existing_ids            engine.ts:1228   (id-mint seed)
-//   validation existence check    engine.ts:3543   (accept/reject pre-check)
-//   _resolution_group_ids         engine.ts:4768
-//   _buildRevisionIndex root      engine.ts:4861   (targeted accept/reject
-//                                                   and the :5340 guard)
+//   F1  a body/header id collision silently resolved the body's revision
+//       and reported plain success
+//   F2  an id existing only in a header was advertised by the projection
+//       yet untargetable — the error even claimed no tracked changes exist
+//   F3  a modify anchored on header text minted revisions that targeted
+//       accept could never resolve
+//   F4  the body-only id scan minted duplicate w:ids inside a header part
+//   F5  two ordinary engine sessions created a full cross-part collision
+//       unaided, then a third mis-resolved it
 //
-// Revision ids are numbered PER PART (Word restarts numbering in each
-// header/footer), so cross-part id collisions are ordinary, and the engine
-// itself recreates them because its mint counter is seeded body-only.
-//
-// The file has two halves:
-//
-//   1. "invariants" — behavior that is CORRECT today and must survive any
-//      fix. Plain regression tests; never flip these.
-//
-//   2. "pinned defects" — each test asserts the BROKEN behavior exactly as
-//      it stands, so the suite keeps proving the issue until it is fixed.
-//      Every buggy expectation is marked `BUG(#114)` with the desired
-//      outcome beside it. When the fix lands these tests FAIL at those
-//      lines — flip each marked expectation to its DESIRED counterpart and
-//      move the test up into the invariants block.
+// Fixed by reading revision state across every story part (body, headers,
+// footers, footnotes, endnotes): the id scan spans every wordprocessingml
+// part, targeted accept/reject resolve a bare id wherever it uniquely
+// lives, a bare id matching several parts is REFUSED (ids are numbered per
+// part, so it cannot name one change), and the optional `part` field on
+// accept/reject picks the part explicitly.
 
 import { describe, it, expect } from "vitest";
 import { createTestDocument, addParagraph } from "./test-utils.js";
@@ -78,11 +73,11 @@ const bodyXml = (doc: DocumentObject) =>
 const revIdsIn = (xml: string) =>
   [...xml.matchAll(/<w:(?:ins|del)\b[^>]*w:id="(\d+)"/g)].map((m) => m[1]);
 
-// ---------------------------------------------------------------------------
-// 1. Invariants — correct today, must survive the #114 fix. Never flip.
-// ---------------------------------------------------------------------------
+/** Text content of `xml` with tags stripped — replacements may land split
+ *  across several runs, so raw-XML substring checks are unreliable. */
+const textOf = (xml: string) => xml.replace(/<[^>]+>/g, "");
 
-describe("issue #114 invariants (must hold before AND after the fix)", () => {
+describe("issue #114 — bulk paths and projection (unchanged by the fix)", () => {
   it("accept_all_revisions resolves revisions in headers as well as the body", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
@@ -129,7 +124,7 @@ describe("issue #114 invariants (must hold before AND after the fix)", () => {
     expect(bodyXml(doc)).toContain("BodyInserted");
   });
 
-  it("the same-part different-author guard (engine.ts:5340) still refuses a body-internal id collision", async () => {
+  it("the same-part different-author guard still refuses a body-internal id collision", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
     injectIns(doc.element, "7", "Alice", "first");
@@ -163,69 +158,92 @@ describe("issue #114 invariants (must hold before AND after the fix)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 2. Pinned defects — these assert the BROKEN behavior of #114 so the suite
-//    repeats the issue's verification. On fixing #114, flip every line
-//    marked BUG(#114) to its DESIRED expectation.
-// ---------------------------------------------------------------------------
-
-describe("issue #114 pinned defects (flip marked expectations when fixed)", () => {
-  it("F1: a body/header id collision resolves the body and reports plain success", async () => {
+describe("issue #114 — targeted resolution across parts (fixed behavior)", () => {
+  it("F1: a bare id matching body AND header is refused, naming both parts and the part selector", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
-    // DIFFERENT authors share w:id=0 across parts — the exact shape the
-    // :5340 guard refuses when both nodes are in the body.
+    // DIFFERENT authors share w:id=0 across parts — Word numbers revision
+    // ids per part, so this is an ordinary document, not a corrupt one.
     addHeader(doc, insXml("0", "Bob", "HeaderInserted"));
     injectIns(doc.element, "0", "Alice", "BodyInserted");
-    expect(revIdsIn(bodyXml(doc))).toEqual(["0"]);
-    expect(revIdsIn(headerXml(doc))).toEqual(["0"]);
 
     const engine = new RedlineEngine(doc, "Reviewer");
-    const res: any = engine.process_batch([
-      { type: "accept", target_id: "0" },
-    ]);
-
-    // BUG(#114): the batch reports unqualified success and resolves only the
-    // body's revision; nothing in the result names the header's, or that an
-    // ambiguity existed. DESIRED: refuse the bare id naming both parts (as
-    // the same-author guard does), or resolve exactly the revision an
-    // explicit part selector names.
-    expect(res.status).toBe("ok"); // BUG(#114) — DESIRED: BatchValidationError naming word/header1.xml
-    expect(res.actions_applied).toBe(1); // BUG(#114)
-    expect(res.skipped_details).toEqual([]); // BUG(#114) — silence is the defect
-    expect(revIdsIn(bodyXml(doc))).toEqual([]); // body resolved
-    expect(revIdsIn(headerXml(doc))).toEqual(["0"]); // BUG(#114) — header revision still pending
+    let caught: any = null;
+    try {
+      engine.process_batch([{ type: "accept", target_id: "0" }]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BatchValidationError);
+    expect(String(caught.message)).toContain("ambiguous");
+    expect(String(caught.message)).toContain("word/document.xml");
+    expect(String(caught.message)).toContain("word/header1.xml");
+    expect(String(caught.message)).toContain('"part"');
+    // Refused means NOTHING was resolved — no silent body-wins.
+    expect(revIdsIn(bodyXml(doc))).toEqual(["0"]);
+    expect(revIdsIn(headerXml(doc))).toEqual(["0"]);
   });
 
-  it("F2: an id that exists only in a header is advertised yet untargetable, and the error denies it exists", async () => {
+  it("F1: the part selector resolves exactly the named side of a collision", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Body paragraph one.");
+    addHeader(doc, insXml("0", "Bob", "HeaderInserted"));
+    injectIns(doc.element, "0", "Alice", "BodyInserted");
+
+    const engine = new RedlineEngine(doc, "Reviewer");
+    const res1: any = engine.process_batch([
+      { type: "accept", target_id: "0", part: "word/header1.xml" },
+    ]);
+    expect(res1.status).toBe("ok");
+    expect(res1.actions_applied).toBe(1);
+    expect(revIdsIn(headerXml(doc))).toEqual([]);
+    expect(headerXml(doc)).toContain("HeaderInserted"); // accepted, text kept
+    expect(revIdsIn(bodyXml(doc))).toEqual(["0"]); // untouched
+
+    // With the header's resolved, the bare id is unique again.
+    const res2: any = engine.process_batch([
+      { type: "accept", target_id: "0" },
+    ]);
+    expect(res2.status).toBe("ok");
+    expect(revIdsIn(bodyXml(doc))).toEqual([]);
+    expect(bodyXml(doc)).toContain("BodyInserted");
+  });
+
+  it("F2: an id that exists only in a header resolves through a bare targeted accept", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
     addHeader(doc, insXml("900", "Bob", "HeaderInserted"));
 
-    // The projection labels it Chg:900 (see the invariant above), so callers
-    // are invited to act on it…
-    const engine = new RedlineEngine(doc, "Reviewer");
+    const res: any = new RedlineEngine(doc, "Reviewer").process_batch([
+      { type: "accept", target_id: "900" },
+    ]);
+    expect(res.status).toBe("ok");
+    expect(res.actions_applied).toBe(1);
+    expect(revIdsIn(headerXml(doc))).toEqual([]);
+    expect(headerXml(doc)).toContain("HeaderInserted");
+  });
+
+  it("F2: the not-found hint lists header ids instead of denying tracked changes exist", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Body paragraph one.");
+    addHeader(doc, insXml("900", "Bob", "HeaderInserted"));
+
     let caught: any = null;
     try {
-      engine.process_batch([{ type: "accept", target_id: "900" }]);
+      new RedlineEngine(doc, "Reviewer").process_batch([
+        { type: "accept", target_id: "555" },
+      ]);
     } catch (e) {
       caught = e;
     }
-
-    // BUG(#114): …but the body-rooted existence check throws, failing the
-    // whole (transactional) batch. DESIRED: the accept resolves the header
-    // revision.
-    expect(caught).toBeInstanceOf(BatchValidationError); // BUG(#114) — DESIRED: no throw
-    // BUG(#114): the guidance is actively wrong — the document visibly HAS a
-    // tracked change; only the body-rooted id list is empty. DESIRED: an
-    // error (if any) that names where the id actually lives.
-    expect(String(caught.message)).toContain(
+    expect(caught).toBeInstanceOf(BatchValidationError);
+    expect(String(caught.message)).toContain("Chg:900");
+    expect(String(caught.message)).not.toContain(
       "This document has no tracked changes.",
-    ); // BUG(#114)
-    expect(revIdsIn(headerXml(doc))).toEqual(["900"]); // untouched either way
+    );
   });
 
-  it("F3: a modify anchored on header text mints revisions that targeted accept can never resolve", async () => {
+  it("F3: revisions the engine authors in a header are resolvable by targeted accept", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
     addHeader(doc);
@@ -234,37 +252,31 @@ describe("issue #114 pinned defects (flip marked expectations when fixed)", () =
       { type: "modify", target_text: "HEADER MARKER", new_text: "Amended Header" },
     ]);
     expect(res.edits_applied).toBe(1);
-
-    // The engine authored a del+ins pair inside word/header1.xml…
     const minted = revIdsIn(headerXml(doc));
     expect(minted.length).toBeGreaterThan(0);
 
-    // …which a fresh engine (the normal act-later flow) cannot address.
-    const engine2 = new RedlineEngine(doc, "Reviewer");
-    let caught: any = null;
-    try {
-      engine2.process_batch([{ type: "accept", target_id: minted[0] }]);
-    } catch (e) {
-      caught = e;
-    }
-    // BUG(#114): the engine's own output is unactionable — only accept_all/
-    // reject_all can ever clear it. DESIRED: no throw, revision resolved.
-    expect(caught).toBeInstanceOf(BatchValidationError); // BUG(#114)
-    expect(revIdsIn(headerXml(doc))).toEqual(minted); // still pending
+    // A fresh engine (the normal act-later flow) resolves it; the del+ins
+    // pair resolves as one unit.
+    const res2: any = new RedlineEngine(doc, "Reviewer").process_batch([
+      { type: "accept", target_id: minted[0] },
+    ]);
+    expect(res2.status).toBe("ok");
+    expect(res2.actions_applied).toBe(1);
+    expect(revIdsIn(headerXml(doc))).toEqual([]);
+    expect(headerXml(doc)).toContain("Amended Header");
+    expect(headerXml(doc)).not.toContain("HEADER MARKER");
   });
 
-  it("F4: the body-only id scan mints a duplicate w:id INSIDE the header part, different authors", async () => {
+  it("F4: the id scan spans parts, so header edits never mint a duplicate id", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
-    // Header already holds id 2 (Bob); body max is 1, so the engine's next
-    // mint is 2.
+    // Header already holds id 2 (Bob); body max is 1. The scan must seed
+    // from the package-wide max, not the body's.
     addHeader(doc, insXml("2", "Bob", "HeaderInserted"));
     injectIns(doc.element, "1", "Alice", "BodyInserted");
 
     const engine = new RedlineEngine(doc, "Reviewer");
-    // BUG(#114): _scan_existing_ids saw only the body ("a fresh engine must
-    // never mint a duplicate" — engine.ts:1226). DESIRED: 2.
-    expect(engine.current_id).toBe(1); // BUG(#114)
+    expect(engine.current_id).toBe(2);
 
     const res: any = engine.process_batch([
       { type: "modify", target_text: "HEADER MARKER", new_text: "Amended Header" },
@@ -276,49 +288,101 @@ describe("issue #114 pinned defects (flip marked expectations when fixed)", () =
         /<w:(?:ins|del)\b[^>]*w:id="2"[^>]*w:author="([^"]*)"/g,
       ),
     ].map((m) => m[1]);
-    // BUG(#114): two revision elements share w:id=2 within ONE part, from
-    // different authors — the exact state the :5340 guard exists to refuse,
-    // manufactured by the engine itself. DESIRED: one element, one author
-    // (fresh ids minted above the package-wide max).
-    expect(authorsOfId2.length).toBe(2); // BUG(#114) — DESIRED: 1
-    expect(new Set(authorsOfId2).size).toBe(2); // BUG(#114)
+    expect(authorsOfId2).toEqual(["Bob"]); // only the pre-existing revision
+    // The minted pair took fresh ids above the package-wide max.
+    const ids = revIdsIn(headerXml(doc)).map(Number);
+    expect(Math.max(...ids)).toBeGreaterThan(2);
+    expect(new Set(revIdsIn(headerXml(doc))).size).toBe(
+      revIdsIn(headerXml(doc)).length,
+    );
   });
 
-  it("F5: two ordinary engine sessions create a full cross-part collision unaided, then mis-resolve it", async () => {
+  it("F5: consecutive sessions mint distinct ids across parts and each side resolves independently", async () => {
     // No foreign/injected revisions anywhere — pure product usage.
     let doc = await createTestDocument();
     addParagraph(doc, "Body paragraph one.");
     addHeader(doc);
 
-    // Session 1: redline the header. Mints del=1/ins=2 in word/header1.xml.
+    // Session 1: redline the header (mints a del+ins pair there).
     new RedlineEngine(doc, "Session One").process_batch([
       { type: "modify", target_text: "HEADER MARKER", new_text: "Amended Header" },
     ]);
     doc = await DocumentObject.load(Buffer.from(await doc.save()));
-    expect(revIdsIn(headerXml(doc))).toEqual(["1", "2"]);
+    const header_ids = revIdsIn(headerXml(doc));
+    expect(header_ids.length).toBeGreaterThan(0);
 
-    // Session 2: redline the body. The id scan is body-only, so the counter
-    // restarts at 0 and mints del=1/ins=2 AGAIN — now in the body.
+    // Session 2: redline the body. The scan sees the header's ids, so the
+    // new pair takes fresh numbers — no cross-part collision forms.
     new RedlineEngine(doc, "Session Two").process_batch([
       { type: "modify", target_text: "Body paragraph one.", new_text: "Body paragraph two." },
     ]);
     doc = await DocumentObject.load(Buffer.from(await doc.save()));
-    // BUG(#114): every id is now ambiguous across parts. DESIRED: session 2
-    // mints 3/4, no collision.
-    expect(revIdsIn(bodyXml(doc)).sort()).toEqual(["1", "2"]); // BUG(#114)
-    expect(revIdsIn(headerXml(doc)).sort()).toEqual(["1", "2"]); // BUG(#114)
+    const body_ids = revIdsIn(bodyXml(doc));
+    expect(body_ids.length).toBeGreaterThan(0);
+    expect(body_ids.filter((id) => header_ids.includes(id))).toEqual([]);
 
-    // Session 3: accept "Chg:1". Two unrelated revisions carry id 1; the
-    // body one wins silently (its replacement pair resolves ids 1 AND 2).
+    // Session 3: both bare ids are unique, so each resolves its own pair.
     const res: any = new RedlineEngine(doc, "Session Three").process_batch([
-      { type: "accept", target_id: "1" },
+      { type: "accept", target_id: header_ids[0] },
+      { type: "accept", target_id: body_ids[0] },
     ]);
-    // BUG(#114): plain success; the header's revisions are untouched and
-    // unreported. DESIRED: refusal naming both parts, or explicit part
-    // targeting.
-    expect(res.status).toBe("ok"); // BUG(#114)
-    expect(res.actions_applied).toBe(1); // BUG(#114)
+    expect(res.status).toBe("ok");
+    expect(res.actions_applied).toBe(2);
+    expect(revIdsIn(headerXml(doc))).toEqual([]);
     expect(revIdsIn(bodyXml(doc))).toEqual([]);
-    expect(revIdsIn(headerXml(doc)).sort()).toEqual(["1", "2"]); // BUG(#114) — still pending
+    expect(textOf(headerXml(doc))).toContain("Amended Header");
+    expect(textOf(bodyXml(doc))).toContain("Body paragraph two.");
+  });
+
+  it("part selectors: leading slash normalizes, and same-id actions in different parts don't collide", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Body paragraph one.");
+    addHeader(doc, insXml("1", "Bob", "HeaderInserted"));
+    injectIns(doc.element, "1", "Alice", "BodyInserted");
+
+    // accept header's Chg:1 but reject the body's Chg:1 — with per-part
+    // pairing keys this is NOT a contradiction.
+    const res: any = new RedlineEngine(doc, "Reviewer").process_batch([
+      { type: "accept", target_id: "1", part: "/word/header1.xml" },
+      { type: "reject", target_id: "1", part: "word/document.xml" },
+    ]);
+    expect(res.status).toBe("ok");
+    expect(res.actions_applied).toBe(2);
+    expect(headerXml(doc)).toContain("HeaderInserted"); // accepted
+    expect(bodyXml(doc)).not.toContain("BodyInserted"); // rejected
+    expect(revIdsIn(headerXml(doc))).toEqual([]);
+    expect(revIdsIn(bodyXml(doc))).toEqual([]);
+  });
+
+  it("part selectors: an unknown part and a wrong part fail with actionable errors", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "Body paragraph one.");
+    addHeader(doc, insXml("900", "Bob", "HeaderInserted"));
+
+    let caught: any = null;
+    try {
+      new RedlineEngine(doc, "Reviewer").process_batch([
+        { type: "accept", target_id: "900", part: "word/nope.xml" },
+      ]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BatchValidationError);
+    expect(String(caught.message)).toContain("not a package part");
+    expect(String(caught.message)).toContain("word/header1.xml");
+
+    caught = null;
+    try {
+      new RedlineEngine(doc, "Reviewer").process_batch([
+        { type: "accept", target_id: "900", part: "word/document.xml" },
+      ]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BatchValidationError);
+    expect(String(caught.message)).toContain("word/document.xml");
+    // The error says where the id actually lives.
+    expect(String(caught.message)).toContain("word/header1.xml");
+    expect(revIdsIn(headerXml(doc))).toEqual(["900"]); // untouched either way
   });
 });

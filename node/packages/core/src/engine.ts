@@ -381,28 +381,52 @@ const ALL_REVISION_TAGS: readonly string[] = [
 interface IndexedRevision {
   el: Element;
   id: string | null;
+  /** OPC part path holding the element ("word/document.xml",
+   *  "word/header1.xml", ...). Revision ids are numbered PER PART, so an id
+   *  is only meaningful together with this (issue #114). */
+  part: string;
   /** Proper ins/del descendants, matching getElementsByTagName's
    *  self-exclusion. */
   nested: IndexedRevision[];
 }
 
 /**
- * Every revision element in the main story, bucketed by tag in document order.
+ * Every revision element in every story part (body, headers, footers,
+ * footnotes, endnotes), bucketed by tag in document order per part.
  *
  * apply_review_actions used to re-scan the whole document for each of these
  * buckets, ~12 full walks per action (18 getElementsByTagName calls), so a
  * batch cost O(actions x document). One walk now answers all of them.
  *
- * Validity is keyed on the owning document's mutation counter AND its
+ * Validity is keyed on every root's owning-document mutation counter AND its
  * identity: the counter catches ordinary edits, and the identity catches a
  * transactional rollback swapping in a freshly parsed document whose counter
- * restarts low enough to collide.
+ * restarts low enough to collide. Roots are re-derived on every check so an
+ * added or removed part invalidates too.
  */
 interface RevisionIndex {
-  doc: any;
-  inc: number | null;
+  roots: { el: Element; doc: any; inc: number | null }[];
   byTag: Map<string, IndexedRevision[]>;
 }
+
+/** Part paths compare and print without the leading "/" some in-memory
+ *  parts carry ("/word/header1.xml" from addPart vs "word/header1.xml"
+ *  from the zip loader). */
+function normalize_part_name(name: string): string {
+  return name.startsWith("/") ? name.substring(1) : name;
+}
+
+/** Content types of the parts revisions can be authored in and targeted
+ *  from — the story parts the mapper projects. Deliberately narrower than
+ *  the accept_all/reject_all traversal: a w:ins inside e.g. a comment's
+ *  body is resolved by the bulk paths but is not an addressable document
+ *  revision (issue #114). */
+const STORY_PART_CONTENT_TYPES: readonly string[] = [
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+];
 
 export function describe_illegal_control_chars(text: string): string | null {
   if (!text) return null;
@@ -1383,15 +1407,61 @@ export class RedlineEngine {
     return [critic_markup, clean_text];
   }
 
+  /**
+   * Every root a bulk revision pass must traverse: the main body plus every
+   * other wordprocessingml XML part (headers, footers, notes, comments, ...).
+   * Shared by accept_all_revisions / reject_all_revisions / _scan_existing_ids
+   * (issue #114 — the id scan used to read the body only, so a fresh engine
+   * minted duplicates of ids already present in a header).
+   */
+  private _revision_roots(): Element[] {
+    const roots: Element[] = [this.doc.element];
+    for (const part of this.doc.pkg.parts) {
+      if (part === this.doc.part) continue;
+      if (
+        part.contentType.includes("wordprocessingml") &&
+        part.contentType.endsWith("+xml")
+      ) {
+        roots.push(part._element);
+      }
+    }
+    return roots;
+  }
+
+  /**
+   * [element, part path] for every part a targeted accept/reject can address:
+   * the main body plus the story parts the mapper projects. This is where
+   * revision ids live per part (issue #114) — the resolution index walks
+   * exactly these roots.
+   */
+  private _story_roots(): [Element, string][] {
+    const roots: [Element, string][] = [
+      [this.doc.element, normalize_part_name(this.doc.part.partname)],
+    ];
+    for (const part of this.doc.pkg.parts) {
+      if (part === this.doc.part) continue;
+      if (STORY_PART_CONTENT_TYPES.includes(part.contentType)) {
+        roots.push([part._element, normalize_part_name(part.partname)]);
+      }
+    }
+    return roots;
+  }
+
   private _scan_existing_ids(): number {
     let maxId = 0;
     // w:pPrChange carries revision ids too (tracked paragraph restyles,
-    // QA 2026-07-23 F1) — a fresh engine must never mint a duplicate.
-    for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
-      const elements = findAllDescendants(this.doc.element, tag);
-      for (const el of elements) {
-        const val = parseInt(el.getAttribute("w:id") || "0", 10);
-        if (!isNaN(val) && val > maxId) maxId = val;
+    // QA 2026-07-23 F1) — a fresh engine must never mint a duplicate. The
+    // scan spans every wordprocessingml part: ids are numbered per part, but
+    // this engine mints one ascending sequence for the whole package, so the
+    // seed must clear the maximum ANYWHERE or a header edit reuses a header's
+    // own id (issue #114 F4).
+    for (const root of this._revision_roots()) {
+      for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
+        const elements = findAllDescendants(root, tag);
+        for (const el of elements) {
+          const val = parseInt(el.getAttribute("w:id") || "0", 10);
+          if (!isNaN(val) && val > maxId) maxId = val;
+        }
       }
     }
     return maxId;
@@ -1894,17 +1964,7 @@ export class RedlineEngine {
    * call deleted, with `removed_comment_notes` naming each one and its author.
    */
   public accept_all_revisions(remove_comments: boolean = false) {
-    const parts_to_process: Element[] = [this.doc.element];
-
-    for (const part of this.doc.pkg.parts) {
-      if (part === this.doc.part) continue;
-      if (
-        part.contentType.includes("wordprocessingml") &&
-        part.contentType.endsWith("+xml")
-      ) {
-        parts_to_process.push(part._element);
-      }
-    }
+    const parts_to_process: Element[] = this._revision_roots();
 
     // Pre-count revisions before mutating. Unit is REVISION ELEMENTS, matching
     // the Python engine and sanitize's count_tracked_changes so no two surfaces
@@ -2176,17 +2236,7 @@ export class RedlineEngine {
    * common case) is exact. This limitation is shared with the Python engine.
    */
   public reject_all_revisions() {
-    const parts_to_process: Element[] = [this.doc.element];
-
-    for (const part of this.doc.pkg.parts) {
-      if (part === this.doc.part) continue;
-      if (
-        part.contentType.includes("wordprocessingml") &&
-        part.contentType.endsWith("+xml")
-      ) {
-        parts_to_process.push(part._element);
-      }
-    }
+    const parts_to_process: Element[] = this._revision_roots();
 
     for (const root_element of parts_to_process) {
       // 0. Reject tracked paragraph restyles: restore the ORIGINAL pPr the
@@ -4429,7 +4479,14 @@ export class RedlineEngine {
         }
         seen_replies.add(reply_key);
       } else if (type === "accept" || type === "reject") {
-        const prior = seen_resolutions.get(target_id);
+        // Ids are numbered per part (issue #114): the same target_id with
+        // different explicit `part` selectors names two unrelated changes,
+        // so duplicates/conflicts are tracked per (part, id). Bare ids keep
+        // one shared bucket — two bare actions on one id are the same
+        // target today as before.
+        const { part: action_part } = this._action_part_filter(action);
+        const resolution_key = `${action_part ?? ""}\x00${target_id}`;
+        const prior = seen_resolutions.get(resolution_key);
         if (prior !== undefined) {
           const [first_idx, first_type] = prior;
           if (first_type === type) {
@@ -4446,7 +4503,7 @@ export class RedlineEngine {
             );
           }
         } else {
-          seen_resolutions.set(target_id, [i, type]);
+          seen_resolutions.set(resolution_key, [i, type]);
         }
       }
     }
@@ -4482,25 +4539,40 @@ export class RedlineEngine {
         }
       } else if (type === "accept" || type === "reject") {
         const target_id = action.target_id.replace("Chg:", "");
-        const all_ins = findAllDescendants(this.doc.element, "w:ins").filter(
-          (n) => n.getAttribute("w:id") === target_id,
-        );
-        const all_del = findAllDescendants(this.doc.element, "w:del").filter(
-          (n) => n.getAttribute("w:id") === target_id,
-        );
+        const { part, error: part_error } = this._action_part_filter(action);
+        if (part_error) {
+          errors.push(
+            `- Action ${gidx(i) + 1} Failed: ${type} on ${action.target_id} — ${part_error}`,
+          );
+          continue;
+        }
+        // Existence spans every story part (issue #114): revisions live in
+        // headers/footers/notes too, and the projection advertises their ids.
         // Tracked paragraph restyles (w:pPrChange) are resolvable revisions
         // too (QA 2026-07-23 F1a).
-        const all_ppc = findAllDescendants(
-          this.doc.element,
-          "w:pPrChange",
-        ).filter((n) => n.getAttribute("w:id") === target_id);
-        if (
-          all_ins.length === 0 &&
-          all_del.length === 0 &&
-          all_ppc.length === 0
-        ) {
+        let found = false;
+        for (const tag of ["w:ins", "w:del", "w:pPrChange"]) {
+          if (
+            this._revisionsByTagIn(tag, part).some((n) => n.id === target_id)
+          ) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
           errors.push(
-            this._action_not_found_error(action.target_id, type, `- Action ${gidx(i) + 1} Failed:`),
+            part !== null
+              ? this._not_found_in_part_error(
+                  action.target_id,
+                  type,
+                  part,
+                  `- Action ${gidx(i) + 1} Failed:`,
+                )
+              : this._action_not_found_error(
+                  action.target_id,
+                  type,
+                  `- Action ${gidx(i) + 1} Failed:`,
+                ),
           );
         }
       }
@@ -5785,18 +5857,28 @@ export class RedlineEngine {
    * All revision ids that resolve as ONE unit with `target_id`: the ids of
    * every contiguous same-author w:ins/w:del sibling of its elements (a
    * replacement's del+ins pair), plus the id itself.
+   *
+   * `part` scopes the lookup to one OPC part. Ids are numbered per part
+   * (issue #114), so a group is only well-defined within one part — callers
+   * that pass null accept matches from anywhere and must have established
+   * the id is unambiguous first.
    */
-  private _resolution_group_ids(target_id: string): Set<string> {
+  private _resolution_group_ids(
+    target_id: string,
+    part: string | null = null,
+  ): Set<string> {
     const nodes = [
-      ...findAllDescendants(this.doc.element, "w:ins"),
-      ...findAllDescendants(this.doc.element, "w:del"),
-    ].filter((n) => n.getAttribute("w:id") === target_id);
+      ...this._revisionsByTagIn("w:ins", part),
+      ...this._revisionsByTagIn("w:del", part),
+    ]
+      .filter((n) => n.id === target_id)
+      .map((n) => n.el);
     const group = new Set<string>();
     if (nodes.length === 0) {
       // A tracked paragraph restyle (w:pPrChange) is a revision of its own
       // (QA 2026-07-23 F1a) — resolvable even with no ins/del elements.
-      const has_ppc = findAllDescendants(this.doc.element, "w:pPrChange").some(
-        (n) => n.getAttribute("w:id") === target_id,
+      const has_ppc = this._revisionsByTagIn("w:pPrChange", part).some(
+        (n) => n.id === target_id,
       );
       if (has_ppc) group.add(target_id);
       return group;
@@ -5830,11 +5912,26 @@ export class RedlineEngine {
       const raw_id = String(act.target_id ?? "");
       if (raw_id.startsWith("Com:")) continue;
       const target_id = raw_id.startsWith("Chg:") ? raw_id.slice(4) : raw_id;
-      const group = this._resolution_group_ids(target_id);
+      // Groups are per-part (issue #114): accepting header1's Chg:1 and
+      // rejecting the body's Chg:1 is NOT a contradiction. Scope to the
+      // action's explicit part, else to the only part holding the id; an
+      // ambiguous or unknown bare id is skipped here — apply/validation
+      // report those with their own errors.
+      const { part: requested_part, error: part_error } =
+        this._action_part_filter(act);
+      if (part_error) continue;
+      let scope = requested_part;
+      if (scope === null) {
+        const parts_with_id = this._parts_holding_id(target_id);
+        if (parts_with_id.length !== 1) continue;
+        scope = parts_with_id[0];
+      }
+      const group = this._resolution_group_ids(target_id, scope);
       if (group.size === 0) continue; // unknown ids fail with their own not-found error
+      const group_key = (gid: string) => `${scope} ${gid}`;
       let conflict: [number, string, string] | null = null;
       for (const gid of group) {
-        const prior = group_first.get(gid);
+        const prior = group_first.get(group_key(gid));
         if (prior !== undefined && prior[1] !== act.type) {
           conflict = prior;
           break;
@@ -5853,8 +5950,8 @@ export class RedlineEngine {
         continue;
       }
       for (const gid of group) {
-        if (!group_first.has(gid)) {
-          group_first.set(gid, [pos, act.type, target_id]);
+        if (!group_first.has(group_key(gid))) {
+          group_first.set(group_key(gid), [pos, act.type, target_id]);
         }
       }
     }
@@ -5877,82 +5974,171 @@ export class RedlineEngine {
    * sibling pointers — fast-xml's nextSibling is an indexOf scan, which would
    * make the walk itself quadratic (see docx/cell-anchor.ts).
    */
-  private _buildRevisionIndex(ownerDoc: any, inc: number | null): RevisionIndex {
+  private _buildRevisionIndex(
+    storyRoots: [Element, string][],
+  ): RevisionIndex {
     const byTag = new Map<string, IndexedRevision[]>();
     for (const tag of ALL_REVISION_TAGS) byTag.set(tag, []);
+    const roots: RevisionIndex["roots"] = [];
 
-    const root: any = this.doc.element;
-    const nodes: any[] = [root];
-    const cursors: number[] = [0];
-    // Enclosing ins/del entries, with the stack depth each was opened at so
-    // they can be closed when the walk leaves them.
-    const openRevisions: IndexedRevision[] = [];
-    const openAtDepth: number[] = [];
+    for (const [root, part] of storyRoots) {
+      const od: any = (root as any).ownerDocument;
+      roots.push({
+        el: root,
+        doc: od,
+        inc: typeof od?._inc === "number" ? od._inc : null,
+      });
 
-    while (nodes.length) {
-      const top = nodes.length - 1;
-      const children = nodes[top].childNodes;
-      if (!children || cursors[top] >= children.length) {
-        nodes.pop();
-        cursors.pop();
-        while (
-          openAtDepth.length &&
-          openAtDepth[openAtDepth.length - 1] > nodes.length
-        ) {
-          openAtDepth.pop();
-          openRevisions.pop();
+      const nodes: any[] = [root];
+      const cursors: number[] = [0];
+      // Enclosing ins/del entries, with the stack depth each was opened at so
+      // they can be closed when the walk leaves them.
+      const openRevisions: IndexedRevision[] = [];
+      const openAtDepth: number[] = [];
+
+      while (nodes.length) {
+        const top = nodes.length - 1;
+        const children = nodes[top].childNodes;
+        if (!children || cursors[top] >= children.length) {
+          nodes.pop();
+          cursors.pop();
+          while (
+            openAtDepth.length &&
+            openAtDepth[openAtDepth.length - 1] > nodes.length
+          ) {
+            openAtDepth.pop();
+            openRevisions.pop();
+          }
+          continue;
         }
-        continue;
-      }
-      const child = children[cursors[top]++];
-      if (child.nodeType !== 1) continue;
+        const child = children[cursors[top]++];
+        if (child.nodeType !== 1) continue;
 
-      const bucket = byTag.get(child.tagName);
-      let entry: IndexedRevision | null = null;
-      if (bucket) {
-        entry = { el: child, id: child.getAttribute("w:id"), nested: [] };
-        bucket.push(entry);
-      }
-      const isRevisionNode =
-        child.tagName === "w:ins" || child.tagName === "w:del";
-      if (entry && isRevisionNode) {
-        for (const ancestor of openRevisions) ancestor.nested.push(entry);
-      }
+        const bucket = byTag.get(child.tagName);
+        let entry: IndexedRevision | null = null;
+        if (bucket) {
+          entry = {
+            el: child,
+            id: child.getAttribute("w:id"),
+            part,
+            nested: [],
+          };
+          bucket.push(entry);
+        }
+        const isRevisionNode =
+          child.tagName === "w:ins" || child.tagName === "w:del";
+        if (entry && isRevisionNode) {
+          for (const ancestor of openRevisions) ancestor.nested.push(entry);
+        }
 
-      nodes.push(child);
-      cursors.push(0);
-      if (entry && isRevisionNode) {
-        openRevisions.push(entry);
-        openAtDepth.push(nodes.length);
+        nodes.push(child);
+        cursors.push(0);
+        if (entry && isRevisionNode) {
+          openRevisions.push(entry);
+          openAtDepth.push(nodes.length);
+        }
       }
     }
-    return { doc: ownerDoc, inc, byTag };
+    return { roots, byTag };
   }
 
-  /** Cached revision index, rebuilt when the document changed (or was
-   *  swapped out by a rollback) since the last build. */
+  /** Cached revision index, rebuilt when any story part changed (or was
+   *  swapped out by a rollback), or the set of story parts itself changed,
+   *  since the last build. */
   private _getRevisionIndex(): RevisionIndex {
-    const ownerDoc: any = (this.doc.element as any).ownerDocument;
-    const inc: number | null =
-      typeof ownerDoc?._inc === "number" ? ownerDoc._inc : null;
+    const storyRoots = this._story_roots();
     const cached = this._revisionIndex;
-    if (cached && cached.doc === ownerDoc && inc !== null && cached.inc === inc) {
-      return cached;
-    }
-    // inc === null (a DOM without a mutation counter) intentionally rebuilds
-    // every time rather than risking a stale index.
-    const built = this._buildRevisionIndex(ownerDoc, inc);
+    const cacheValid =
+      cached !== null &&
+      cached.roots.length === storyRoots.length &&
+      cached.roots.every((r, i) => {
+        const el = storyRoots[i][0];
+        const od: any = (el as any).ownerDocument;
+        // inc === null (a DOM without a mutation counter) intentionally
+        // rebuilds every time rather than risking a stale index.
+        return (
+          r.el === el &&
+          r.doc === od &&
+          r.inc !== null &&
+          typeof od?._inc === "number" &&
+          r.inc === od._inc
+        );
+      });
+    if (cacheValid) return cached!;
+    const built = this._buildRevisionIndex(storyRoots);
     this._revisionIndex = built;
     return built;
   }
 
-  /** Revision elements of `tag` in document order, id already read. */
+  /** Revision elements of `tag` across every story part, per-part document
+   *  order, id already read. */
   private _revisionsByTag(tag: string): IndexedRevision[] {
     return this._getRevisionIndex().byTag.get(tag) ?? [];
   }
 
-  /** Distinct tracked-change ids (w:id on w:ins/w:del/w:pPrChange) in the
-   *  main story. */
+  /** As _revisionsByTag, filtered to one OPC part (normalized path). A null
+   *  part means no filter. */
+  private _revisionsByTagIn(
+    tag: string,
+    part: string | null,
+  ): IndexedRevision[] {
+    const all = this._revisionsByTag(tag);
+    if (part === null) return all;
+    return all.filter((n) => n.part === part);
+  }
+
+  /**
+   * Distinct normalized part paths holding a revision element (w:ins/w:del or
+   * a format-change record) with `target_id`, in story-root order. More than
+   * one entry means the bare id is ambiguous (issue #114): ids are numbered
+   * per part.
+   */
+  private _parts_holding_id(target_id: string): string[] {
+    const parts: string[] = [];
+    for (const tag of ALL_REVISION_TAGS) {
+      for (const n of this._revisionsByTag(tag)) {
+        if (n.id === target_id && !parts.includes(n.part)) parts.push(n.part);
+      }
+    }
+    return parts;
+  }
+
+  /**
+   * Resolves an accept/reject action's optional `part` selector to a
+   * normalized story-part path, or an error string when it names no part a
+   * targeted action can address. `part: null` = no restriction (bare id).
+   */
+  private _action_part_filter(action: any): {
+    part: string | null;
+    error?: string;
+  } {
+    const raw = (action as any).part;
+    if (raw === undefined || raw === null || raw === "") {
+      return { part: null };
+    }
+    const story_parts = this._story_roots().map(([, name]) => name);
+    if (typeof raw !== "string") {
+      return {
+        part: null,
+        error:
+          `\`part\` must be a string naming a package part ` +
+          `(one of: ${story_parts.join(", ")}).`,
+      };
+    }
+    const wanted = normalize_part_name(raw);
+    if (!story_parts.includes(wanted)) {
+      return {
+        part: null,
+        error:
+          `part '${raw}' is not a package part that can carry tracked ` +
+          `changes. Parts addressable by accept/reject: ${story_parts.join(", ")}.`,
+      };
+    }
+    return { part: wanted };
+  }
+
+  /** Distinct tracked-change ids (w:id on w:ins/w:del/w:pPrChange) across
+   *  every story part. */
   private _existing_change_ids(): string[] {
     const ids = new Set<string>();
     for (const tag of ALL_REVISION_TAGS) {
@@ -6232,6 +6418,52 @@ export class RedlineEngine {
     );
   }
 
+  /** Not-found variant for an action that named an explicit `part` (issue
+   *  #114): says where the id DOES live instead of denying it exists. */
+  private _not_found_in_part_error(
+    raw_id: string,
+    type: string,
+    part: string,
+    lead = "- Failed to apply action:",
+  ): string {
+    const bare = raw_id.replace(/^(Chg:|Com:)/, "");
+    const echo = raw_id.startsWith("Chg:") ? raw_id : `Chg:${bare}`;
+    const elsewhere = this._parts_holding_id(bare);
+    const where =
+      elsewhere.length > 0
+        ? `Revisions with that id exist in: ${elsewhere.join(", ")}. `
+        : "";
+    const find_hint =
+      this.id_discovery_hint ||
+      "Call `read_docx` with `mode='changes'` on the document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.";
+    return (
+      `${lead} ${type} on ${echo} — no tracked change with w:id=${bare} exists ` +
+      `in part '${part}'. ${where}${find_hint}`
+    );
+  }
+
+  /**
+   * Refusal for a bare id matching revisions in several OPC parts (issue
+   * #114). Mirrors the same-id-different-authors guard's principle: when an
+   * id cannot name one change, refuse rather than guess — but unlike that
+   * terminal case, this one is actionable, so the message says exactly how.
+   */
+  private _ambiguous_part_error(
+    raw_id: string,
+    type: string,
+    parts: string[],
+    lead: string,
+  ): string {
+    const bare = raw_id.replace(/^Chg:/, "");
+    return (
+      `${lead} ${type} on Chg:${bare} is ambiguous: revisions with ` +
+      `w:id=${bare} exist in ${parts.length} document parts (${parts.join(", ")}). ` +
+      `Revision ids are numbered per part, so the bare id cannot name one change. ` +
+      `Re-issue the action with \`part\` set to the part whose change you mean, ` +
+      `e.g. {"type": "${type}", "target_id": "${bare}", "part": "${parts[0]}"}.`
+    );
+  }
+
   /** `indices` as in validate_review_actions: caller-index space for the prose. */
   public apply_review_actions(
     actions: any[],
@@ -6241,7 +6473,10 @@ export class RedlineEngine {
     let applied = 0;
     let skipped = 0;
     let already_resolved = 0;
-    const resolved_history = new Map<string, string>(); // id -> resolving action type
+    // id -> how and WHERE it was resolved: ids are per-part (issue #114), so
+    // a follow-up naming an explicit different part is a fresh lookup, not a
+    // duplicate of this entry.
+    const resolved_history = new Map<string, { type: string; part: string }>();
 
     // Sort actions internally: non-destructive metadata operations (ReplyComment) first,
     // followed by destructive structural operations (AcceptChange, RejectChange).
@@ -6298,9 +6533,23 @@ export class RedlineEngine {
 
       const target_id = action.target_id.replace("Chg:", "");
 
-      const prior_type = resolved_history.get(target_id);
-      if (prior_type !== undefined) {
-        if (prior_type === type) {
+      // Issue #114: the action may carry an explicit `part` selector.
+      const { part: requested_part, error: part_error } =
+        this._action_part_filter(action);
+      if (part_error) {
+        skipped++;
+        this.skipped_details.push(
+          `- Action ${gidx(pos) + 1} Failed: ${type} on ${action.target_id} — ${part_error}`,
+        );
+        continue;
+      }
+
+      const prior = resolved_history.get(target_id);
+      if (
+        prior !== undefined &&
+        (requested_part === null || requested_part === prior.part)
+      ) {
+        if (prior.type === type) {
           // Consistent follow-up on the pair: legitimate agent workflow
           // ("accept both ids of the replacement"), but no state transition
           // happens — report it accurately (ADEU-QA-004).
@@ -6316,7 +6565,7 @@ export class RedlineEngine {
         // anything mutates; this guard covers direct callers.
         this.skipped_details.push(
           `- Action ${gidx(pos) + 1} Failed: contradictory action — '${type}' on ${action.target_id}, but ` +
-            `the change was already resolved as '${prior_type}' together with its replacement ` +
+            `the change was already resolved as '${prior.type}' together with its replacement ` +
             `pair by an earlier action in this batch.`,
         );
         skipped++;
@@ -6324,12 +6573,37 @@ export class RedlineEngine {
       }
 
       // One document walk backs every lookup below (see _getRevisionIndex);
-      // it is rebuilt only after this batch's own mutations bump the
-      // document's counter, so consecutive non-mutating actions share it.
-      const all_ins = this._revisionsByTag("w:ins")
+      // it is rebuilt only after this batch's own mutations bump a part's
+      // counter, so consecutive non-mutating actions share it.
+      //
+      // The part a bare id acts on must be UNIQUE (issue #114): ids are
+      // numbered per part, so one w:id in two parts names two unrelated
+      // changes, and resolving whichever a body-first walk happens to find
+      // is exactly the silent mis-resolution this refuses. Same principle
+      // as the different-authors guard below — refuse over guess — but this
+      // one is actionable: the error says which parts and how to choose.
+      const parts_with_id = this._parts_holding_id(target_id);
+      let acting_part: string | null = requested_part;
+      if (acting_part === null) {
+        if (parts_with_id.length > 1) {
+          skipped++;
+          this.skipped_details.push(
+            this._ambiguous_part_error(
+              action.target_id,
+              type,
+              parts_with_id,
+              `- Action ${gidx(pos) + 1} Failed:`,
+            ),
+          );
+          continue;
+        }
+        acting_part = parts_with_id.length === 1 ? parts_with_id[0] : null;
+      }
+
+      const all_ins = this._revisionsByTagIn("w:ins", acting_part)
         .filter((n) => n.id === target_id)
         .map((n) => n.el);
-      const all_del = this._revisionsByTag("w:del")
+      const all_del = this._revisionsByTagIn("w:del", acting_part)
         .filter((n) => n.id === target_id)
         .map((n) => n.el);
       const all_nodes = [...all_ins, ...all_del];
@@ -6339,7 +6613,7 @@ export class RedlineEngine {
       // as "[Chg:N format]" — all of them actionable by id
       // (QA round 3, finding 2.2).
       const direct_ppc = PPC_TAGS.flatMap((tag) =>
-        this._revisionsByTag(tag)
+        this._revisionsByTagIn(tag, acting_part)
           .filter((n) => n.id === target_id)
           .map((n) => n.el),
       );
@@ -6351,11 +6625,18 @@ export class RedlineEngine {
           // (engine.py:5246) already do: the failure envelope reads the
           // caller's index back out of this prose, and an unnumbered skip is
           // blamed on change #1.
-          this._action_not_found_error(
-            action.target_id,
-            type,
-            `- Action ${gidx(pos) + 1} Failed:`,
-          ),
+          requested_part !== null
+            ? this._not_found_in_part_error(
+                action.target_id,
+                type,
+                requested_part,
+                `- Action ${gidx(pos) + 1} Failed:`,
+              )
+            : this._action_not_found_error(
+                action.target_id,
+                type,
+                `- Action ${gidx(pos) + 1} Failed:`,
+              ),
         );
         continue;
       }
@@ -6394,7 +6675,7 @@ export class RedlineEngine {
       // left the paired insertion pending (engine divergence,
       // QA 2026-07-19 ADEU-QA-004).
       //
-      // QA 2026-07-23 F1: the group is resolved by ID, document-wide. A
+      // QA 2026-07-23 F1: the group is resolved by ID, part-wide. A
       // multi-paragraph replacement spreads ONE insert id across several
       // paragraphs (content <w:ins> elements plus tracked paragraph marks),
       // and the old node-set walk unwound only the sibling-contiguous
@@ -6420,8 +6701,13 @@ export class RedlineEngine {
       // so newly added ids can match elements ELSEWHERE in the document whose
       // own nested revisions then join the group. It is now pure in-memory
       // work over the index — the nested lists were recorded during the walk.
+      //
+      // Everything in the group stays inside acting_part: group ids are only
+      // meaningful within the part that minted them (issue #114) — the same
+      // number in another part is an unrelated change that must not resolve
+      // along with this one.
       const indexedRevisionNodes = REVISION_NODE_TAGS.flatMap((tag) =>
-        this._revisionsByTag(tag),
+        this._revisionsByTagIn(tag, acting_part),
       );
       let group_size = -1;
       while (group_size !== group_ids.size) {
@@ -6440,7 +6726,7 @@ export class RedlineEngine {
       // comment spanning the del+ins pair survives an accept (QA round 3,
       // finding 1.1).
       for (const tag of REVISION_NODE_TAGS) {
-        for (const entry of this._revisionsByTag(tag)) {
+        for (const entry of this._revisionsByTagIn(tag, acting_part)) {
           if (entry.id && group_ids.has(entry.id)) group_nodes.push(entry.el);
         }
       }
@@ -6448,7 +6734,7 @@ export class RedlineEngine {
       // (F1a / QA round 3 finding 2.2): accept strips the change record,
       // reject restores the original properties.
       const group_ppc = PPC_TAGS.flatMap((tag) =>
-        this._revisionsByTag(tag)
+        this._revisionsByTagIn(tag, acting_part)
           .filter((entry) => entry.id !== null && group_ids.has(entry.id))
           .map((entry) => entry.el),
       );
@@ -6595,7 +6881,9 @@ export class RedlineEngine {
       }
 
       for (const rid of resolved_now) {
-        resolved_history.set(rid, type);
+        // acting_part is non-null here: matches existed, and every index
+        // entry carries its part.
+        resolved_history.set(rid, { type, part: acting_part! });
       }
       applied++;
 

@@ -15,12 +15,22 @@ export interface ModifyText {
 export interface AcceptChange {
   type: 'accept';
   target_id: string;
+  /**
+   * OPC part the change lives in, e.g. "word/header1.xml". Revision ids are
+   * numbered PER PART, so the same target_id can name unrelated changes in
+   * different parts (issue #114); the engine refuses such a bare id and this
+   * field disambiguates it. Omit whenever the id is unique in the package.
+   */
+  part?: string | null;
   comment?: string | null;
 }
 
 export interface RejectChange {
   type: 'reject';
   target_id: string;
+  /** As on AcceptChange: disambiguates a target_id present in several OPC
+   *  parts (issue #114). Omit whenever the id is unique in the package. */
+  part?: string | null;
   comment?: string | null;
 }
 
