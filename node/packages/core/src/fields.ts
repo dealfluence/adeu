@@ -17,7 +17,10 @@
  * that quietly disagrees with the document text the agent is editing.
  */
 import { findChild, findAllDescendants } from "./docx/dom.js";
-import { findDescendantsByLocalName } from "./sanitize/transforms.js";
+import {
+  DocumentProtection,
+  readDocumentProtection,
+} from "./utils/protection.js";
 import { clean_breadcrumb, offset_to_page } from "./outline.js";
 import {
   QN_W_SDT,
@@ -41,7 +44,14 @@ export const PREVIEW_CAP = 80;
 /** Dropdown/combobox options listed before the overflow marker (spec §3.9). */
 export const OPTIONS_SHOWN = 8;
 
-/** `w:documentProtection/@w:edit` -> the banner's word (spec-projection §7). */
+/**
+ * `w:documentProtection/@w:edit` -> the BANNER's word (spec-projection §7).
+ *
+ * Deliberately not `describeProtection()`: that phrasing serves gate errors
+ * and A3.4 pins "read-only, enforced" as substrings of one. The banner is a
+ * different surface with its own frozen wording, so the parse is shared and
+ * only the rendering differs.
+ */
 const PROTECTION_WORDS: Record<string, string> = {
   readOnly: "read-only",
   forms: "fill-in-forms only",
@@ -65,15 +75,19 @@ const CONTAINER_CLASSES: ReadonlySet<string> = new Set([
   "repeating-item",
 ]);
 
-export interface DocumentProtection {
-  mode: string;
-  enforced: boolean;
+/** The banner/ledger phrasing for a parsed protection state (spec §7). */
+export function protectionLabel(p: DocumentProtection): string {
+  if (p.edit === null) return "none";
+  const word = PROTECTION_WORDS[p.edit] ?? p.edit;
+  return p.enforced ? `${word} (enforced)` : word;
 }
 
-export function protectionLabel(p: DocumentProtection): string {
-  if (p.mode === "none") return "none";
-  return p.enforced ? `${p.mode} (enforced)` : p.mode;
-}
+/**
+ * Re-exported so the ledger's callers reach ONE parser. CC-4 owns the reader
+ * (it runs on every engine load for the write gates); CC-2 owns the wording.
+ */
+export { readDocumentProtection };
+export type { DocumentProtection };
 
 export interface FieldEntry {
   ordinal: number;
@@ -99,34 +113,6 @@ export interface FieldEntry {
 // ---------------------------------------------------------------------------
 // Protection
 // ---------------------------------------------------------------------------
-
-/** Read `w:documentProtection` from `word/settings.xml`. */
-export function readDocumentProtection(doc: any): DocumentProtection {
-  const none: DocumentProtection = { mode: "none", enforced: false };
-  const settingsPart = doc?.pkg?.getPartByPath?.("word/settings.xml");
-  if (!settingsPart?._element) return none;
-
-  // Local-name matching, mirroring extract_document_settings_warnings: the
-  // settings part comes from many Word versions and the prefix is not
-  // guaranteed to be `w`.
-  const nodes = findDescendantsByLocalName(
-    settingsPart._element,
-    "documentProtection",
-  );
-  const node = nodes.length > 0 ? nodes[0] : null;
-  if (!node) return none;
-
-  const edit = node.getAttribute("w:edit");
-  // An enforcement flag with no edit mode protects nothing in Word, and
-  // reporting "none (enforced)" would be a contradiction the agent has to
-  // resolve. Treat it as unprotected.
-  if (!edit || !(edit in PROTECTION_WORDS)) return none;
-  const enforcement = node.getAttribute("w:enforcement");
-  return {
-    mode: PROTECTION_WORDS[edit],
-    enforced: enforcement === "1" || enforcement === "true",
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Collection
@@ -364,7 +350,7 @@ export function fieldSummary(doc: any): [number, number, number, number] {
 export function bannerForDocument(doc: any, hint = ""): string | null {
   const counts = fieldSummary(doc);
   const protection = readDocumentProtection(doc);
-  if (counts[0] === 0 && protection.mode === "none") return null;
+  if (counts[0] === 0 && protection.edit === null) return null;
   const line = `> **Protection:** ${protectionLabel(protection)} \u00b7 **Fields:** ${summaryText(counts)}`;
   return hint ? `${line}${hint}` : line;
 }
@@ -504,7 +490,7 @@ export function renderBanner(
   protection: DocumentProtection,
   hint = "",
 ): string | null {
-  if (entries.length === 0 && protection.mode === "none") return null;
+  if (entries.length === 0 && protection.edit === null) return null;
   const line = `> **Protection:** ${protectionLabel(protection)} \u00b7 **Fields:** ${fieldsSummary(entries)}`;
   return hint ? `${line}${hint}` : line;
 }
@@ -585,7 +571,7 @@ export function renderAppendixSection(
   protection: DocumentProtection,
   hint = "",
 ): string[] {
-  if (counts[0] === 0 && protection.mode === "none") return [];
+  if (counts[0] === 0 && protection.edit === null) return [];
   const lines = [
     "## Content Controls",
     "",

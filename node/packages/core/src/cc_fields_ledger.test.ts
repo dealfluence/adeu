@@ -124,9 +124,12 @@ describe("A2.2 — protection line on a zero-control document", () => {
     ["comments", "comments only"],
     ["trackedChanges", "tracked-changes only"],
   ])("gives %s the word %s", async (edit, word) => {
+    // The parse is shared with CC-4's gate reader; only the WORDING is ours.
+    // describeProtection() says "fill-in-forms, enforced" for gate errors,
+    // which A3.4 pins; the banner says "fill-in-forms only (enforced)".
     const { doc } = await load(edit as any, PLAIN_BODY);
     const prot = readDocumentProtection(doc);
-    expect(prot.mode).toBe(word);
+    expect(prot.edit).toBe(edit);
     expect(protectionLabel(prot)).toBe(`${word} (enforced)`);
   });
 });

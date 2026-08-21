@@ -35,6 +35,7 @@ from .utils.content_controls import (
     part_element,
 )
 from .utils.docx import iter_document_parts_with_kind
+from .utils.protection import DocumentProtection, read_document_protection
 
 #: Ledger lines per response (spec §4). FedRAMP rev4 projects 5,007 controls;
 #: the cap keeps one response inside the same budget philosophy the changes
@@ -47,7 +48,11 @@ PREVIEW_CAP = 80
 #: Dropdown/combobox options listed before the overflow marker (spec §3 §9).
 OPTIONS_SHOWN = 8
 
-#: ``w:documentProtection/@w:edit`` → the banner's word (spec-projection §7).
+#: ``w:documentProtection/@w:edit`` -> the BANNER's word (spec-projection §7).
+#: Deliberately not ``DocumentProtection.describe()``: that phrasing serves
+#: gate errors and A3.4 pins "read-only, enforced" as substrings of one. The
+#: banner is a different surface with its own frozen wording, so the parse is
+#: shared and only the rendering differs.
 _PROTECTION_WORDS: Dict[str, str] = {
     "readOnly": "read-only",
     "forms": "fill-in-forms only",
@@ -68,20 +73,6 @@ _QN_W_P = _W + "p"
 _QN_W_TBL = _W + "tbl"
 _QN_W_TR = _W + "tr"
 _QN_W_TC = _W + "tc"
-
-
-@dataclass(frozen=True)
-class DocumentProtection:
-    """``w:documentProtection`` as the banner and ledger report it."""
-
-    mode: str = "none"
-    enforced: bool = False
-
-    @property
-    def label(self) -> str:
-        if self.mode == "none":
-            return "none"
-        return f"{self.mode} (enforced)" if self.enforced else self.mode
 
 
 @dataclass(frozen=True)
@@ -113,52 +104,12 @@ class FieldEntry:
 # ---------------------------------------------------------------------------
 
 
-def read_document_protection(doc: Any) -> DocumentProtection:
-    """Read ``w:documentProtection`` from ``word/settings.xml``.
-
-    Mirrors :func:`adeu.domain.extract_document_settings_warnings` in how it
-    reaches the part: settings may load as a generic ``Part`` rather than an
-    ``XmlPart``, so the blob is parsed directly rather than assumed to expose
-    an element tree.
-    """
-    settings_part = None
-    try:
-        for part in doc.part.package.parts:
-            if str(part.partname) == "/word/settings.xml":
-                settings_part = part
-                break
-    except Exception:
-        return DocumentProtection()
-    if settings_part is None:
-        return DocumentProtection()
-
-    from docx.oxml import parse_xml
-
-    try:
-        root = parse_xml(settings_part.blob)
-    except Exception:
-        return DocumentProtection()
-
-    node = None
-    for el in root.iter():
-        tag = el.tag
-        if isinstance(tag, str) and tag.endswith("}documentProtection"):
-            node = el
-            break
-    if node is None:
-        return DocumentProtection()
-
-    edit = node.get(_W + "edit")
-    # An enforcement flag with no edit mode protects nothing in Word, and
-    # reporting "none (enforced)" would be a contradiction the agent has to
-    # resolve. Treat it as unprotected.
-    if not edit or edit not in _PROTECTION_WORDS:
-        return DocumentProtection()
-    enforcement = node.get(_W + "enforcement")
-    return DocumentProtection(
-        mode=_PROTECTION_WORDS[edit],
-        enforced=enforcement in ("1", "true"),
-    )
+def protection_label(protection: DocumentProtection) -> str:
+    """The banner/ledger phrasing for a parsed protection state (spec §7)."""
+    if protection.edit is None:
+        return "none"
+    word = _PROTECTION_WORDS.get(protection.edit, protection.edit)
+    return f"{word} (enforced)" if protection.enforced else word
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +314,9 @@ def banner_for_document(doc: Any, hint: str = "") -> Optional[str]:
     """The full-view banner, computed without projecting values (spec §7)."""
     counts = field_summary(doc)
     protection = read_document_protection(doc)
-    if counts[0] == 0 and protection.mode == "none":
+    if counts[0] == 0 and protection.edit is None:
         return None
-    line = f"> **Protection:** {protection.label} \u00b7 **Fields:** {_summary_text(counts)}"
+    line = f"> **Protection:** {protection_label(protection)} \u00b7 **Fields:** {_summary_text(counts)}"
     return f"{line}{hint}" if hint else line
 
 
@@ -555,9 +506,9 @@ def render_banner(
     A plain document — no controls, no protection — gains zero noise. That is
     the rule that keeps this from taxing every ordinary read.
     """
-    if not entries and protection.mode == "none":
+    if not entries and protection.edit is None:
         return None
-    line = f"> **Protection:** {protection.label} \u00b7 **Fields:** {_fields_summary(entries)}"
+    line = f"> **Protection:** {protection_label(protection)} \u00b7 **Fields:** {_fields_summary(entries)}"
     return f"{line}{hint}" if hint else line
 
 
@@ -571,7 +522,7 @@ def render_ledger(
     """The ``mode="fields"`` body (spec §2-§4)."""
     header = [
         f"# Fields: {basename}",
-        f"Protection: {protection.label} \u00b7 {_fields_summary(entries)}",
+        f"Protection: {protection_label(protection)} \u00b7 {_fields_summary(entries)}",
     ]
     if not entries:
         return "\n".join(header + ["", "No content controls."])
@@ -640,12 +591,12 @@ def render_appendix_section(
     Header lines only: the full ledger never renders here, because the appendix
     is bounded and a 5,007-line ledger would swallow it.
     """
-    if counts[0] == 0 and protection.mode == "none":
+    if counts[0] == 0 and protection.edit is None:
         return []
     lines = [
         "## Content Controls",
         "",
-        f"Protection: {protection.label} \u00b7 {_summary_text(counts)}",
+        f"Protection: {protection_label(protection)} \u00b7 {_summary_text(counts)}",
     ]
     if hint:
         lines.append(hint)

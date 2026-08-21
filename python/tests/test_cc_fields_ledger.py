@@ -110,10 +110,15 @@ class TestA22ProtectionLine:
         ],
     )
     def test_every_protection_mode_has_a_word(self, edit, word):
+        """The parse is shared with CC-4's gate reader; only the WORDING is
+        ours. `describe()` says "fill-in-forms, enforced" for gate errors,
+        which A3.4 pins; the banner says "fill-in-forms only (enforced)"."""
+        from adeu.fields import protection_label
+
         doc, _ = _load(protection=edit, body_xml=self.EMPTY_BODY)
         prot = read_document_protection(doc)
-        assert prot.mode == word
-        assert prot.label == f"{word} (enforced)"
+        assert prot.edit == edit
+        assert protection_label(prot) == f"{word} (enforced)"
 
 
 class TestA25AnonymousControls:
