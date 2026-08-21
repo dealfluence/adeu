@@ -302,6 +302,10 @@ const CORPUS_PROJECTION_SIZES: Record<string, [number, number]> = {
   dau_acquisition_plan: [15_651, 15_090],
   wawd_esi_agreement: [15_858, 15_858],
   on_juries_form1: [5_505, 3_199],
+  // A .dotx. Absent from this table until CC-11, because python could not open
+  // one at all and there was nothing to pin against; both engines project the
+  // same 7,221 chars in both views (verified 2026-08-21).
+  odot_uic_drywell: [7_221, 7_221],
 };
 
 describe("corpus projection sizes are pinned to the python engine", () => {

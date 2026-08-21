@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
-from docx import Document
 
 from adeu.diff import generate_structured_edits
 from adeu.ingest import _extract_text_from_doc
@@ -21,6 +20,7 @@ from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.sanitize import transforms
 from adeu.sanitize.report import SanitizeReport
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.opc import load_document as Document
 
 logger = structlog.get_logger(__name__)
 

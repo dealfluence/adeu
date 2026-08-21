@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import structlog
-from docx import Document as load_document
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -22,6 +21,7 @@ from adeu.models import DeleteTableRow, InsertTableRow
 from adeu.pagination import parse_page_arg
 from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
+from adeu.utils.opc import load_document
 from adeu.utils.text import batch_details_header
 
 logger = structlog.get_logger(__name__)
@@ -289,8 +289,6 @@ if sys.platform == "win32":
         and avoids the COM round-trip overhead that dominated the old character-by-
         character traversal.
         """
-        from docx import Document as load_document
-
         from adeu.ingest import _extract_text_from_doc
 
         pythoncom.CoInitialize()

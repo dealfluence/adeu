@@ -31,12 +31,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from docx import Document
-
 from adeu.ingest import _extract_text_from_doc
 from adeu.outline import OutlineNode, extract_outline
 from adeu.pagination import PaginationResult, paginate, split_structural_appendix
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.opc import load_document as Document
 
 MAX_ENTRIES = 3
 

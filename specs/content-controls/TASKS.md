@@ -275,7 +275,9 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-11 â€” Python cannot open a `.dotx` at all (P1, dual-engine parity)
 
-- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch: content-controls-specs)
+- Status: `review` (agent: opencode-windows, 2026-08-21) â€” `.dotx`/`.dotm`/`.docm` open in
+  Python, save preserves the flavour, A5.7 un-xfailed, corpus parity table extended to
+  the 5th document. See PROGRESS.md 2026-08-21 (CC-11).
 - Found by: CC-3 (A5.7), 2026-08-21 â€” filed rather than fixed in place because the
   repair has a save-path fidelity question that deserves its own decision
 - Depends on: â€”
@@ -299,3 +301,12 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   is a **strict xfail** today, so it flips red the moment this lands and must be
   un-marked in the same PR. Add a synthetic .dotx fixture too: the corpus is optional,
   so a corpus-only guard is no guard on a default CI run.
+- Resolution: the Scope above proposed the WRONG repair, and the save-side question it
+  flagged is what exposed it. Normalising the content type on load does leak: `python-docx`
+  serialises `[Content_Types].xml` from the parts' own `content_type`, so the rewrite
+  rides along into `save()` and turns the user's template into a document â€” fidelity
+  lost by a *read*. Instead `adeu/utils/opc.py` registers the template and macro-enabled
+  content types against `DocumentPart` in `PartFactory.part_type_for`, so the part
+  becomes a real `DocumentPart` while keeping its own content type. `.dotx` in, `.dotx`
+  out, and the save-side question disappears rather than being traded off. All nine
+  `docx.Document` call sites now import `adeu.utils.opc.load_document`.

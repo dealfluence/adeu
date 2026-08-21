@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 import structlog
-from docx import Document
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
@@ -30,6 +29,7 @@ from adeu.utils.docx import (
     paragraph_mark_is_deleted,
     strip_bom_from_docx_bytes,
 )
+from adeu.utils.opc import load_document as Document
 from adeu.utils.text import escape_critic_tokens
 
 logger = structlog.get_logger(__name__)

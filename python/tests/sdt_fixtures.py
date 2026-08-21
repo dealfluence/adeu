@@ -92,6 +92,7 @@ def build_sdt_docx(
     custom_xml: str | None = None,
     store_item_id: str | None = None,
     glossary: dict[str, str] | None = None,
+    main_content_type: str | None = None,
 ) -> Path:
     """Write a Word-openable package whose `w:body` is `body`.
 
@@ -100,6 +101,11 @@ def build_sdt_docx(
     wire a data store for `w:dataBinding`; pass `custom_xml=None` while leaving
     a `w:storeItemID` in the body to get a DANGLING binding. `glossary` maps
     doc-part name -> placeholder prose.
+
+    `main_content_type` overrides the declared content type of
+    `word/document.xml`, which is the ONLY thing distinguishing a `.dotx`
+    template or a `.docm` macro-enabled document from a plain `.docx` (CC-11).
+    Defaults to the plain-document type.
     """
     doc_rels = [
         f'<Relationship Id="rId1" Type="{_REL_TYPE}/settings" Target="settings.xml"/>',
@@ -108,7 +114,7 @@ def build_sdt_docx(
     content_types = [
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
         '<Default Extension="xml" ContentType="application/xml"/>',
-        f'<Override PartName="/word/document.xml" ContentType="{_CT}.document.main+xml"/>',
+        f'<Override PartName="/word/document.xml" ContentType="{main_content_type or f"{_CT}.document.main+xml"}"/>',
         f'<Override PartName="/word/settings.xml" ContentType="{_CT}.settings+xml"/>',
         f'<Override PartName="/word/styles.xml" ContentType="{_CT}.styles+xml"/>',
     ]

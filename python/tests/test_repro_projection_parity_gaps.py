@@ -24,12 +24,13 @@ the Python side cannot silently re-open the gap.
 import io
 
 import pytest
-from docx import Document
+from docx import Document  # noqa: F401 — Document() with no args builds an empty doc; load_document opens bytes
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
 from adeu.redline.mapper import DocumentMapper
+from adeu.utils.opc import load_document
 
 NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
@@ -96,7 +97,7 @@ def test_markers_stay_balanced_when_a_whitespace_only_same_style_run_follows():
 
 def test_ingest_and_mapper_agree_on_merged_emphasis():
     data = _docx(_paragraph_of([("Name of Organization", BOLD), (" CSP Name", BOLD)]))
-    assert DocumentMapper(Document(io.BytesIO(data)), clean_view=True).full_text == _project(data)
+    assert DocumentMapper(load_document(io.BytesIO(data)), clean_view=True).full_text == _project(data)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +226,10 @@ CORPUS_PROJECTION_SIZES = {
     "dau_acquisition_plan": (15_651, 15_090),
     "wawd_esi_agreement": (15_858, 15_858),
     "on_juries_form1": (5_505, 3_199),
+    # A .dotx. Absent from this table until CC-11, because python could not open
+    # one at all and there was nothing to pin against; both engines project the
+    # same 7,221 chars in both views (verified 2026-08-21).
+    "odot_uic_drywell": (7_221, 7_221),
 }
 
 
@@ -257,7 +262,7 @@ def test_corpus_ingest_and_mapper_agree(key):
     data = corpus_path(key).read_bytes()
     for clean_view in (False, True):
         projected = extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
-        mapped = DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
+        mapped = DocumentMapper(load_document(io.BytesIO(data)), clean_view=clean_view).full_text
         assert mapped == projected, f"{key}: mapper drifted from ingest (clean={clean_view})"
 
 

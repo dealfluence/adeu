@@ -515,3 +515,63 @@ Verification: 10/10 views byte-identical python<->node (4 corpus documents plus
 the tracked-change fixture, raw and clean), zero mapper drift in either engine.
 python ruff + format + mypy clean, 1517 passed / 70 skipped. node build + lint
 clean, 758 passed / 1 skipped, 296, 42.
+
+## 2026-08-21 — CC-11: Python opens every WordprocessingML flavour (opencode-windows)
+
+`.dotx`, `.dotm` and `.docm` now open through every Python entry point, and a
+`.dotx` saves back as a `.dotx`. Status `review`.
+
+**The task description proposed the wrong fix, and its own open question is what
+exposed it.** CC-11 was filed with the scope "normalise the template content type
+in `strip_bom_from_docx_bytes`" plus a flagged worry: does the normalised type leak
+into the output? It does, unavoidably — `python-docx` serialises
+`[Content_Types].xml` from each part's own `content_type` attribute, so a load-time
+rewrite rides all the way through `save()` and silently converts the user's template
+into a document. A read-only operation would have cost the user their template. The
+worry was not a detail to trade off; it was the design telling us it was wrong.
+
+The repair instead teaches `python-docx` the other content types.
+`PartFactory.part_type_for` is the map it consults to pick a part's class;
+`adeu/utils/opc.py` registers `template.main+xml`,
+`document.macroEnabled.main+xml` and `template.macroEnabledTemplate.main+xml`
+against `DocumentPart`. The part then *is* a `DocumentPart` while keeping its own
+declared content type, so nothing needs rewriting and nothing can leak.
+`docx.Document()`'s own content-type equality check is bypassed by opening the
+package directly, which is also where the teaching error now lives: it names the
+content type it found and lists the four it accepts, instead of `python-docx`'s bare
+"is not a Word file" that the CLI surfaced as an unhandled traceback.
+`load_document()` deliberately requires its argument — `docx.Document()` defaults to
+opening a bundled empty template, which turns a forgotten argument into a silently
+empty document rather than an error.
+
+All nine `docx.Document` call sites (`ingest`, `redline/engine`,
+`mcp_components/doc_cache`, `sanitize/core`, `text_revision`, `utils/docx`, `cli`,
+`tools/live_word` x2) now import `adeu.utils.opc.load_document`.
+
+**Parity table extended to the fifth corpus document.** CC-3's pinned projection
+sizes covered four documents; `odot_uic_drywell` was missing for exactly one reason —
+python could not open it, so there was nothing to pin against. It projects 7,221
+chars in BOTH views in BOTH engines, byte-identical, and is now pinned in both
+`test_repro_projection_parity_gaps.py` and `repro_projection_parity_gaps.test.ts`.
+A5.1's "identical counts" assertion therefore covers the template case too.
+
+**Tests are synthetic, not corpus-only.** `tests/test_opc_document_types.py` builds
+all four flavours through `sdt_fixtures.build_sdt_docx(..., main_content_type=...)`
+(new kwarg) and asserts: each opens; the declared type never reaches the text
+projection; and `save()` round-trips the declared type unchanged. The corpus is
+gitignored and optional, so a corpus-only guard would skip straight past a regression
+on a default CI run. A5.7's strict xfail in `test_corpus_validation.py` is un-marked
+and passes.
+
+Also corrected two stale references in `repro_projection_parity_gaps.test.ts`: the
+skipped mapper-drift guards cite CC-11, but that drift is CC-12 — a leftover from the
+task-number collision. CC-11 is the `.dotx` row.
+
+Verification: python ruff + format + mypy clean, 1595 passed / 7 skipped / 0 failed;
+node build clean, lint clean, 755 passed + 5 skipped (the CC-12 guards) + 296 + 42.
+
+Note for whoever picks up CC-8 (docs): `is_template()` and `suggested_extension()`
+are exported from `adeu.utils.opc` for callers that write a NEW file beside the
+original and so have to choose an extension. Nothing uses them yet — the CLI and
+sanitize both write to a path the user supplied — but a `.dotx` sanitized to
+`out.docx` would be a surprise worth documenting.

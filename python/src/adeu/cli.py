@@ -1073,7 +1073,7 @@ def _load_docx_or_exit(path: Path):
         from adeu.utils.docx import strip_bom_from_docx_bytes
 
         sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-        from docx import Document as load_document
+        from adeu.utils.opc import load_document
 
         return load_document(BytesIO(sanitized_bytes))
     except Exception as e:

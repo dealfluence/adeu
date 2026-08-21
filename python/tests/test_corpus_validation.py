@@ -193,26 +193,18 @@ def test_a5_7_the_fixture_really_is_a_template():
     assert "template.main+xml" in content_types
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CC-11: the Python engine cannot open a .dotx at all â€” python-docx rejects "
-    "'template.main+xml'. Node opens the same file. Strict so this flips the moment "
-    "CC-11 lands rather than sitting here as a permanent skip.",
-)
 def test_a5_7_dotx_template_opens_through_the_standard_path():
     """A .dotx is an OPC package like any other; the engine must not sniff content types.
 
     The ledger/picture halves of A5.7 need CC-1. This is the half that is
-    testable today, and it fails: `python-docx`'s `Document()` raises
-    `ValueError: ... is not a Word file, content type is
-    '...wordprocessingml.template.main+xml'`, and the CLI surfaces it as an
-    unhandled traceback rather than a teaching error. `@adeu/core` reads the
-    same file happily (7,719 chars), so this is a dual-engine parity break as
-    well as a product gap â€” templates are exactly what a content-controls
-    initiative is for. Filed as CC-11; not fixed inside CC-3 because the repair
-    has a save-path fidelity question (does a normalised content type leak into
-    the output and turn the user's template into a document?) that deserves its
-    own row, not a drive-by.
+    testable today. It failed until CC-11: `python-docx`'s `Document()` accepts
+    exactly one main-part content type and raised `ValueError: ... is not a Word
+    file` on `template.main+xml`, which the CLI surfaced as an unhandled
+    traceback, while `@adeu/core` read the same file happily. `adeu.utils.opc`
+    now registers the template and macro-enabled content types against
+    `DocumentPart`, so the part keeps its own content type and a `.dotx` saves
+    back as a `.dotx` — see `tests/test_opc_document_types.py` for the
+    round-trip guard.
     """
     text = _project(corpus_path("odot_uic_drywell").read_bytes())
     assert text.strip(), "the .dotx projected nothing at all"

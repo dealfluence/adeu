@@ -1753,9 +1753,9 @@ def _validate_docx_main_part(sanitized_bytes: bytes) -> None:
         raise ValueError("not a valid DOCX file (got bad zip signature)") from e
 
     try:
-        from docx import Document
+        from adeu.utils.opc import load_document
 
-        Document(io.BytesIO(sanitized_bytes))
+        load_document(io.BytesIO(sanitized_bytes))
     except Exception as e:
         if isinstance(e, ValueError) and "not a valid DOCX file" in str(e):
             raise

@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import lxml.etree as etree
 import structlog
-from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
 from docx.text.paragraph import Paragraph
@@ -29,6 +28,7 @@ from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
 from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
+from adeu.utils.opc import load_document as Document
 from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import (
     PREVIEW_TEXT_CAP,
