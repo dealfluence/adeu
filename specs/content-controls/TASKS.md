@@ -55,7 +55,14 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     ingest AND mapper, so the Virtual Text contract holds by construction rather than
     by two implementations agreeing.
   - **1b — anchored leaves + groups + clean view** (osx): A1.1-A1.5, A1.10.
-  - **1c — checkboxes** (unclaimed): A1.8. Needs 1a only.
+  - **1c — checkboxes** (`in-progress`, agent: opencode-windows, since: 2026-08-21): A1.8.
+    Needs 1a only. Taking the COM + corpus reconnaissance half FIRST, while 1a is in
+    flight: what glyph/font pairs Word actually writes, whether `w14:checked` and the
+    glyph can disagree, and whether legacy `FORMCHECKBOX` (`w:fldChar`+`w:ffData`) is in
+    the corpus at all. §4 of spec-projection.md assumes `w14:checkbox`; if the wild is
+    mostly legacy form fields then A1.8 as written misses most real checkboxes, and that
+    is worth knowing BEFORE the projection is wired, not after. Touches tests + spec
+    only until 1a lands, so it cannot collide with osx's `classify_sdt` work.
   - **1d — chrome-stripping protection** (unclaimed): A1.6, outline
     `_strip_inline_formatting` + search `_emphasizedSnippet`. Needs 1b.
   - **1e — anchor fabrication refusal** (unclaimed): A1.7, validation layer. Needs 1b.
