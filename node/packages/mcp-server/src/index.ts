@@ -946,6 +946,34 @@ server.registerTool(
         .describe(
           "Whether to apply valid edits when some fail (salvage mode). Defaults to true.",
         ),
+      // CC-4 write-gate overrides (spec-gates.md §1). All default FALSE:
+      // §1 requires it because a truthy default survives client stripping,
+      // and a gate that defaults to off is a gate that does not exist.
+      // .default() rather than required, per the author_name note above:
+      // real clients drop primitive entries from required[].
+      ignore_control_locks: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Apply edits even inside content-locked or grouped content controls. Defaults to false. " +
+            "Word refuses such edits, so overriding means the document owner has accepted the lock is wrong.",
+        ),
+      ignore_document_protection: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Apply changes even when the document carries enforced editing protection " +
+            "(read-only, fill-in-forms, comments-only, tracked-changes-only). Defaults to false.",
+        ),
+      allow_untracked_writes: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Permit writes that Word records WITHOUT tracked changes. Defaults to false. Applies only " +
+            "to fill-in-forms-protected documents, where Word does not record revisions at all; every " +
+            "such write is flagged in the report. Separate from ignore_document_protection because it " +
+            "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
+        ),
     },
   },
   async ({
@@ -955,6 +983,9 @@ server.registerTool(
     changes,
     output_path,
     partial,
+    ignore_control_locks,
+    ignore_document_protection,
+    allow_untracked_writes,
   }) => {
     try {
       void reasoning;
@@ -1095,6 +1126,9 @@ server.registerTool(
       }
       const engine = new RedlineEngine(doc, author_name, {
         id_discovery_hint: MCP_ID_DISCOVERY_HINT,
+        ignore_control_locks,
+        ignore_document_protection,
+        allow_untracked_writes,
       });
 
       let stats;
@@ -1659,6 +1693,12 @@ server.registerTool(
 export function formatBatchResult(stats: any, outPath: string): string {
   // Rendered markdown is the minimal form for MCP tool output; see payloads.ts for structured consumers.
   let res = `Batch complete. Saved to: ${outPath}\n`;
+  // spec-gates §5: an exercised override is disclosed in the report header,
+  // beside the impersonation warning, because both are "this batch did
+  // something the default would not have".
+  if (stats.overrides_note) {
+    res += `\n*${stats.overrides_note}*\n`;
+  }
   if (stats.author_impersonation_warning) {
     res += `\n*Warning:* ${stats.author_impersonation_warning}\n`;
   }

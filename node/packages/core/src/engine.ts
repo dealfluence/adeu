@@ -37,6 +37,31 @@ import {
 } from "./utils/text.js";
 import { RegexTimeoutError } from "./utils/safe-regex.js";
 import { CORE_VERSION } from "./version.js";
+import type { SdtInfo } from "./utils/content-controls.js";
+import type { DocumentProtection } from "./utils/protection.js";
+import {
+  UNPROTECTED,
+  isProtectionActive,
+  readDocumentProtection,
+} from "./utils/protection.js";
+import {
+  type GateOverrides,
+  NO_OVERRIDES,
+  checkBlockMergeAcrossControl,
+  checkBoundControl,
+  checkCheckboxEdit,
+  checkContentLock,
+  checkDeleteLock,
+  checkGroupRegion,
+  checkPlaceholderTarget,
+  checkProtectionBlocksEdit,
+  checkProtectionBlocksReview,
+  checkUntrackedWrite,
+  crossedControlWalls,
+  describeControl,
+  overridesNote,
+  segmentationNote,
+} from "./gates.js";
 
 // Ceiling for refusal advisory message characters (~70 approx tokens).
 const GUARD_MESSAGE_CAP = 70 * 4;
@@ -590,6 +615,13 @@ export class RedlineEngine {
   public clean_mapper: DocumentMapper | null = null;
   public original_mapper: DocumentMapper | null = null;
   public skipped_details: string[] = [];
+  /** CC-4 per-batch override opt-outs (spec-gates §1); all default false. */
+  public gate_overrides: GateOverrides = NO_OVERRIDES;
+  /** Protection state, read once at load (spec-gates §3). */
+  public protection: DocumentProtection = UNPROTECTED;
+  /** Controls whose locks an override actually bypassed, for the report
+   *  disclosure (spec-gates §5). Reset per batch. */
+  public _overridden_controls: SdtInfo[] = [];
   /** Comment removals accept_all_revisions actually performed, attributed to
    *  their authors ("Com:1 (by Sarah Chen)") — see B2 in
    *  BUG_comment_threading_anchoring_and_typography.md. */
@@ -611,11 +643,30 @@ export class RedlineEngine {
   constructor(
     doc: DocumentObject,
     author: string = "Adeu AI (TS)",
-    opts?: { id_discovery_hint?: string },
+    opts?: {
+      id_discovery_hint?: string;
+      ignore_control_locks?: boolean;
+      ignore_document_protection?: boolean;
+      allow_untracked_writes?: boolean;
+    },
   ) {
     this.doc = doc;
     this.author = author;
     this.id_discovery_hint = opts?.id_discovery_hint ?? null;
+    // CC-4 write-gate overrides. Constructor options rather than
+    // process_batch arguments because the gates run in three places —
+    // validate_edits, the resolver and the apply-path backstop — and only the
+    // first takes batch arguments today. Python twin: RedlineEngine.__init__.
+    this.gate_overrides = {
+      ignore_control_locks: opts?.ignore_control_locks ?? false,
+      ignore_document_protection: opts?.ignore_document_protection ?? false,
+      allow_untracked_writes: opts?.allow_untracked_writes ?? false,
+    };
+    // Read once at load (spec-gates §3), not per gate: it lives in
+    // word/settings.xml, which nothing else in a batch touches, and the
+    // gates, the projection banner and the fields ledger must all report the
+    // same state.
+    this.protection = readDocumentProtection(doc);
     this.timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
     const w16du_ns =
@@ -3003,6 +3054,193 @@ export class RedlineEngine {
     return deleted;
   }
 
+  /** [intersecting, at_start, at_end] control stacks for a changed range. */
+  private _control_gate_context(
+    mapper: any,
+    start: number,
+    length: number,
+  ): [SdtInfo[], SdtInfo[], SdtInfo[]] {
+    const intersecting =
+      typeof mapper?.controls_intersecting === "function"
+        ? mapper.controls_intersecting(start, length)
+        : [];
+    const at_start =
+      typeof mapper?.controls_at === "function" ? mapper.controls_at(start) : [];
+    const at_end =
+      typeof mapper?.controls_at === "function"
+        ? mapper.controls_at(Math.max(start + length - 1, start))
+        : [];
+    return [intersecting, at_start, at_end];
+  }
+
+  /**
+   * Would this edit dissolve `info`'s wrapper rather than empty it?
+   *
+   * G2 protects a control's EXISTENCE, not its text: emptying a delete-locked
+   * control is allowed and leaves the wrapper with an empty pair (A3.3). Only
+   * a deletion that also consumes text outside the control would have to hoist
+   * the wrapper away, so the test is "covers all of the content AND reaches
+   * past it".
+   */
+  private _deletes_entire_control(
+    mapper: any,
+    info: SdtInfo,
+    start: number,
+    length: number,
+    final_new: string,
+  ): boolean {
+    if (final_new.trim() !== "") return false;
+    const ranges: [number, number, SdtInfo][] = mapper?.control_ranges ?? [];
+    const rng = ranges.find((r) => r[2] === info);
+    if (!rng) return false;
+    const [c_start, c_end] = rng;
+    const covers_all = start <= c_start && start + length >= c_end;
+    const reaches_outside = start < c_start || start + length > c_end;
+    return covers_all && reaches_outside;
+  }
+
+  /**
+   * Run the CC-4 gate matrix over one resolved edit; first failure wins.
+   *
+   * Order is deliberate, most-fundamental first: document protection binds
+   * regardless of where the edit lands, so it is checked before anything about
+   * the control; then the two category errors that no override can reasonably
+   * bypass (bound content, placeholder ghosts), because telling the caller
+   * "this text is not what you think it is" is more useful than telling them a
+   * lock stopped them; then the lock gates; then structure.
+   *
+   * Python twin: RedlineEngine._check_control_gates.
+   */
+  private _check_control_gates(
+    edit_number: number,
+    edit: any,
+    mapper: any,
+    start: number,
+    length: number,
+    final_target: string = "",
+    final_new: string = "",
+  ): string | null {
+    const overrides = this.gate_overrides;
+    const infos: SdtInfo[] = Array.from(
+      (mapper?._sdt_infos as Map<any, SdtInfo> | undefined)?.values() ?? [],
+    );
+    const [intersecting, at_start, at_end] = this._control_gate_context(
+      mapper,
+      start,
+      length,
+    );
+
+    const is_comment_only =
+      !!edit.comment && (edit.new_text || "") === (edit.target_text || "");
+
+    let err = checkProtectionBlocksEdit(edit_number, this.protection, {
+      controls: intersecting,
+      isCommentOnly: is_comment_only,
+      overrides,
+    });
+    if (err) return err;
+    // Comment-only edits mutate no text, so the tracking guarantee that G5's
+    // untracked-write gate defends is not at stake for them.
+    if (!is_comment_only) {
+      err = checkUntrackedWrite(edit_number, this.protection, overrides);
+      if (err) return err;
+    }
+
+    // G8 works off the target string, not the range: an empty control has no
+    // content spans to intersect (see gates.checkPlaceholderTarget).
+    err = checkPlaceholderTarget(edit_number, edit.target_text || "", infos);
+    if (err) return err;
+
+    if (intersecting.length === 0) return null;
+
+    err = checkBoundControl(edit_number, intersecting);
+    if (err) return err;
+    err = checkCheckboxEdit(
+      edit_number,
+      intersecting,
+      edit.target_text || "",
+      edit.new_text || "",
+    );
+    if (err) return err;
+    err = checkContentLock(edit_number, intersecting, overrides);
+    if (err) return err;
+    err = checkGroupRegion(edit_number, intersecting, overrides);
+    if (err) return err;
+    for (const info of intersecting) {
+      if (this._deletes_entire_control(mapper, info, start, length, final_new)) {
+        err = checkDeleteLock(edit_number, [info], true, overrides);
+        if (err) return err;
+      }
+    }
+
+    // G15: a merge is what makes a wall crossing structural rather than
+    // segmentable. Without a paragraph break being consumed, a crossing is
+    // G14's business (auto-segment), not a refusal.
+    if (final_target.includes("\n\n") && !final_new.includes("\n\n")) {
+      const crossed = crossedControlWalls(intersecting, at_start, at_end);
+      err = checkBlockMergeAcrossControl(edit_number, crossed);
+      if (err) return err;
+    }
+
+    // G14: the edit is valid on both sides of a wall it crosses, so it
+    // applies — the word-level sub-edit splitter already lands each half on
+    // its own side. What was missing is the disclosure: an agent that asked to
+    // change text "in CC:3" and silently got a change half outside it has been
+    // told something untrue by omission.
+    const crossed = crossedControlWalls(intersecting, at_start, at_end);
+    if (crossed.length > 0) {
+      edit._warning = segmentationNote(crossed);
+    }
+
+    // Record what an override let through, for the report disclosure.
+    if (overrides.ignore_control_locks) {
+      for (const info of intersecting) {
+        if (info.contentLocked || info.cls === "group") {
+          if (!this._overridden_controls.includes(info)) {
+            this._overridden_controls.push(info);
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The apply-path subset of the gate matrix; a reason string, or null.
+   *
+   * Only the document-property gates run here — content locks, group regions,
+   * data binding and protection. Deliberately not the whole matrix: G8 and G11
+   * depend on the target STRING, and G14/G15 on the edit's shape, none of
+   * which a positionally-pinned edit has resolved in a form this layer can
+   * trust. Those stay validate-only, exactly as the paragraph-merge refusal
+   * does.
+   */
+  private _apply_gate_refusal(
+    mapper: any,
+    start: number,
+    length: number,
+  ): string | null {
+    const overrides = this.gate_overrides;
+    if (
+      isProtectionActive(this.protection) &&
+      !overrides.ignore_document_protection &&
+      this.protection.edit === "readOnly"
+    ) {
+      return "document is read-only protected";
+    }
+    const controls: SdtInfo[] =
+      typeof mapper?.controls_intersecting === "function"
+        ? mapper.controls_intersecting(start, length)
+        : [];
+    if (controls.length === 0) return null;
+    const bound = controls.find((i) => i.bound);
+    if (bound) return `${describeControl(bound)} is data-bound`;
+    if (overrides.ignore_control_locks) return null;
+    const locked = controls.find((i) => i.contentLocked);
+    if (locked) return `${describeControl(locked)} is content-locked`;
+    return null;
+  }
+
   public validate_edits(edits: any[], index_offset: number = 0): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
@@ -3274,6 +3512,28 @@ export class RedlineEngine {
         // shared context are fine.
         const eff_start = m_start + pfx;
         const eff_end = m_start + m_len - sfx;
+
+        // CC-4 content-control gates (spec-gates §2). Same shape as the
+        // part-boundary refusal above, for the same reason: a control wall is
+        // a place where an edit that looks fine in the flattened projection
+        // cannot be applied to the XML.
+        //
+        // The CHANGED range (eff_*), not the raw match, so shared context
+        // reaching into a locked control does not by itself refuse the edit —
+        // the caller is not modifying it. This is the image-marker gate's
+        // rule, not the part gate's: the part gate uses the raw range because
+        // the insertion ANCHOR is ambiguous at a part gap, which has no
+        // analogue here.
+        const gate_error = this._check_control_gates(
+          i + 1 + index_offset,
+          edit,
+          target_mapper,
+          eff_start,
+          Math.max(eff_end - eff_start, 0),
+          final_target,
+          final_new,
+        );
+        if (gate_error) errors.push(gate_error);
         if (eff_end > eff_start) {
           const overlapping = target_mapper.spans.filter(
             (s) =>
@@ -3944,6 +4204,7 @@ export class RedlineEngine {
     }
 
     this.skipped_details = [];
+    this._overridden_controls = [];
     // (0-based index in the CALLER's array, reason) for every failure, whatever
     // bucket it came from — the machine-readable half of the failure envelope
     // (B9, mirrors engine.py:2673).
@@ -3981,10 +4242,26 @@ export class RedlineEngine {
     // The document-aware pairing check runs BEFORE any action mutates the
     // DOM: accept + reject across one replacement's del+ins pair is a
     // contradiction, not two independent operations (ADEU-QA-004).
-    let action_errors =
-      actions.length > 0
-        ? this.validate_review_actions(actions, action_indices, partial)
-        : [];
+    // G7/G4 (spec-gates §2): protection gates review actions BEFORE the
+    // id-existence check, because "that id does not exist" would be a
+    // misleading answer to "why did my Accept fail" in a document where no
+    // Accept can succeed at all.
+    let action_errors: string[] = [];
+    for (let n = 0; n < actions.length; n++) {
+      const err = checkProtectionBlocksReview(
+        action_indices[n] + 1,
+        (actions[n] as any)?.type ?? "",
+        this.protection,
+        this.gate_overrides,
+      );
+      if (err) action_errors.push(err);
+    }
+    if (action_errors.length === 0) {
+      action_errors =
+        actions.length > 0
+          ? this.validate_review_actions(actions, action_indices, partial)
+          : [];
+    }
     if (actions.length > 0 && action_errors.length === 0) {
       action_errors = this.validate_action_pairing(actions, action_indices);
     }
@@ -4257,6 +4534,10 @@ export class RedlineEngine {
       // engine.py:2864-2869.
       status: partial && failed_list.length > 0 ? "partial" : "ok",
       author_impersonation_warning: author_impersonation_warning,
+      // spec-gates §5: an override that was actually exercised is disclosed in
+      // the report header. Silence here would let a batch bypass a safety rail
+      // with no trace for the human reviewing it.
+      overrides_note: overridesNote(this.gate_overrides, this._overridden_controls),
       failed: failed_list.map(([index, reason]) => ({
         index,
         reason,
@@ -6940,6 +7221,23 @@ export class RedlineEngine {
         console.error(
           `Refusing edit that spans OPC part boundary (start=${start_idx}, parts=${Array.from(crossed_parts).sort().join(",")})`,
         );
+        return false;
+      }
+    }
+
+    // CC-4 (apply-level backstop, same reason as C1 above): pinned edits skip
+    // validate_edits AND the resolver, so a diff-generated batch reaches here
+    // with no gate having run. Only the gates whose answer cannot change
+    // between validate and apply are repeated — locks, binding and protection
+    // are properties of the document, not of the match, so re-deriving them
+    // here is cheap and cannot disagree.
+    if ((op === "DELETION" || op === "MODIFICATION") && length) {
+      const blocked = this._apply_gate_refusal(active_mapper, start_idx, length);
+      if (blocked) {
+        console.error(
+          `Refusing edit inside a gated content control (start=${start_idx}, reason=${blocked})`,
+        );
+        if (!edit._error_msg) edit._error_msg = blocked;
         return false;
       }
     }

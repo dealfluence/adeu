@@ -1564,6 +1564,10 @@ def handle_apply(args):
                 for item in failed_items:
                     print(f"  - Change #{item['index'] + 1} Failed: {item['reason']}", file=sys.stderr)
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+            if stats.get("overrides_note"):
+                # spec-gates §5. stderr, like the impersonation warning: it is
+                # a note about how the batch ran, not part of the result.
+                print(f"⚠️  {stats['overrides_note']}", file=sys.stderr)
             if stats.get("author_impersonation_warning"):
                 print(f"⚠️  {stats['author_impersonation_warning']}", file=sys.stderr)
 
