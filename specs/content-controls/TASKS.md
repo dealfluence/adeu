@@ -17,7 +17,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-0 — Python parity: SDT-wrapped table rows/cells are invisible (P0, data loss)
 
-- Status: `pending`
+- Status: `in-progress (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)`
 - Depends on: —
 - Acceptance: [A0](acceptance/A0-table-sdt-visibility.md) (all examples)
 - Scope: Python traversal must descend into row-level (`sdtContent > w:tr`) and
