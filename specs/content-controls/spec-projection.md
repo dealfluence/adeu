@@ -89,6 +89,22 @@ placeholder := "{>>placeholder: " TEXT "<<}"
   disambiguating context as usual) is the text-first toggle and MUST route through
   checkbox semantics (glyph swap + `w14:checked` update, spec-set-field.md §5.5). Any
   other textual mutation of the token is rejected (A3.8).
+- **A checkbox control is not always inline.** This section was written assuming it is;
+  the corpus disagrees. In `odot_uic_drywell`, 11 of 19 checkboxes are *cell-level* — a
+  `w:sdt` whose parent is `w:tr`, wrapping an entire `w:tc` that contains nothing but the
+  glyph, which is how Word writes a checkbox column in a form table. The projection is
+  unchanged (that cell projects the token and nothing else), so this is a clarification
+  and not a distinct case to implement. It is called out because it dictates *where* the
+  substitution has to live: cell-level controls never pass through the `w:sdt` branch of
+  the traversal, so both engines substitute at **run emission**, the one point every
+  path reaches. Added by CC-1c, 2026-08-21, with Mikko's sign-off.
+- The mark is read from `w14:checked`, never inferred from the glyph, and carries **no
+  emphasis markers** even when the glyph run is bold or italic — the token is chrome, and
+  `[**x**]` would hand every marker-stripping pass something to mangle. CC-1c found 13 of
+  `odot_uic_drywell`'s 19 control glyphs arrived wrapped in `**`.
+- Ballot glyphs **outside** any checkbox control are prose and are left alone. The "never
+  the raw glyph" rule above is scoped to control content: the same document carries two
+  bare `☐` runs in ordinary prose, and rewriting those would fabricate two controls.
 
 ## 5. Group controls
 

@@ -42,7 +42,8 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-1 — Projection: sdt events, anchors, flags, checkboxes, placeholder bubbles (P1)
 
-- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
+- Status: `done` (2026-08-21) — all five in-scope sub-items landed across both agents;
+  1f reassigned to CC-2 by Mikko. See the completion note under the decomposition.
 - **Decomposition** (osx, 2026-08-21). CC-1 is multi-session; slicing it so the two
   agents can work in parallel without fighting over the same files. I am taking
   **1a then 1b** (they are one design and splitting them would mean writing the event
@@ -68,7 +69,22 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     remove. Verified 14/14 projections byte-identical py↔node with zero mapper drift.
     Two node-only defects found by that comparison and fixed here (hyperlinks losing
     their OPC part inside block controls; see PROGRESS.md).
-  - **1c — checkboxes** (`in-progress`, agent: opencode-windows, since: 2026-08-21): A1.8.
+  - **1c — checkboxes** (`done (7ab331f)`, agent: opencode-windows, 2026-08-21): A1.8.
+    Both engines, ingest and mapper, both views; 9 tests each side asserting the same
+    strings; the CC-1b golden shim for CC:6 is deleted, so A1.1/A1.2 are now exact for
+    all 16 controls. Three findings worth carrying forward, all in PROGRESS.md and
+    folded into spec-projection.md §4 with Mikko's sign-off:
+    **(i)** a checkbox is not always inline — 11 of `odot_uic_drywell`'s 19 are
+    cell-level (`w:sdt` parented by `w:tr`, wrapping a whole `w:tc`) and never reach the
+    sdt branch, so both engines substitute at **run emission**, the one point every path
+    passes through;
+    **(ii)** the corpus sizes moved and one moved DOWN — 13 of those 19 control glyphs
+    arrived wrapped in `**`, and dropping those markers outweighs the token widening,
+    net −14 on that document; attributed to the character in both parity tables;
+    **(iii)** the node `golden()` helper was broken on every Windows checkout (CRLF
+    against a `\n```\n` fence match), so A1.1/A1.2 were unverifiable here while staying
+    green on macOS — fixed in the same commit, and `ccFixtureBodyXml()` hardened against
+    the latent form of it. Original scope follows.
     Needs 1a only. Taking the COM + corpus reconnaissance half FIRST, while 1a is in
     flight: what glyph/font pairs Word actually writes, whether `w14:checked` and the
     glyph can disagree, and whether legacy `FORMCHECKBOX` (`w:fldChar`+`w:ffData`) is in
@@ -107,9 +123,13 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     text-first fill on). Both carve-outs are pinned. Suites:
     `test_cc_anchor_fabrication_refusal.py` (17) and its node twin (17); both fail 10/17
     against the unfixed code.
-  - **1f — banner** (unclaimed): A1.9. Touches CLI + both MCP servers and overlaps
-    CC-2's surface work — probably belongs WITH CC-2 rather than here; whoever takes
-    CC-2 should take it.
+  - **1f — banner** (`moved to CC-2`, Mikko 2026-08-21): A1.9. Confirmed: it touches the
+    CLI and both MCP servers, which is CC-2's surface exactly, and doing it here would
+    mean visiting those three surfaces twice. **A1.9 is now CC-2's acceptance, not
+    CC-1's** — CC-1 does not wait on it.
+- **CC-1 is complete** (`done`, 2026-08-21): 1a `38444d2`, 1b `eb0a141`, 1c `7ab331f`,
+  1d `a576f34`, 1e `c532d5b`; 1f reassigned to CC-2 above. This unblocks CC-2, CC-4,
+  CC-5 and the CC-1-dependent half of CC-3.
 - Depends on: CC-0
 - Acceptance: [A1](acceptance/A1-projection.md) (all examples), golden fixture in
   [acceptance/fixture-standard.md](acceptance/fixture-standard.md)
@@ -123,19 +143,22 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-2 — Fields ledger, appendix summary, banner (P1)
 
-- Status: `pending`
-- Depends on: CC-1
-- Acceptance: [A2](acceptance/A2-fields-ledger.md) (all examples)
+- Status: `pending` — **claimable now, CC-1 is `done`.**
+- Depends on: CC-1 (`done`)
+- Acceptance: [A2](acceptance/A2-fields-ledger.md) (all examples), **plus A1.9 (the
+  protection/fields banner), reassigned here from CC-1f by Mikko 2026-08-21** — it
+  touches the CLI and both MCP servers, which is this task's surface exactly.
 - Scope: `read_docx(mode="fields")` + `fields_offset` pagination (MCP, both servers),
   `adeu extract --mode fields` (CLI), appendix "Content Controls" summary block,
   protection/fields banner on full view. Line format per spec-fields-ledger.md, exact.
 
 ## CC-3 — Corpus fetch mechanism + corpus validation tests (P1)
 
-- Status: `review` (agent: opencode-windows, 2026-08-21) — mechanism, helpers, CI job and
-  the **pre-CC-1 subset** of A5 are done and green in both engines. The remaining A5
-  examples need CC-1/CC-2/CC-4/CC-5 and are listed per-blocker in PROGRESS.md; this row
-  goes `done` when the last of them lands (or Mikko splits the tail into CC-3b).
+- Status: `done` (agent: opencode-windows, 2026-08-21) — mechanism, helpers, CI job and
+  the **pre-CC-1 subset** of A5 are done and green in both engines. **Split by Mikko,
+  2026-08-21:** the dependent tail is now **CC-3b** below rather than holding this row
+  open for the whole initiative. A row that sits in `review` until every other task
+  lands is a poor signal — the mechanism this task was actually about is finished.
   Spun out: **CC-11** (Python cannot open a .dotx — A5.7 is a strict xfail until fixed).
 - Depends on: CC-0 (cell-level counts require Python parity) — `review`, engine fix merged
 - Acceptance: [A5](acceptance/A5-corpus-validation.md) — A5.9 done; A5.1/A5.7/A5.8 done
@@ -147,6 +170,22 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   implements the A5 invariant tests, and adds an optional CI job (manual trigger /
   `ADEU_FETCH_CORPUS=1`) that fetches and runs them.
 
+## CC-3b — The dependency-blocked tail of A5 corpus validation (P1)
+
+- Status: `pending` — split out of CC-3 by Mikko, 2026-08-21, so CC-3's finished
+  mechanism could close instead of tracking other people's work.
+- Depends on: CC-2 (A5.2 ledger), CC-4 (A5.3 gates), CC-5 (A5.4 `set_field`),
+  CC-1 (A5.5 anchors — now `done`, so A5.5 is claimable immediately), A5.6
+- Acceptance: the A5 examples CC-3 could not reach — A5.2, A5.3, A5.4, A5.5, A5.6.
+  Per-blocker detail is in PROGRESS.md under CC-3.
+- Scope: no new mechanism. `corpus_path()` / `corpusPath()`, the skip-if-missing
+  fixtures and the optional CI job all exist; this row is purely the remaining
+  invariant tests, each landing as its blocker clears.
+- Note: **A5.1's identical-counts assertion is still blocked** on the two known
+  python/node divergences (emphasis-marker coalescing, and header lines node projects
+  that python omits) — see CC-10's closing note, which measured that closing the page
+  break gap alone flipped the sign rather than closing it.
+
 ## CC-4 — Write gates: locks, groups, document protection, placeholder targets (P2)
 
 - Status: `pending`
@@ -157,13 +196,32 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   (MCP both servers, CLI flags `--ignore-control-locks` / `--ignore-document-protection`);
   boundary auto-segmentation at control walls; block-merge refusal across SDT boundaries;
   review-action gating per spec — resolved by CC-6: G9 is now *allow* (Word permits
-  Accept/Reject inside locked controls), G7 confirmed. One open question for G5, in
-  PROGRESS.md, needs Mikko's answer before this task's error contracts are final.
+  Accept/Reject inside locked controls), G7 confirmed.
+- **G5 resolved by Mikko, 2026-08-21** (spec-gates.md §1a). Under `edit="forms"` Word
+  writes the permitted fills untracked and *reading* `TrackRevisions` throws, so Adeu's
+  "always tracked" contract is unenforceable there. Decision: **refuse by default, with
+  an explicit per-batch opt-in.** A new `allow_untracked_writes` param (schema default
+  `false`; CLI `--allow-untracked-writes`) unlocks G5 only; without it the write is
+  rejected with a teaching error naming the cause, and with it every untracked write
+  carries its own report note. Deliberately NOT folded into
+  `ignore_document_protection`: that bypasses a gate the author set, whereas this
+  accepts a downgrade of Adeu's own output guarantee, and the G5 writes in question are
+  ones Word itself permits — no protection is being ignored. This task's error contracts
+  are now final.
 
 ## CC-5 — `set_field` change type + fill semantics (P2)
 
 - Status: `pending`
 - Depends on: CC-4; CC-6 findings must be recorded before this task's PR merges
+- **Scope grew, Mikko 2026-08-21: the bound-control reject path is now v1, not CC-9.**
+  CC-6(e) found that Word rewrites a bound control's content from its XML store on open,
+  and that a headless reject leaves the store holding the *rejected* value — so the next
+  open silently re-applies what the user rejected. A reject that undoes itself, with no
+  error. That is the same silent-wrong-output class as CC-14, which is treated as P1, so
+  parking it in a P3 row was not defensible. Minimum for v1, in this task: either
+  dual-write the store on reject, or — cheaper and sufficient — **gate it**, refusing
+  `RejectChange` inside a data-bound control with an error that names the reason. The
+  richer resync policy and repeating-section work stay in CC-9.
 - Acceptance: [A4](acceptance/A4-set-field.md) (all examples)
 - Scope: `set_field` in the DocumentChange union + flat MCP schema (both engines),
   resolution order CC-ordinal → tag → alias, `match_mode` reuse; per-type semantics
@@ -173,9 +231,11 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-6 — Word COM verification battery (P2, informs CC-4/CC-5)
 
-- Status: `review` (agent: opencode-windows, 2026-08-21) — findings landed, tests green;
-  two items need Mikko's sign-off before `done`: the G5 forms-protection question and
-  the CC-9 bound-store reject-resync scope (both in PROGRESS.md)
+- Status: `done` (agent: opencode-windows, 2026-08-21) — findings landed, 18 COM-backed
+  tests green, and both sign-off items answered by Mikko on 2026-08-21: **G5** resolved
+  as refuse-by-default plus an `allow_untracked_writes` opt-in (recorded on CC-4 and in
+  spec-gates.md §1a), and the **bound-store reject-resync** pulled out of CC-9 into CC-5
+  as a v1 requirement (recorded on CC-5). Nothing in this row is outstanding.
 - Depends on: CC-1 (fixture builders reused) — started ahead of it; deviation disclosed
   in PROGRESS.md. Ran on Windows + real Word (16.0)
   (`python/tests/word_com.py` harness, `xdist_group("live_word")`)
@@ -329,9 +389,15 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-13 — The live-Word suite is nondeterministic and blocks `git push` (P1, tooling)
 
-- Status: `review` (agent: opencode-windows, since: 2026-08-21, branch:
-  content-controls-specs) — acceptance met with one honest residual, see the
-  measurement block below. Pushing from Windows is no longer a coin flip.
+- Status: `done` (agent: opencode-windows, 2026-08-21; `e33a615` + `c1f1adf`) — closed by
+  Mikko's call on 2026-08-21: **the live-Word suite stays in the pre-push hook and the
+  residual flakiness is accepted for now**, as out of scope for the content-controls
+  work. Quarantining (option 4) was offered and declined. What landed is option 2 done
+  properly: measured 15 consecutive runs of all 43 live-Word tests with a deliberately
+  poisoned Word, zero failures, against a baseline that failed >50% of the time. The
+  honest residual below stands — roughly one uncharacterised failure in ~21 runs, and a
+  4x slowdown when strays accumulate — and options 1 and 3 remain the principled fixes
+  for whoever needs them. Recorded, not hidden.
   Found while verifying CC-1c. Taken ahead of CC-1c's
   implementation half for two reasons: 1c's wiring lands in the same traversal code
   osx is editing for 1b right now, and this row is what makes any Windows push
@@ -488,6 +554,11 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   wins on open — so the stale-store risk lives entirely in Adeu's headless reject path,
   and a stale store does not just disagree, it re-applies the rejected value. Scope the
   resync policy around reject, not accept.
+- **Descoped by Mikko, 2026-08-21: the reject path itself is no longer this row's.** It
+  moved to **CC-5** as a v1 requirement (fix or gate), because shipping a silent
+  re-application of a rejected value is the CC-14 failure class and does not belong
+  behind a P3 gate. What remains here is the richer policy — full dual-write hardening,
+  resync on accept, and the repeating-section operations.
 
 ## CC-11 — Python cannot open a `.dotx` at all (P1, dual-engine parity)
 

@@ -1092,3 +1092,108 @@ each run, sometimes neither) and pass 55/55 serially. Reproduced on a clean
 tree at 2 of 3 full-suite runs, so it is pre-existing and not CC-14's. It is
 the same class as the flake already noted for `TestC1FooterBoundary`; worth its
 own row if it starts costing anyone time.
+
+---
+
+## 2026-08-21 — CC-1c checkbox projection + six decisions from Mikko (opencode-windows)
+
+CC-1c landed (`7ab331f`), CC-1 is complete, and the blocked list was worked through
+with Mikko. Recording the engineering findings first, the decisions second.
+
+### What CC-1c actually cost, and why the numbers look wrong
+
+A `w14:checkbox` now projects `[x]` / `[ ]` in both engines, ingest and mapper, both
+views. The mark is read from `w14:checked` and never inferred from the glyph — a COM
+finding, not a preference: Word restores `w14:checked` when a toggle is rejected, so
+the attribute is the settled value while the glyph can lag it inside a pending
+revision. `[` and `]` are virtual; the mark is a **real run-backed span** over the
+glyph run. Because Word writes the glyph as literal `w:t`, the substitution is one
+character for one character and no offset arithmetic downstream changes.
+
+Three things the corpus taught that the spec did not:
+
+1. **A checkbox is not always inline, and §4 assumed it was.** 11 of
+   `odot_uic_drywell`'s 19 checkboxes are cell-level — a `w:sdt` whose parent is `w:tr`,
+   wrapping an entire `w:tc` that holds nothing but the glyph, which is how Word writes
+   a checkbox column in a form table. Those never pass through the `w:sdt` branch of the
+   traversal at all. This is why both engines substitute at **run emission** instead:
+   it is the one point every path reaches, so the fix is path-independent by
+   construction rather than by enumeration. The `w:sdt` branch keeps only the degenerate
+   no-glyph fallback, so a generated control cannot collapse to a two-character `[]`.
+   §4 amended with a clarification (not a behaviour change) on Mikko's sign-off.
+
+2. **The corpus size went DOWN, which looked like a bug and was not.**
+   `odot_uic_drywell` moved 7,449 → 7,435. Expected was +38 (19 controls × 2 chars of
+   token width). Attribution, verified against a baseline worktree at `d05621c` rather
+   than reasoned about: of the document's 21 ballot glyphs, 19 sit in controls and
+   **13 of those arrived wrapped in emphasis markers**, projecting as `**<glyph>**`.
+   The mark is chrome and now carries none, so −52 for 13 × 4 dropped marker characters
+   against +38 of width, net −14. Exact. The old projection was literally handing an
+   LLM `**☐**`. `fedramp_ssp_rev4` moved +7,762 on both views = 3,881 checkboxes × 2,
+   with no emphasis involved. Both engines agree on all four values; the parity tables
+   carry the attribution inline so the next reader does not have to redo this.
+
+3. **The two bare prose glyphs are the whole reason the gate is where it is.** The
+   glyph test runs BEFORE the walk to the enclosing control — which keeps the ancestor
+   walk to ~7,700 runs rather than 559,000, but more importantly is the correctness
+   boundary. `odot_uic_drywell` carries two `☐` runs in ordinary prose outside any
+   control; substituting on the character alone would fabricate two checkboxes in a
+   document with 19 real ones to hide among.
+
+### A Windows-only test bug that made CC-1c unverifiable here
+
+Node's `golden()` helper read `fixture-standard.md` with `readFileSync` and matched the
+code fence as `\n```\n`. Git checks that file out CRLF on Windows, so the match returned
+null and both golden tests died in `m![1]` with a bare `TypeError` — a failure that
+reads like a projection bug and is not one. Green on macOS, red on every Windows
+checkout, which is why it survived. The python twin never had it because
+`Path.read_text()` translates newlines; `readFileSync` hands back the bytes as they are.
+
+Normalised on read, and `ccFixtureBodyXml()` hardened the same way. That second one is
+currently masked by `trim()` — the shared fixture body is one line — but the day anyone
+reformats `cc_fixture.body.xml` to multi-line, python and node would build their fixture
+from **different bytes on Windows only**. Cheaper to close than to diagnose later.
+
+### Mojibake in the shared docs, from this side
+
+Separately (`ecefccb`): TASKS.md and PROGRESS.md were carrying 47 and 50 mojibake
+sequences — em-dashes stored as `â€”`, plus quotes, ellipses and a ballot glyph. A
+UTF-8 file read as cp1252 and re-encoded. This is the exact trap AGENTS.md documents for
+`Set-Content -Encoding utf8`, and the corrupted lines are the older sections while
+recent writing is clean, so it came from this side. Repaired per-run rather than by a
+whole-file round-trip, because both files also hold genuine em-dashes that would have
+been destroyed. **Implication worth flagging: any earlier PowerShell-authored edit to a
+shared doc is suspect.**
+
+### Decisions from Mikko, 2026-08-21
+
+- **G5 / forms protection → refuse by default, explicit opt-in.** Word writes the
+  permitted fills untracked and *reading* `TrackRevisions` throws, so the "always
+  tracked" contract is unenforceable there. New `allow_untracked_writes` param (default
+  `false`, CLI `--allow-untracked-writes`), unlocking G5 only; without it a teaching
+  error naming the cause, with it a report note on **every** untracked write. Kept
+  separate from `ignore_document_protection` on purpose: that bypasses a gate the author
+  set, this accepts a downgrade of Adeu's own guarantee, and the G5 writes are ones Word
+  itself permits. spec-gates.md §1a. Closes CC-6.
+- **Bound-store reject → pulled from CC-9 (P3) into CC-5 (v1).** A headless reject
+  leaves the store holding the rejected value and the store wins on open, so Word
+  re-applies it: a reject that undoes itself, silently. Same class as CC-14. v1 must
+  either dual-write on reject or refuse `RejectChange` inside a bound control. Closes
+  CC-6's second sign-off item.
+- **CC-13 → closed, live-Word stays in the pre-push hook.** Quarantine offered and
+  declined; residual flakiness accepted as out of scope for this initiative. The honest
+  residual stands on the row.
+- **spec-projection.md §4 → clarifying sentence** for cell-level checkboxes. Confirmed
+  as documentation, not behaviour.
+- **CC-3 → split.** The finished mechanism closes; the dependency-blocked A5 tail is now
+  **CC-3b**.
+- **CC-1f → CC-2.** A1.9's banner touches the CLI and both MCP servers, which is CC-2's
+  surface; doing it in CC-1 meant visiting them twice.
+
+### Board effect
+
+**CC-1 is `done`** (1a `38444d2`, 1b `eb0a141`, 1c `7ab331f`, 1d `a576f34`,
+1e `c532d5b`; 1f → CC-2). That unblocks **CC-2, CC-4, CC-5** and A5.5 in CC-3b.
+CC-3, CC-6 and CC-13 all moved to `done`. Verification at `7ab331f`: python
+1,733 passed / 7 skipped including all 43 live-Word tests on a cold Word, ruff and mypy
+clean; node 853 + 306 + 42 passed, build and lint clean.

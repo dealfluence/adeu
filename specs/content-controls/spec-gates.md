@@ -17,11 +17,41 @@ default `false`. Gates run in `validate_edits` AND independently in the apply pa
 | --- | --- | --- |
 | `ignore_control_locks` | `process_document_batch` (both MCP servers), CLI `--ignore-control-locks`, engine kwarg | Gates G1, G2, G3, G9 |
 | `ignore_document_protection` | `process_document_batch`, CLI `--ignore-document-protection`, engine kwarg | Gates G4–G7 |
+| `allow_untracked_writes` | `process_document_batch`, CLI `--allow-untracked-writes`, engine kwarg | G5 only — permits the forms-protection writes Word itself records untracked |
 
 Booleans, schema default `false` (truthy defaults survive client stripping; the
 defaults are additionally stated in the tool description per §7a rules). Overrides exist
 because document owners legitimately edit their own rails; agents must opt in per batch,
 and reports note when an override was exercised.
+
+### 1a. Forms protection and the tracking contract
+
+Resolved by Mikko, 2026-08-21, on CC-6's finding. Adeu's standing contract is that it
+**always writes tracked changes**. Under `w:documentProtection w:edit="forms"` that
+contract is not merely inconvenient, it is unenforceable: CC-6 measured real Word 16.0
+writing the permitted fills **untracked**, and *reading* `Document.TrackRevisions` throws
+outright there — so Adeu cannot honour the contract and cannot even inspect whether it
+has been broken.
+
+Three options were costed. Refusing outright guts the feature for forms-protected
+templates, which are precisely the documents a content-controls initiative exists to
+serve. Writing untracked with only a report note was rejected as the worst of the three:
+a guarantee that quietly weakens under a condition the caller cannot detect is more
+dangerous than no guarantee, because callers automate against the guarantee.
+
+**Chosen: refuse by default, with an explicit per-batch opt-in.**
+
+1. Default (`allow_untracked_writes = false`): reject the write with a teaching error
+   that names the cause — the document is forms-protected, Word records these writes
+   untracked, and Adeu will not silently downgrade its tracking guarantee.
+2. With the override: perform the write, and emit a per-edit report note on **every**
+   untracked write, not once per batch.
+
+This is deliberately a *separate* param from `ignore_document_protection`. That one
+bypasses a gate the document author set; this one accepts a downgrade in Adeu's own
+output guarantee. They are different admissions and a caller may well want one without
+the other — in particular, the G5 writes in question are ones Word itself *permits*, so
+no protection is being ignored at all.
 
 ## 2. Gate matrix
 
@@ -36,7 +66,7 @@ substrings, not full strings.
 | G2 | Edit would delete/unwrap a control whose `w:lock` = `sdtLocked`/`sdtContentLocked` (target consumes the entire control content plus surrounding text, or a block merge would dissolve the wrapper) | Reject; content-only deletion inside a merely delete-locked control is allowed and leaves the wrapper + empty pair |
 | G3 | Edit targets text inside a `w:group` control but outside any nested leaf control | Reject as locked region (nested leaves stay editable) |
 | G4 | `w:documentProtection w:edit="readOnly"` | Reject all mutating operations (edits, set_field, review actions, row ops) |
-| G5 | `w:edit="forms"` | Allow only: `set_field`, edits fully inside leaf-control content, checkbox toggles. Reject any body/table edit outside controls (and legacy-form-field regions are out of v1 scope — reject with that stated) |
+| G5 | `w:edit="forms"` | Allow only: `set_field`, edits fully inside leaf-control content, checkbox toggles. Reject any body/table edit outside controls (and legacy-form-field regions are out of v1 scope — reject with that stated). **Those permitted writes are additionally gated on `allow_untracked_writes` (default `false`) — see §1a.** |
 | G6 | `w:edit="comments"` | Allow only comment-only changes (`target == new` + comment) and `ReplyComment`; reject text mutations |
 | G7 | `w:edit="trackedChanges"` | Text edits proceed (Adeu always writes tracked changes); `AcceptChange`/`RejectChange` are rejected (resolving revisions is exactly what this protection forbids). Confirmed against Word by CC-6(d): Accept and Reject both fail with "This command is not available", document-wide, while tracked editing stays allowed |
 | G8 | `ModifyText` target overlaps placeholder ghost text | Reject; point to `set_field` and to inserting at the empty pair `{#cc:N}{#/cc:N}`. Never editable "as text" — ghost runs are not content |
