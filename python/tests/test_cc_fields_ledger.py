@@ -17,6 +17,7 @@ from docx import Document
 
 from adeu.fields import (
     collect_fields,
+    render_line,
     read_document_protection,
     render_banner,
     render_ledger,
@@ -26,11 +27,7 @@ from adeu.ingest import _extract_text_from_doc
 from tests.cc_fixture import cc_fixture_bytes
 
 _FIXTURE_STANDARD = (
-    Path(__file__).resolve().parents[2]
-    / "specs"
-    / "content-controls"
-    / "acceptance"
-    / "fixture-standard.md"
+    Path(__file__).resolve().parents[2] / "specs" / "content-controls" / "acceptance" / "fixture-standard.md"
 )
 
 
@@ -101,10 +98,7 @@ class TestA22ProtectionLine:
         doc, text = _load(protection="forms", body_xml=self.EMPTY_BODY)
         entries = collect_fields(doc, text, None)
         banner = render_banner(entries, read_document_protection(doc))
-        assert banner == (
-            "> **Protection:** fill-in-forms only (enforced) \u00b7 "
-            "**Fields:** no content controls"
-        )
+        assert banner == ("> **Protection:** fill-in-forms only (enforced) \u00b7 **Fields:** no content controls")
 
     @pytest.mark.parametrize(
         "edit,word",
@@ -127,9 +121,7 @@ class TestA25AnonymousControls:
 
     def test_anonymous_control_renders_bare(self):
         # CC:12 and CC:13 are the fixture's anonymous controls (repeating items).
-        line = next(
-            line for line in _ledger().splitlines() if line.startswith("CC:12 ")
-        )
+        line = next(line for line in _ledger().splitlines() if line.startswith("CC:12 "))
         assert line == "CC:12  item \u2014 p1 \u2014 in CC:11 \u2014 wraps 1 block"
 
     def test_no_empty_quotes_or_empty_tag_anywhere(self):
@@ -187,7 +179,7 @@ class TestPreviewCaps:
 
     def test_value_truncates_at_80_with_ellipsis(self):
         body = (
-            "<w:p><w:sdt><w:sdtPr><w:tag w:val=\"long\"/><w:text/></w:sdtPr>"
+            '<w:p><w:sdt><w:sdtPr><w:tag w:val="long"/><w:text/></w:sdtPr>'
             "<w:sdtContent><w:r><w:t>" + ("A" * 200) + "</w:t></w:r>"
             "</w:sdtContent></w:sdt></w:p>"
         )
@@ -195,13 +187,9 @@ class TestPreviewCaps:
         assert 'value: "' + "A" * 80 + '\u2026"' in line
 
     def test_options_cap_at_eight_with_overflow_marker(self):
-        items = "".join(
-            f'<w:listItem w:displayText="Opt{i}" w:value="{i}"/>' for i in range(1, 12)
-        )
+        items = "".join(f'<w:listItem w:displayText="Opt{i}" w:value="{i}"/>' for i in range(1, 12))
         body = (
-            '<w:p><w:sdt><w:sdtPr><w:tag w:val="dd"/><w:dropDownList>'
-            + items
-            + "</w:dropDownList></w:sdtPr>"
+            '<w:p><w:sdt><w:sdtPr><w:tag w:val="dd"/><w:dropDownList>' + items + "</w:dropDownList></w:sdtPr>"
             "<w:sdtContent><w:r><w:t>Opt1</w:t></w:r></w:sdtContent></w:sdt></w:p>"
         )
         line = [x for x in _ledger(body_xml=body).splitlines() if x.startswith("CC:1")][0]
@@ -266,3 +254,90 @@ class TestPagination:
         # would make the count depend on where the reader happened to be.
         out = _ledger(body_xml=self._many(250), offset=100)
         assert "250 content controls" in out.splitlines()[1]
+
+
+class TestHeadingIndexEquivalence:
+    """The ledger's fast heading index must match the function it replaced.
+
+    `heading_path_at` re-splits the whole projection per call, which made the
+    ledger quadratic: 8.8 seconds on FedRAMP rev4 (5,007 controls), twenty times
+    the cost of the entire projection. `_HeadingIndex` precomputes each
+    breadcrumb once and binary-searches — 115ms — but a faster answer is only
+    worth having if it is the SAME answer.
+    """
+
+    DOC = "\n".join(
+        [
+            "# Master Services Agreement",
+            "Intro prose.",
+            "## Definitions",
+            "Term text here.",
+            "### Sub-definition",
+            "Deep text.",
+            "## Payment",
+            "Pay text.",
+            "# Schedule A",
+            "Schedule text.",
+            "Trailing prose with no heading after it.",
+        ]
+    )
+
+    def test_agrees_at_every_offset(self):
+        from adeu.fields import _HeadingIndex
+        from adeu.outline import heading_path_at
+
+        index = _HeadingIndex(self.DOC)
+        for offset in range(len(self.DOC) + 1):
+            assert index.path_at(offset) == heading_path_at(offset, self.DOC), f"diverged at offset {offset}"
+
+    def test_agrees_on_text_with_no_headings(self):
+        from adeu.fields import _HeadingIndex
+        from adeu.outline import heading_path_at
+
+        plain = "Just prose.\n\nMore prose."
+        index = _HeadingIndex(plain)
+        for offset in range(len(plain) + 1):
+            assert index.path_at(offset) == heading_path_at(offset, plain)
+
+    def test_agrees_on_a_real_corpus_document(self):
+        from tests.utils import corpus_path
+
+        path = corpus_path("fedramp_ssp_rev4")
+        if path is None:
+            pytest.skip("corpus not fetched")
+
+        from docx import Document as _D
+
+        from adeu.fields import _HeadingIndex
+        from adeu.outline import heading_path_at
+
+        doc = _D(str(path))
+        text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        index = _HeadingIndex(text)
+        # Every anchor offset in the document, which is exactly the set of
+        # offsets the ledger will ask about.
+        for m in re.finditer(r"\{#cc:\d+[^}]*\}", text):
+            assert index.path_at(m.start()) == heading_path_at(m.start(), text)
+
+    def test_ledger_renders_breadcrumbs_on_a_real_document(self):
+        """The minimal fixture package has no styles.xml, so `Heading1` never
+        resolves and it can never produce a breadcrumb. Use a real document."""
+        from tests.utils import corpus_path
+
+        path = corpus_path("fedramp_ssp_rev4")
+        if path is None:
+            pytest.skip("corpus not fetched")
+
+        from docx import Document as _D
+
+        doc = _D(str(path))
+        text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
+        if isinstance(text, tuple):
+            text = text[0]
+        entries = collect_fields(doc, text, None)
+        with_crumbs = [e for e in entries if e.heading_path]
+        assert with_crumbs, "no control resolved a heading path in a headed document"
+        line = render_line(with_crumbs[0], 6)
+        assert f"p{with_crumbs[0].page} \u00b7 {with_crumbs[0].heading_path}" in line

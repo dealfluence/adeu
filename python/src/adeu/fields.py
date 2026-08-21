@@ -18,11 +18,12 @@ would produce a ledger that quietly disagrees with the document text the agent
 is editing.
 """
 
+import bisect
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .outline import clean_breadcrumb, heading_path_at, offset_to_page
+from .outline import clean_breadcrumb, offset_to_page
 from .utils.content_controls import (
     QN_W_SDT,
     QN_W_SDTCONTENT,
@@ -162,18 +163,71 @@ def read_document_protection(doc: Any) -> DocumentProtection:
 # ---------------------------------------------------------------------------
 
 
-def _anchor_bounds(raw_text: str, ordinal: int) -> Optional[Tuple[int, int, int]]:
-    """``(open_start, open_end, close_start)`` for one control's anchor pair."""
-    open_m = re.search(r"\{#cc:%d(?: [^}]*)?\}" % ordinal, raw_text)
-    if open_m is None:
-        return None
-    close_m = re.search(
-        r"\{#/cc:%d\}" % ordinal,
-        raw_text,
-    )
-    if close_m is None or close_m.start() < open_m.end():
-        return None
-    return open_m.start(), open_m.end(), close_m.start()
+_ANCHOR_SCAN_RE = re.compile(r"\{#(/?)cc:(\d+)(?: [^}]*)?\}")
+
+
+def _scan_anchors(raw_text: str) -> Dict[int, Tuple[int, int, int]]:
+    """``ordinal -> (open_start, open_end, close_start)`` in ONE pass.
+
+    Searching per control instead cost 8.8 seconds on FedRAMP rev4 — twenty
+    times the cost of the whole projection — because each of 5,007 controls
+    scanned 600 KB of text. The ledger is a read-path feature; it must not be
+    the slowest thing in the read.
+    """
+    opens: Dict[int, Tuple[int, int]] = {}
+    closes: Dict[int, int] = {}
+    for m in _ANCHOR_SCAN_RE.finditer(raw_text):
+        ordinal = int(m.group(2))
+        if m.group(1):
+            closes.setdefault(ordinal, m.start())
+        else:
+            opens.setdefault(ordinal, (m.start(), m.end()))
+    bounds: Dict[int, Tuple[int, int, int]] = {}
+    for ordinal, (open_start, open_end) in opens.items():
+        close = closes.get(ordinal)
+        if close is not None and close >= open_end:
+            bounds[ordinal] = (open_start, open_end, close)
+    return bounds
+
+
+class _HeadingIndex:
+    """Answers "which heading path contains this offset?" in O(log H).
+
+    :func:`adeu.outline.heading_path_at` re-splits the whole projection on every
+    call — fine for a handful of search hits, quadratic for a ledger with
+    thousands of rows. This precomputes every heading's full breadcrumb once and
+    binary-searches it; a test pins that the two agree line for line.
+    """
+
+    __slots__ = ("_starts", "_paths")
+
+    def __init__(self, text: str) -> None:
+        self._starts: List[int] = []
+        self._paths: List[str] = []
+        stack: List[Tuple[int, List[str]]] = []
+        offset = 0
+        for line in text.split("\n"):
+            m = re.match(r"^(#{1,6})\s+(.*)", line)
+            if m:
+                level = len(m.group(1))
+                heading = clean_breadcrumb(m.group(2))
+                if len(heading) > 80:
+                    heading = heading[:80] + "..."
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                path = (stack[-1][1] if stack else []) + [heading]
+                stack.append((level, path))
+                self._starts.append(offset)
+                self._paths.append(" > ".join(path))
+            offset += len(line) + 1
+
+    def path_at(self, offset: int) -> str:
+        if not self._starts:
+            return ""
+        # heading_path_at scans back from the END of the line containing the
+        # offset, so a heading ON that line counts as containing it.
+        i = bisect.bisect_right(self._starts, offset) - 1
+        return self._paths[i] if i >= 0 else ""
 
 
 def _preview(text: str, cap: int = PREVIEW_CAP) -> str:
@@ -296,10 +350,13 @@ def collect_fields(
             node = node.getparent()
         return None
 
+    anchors = _scan_anchors(raw_text)
+    headings = _HeadingIndex(raw_text)
+
     entries: List[FieldEntry] = []
     last_known_offset = 0
     for info in ordered:
-        bounds = _anchor_bounds(raw_text, info.ordinal)
+        bounds = anchors.get(info.ordinal)
 
         # Location. An anchored control reports its own offset exactly. An
         # un-anchored one (checkbox, picture, building block, repeating
@@ -314,7 +371,7 @@ def collect_fields(
         offset = last_known_offset
 
         page = offset_to_page(offset, page_offsets) if page_offsets else 1
-        crumb = heading_path_at(offset, raw_text) if raw_text else ""
+        crumb = headings.path_at(offset)
 
         value: Optional[str] = None
         checkbox_state: Optional[str] = None

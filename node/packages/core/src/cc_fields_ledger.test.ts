@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { ccFixtureBytes, ccGolden } from "./test-utils.js";
+import { heading_path_at } from "./outline.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import {
@@ -17,6 +18,7 @@ import {
   renderLedger,
   summaryCounts,
   protectionLabel,
+  HeadingIndex,
 } from "./fields.js";
 
 const PLAIN_BODY = "<w:p><w:r><w:t>Plain paragraph.</w:t></w:r></w:p>";
@@ -267,5 +269,47 @@ describe("pagination (spec §4)", () => {
     // would make the count depend on where the reader happened to be.
     const out = await ledger({ bodyXml: manyControls(250), offset: 100 });
     expect(out.split("\n")[1]).toContain("250 content controls");
+  });
+});
+
+describe("heading index equivalence", () => {
+  /**
+   * The ledger's fast heading index must match the function it replaced.
+   *
+   * `heading_path_at` re-splits the whole projection per call, which made the
+   * ledger quadratic: 8.8 seconds on FedRAMP rev4 (5,007 controls), twenty
+   * times the cost of the entire projection. `HeadingIndex` precomputes each
+   * breadcrumb once and binary-searches — but a faster answer is only worth
+   * having if it is the SAME answer.
+   */
+  const DOC = [
+    "# Master Services Agreement",
+    "Intro prose.",
+    "## Definitions",
+    "Term text here.",
+    "### Sub-definition",
+    "Deep text.",
+    "## Payment",
+    "Pay text.",
+    "# Schedule A",
+    "Schedule text.",
+    "Trailing prose with no heading after it.",
+  ].join("\n");
+
+  it("agrees at every offset", () => {
+    const index = new HeadingIndex(DOC);
+    for (let i = 0; i <= DOC.length; i++) {
+      expect(index.pathAt(i), `diverged at offset ${i}`).toBe(
+        heading_path_at(i, DOC),
+      );
+    }
+  });
+
+  it("agrees on text with no headings", () => {
+    const plain = "Just prose.\n\nMore prose.";
+    const index = new HeadingIndex(plain);
+    for (let i = 0; i <= plain.length; i++) {
+      expect(index.pathAt(i)).toBe(heading_path_at(i, plain));
+    }
   });
 });

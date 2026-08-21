@@ -18,7 +18,7 @@
  */
 import { findChild, findAllDescendants } from "./docx/dom.js";
 import { findDescendantsByLocalName } from "./sanitize/transforms.js";
-import { clean_breadcrumb, heading_path_at, offset_to_page } from "./outline.js";
+import { clean_breadcrumb, offset_to_page } from "./outline.js";
 import {
   QN_W_SDT,
   QN_W_SDTCONTENT,
@@ -132,15 +132,90 @@ export function readDocumentProtection(doc: any): DocumentProtection {
 // Collection
 // ---------------------------------------------------------------------------
 
-function anchorBounds(
-  rawText: string,
-  ordinal: number,
-): [number, number, number] | null {
-  const open = new RegExp(`\\{#cc:${ordinal}(?: [^}]*)?\\}`).exec(rawText);
-  if (!open) return null;
-  const close = new RegExp(`\\{#/cc:${ordinal}\\}`).exec(rawText);
-  if (!close || close.index < open.index + open[0].length) return null;
-  return [open.index, open.index + open[0].length, close.index];
+const ANCHOR_SCAN_RE = /\{#(\/?)cc:(\d+)(?: [^}]*)?\}/g;
+
+/**
+ * `ordinal -> [openStart, openEnd, closeStart]` in ONE pass.
+ *
+ * Searching per control instead cost 8.8 seconds on FedRAMP rev4 — twenty
+ * times the cost of the whole projection — because each of 5,007 controls
+ * scanned 600 KB of text. The ledger is a read-path feature; it must not be
+ * the slowest thing in the read.
+ */
+function scanAnchors(rawText: string): Map<number, [number, number, number]> {
+  const opens = new Map<number, [number, number]>();
+  const closes = new Map<number, number>();
+  ANCHOR_SCAN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANCHOR_SCAN_RE.exec(rawText)) !== null) {
+    const ordinal = Number(m[2]);
+    if (m[1]) {
+      if (!closes.has(ordinal)) closes.set(ordinal, m.index);
+    } else if (!opens.has(ordinal)) {
+      opens.set(ordinal, [m.index, m.index + m[0].length]);
+    }
+  }
+  const bounds = new Map<number, [number, number, number]>();
+  for (const [ordinal, [openStart, openEnd]] of opens) {
+    const close = closes.get(ordinal);
+    if (close !== undefined && close >= openEnd)
+      bounds.set(ordinal, [openStart, openEnd, close]);
+  }
+  return bounds;
+}
+
+/**
+ * Answers "which heading path contains this offset?" in O(log H).
+ *
+ * `heading_path_at` re-splits the whole projection on every call — fine for a
+ * handful of search hits, quadratic for a ledger with thousands of rows. This
+ * precomputes every heading's full breadcrumb once and binary-searches it; a
+ * test pins that the two agree.
+ */
+export class HeadingIndex {
+  private starts: number[] = [];
+  private paths: string[] = [];
+
+  constructor(text: string) {
+    const stack: Array<{ level: number; path: string[] }> = [];
+    let offset = 0;
+    for (const line of text.split("\n")) {
+      const m = line.match(/^(#{1,6})\s+(.*)/);
+      if (m) {
+        const level = m[1].length;
+        let heading = clean_breadcrumb(m[2]);
+        if (heading.length > 80) heading = heading.slice(0, 80) + "...";
+        while (stack.length > 0 && stack[stack.length - 1].level >= level)
+          stack.pop();
+        const path = (stack.length > 0 ? stack[stack.length - 1].path : []).concat([
+          heading,
+        ]);
+        stack.push({ level, path });
+        this.starts.push(offset);
+        this.paths.push(path.join(" > "));
+      }
+      offset += line.length + 1;
+    }
+  }
+
+  pathAt(offset: number): string {
+    if (this.starts.length === 0) return "";
+    // heading_path_at scans back from the END of the line containing the
+    // offset, so a heading ON that line counts as containing it.
+    let lo = 0;
+    let hi = this.starts.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.starts[mid] <= offset) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return found >= 0 ? this.paths[found] : "";
+  }
 }
 
 /** Whitespace-collapsed, anchor-free, markup-free preview (spec §3.7). */
@@ -268,10 +343,13 @@ export function collectFields(
     return null;
   };
 
+  const anchors = scanAnchors(rawText);
+  const headings = new HeadingIndex(rawText);
+
   const entries: FieldEntry[] = [];
   let lastKnownOffset = 0;
   for (const info of ordered) {
-    const bounds = anchorBounds(rawText, info.ordinal);
+    const bounds = anchors.get(info.ordinal);
 
     // Location. An anchored control reports its own offset exactly. An
     // un-anchored one (checkbox, picture, building block, repeating section
@@ -285,7 +363,7 @@ export function collectFields(
     const offset = lastKnownOffset;
 
     const page = pageOffsets ? offset_to_page(offset, pageOffsets) : 1;
-    const crumb = rawText ? heading_path_at(offset, rawText) : "";
+    const crumb = headings.pathAt(offset);
 
     let value: string | null = null;
     let checkboxState: string | null = null;
