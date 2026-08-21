@@ -265,7 +265,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-11 â€” Python cannot open a `.dotx` at all (P1, dual-engine parity)
 
-- Status: `pending`
+- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch: content-controls-specs)
 - Found by: CC-3 (A5.7), 2026-08-21 â€” filed rather than fixed in place because the
   repair has a save-path fidelity question that deserves its own decision
 - Depends on: â€”
