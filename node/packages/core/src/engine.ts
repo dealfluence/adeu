@@ -3530,16 +3530,26 @@ export class RedlineEngine {
     length: number,
     final_target: string = "",
     final_new: string = "",
+    known_controls: SdtInfo[] | null = null,
+    from_set_field: boolean = false,
   ): string | null {
     const overrides = this.gate_overrides;
     const infos: SdtInfo[] = Array.from(
       (mapper?._sdt_infos as Map<any, SdtInfo> | undefined)?.values() ?? [],
     );
-    const [intersecting, at_start, at_end] = this._control_gate_context(
+    let [intersecting, at_start, at_end] = this._control_gate_context(
       mapper,
       start,
       length,
     );
+    if (known_controls !== null) {
+      // A `set_field` names its target; it does not infer it from a range.
+      // That matters for an EMPTY control, whose content span is zero-length,
+      // so nothing intersects it - and G5 would then refuse the fill as "body
+      // text outside a content control", the single most common legitimate
+      // operation under forms protection.
+      intersecting = known_controls;
+    }
 
     const is_comment_only =
       !!edit.comment && (edit.new_text || "") === (edit.target_text || "");
@@ -3564,8 +3574,12 @@ export class RedlineEngine {
 
     if (intersecting.length === 0) return null;
 
-    err = checkBoundControl(edit_number, intersecting);
-    if (err) return err;
+    // G13 refuses TEXT edits to bound content and recommends set_field.
+    // Running it against a set_field would refuse the recommendation.
+    if (!from_set_field) {
+      err = checkBoundControl(edit_number, intersecting);
+      if (err) return err;
+    }
     err = checkCheckboxEdit(
       edit_number,
       intersecting,
@@ -3630,6 +3644,7 @@ export class RedlineEngine {
     mapper: any,
     start: number,
     length: number,
+    fromSetField: boolean = false,
   ): string | null {
     const overrides = this.gate_overrides;
     if (
@@ -3644,8 +3659,14 @@ export class RedlineEngine {
         ? mapper.controls_intersecting(start, length)
         : [];
     if (controls.length === 0) return null;
+    // G13 refuses TEXT edits to bound content and points the caller at
+    // set_field. A fill desugars into pinned ModifyText sub-edits, so without
+    // this exemption the backstop would refuse the very operation the error
+    // recommends - and the recommendation would be a dead end. set_field is
+    // safe here precisely because it dual-writes the store, which is the
+    // whole reason the text path is not. Mirrors the Python engine (674c8c0).
     const bound = controls.find((i) => i.bound);
-    if (bound) return `${describeControl(bound)} is data-bound`;
+    if (bound && !fromSetField) return `${describeControl(bound)} is data-bound`;
     if (overrides.ignore_control_locks) return null;
     const locked = controls.find((i) => i.contentLocked);
     if (locked) return `${describeControl(locked)} is content-locked`;
@@ -3677,10 +3698,65 @@ export class RedlineEngine {
         // or ambiguous target is the recoverable half of A4.2, and the batch
         // contract promises those fail the whole run without touching the
         // document.
+        let hits: FieldEntry[];
         try {
-          this._resolve_set_field_targets(edit);
+          hits = this._resolve_set_field_targets(edit);
         } catch (e: any) {
           errors.push(`- Edit ${i + 1 + index_offset} Failed: ${e?.message ?? e}`);
+          continue;
+        }
+
+        // Class and structure refusals come BEFORE the gates, and the order
+        // is load-bearing. A group is not a value-bearing field at all, so
+        // filling one is meaningless rather than merely forbidden - and the
+        // lock gate, reached first, answered with "pass ignore_control_locks
+        // to override", advice that would still be wrong after the override.
+        let refusal: string | null = null;
+        for (const entry of hits) {
+          const info = this._sdt_info_for_ordinal(entry.ordinal);
+          refusal = refuseClass(info ? info.cls : entry.cls_word, entry.ordinal);
+          if (!refusal && info) refusal = refuseValue(info, entry.ordinal, edit.value);
+          if (refusal) {
+            errors.push(`- Edit ${i + 1 + index_offset} Failed: ${refusal}`);
+            break;
+          }
+        }
+        if (refusal) continue;
+
+        // A4.12: a fill is gated exactly as any other edit, WITH the same
+        // teaching error. The apply-layer backstop already refuses locked
+        // controls, but it answers generically - so the caller learns that
+        // something went wrong and nothing about what or how to proceed.
+        for (const entry of hits) {
+          const span = this._cc_content_range(entry.ordinal);
+          if (!span) continue;
+          const [start, end] = span;
+          const current = this.mapper.full_text.slice(start, end);
+          const info = this._sdt_info_for_ordinal(entry.ordinal);
+          // Gated as the edit it will BECOME, not as the SetField: the
+          // desugared ModifyText is what reaches the apply layer.
+          const probe: any = {
+            type: "modify",
+            target_text: current,
+            new_text: edit.value,
+            comment: edit.comment ?? null,
+          };
+          probe._parent_edit_ref = edit;
+          const gate_err = this._check_control_gates(
+            i + 1 + index_offset,
+            probe,
+            this.mapper,
+            start,
+            end - start,
+            current,
+            edit.value,
+            info ? [info] : null,
+            true,
+          );
+          if (gate_err) {
+            errors.push(gate_err);
+            break;
+          }
         }
         continue;
       }
@@ -7702,7 +7778,12 @@ export class RedlineEngine {
     // are properties of the document, not of the match, so re-deriving them
     // here is cheap and cannot disagree.
     if ((op === "DELETION" || op === "MODIFICATION") && length) {
-      const blocked = this._apply_gate_refusal(active_mapper, start_idx, length);
+      const blocked = this._apply_gate_refusal(
+        active_mapper,
+        start_idx,
+        length,
+        edit._parent_edit_ref?.type === "set_field",
+      );
       if (blocked) {
         console.error(
           `Refusing edit inside a gated content control (start=${start_idx}, reason=${blocked})`,

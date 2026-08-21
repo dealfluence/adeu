@@ -2216,6 +2216,8 @@ class RedlineEngine:
         *,
         final_target: str = "",
         final_new: str = "",
+        known_controls: Optional[List[Any]] = None,
+        from_set_field: bool = False,
     ) -> Optional[str]:
         """Run the CC-4 gate matrix over one resolved edit; first failure wins.
 
@@ -2229,6 +2231,13 @@ class RedlineEngine:
         overrides = self.gate_overrides
         infos = list(getattr(mapper, "_sdt_infos", {}).values())
         intersecting, at_start, at_end = self._control_gate_context(mapper, start, length)
+        if known_controls is not None:
+            # A `set_field` names its target; it does not infer it from a
+            # range. That matters for an EMPTY control, whose content span is
+            # zero-length, so nothing intersects it - and G5 would then refuse
+            # the fill as "body text outside a content control", which is the
+            # single most common legitimate operation under forms protection.
+            intersecting = known_controls
 
         is_comment_only = bool(getattr(edit, "comment", None)) and (edit.new_text or "") == (edit.target_text or "")
 
@@ -2257,9 +2266,13 @@ class RedlineEngine:
         if not intersecting:
             return None
 
-        err = check_bound_control(edit_number, intersecting)
-        if err:
-            return err
+        # G13 refuses TEXT edits to bound content and recommends set_field.
+        # Running it against a set_field would refuse the recommendation
+        # (674c8c0 fixed the same contradiction at the apply layer).
+        if not from_set_field:
+            err = check_bound_control(edit_number, intersecting)
+            if err:
+                return err
         err = check_checkbox_edit(edit_number, intersecting, edit.target_text or "", edit.new_text or "")
         if err:
             return err
@@ -2345,15 +2358,75 @@ class RedlineEngine:
             # earlier redline). The string-shape checks above still apply.
             if isinstance(edit, SetField):
                 from adeu.fields import FieldResolutionError
+                from adeu.utils.field_write import refuse_class, refuse_value
 
                 # Resolve the field NOW, before anything is written. An
                 # unresolvable or ambiguous target is the recoverable half of
                 # A4.2, and the batch contract promises those fail the whole
                 # run without touching the document.
                 try:
-                    self._resolve_set_field_targets(edit)
+                    hits = self._resolve_set_field_targets(edit)
                 except FieldResolutionError as fe:
                     errors.append(f"- Edit {i + 1} Failed: {fe}")
+                    continue
+                # A4.12: a fill is gated exactly as any other edit, WITH the
+                # same teaching error. The apply-layer backstop already
+                # refused locked controls, but it answers with a generic
+                # "failed to apply" - so the caller learned that something
+                # went wrong and nothing about what or how to proceed, which
+                # is the whole thing CC-4's error contract exists to prevent.
+                # Class and structure refusals come BEFORE the gates, and the
+                # order is load-bearing. A group is not a value-bearing field
+                # at all, so filling one is meaningless rather than merely
+                # forbidden - and CC-4's lock gate, reached first, answered
+                # with "pass ignore_control_locks to override", which is
+                # advice that would still be wrong after the override: the
+                # group's "content" is the controls inside it.
+                refusal = None
+                for entry in hits:
+                    info = self._sdt_info_for_ordinal(entry.ordinal)
+                    cls = info.cls if info is not None else entry.cls_word
+                    refusal = refuse_class(cls, entry.ordinal)
+                    if refusal is None and info is not None:
+                        refusal = refuse_value(info, entry.ordinal, edit.value)
+                    if refusal is not None:
+                        errors.append(f"- Edit {i + 1} Failed: {refusal}")
+                        break
+                if refusal is not None:
+                    continue
+
+                for entry in hits:
+                    span = self._cc_content_range(entry.ordinal)
+                    if span is None:
+                        continue
+                    start, end = span
+                    current = self.mapper.full_text[start:end]
+                    # Gated as the edit it will BECOME, not as the SetField:
+                    # the desugared ModifyText is what reaches the apply
+                    # layer, so checking anything else here would let
+                    # validation and application disagree.
+                    probe = ModifyText(
+                        type="modify",
+                        target_text=current,
+                        new_text=edit.value,
+                        comment=edit.comment,
+                    )
+                    probe._parent_edit_ref = edit
+                    info = self._sdt_info_for_ordinal(entry.ordinal)
+                    gate_err = self._check_control_gates(
+                        i + 1,
+                        probe,
+                        self.mapper,
+                        start,
+                        end - start,
+                        final_target=current,
+                        final_new=edit.value,
+                        known_controls=[info] if info is not None else None,
+                        from_set_field=True,
+                    )
+                    if gate_err:
+                        errors.append(gate_err)
+                        break
                 continue
             if (
                 getattr(edit, "_match_start_index", None) is not None

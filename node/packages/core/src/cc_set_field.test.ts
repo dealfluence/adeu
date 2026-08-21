@@ -485,3 +485,67 @@ describe("A4.9 — a temporary control unwraps on fill", () => {
     expect(note).toContain("unwrapped");
   });
 });
+
+describe("A4.12 — set_field respects the gates", () => {
+  // True by construction rather than by a second implementation remembering
+  // to check: a fill desugars into ordinary pinned ModifyText sub-edits, so
+  // the gates see a normal edit. These tests exist to keep it that way - the
+  // cheapest way to break it would be a future "fast path" for fills.
+  it("refuses a fill into a locked control", async () => {
+    expect((await expectRefusal("fixed_clause", "Net 90")).toLowerCase()).toContain("lock");
+  });
+
+  it("names the control in the refusal", async () => {
+    const msg = await expectRefusal("fixed_clause", "Net 90");
+    expect(msg).toMatch(/CC:7|Payment Terms/);
+  });
+
+  it("lets the ordinary override through", async () => {
+    const buf = Buffer.from(ccFixtureBytes());
+    const doc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(doc, "Test Author", {
+      ignore_control_locks: true,
+    } as any);
+    const result = engine.process_batch([
+      { type: "set_field", field: "fixed_clause", value: "Net 90" } as any,
+    ]);
+    expect(result.edits_applied).toBe(1);
+    expect(textIn(savedSdt(await doc.save(), 7), "w:ins")).toContain("Net 90");
+  });
+
+  it("refuses an untracked fill under forms protection", async () => {
+    // spec-set-field §2 says forms protection is "exactly what stays allowed"
+    // for set_field. CC-6 measured otherwise and CC-4 encoded the
+    // measurement: Word records fills in a forms-protected document as
+    // UNTRACKED, so applying one would break Adeu's guarantee that every
+    // write is tracked. G5 permits the fill; the untracked-write gate refuses
+    // it. The measurement wins over the frozen sentence.
+    const buf = Buffer.from(ccFixtureBytes("forms"));
+    const doc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(doc, "Test Author");
+    let msg = "";
+    try {
+      const r = engine.process_batch([
+        { type: "set_field", field: "client_name", value: "Acme Ltd." } as any,
+      ]);
+      msg = (r.skipped_details || []).join(" ");
+      expect(r.edits_applied).toBe(0);
+    } catch (e: any) {
+      msg = String(e?.message ?? e);
+    }
+    expect(msg.toLowerCase()).toContain("untracked");
+    expect(msg).toContain("allow_untracked_writes");
+  });
+
+  it("lets the untracked-write override through", async () => {
+    const buf = Buffer.from(ccFixtureBytes("forms"));
+    const doc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(doc, "Test Author", {
+      allow_untracked_writes: true,
+    } as any);
+    const result = engine.process_batch([
+      { type: "set_field", field: "client_name", value: "Acme Ltd." } as any,
+    ]);
+    expect(result.edits_applied).toBe(1);
+  });
+});

@@ -783,3 +783,84 @@ class TestA410TextFirstParity:
             )
 
         assert state(text_first) == state(explicit)
+
+
+class TestA412SetFieldRespectsGates:
+    """A4.12 — a fill is refused by G1 exactly as any other edit is.
+
+    True by construction rather than by a second implementation remembering
+    to check: `set_field` desugars into ordinary pinned `ModifyText`
+    sub-edits, so the gates see a normal edit. These tests exist to keep it
+    that way - the cheapest way to break it would be a future "fast path"
+    for fills that skips the pipeline.
+    """
+
+    def test_a_locked_control_refuses_the_fill(self):
+        msg = _expect_refusal("fixed_clause", "Net 90")
+        assert "lock" in msg.lower()
+
+    def test_the_refusal_names_the_control(self):
+        msg = _expect_refusal("fixed_clause", "Net 90")
+        assert "CC:7" in msg or "Payment Terms" in msg
+
+    def test_the_override_lets_it_through(self):
+        """Same override as any other edit - set_field needs no special one."""
+        import io
+
+        from adeu.models import SetField
+        from adeu.redline.engine import RedlineEngine
+
+        engine = RedlineEngine(
+            io.BytesIO(cc_fixture_bytes()),
+            author="Test Author",
+            ignore_control_locks=True,
+        )
+        result = engine.process_batch([SetField(field="fixed_clause", value="Net 90")])
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+        sdt = _saved_sdt(engine.save_to_stream().getvalue(), 7)
+        assert "Net 90" in "".join(t.text or "" for i in sdt.iter(f"{W}ins") for t in i.iter(f"{W}t"))
+
+    def test_forms_protection_refuses_an_untracked_fill(self):
+        """spec-set-field §2 says forms protection is "exactly what stays
+        allowed" for set_field. CC-6 measured otherwise and CC-4 encoded the
+        measurement: Word records fills in a forms-protected document as
+        UNTRACKED, so applying one would break Adeu's guarantee that every
+        write is a tracked change. G5 permits the fill; the untracked-write
+        gate refuses it. The measurement wins over the frozen sentence, and
+        the deviation is recorded on the board.
+        """
+        msg = _expect_refusal_protected("client_name", "Acme Ltd.")
+        assert "untracked" in msg.lower()
+        assert "allow_untracked_writes" in msg
+
+    def test_the_untracked_write_override_lets_the_fill_through(self):
+        """The refusal is a guarantee, not a prohibition: it is overridable,
+        and the override is the ordinary one rather than a set_field special."""
+        import io
+
+        from adeu.models import SetField
+        from adeu.redline.engine import RedlineEngine
+
+        engine = RedlineEngine(
+            io.BytesIO(cc_fixture_bytes(protection="forms")),
+            author="Test Author",
+            allow_untracked_writes=True,
+        )
+        result = engine.process_batch([SetField(field="client_name", value="Acme Ltd.")])
+        assert result["edits_applied"] == 1, result.get("skipped_details")
+
+
+def _expect_refusal_protected(field, value):
+    """As `_expect_refusal`, against the forms-protected fixture."""
+    import io
+
+    from adeu.models import SetField
+    from adeu.redline.engine import BatchValidationError, RedlineEngine
+
+    engine = RedlineEngine(io.BytesIO(cc_fixture_bytes(protection="forms")), author="Test Author")
+    try:
+        result = engine.process_batch([SetField(field=field, value=value)])
+    except BatchValidationError as exc:
+        return str(exc)
+    assert result["edits_applied"] == 0
+    return " ".join(result.get("skipped_details") or [])
