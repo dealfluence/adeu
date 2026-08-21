@@ -89,6 +89,11 @@ export interface SdtInfo {
   deleteLocked: boolean;
   bound: boolean;
   bindingXpath: string | null;
+  /**
+   * `w:dataBinding/@w:storeItemID` - which CustomXML store the xpath is
+   * relative to. Needed to write the store back (spec-set-field §6).
+   */
+  storeItemId: string | null;
   showingPlaceholder: boolean;
   placeholderText: string | null;
   temporary: boolean;
@@ -194,6 +199,7 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
   const binding = sdtPr ? findChild(sdtPr, "w:dataBinding") : null;
   const bound = !!binding;
   const bindingXpath = binding ? binding.getAttribute("w:xpath") : null;
+  const storeItemId = binding ? binding.getAttribute("w:storeItemID") : null;
 
   const showingPlaceholder = !!(sdtPr && findChild(sdtPr, "w:showingPlcHdr"));
 
@@ -269,6 +275,7 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
     deleteLocked,
     bound,
     bindingXpath,
+    storeItemId,
     showingPlaceholder,
     placeholderText,
     temporary,

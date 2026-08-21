@@ -44,10 +44,31 @@ export interface DeleteTableRow {
   _match_start_index?: number | null;
 }
 
+/**
+ * Fill a content control the way Word fills it (spec-set-field.md).
+ *
+ * The explicit, batchable form of what a text-first edit at a control's
+ * sanctioned surface already does. Both routes desugar to the same tracked
+ * replacement, so `set_field` gets no special pass through the gates and
+ * needs no parallel writer.
+ */
+export interface SetField {
+  type: 'set_field';
+  /** The 'CC:<N>' id, the control's tag, or its alias. */
+  field: string;
+  /** The value to write. Empty string clears the field. */
+  value: string;
+  match_mode?: 'strict' | 'first' | 'all';
+  comment?: string | null;
+  _match_start_index?: number | null;
+  _active_mapper_ref?: any | null;
+}
+
 export type DocumentChange = 
   | ModifyText 
   | AcceptChange 
   | RejectChange 
   | ReplyComment 
   | InsertTableRow 
-  | DeleteTableRow;
+  | DeleteTableRow
+  | SetField;

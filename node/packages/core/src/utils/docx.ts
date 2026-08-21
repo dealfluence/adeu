@@ -797,6 +797,24 @@ export function apply_formatting_to_segments(
 }
 
 /** Does this control contain a ballot-glyph run to hang the mark on? */
+/**
+ * The mark for a ballot run that sits inside a tracked revision.
+ *
+ * `undefined` when the run is not inside one, which is the ordinary case and
+ * keeps `w14:checked` authoritative.
+ */
+function revisionBallotMark(rElement: Element, text: string): string | undefined {
+  let node: any = rElement.parentNode;
+  while (node) {
+    const tag = node.tagName;
+    if (tag === "w:ins" || tag === "w:del") {
+      return text === "\u2611" || text === "\u2612" ? "x" : " ";
+    }
+    node = node.parentNode;
+  }
+  return undefined;
+}
+
 function hasBallotRun(sdtEl: Element): boolean {
   const content = findChild(sdtEl, QN_W_SDTCONTENT);
   if (!content) return false;
@@ -1189,7 +1207,18 @@ export function* iter_paragraph_content(
         // because a checkbox control is not always inline: 11 of
         // `odot_uic_drywell`'s 19 checkboxes wrap a whole `w:tc` (a checkbox
         // column in a form table), and that path never reaches the sdt branch.
-        run.projTextOverride = checkboxMark(cbInfo);
+        //
+        // The mark normally comes from `w14:checked` (the settled value - see
+        // checkboxMark), but a run inside a revision projects ITS OWN glyph
+        // instead. A tracked toggle writes two glyph runs, an inserted new
+        // state and a deleted old one, and the attribute can only describe
+        // one of them: taking it for both rendered two identical boxes, a
+        // toggle that appears to change nothing. Reading each revision run's
+        // own glyph makes the pending change legible, and the clean view
+        // keeps exactly one box because the deleted half never reaches it
+        // (A4.6).
+        const runText = get_run_text(run);
+        run.projTextOverride = revisionBallotMark(r_element, runText) ?? checkboxMark(cbInfo);
         yield { type: "checkbox_start", info: cbInfo } as SdtEvent;
         yield run;
         yield { type: "checkbox_end", info: cbInfo } as SdtEvent;

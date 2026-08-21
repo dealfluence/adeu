@@ -522,6 +522,9 @@ export function ccFixtureBodyElement(): any {
  * glyph run at all). The package around it stays identical, so a synthetic
  * body is exercised through exactly the same load path as the real fixture.
  */
+/** The store item id CC:10's `w:dataBinding` names in the shared body XML. */
+export const CC_BOUND_STORE_ITEM_ID = '{A1B2C3D4-0000-0000-0000-000000000001}';
+
 export function ccFixtureBytes(
   protection?: 'forms' | 'readOnly' | 'comments' | 'trackedChanges',
   bodyXml?: string,
@@ -529,6 +532,11 @@ export function ccFixtureBytes(
   // the same as '0': the OOXML boolean rule makes an absent attribute mean
   // true. CC-4's protection reader is tested against all three states.
   enforcement: string | null = '1',
+  // Appended FOURTH, not third: `enforcement` is already passed positionally
+  // by cc_protection_state.test.ts. Adds a CustomXML data store carrying this
+  // root element, registered under the id CC:10's binding names - the
+  // fixture's binding DANGLES by design, and A4.8 needs both states.
+  customXml?: string,
 ): Uint8Array {
   const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
   const enforcementAttr = enforcement === null ? '' : ` w:enforcement="${enforcement}"`;
@@ -546,6 +554,10 @@ export function ccFixtureBytes(
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
         '<Override PartName="/word/settings.xml" ContentType="' +
         'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>' +
+        (customXml === undefined
+          ? ''
+          : '<Override PartName="/customXml/itemProps1.xml" ContentType="' +
+            'application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>') +
         '</Types>',
     ),
     '_rels/.rels': strToU8(
@@ -567,10 +579,31 @@ export function ccFixtureBytes(
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
         '<Relationship Id="rId1" Type="' +
         'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"' +
-        ' Target="settings.xml"/></Relationships>',
+        ' Target="settings.xml"/>' +
+        (customXml === undefined
+          ? ''
+          : '<Relationship Id="rId2" Type="' +
+            'http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml' +
+            '" Target="../customXml/item1.xml"/>') +
+        '</Relationships>',
     ),
     'word/settings.xml': strToU8(decl + `<w:settings ${w}>${prot}</w:settings>`),
   };
+  if (customXml !== undefined) {
+    files['customXml/item1.xml'] = strToU8(decl + customXml);
+    files['customXml/itemProps1.xml'] = strToU8(
+      decl +
+        '<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml"' +
+        ` ds:itemID="${CC_BOUND_STORE_ITEM_ID}"><ds:schemaRefs/></ds:datastoreItem>`,
+    );
+    files['customXml/_rels/item1.xml.rels'] = strToU8(
+      decl +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="' +
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps' +
+        '" Target="itemProps1.xml"/></Relationships>',
+    );
+  }
   return zipSync(files);
 }
 

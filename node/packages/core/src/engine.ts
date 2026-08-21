@@ -62,6 +62,26 @@ import {
   overridesNote,
   segmentationNote,
 } from "./gates.js";
+import { collectFields, resolveField, type FieldEntry } from "./fields.js";
+import {
+  checkboxGlyph,
+  clearPlaceholder,
+  findBoundStore,
+  glyphRun,
+  optionIsListed,
+  parseCheckboxValue,
+  parseIsoDate,
+  refuseClass,
+  refuseValue,
+  renderDate,
+  resolveOption,
+  sdtContent,
+  setCheckboxChecked,
+  setDropdownLastValue,
+  setFullDate,
+  unwrapSdt,
+  writeBoundValue,
+} from "./utils/field-write.js";
 
 // Ceiling for refusal advisory message characters (~70 approx tokens).
 const GUARD_MESSAGE_CAP = 70 * 4;
@@ -399,8 +419,14 @@ export function validate_edit_strings(
 
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i];
+    // `set_field` has no target_text - it addresses a control by id rather
+    // than by content - but its `value` is written into the document and must
+    // clear exactly the same bar as any other inserted string. A value
+    // containing `{#cc:3}` or raw CriticMarkup would fabricate anchors and
+    // reviewer names as prose (CC-1e), and routing it here is what stops
+    // `set_field` becoming a hole in that check.
     const t_text = edit.target_text || "";
-    const n_text = edit.new_text || "";
+    const n_text = edit.new_text ?? edit.value ?? "";
 
     // VAL-CRIT-8: XML-illegal control characters (QA 2026-07-17 F11).
     const checked_fields: Array<[string, string]> = [
@@ -611,6 +637,8 @@ export class RedlineEngine {
   public mapper: DocumentMapper;
   /** Anchor pairs as offsets into mapper.full_text; invalidated with it. */
   private _cc_anchor_pairs: Array<[number, number, number]> | null = null;
+  /** (projection text, ledger rows) - see _field_entries. */
+  private _field_entries_cache: [string, FieldEntry[]] | null = null;
   public comments_manager: CommentsManager;
   public clean_mapper: DocumentMapper | null = null;
   public original_mapper: DocumentMapper | null = null;
@@ -691,6 +719,7 @@ export class RedlineEngine {
     this.mapper = new DocumentMapper(this.doc);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
     this.comments_manager = new CommentsManager(this.doc);
   }
 
@@ -1365,6 +1394,388 @@ export class RedlineEngine {
       }
     }
     return maxId;
+  }
+
+  // ------------------------------------------------------------------
+  // set_field (CC-5, spec-set-field.md) - twin of the Python engine's block
+  // ------------------------------------------------------------------
+
+  /**
+   * The ledger rows for the CURRENT document state.
+   *
+   * Deliberately re-collected whenever the projection has been rebuilt: a
+   * `set_field` earlier in the batch may have filled, cleared or unwrapped a
+   * control, and resolving a later one against a stale ledger would target an
+   * offset that no longer means what it did.
+   */
+  private _field_entries(): FieldEntry[] {
+    const text = this.mapper.full_text;
+    if (this._field_entries_cache && this._field_entries_cache[0] === text) {
+      return this._field_entries_cache[1];
+    }
+    const entries = collectFields(this.doc, text);
+    this._field_entries_cache = [text, entries];
+    return entries;
+  }
+
+  /** The controls this `set_field` names, or a FieldResolutionError. */
+  private _resolve_set_field_targets(edit: any): FieldEntry[] {
+    return resolveField(this._field_entries(), edit.field, edit.match_mode || "strict");
+  }
+
+  private _sdt_info_for_ordinal(ordinal: number): any | null {
+    const infos = (this.mapper as any)._sdt_infos;
+    if (!infos) return null;
+    for (const info of infos.values()) {
+      if (info.ordinal === ordinal) return info;
+    }
+    return null;
+  }
+
+  /**
+   * The projection offsets BETWEEN this control's anchor pair, or null when
+   * the control does not anchor (spec §1 leaves groups, repeating sections
+   * and nested rich-text ledger-only).
+   */
+  private _cc_content_range(ordinal: number): [number, number] | null {
+    this._field_label_at(0); // builds _cc_anchor_pairs if cold
+    for (const [start, end, ord] of this._cc_anchor_pairs ?? []) {
+      if (ord === ordinal) return [start, end];
+    }
+    return null;
+  }
+
+  /** Drop everything keyed on the projection after an untracked write. */
+  private _invalidate_projection_caches(): void {
+    this.mapper["_build_map"]();
+    this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
+    this._field_entries_cache = null;
+  }
+
+  /**
+   * `w:sdtContent` when `offset` is the content position of an EMPTY control.
+   *
+   * This is the "empty-pair insertion" surface (A4.10): the sanctioned way to
+   * fill a field with a text-first edit is to type between its anchors, which
+   * produces an insertion at the exact offset where the pair's open and close
+   * tokens meet. Offsets alone cannot express "inside" there - the control
+   * contains no run to anchor to - so without this the value lands NEXT TO
+   * the field and the control stays empty.
+   *
+   * Shared with `set_field` deliberately: A4.10 requires the two routes to
+   * produce identical XML, and the only way to guarantee that is for them to
+   * run the same code rather than to agree by inspection.
+   */
+  private _empty_control_fill_host(mapper: any, offset: number): any | null {
+    const text: string = mapper?.full_text ?? "";
+    if (!text) return null;
+    const opens = new Map<number, number>();
+    const re = /\{#(\/?)cc:(\d+)(?: [^}]*)?\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const ordinal = Number(m[2]);
+      if (m[1]) {
+        const openEnd = opens.get(ordinal);
+        opens.delete(ordinal);
+        if (openEnd !== undefined && openEnd === m.index && m.index === offset) {
+          const info = this._sdt_info_for_ordinal(ordinal);
+          if (!info) return null;
+          // Same untracked teardown Word performs, so a text-first fill of a
+          // placeholder control does not leave the ghost styling behind
+          // (CC-6(a)).
+          if (info.showingPlaceholder && clearPlaceholder(info)) {
+            this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
+            this._field_entries_cache = null;
+          }
+          return sdtContent(info.element);
+        }
+      } else {
+        opens.set(ordinal, m.index + m[0].length);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The checkbox fill (A4.6), which cannot desugar into a ModifyText.
+   *
+   * A checkbox has no anchor pair and no editable span - it projects as a
+   * virtual bracket token - so there is no offset for a pinned edit to
+   * target. It is written directly instead: the state attribute flips
+   * silently, and the glyph swap carries the redline.
+   *
+   * `w:ins` goes BEFORE `w:del`, which is Word's own order (CC-6(b)) and is
+   * visible rather than cosmetic: the projection reads document order, so the
+   * reverse would render the toggle backwards.
+   */
+  private _apply_checkbox_set_field(edit: any, entry: FieldEntry, info: any): boolean {
+    const checked = parseCheckboxValue(edit.value);
+    if (checked === null) {
+      const msg =
+        `CC:${entry.ordinal} is a checkbox; '${edit.value}' is neither checked nor unchecked. ` +
+        "Use true/false (also accepted: x, [x], 1, 0, yes, no).";
+      edit._applied_status = false;
+      edit._error_msg = msg;
+      this.skipped_details.push(`- ${msg}`);
+      return false;
+    }
+
+    const oldRun = glyphRun(info);
+    const [char, font] = checkboxGlyph(info, checked);
+    const xmlDoc = this.doc.part._element.ownerDocument!;
+
+    const newRun = oldRun ? (oldRun.cloneNode(true) as any) : xmlDoc.createElement("w:r");
+    for (const t of Array.from(newRun.getElementsByTagName("w:t") as any) as any[]) {
+      t.parentNode?.removeChild(t);
+    }
+    const tEl = xmlDoc.createElement("w:t");
+    tEl.appendChild(xmlDoc.createTextNode(char));
+    newRun.appendChild(tEl);
+    if (font) {
+      let rpr = findChild(newRun, "w:rPr");
+      if (!rpr) {
+        rpr = xmlDoc.createElement("w:rPr");
+        newRun.insertBefore(rpr, newRun.firstChild);
+      }
+      for (const existing of Array.from(rpr.getElementsByTagName("w:rFonts") as any) as any[]) {
+        existing.parentNode?.removeChild(existing);
+      }
+      const fonts = xmlDoc.createElement("w:rFonts");
+      for (const attr of ["w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"]) {
+        fonts.setAttribute(attr, font);
+      }
+      rpr.insertBefore(fonts, rpr.firstChild);
+    }
+
+    const ins = this._create_track_change_tag("w:ins", "", this._getNextId());
+    ins.appendChild(newRun);
+
+    const parent = oldRun ? oldRun.parentNode : null;
+    if (!parent) {
+      const content = sdtContent(info.element);
+      if (!content) return false;
+      content.appendChild(ins);
+    } else {
+      parent.insertBefore(ins, oldRun);
+      const delTag = this._create_track_change_tag("w:del", "", this._getNextId());
+      const delRun = oldRun.cloneNode(true) as any;
+      for (const t of Array.from(delRun.getElementsByTagName("w:t") as any) as any[]) {
+        const dt = xmlDoc.createElement("w:delText");
+        while (t.firstChild) dt.appendChild(t.firstChild);
+        for (let i = 0; i < t.attributes.length; i++) {
+          dt.setAttribute(t.attributes[i].name, t.attributes[i].value);
+        }
+        t.parentNode?.replaceChild(dt, t);
+      }
+      delTag.appendChild(delRun);
+      parent.replaceChild(delTag, oldRun);
+    }
+
+    setCheckboxChecked(info, checked);
+    edit._applied_status = true;
+    edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
+    return true;
+  }
+
+  /**
+   * Desugar one `set_field` into pinned `ModifyText` sub-edits.
+   *
+   * This is the whole design of CC-5 in one method. `set_field` writes
+   * nothing itself: it performs the untracked teardown Word performs
+   * (placeholder state, §4.1-4.2), then hands the actual content change to
+   * the ordinary edit pipeline as a position-pinned `ModifyText`. That is
+   * what makes A4.12 true by construction - the gates, atomicity, author
+   * resolution and reporting all see a normal edit, so `set_field` cannot
+   * acquire a special pass through any of them by accident.
+   */
+  private _resolve_set_field(edit: any, resolved_edits: Array<[any, any]>): void {
+    let hits: FieldEntry[];
+    try {
+      hits = this._resolve_set_field_targets(edit);
+    } catch (e: any) {
+      edit._applied_status = false;
+      edit._error_msg = e?.message ?? String(e);
+      this.skipped_details.push(`- ${edit._error_msg}`);
+      return;
+    }
+
+    const clsOf = (e: FieldEntry): string => {
+      const info = this._sdt_info_for_ordinal(e.ordinal);
+      return info ? info.cls : e.cls_word;
+    };
+
+    // Phase 0: refuse before touching anything. Class first (A4.11), then the
+    // structure rules (A4.7). Both are checked for EVERY target before any is
+    // written, so a match_mode="all" fan-out cannot half-apply and leave the
+    // document in a state no single call could have produced.
+    for (const entry of hits) {
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+      let msg = refuseClass(clsOf(entry), entry.ordinal);
+      if (!msg && info) msg = refuseValue(info, entry.ordinal, edit.value);
+      if (msg) {
+        edit._applied_status = false;
+        edit._error_msg = msg;
+        this.skipped_details.push(`- ${msg}`);
+        return;
+      }
+    }
+
+    // Phase 1: the untracked teardown, for every target, before any offsets
+    // are read. Clearing a placeholder deletes the ghost text from the
+    // projection, so ranges computed before it would be stale by exactly the
+    // length of the prompt.
+    let touched = false;
+    for (const entry of hits) {
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+      if (info?.showingPlaceholder && clearPlaceholder(info)) touched = true;
+    }
+    if (touched) this._invalidate_projection_caches();
+
+    // Phase 1b: per-class value translation. The caller's string is not
+    // always what gets written: a dropdown's `w:value` resolves to its
+    // display text, and a date renders through the control's own format.
+    const effective = new Map<number, string>();
+    const notes = new Map<number, string>();
+    for (const entry of hits) {
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+      if (!info) continue;
+      if (info.cls === "dropdown" || info.cls === "combobox") {
+        const [display, err] = resolveOption(info, edit.value);
+        if (err) {
+          const msg = `CC:${entry.ordinal}: ${err}`;
+          edit._applied_status = false;
+          edit._error_msg = msg;
+          this.skipped_details.push(`- ${msg}`);
+          return;
+        }
+        effective.set(entry.ordinal, display!);
+        if (info.cls === "combobox" && !optionIsListed(info, display!)) {
+          notes.set(entry.ordinal, `'${display}' is not in the option list`);
+        }
+      } else if (info.cls === "date") {
+        const parts = parseIsoDate(edit.value);
+        if (!parts) {
+          const msg =
+            `CC:${entry.ordinal} is a date control; '${edit.value}' is not a date. ` +
+            "Use the canonical YYYY-MM-DD form (e.g. 2026-03-01).";
+          edit._applied_status = false;
+          edit._error_msg = msg;
+          this.skipped_details.push(`- ${msg}`);
+          return;
+        }
+        const [text, unsupported] = renderDate(parts, info.dateFormat);
+        effective.set(entry.ordinal, text);
+        if (unsupported) {
+          notes.set(
+            entry.ordinal,
+            `the control's date format '${info.dateFormat}' is not supported in v1; wrote the canonical ${text}`,
+          );
+        }
+      }
+    }
+
+    // Phase 2: checkboxes are written directly; everything else desugars.
+    const direct = hits.filter((e) => clsOf(e) === "checkbox");
+    if (direct.length) {
+      let ok = true;
+      for (const entry of direct) {
+        const info = this._sdt_info_for_ordinal(entry.ordinal);
+        if (!info || !this._apply_checkbox_set_field(edit, entry, info)) ok = false;
+      }
+      if (ok) this._invalidate_projection_caches();
+      return;
+    }
+
+    // Phase 2b: one pinned sub-edit per target.
+    for (const entry of hits) {
+      const span = this._cc_content_range(entry.ordinal);
+      if (!span) {
+        const msg =
+          `CC:${entry.ordinal} has no editable content span, so set_field cannot write to it. ` +
+          "Run read_docx with mode='fields' to see what this control is.";
+        edit._applied_status = false;
+        edit._error_msg = msg;
+        this.skipped_details.push(`- ${msg}`);
+        return;
+      }
+
+      const [start, end] = span;
+      const current = this.mapper.full_text.slice(start, end);
+      const value = effective.get(entry.ordinal) ?? edit.value;
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+
+      const sub: any = {
+        type: "modify",
+        target_text: current,
+        new_text: value,
+        comment: edit.comment ?? null,
+      };
+      // Always atomic, comment or not (spec §3): a fill is one logical act,
+      // and word-splitting it would scatter a single field update across
+      // several review entries.
+      sub._internal_op = !current ? "INSERTION" : !value ? "DELETION" : "MODIFICATION";
+      sub._resolved_start_idx = start;
+      sub._active_mapper_ref = this.mapper;
+      sub._parent_edit_ref = edit;
+      if (!current && info) {
+        // Nothing left inside the control to anchor to; name the host.
+        sub._insert_host_el = sdtContent(info.element);
+      }
+
+      // The attribute syncs ride along with the content change and take no
+      // revision of their own (spec §5, the URL_RETARGET class).
+      if (info) {
+        if (info.cls === "dropdown" || info.cls === "combobox") {
+          setDropdownLastValue(info, value);
+        } else if (info.cls === "date") {
+          const parts = parseIsoDate(edit.value);
+          if (parts) setFullDate(info, parts);
+        }
+
+        // A bound control dual-writes. The store WINS ON OPEN (CC-6(e)), so
+        // content-only writing to a bound control is data loss with extra
+        // steps - Word silently rewrites the content back from the store,
+        // discarding the edit with no revision to show for it.
+        if (info.bound) {
+          const store = findBoundStore(this.doc, info.storeItemId);
+          const wrote = !!store && writeBoundValue(store, info.bindingXpath, value);
+          const prior = notes.get(entry.ordinal);
+          const suffix = prior ? `; ${prior}` : "";
+          notes.set(
+            entry.ordinal,
+            wrote
+              ? `bound store ${info.bindingXpath} updated to match${suffix}`
+              : `WARNING: this field is bound to ${info.bindingXpath} but the data store ` +
+                  "could not be resolved, so only the visible text was updated. If the store " +
+                  `is restored later, Word will overwrite this edit from it.${suffix}`,
+          );
+        }
+
+        // A `w:temporary` control does not survive being edited: Word unwraps
+        // it on ANY content change, tracked or not (CC-6(c)). One-way, so the
+        // report discloses it.
+        if (info.temporary) {
+          sub._unwrap_sdt_after = info.element;
+          const prior = notes.get(entry.ordinal);
+          const unwrapNote =
+            "this control was temporary and has been unwrapped, as Word does on any edit";
+          notes.set(entry.ordinal, prior ? `${prior}; ${unwrapNote}` : unwrapNote);
+        }
+      }
+
+      const note = notes.get(entry.ordinal);
+      if (note) {
+        edit._warning = edit._warning ? `${edit._warning}; ${note}` : note;
+      }
+
+      if (edit._resolved_start_idx === undefined || edit._resolved_start_idx === null) {
+        edit._resolved_start_idx = start;
+        edit._resolved_proxy_edit = sub;
+      }
+      resolved_edits.push([sub, value]);
+    }
   }
 
   /**
@@ -3261,6 +3672,18 @@ export class RedlineEngine {
       // unrelated text (a comment timestamp, an earlier redline). The
       // string-shape checks above still apply. Checked BEFORE the empty-target
       // rejection below: pinned pure insertions legitimately carry no target.
+      if (edit.type === "set_field") {
+        // Resolve the field NOW, before anything is written. An unresolvable
+        // or ambiguous target is the recoverable half of A4.2, and the batch
+        // contract promises those fail the whole run without touching the
+        // document.
+        try {
+          this._resolve_set_field_targets(edit);
+        } catch (e: any) {
+          errors.push(`- Edit ${i + 1 + index_offset} Failed: ${e?.message ?? e}`);
+        }
+        continue;
+      }
       if (
         (edit._match_start_index !== undefined &&
           edit._match_start_index !== null) ||
@@ -4143,6 +4566,7 @@ export class RedlineEngine {
     this.mapper = new DocumentMapper(this.doc);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
     this.comments_manager = new CommentsManager(this.doc);
     this.clean_mapper = null;
     // The restore can swap whole parts for freshly parsed ones, so the
@@ -4423,6 +4847,7 @@ export class RedlineEngine {
                 this.mapper = new DocumentMapper(this.doc);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
                 this.clean_mapper = null;
               } else {
                 // QA 2026-07-23 F2: an APPLY-stage failure ("Failed to locate
@@ -4451,6 +4876,7 @@ export class RedlineEngine {
                   this.mapper = new DocumentMapper(this.doc);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
+    this._field_entries_cache = null;
                   this.clean_mapper = null;
                 }
               }
@@ -4659,6 +5085,16 @@ export class RedlineEngine {
     for (const edit of edits) {
       if (typeof edit !== "object" || edit === null) continue;
 
+      if (edit.type === "set_field") {
+        // Before the pinned branch: `set_field` addresses its target by id,
+        // so a caller-supplied offset would be meaningless - and taking the
+        // pinned path would hand the apply layer a change with no
+        // target_text at all.
+        this._resolve_set_field(edit, resolved_edits);
+        if (edit._error_msg) skipped += 1;
+        continue;
+      }
+
       if (
         (edit._resolved_start_idx !== undefined &&
           edit._resolved_start_idx !== null) ||
@@ -4697,6 +5133,20 @@ export class RedlineEngine {
             this.clean_mapper = new DocumentMapper(this.doc, true);
           }
           edit._active_mapper_ref = this.clean_mapper;
+        }
+        // A pure insertion landing exactly between an empty control's anchors
+        // is a field fill expressed as text (A4.10).
+        if (
+          edit.type === "modify" &&
+          !edit.target_text &&
+          edit.new_text &&
+          !edit._insert_host_el
+        ) {
+          const host = this._empty_control_fill_host(
+            edit._active_mapper_ref,
+            edit._resolved_start_idx ?? 0,
+          );
+          if (host) edit._insert_host_el = host;
         }
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
@@ -4939,6 +5389,12 @@ export class RedlineEngine {
         success = this._apply_single_edit_indexed(edit, orig_new, false);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
         success = this._apply_table_edit(edit, false);
+      }
+      if (success && edit._unwrap_sdt_after) {
+        // After the content change, never before: the edit resolves against
+        // offsets inside the control, and dissolving the wrapper first would
+        // move them (CC-6(c), spec-set-field §4.4).
+        unwrapSdt(edit._unwrap_sdt_after);
       }
       if (success) {
         const owner = edit._parent_edit_ref || edit;
@@ -6941,13 +7397,24 @@ export class RedlineEngine {
         if (!final_new_text.startsWith("\n")) {
           final_new_text = "\n\n" + final_new_text;
         }
+      } else if (edit._insert_host_el) {
+        // An empty content control names its host explicitly, because
+        // position alone can no longer reach it: once the ghost run is gone
+        // there is no run inside `w:sdtContent` to anchor to, and the nearest
+        // run by offset lives OUTSIDE the control. The insertion would then
+        // land next to the field instead of in it - a filled-looking document
+        // whose control is still empty, and whose value Word will not treat
+        // as the field's content. Same shape as the OPC part boundary: a wall
+        // that offsets cannot see, so the container is carried explicitly.
+        anchor_run = null;
+        anchor_para = null;
       } else {
         [anchor_run, anchor_para] = active_mapper.get_insertion_anchor(
           start_idx,
           rebuild_map,
         );
       }
-      if (!anchor_run && !anchor_para) return false;
+      if (!anchor_run && !anchor_para && !edit._insert_host_el) return false;
 
       // QA 2026-07-18 C2 (apply-level backstop, pinned edits bypass
       // validate_edits): refuse insertions that would write row-shaped pipe
@@ -7088,7 +7555,10 @@ export class RedlineEngine {
       // inline case needs DOM splicing here.
       const is_inline_first = result.first_node.tagName === "w:ins";
       if (is_inline_first) {
-        if (anchor_run) {
+        if (edit._insert_host_el) {
+          // The control IS the anchor: append into its emptied sdtContent.
+          edit._insert_host_el.appendChild(result.first_node);
+        } else if (anchor_run) {
           let anchor_el: Element = anchor_run._element;
           let anchor_parent = anchor_el.parentNode as Element | null;
           // A tracked-deleted anchor (run inside <w:del>) cannot host the

@@ -665,13 +665,23 @@ export function build_paragraph_text(
       } else if (item.type === "checkbox_start") {
         // Checkbox tokens persist in the clean view: they are structural
         // (spec §6), like the anchors, not commentary.
-        parts.push(CHECKBOX_OPEN);
+        //
+        // The DELETED half of a tracked toggle is the exception. Its brackets
+        // are chrome around content the clean view drops, so keeping them
+        // rendered two checkboxes where the document has one, the second
+        // permanently empty. Same rule the image branch already applies to
+        // deleted content.
+        if (!(cleanView && Object.keys(active_del).length > 0)) {
+          parts.push(CHECKBOX_OPEN);
+        }
       } else if (item.type === "checkbox_mark") {
         // Fallback only — the mark is normally a real run emitted by the
         // traversal, and arrives through the Run branch.
         parts.push(checkboxMark(info));
       } else if (item.type === "checkbox_end") {
-        parts.push(CHECKBOX_CLOSE);
+        if (!(cleanView && Object.keys(active_del).length > 0)) {
+          parts.push(CHECKBOX_CLOSE);
+        }
       } else {
         parts.push(closeToken(info));
       }

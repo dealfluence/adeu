@@ -1118,13 +1118,25 @@ export class DocumentMapper {
             txt += `{>>placeholder: ${info.placeholderText}<<}`;
           }
         } else if (item.type === "checkbox_start") {
-          txt = CHECKBOX_OPEN;
+          // The deleted half of a tracked toggle contributes no brackets to
+          // the clean view - its content is dropped, so the chrome around it
+          // would render a second, permanently empty checkbox. Mirrors
+          // ingest.ts exactly: the two projections are twins, and a
+          // divergence here is the CC-12 defect class (offsets that disagree
+          // with the text the caller was shown).
+          txt =
+            this.clean_view && Object.keys(active_del).length > 0
+              ? ""
+              : CHECKBOX_OPEN;
         } else if (item.type === "checkbox_mark") {
           // Fallback only; normally the mark is a real run-backed span
           // emitted through the Run branch (spec §4).
           txt = checkboxMark(info);
         } else if (item.type === "checkbox_end") {
-          txt = CHECKBOX_CLOSE;
+          txt =
+            this.clean_view && Object.keys(active_del).length > 0
+              ? ""
+              : CHECKBOX_CLOSE;
         } else {
           txt = closeToken(info);
         }

@@ -580,3 +580,107 @@ export function renderAppendixSection(
   if (hint) lines.push(hint);
   return lines;
 }
+
+// ---------------------------------------------------------------------------
+// Resolution (CC-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `set_field` target that could not be resolved to exactly one control.
+ *
+ * Carries the teaching text rather than a bare message: every one of these is
+ * recoverable by the caller, but only if the error says what the valid
+ * answers are (the invalid-action-id error class, spec-set-field §1).
+ */
+export class FieldResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FieldResolutionError";
+  }
+}
+
+/**
+ * How many tags/aliases an unresolvable-field error lists before truncating.
+ * A 5,000-control document would otherwise emit an error larger than the
+ * document, and past ~30 the list stops being readable anyway.
+ */
+const FIELD_SUGGESTION_CAP = 30;
+
+function availableSummary(entries: readonly FieldEntry[]): string {
+  if (!entries.length) return "This document has no content controls.";
+  const names: string[] = [];
+  for (const entry of entries) {
+    for (const name of [entry.tag, entry.alias]) {
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  const shown = names.slice(0, FIELD_SUGGESTION_CAP);
+  const tail = names.length > shown.length ? ` (+${names.length - shown.length} more)` : "";
+  if (!shown.length) {
+    const max = Math.max(...entries.map((e) => e.ordinal));
+    return (
+      `This document's ${entries.length} controls have no tags or aliases; ` +
+      `target them by id, CC:1 .. CC:${max}. Run read_docx with mode='fields' for the list.`
+    );
+  }
+  return (
+    "Available: " +
+    shown.join(", ") +
+    tail +
+    ". Run read_docx with mode='fields' for the full list with ids."
+  );
+}
+
+/**
+ * Resolve a `set_field` target to the entries it names (spec §1).
+ *
+ * Order is ordinal, then exact `w:tag`, then exact `w:alias`, and it is an
+ * order rather than a merged lookup on purpose: tags and aliases are author
+ * strings, so a document may legally use `CC:2` as someone's tag. The
+ * documented id has to win, or the addressing scheme this engine publishes
+ * could be shadowed by the document it addresses.
+ *
+ * Matching is case-sensitive per spec - these are identifiers, and a
+ * case-insensitive match would make `Total` and `total` the same field in a
+ * document that deliberately uses both.
+ */
+export function resolveField(
+  entries: readonly FieldEntry[],
+  field: string,
+  matchMode: string = "strict",
+): FieldEntry[] {
+  if (!field || !field.trim()) {
+    throw new FieldResolutionError(
+      "set_field requires 'field': the 'CC:<N>' id, tag, or alias of the control to fill. " +
+        "Run read_docx with mode='fields' to list them.",
+    );
+  }
+
+  const m = /^CC:(\d+)$/.exec(field.trim());
+  if (m) {
+    const ordinal = Number(m[1]);
+    const byOrdinal = entries.filter((e) => e.ordinal === ordinal);
+    if (byOrdinal.length) return byOrdinal;
+    throw new FieldResolutionError(
+      `No content control with id 'CC:${ordinal}'. ${availableSummary(entries)}`,
+    );
+  }
+
+  let hits = entries.filter((e) => e.tag === field);
+  if (!hits.length) hits = entries.filter((e) => e.alias === field);
+  if (!hits.length) {
+    throw new FieldResolutionError(
+      `No content control matches field '${field}'. ${availableSummary(entries)}`,
+    );
+  }
+
+  if (hits.length === 1 || matchMode === "all") return [...hits];
+  if (matchMode === "first") return [hits[0]];
+
+  const ids = hits.map((e) => `CC:${e.ordinal}`).join(", ");
+  throw new FieldResolutionError(
+    `Field '${field}' matches ${hits.length} controls (${ids}). ` +
+      "Target one by its 'CC:<N>' id, or set match_mode='first' to take the first " +
+      "or match_mode='all' to fill every occurrence.",
+  );
+}
