@@ -298,15 +298,15 @@ describe("run-level elements project their glyph", () => {
 // ---------------------------------------------------------------------------
 const CORPUS_PROJECTION_SIZES: Record<string, [number, number]> = {
   // key: [raw_view_chars, clean_view_chars]
-  fedramp_ssp_rev4: [583_407, 498_507],
-  dau_acquisition_plan: [15_651, 15_090],
-  wawd_esi_agreement: [15_858, 15_858],
+  fedramp_ssp_rev4: [605_489, 505_540],
+  dau_acquisition_plan: [17_711, 15_354],
+  wawd_esi_agreement: [15_978, 15_891],
   on_juries_form1: [5_505, 3_199],
   ca_talent_recruitment: [5_461, 4_957],
   // A .dotx. Absent from this table until CC-11, because python could not open
   // one at all and there was nothing to pin against; both engines project the
   // same 7,221 chars in both views (verified 2026-08-21).
-  odot_uic_drywell: [7_221, 7_221],
+  odot_uic_drywell: [7_434, 7_434],
 };
 
 describe("corpus projection sizes are pinned to the python engine", () => {

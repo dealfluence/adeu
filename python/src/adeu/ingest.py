@@ -11,6 +11,7 @@ from docx.text.paragraph import Paragraph
 
 from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
+from adeu.utils.content_controls import SdtEvent, assign_ordinals, part_element
 from adeu.utils.docx import (
     DocxEvent,
     ProjectedRun,
@@ -136,6 +137,13 @@ def _extract_text_from_doc(
     comments_mgr = CommentsManager(doc)
     comments_map = comments_mgr.extract_comments_data()
 
+    # Ordinals are assigned ONCE, over the parts in projection order, and the
+    # resulting map is threaded through every level below. Spec-projection.md
+    # §9 requires this to be a single shared pre-pass rather than a counter
+    # each producer maintains: a counter is exactly the shape of bug CC-12 was
+    # (two producers agreeing with each other and both wrong).
+    sdt_infos = assign_ordinals(part_element(part) for part, _kind in iter_document_parts_with_kind(doc))
+
     full_text: list[str] = []
     # Store the lxml proxy as the 3rd tuple item to keep it alive, preventing
     # CPython from recycling the id() memory address between passes.
@@ -154,6 +162,7 @@ def _extract_text_from_doc(
             offset_map=offset_map,
             cursor=part_cursor,
             table_acc=structure.tables if structure is not None else None,
+            sdt_infos=sdt_infos,
         )
         if part_text:
             if full_text:
@@ -190,6 +199,7 @@ def _extract_blocks(
     style_cache: dict | None = None,
     default_pstyle: str | None = None,
     part: Any = None,
+    sdt_infos: dict | None = None,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
@@ -237,6 +247,7 @@ def _extract_blocks(
                 clean_view,
                 offset_map=offset_map,
                 cursor=block_start,
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
             )
@@ -265,6 +276,7 @@ def _extract_blocks(
                 default_pstyle,
                 paragraph_prefix=style_prefix,
                 part=part,
+                sdt_infos=sdt_infos,
             )
             if clean_view and not p_text and paragraph_mark_is_deleted(p_elem):
                 # Accepting a tracked paragraph-mark deletion merges the
@@ -297,6 +309,7 @@ def _extract_blocks(
                 offset_map=offset_map,
                 cursor=block_start,
                 geometry=geometry,
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
@@ -326,6 +339,7 @@ def extract_table(
     style_cache: dict | None = None,
     default_pstyle: str | None = None,
     part: Any = None,
+    sdt_infos: dict | None = None,
 ) -> str:
     """
     Args:
@@ -380,6 +394,7 @@ def extract_table(
                 clean_view,
                 offset_map=offset_map,
                 cursor=cell_cursor,
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
@@ -435,6 +450,7 @@ def build_paragraph_text(
     default_pstyle: Optional[str] = None,
     paragraph_prefix: Optional[str] = None,
     part: Any = None,
+    sdt_infos: Optional[dict] = None,
 ):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
@@ -470,7 +486,7 @@ def build_paragraph_text(
     # used only to decide whether the next incoming run can elide adjacent markers.
     current_style = ("", "")
 
-    items = list(iter_paragraph_content(paragraph, part=part))
+    items = list(iter_paragraph_content(paragraph, part=part, sdt_infos=sdt_infos))
 
     # Heading-leading-whitespace strip: in heading paragraphs, leading runs
     # whose text is whitespace-only (e.g. a lone <w:br/> or <w:tab/>) are
@@ -623,6 +639,38 @@ def build_paragraph_text(
                                 current_style = ("", "")
                             parts.append(f"{{>>{meta_block}<<}}")
                         deferred_meta_states = []
+
+        elif isinstance(item, SdtEvent):
+            # Content-control boundary. A sibling of the DocxEvent branch
+            # rather than a member of it: DocxEvent is a 4-field NamedTuple
+            # keyed on strings, and an anchor needs the whole SdtInfo (flags,
+            # class, placeholder text), so widening DocxEvent would have meant
+            # a parallel out-of-band lookup at every consumer.
+            #
+            # Heading content has begun: an anchor is addressable text, so
+            # the leading-whitespace strip stops here exactly as it does for
+            # every other non-Run event.
+            leading_strip_active = False
+            # Anchor tokens are structural and must NOT be swept into the
+            # emphasis/CriticMarkup group being accumulated: a control inside a
+            # bold span would otherwise emit `**{#cc:3}text**`, and every
+            # marker-stripping pass would mangle the token.
+            if pending_text:
+                s_tok, e_tok = current_wrappers
+                parts.append(f"{s_tok}{pending_text}{e_tok}")
+                pending_text = ""
+                current_wrappers = ("", "")
+                current_style = ("", "")
+            info = item.info
+            if item.type == "sdt_start":
+                parts.append(info.open_token)
+                # The placeholder bubble is virtual chrome: raw view only,
+                # dropped in the clean view because an unfilled field has no
+                # accepted-state content (spec §6).
+                if not clean_view and info.showing_placeholder and info.placeholder_text:
+                    parts.append(f"{{>>placeholder: {info.placeholder_text}<<}}")
+            else:
+                parts.append(info.close_token)
 
         elif isinstance(item, DocxEvent):
             # Once we see any event, real heading content has effectively begun

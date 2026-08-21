@@ -12,6 +12,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from adeu.redline.comments import CommentsManager
+from adeu.utils.content_controls import SdtEvent, assign_ordinals, part_element
 from adeu.utils.docx import (
     DocxEvent,
     ProjectedRun,
@@ -240,6 +241,13 @@ class DocumentMapper:
         # engine refuse or re-anchor edits at OPC part boundaries (QA C1).
         self.part_ranges: List[Tuple[int, int, str]] = []
         self._current_part_index = 0
+
+        # THE SAME pre-pass ingest runs, over the same parts in the same order.
+        # Not a second implementation of ordinal assignment: spec-projection.md
+        # §9 requires one shared helper precisely so the two producers cannot
+        # disagree about which control is CC:7 (CC-12 is what disagreement
+        # costs).
+        self._sdt_infos = assign_ordinals(part_element(part) for part, _kind in iter_document_parts_with_kind(self.doc))
 
         # Mirrors ingest._extract_text_from_doc exactly: parts are joined by
         # "\n\n", and a part that projects NO text contributes NOTHING — not
@@ -644,7 +652,7 @@ class DocumentMapper:
                 current += len(e_tok)
             pending_runs = []
 
-        items = list(iter_paragraph_content(paragraph, part=part))
+        items = list(iter_paragraph_content(paragraph, part=part, sdt_infos=self._sdt_infos))
 
         # Twin of ingest.build_paragraph_text: reuse the prefix _map_blocks
         # already computed instead of re-deriving it per paragraph.
@@ -832,6 +840,28 @@ class DocumentMapper:
                             self._add_virtual_text(full_meta, current, paragraph)
                             current += len(full_meta)
                         deferred_meta_states = []
+
+            elif isinstance(item, SdtEvent):
+                # Content-control boundary. Twin of the ingest branch — the
+                # tokens are VIRTUAL spans (run=None), so they occupy offsets
+                # in the projection but map back to no run, exactly like the
+                # `{#cell:}` anchors and bookmark tokens above. `flush_pending_runs`
+                # first, for the same reason ingest flushes `pending_text`: an
+                # anchor must never end up inside an emphasis or CriticMarkup
+                # group.
+                leading_strip_active = False
+                flush_pending_runs()
+                current_wrappers = ("", "")
+                current_style = ("", "")
+                info = item.info
+                if item.type == "sdt_start":
+                    txt = info.open_token
+                    if not self.clean_view and info.showing_placeholder and info.placeholder_text:
+                        txt += f"{{>>placeholder: {info.placeholder_text}<<}}"
+                else:
+                    txt = info.close_token
+                self._add_virtual_text(txt, current, paragraph)
+                current += len(txt)
 
             elif isinstance(item, DocxEvent):
                 leading_strip_active = False

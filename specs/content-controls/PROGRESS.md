@@ -778,3 +778,61 @@ Practical note for the other agent and for future me: a live-Word failure should
 reproduced from a cold Word (`Stop-Process -Name WINWORD -Force`) before it is believed.
 That killing Word between runs changes the outcome is itself the evidence that the state
 lives in the Word instance and not in the tests.
+### 2026-08-21 - CC-1b: inline anchors land in both engines (opencode-osx)
+
+`sdt_start`/`sdt_end` events now flow through both engines' paragraph traversal,
+and ingest and the mapper both consume them. Inline anchored leaf controls
+project their `{#cc:N}` pairs with normative flag order, the empty control
+projects as the matchable adjacent pair, and the placeholder bubble renders in
+the raw view only. **A1.4 is fixed**: the ghost text no longer projects as body
+text. That was the worst pre-CC-1 defect - a reader could not distinguish
+"Click or tap here to enter text." from a real party name, and neither could a
+model asked to fill the field.
+
+Verified 12/12 views byte-identical python<->node (5 corpus documents, the .dotx
+template, and the 16-control fixture, raw and clean) with zero mapper drift in
+either engine.
+
+**Design points.**
+
+The ordinal pre-pass is computed once per document by each producer from the
+SAME shared helper over the SAME part sequence, and threaded down as a
+parameter. Passing the map is what makes the boundary visible at all: callers
+that omit it (outline, sanitize, domain) keep the historical transparent
+behaviour exactly, which is what they want - outline must not grow anchor
+tokens.
+
+`SdtEvent` is a sibling of `DocxEvent`, not another `type` case inside it.
+`DocxEvent` is a four-string record; an anchor needs the whole `SdtInfo` (flags,
+class, placeholder text), so folding it in would have meant a parallel
+out-of-band lookup at every consumer - which is the shape of drift this
+initiative keeps paying for.
+
+**A rule I had to make explicit rather than guess.** Node's mapper drifted 3
+characters from node's ingest on `dau_acquisition_plan`: a heading containing an
+empty control, `## {#cc:62 locked}{>>placeholder: ...<<}{#/cc:62}   `. Both
+engines strip leading whitespace-only runs in headings and stop at "any non-Run
+event"; the mapper counted an sdt boundary as such an event and the ingest did
+not. Rather than pick whichever side made the diff vanish, I applied the
+documented rule uniformly to all four sites: an anchor is addressable text, so
+heading content has begun and the strip stops. My own CC-12 guard caught this,
+which is the first time that guard has paid for itself.
+
+**Scope honesty.** Block-level anchors (CC:1), groups (CC:8) and the three table
+controls (CC:14-16) are NOT done - they still project transparently, content
+visible, anchors missing. Both suites assert that explicitly in a test that
+fails the moment those anchors land, so the gap cannot be mistaken for done and
+the golden comparison has to be updated deliberately. A1.1/A1.2 full-document
+goldens therefore remain unmet (and A1.1 is additionally blocked on the
+GOLDEN-RAW divider defect flagged earlier today).
+
+**Filed CC-14, and it is not mine.** Full-suite verification surfaced
+`test_p2_json_text_roundtrip_is_exact_or_loud` failing: a one-paragraph document
+split into two applies cleanly and yields `'0.\n\n 0.'` instead of
+`'0.\n\n0.'`. I stashed my work and reproduced it on a clean tree - pre-existing,
+unrelated to content controls, surfaced only because hypothesis happened to
+generate that example during one of my runs and cached it. It is the silent
+failure mode the property exists to forbid: the engine may refuse an edit, but
+it may not accept one and produce a different document. `.hypothesis` is
+gitignored, so CI will not rediscover it deterministically; CC-14 says to pin
+the example.

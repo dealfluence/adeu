@@ -16,6 +16,8 @@ from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
+from adeu.utils.content_controls import SdtEvent
+
 logger = structlog.get_logger(__name__)
 
 
@@ -908,10 +910,18 @@ def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     return "\n".join(wrap(p) if p else "" for p in parts)
 
 
-def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[ParagraphItem]:
+def iter_paragraph_content(
+    paragraph: Any, part: Any = None, sdt_infos: Optional[dict] = None
+) -> Iterator[ParagraphItem]:
     """
     Iterates over the content of a paragraph, yielding both Runs and Comment events.
     This allows reconstruction of text with inline comments using CriticMarkup.
+
+    ``sdt_infos`` is the ``id(element) -> SdtInfo`` map from
+    ``content_controls.assign_ordinals``. Supplying it turns inline content
+    controls from transparent wrappers into ``SdtEvent`` boundaries; omitting it
+    preserves the historical behaviour exactly, which is what callers like
+    outline and sanitize want (they must not grow anchor tokens).
     """
     doc_part = part if part is not None else _get_part_safely(paragraph)
     # State for complex fields (w:fldChar)
@@ -1101,7 +1111,26 @@ def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[Paragra
                 if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                     yield DocxEvent("bookmark", b_name)
             elif tag in (QN_W_SDT, QN_W_SMARTTAG, QN_W_SDTCONTENT):
-                yield from traverse_node(child)
+                # Content controls were historically transparent here: the
+                # boundary was erased and only the contents projected. When the
+                # caller supplies the ordinal map (ingest and the mapper do;
+                # outline/sanitize deliberately do not) the boundary becomes
+                # visible as a pair of events, and an ANCHORED control's
+                # contents are bracketed by them.
+                info = sdt_infos.get(id(child)) if sdt_infos is not None else None
+                if info is None or not info.anchored:
+                    yield from traverse_node(child)
+                else:
+                    yield SdtEvent("sdt_start", info)
+                    if not info.showing_placeholder:
+                        yield from traverse_node(child)
+                    # Ghost text NEVER projects as body text (spec §3, A1.4).
+                    # The placeholder run lives in sdtContent like any other
+                    # run, so descending would emit "Click or tap here to enter
+                    # text." as if the user had typed it. The bubble that
+                    # replaces it is chrome, added by the consumer, because
+                    # only the consumer knows whether this is the clean view.
+                    yield SdtEvent("sdt_end", info)
 
     p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     yield from traverse_node(p_el)

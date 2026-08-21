@@ -15,6 +15,14 @@ import {
   iter_paragraph_content,
 } from "./utils/docx.js";
 import { findChild } from "./docx/dom.js";
+import {
+  assignOrdinals,
+  closeToken,
+  isSdtEvent,
+  openToken,
+  partElement,
+  type SdtInfo,
+} from "./utils/content-controls.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
 import { build_structural_appendix } from "./domain.js";
 import { extract_comments_data } from "./comments.js";
@@ -74,6 +82,17 @@ export function _extractTextFromDoc(
     : null;
   let cursor = 0;
 
+  // Ordinals are assigned ONCE, over the parts in projection order, and the
+  // resulting map is threaded through every level below. Spec-projection.md §9
+  // requires this to be a single shared pre-pass rather than a counter each
+  // producer maintains: a counter is exactly the shape of bug CC-12 was (two
+  // producers agreeing with each other and both wrong).
+  const sdtInfos = assignOrdinals(
+    Array.from(iter_document_parts_with_kind(doc)).map(([part]) =>
+      partElement(part),
+    ),
+  );
+
   for (const [part, part_kind] of iter_document_parts_with_kind(doc)) {
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
     const part_text = _extract_blocks(
@@ -83,6 +102,7 @@ export function _extractTextFromDoc(
       part_cursor,
       return_paragraph_offsets ? paragraph_offsets : undefined,
       structure ? structure.tables : undefined,
+      sdtInfos,
     );
     if (part_text) {
       if (full_text.length > 0) cursor += 2;
@@ -122,6 +142,7 @@ function _extract_blocks(
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
   table_acc?: TableGeometry[],
+  sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
@@ -151,6 +172,8 @@ function _extract_blocks(
         cleanView,
         block_start,
         paragraph_offsets,
+        undefined,
+        sdtInfos,
       );
       if (fn_text) {
         blocks.push(fn_text);
@@ -170,6 +193,7 @@ function _extract_blocks(
         cleanView,
         style_cache,
         default_pstyle,
+        sdtInfos,
       );
       if (cleanView && !p_text && paragraph_mark_is_deleted(item._element)) {
         // Accepting a tracked paragraph-mark deletion merges the paragraph
@@ -201,6 +225,7 @@ function _extract_blocks(
         block_start,
         paragraph_offsets,
         geometry,
+        sdtInfos,
       );
       if (table_text) {
         blocks.push(table_text);
@@ -227,6 +252,7 @@ export function extract_table(
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
   geometry?: TableGeometry | null,
+  sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const rows_text: string[] = [];
   let rows_processed = 0;
@@ -261,6 +287,8 @@ export function extract_table(
         cleanView,
         cell_cursor,
         paragraph_offsets,
+        undefined,
+        sdtInfos,
       );
       // Emit a stable, document-native anchor for this cell so empty/short
       // value cells are addressable by the engine. Reuses the {#...} bookmark
@@ -337,6 +365,7 @@ export function build_paragraph_text(
   cleanView: boolean,
   style_cache?: any,
   default_pstyle?: string | null,
+  sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const parts: string[] = [];
   const active_ins: Record<string, DocxEvent> = {};
@@ -349,7 +378,7 @@ export function build_paragraph_text(
   let current_wrappers: [string, string] = ["", ""];
   let current_style: [string, string] = ["", ""];
 
-  const items = Array.from(iter_paragraph_content(paragraph));
+  const items = Array.from(iter_paragraph_content(paragraph, sdtInfos));
   const is_heading = is_heading_paragraph(
     paragraph,
     style_cache,
@@ -520,6 +549,39 @@ export function build_paragraph_text(
             deferred_meta_states.length = 0; // clear
           }
         }
+      }
+    } else if (isSdtEvent(item)) {
+      // Content-control boundary. Handled BEFORE the DocxEvent branch and as a
+      // distinct shape rather than another `ev.type` case: DocxEvent is a
+      // four-string record, and an anchor needs the whole SdtInfo (flags,
+      // class, placeholder text), so folding it in would have meant a parallel
+      // out-of-band lookup at every consumer.
+      //
+      // Heading content has begun: an anchor is addressable text, so the
+      // leading-whitespace strip stops here exactly as it does for every other
+      // non-Run event.
+      leading_strip_active = false;
+      // Anchor tokens are structural and must NOT be swept into the emphasis /
+      // CriticMarkup group being accumulated: a control inside a bold span
+      // would otherwise emit `**{#cc:3}text**`, and every marker-stripping
+      // pass would mangle the token.
+      if (pending_text) {
+        parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+        pending_text = "";
+        current_wrappers = ["", ""];
+        current_style = ["", ""];
+      }
+      const info = item.info;
+      if (item.type === "sdt_start") {
+        parts.push(openToken(info));
+        // The placeholder bubble is virtual chrome: raw view only, dropped in
+        // the clean view because an unfilled field has no accepted-state
+        // content (spec §6).
+        if (!cleanView && info.showingPlaceholder && info.placeholderText) {
+          parts.push(`{>>placeholder: ${info.placeholderText}<<}`);
+        }
+      } else {
+        parts.push(closeToken(info));
       }
     } else {
       const ev = item as DocxEvent;

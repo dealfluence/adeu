@@ -1,4 +1,5 @@
 import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
+import { isAnchored, type SdtEvent, type SdtInfo } from "./content-controls.js";
 import {
   Paragraph,
   Table,
@@ -1010,7 +1011,8 @@ export function _get_part(parent: any): any {
 
 export function* iter_paragraph_content(
   paragraph: Paragraph,
-): Generator<Run | DocxEvent> {
+  sdtInfos?: Map<any, SdtInfo>,
+): Generator<Run | DocxEvent | SdtEvent> {
   let in_complex_field = false;
   let current_instr = "";
   let hide_result = false;
@@ -1103,7 +1105,7 @@ export function* iter_paragraph_content(
     if (c_id !== null) yield { type: "fmt_end", id: c_id };
   }
 
-  function* traverse_node(node: Element): Generator<Run | DocxEvent> {
+  function* traverse_node(node: Element): Generator<Run | DocxEvent | SdtEvent> {
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i] as Element;
       if (child.nodeType !== 1) continue;
@@ -1161,7 +1163,27 @@ export function* iter_paragraph_content(
         tag === QN_W_SMARTTAG ||
         tag === QN_W_SDTCONTENT
       ) {
-        yield* traverse_node(child);
+        // Content controls were historically transparent here: the boundary
+        // was erased and only the contents projected. When the caller supplies
+        // the ordinal map (ingest and the mapper do; outline/sanitize
+        // deliberately do not) the boundary becomes visible as a pair of
+        // events, and an ANCHORED control's contents are bracketed by them.
+        const info = sdtInfos ? sdtInfos.get(child) : undefined;
+        if (!info || !isAnchored(info)) {
+          yield* traverse_node(child);
+        } else {
+          yield { type: "sdt_start", info } as SdtEvent;
+          if (!info.showingPlaceholder) {
+            yield* traverse_node(child);
+          }
+          // Ghost text NEVER projects as body text (spec §3, A1.4). The
+          // placeholder run lives in sdtContent like any other run, so
+          // descending would emit "Click or tap here to enter text." as if
+          // the user had typed it. The bubble that replaces it is chrome,
+          // added by the consumer, because only the consumer knows whether
+          // this is the clean view.
+          yield { type: "sdt_end", info } as SdtEvent;
+        }
       }
     }
   }

@@ -57,7 +57,14 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     spec-projection.md §9 the ordinal pre-pass MUST be one shared helper consumed by
     ingest AND mapper, so the Virtual Text contract holds by construction rather than
     by two implementations agreeing.
-  - **1b — anchored leaves + groups + clean view** (osx): A1.1-A1.5, A1.10.
+  - **1b — anchored leaves + groups + clean view** (osx, `in-progress`): A1.1-A1.5,
+    A1.10. **INLINE half landed** (`sdt_start`/`sdt_end` events through both engines'
+    traversal, ingest + mapper emitting anchors, flags, the empty pair and the
+    placeholder bubble; A1.4 fixed). Remaining: block-level anchors (CC:1), group
+    boundary tokens (CC:8), and the table cases (CC:14 cell, CC:15 row, CC:16 in-cell
+    block), which need the boundary surfaced from `_iter_block_children` and from
+    `_iter_sdt_transparent_children`/`findChildrenSdtTransparent` - those currently
+    discard the wrapper entirely and return only the `w:tr`/`w:tc`.
   - **1c — checkboxes** (`in-progress`, agent: opencode-windows, since: 2026-08-21): A1.8.
     Needs 1a only. Taking the COM + corpus reconnaissance half FIRST, while 1a is in
     flight: what glyph/font pairs Word actually writes, whether `w14:checked` and the
@@ -352,6 +359,31 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 - Note for whoever takes it: `Stop-Process -Name WINWORD -Force` between runs changes
   the outcome, which is itself evidence that the state lives in the Word instance
   rather than in the tests.
+## CC-14 - Redline replay silently produces the wrong document (P1, correctness)
+
+- Status: `pending`
+- Found by: opencode-osx, 2026-08-21, during CC-1b verification. **Pre-existing** -
+  reproduced on a stashed clean tree, unrelated to content controls. Hypothesis had
+  simply never generated this example before and cached it mid-session.
+- Reproduce: `cd python && uv run pytest tests/test_property_invariants.py::test_p2_json_text_roundtrip_is_exact_or_loud -n 0`
+  Falsifying example: `data=(['0 0.'], ['0.', '0.'])` - i.e. one paragraph `"0 0."`
+  edited into two paragraphs `"0."` and `"0."`.
+- Symptom: the batch applies cleanly (no `BatchValidationError`, `edits_skipped == 0`)
+  and the accepted output is `'0.\n\n 0.'` where the requested text was
+  `'0.\n\n0.'` - a stray leading space on the second paragraph.
+- Why it matters more than the character count suggests: this is the *silent* failure
+  mode. The property is called `..._is_exact_or_loud` precisely because the engine is
+  allowed to refuse an edit but is NOT allowed to accept it and produce something
+  different. A caller replaying JSON edits gets a document that differs from what it
+  asked for, with no error to act on. Every other outcome in that test is a clean
+  refusal.
+- Likely area: paragraph-split handling in the alignment-generated edits - the split
+  point appears to keep the separating space with the tail rather than consuming it.
+  See `generate_edits_via_paragraph_alignment` and the split path in
+  `redline/engine.py`.
+- Note: `.hypothesis` is gitignored, so CI will NOT reproduce this deterministically.
+  Whoever takes it should pin the example as an explicit regression test rather than
+  relying on the property search to rediscover it.
 
 ## CC-9 â€” P3 seeds: bound dual-write hardening, repeating-section ops, field-labeled diff (P3)
 

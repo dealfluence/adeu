@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { unzipSync, strFromU8 } from 'fflate';
+import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import { DocumentObject } from './docx/bridge.js';
 import { parseFastXml } from './docx/fast-xml.js';
 import { isWordReadableLongHexNumber } from './docx/long-hex-number.js';
@@ -500,4 +500,49 @@ export function ccFixtureDocumentXml(): string {
 export function ccFixtureBodyElement(): any {
   const doc = parseFastXml(ccFixtureDocumentXml());
   return findChildTag(doc.documentElement, 'w:body');
+}
+
+/**
+ * A complete minimal package for the content-control fixture.
+ *
+ * Mirrors `python/tests/cc_fixture.py::cc_fixture_bytes` and
+ * `scripts/make_cc_fixture.py` part-for-part, so the two engines are handed
+ * byte-comparable input. `protection` selects the `cc_fixture_forms` variant.
+ */
+export function ccFixtureBytes(protection?: 'forms' | 'readOnly' | 'comments'): Uint8Array {
+  const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const prot = protection
+    ? `<w:documentProtection w:edit="${protection}" w:enforcement="1"/>`
+    : '';
+  const decl = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const files: Record<string, Uint8Array> = {
+    '[Content_Types].xml': strToU8(
+      decl +
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="' +
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        '<Override PartName="/word/settings.xml" ContentType="' +
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>' +
+        '</Types>',
+    ),
+    '_rels/.rels': strToU8(
+      decl +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="' +
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"' +
+        ' Target="word/document.xml"/></Relationships>',
+    ),
+    'word/document.xml': strToU8(decl + '\n' + ccFixtureDocumentXml()),
+    'word/_rels/document.xml.rels': strToU8(
+      decl +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="' +
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"' +
+        ' Target="settings.xml"/></Relationships>',
+    ),
+    'word/settings.xml': strToU8(decl + `<w:settings ${w}>${prot}</w:settings>`),
+  };
+  return zipSync(files);
 }

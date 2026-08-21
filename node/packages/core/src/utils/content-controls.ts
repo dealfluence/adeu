@@ -90,6 +90,7 @@ export interface SdtInfo {
   bound: boolean;
   bindingXpath: string | null;
   showingPlaceholder: boolean;
+  placeholderText: string | null;
   options: ReadonlyArray<readonly [string, string]>;
   checked: boolean | null;
   dateFormat: string | null;
@@ -162,6 +163,19 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
 
   const showingPlaceholder = !!(sdtPr && findChild(sdtPr, "w:showingPlcHdr"));
 
+  const content = findChild(sdtElement, QN_W_SDTCONTENT);
+  let placeholderText: string | null = null;
+  if (showingPlaceholder && content) {
+    // The ghost text is a perfectly ordinary run inside sdtContent - which is
+    // exactly why it leaked into the projection as body text before CC-1.
+    // Captured here so the consumer can render it as a bubble and nowhere else.
+    const ghost = findAllDescendants(content, "w:t")
+      .map((t: any) => t.textContent ?? "")
+      .join("")
+      .trim();
+    placeholderText = ghost || null;
+  }
+
   let options: ReadonlyArray<readonly [string, string]> = [];
   if (cls === "dropdown" || cls === "combobox") {
     const listEl = sdtPr
@@ -192,7 +206,6 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
     dateFormat = val(dateEl ? findChild(dateEl, "w:dateFormat") : null);
   }
 
-  const content = findChild(sdtElement, QN_W_SDTCONTENT);
   const hasNestedSdt = !!content && findAllDescendants(content, QN_W_SDT).length > 0;
 
   // Flag order is normative (spec §2): locked, bound, group. A group is an
@@ -213,6 +226,7 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
     bound,
     bindingXpath,
     showingPlaceholder,
+    placeholderText,
     options,
     checked,
     dateFormat,
@@ -260,4 +274,39 @@ export function assignOrdinals(partElements: Iterable<any>): Map<any, SdtInfo> {
     }
   }
   return infos;
+}
+
+/** A control boundary in the traversal stream. */
+export interface SdtEvent {
+  type: "sdt_start" | "sdt_end";
+  info: SdtInfo;
+}
+
+/**
+ * Narrow a traversal item to a control boundary.
+ *
+ * Structural rather than nominal, because the traversal stream carries plain
+ * objects: an item is an SdtEvent iff it is one of the two boundary types AND
+ * carries an `info`. Testing `type` alone would misfire the day some other
+ * producer emits a like-named event.
+ */
+export function isSdtEvent(item: any): item is SdtEvent {
+  return (
+    !!item &&
+    (item.type === "sdt_start" || item.type === "sdt_end") &&
+    "info" in item
+  );
+}
+
+/**
+ * The DOM root to scan for content controls in a projected part.
+ *
+ * `iter_document_parts_with_kind` yields heterogeneous objects (a Document, a
+ * header/footer part, a NotesPart), so the ordinal pre-pass needs one place
+ * that knows how to reach the element behind each of them - and BOTH producers
+ * must reach it the same way, or they would scan different roots and number
+ * the controls differently.
+ */
+export function partElement(part: any): any {
+  return part?.element ?? part?._element ?? part;
 }

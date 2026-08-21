@@ -19,7 +19,7 @@ precedent is followed here.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Iterator, NamedTuple, Optional, Tuple
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W14_NS = "http://schemas.microsoft.com/office/word/2010/wordml"
@@ -90,6 +90,7 @@ class SdtInfo:
     bound: bool = False
     binding_xpath: Optional[str] = None
     showing_placeholder: bool = False
+    placeholder_text: Optional[str] = None
     options: Tuple[Tuple[str, str], ...] = ()
     checked: Optional[bool] = None
     date_format: Optional[str] = None
@@ -120,6 +121,19 @@ class SdtInfo:
     @property
     def close_token(self) -> str:
         return f"{{#/cc:{self.ordinal}}}"
+
+
+class SdtEvent(NamedTuple):
+    """A control boundary in the traversal stream.
+
+    Carries the whole :class:`SdtInfo` rather than just an ordinal so consumers
+    never have to re-derive classification — ingest, the mapper and the ledger
+    all read the same object, which is what makes their agreement structural
+    rather than coincidental.
+    """
+
+    type: str  # "sdt_start" | "sdt_end"
+    info: SdtInfo
 
 
 def _first_child(parent: Any, qname: str) -> Any:
@@ -175,6 +189,16 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
 
     showing_placeholder = _first_child(sdtPr, _w("showingPlcHdr")) is not None
 
+    content = _first_child(sdt_element, QN_W_SDTCONTENT)
+    placeholder_text: Optional[str] = None
+    if showing_placeholder and content is not None:
+        # The ghost text is a perfectly ordinary run inside sdtContent - which
+        # is exactly why it leaked into the projection as body text before
+        # CC-1. Captured here so the consumer can render it as a bubble and
+        # nowhere else.
+        ghost = "".join(t.text or "" for t in content.iter(_w("t")))
+        placeholder_text = ghost.strip() or None
+
     options: Tuple[Tuple[str, str], ...] = ()
     if cls in ("dropdown", "combobox"):
         list_el = _first_child(sdtPr, _w("dropDownList") if cls == "dropdown" else _w("comboBox"))
@@ -197,7 +221,6 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
         date_el = _first_child(sdtPr, _w("date"))
         date_format = _val(_first_child(date_el, _w("dateFormat")))
 
-    content = _first_child(sdt_element, QN_W_SDTCONTENT)
     has_nested_sdt = content is not None and content.find(f".//{QN_W_SDT}") is not None
 
     # Flag order is normative (spec §2): locked, bound, group. A group is an
@@ -221,6 +244,7 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
         bound=bound,
         binding_xpath=binding_xpath,
         showing_placeholder=showing_placeholder,
+        placeholder_text=placeholder_text,
         options=options,
         checked=checked,
         date_format=date_format,
@@ -242,6 +266,22 @@ def iter_sdt_elements_in_order(part_element: Any) -> Iterator[Any]:
         return
     for el in part_element.iter(QN_W_SDT):
         yield el
+
+
+def part_element(part: Any) -> Any:
+    """The lxml root to scan for content controls in a projected part.
+
+    ``iter_document_parts_with_kind`` yields heterogeneous objects (a Document,
+    a header/footer part, a NotesPart), so the ordinal pre-pass needs one place
+    that knows how to reach the element behind each of them — and BOTH
+    producers must reach it the same way, or they would scan different roots
+    and number the controls differently.
+    """
+    for attr in ("element", "_element"):
+        el = getattr(part, attr, None)
+        if el is not None:
+            return el
+    return part
 
 
 def assign_ordinals(part_elements: Any) -> "dict[int, SdtInfo]":

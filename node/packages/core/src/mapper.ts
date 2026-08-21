@@ -2,6 +2,14 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
+import {
+  assignOrdinals,
+  closeToken,
+  isSdtEvent,
+  openToken,
+  partElement,
+  type SdtInfo,
+} from "./utils/content-controls.js";
 import { extract_comments_data } from "./comments.js";
 import { escape_critic_tokens } from "./utils/text.js";
 import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-regex.js";
@@ -142,6 +150,7 @@ export class DocumentMapper {
   // or re-anchor edits at OPC part boundaries (QA 2026-07-18 C1).
   public part_ranges: [number, number, string][] = [];
   private _current_part_index = 0;
+  private _sdt_infos: Map<any, SdtInfo> = new Map();
   private _text_chunks: string[] = [];
   private _plain_projection: [string, number[]] | null = null;
 
@@ -175,6 +184,16 @@ export class DocumentMapper {
     // the reader, but a non-empty `spans` array made the old check believe it
     // had emitted, so an empty header put a stray "\n\n" at the front of the
     // mapper's text.
+    // THE SAME pre-pass ingest runs, over the same parts in the same order.
+    // Not a second implementation of ordinal assignment: spec-projection.md §9
+    // requires one shared helper precisely so the two producers cannot
+    // disagree about which control is CC:7 (CC-12 is what disagreement costs).
+    this._sdt_infos = assignOrdinals(
+      Array.from(iter_document_parts_with_kind(this.doc)).map(([part]) =>
+        partElement(part),
+      ),
+    );
+
     let part_idx = 0;
     let emitted_any_part = false;
     for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
@@ -593,7 +612,7 @@ export class DocumentMapper {
       pending_runs = [];
     };
 
-    const items = Array.from(iter_paragraph_content(paragraph));
+    const items = Array.from(iter_paragraph_content(paragraph, this._sdt_infos));
     const is_heading = is_heading_paragraph(
       paragraph,
       style_cache,
@@ -852,6 +871,33 @@ export class DocumentMapper {
             deferred_meta_states = [];
           }
         }
+      } else if (isSdtEvent(item)) {
+        // Content-control boundary. Twin of the ingest branch — the tokens are
+        // VIRTUAL spans (run=null), so they occupy offsets in the projection
+        // but map back to no run, exactly like the `{#cell:}` anchors and
+        // bookmark tokens. Flush first, for the same reason ingest flushes
+        // `pending_text`: an anchor must never end up inside an emphasis or
+        // CriticMarkup group.
+        leading_strip_active = false;
+        flush_pending_runs();
+        current_wrappers = ["", ""];
+        current_style = ["", ""];
+        const info = item.info;
+        let txt: string;
+        if (item.type === "sdt_start") {
+          txt = openToken(info);
+          if (
+            !this.clean_view &&
+            info.showingPlaceholder &&
+            info.placeholderText
+          ) {
+            txt += `{>>placeholder: ${info.placeholderText}<<}`;
+          }
+        } else {
+          txt = closeToken(info);
+        }
+        this._add_virtual_text(txt, current, paragraph);
+        current += txt.length;
       } else {
         const ev = item as DocxEvent;
         leading_strip_active = false;
