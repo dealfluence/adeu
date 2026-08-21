@@ -1682,6 +1682,13 @@ export function formatBatchResult(stats: any, outPath: string): string {
         res += `**Path:** \`${report.heading_path}\`\n`;
       }
 
+      if (report.field) {
+        // Audit-trail symmetry with Path: an edit inside a content control is
+        // subject to that control's locks and binding, which decides whether a
+        // human can keep it.
+        res += `field: ${report.field}\n`;
+      }
+
       const occ = report.occurrences_modified ?? 0;
       res += `**Mode:** \`${report.match_mode || "strict"}\` (${occ} occurrence${occ !== 1 ? "s" : ""} modified)\n`;
 

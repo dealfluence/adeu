@@ -584,6 +584,8 @@ export class RedlineEngine {
   public timestamp: string;
   public current_id: number;
   public mapper: DocumentMapper;
+  /** Anchor pairs as offsets into mapper.full_text; invalidated with it. */
+  private _cc_anchor_pairs: Array<[number, number, number]> | null = null;
   public comments_manager: CommentsManager;
   public clean_mapper: DocumentMapper | null = null;
   public original_mapper: DocumentMapper | null = null;
@@ -636,6 +638,8 @@ export class RedlineEngine {
 
     this.current_id = this._scan_existing_ids();
     this.mapper = new DocumentMapper(this.doc);
+    // Offsets into mapper.full_text; rebuilt whenever the mapper is.
+    this._cc_anchor_pairs = null;
     this.comments_manager = new CommentsManager(this.doc);
   }
 
@@ -1310,6 +1314,66 @@ export class RedlineEngine {
       }
     }
     return maxId;
+  }
+
+  /**
+   * `CC:<N> "<alias>" (tag: <tag>)` for the control containing `offset`.
+   *
+   * Audit-trail symmetry with `heading_path` (spec-fields-ledger §6): a
+   * reviewer reading the report needs to know an edit landed inside a content
+   * control, because that is what decides whether Word will let a human keep
+   * it.
+   *
+   * Resolves the INNERMOST containing control — an edit inside CC:9 reports
+   * CC:9, not the group CC:8 that wraps it, which is the more specific and
+   * more actionable answer.
+   */
+  private _field_label_at(offset: number): string {
+    if (this._cc_anchor_pairs === null) {
+      const pairs: Array<[number, number, number]> = [];
+      const text = this.mapper.full_text;
+      const opens = new Map<number, number>();
+      const re = /\{#(\/?)cc:(\d+)(?: [^}]*)?\}/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const ordinal = Number(m[2]);
+        if (m[1]) {
+          const openEnd = opens.get(ordinal);
+          if (openEnd !== undefined) {
+            opens.delete(ordinal);
+            pairs.push([openEnd, m.index, ordinal]);
+          }
+        } else {
+          opens.set(ordinal, m.index + m[0].length);
+        }
+      }
+      this._cc_anchor_pairs = pairs;
+    }
+
+    let best: [number, number, number] | null = null;
+    for (const [start, end, ordinal] of this._cc_anchor_pairs) {
+      if (start <= offset && offset <= end) {
+        if (best === null || end - start < best[1] - best[0])
+          best = [start, end, ordinal];
+      }
+    }
+    if (best === null) return "";
+
+    const ordinal = best[2];
+    let info: any = null;
+    const infos = (this.mapper as any)._sdt_infos;
+    if (infos) {
+      for (const candidate of infos.values()) {
+        if (candidate.ordinal === ordinal) {
+          info = candidate;
+          break;
+        }
+      }
+    }
+    let label = `CC:${ordinal}`;
+    if (info?.alias) label += ` "${info.alias}"`;
+    if (info?.tag) label += ` (tag: ${info.tag})`;
+    return label;
   }
 
   private _get_heading_path_and_page(
@@ -3817,6 +3881,8 @@ export class RedlineEngine {
     restoreSnapshot(this.doc, snapshot);
     this.current_id = originalCurrentId;
     this.mapper = new DocumentMapper(this.doc);
+    // Offsets into mapper.full_text; rebuilt whenever the mapper is.
+    this._cc_anchor_pairs = null;
     this.comments_manager = new CommentsManager(this.doc);
     this.clean_mapper = null;
     // The restore can swap whole parts for freshly parsed ones, so the
@@ -4078,6 +4144,8 @@ export class RedlineEngine {
               ) {
                 applied_so_far++;
                 this.mapper = new DocumentMapper(this.doc);
+    // Offsets into mapper.full_text; rebuilt whenever the mapper is.
+    this._cc_anchor_pairs = null;
                 this.clean_mapper = null;
               } else {
                 // QA 2026-07-23 F2: an APPLY-stage failure ("Failed to locate
@@ -4104,6 +4172,8 @@ export class RedlineEngine {
                 // validates against that state.
                 if ((edit as any)._applied_status) {
                   this.mapper = new DocumentMapper(this.doc);
+    // Offsets into mapper.full_text; rebuilt whenever the mapper is.
+    this._cc_anchor_pairs = null;
                   this.clean_mapper = null;
                 }
               }
@@ -4161,6 +4231,7 @@ export class RedlineEngine {
             clean_text: clean_text,
             pages: (edit as any)._pages || [],
             heading_path: (edit as any)._heading_path || "",
+            field: (edit as any)._field || "",
             occurrences_modified: (edit as any)._occurrences_modified || 0,
             match_mode: (edit as any).match_mode || "strict",
           });
@@ -4639,6 +4710,7 @@ export class RedlineEngine {
           if (!pages.includes(page)) pages.unshift(page);
           parent._pages = pages;
           parent._heading_path = path;
+          parent._field = this._field_label_at(start);
         } else {
           if (first_in_group) {
             edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
@@ -4652,6 +4724,7 @@ export class RedlineEngine {
           if (!pages.includes(page)) pages.unshift(page);
           edit._pages = pages;
           edit._heading_path = path;
+          edit._field = this._field_label_at(start);
         }
       } else {
         skipped++;

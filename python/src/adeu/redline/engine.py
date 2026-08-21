@@ -123,6 +123,7 @@ class BatchValidationError(Exception):
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # CC-1e: content-control anchors, open or close, with or without flag words.
+_CC_ANCHOR_SCAN_RE = re.compile(r"\{#(/?)cc:(\d+)(?: [^}]*)?\}")
 _CC_ANCHOR_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
 
 # The sanctioned empty-pair fill target (spec-projection.md §3): an open and
@@ -503,6 +504,8 @@ class RedlineEngine:
         )
         self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
+        # Offsets into mapper.full_text; rebuilt whenever the mapper is.
+        self._cc_anchor_pairs: "list[tuple[int, int, int]] | None" = None
         self.comments_manager = CommentsManager(self.doc)
         self.clean_mapper: Optional[DocumentMapper] = None
         self.original_mapper: Optional[DocumentMapper] = None
@@ -2552,6 +2555,8 @@ class RedlineEngine:
         engine, which re-creates its mapper after each applied edit.
         """
         self.mapper = DocumentMapper(self.doc)
+        # Offsets into mapper.full_text; rebuilt whenever the mapper is.
+        self._cc_anchor_pairs = None
         self.clean_mapper = None
         self.original_mapper = None
 
@@ -2693,6 +2698,7 @@ class RedlineEngine:
             "clean_text": clean_text,
             "pages": getattr(edit, "_pages", []),
             "heading_path": getattr(edit, "_heading_path", ""),
+            "field": getattr(edit, "_field", ""),
             "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
@@ -2707,6 +2713,52 @@ class RedlineEngine:
         Processes a unified batch of actions and edits safely.
         """
         return self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
+
+    def _field_label_at(self, offset: int) -> str:
+        """``CC:<N> "<alias>" (tag: <tag>)`` for the control containing ``offset``.
+
+        Audit-trail symmetry with ``heading_path`` (spec-fields-ledger §6): a
+        reviewer reading the report needs to know an edit landed inside a
+        content control, because that is what decides whether Word will let a
+        human keep it.
+
+        Resolves the INNERMOST containing control — an edit inside CC:9 reports
+        CC:9, not the group CC:8 that wraps it, which is the more specific and
+        more actionable answer.
+        """
+        pairs = self._cc_anchor_pairs
+        if pairs is None:
+            pairs = []
+            text = self.mapper.full_text
+            opens: dict[int, tuple[int, int]] = {}
+            for m in _CC_ANCHOR_SCAN_RE.finditer(text):
+                ordinal = int(m.group(2))
+                if m.group(1):
+                    if ordinal in opens:
+                        _open_start, open_end = opens.pop(ordinal)
+                        pairs.append((open_end, m.start(), ordinal))
+                else:
+                    opens[ordinal] = (m.start(), m.end())
+            self._cc_anchor_pairs = pairs
+
+        best: tuple[int, int, int] | None = None
+        for start, end, ordinal in pairs:
+            if start <= offset <= end and (best is None or (end - start) < (best[1] - best[0])):
+                best = (start, end, ordinal)
+        if best is None:
+            return ""
+
+        ordinal = best[2]
+        info = next(
+            (i for i in getattr(self.mapper, "_sdt_infos", {}).values() if i.ordinal == ordinal),
+            None,
+        )
+        label = f"CC:{ordinal}"
+        if info is not None and info.alias:
+            label += f' "{info.alias}"'
+        if info is not None and info.tag:
+            label += f" (tag: {info.tag})"
+        return label
 
     def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
         page = 1
@@ -3418,6 +3470,7 @@ class RedlineEngine:
                         pages.insert(0, page)
                     parent._pages = pages
                     parent._heading_path = path
+                    parent._field = self._field_label_at(start)
                 else:
                     if first_in_group:
                         edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
@@ -3427,6 +3480,7 @@ class RedlineEngine:
                         pages.insert(0, page)
                     edit._pages = pages
                     edit._heading_path = path
+                    edit._field = self._field_label_at(start)
             else:
                 skipped += 1
 

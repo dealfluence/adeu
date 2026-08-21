@@ -11,6 +11,7 @@ import { ccFixtureBytes, ccGolden } from "./test-utils.js";
 import { heading_path_at } from "./outline.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
+import { RedlineEngine } from "./engine.js";
 import {
   collectFields,
   readDocumentProtection,
@@ -311,5 +312,44 @@ describe("heading index equivalence", () => {
     for (let i = 0; i <= plain.length; i++) {
       expect(index.pathAt(i)).toBe(heading_path_at(i, plain));
     }
+  });
+});
+
+describe("A2.6 — per-edit reports name the field", () => {
+  // spec-fields-ledger §6 — audit-trail symmetry with `heading_path`.
+  async function report(target: string, newText: string) {
+    const buf = Buffer.from(ccFixtureBytes());
+    const doc = await DocumentObject.load(buf);
+    const engine = new RedlineEngine(doc, "Tester");
+    const stats: any = await engine.process_batch([
+      { type: "modify", target_text: target, new_text: newText } as any,
+    ]);
+    return stats.edits[0];
+  }
+
+  it("names the control an edit landed in", async () => {
+    const r = await report("ACME Corp", "Acme Corporation");
+    expect(r.status).toBe("applied");
+    expect(r.field).toBe('CC:3 "Counterparty" (tag: counterparty)');
+  });
+
+  it("names nothing for an edit outside any control", async () => {
+    const r = await report("Signed by the parties below.", "Signed below.");
+    expect(r.status).toBe("applied");
+    expect(r.field).toBe("");
+  });
+
+  it("reports the innermost control when nested", async () => {
+    // CC:9 sits inside the group CC:8. The specific answer is the useful one:
+    // CC:9's own lock and binding govern the edit.
+    const r = await report("123 Main Street, Ottawa", "1 Queen Street, Ottawa");
+    expect(r.status).toBe("applied");
+    expect(r.field).toBe('CC:9 "Notice Address" (tag: notice_address)');
+  });
+
+  it("reports tag only for an anonymous control", async () => {
+    const r = await report("Approved without conditions.", "Approved.");
+    expect(r.status).toBe("applied");
+    expect(r.field).toBe("CC:16 (tag: cell_notes)");
   });
 });

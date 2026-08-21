@@ -341,3 +341,38 @@ class TestHeadingIndexEquivalence:
         assert with_crumbs, "no control resolved a heading path in a headed document"
         line = render_line(with_crumbs[0], 6)
         assert f"p{with_crumbs[0].page} \u00b7 {with_crumbs[0].heading_path}" in line
+
+
+class TestA26PerEditReportsNameTheField:
+    """spec-fields-ledger §6 — audit-trail symmetry with `heading_path`."""
+
+    @staticmethod
+    def _report(target, new_text):
+        from adeu.models import ModifyText
+        from adeu.redline.engine import RedlineEngine
+
+        engine = RedlineEngine(io.BytesIO(cc_fixture_bytes()), author="Tester")
+        stats = engine.process_batch([ModifyText(type="modify", target_text=target, new_text=new_text)])
+        return stats["edits"][0]
+
+    def test_edit_inside_a_control_names_it(self):
+        report = self._report("ACME Corp", "Acme Corporation")
+        assert report["status"] == "applied"
+        assert report["field"] == 'CC:3 "Counterparty" (tag: counterparty)'
+
+    def test_edit_outside_any_control_names_nothing(self):
+        report = self._report("Signed by the parties below.", "Signed below.")
+        assert report["status"] == "applied"
+        assert report["field"] == ""
+
+    def test_nested_control_reports_the_innermost(self):
+        # CC:9 sits inside the group CC:8. The specific answer is the useful
+        # one: CC:9's own lock and binding govern the edit.
+        report = self._report("123 Main Street, Ottawa", "1 Queen Street, Ottawa")
+        assert report["status"] == "applied"
+        assert report["field"] == 'CC:9 "Notice Address" (tag: notice_address)'
+
+    def test_anonymous_control_reports_its_tag_only(self):
+        report = self._report("Approved without conditions.", "Approved.")
+        assert report["status"] == "applied"
+        assert report["field"] == "CC:16 (tag: cell_notes)"

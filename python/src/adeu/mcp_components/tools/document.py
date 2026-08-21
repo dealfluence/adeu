@@ -817,6 +817,11 @@ async def _process_document_batch_disk(
                 res += f"### Edit {i + 1} {status_indicator}{page_suffix}\n"
                 if report.get("heading_path"):
                     res += f"**Path:** `{report['heading_path']}`\n"
+                if report.get("field"):
+                    # Audit-trail symmetry with Path: an edit inside a content
+                    # control is subject to that control's locks and binding,
+                    # which decides whether a human can keep it.
+                    res += f"field: {report['field']}\n"
 
                 occ = report.get("occurrences_modified", 0)
                 occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"

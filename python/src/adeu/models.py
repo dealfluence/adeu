@@ -130,6 +130,9 @@ class ModifyText(BaseModel):
     _any_sub_failure: bool = PrivateAttr(default=False)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
+    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
+    # content control (spec-fields-ledger §6).
+    _field: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
     _is_table_edit: bool = PrivateAttr(default=False)
     _has_markdown: bool = PrivateAttr(default=False)
@@ -234,6 +237,9 @@ class InsertTableRow(BaseModel):
     _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
+    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
+    # content control (spec-fields-ledger §6).
+    _field: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
     # See ModifyText._reserved_ins_id (F20, QA 2026-07-23).
     _reserved_ins_id: Optional[str] = PrivateAttr(default=None)
@@ -272,6 +278,9 @@ class DeleteTableRow(BaseModel):
     _parent_edit_ref: Optional["TableRowChange"] = PrivateAttr(default=None)
     _pages: list[int] = PrivateAttr(default_factory=list)
     _heading_path: Optional[str] = PrivateAttr(default=None)
+    # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
+    # content control (spec-fields-ledger §6).
+    _field: Optional[str] = PrivateAttr(default=None)
     _occurrences_modified: int = PrivateAttr(default=0)
     # See ModifyText._reserved_del_id (F20, QA 2026-07-23).
     _reserved_del_id: Optional[str] = PrivateAttr(default=None)
