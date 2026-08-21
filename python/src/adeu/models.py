@@ -494,6 +494,7 @@ def _infer_type_in_place(item: dict) -> None:
       - has `cells`                       -> "insert_row"
       - has `text` and `target_id`        -> "reply"
       - has `target_text` and `new_text`  -> "modify"
+      - has `field` and `value`           -> "set_field"
 
     Deliberately NOT inferred (left absent so validation rejects with a clear
     discriminator error):
@@ -505,6 +506,9 @@ def _infer_type_in_place(item: dict) -> None:
         return
     if "cells" in item:
         item["type"] = "insert_row"
+    elif "field" in item and "value" in item:
+        # `field` belongs to no other variant, so the pair is unambiguous.
+        item["type"] = "set_field"
     elif "text" in item and "target_id" in item:
         item["type"] = "reply"
     elif "target_text" in item and "new_text" in item:

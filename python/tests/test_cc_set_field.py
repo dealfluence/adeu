@@ -223,3 +223,141 @@ class TestA41FillEmptyTextField:
         if isinstance(text, tuple):
             text = text[0]
         assert "{#cc:2}Acme Legal Services Ltd.{#/cc:2}" in text
+
+
+# ---------------------------------------------------------------------------
+# Surfaces — the fill has to be reachable, not merely implemented
+# ---------------------------------------------------------------------------
+
+
+class TestSetFieldSurfaces:
+    @staticmethod
+    def _flat_props():
+        from pydantic import TypeAdapter
+
+        from adeu.models import FlatSchemaDocumentChange
+
+        return TypeAdapter(list[FlatSchemaDocumentChange]).json_schema()["items"]["properties"]
+
+    def test_field_and_value_publish_exactly_like_the_other_optional_strings(self):
+        """Asserted as PARITY with `target_text`, not against a literal shape.
+
+        Every optional property on the flat schema is a nullable string
+        (`anyOf: [string, null]`), which is the convention this surface
+        already publishes. Pinning a literal here would either freeze a
+        second convention for the two new props or fail the moment the
+        existing ones changed - so the assertion is that they are the same.
+        """
+        props = self._flat_props()
+        shape = lambda d: {k: v for k, v in d.items() if k not in ("description", "title")}  # noqa: E731
+        for name in ("field", "value"):
+            assert shape(props[name]) == shape(props["target_text"]), name
+
+    def test_neither_new_property_introduces_a_variant_union(self):
+        """AI_CONTEXT §7a: the flat schema stays ONE object (no oneOf)."""
+        from pydantic import TypeAdapter
+
+        from adeu.models import FlatSchemaDocumentChange
+
+        schema = TypeAdapter(list[FlatSchemaDocumentChange]).json_schema()
+        assert "$defs" not in schema
+        assert "oneOf" not in schema["items"]
+        for name in ("field", "value"):
+            assert "oneOf" not in schema["items"]["properties"][name]
+
+    def test_set_field_is_in_the_published_type_enum(self):
+        from pydantic import TypeAdapter
+
+        from adeu.models import FlatSchemaDocumentChange
+
+        schema = TypeAdapter(list[FlatSchemaDocumentChange]).json_schema()
+        assert "set_field" in schema["items"]["properties"]["type"]["enum"]
+
+    def test_a_missing_type_discriminator_is_inferred_from_field_plus_value(self):
+        """Clients drop primitive `required[]` entries; `field` belongs to no
+        other variant, so the pair is unambiguous."""
+        from pydantic import TypeAdapter
+
+        from adeu.models import BatchChanges
+
+        changes = TypeAdapter(BatchChanges).validate_python([{"field": "client_name", "value": "X"}])
+        assert changes[0].type == "set_field"
+
+    def test_the_cli_strict_schema_accepts_set_field(self):
+        from pydantic import TypeAdapter
+
+        from adeu.models import StrictBatchChanges
+
+        changes = TypeAdapter(StrictBatchChanges).validate_python(
+            [{"type": "set_field", "field": "client_name", "value": "X"}]
+        )
+        assert changes[0].value == "X"
+
+    def test_the_cli_strict_schema_still_demands_an_explicit_type(self):
+        """Surface-specific requiredness: inference is an MCP tolerance."""
+        import pydantic
+        from pydantic import TypeAdapter
+
+        from adeu.models import StrictBatchChanges
+
+        with pytest.raises(pydantic.ValidationError):
+            TypeAdapter(StrictBatchChanges).validate_python([{"field": "a", "value": "b"}])
+
+    def test_a_value_that_fabricates_an_anchor_is_refused(self):
+        """CC-1e, reached through set_field's `value` rather than `new_text`.
+
+        A hard batch failure rather than a skip: writing `{#cc:3}` into a
+        document would fabricate a control that does not exist, and the
+        transactional contract says such a batch touches nothing.
+        """
+        from adeu.redline.engine import BatchValidationError
+
+        with pytest.raises(BatchValidationError) as exc:
+            _fill("client_name", "Acme {#cc:3} Ltd.")
+        assert "anchor" in str(exc.value).lower()
+
+
+class TestSetFieldThroughTheCli:
+    """The whole point of a skeleton: reachable from a real command."""
+
+    def test_apply_fills_the_field_from_a_changes_file(self, tmp_path):
+        import json
+        import zipfile
+
+        from lxml import etree
+
+        from tests.utils import run_cli
+
+        docx = tmp_path / "cc.docx"
+        docx.write_bytes(cc_fixture_bytes())
+        changes = tmp_path / "changes.json"
+        changes.write_text(
+            json.dumps([{"type": "set_field", "field": "client_name", "value": "Acme Ltd."}]),
+            encoding="utf-8",
+        )
+        out = tmp_path / "out.docx"
+
+        res = run_cli("apply", str(docx), str(changes), "-o", str(out))
+        assert res.returncode == 0, res.stderr
+        assert out.exists()
+
+        with zipfile.ZipFile(out) as z:
+            tree = etree.fromstring(z.read("word/document.xml"))
+        inserted = ["".join(t.text or "" for t in ins.iter(f"{W}t")) for ins in tree.iter(f"{W}ins")]
+        assert "Acme Ltd." in inserted
+
+    def test_an_unresolvable_field_fails_the_command_with_the_available_list(self, tmp_path):
+        import json
+
+        from tests.utils import run_cli
+
+        docx = tmp_path / "cc.docx"
+        docx.write_bytes(cc_fixture_bytes())
+        changes = tmp_path / "changes.json"
+        changes.write_text(
+            json.dumps([{"type": "set_field", "field": "nope", "value": "x"}]),
+            encoding="utf-8",
+        )
+        res = run_cli("apply", str(docx), str(changes), "-o", str(tmp_path / "o.docx"))
+        assert res.returncode != 0
+        assert "nope" in (res.stdout + res.stderr)

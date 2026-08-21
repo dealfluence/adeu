@@ -525,7 +525,9 @@ _CHANGE_TYPE_REFERENCE = (
     '  reply      — {"type": "reply", "target_id": "Com:N", "text": "..."}\n'
     '  insert_row — {"type": "insert_row", "target_text": "...", "cells": ["...", "..."]}'
     ' (optional: position "above"/"below")\n'
-    '  delete_row — {"type": "delete_row", "target_text": "..."}'
+    '  delete_row — {"type": "delete_row", "target_text": "..."}\n'
+    '  set_field  — {"type": "set_field", "field": "CC:4"|tag|alias, "value": "..."}'
+    " (optional: match_mode, comment; run `adeu extract --mode fields` to list fields)"
 )
 
 
