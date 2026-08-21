@@ -239,3 +239,29 @@ whole class of run-level elements that take the same path (`w:tab`, `w:cr`,
 `w:noBreakHyphen`, `w:softHyphen`, `w:sym`) instead of special-casing `w:br` — the
 projected form for each needs deciding once and pinning in both engines. A5.1 now carries
 a pointer to the blockers.
+
+### 2026-08-21 — CC-10 diagnosis corrected, blocked on a design decision (opencode-osx)
+
+I filed CC-10 as "python leaks raw OOXML". Wrong, and it would have sent the next agent
+hunting a bad `tostring()` call. `_PAGE_BREAK_TOKEN` (`utils/docx.py:95`) is a deliberate
+in-band sentinel and it is load-bearing: `pagination.py:262-272` splits on it to honour
+manual page breaks, a capability node does not have at all (`pagination.ts:131` is
+density-only). `docs/FIDELITY.md:36` says both engines project a break as a newline, so
+python violates its own documented contract while node satisfies it — but simply
+conforming would delete a real, tested feature.
+
+Three options are costed on the board. The blocker is that `paginate()` takes only a
+string and has 15 call sites (engine, doc_cache, response builders, CLI), so routing the
+signal out of band (option A) is a genuine refactor of core read paths, not a local fix.
+Option B (project `\f` in both engines, split on `\f`) buys parity and keeps the
+capability for a one-line pagination change, at the price of a non-printing character in
+the output and an amendment to FIDELITY.md. Recommending B; not proceeding until Mikko
+picks, because A and C have very different blast radii and B changes node's output for
+every document with a page break.
+
+**Arithmetic that changes CC-3's plan:** fixing page breaks alone does not unblock A5.1.
+On `fedramp_ssp_rev4` the three divergences partially cancel — page breaks are worth
+python +340 chars (17 × 21), emphasis coalescing and the missing header lines are worth
+node +202, netting the measured python +138. Closing only the break gap flips the sign to
+node +202. A5.1's identical-counts assertion needs all three fixed, so CC-3 should not
+plan around CC-10 alone.
