@@ -619,6 +619,9 @@ async def _process_document_batch_disk(
     output_path: Optional[str],
     rejected_notes: Optional[RejectedNotes] = None,
     partial: bool = True,
+    ignore_control_locks: bool = False,
+    ignore_document_protection: bool = False,
+    allow_untracked_writes: bool = False,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -675,7 +678,14 @@ async def _process_document_batch_disk(
 
     def _run_batch_sync() -> tuple[bool, Any, str, str]:
         stream = read_file_bytes(original_docx_path)
-        engine = RedlineEngine(stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
+        engine = RedlineEngine(
+            stream,
+            author=author_name,
+            id_discovery_hint=MCP_ID_DISCOVERY_HINT,
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
+        )
 
         valid_indices = getattr(rejected_notes, "valid_indices", None)
         try:
@@ -1313,6 +1323,32 @@ PROCESS_BATCH_COMMON_DESC = (
     "Validation failures reject the whole batch transactionally: nothing is "
     "applied until every change resolves.\n\n"
 )
+# CC-4 override parameters (spec-gates.md §1). Defined once and reused by both
+# tool registrations so the win32 and non-win32 surfaces cannot drift in either
+# their defaults or their prose — the two have drifted before.
+#
+# All three default False. spec-gates §1 requires it: a truthy default survives
+# client stripping, and a gate that defaults to off is a gate that does not
+# exist. The defaults are restated in the description text per the §7a rule,
+# because some clients show the caller only the prose.
+IgnoreControlLocksParam = Annotated[
+    bool,
+    "Apply edits even inside content-locked or grouped content controls. Defaults to False. "
+    "Word refuses such edits, so overriding means the document owner has accepted the lock is wrong.",
+]
+IgnoreDocumentProtectionParam = Annotated[
+    bool,
+    "Apply changes even when the document carries enforced editing protection "
+    "(read-only, fill-in-forms, comments-only, tracked-changes-only). Defaults to False.",
+]
+AllowUntrackedWritesParam = Annotated[
+    bool,
+    "Permit writes that Word records WITHOUT tracked changes. Defaults to False. Applies only to "
+    "fill-in-forms-protected documents, where Word does not record revisions at all; every such "
+    "write is flagged in the report. This is separate from ignore_document_protection because it "
+    "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
+]
+
 PROCESS_BATCH_WIN32_EXTRA = (
     "If the file is open in Word, edits run live on the canvas. "
     "Leave original_docx_path empty to edit whatever document is currently active.\n\n"
@@ -1571,6 +1607,9 @@ if sys.platform == "win32":
             bool,
             "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
         ] = True,
+        ignore_control_locks: IgnoreControlLocksParam = False,
+        ignore_document_protection: IgnoreDocumentProtectionParam = False,
+        allow_untracked_writes: AllowUntrackedWritesParam = False,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1600,7 +1639,17 @@ if sys.platform == "win32":
             )
         if not original_docx_path:
             # Edit active document directly. No disk fallback available.
-            res = await process_active_word_batch(ctx, changes, author_name, None)
+            res = await process_active_word_batch(
+                ctx,
+                changes,
+                author_name,
+                None,
+                {
+                    "ignore_control_locks": ignore_control_locks,
+                    "ignore_document_protection": ignore_document_protection,
+                    "allow_untracked_writes": allow_untracked_writes,
+                },
+            )
         elif is_document_open_in_word(original_docx_path):
             # The file is open in Word: apply edits to the live canvas so the
             # agent's changes land where the user is looking. If the probe matched
@@ -1608,7 +1657,17 @@ if sys.platform == "win32":
             # (which the explicit path makes authoritative) instead of erroring.
             await ctx.debug("Document is open in live Word; editing the canvas.")
             try:
-                res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
+                res = await process_active_word_batch(
+                    ctx,
+                    changes,
+                    author_name,
+                    original_docx_path,
+                    {
+                        "ignore_control_locks": ignore_control_locks,
+                        "ignore_document_protection": ignore_document_protection,
+                        "allow_untracked_writes": allow_untracked_writes,
+                    },
+                )
             except LiveWordUnavailableError:
                 await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk edit.")
                 res = await _process_document_batch_disk(
@@ -1619,6 +1678,9 @@ if sys.platform == "win32":
                     output_path,
                     rejected_notes=rejected_notes,
                     partial=partial,
+                    ignore_control_locks=ignore_control_locks,
+                    ignore_document_protection=ignore_document_protection,
+                    allow_untracked_writes=allow_untracked_writes,
                 )
         else:
             # Not open in Word (or Word not running): the file on disk is
@@ -1631,6 +1693,9 @@ if sys.platform == "win32":
                 output_path,
                 rejected_notes=rejected_notes,
                 partial=partial,
+                ignore_control_locks=ignore_control_locks,
+                ignore_document_protection=ignore_document_protection,
+                allow_untracked_writes=allow_untracked_writes,
             )
         return add_timing_if_debug(start_time, res)
 
@@ -1883,6 +1948,9 @@ else:
             bool,
             "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
         ] = True,
+        ignore_control_locks: IgnoreControlLocksParam = False,
+        ignore_document_protection: IgnoreDocumentProtectionParam = False,
+        allow_untracked_writes: AllowUntrackedWritesParam = False,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1914,5 +1982,8 @@ else:
             output_path,
             rejected_notes=rejected_notes,
             partial=partial,
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
         )
         return add_timing_if_debug(start_time, res)

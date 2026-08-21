@@ -1144,17 +1144,23 @@ def _load_docx_or_exit(path: Path):
         raise
 
 
-def _open_redline_engine_or_exit(path: Path, author: "str | None" = None, terse_errors: bool = False) -> RedlineEngine:
+def _open_redline_engine_or_exit(
+    path: Path,
+    author: "str | None" = None,
+    terse_errors: bool = False,
+    gate_overrides: "dict | None" = None,
+) -> RedlineEngine:
     """Opens a RedlineEngine on `path` through the single shared error path."""
     _require_input_file(path)
     import zipfile
 
+    gates = gate_overrides or {}
     try:
         with open(path, "rb") as f:
             stream = BytesIO(f.read())
         if author is not None:
-            return RedlineEngine(stream, author=author, terse_errors=terse_errors)
-        return RedlineEngine(stream, terse_errors=terse_errors)
+            return RedlineEngine(stream, author=author, terse_errors=terse_errors, **gates)
+        return RedlineEngine(stream, terse_errors=terse_errors, **gates)
     except SystemExit:
         raise
     except Exception as e:
@@ -1426,6 +1432,11 @@ def handle_apply(args):
         args.original,
         author=args.author,
         terse_errors=getattr(args, "terse_errors", False),
+        gate_overrides={
+            "ignore_control_locks": getattr(args, "ignore_control_locks", False),
+            "ignore_document_protection": getattr(args, "ignore_document_protection", False),
+            "allow_untracked_writes": getattr(args, "allow_untracked_writes", False),
+        },
     )
     try:
         stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
@@ -2295,6 +2306,27 @@ def _main_impl():
         "--terse-errors",
         action="store_true",
         help="Reduce ambiguity examples (2 max, ±25 chars context) and listed stale IDs (8 max) in error payloads.",
+    )
+    # CC-4 write-gate overrides (spec-gates.md §1). Three separate flags, not
+    # one --force: they license different things, and a single flag would make
+    # a caller who wanted one silently accept all three.
+    p_apply.add_argument(
+        "--ignore-control-locks",
+        action="store_true",
+        help="Apply edits even inside content-locked or grouped content controls (Word refuses these).",
+    )
+    p_apply.add_argument(
+        "--ignore-document-protection",
+        action="store_true",
+        help="Apply changes even when the document carries enforced editing protection.",
+    )
+    p_apply.add_argument(
+        "--allow-untracked-writes",
+        action="store_true",
+        help=(
+            "Permit writes Word records WITHOUT tracked changes (fill-in-forms-protected documents only). "
+            "Concedes Adeu's always-tracked guarantee; every such write is flagged in the report."
+        ),
     )
     p_apply.add_argument(
         "--json",

@@ -27,9 +27,27 @@ from adeu.models import (
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
+from adeu.redline.gates import (
+    GateOverrides,
+    check_block_merge_across_control,
+    check_bound_control,
+    check_checkbox_edit,
+    check_content_lock,
+    check_delete_lock,
+    check_group_region,
+    check_placeholder_target,
+    check_protection_blocks_edit,
+    check_protection_blocks_review,
+    check_untracked_write,
+    crossed_control_walls,
+    describe_control,
+    overrides_note,
+    segmentation_note,
+)
 from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
 from adeu.utils.opc import load_document as Document
+from adeu.utils.protection import read_document_protection
 from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import (
     PREVIEW_TEXT_CAP,
@@ -468,8 +486,23 @@ class RedlineEngine:
         author: str = "Adeu AI",
         id_discovery_hint: Optional[str] = None,
         terse_errors: bool = False,
+        ignore_control_locks: bool = False,
+        ignore_document_protection: bool = False,
+        allow_untracked_writes: bool = False,
     ):
         self.terse_errors = terse_errors
+        # CC-4 write-gate overrides. Engine kwargs rather than process_batch
+        # arguments because the gates run in three places — validate_edits,
+        # the resolver and the apply-path backstop — and only the first takes
+        # batch arguments today. Same route terse_errors takes.
+        self.gate_overrides = GateOverrides(
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
+        )
+        # Controls whose locks an override actually bypassed, for the report
+        # disclosure (spec-gates §5). Reset per batch.
+        self._overridden_controls: List[Any] = []
         # Surface-aware advice for "how do I list the current Chg:/Com: ids":
         # the CLI default points at CLI commands; the MCP layer passes a
         # read_docx-based hint because MCP callers cannot run the CLI
@@ -492,6 +525,11 @@ class RedlineEngine:
         # collected three identical replies that way).
         self.rollback_verified = True
         self.doc = Document(BytesIO(sanitized_bytes))
+        # Read once at load (spec-gates §3), not per gate: it lives in
+        # word/settings.xml, which nothing else in a batch touches, and the
+        # gates, the projection banner and the fields ledger must all report
+        # the same state.
+        self.protection = read_document_protection(self.doc)
 
         # No part is stamped with the w16du namespace up front. Tracked-change
         # writes (w16du:dateUtc attributes) self-declare the prefix locally on
@@ -2109,6 +2147,163 @@ class RedlineEngine:
         except ValueError:
             pass
 
+    def _control_gate_context(self, mapper: Any, start: int, length: int):
+        """(intersecting, at_start, at_end) control stacks for a changed range."""
+        intersecting = mapper.controls_intersecting(start, length) if hasattr(mapper, "controls_intersecting") else []
+        at_start = mapper.controls_at(start) if hasattr(mapper, "controls_at") else []
+        at_end = mapper.controls_at(max(start + length - 1, start)) if hasattr(mapper, "controls_at") else []
+        return intersecting, at_start, at_end
+
+    def _deletes_entire_control(self, mapper: Any, info: Any, start: int, length: int, final_new: str) -> bool:
+        """Would this edit dissolve ``info``'s wrapper rather than empty it?
+
+        G2 protects a control's EXISTENCE, not its text: emptying a
+        delete-locked control is allowed and leaves the wrapper with an empty
+        pair (A3.3). Only a deletion that also consumes text outside the
+        control would have to hoist the wrapper away, so the test is "covers
+        all of the content AND reaches past it".
+        """
+        if final_new.strip():
+            return False
+        rng = next((r for r in getattr(mapper, "control_ranges", []) if r[2] is info), None)
+        if rng is None:
+            return False
+        c_start, c_end, _ = rng
+        covers_all = start <= c_start and start + length >= c_end
+        reaches_outside = start < c_start or start + length > c_end
+        return covers_all and reaches_outside
+
+    def _apply_gate_refusal(self, mapper: Any, start: int, length: int) -> Optional[str]:
+        """The apply-path subset of the gate matrix; a reason string, or None.
+
+        Only the document-property gates run here — content locks, group
+        regions, data binding and protection. Deliberately not the whole
+        matrix: G8 and G11 depend on the target STRING, and G14/G15 on the
+        edit's shape, none of which a positionally-pinned edit has resolved
+        in a form this layer can trust. Those stay validate-only, exactly as
+        the paragraph-merge refusal does.
+        """
+        overrides = self.gate_overrides
+        if self.protection.active and not overrides.ignore_document_protection and self.protection.edit == "readOnly":
+            return "document is read-only protected"
+        controls = mapper.controls_intersecting(start, length) if hasattr(mapper, "controls_intersecting") else []
+        if not controls:
+            return None
+        info = next((i for i in controls if getattr(i, "bound", False)), None)
+        if info is not None:
+            return f"{describe_control(info)} is data-bound"
+        if overrides.ignore_control_locks:
+            return None
+        info = next((i for i in controls if getattr(i, "content_locked", False)), None)
+        if info is not None:
+            return f"{describe_control(info)} is content-locked"
+        return None
+
+    def _check_control_gates(
+        self,
+        edit_number: int,
+        edit: Any,
+        mapper: Any,
+        start: int,
+        length: int,
+        *,
+        final_target: str = "",
+        final_new: str = "",
+    ) -> Optional[str]:
+        """Run the CC-4 gate matrix over one resolved edit; first failure wins.
+
+        Order is deliberate, most-fundamental first: document protection binds
+        regardless of where the edit lands, so it is checked before anything
+        about the control; then the two category errors that no override can
+        reasonably bypass (bound content, placeholder ghosts), because telling
+        the caller "this text is not what you think it is" is more useful than
+        telling them a lock stopped them; then the lock gates; then structure.
+        """
+        overrides = self.gate_overrides
+        infos = list(getattr(mapper, "_sdt_infos", {}).values())
+        intersecting, at_start, at_end = self._control_gate_context(mapper, start, length)
+
+        is_comment_only = bool(getattr(edit, "comment", None)) and (edit.new_text or "") == (edit.target_text or "")
+
+        err = check_protection_blocks_edit(
+            edit_number,
+            self.protection,
+            controls=intersecting,
+            is_comment_only=is_comment_only,
+            overrides=overrides,
+        )
+        if err:
+            return err
+        # Comment-only edits mutate no text, so the tracking guarantee that
+        # G5's untracked-write gate defends is not at stake for them.
+        if not is_comment_only:
+            err = check_untracked_write(edit_number, self.protection, overrides)
+            if err:
+                return err
+
+        # G8 works off the target string, not the range: an empty control has
+        # no content spans to intersect (see gates.check_placeholder_target).
+        err = check_placeholder_target(edit_number, edit.target_text or "", infos)
+        if err:
+            return err
+
+        if not intersecting:
+            return None
+
+        err = check_bound_control(edit_number, intersecting)
+        if err:
+            return err
+        err = check_checkbox_edit(edit_number, intersecting, edit.target_text or "", edit.new_text or "")
+        if err:
+            return err
+        err = check_content_lock(edit_number, intersecting, overrides)
+        if err:
+            return err
+        err = check_group_region(edit_number, intersecting, overrides)
+        if err:
+            return err
+        for info in intersecting:
+            if self._deletes_entire_control(mapper, info, start, length, final_new):
+                err = check_delete_lock(
+                    edit_number,
+                    [info],
+                    deletes_entire_control=True,
+                    overrides=overrides,
+                )
+                if err:
+                    return err
+
+        # G15: a merge is what makes a wall crossing structural rather than
+        # segmentable. Without a paragraph break being consumed, a crossing is
+        # G14's business (auto-segment), not a refusal.
+        if "\n\n" in final_target and "\n\n" not in final_new:
+            crossed = crossed_control_walls(intersecting, at_start, at_end)
+            err = check_block_merge_across_control(edit_number, crossed)
+            if err:
+                return err
+
+        # G14: the edit is valid on both sides of a wall it crosses, so it
+        # applies — the word-level sub-edit splitter already lands each half
+        # on its own side. What was missing is the disclosure: an agent that
+        # asked to change text "in CC:3" and silently got a change half
+        # outside it has been told something untrue by omission.
+        crossed = crossed_control_walls(intersecting, at_start, at_end)
+        if crossed:
+            try:
+                edit._warning = segmentation_note(crossed)
+            except (AttributeError, ValueError):
+                # Report notes are advisory; never fail an otherwise-valid
+                # edit because a model object would not take the attribute.
+                pass
+
+        # Record what an override let through, for the report disclosure.
+        if overrides.ignore_control_locks:
+            for info in intersecting:
+                if getattr(info, "content_locked", False) or getattr(info, "cls", None) == "group":
+                    if not any(x is info for x in self._overridden_controls):
+                        self._overridden_controls.append(info)
+        return None
+
     def validate_edits(
         self,
         edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
@@ -2329,6 +2524,29 @@ class RedlineEngine:
                 # the shared context are fine.
                 eff_start = start + prefix_len
                 eff_end = start + length - suffix_len
+
+                # CC-4 content-control gates (spec-gates §2). Same shape as
+                # the part-boundary refusal above, for the same reason: a
+                # control wall is a place where an edit that looks fine in the
+                # flattened projection cannot be applied to the XML.
+                #
+                # The CHANGED range (eff_*), not the raw match, so shared
+                # context reaching into a locked control does not by itself
+                # refuse the edit — the caller is not modifying it. This is
+                # the image-marker gate's rule, not the part gate's: the part
+                # gate uses the raw range because the insertion ANCHOR is
+                # ambiguous at a part gap, which has no analogue here.
+                gate_error = self._check_control_gates(
+                    i + 1,
+                    edit,
+                    target_mapper,
+                    eff_start,
+                    max(eff_end - eff_start, 0),
+                    final_target=final_target,
+                    final_new=final_new,
+                )
+                if gate_error:
+                    errors.append(gate_error)
                 if eff_end > eff_start:
                     overlapping = [
                         s
@@ -2895,6 +3113,7 @@ class RedlineEngine:
             )
 
         self.skipped_details = []
+        self._overridden_controls = []
         failed_list: List[Tuple[int, str]] = []
 
         actions_with_idx = [
@@ -2948,6 +3167,26 @@ class RedlineEngine:
                 pre_batch_fingerprint = self._batch_fingerprint()
 
         if actions:
+            # G7/G4 (spec-gates §2): protection gates review actions BEFORE
+            # the id-existence check, because "that id does not exist" would
+            # be a misleading answer to "why did my Accept fail" in a document
+            # where no Accept can succeed at all.
+            protection_errors = [
+                err
+                for err in (
+                    check_protection_blocks_review(
+                        idx + 1,
+                        getattr(act, "type", ""),
+                        self.protection,
+                        self.gate_overrides,
+                    )
+                    for idx, act in zip(action_indices, actions, strict=True)
+                )
+                if err
+            ]
+            if protection_errors:
+                failed_list.extend(_extract_failed_indices(protection_errors))
+                raise BatchValidationError(protection_errors, failed=failed_list)
             action_shape_errors = validate_review_action_batch(actions, indices=action_indices)
             if action_shape_errors:
                 failed_list.extend(_extract_failed_indices(action_shape_errors))
@@ -3151,6 +3390,10 @@ class RedlineEngine:
             "skipped_details": self.skipped_details,
             "edits": edits_reports,
             "author_impersonation_warning": author_impersonation_warning,
+            # spec-gates §5: an override that was actually exercised is
+            # disclosed in the report header. Silence here would let a batch
+            # bypass a safety rail with no trace for the human reviewing it.
+            "overrides_note": overrides_note(self.gate_overrides, self._overridden_controls),
             "engine": "python",
             "version": __version__,
         }
@@ -5261,6 +5504,24 @@ class RedlineEngine:
                     start=start_idx,
                     parts=sorted(crossed_parts),
                 )
+                return False
+
+        # CC-4 (apply-level backstop, same reason as C1 above): pinned edits
+        # skip validate_edits AND the resolver, so a diff-generated batch
+        # reaches here with no gate having run. Only the gates whose answer
+        # cannot change between validate and apply are repeated — locks,
+        # binding and protection are properties of the document, not of the
+        # match, so re-deriving them here is cheap and cannot disagree.
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and length:
+            blocked = self._apply_gate_refusal(active_mapper, start_idx, length)
+            if blocked:
+                logger.warning(
+                    "Refusing edit inside a gated content control",
+                    start=start_idx,
+                    reason=blocked,
+                )
+                if getattr(edit, "_error_msg", None) in (None, ""):
+                    edit._error_msg = blocked
                 return False
 
         target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)

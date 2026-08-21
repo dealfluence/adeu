@@ -567,7 +567,10 @@ if sys.platform == "win32":
         return None
 
     def _process_active_word_batch_core(
-        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+        changes: List[DocumentChange],
+        author_name: str,
+        file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> dict[str, Any]:
         stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
@@ -667,7 +670,10 @@ if sys.platform == "win32":
                 xml_str = doc.WordOpenXML
                 snapshot_stream = _build_mock_docx_stream(xml_str)
                 snapshot_engine = RedlineEngine(
-                    snapshot_stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT
+                    snapshot_stream,
+                    author=author_name,
+                    id_discovery_hint=MCP_ID_DISCOVERY_HINT,
+                    **(gate_overrides or {}),
                 )
                 # Bug 5: renumber the snapshot's IDs so that any error messages
                 # mention the same Chg:N / Com:N values the agent saw when it
@@ -1233,6 +1239,7 @@ if sys.platform == "win32":
         changes: List[DocumentChange],
         author_name: str,
         file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> str:
         if not changes:
             return "No changes provided."
@@ -1242,7 +1249,7 @@ if sys.platform == "win32":
 
         await ctx.info(f"Applying {len(changes)} changes to live Word document...")
         try:
-            stats = _process_active_word_batch_core(changes, author_name, file_path)
+            stats = _process_active_word_batch_core(changes, author_name, file_path, gate_overrides)
             await ctx.info(f"Live Word batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}.")
             res = f"[Live Word Mode] Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
             if "author_overridden_by_word" in stats:
@@ -1325,7 +1332,10 @@ else:
         return False
 
     def _process_active_word_batch_core(
-        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+        changes: List[DocumentChange],
+        author_name: str,
+        file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> dict[str, Any]:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
@@ -1354,6 +1364,7 @@ else:
         changes: List[DocumentChange],
         author_name: str,
         file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> str:
         raise NotImplementedError("Live Word is only supported on Windows.")
 

@@ -228,6 +228,10 @@ def test_process_batch_falls_back_to_disk_on_com_unavailable(monkeypatch):
         output_path,
         rejected_notes=None,
         partial=True,
+        # **kwargs rather than naming the CC-4 gate overrides: this stub is
+        # asserting DISPATCH (which path the tool took), not the batch
+        # parameters, so it should not need editing every time one is added.
+        **kwargs,
     ):
         called["path"] = original_docx_path
         called["author"] = author_name
@@ -259,7 +263,7 @@ def test_process_batch_uses_live_when_open_and_com_healthy(monkeypatch):
     ctx = get_mock_ctx()
     monkeypatch.setattr(doc_mod, "is_document_open_in_word", lambda _p: True)
 
-    async def _live(ctx, changes, author_name, path):
+    async def _live(ctx, changes, author_name, path, gate_overrides=None):
         return "LIVE_BATCH_RESULT"
 
     monkeypatch.setattr(doc_mod, "process_active_word_batch", _live)
@@ -350,7 +354,7 @@ def test_process_batch_active_mode_surfaces_com_unavailable(monkeypatch):
     # function wraps a LiveWordUnavailableError as ToolError (it re-raises the
     # unavailable error, which the tool boundary turns into a ToolError). We
     # simulate the surfaced form here.
-    async def _active(ctx, changes, author_name, path):
+    async def _active(ctx, changes, author_name, path, gate_overrides=None):
         assert path is None
         raise ToolError("Could not connect to active Word document. (-2147221021)")
 

@@ -296,6 +296,13 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
     author = req.get("author")
     partial = bool(req.get("partial", False))
     terse_errors = bool(req.get("terse_errors", False))
+    # CC-4 write-gate overrides (spec-gates.md §1), default off like every
+    # other surface.
+    gate_overrides = {
+        "ignore_control_locks": bool(req.get("ignore_control_locks", False)),
+        "ignore_document_protection": bool(req.get("ignore_document_protection", False)),
+        "allow_untracked_writes": bool(req.get("allow_untracked_writes", False)),
+    }
     report_style = req.get("report", "standard")
     output_path_str = req.get("output") or req.get("output_path")
     output_path = Path(output_path_str) if output_path_str else None
@@ -322,7 +329,9 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             _emit_error("invalid_input", "Invalid 'changes' format; expected array or file path string.")
             return
 
-        engine = _open_redline_engine_or_exit(path, author=author, terse_errors=terse_errors)
+        engine = _open_redline_engine_or_exit(
+            path, author=author, terse_errors=terse_errors, gate_overrides=gate_overrides
+        )
         stats = engine.process_batch(changes, partial=partial)
 
         applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
