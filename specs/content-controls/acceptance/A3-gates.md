@@ -46,8 +46,26 @@ failure under `partial=true` with nothing saved for that edit).
 - **When** (a) `ModifyText` targets boilerplate outside any control
   (`approved boilerplate and must not be modified` → anything);
   (b) `set_field` fills CC:2; (c) `ModifyText` edits `ACME Corp` (inside CC:3).
-- **Then** (a) rejected naming fill-in-forms protection; (b) and (c) apply.
+- **Then** (a) rejected naming fill-in-forms protection and
+  `ignore_document_protection`; (b) and (c) are permitted *by the protection*
+  but are **additionally gated on `allow_untracked_writes`** — rejected by
+  default naming the untracked-write cause, applying when it is passed.
 - Surfaces: both engines.
+
+> **Correction, 2026-08-22 (CC-4 implementation).** This example previously
+> read "(b) and (c) apply", full stop. That predates spec-gates §1a, which
+> Mikko decided on 2026-08-21 in response to CC-6's finding and which added the
+> second gate: under `forms` protection Word records the permitted fills
+> UNTRACKED and reading `TrackRevisions` throws, so Adeu's always-tracked
+> contract is unenforceable there. §1a is explicit that "those permitted writes
+> are additionally gated on `allow_untracked_writes` (default `false`)". A3.5
+> simply was not restated when §1a landed. §1a is the later and more specific
+> statement, so it governs, and this example now matches it.
+>
+> The two protection parameters are deliberately NOT interchangeable, and the
+> suites assert it: `ignore_document_protection` bypasses a gate the document
+> author set, `allow_untracked_writes` concedes a guarantee Adeu makes about
+> its own output. Passing either alone leaves the other gate standing.
 
 ### A3.6 — trackedChanges protection blocks review actions only (G7)
 - **Given** a document with `w:edit="trackedChanges"` protection and one pending change.
@@ -97,6 +115,25 @@ failure under `partial=true` with nothing saved for that edit).
 - **Then** rejected structurally (content may not be hoisted across a control wrapper);
   error suggests two separate edits.
 - Surfaces: both engines.
+
+> **Note, 2026-08-22 (CC-4 implementation).** This example is refused one layer
+> EARLIER than G15, and correctly so: CC:1 is anchored, so the merge would have
+> to delete `{#/cc:1}`, and CC-1e's anchor-tampering gate rejects it first with
+> a more specific error. G15 is therefore not exercised by A3.11 as written.
+>
+> Where G15 does the work is the **unanchored** walls — repeating-section items
+> (CC:12/CC:13), checkboxes, pictures — which project no tokens and so have no
+> anchor gate protecting them. Without G15 a merge across a repeating-item wall
+> would silently hoist one item's content into the other and the section would
+> lose an item. Both cases are pinned in the suites: the anchored one asserts
+> that the anchor gate is what fires, the unanchored one that G15 is.
+
+### G10 and G12 are NOT in CC-4
+
+Both gate `set_field` values (dropdown `listItem` membership; date format), and
+`set_field` does not exist in either engine — it is CC-5. They are listed in
+spec-gates §2 for completeness of the matrix, but nothing in CC-4's scope line
+mentions them and there is no operation for them to gate. They land with CC-5.
 
 ### A3.12 — Context widening never crosses a locked wall
 - **Given** a document where a locked control's text is the only disambiguator between

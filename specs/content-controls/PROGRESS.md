@@ -1313,3 +1313,104 @@ which A2.2 (protected, zero controls) and A2.3 (250 controls) were not
 constructible in python. Per-edit reports now name the innermost containing
 control, not the outermost — CC:9's own lock governs the edit, not the group
 CC:8 that wraps it.
+## 2026-08-22 — CC-4 write gates complete (windows)
+
+Gate matrix, both engines, all surfaces. Python 1,764 passed / 16 skipped; node
+922 + 306 + 42; ruff, mypy and eslint clean. Commits: `56aabeb`, `808e829`
+(identity), `34330d9` (protection state), `6836cb5` (python gates), `71d5ce4`
+(node gates + surfaces), plus the closing commit for widening, COM agreement
+and the spec corrections below.
+
+### The architectural gap this row actually had to close
+
+Every gate in the matrix is one question wearing different clothes: *does this
+edit's text sit inside control X, and what does X permit?* Neither engine could
+answer it. `TextSpan` carried `part_index` — which is exactly this shape of
+answer for OPC part walls — and nothing for control walls. So the first two
+commits build `TextSpan.sdt_stack` alongside it, `control_ranges` alongside
+`part_ranges`, and `controls_at` / `controls_intersecting` alongside
+`part_kind_at`. Modelling on the part wall was deliberate: it is the same
+problem with a decade of scar tissue (QA 2026-07-18 C1) and a proven
+three-layer shape — mapper field, validate refusal, apply backstop.
+
+A span's stack has two sources because neither alone covers the document. The
+run walk sees inline controls and is blind to block ones; the mapper's block
+cursor sees block controls and is blind to inline ones. CC:9 — an inline
+control nested in a block group — cannot be produced by either alone.
+
+### Four findings that changed the work
+
+**Table controls are a third structural kind.** CC:14 (cell-level) and CC:15
+(row-level) wrap `w:tc`/`w:tr` and are reached through `_map_table`, not the
+block or run walks. The first cut of the identity field left them with no
+ranges at all, so every gate would have silently permitted edits inside them.
+Caught by asserting the WHOLE set of content-bearing controls rather than
+samples — the failure mode here is permissive and quiet, which is the argument
+for the stronger assertion.
+
+**CC:2 has no content range, and that is correct.** It is empty, and its
+placeholder ghost projects as a virtual bubble rather than as content. So G8
+cannot be a span-intersection gate like its siblings and instead matches the
+target against the control's placeholder text. Learned from a fixture rather
+than from a failing acceptance example.
+
+**A3.5 contradicted spec-gates §1a; §1a governs.** A3.5 says the
+forms-protected fills "(b) and (c) apply". §1a — Mikko's 2026-08-21 decision on
+CC-6's finding — adds a second gate on exactly those writes, since Word records
+them untracked and reading `TrackRevisions` throws there. A3.5 predates the
+decision and was never restated. Implemented per §1a and A3.5 corrected. Also
+pinned: the two protection parameters are NOT interchangeable, because §1a is
+emphatic that they are different admissions — one bypasses the author's gate,
+the other concedes Adeu's own output guarantee.
+
+**A3.11 does not exercise G15.** Its example (merging out of block CC:1) is
+refused one layer earlier by CC-1e's anchor gate, because the merge would have
+to delete `{#/cc:1}` — and that is a *more* precise error, so it stays. G15's
+real job is the UNANCHORED walls: repeating-section items, checkboxes,
+pictures, which project no tokens and have no anchor gate protecting them. A
+merge across a repeating-item wall would otherwise silently hoist one item's
+content into the other. Both cases now pinned, each asserting which gate fires.
+
+Related: **A3.10 was already satisfied** by `trim_common_context`, which
+narrows the crossing edit to the outside-the-control part before any gate sees
+it. The genuine crossing is when both sides change, and there the word-diff
+splitter already lands each half correctly. What was actually missing was not
+segmentation but DISCLOSURE — an agent that asked to change CC:3 and silently
+got a change half outside it was told something untrue by omission. Now a
+per-edit report note.
+
+### G10 and G12 are deferred to CC-5, not skipped
+
+Both gate `set_field` values, and `set_field` exists in neither engine. They
+are in the §2 matrix for completeness but have no operation to gate. Recorded
+on A3, on CC-4's row and on CC-5's, which now also inherits the obligation to
+make CC-4's "use set_field instead" advice true for bound controls rather than
+a dead end.
+
+### COM agreement is now pinned, not assumed
+
+CC-6 measured what Word permits; A3 pins what Adeu decides; nothing connected
+them, so a gate could have been changed into disagreeing with Word and both
+suites would have stayed green. `test_live_word_gate_agreement.py` drives real
+Word over the same document Adeu gates and asserts the verdicts match — for
+`sdtContentLocked`, `sdtLocked` and unlocked controls — plus that
+`ignore_control_locks` lands exactly where Word lands once `LockContents` is
+cleared. That last one matters because an override that skipped the gate while
+the edit still could not apply would convert a clear refusal into a silent
+no-op, which is the failure spec-gates §7 exists to prevent.
+
+The one asymmetry left deliberately in place: Adeu is stricter than Word for
+G13 (data binding), because there the write succeeds in Word and then silently
+reverts on open (CC-6(e)). Being stricter than Word is right when Word's
+permission is a trap.
+
+### Context widening
+
+`make_edits_self_contained` now clamps at locked and group walls, so `diff`
+output stays closed under `apply` — without it the tool would emit batches its
+own engine rejects. The walls are read back out of the projection
+(`{#cc:7 locked}`) rather than passed in from the mapper: the function receives
+only text, and deriving the walls from that same text makes it impossible for
+the wall list to describe a different document than the one being widened. Node
+has no `make_edits_self_contained` (its diff is per-part and structural), so
+there is nothing to clamp on that side.

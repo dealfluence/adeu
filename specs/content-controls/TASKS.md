@@ -202,11 +202,29 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-4 — Write gates: locks, groups, document protection, placeholder targets (P2)
 
-- Status: `in-progress` (agent: opencode-windows, since: 2026-08-21, branch:
-  content-controls-specs) — taken on the Windows side deliberately: this row is mostly
-  questions about what Word actually permits, and the answers are COM-checkable here.
-  CC-6 already resolved G7/G9 and Mikko settled G5, so the gate matrix is now fully
-  specified and this is implementation rather than discovery.
+- Status: `done` (agent: opencode-windows, 2026-08-22, branch:
+  content-controls-specs). Commits: identity `56aabeb` + `808e829`, protection state
+  `34330d9`, python gates `6836cb5`, node gates + surfaces `71d5ce4`, widening +
+  COM agreement + spec corrections in the closing commit. Taken on the Windows side
+  deliberately: this row was mostly questions about what Word actually permits, and
+  the answers are COM-checkable here.
+- **G10 and G12 are NOT part of this row** and were not implemented: both gate
+  `set_field` values, and `set_field` does not exist in either engine — it is CC-5.
+  They are in the spec-gates §2 matrix for completeness but have no operation to
+  gate until CC-5 lands. Recorded on A3 and on CC-5 below.
+- Three findings that amended the acceptance doc (all written up in A3 and
+  PROGRESS.md): **A3.5** contradicted spec-gates §1a and §1a won (the forms-protected
+  fills are additionally gated on `allow_untracked_writes`, which A3.5 predated);
+  **A3.11** is refused by CC-1e's anchor gate before G15 ever sees it, so G15's real
+  job is the *unanchored* walls; **A3.10** was already satisfied by
+  `trim_common_context`, so what was actually missing was the disclosure, not the
+  segmentation.
+- COM agreement is pinned, not assumed: `test_live_word_gate_agreement.py` drives
+  real Word over the same document Adeu gates and asserts the two verdicts match,
+  including that `ignore_control_locks` lands where Word lands once the lock is
+  cleared. Previously CC-6 measured Word and A3 pinned Adeu with nothing connecting
+  them, so a gate could be changed into disagreeing with Word and both suites would
+  have stayed green.
 - Depends on: CC-1 (`done`)
 - Acceptance: [A3](acceptance/A3-gates.md) (all examples)
 - Scope: load-time protection state; gate matrix + teaching-error contracts per
@@ -244,6 +262,19 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 - Depends on: CC-4 (A4.12 only, see above); CC-6 findings must be recorded before this
   task's PR merges — done, CC-6 is closed and `test_live_word_content_controls.py` pins
   each finding
+- **CC-4 closed 2026-08-22** (`b5d6801`), so the A4.12 dependency is now satisfied and
+  the gate entry point exists: `RedlineEngine._check_control_gates` in both engines,
+  built on `python/src/adeu/redline/gates.py` / `node/packages/core/src/gates.ts`.
+- **Inherits G10 and G12 from CC-4.** Both gate `set_field` values (dropdown
+  `listItem` membership; date format matching ISO or the control's `w:dateFormat`),
+  so they could not be implemented before the operation existed. The gate module and
+  its four-part error contract are in place in both engines
+  (`python/src/adeu/redline/gates.py`, `node/packages/core/src/gates.ts`); these two
+  are new functions in it plus a call from the `set_field` handler.
+- **The G13 sibling to be aware of:** CC-4 refuses `ModifyText` on bound controls and
+  points the caller at `set_field`. That error is now a promise this row has to keep —
+  `set_field` is the sanctioned path for bound content, so its dual-write (or the
+  reject-gate below) is what makes CC-4's advice true rather than a dead end.
 - **Scope grew, Mikko 2026-08-21: the bound-control reject path is now v1, not CC-9.**
   CC-6(e) found that Word rewrites a bound control's content from its XML store on open,
   and that a headless reject leaves the store holding the *rejected* value — so the next
