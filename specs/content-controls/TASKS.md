@@ -257,18 +257,32 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-5 — `set_field` change type + fill semantics (P2)
 
-- Status: `in-progress` (agent: opencode-osx, since: 2026-08-22, branch:
-  content-controls-specs) — **started while CC-4 is still in flight, deliberately.**
-  The dependency is real but narrow: only A4.12 (set_field is refused by G1 like any
-  other edit) needs the gate matrix. Everything else — the union member, field
-  resolution, fill semantics, the per-class writers, the surfaces — is independent,
-  and CC-4 has already landed the two pieces of plumbing this row actually consumes
-  (`read_document_protection`, and `sdt_stack` on every run, 56aabeb). Sequencing
-  strictly behind CC-4 would idle this side for no gain and leave CC-7, which depends
-  on BOTH, waiting on a serial chain.
-  Coordination: this row does not touch the gate matrix or `ignore_*` params — those
-  are CC-4's. `set_field` calls whatever gate entry point CC-4 publishes; until it
-  exists the call site is one function, and A4.12 lands as the last commit of this row.
+- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-22) — A4.1-A4.12 met in both
+  engines, plus the MCP and CLI surfaces. Started while CC-4 was still in flight, which
+  worked: the only true dependency was A4.12, and the two rows met in a merge that
+  produced four integration defects (three found by windows, one by osx) rather than a
+  conflict. **Three frozen-spec deviations, all needing Mikko's ruling** (README rule 4).
+  - **§2 forms protection.** The spec says forms protection is "exactly what stays
+    allowed" for `set_field`. CC-6 measured the opposite and CC-4 encoded the
+    measurement: Word records fills in a forms-protected document as UNTRACKED, so
+    applying one breaks the guarantee that every write is a tracked change. G5 permits
+    the fill, the untracked-write gate refuses it, `allow_untracked_writes` overrides.
+    Both engines pin the refusal AND the override. The measurement wins over the frozen
+    sentence, but the sentence should be corrected rather than left contradicting.
+  - **§6 bound dual-write, node only.** Python evaluates the binding xpath with lxml.
+    Node has no XPath engine, and adding a dependency to walk four elements was not
+    worth it, so the node twin resolves exactly the shape Word writes — absolute
+    positional paths like `/root[1]/matter[1]` — and returns null for anything else,
+    which routes to the same dangling-binding warning as a missing store. An honest
+    downgrade with a disclosure, never a silent partial write, but it IS an engine
+    asymmetry and those have hurt before.
+  - **A4.6 raw-view rendering.** The example says "raw view shows the pending toggle"
+    without fixing the form. A tracked toggle renders as an inserted new state beside a
+    deleted old one; the brackets sit outside the CriticMarkup rather than inside it.
+    Both engines agree and the clean view shows exactly one box, which is the part the
+    example does pin.
+- Depends on: CC-4 (`done`) — A4.12 landed after it; CC-6 findings recorded (CC-6 closed,
+  `test_live_word_content_controls.py` pins each)
 - Depends on: CC-4 (A4.12 only, see above); CC-6 findings must be recorded before this
   task's PR merges — done, CC-6 is closed and `test_live_word_content_controls.py` pins
   each finding

@@ -1465,3 +1465,77 @@ Live Word twins also carry will pass review, pass CI on macOS, and fail here.
 Merged tree after the fixes: python 1,945 passed / 16 skipped including the
 full live-Word battery, node 962 + 321 + 42, langchain 212, ruff/mypy/eslint
 clean, release consistency clean.
+
+## 2026-08-22 — CC-5: `set_field`, both engines (osx)
+
+A4.1-A4.12 met in both engines and on the MCP and CLI surfaces. Taken while
+CC-4 was still in flight, deliberately: only A4.12 truly depended on it, and
+the alternative was idling one machine while CC-7 waited on a serial chain.
+That bet paid, but not for free — see the merge below.
+
+**`set_field` writes nothing itself.** It performs the untracked teardown Word
+performs (clearing `w:showingPlcHdr` and dropping the ghost run, which CC-6(a)
+confirmed produces no revision) and then hands the content change to the
+ordinary edit pipeline as a position-pinned `ModifyText`. Atomicity, author
+resolution, revision ids, comments, reporting and the gates all see a normal
+edit, so a fill cannot acquire a special pass through any of them by accident.
+A4.12 and A4.10 both become structural consequences rather than features:
+text-first fills route through the same function, so the two surfaces cannot
+produce different XML without failing a test that compares them to each other.
+
+**The empty control needed a new concept.** Once the ghost run is gone,
+`w:sdtContent` holds no run, and the nearest run BY OFFSET lives outside the
+control — so the value landed beside the field, leaving a filled-looking
+document whose control was still empty and whose value Word would not treat as
+the field's content. Edits now carry an optional insertion host: the same shape
+as the OPC part boundary, a wall that offsets cannot see, so the container
+travels explicitly. The text-first route hit the identical bug and the
+post-apply verification gate caught it by refusing to write the file.
+
+**Three defects of my own, each a different lesson.** Filling a GROUP applied:
+I had inferred value-bearing-ness from whether a control anchors, and groups
+anchor, so `set_field` on CC:8 replaced its content — which is the other
+controls inside it. Wrong output reported as success, the CC-14 shape. The
+class check is now explicit against the frozen list. The date renderer tested
+its supported tokens as SUBSTRINGS, so `dddd, MMMM d` — day name, month name —
+matched on the `dd` and `MM` inside them and rendered `0101, 0303 1`: not a
+misformatted date but an unreadable one, written silently. And the first
+tracked toggle this engine has ever produced exposed a projection defect
+nothing could reach before: the checkbox mark is substituted at RUN emission,
+so two glyph runs rendered two bracket pairs and the clean view showed two
+checkboxes where the document has one. Fixed in both projections, with a test
+pinning mapper and ingest equal on the toggled document, because a divergence
+there is the CC-12 class.
+
+**The CC-4 merge produced four integration defects rather than a conflict.**
+Windows found three: G13's backstop refused `set_field`, the operation G13's
+own error recommends; `set_field` was silently dropped on the Live Word path;
+and `mode="fields"` returned the whole document there. The node engine then
+turned out to have the same G13 contradiction, caught by five A4.8 tests the
+moment the trees met. The generalisable point is Windows': a gate and the
+alternative it recommends are one contract, and here they were written by
+different agents on different machines with no test spanning both until now.
+
+Two ordering findings from wiring the gates. Class refusals must precede them —
+filling a group hit the lock gate first, which advised `ignore_control_locks`,
+advice still wrong after the override. And an empty control has a zero-length
+span, so nothing intersects it, so G5 refused a fill as "body text outside a
+content control" — the most common legitimate operation under forms protection.
+A `set_field` names its target rather than inferring it from a range, so the
+gates are now told which control is being filled.
+
+**Three spec deviations, all on the board for Mikko.** §2's "forms protection
+is exactly what stays allowed" is contradicted by CC-6's measurement that Word
+writes such fills untracked; §6's dual-write is narrowed on node to the
+positional-path subset Word actually emits, since node has no XPath engine; and
+A4.6 does not fix the raw-view form of a pending toggle, which both engines now
+render the same way.
+
+One process note worth keeping. I spent a while chasing a node projection
+defect that did not exist — tracked changes inside a control appeared to
+project with no CriticMarkup, which would have been severe — and confirmed it
+against python, dumped the XML and instrumented the event stream before finding
+the cause: `extractTextFromBuffer` takes POSITIONAL arguments, and the options
+object I passed was truthy, so every probe had been reading the clean view. The
+engine was right and my instrument was wrong. Reaching for the event stream
+instead of filing the bug is what caught it.
