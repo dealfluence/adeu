@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Tuple, Union
 
+from adeu.utils.docx import PAGE_BREAK_TOKEN
+
 PAGE_TARGET_CHARS = 19_000
 PAGE_RANGE_MAX_PAGES = 8
 APPENDIX_MARKER = "<!-- READONLY_BOUNDARY_START -->"
@@ -259,15 +261,15 @@ def _tokenize_into_atomic_blocks(markdown_body: str) -> List[Tuple[str, int, boo
 
     refined: List[Tuple[str, int, bool]] = []
     for block_text, block_offset in merged:
-        if '<w:br w:type="page"/>' in block_text:
-            parts = block_text.split('<w:br w:type="page"/>')
+        if PAGE_BREAK_TOKEN in block_text:
+            parts = block_text.split(PAGE_BREAK_TOKEN)
             curr_offset = block_offset
             for idx, part in enumerate(parts):
                 part_len = len(part)
                 is_last_part = idx == len(parts) - 1
                 if part or not is_last_part:
                     refined.append((part, curr_offset, not is_last_part))
-                curr_offset += part_len + len('<w:br w:type="page"/>')
+                curr_offset += part_len + len(PAGE_BREAK_TOKEN)
         else:
             refined.append((block_text, block_offset, False))
 

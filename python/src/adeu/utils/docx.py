@@ -92,9 +92,17 @@ _TEXTBOX_DISCLOSURE_CAP = 300
 # Toggle-property "off" values: <w:b w:val="0|false|off"/> means NOT bold.
 # Any other value (including a missing w:val) means the toggle is on.
 _OFF_VALS = ("0", "false", "off")
-# A page break projects as its literal markup so downstream consumers can
-# round-trip it; see get_run_text / get_run_text_and_markers.
-_PAGE_BREAK_TOKEN = '<w:br w:type="page"/>'
+# A page break projects as U+000C FORM FEED — the conventional plain-text page
+# separator — so that pagination can find manual breaks without putting markup
+# in the character stream an LLM reads. Kept identical in the Node engine
+# (utils/docx.ts get_run_text) and consumed by pagination._tokenize_into_atomic_blocks.
+#
+# It was literal `<w:br w:type="page"/>` markup until 2026-08-21 (CC-10): 22 characters
+# of XML in the projection, and a silent parity break, since Node emitted "\n".
+_PAGE_BREAK_TOKEN = "\f"
+# Public alias: pagination imports this rather than re-spelling the character,
+# so the producer and the consumer of the signal cannot drift apart.
+PAGE_BREAK_TOKEN = _PAGE_BREAK_TOKEN
 
 
 def _textbox_text(graphic_el) -> str:
@@ -1202,10 +1210,7 @@ def get_run_text(run: Run) -> str:
         elif child.tag == QN_W_TAB:
             text += " "  # Convert tab to space
         elif child.tag == QN_W_BR:
-            if child.get(qn("w:type")) == "page":
-                text += '<w:br w:type="page"/>'
-            else:
-                text += "\n"
+            text += _PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n"
         elif child.tag == QN_W_CR:
             text += "\n"
     return text

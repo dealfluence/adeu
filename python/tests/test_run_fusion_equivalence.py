@@ -46,8 +46,9 @@ def old_get_run_text(run) -> str:
         elif child.tag == QN_W_TAB:
             text += " "
         elif child.tag == QN_W_BR:
+            # CC-10: a page break projects as U+000C, not as literal markup.
             if child.get(qn("w:type")) == "page":
-                text += '<w:br w:type="page"/>'
+                text += "\f"
             else:
                 text += "\n"
         elif child.tag == QN_W_CR:

@@ -15,6 +15,17 @@ export const QN_W_DELTEXT = "w:delText";
 export const QN_W_TAB = "w:tab";
 export const QN_W_BR = "w:br";
 export const QN_W_CR = "w:cr";
+
+/**
+ * A page break projects as U+000C FORM FEED — the conventional plain-text page
+ * separator — rather than as a newline, so that pagination can find manual
+ * breaks without putting markup in the character stream an LLM reads.
+ *
+ * Must stay identical to python's `adeu.utils.docx.PAGE_BREAK_TOKEN`. Until
+ * 2026-08-21 (CC-10) the engines disagreed here: node emitted "\n" while python
+ * emitted 22 characters of literal `<w:br w:type="page"/>` markup.
+ */
+export const PAGE_BREAK_TOKEN = "\f";
 export const QN_W_RPR = "w:rPr";
 export const QN_W_RPRCHANGE = "w:rPrChange";
 export const QN_W_COMMENTREFERENCE = "w:commentReference";
@@ -768,7 +779,10 @@ export function get_run_text(run: Run): string {
       text += raw.replace(/\t/g, " ");
     } else if (child.tagName === QN_W_TAB) {
       text += " ";
-    } else if (child.tagName === QN_W_BR || child.tagName === QN_W_CR) {
+    } else if (child.tagName === QN_W_BR) {
+      text +=
+        child.getAttribute("w:type") === "page" ? PAGE_BREAK_TOKEN : "\n";
+    } else if (child.tagName === QN_W_CR) {
       text += "\n";
     }
   }

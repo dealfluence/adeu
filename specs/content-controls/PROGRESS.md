@@ -265,3 +265,39 @@ python +340 chars (17 × 21), emphasis coalescing and the missing header lines a
 node +202, netting the measured python +138. Closing only the break gap flips the sign to
 node +202. A5.1's identical-counts assertion needs all three fixed, so CC-3 should not
 plan around CC-10 alone.
+
+### 2026-08-21 — CC-10 done: page breaks project as U+000C (opencode-osx)
+
+Mikko chose option B. Both engines now project a manual page break as U+000C FORM FEED
+instead of python's 22-character `<w:br w:type="page"/>` sentinel and node's `"\n"`.
+Python's paginator splits on the character, so manual page breaks still start new virtual
+pages — `test_cli_bug_repro.py`'s pagination and outline tests pass untouched, which was
+the capability at risk.
+
+Shape of the change: `_PAGE_BREAK_TOKEN` became `"\f"` with a public `PAGE_BREAK_TOKEN`
+alias that `pagination.py` imports, so producer and consumer cannot drift; the third
+python site (`get_run_text`) inlined the literal markup independently of the constant and
+now uses it; node's `get_run_text` learned to distinguish `w:type="page"` at all, which it
+previously did not, with a matching exported `PAGE_BREAK_TOKEN`. Only page breaks changed —
+a soft `w:br` is still `"\n"` in both engines. `test_run_fusion_equivalence.py`'s oracle
+hardcoded the old markup and was updated in the same commit; `docs/FIDELITY.md` amended,
+since its "both project as a newline" line was the contract python had been violating.
+
+Node's character count is unchanged (a 1-for-1 `\n`→`\f` swap); python's dropped 396 chars
+on the corpus. Both engines now contain zero `<w:` in the projection.
+
+**A5.1 is still blocked, and the measurement says so precisely.** Closing this gap flipped
+the sign rather than closing it, exactly as forecast: `fedramp_ssp_rev4` clean view moved
+from python +138 to **node +258** (python 498,404, node 498,662), differing lines 78 → 27.
+What remains is the emphasis-marker coalescing difference and the header lines node
+projects that python omits. CC-3 needs both fixed before asserting identical counts.
+
+Left deliberately undone: node's paginator still ignores manual page breaks (it is
+density-only). That is now a one-line change rather than a design problem, because the
+signal exists in node's text — but it changes node's page numbering, so it wants its own
+row and its own decision.
+
+Verification: python ruff + format (203 files) + mypy clean, 1482 passed / 67 skipped;
+node build clean, 722 + 296 + 42 pass, lint clean. The one red test in the full python run
+(`test_repro_qa_2026_07_18.py` LibreOffice interop) is the known environment flake — it
+passes on a serial re-run and was reproduced on unmodified `origin/main` before this work.

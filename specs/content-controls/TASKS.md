@@ -144,9 +144,10 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-10 — Python leaks raw OOXML into the text projection (P1, parity + output quality)
 
-- Status: `blocked` (agent: opencode-osx, 2026-08-21) — diagnosis corrected and design
-  options costed below; needs Mikko's pick between (A) out-of-band offsets, (B) form
-  feed, (C) plain newline before implementation starts
+- Status: `done` (agent: opencode-osx, 2026-08-21) — option **B** chosen by Mikko and
+  implemented: both engines project U+000C for a page break, python's pagination splits
+  on it, no markup left in either projection. Regression files:
+  `python/tests/test_repro_raw_ooxml_in_projection.py` + node twin. FIDELITY.md amended.
 - Depends on: —
 - Found by: CC-0 corpus measurement, 2026-08-21 (PROGRESS.md)
 - Acceptance: no `<w:...>` markup appears in any projected view in either engine; python
@@ -176,7 +177,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   constant). `tests/test_run_fusion_equivalence.py` hardcodes the token in its oracle and
   must be updated in the same commit; `pagination.py:270`'s offset arithmetic assumes the
   token occupies real text space.
-- **Blocked on a design decision (needs Mikko).** Three options, none free:
+- **Decision (2026-08-21): option B.** Three options were costed; B was chosen:
   - **(A) Out-of-band offsets.** `paginate()` grows a page-break-offsets argument.
     Correct and keeps both the contract and the capability, but `paginate()` has 15
     call sites across `redline/engine.py`, `mcp_components/doc_cache.py`,
@@ -191,12 +192,15 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   - **(C) Literal newline.** Cheapest, matches FIDELITY.md verbatim, but python loses
     manual-page-break pagination — `test_cli_bug_repro.py` pagination/outline tests go
     red and page numbers stop tracking Word's.
-  Recommendation: **B**, then a follow-up row to teach node's pagination the same signal.
-- **Fixing page breaks alone does NOT unblock A5.1.** The three divergences partially
-  offset: page breaks are worth python +340 chars on `fedramp_ssp_rev4` (17 breaks × 21),
-  the other two are worth node +202, netting the measured python +138. Close the break
-  gap alone and it flips to node +202. A5.1 needs all three: page breaks, emphasis-marker
-  coalescing, and the header lines node projects that python omits.
+  **Chosen: B.** Follow-up row still open: node's pagination does not act on the token
+  (density-only), so node still ignores manual page breaks — now a one-line fix, since
+  the signal is present in its text.
+- **Fixing page breaks alone did NOT unblock A5.1 — confirmed by measurement.** The
+  divergences partially offset, so closing this one flipped the sign as predicted:
+  `fedramp_ssp_rev4` clean view went from python 498,800 / node 498,662 (python +138) to
+  python 498,404 / node 498,662 (**node +258**), and differing lines fell 78 → 27. The
+  remaining gap is entirely the other two divergences — emphasis-marker coalescing, and
+  the header lines node projects that python omits. **A5.1 stays blocked on those two.**
 - Split out, NOT in this task: node pagination ignoring manual page breaks is a separate
   capability gap (own row when someone wants it).
 - Also silently dropped by BOTH engines, so not parity-visible but real content loss:
