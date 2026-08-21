@@ -628,7 +628,7 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-16 — The LibreOffice interop harness reports scheduling, not documents (P1, tooling)
 
-- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21, branch: content-controls-specs)
+- Status: `done (dcd769a)` (agent: opencode-osx, 2026-08-21, branch: content-controls-specs)
   — found while verifying CC-14; filed and fixed rather than left as a note, because
   the quiet half of it means QA C1/H4 interop coverage mostly was not running.
 - Depends on: — (pure test infrastructure; no spec surface)
