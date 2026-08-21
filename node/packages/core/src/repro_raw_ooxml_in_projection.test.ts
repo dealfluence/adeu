@@ -8,10 +8,8 @@
  * emit U+000C FORM FEED, the conventional plain-text page separator, so the
  * signal survives without markup in the character stream.
  *
- * Node's paginator does not yet act on the token — it is density-only and
- * ignores manual breaks (a separate capability gap). What is pinned here is
- * that node *projects* the same character python does, which is what keeps
- * the two engines' text byte-identical.
+ * Node's paginator now acts on the token too, so a manual page break starts a
+ * new virtual page in both engines and their page numbers agree.
  */
 
 import { describe, it, expect } from "vitest";
@@ -21,6 +19,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
 import { PAGE_BREAK_TOKEN } from "./utils/docx.js";
+import { paginate } from "./pagination.js";
 
 const NS =
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -92,5 +91,36 @@ describe("page breaks project as a character, never as markup", () => {
     const projected = await extractTextFromBuffer(buf, true, false);
     const mapped = new DocumentMapper(await DocumentObject.load(buf), true).full_text;
     expect(mapped).toBe(projected);
+  });
+});
+
+describe("manual page breaks start a new virtual page", () => {
+  // Values pinned against the python engine, which has honoured manual breaks
+  // since before the TS port existed:
+  //   paginate("First page body.\fSecond page body.", "")
+  //     -> 2 pages, offsets [0, 17]
+  it("splits on the token and reports python's offsets", () => {
+    const r = paginate(`First page body.${PAGE_BREAK_TOKEN}Second page body.`, "");
+    expect(r.total_pages).toBe(2);
+    expect(r.body_pages[0]).toBe("First page body.");
+    expect(r.body_pages[1]).toBe("Second page body.");
+    // Second page starts after the 1-char token, not 22 chars later.
+    expect(r.body_page_offsets).toEqual([0, "First page body.".length + 1]);
+  });
+
+  it("does not split a document without manual breaks", () => {
+    expect(paginate("Just one short body.", "").total_pages).toBe(1);
+  });
+
+  it("emits a leading break's empty page, matching python", () => {
+    // Python yields TWO pages here, the first empty — a break before any
+    // content still ends a page. Arguably surprising, but it is the shipped
+    // behaviour and parity is the contract; pinned so neither engine drifts.
+    //   paginate("\fOnly real content.", "") -> 2 pages, offsets [0, 1]
+    const r = paginate(`${PAGE_BREAK_TOKEN}Only real content.`, "");
+    expect(r.total_pages).toBe(2);
+    expect(r.body_pages[0]).toBe("");
+    expect(r.body_pages[1]).toBe("Only real content.");
+    expect(r.body_page_offsets).toEqual([0, 1]);
   });
 });

@@ -235,7 +235,8 @@ export class DocumentObject {
     return new DocumentObject(pkg, mainPart);
   }
 
-  public relateTo(part: Part, relType: string) {
+  /** Relates `part` to the main document part and returns the new r:id. */
+  public relateTo(part: Part, relType: string): string {
     let rId = 1;
     while (this.part.rels.has(`rId${rId}`)) rId++;
     const id = `rId${rId}`;
@@ -247,6 +248,7 @@ export class DocumentObject {
     this.part.rels.set(id, new Relationship(id, relType, target, false));
     const relsPart = this.pkg.getOrCreateRelsPart(this.part.partname);
     relsPart.addRelationship(id, relType, target, false);
+    return id;
   }
 
   public relateToExternal(target: string, relType: string): string {

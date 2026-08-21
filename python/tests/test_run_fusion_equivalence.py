@@ -43,8 +43,10 @@ def old_get_run_text(run) -> str:
         if child.tag == QN_W_T or child.tag == QN_W_DELTEXT:
             raw = child.text or ""
             text += raw.replace("\t", " ")
-        elif child.tag == QN_W_TAB:
+        elif child.tag == QN_W_TAB or child.tag == qn("w:ptab"):
             text += " "
+        elif child.tag == qn("w:noBreakHyphen"):
+            text += "-"
         elif child.tag == QN_W_BR:
             # CC-10: a page break projects as U+000C, not as literal markup.
             if child.get(qn("w:type")) == "page":

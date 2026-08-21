@@ -362,10 +362,25 @@ export class DocumentMapper {
             // token offset so resolution targets THIS cell, not a neighbour.
             const cellPara = new Paragraph(firstP, cell);
             this._add_virtual_text("", current, cellPara);
-            const has_content = current > cell_start;
-            if (has_content) {
-              this._add_virtual_text(" ", current, cellPara);
-              current += 1;
+            if (cell_start < current) {
+              // Separator only when the projected cell text does not already
+              // end with a space — mirrors ingest's endsWith(" ") check.
+              // Emphasis hoists trailing whitespace out of its closing marker,
+              // so a bold cell commonly ends "**Label** "; padding
+              // unconditionally emitted two spaces before the anchor and broke
+              // the Virtual Text contract against ingest.
+              let last_char = "";
+              for (let ci = this._text_chunks.length - 1; ci >= 0; ci--) {
+                const chunk = this._text_chunks[ci]!;
+                if (chunk) {
+                  last_char = chunk[chunk.length - 1]!;
+                  break;
+                }
+              }
+              if (last_char !== " ") {
+                this._add_virtual_text(" ", current, cellPara);
+                current += 1;
+              }
             }
             const anchor = `{#cell:${paraId}}`;
             this._add_virtual_text(anchor, current, cellPara);
@@ -600,28 +615,47 @@ export class DocumentMapper {
             new_wrappers[0] === current_wrappers[0] &&
             new_wrappers[1] === current_wrappers[1]
           ) {
-            let skip_leading_prefix = false;
+            // Adjacent same-style marker elision must mirror
+            // ingest.buildParagraphText EXACTLY. Two historical faults, both
+            // fixed on the python side and ported here (CC-10 follow-up):
+            // (a) the check looked only at the LITERAL last pending part, so
+            //     any boundary whitespace defeated it — "**Request for**
+            //     **Bids**" instead of "**Request for Bids**"; and
+            // (b) it popped the closing marker WITHOUT confirming the incoming
+            //     run really opens with the matching prefix, so a
+            //     whitespace-only same-style run following it lost marker
+            //     balance outright ("**March 2012 " with no closer).
+            const isWs = (s: string) => s.length > 0 && /^\s+$/.test(s);
+            let incoming = run_parts;
             if (
               new_style[0] === current_style[0] &&
               new_style[1] === current_style[1] &&
-              current_style[0] !== "" &&
-              pending_runs[pending_runs.length - 1][0] === "virtual" &&
-              pending_runs[pending_runs.length - 1][1] === current_style[1]
+              !(current_style[0] === "" && current_style[1] === "")
             ) {
-              pending_runs.pop();
-              skip_leading_prefix = true;
+              let k = pending_runs.length - 1;
+              while (k >= 0 && pending_runs[k][0] === "real" && isWs(pending_runs[k][1]))
+                k--;
+              const pending_ends_with_suffix =
+                k >= 0 &&
+                pending_runs[k][0] === "virtual" &&
+                pending_runs[k][1] === current_style[1];
+
+              let m = 0;
+              while (m < run_parts.length && run_parts[m][0] === "real" && isWs(run_parts[m][1]))
+                m++;
+              const incoming_starts_with_prefix =
+                m < run_parts.length &&
+                run_parts[m][0] === "virtual" &&
+                run_parts[m][1] === new_style[0];
+
+              if (pending_ends_with_suffix && incoming_starts_with_prefix) {
+                pending_runs.splice(k, 1);
+                incoming = run_parts.slice(0, m).concat(run_parts.slice(m + 1));
+              }
             }
 
             const curr_comment_ids = Array.from(active_ids);
-            for (const [kind, txt, r_obj, r_off] of run_parts) {
-              if (
-                skip_leading_prefix &&
-                kind === "virtual" &&
-                txt === new_style[0]
-              ) {
-                skip_leading_prefix = false;
-                continue;
-              }
+            for (const [kind, txt, r_obj, r_off] of incoming) {
               pending_runs.push([
                 kind,
                 txt,

@@ -777,8 +777,18 @@ export function get_run_text(run: Run): string {
     if (child.tagName === QN_W_T || child.tagName === QN_W_DELTEXT) {
       const raw = child.textContent || "";
       text += raw.replace(/\t/g, " ");
-    } else if (child.tagName === QN_W_TAB) {
+    } else if (child.tagName === QN_W_TAB || child.tagName === "w:ptab") {
+      // w:ptab is an absolute-position tab; it separates content like w:tab.
       text += " ";
+    } else if (child.tagName === "w:noBreakHyphen") {
+      // A real hyphen glyph. Dropping it merged the words either side
+      // ("e-mail" projected as "email"). w:softHyphen is deliberately NOT
+      // handled: it is an optional break hint Word renders only when the line
+      // actually breaks, so projecting nothing is correct. w:sym is likewise
+      // still dropped — symbol fonts map glyphs into the Unicode private-use
+      // area, so the code point alone does not identify the character; that
+      // needs a font-aware decision (CC-1 owns checkbox glyphs).
+      text += "-";
     } else if (child.tagName === QN_W_BR) {
       text +=
         child.getAttribute("w:type") === "page" ? PAGE_BREAK_TOKEN : "\n";
@@ -866,27 +876,97 @@ export function* iter_document_parts(doc: any): Generator<any> {
  * an OPC part boundary — the QA 2026-07-18 C1 failure wrote a final body
  * paragraph into word/footer1.xml.
  */
+/**
+ * Every `w:sectPr` in document order: one per section-terminating paragraph
+ * (`w:p/w:pPr/w:sectPr`), with the body-level `w:sectPr` last — the order
+ * python-docx's `doc.sections` yields.
+ */
+function* _iter_sect_pr(doc: any): Generator<Element> {
+  const body: Element = doc.element;
+  for (let i = 0; i < body.childNodes.length; i++) {
+    const child = body.childNodes[i] as Element;
+    if (child.nodeType !== 1 || child.tagName !== QN_W_P) continue;
+    const pPr = findChild(child, "w:pPr");
+    const sectPr = pPr && findChild(pPr, "w:sectPr");
+    if (sectPr) yield sectPr;
+  }
+  const bodySectPr = findChild(body, "w:sectPr");
+  if (bodySectPr) yield bodySectPr;
+}
+
+/** `w:settings/w:evenAndOddHeaders` — the document-wide even/odd toggle. */
+function _odd_and_even_pages(doc: any): boolean {
+  const settings = doc.pkg.getPartByPath("word/settings.xml");
+  if (!settings) return false;
+  return findChild(settings._element, "w:evenAndOddHeaders") !== null;
+}
+
+/**
+ * Header/footer parts a section actually references, in Word's own precedence
+ * order: primary, then first-page (only when the section sets `w:titlePg`),
+ * then even-page (only when the document sets `w:evenAndOddHeaders`).
+ *
+ * A section that carries no reference of a given type inherits the previous
+ * section's — Word's "Link to Previous" — so skipping the absent reference is
+ * exactly what stops inherited headers from projecting twice.
+ *
+ * This mirrors python `iter_document_parts_with_kind._iter_section_parts`.
+ * Before this existed the TS port simply listed every header/footer part in
+ * the package, which projected parts Word never renders: unreferenced orphans,
+ * first-page headers in sections without `w:titlePg`, and even-page headers in
+ * documents without `w:evenAndOddHeaders`.
+ */
+function* _iter_section_parts(
+  doc: any,
+  kind: "header" | "footer",
+): Generator<any> {
+  const refTag = kind === "header" ? "w:headerReference" : "w:footerReference";
+  const oddAndEven = _odd_and_even_pages(doc);
+
+  for (const sectPr of _iter_sect_pr(doc)) {
+    const refs = findChildren(sectPr, refTag);
+    const byType = (t: string) =>
+      refs.find((r) => (r.getAttribute("w:type") || "default") === t);
+
+    const resolve = (ref: Element | undefined): any => {
+      if (!ref) return undefined;
+      const rId = ref.getAttribute("r:id");
+      if (!rId) return undefined;
+      const rel = doc.part.rels.get(rId);
+      if (!rel) return undefined;
+      const target = rel.target.replace(/^\/?word\//, "").replace(/^\//, "");
+      return doc.pkg.getPartByPath("word/" + target);
+    };
+
+    // 1. Primary
+    const primary = resolve(byType("default"));
+    if (primary) yield primary;
+
+    // 2. First page — only when this section opts in.
+    if (findChild(sectPr, "w:titlePg") !== null) {
+      const first = resolve(byType("first"));
+      if (first) yield first;
+    }
+
+    // 3. Even page — only when the document opts in.
+    if (oddAndEven) {
+      const even = resolve(byType("even"));
+      if (even) yield even;
+    }
+  }
+}
+
 export function* iter_document_parts_with_kind(
   doc: any,
 ): Generator<[any, string]> {
   // 1. Headers
-  const headers = doc.pkg.parts.filter(
-    (p: any) =>
-      p.contentType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
-  );
-  for (const h of headers) yield [h, "header"];
+  for (const h of _iter_section_parts(doc, "header")) yield [h, "header"];
 
   // 2. Main Document Body
   yield [doc, "body"];
 
   // 3. Footers
-  const footers = doc.pkg.parts.filter(
-    (p: any) =>
-      p.contentType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
-  );
-  for (const f of footers) yield [f, "footer"];
+  for (const f of _iter_section_parts(doc, "footer")) yield [f, "footer"];
 
   // 4. Notes
   const fnPart = doc.pkg.getPartByPath("word/footnotes.xml");

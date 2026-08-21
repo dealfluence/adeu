@@ -2,6 +2,8 @@
  * Stateless paginator for projected DOCX Markdown.
  */
 
+import { PAGE_BREAK_TOKEN } from './utils/docx.js';
+
 const PAGE_TARGET_CHARS = 19_000;
 export const PAGE_RANGE_MAX_PAGES = 8;
 const APPENDIX_MARKER = '<!-- READONLY_BOUNDARY_START -->';
@@ -128,9 +130,41 @@ export function paginate(markdown_body: string, structural_appendix: string = ''
   };
 }
 
-function _tokenize_into_atomic_blocks(markdown_body: string): [string, number][] {
+/**
+ * Splits `markdown_body` into atomic blocks as
+ * `[block_text, start_offset, force_split_after]`.
+ *
+ * The third element carries manual page breaks. The projection writes a page
+ * break as U+000C (`PAGE_BREAK_TOKEN`), so a block containing one is cut at
+ * that point and the preceding part is flagged to end its page — which is how
+ * a reader's page numbers line up with Word's. Before this existed the TS port
+ * ignored manual breaks entirely and paginated purely by density, so it
+ * disagreed with the python engine on every document that used them.
+ */
+function _tokenize_into_atomic_blocks(
+  markdown_body: string,
+): [string, number, boolean][] {
   const raw_blocks = _split_on_safe_paragraph_breaks(markdown_body);
-  return _merge_footnote_sections(raw_blocks);
+  const merged = _merge_footnote_sections(raw_blocks);
+
+  const refined: [string, number, boolean][] = [];
+  for (const [block_text, block_offset] of merged) {
+    if (block_text.includes(PAGE_BREAK_TOKEN)) {
+      const parts = block_text.split(PAGE_BREAK_TOKEN);
+      let curr_offset = block_offset;
+      for (let idx = 0; idx < parts.length; idx++) {
+        const part = parts[idx]!;
+        const is_last_part = idx === parts.length - 1;
+        if (part || !is_last_part) {
+          refined.push([part, curr_offset, !is_last_part]);
+        }
+        curr_offset += part.length + PAGE_BREAK_TOKEN.length;
+      }
+    } else {
+      refined.push([block_text, block_offset, false]);
+    }
+  }
+  return refined;
 }
 
 function _split_on_safe_paragraph_breaks(text: string): [string, number][] {
@@ -224,7 +258,9 @@ function _merge_footnote_sections(blocks: [string, number][]): [string, number][
   return merged;
 }
 
-function _assemble_pages(block_records: [string, number][]): [string[], number[]] {
+function _assemble_pages(
+  block_records: [string, number, boolean][],
+): [string[], number[]] {
   if (!block_records.length) return [[''], [0]];
 
   const pages: string[] = [];
@@ -244,7 +280,7 @@ function _assemble_pages(block_records: [string, number][]): [string[], number[]
     current_start = -1;
   };
 
-  for (const [block_text, block_offset] of block_records) {
+  for (const [block_text, block_offset, force_split] of block_records) {
     const block_size = block_text.length;
     const added_size = block_size + (current_blocks.length > 0 ? 2 : 0);
 
@@ -261,6 +297,8 @@ function _assemble_pages(block_records: [string, number][]): [string[], number[]
     if (current_blocks.length === 0) current_start = block_offset;
     current_blocks.push(block_text);
     current_size += current_size > 0 ? added_size : block_size;
+
+    if (force_split) flush_current();
   }
 
   flush_current();

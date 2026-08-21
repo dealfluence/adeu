@@ -264,9 +264,14 @@ export function extract_table(
           !cell_content || cell_content.trim() === "",
         );
         if (paraId) {
-          const space_pad = cell_content ? " " : "";
-          const anchor = `${space_pad}{#cell:${paraId}}`;
-          cell_content = cell_content + anchor;
+          // Only pad when the cell text does not already end in a space:
+          // emphasis hoists trailing whitespace out of its closing marker, so
+          // a bold cell commonly ends "**Label** " and padding unconditionally
+          // produced "**Label**  {#cell:...}" — two spaces where python emits
+          // one. Mirrors python ingest.py's `separator`.
+          const space_pad =
+            cell_content && !cell_content.endsWith(" ") ? " " : "";
+          cell_content = cell_content + `${space_pad}{#cell:${paraId}}`;
         }
       }
       cell_texts.push(cell_content);
@@ -379,15 +384,31 @@ export function build_paragraph_text(
             new_style[0] !== "" || new_style[1] !== ""
               ? seg.match(new RegExp("^(\\s*)" + escaped_prefix))
               : null;
+          // Trailing whitespace is hoisted OUT of the closing marker, so the
+          // pending group commonly ends "**A** " rather than "**A**". Testing
+          // endsWith() against the literal tail therefore misses the elision
+          // and yields "**A** **B**" instead of "**A B**". Ignore trailing
+          // whitespace for the test, then put it back. Mirrors python
+          // ingest.build_paragraph_text exactly (CC-10 follow-up).
+          let trailing_ws = "";
+          for (let k = pending_text.length - 1; k >= 0; k--) {
+            const ch = pending_text[k]!;
+            if (/\s/.test(ch)) trailing_ws = ch + trailing_ws;
+            else break;
+          }
+          const pending_without_ws = trailing_ws
+            ? pending_text.slice(0, -trailing_ws.length)
+            : pending_text;
           if (
             new_style[0] === current_style[0] &&
             new_style[1] === current_style[1] &&
-            current_style[0] !== "" &&
-            pending_text.endsWith(current_style[1]) &&
+            !(current_style[0] === "" && current_style[1] === "") &&
+            pending_without_ws.endsWith(current_style[1]) &&
             lead_match !== null
           ) {
             pending_text =
-              pending_text.slice(0, -current_style[1].length) +
+              pending_without_ws.slice(0, -current_style[1].length) +
+              trailing_ws +
               lead_match[1] +
               seg.slice(lead_match[0].length);
           } else {

@@ -25,6 +25,7 @@ import {
   addParagraph,
   addTable,
   setCellText,
+  attachHeaderFooter,
 } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { serializeXml } from "./docx/dom.js";
@@ -65,17 +66,15 @@ async function buildHeaderFooterDoc(
   extraBodyParagraph = false,
 ): Promise<DocumentObject> {
   const doc = await createTestDocument();
-  doc.pkg.addPart(
-    "/word/header1.xml",
-    CT_HEADER,
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-      `<w:hdr xmlns:w="${W_NS}"><w:p><w:r><w:t xml:space="preserve">HEADER MARKER</w:t></w:r></w:p></w:hdr>`,
+  attachHeaderFooter(
+    doc,
+    "header",
+    `<w:p><w:r><w:t xml:space="preserve">HEADER MARKER</w:t></w:r></w:p>`,
   );
-  doc.pkg.addPart(
-    "/word/footer1.xml",
-    CT_FOOTER,
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-      `<w:ftr xmlns:w="${W_NS}"><w:p><w:r><w:t xml:space="preserve">FOOTER MARKER</w:t></w:r></w:p></w:ftr>`,
+  attachHeaderFooter(
+    doc,
+    "footer",
+    `<w:p><w:r><w:t xml:space="preserve">FOOTER MARKER</w:t></w:r></w:p>`,
   );
   addParagraph(doc, "Body paragraph one.");
   if (extraBodyParagraph) addParagraph(doc, "New final body paragraph.");
@@ -253,17 +252,15 @@ async function buildStyleListDoc(): Promise<DocumentObject> {
 async function buildWatermarkDoc(): Promise<DocumentObject> {
   const doc = await createTestDocument();
   addParagraph(doc, "Confidential body.");
-  doc.pkg.addPart(
-    "/word/header1.xml",
-    CT_HEADER,
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-      `<w:hdr xmlns:w="${W_NS}" xmlns:v="urn:schemas-microsoft-com:vml">` +
-      `<w:p><w:r><w:t>Header text</w:t></w:r></w:p>` +
+  attachHeaderFooter(
+    doc,
+    "header",
+    `<w:p><w:r><w:t>Header text</w:t></w:r></w:p>` +
       `<w:p><w:r><w:pict>` +
       `<v:shape id="PowerPlusWaterMarkObject" type="#_x0000_t136" style="position:absolute;width:400pt;height:100pt">` +
       `<v:textpath style="font-family:Calibri" string="DRAFT ACME SECRET"/>` +
       `</v:shape>` +
-      `</w:pict></w:r></w:p></w:hdr>`,
+      `</w:pict></w:r></w:p>`,
   );
   return doc;
 }

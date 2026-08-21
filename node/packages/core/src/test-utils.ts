@@ -351,4 +351,99 @@ export function corpusSkipReason(key: string): string {
 export function corpusBuffer(key: string): Buffer | null {
   const path = corpusPath(key);
   return path ? readFileSync(path) : null;
+
+const W_NS_URI = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const REL_BASE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const CT_BASE = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+
+/**
+ * Attaches a header or footer the way Word does — and the way python-docx's
+ * `section.header` does, which is what the python test builders use.
+ *
+ * Three things must exist, not one: the part, a relationship from
+ * word/document.xml, and a `w:headerReference`/`w:footerReference` inside the
+ * body's `w:sectPr`. Dropping an orphan part into the package is not enough:
+ * `iter_document_parts_with_kind` walks section references (mirroring python),
+ * so an unreferenced part is invisible — exactly as it is invisible in Word.
+ *
+ * @param type "default" | "first" | "even". "first" additionally sets
+ *             `w:titlePg` on the section, and "even" requires
+ *             `w:evenAndOddHeaders` in settings.xml, since the engine honours
+ *             both toggles.
+ */
+export function attachHeaderFooter(
+  doc: DocumentObject,
+  kind: 'header' | 'footer',
+  innerXml: string,
+  opts: { type?: 'default' | 'first' | 'even'; path?: string } = {},
+): any {
+  const type = opts.type ?? 'default';
+  const root = kind === 'header' ? 'w:hdr' : 'w:ftr';
+  const n = doc.pkg.parts.filter((p: any) =>
+    p.partname.startsWith(`word/${kind}`) || p.partname.startsWith(`/word/${kind}`),
+  ).length + 1;
+  const path = opts.path ?? `/word/${kind}${n}.xml`;
+
+  const part = doc.pkg.addPart(
+    path,
+    `${CT_BASE}.${kind}+xml`,
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<${root} xmlns:w="${W_NS_URI}">${innerXml}</${root}>`,
+  );
+
+  const rId = doc.relateTo(part, `${REL_BASE}/${kind}`);
+
+  const body = doc.element;
+  const owner = body.ownerDocument!;
+  let sectPr = null as any;
+  for (let i = body.childNodes.length - 1; i >= 0; i--) {
+    const c = body.childNodes[i] as any;
+    if (c.nodeType === 1 && c.tagName === 'w:sectPr') {
+      sectPr = c;
+      break;
+    }
+  }
+  if (!sectPr) {
+    sectPr = owner.createElement('w:sectPr');
+    body.appendChild(sectPr);
+  }
+
+  const ref = owner.createElement(`w:${kind}Reference`);
+  ref.setAttribute('w:type', type);
+  ref.setAttribute('r:id', rId);
+  // References must precede the geometry elements inside w:sectPr.
+  sectPr.insertBefore(ref, sectPr.firstChild ?? null);
+
+  if (type === 'first' && !findChildTag(sectPr, 'w:titlePg')) {
+    sectPr.appendChild(owner.createElement('w:titlePg'));
+  }
+  if (type === 'even') enableEvenAndOddHeaders(doc);
+
+  return part;
+}
+
+function findChildTag(el: any, tag: string): any {
+  for (let i = 0; i < el.childNodes.length; i++) {
+    const c = el.childNodes[i];
+    if (c.nodeType === 1 && c.tagName === tag) return c;
+  }
+  return null;
+}
+
+/** Sets `w:evenAndOddHeaders` in word/settings.xml, creating the part if absent. */
+export function enableEvenAndOddHeaders(doc: DocumentObject): void {
+  let settings = doc.pkg.getPartByPath('word/settings.xml');
+  if (!settings) {
+    settings = doc.pkg.addPart(
+      '/word/settings.xml',
+      `${CT_BASE}.settings+xml`,
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="${W_NS_URI}"/>`,
+    );
+    doc.relateTo(settings, `${REL_BASE}/settings`);
+  }
+  if (!findChildTag(settings._element, 'w:evenAndOddHeaders')) {
+    settings._element.appendChild(
+      settings._element.ownerDocument!.createElement('w:evenAndOddHeaders'),
+    );
+  }
 }

@@ -35,6 +35,17 @@ QN_W_DELTEXT = qn("w:delText")
 QN_W_TAB = qn("w:tab")
 QN_W_BR = qn("w:br")
 QN_W_CR = qn("w:cr")
+# Rendered run content that used to fall through the projection silently:
+#   w:noBreakHyphen is a real hyphen glyph, so dropping it merged the word
+#     either side of it ("e-mail" projected as "email").
+#   w:ptab is an absolute-position tab; it separates content like w:tab.
+# w:softHyphen is deliberately NOT here: it is an optional break hint Word
+# renders only when it actually breaks the line, so projecting nothing is
+# correct. w:sym is also still dropped - see AI_CONTEXT / CC-1, it needs a
+# font-aware decision (symbol fonts map glyphs into the private-use area,
+# so the code point alone does not identify the character).
+QN_W_NOBREAKHYPHEN = qn("w:noBreakHyphen")
+QN_W_PTAB = qn("w:ptab")
 QN_W_RPR = qn("w:rPr")
 QN_W_RPRCHANGE = qn("w:rPrChange")
 QN_W_COMMENTREFERENCE = qn("w:commentReference")
@@ -945,8 +956,10 @@ def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[Paragra
                 i = child.find(QN_W_I)
                 if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
                     is_italic = True
-            elif tag == QN_W_TAB:
+            elif tag == QN_W_TAB or tag == QN_W_PTAB:
                 text_parts.append(" ")
+            elif tag == QN_W_NOBREAKHYPHEN:
+                text_parts.append("-")
             elif tag == QN_W_CR:
                 text_parts.append("\n")
             elif tag == QN_W_BR:
@@ -1182,8 +1195,10 @@ def run_text_and_flags(r_element) -> tuple[str, bool, bool]:
             i = child.find(QN_W_I)
             if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
                 is_italic = True
-        elif tag == QN_W_TAB:
+        elif tag == QN_W_TAB or tag == QN_W_PTAB:
             parts.append(" ")
+        elif tag == QN_W_NOBREAKHYPHEN:
+            parts.append("-")
         elif tag == QN_W_BR:
             parts.append(_PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n")
         elif tag == QN_W_CR:
@@ -1207,8 +1222,10 @@ def get_run_text(run: Run) -> str:
             # Fix 5.1: Normalize literal tabs to spaces to match w:tab behavior
             raw = child.text or ""
             text += raw.replace("\t", " ")
-        elif child.tag == QN_W_TAB:
+        elif child.tag == QN_W_TAB or child.tag == QN_W_PTAB:
             text += " "  # Convert tab to space
+        elif child.tag == QN_W_NOBREAKHYPHEN:
+            text += "-"
         elif child.tag == QN_W_BR:
             text += _PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n"
         elif child.tag == QN_W_CR:
