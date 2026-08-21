@@ -557,6 +557,20 @@ class ProjectedRun:
     proj_text: str
     proj_bold: bool
     proj_italic: bool
+    #: The content controls enclosing this run, outermost first, or `()`.
+    #:
+    #: Carried on the run rather than derived later because the traversal is
+    #: the only place that knows it cheaply - it already walks into every
+    #: `w:sdt`, so maintaining a stack costs one push and one pop per control,
+    #: whereas recovering the same fact afterwards means an ancestor walk per
+    #: run and there are 559 K of them on the stress document.
+    #:
+    #: This deliberately tracks EVERY control, not just the anchored ones that
+    #: project `{#cc:N}` tokens. The write gates (CC-4) must see picture,
+    #: repeating and building-block controls too - a lock on one of those is
+    #: just as real - and those emit no `sdt_start`/`sdt_end` events at all.
+    #: Structure and projection are separate concerns; this is the structure.
+    sdt_stack: Tuple[Any, ...] = ()
 
     @property
     def text(self) -> str:
@@ -960,6 +974,11 @@ def iter_paragraph_content(
     outline and sanitize want (they must not grow anchor tokens).
     """
     doc_part = part if part is not None else _get_part_safely(paragraph)
+    # The content controls currently open around the walk position, outermost
+    # first. Stamped onto every `ProjectedRun` so consumers can answer "which
+    # controls enclose this text" without an ancestor walk per run. Tracks
+    # every control, anchored or not - see `ProjectedRun.sdt_stack`.
+    sdt_stack: list = []
     # State for complex fields (w:fldChar)
     in_complex_field = False
     current_instr = ""
@@ -1101,10 +1120,10 @@ def iter_paragraph_content(
                 # run would otherwise project `[**x**]` for the marker-
                 # stripping passes to mangle (the QA F4/F22b class).
                 yield SdtEvent("checkbox_start", cb_info)
-                yield ProjectedRun(r_element, cb_info.checkbox_mark, False, False)
+                yield ProjectedRun(r_element, cb_info.checkbox_mark, False, False, tuple(sdt_stack))
                 yield SdtEvent("checkbox_end", cb_info)
             else:
-                yield ProjectedRun(r_element, text, is_bold, is_italic)
+                yield ProjectedRun(r_element, text, is_bold, is_italic, tuple(sdt_stack))
 
         if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
@@ -1178,32 +1197,46 @@ def iter_paragraph_content(
                 # visible as a pair of events, and an ANCHORED control's
                 # contents are bracketed by them.
                 info = sdt_infos.get(id(child)) if sdt_infos is not None else None
-                if info is not None and info.cls == "checkbox" and not _has_ballot_run(child):
-                    # Degenerate control: Word always writes the glyph run, but
-                    # a generator might not. Emit the whole token virtually so
-                    # it stays three characters wide instead of collapsing to
-                    # `[]`, which no edit surface expects.
-                    #
-                    # The NORMAL case is deliberately absent from this branch:
-                    # a checkbox's glyph run substitutes itself where runs are
-                    # emitted, so it works on every path that reaches a run —
-                    # inline, in a cell, or wrapping one. See the run branch.
-                    yield SdtEvent("checkbox_start", info)
-                    yield SdtEvent("checkbox_mark", info)
-                    yield SdtEvent("checkbox_end", info)
-                elif info is None or not info.anchored:
-                    yield from traverse_node(child)
-                else:
-                    yield SdtEvent("sdt_start", info)
-                    if not info.showing_placeholder:
+                # Track the control regardless of whether it ANCHORS. Anchoring
+                # decides whether a `{#cc:N}` token projects; enclosure decides
+                # which gates apply, and the two are not the same question. A
+                # `sdtContentLocked` picture control projects no token and is
+                # still locked.
+                pushed = info is not None and tag == QN_W_SDT
+                if pushed:
+                    sdt_stack.append(info)
+                try:
+                    if info is not None and info.cls == "checkbox" and not _has_ballot_run(child):
+                        # Degenerate control: Word always writes the glyph run,
+                        # but a generator might not. Emit the whole token
+                        # virtually so it stays three characters wide instead
+                        # of collapsing to `[]`, which no edit surface expects.
+                        #
+                        # The NORMAL case is deliberately absent from this
+                        # branch: a checkbox's glyph run substitutes itself
+                        # where runs are emitted, so it works on every path
+                        # that reaches a run — inline, in a cell, or wrapping
+                        # one. See the run branch.
+                        yield SdtEvent("checkbox_start", info)
+                        yield SdtEvent("checkbox_mark", info)
+                        yield SdtEvent("checkbox_end", info)
+                    elif info is None or not info.anchored:
                         yield from traverse_node(child)
-                    # Ghost text NEVER projects as body text (spec §3, A1.4).
-                    # The placeholder run lives in sdtContent like any other
-                    # run, so descending would emit "Click or tap here to enter
-                    # text." as if the user had typed it. The bubble that
-                    # replaces it is chrome, added by the consumer, because
-                    # only the consumer knows whether this is the clean view.
-                    yield SdtEvent("sdt_end", info)
+                    else:
+                        yield SdtEvent("sdt_start", info)
+                        if not info.showing_placeholder:
+                            yield from traverse_node(child)
+                        # Ghost text NEVER projects as body text (spec §3,
+                        # A1.4). The placeholder run lives in sdtContent like
+                        # any other run, so descending would emit "Click or tap
+                        # here to enter text." as if the user had typed it. The
+                        # bubble that replaces it is chrome, added by the
+                        # consumer, because only the consumer knows whether
+                        # this is the clean view.
+                        yield SdtEvent("sdt_end", info)
+                finally:
+                    if pushed:
+                        sdt_stack.pop()
 
     p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     yield from traverse_node(p_el)

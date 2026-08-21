@@ -1081,6 +1081,11 @@ export function* iter_paragraph_content(
   let in_complex_field = false;
   let current_instr = "";
   let hide_result = false;
+  // The content controls currently open around the walk position, outermost
+  // first. Snapshotted onto every `Run` so consumers can answer "which
+  // controls enclose this text" without an ancestor walk per run. Tracks every
+  // control, anchored or not - see `Run.sdtStack`.
+  const sdtStack: SdtInfo[] = [];
 
   function* process_run_element(
     r_element: Element,
@@ -1168,6 +1173,11 @@ export function* iter_paragraph_content(
 
     if (!hide_result) {
       const run = new Run(r_element, paragraph);
+      // Snapshot, not the live array: the stack keeps mutating as the walk
+      // continues, and a shared reference would leave every run reporting the
+      // controls open at the END of the paragraph. Empty stacks share one
+      // frozen array, which is the common case by a wide margin.
+      if (sdtStack.length) run.sdtStack = sdtStack.slice();
       const cbInfo = enclosingCheckbox(r_element, get_run_text(run), sdtInfos);
       if (cbInfo) {
         // Spec §4, twin of the python branch. `[` and `]` are virtual chrome;
@@ -1254,29 +1264,40 @@ export function* iter_paragraph_content(
         // deliberately do not) the boundary becomes visible as a pair of
         // events, and an ANCHORED control's contents are bracketed by them.
         const info = sdtInfos ? sdtInfos.get(child) : undefined;
-        if (info && info.cls === "checkbox" && !hasBallotRun(child)) {
-          // Degenerate control: Word always writes the glyph run, but a
-          // generator might not. Emit the token virtually so it stays three
-          // characters wide instead of collapsing to `[]`. The NORMAL case is
-          // absent by design — the glyph run substitutes itself at run
-          // emission, which covers every path that reaches a run.
-          yield { type: "checkbox_start", info } as SdtEvent;
-          yield { type: "checkbox_mark", info } as SdtEvent;
-          yield { type: "checkbox_end", info } as SdtEvent;
-        } else if (!info || !isAnchored(info)) {
-          yield* traverse_node(child);
-        } else {
-          yield { type: "sdt_start", info } as SdtEvent;
-          if (!info.showingPlaceholder) {
+        // Track the control regardless of whether it ANCHORS. Anchoring
+        // decides whether a `{#cc:N}` token projects; enclosure decides which
+        // gates apply, and the two are not the same question. A
+        // `sdtContentLocked` picture control projects no token and is still
+        // locked.
+        const pushed = !!info && tag === QN_W_SDT;
+        if (pushed) sdtStack.push(info);
+        try {
+          if (info && info.cls === "checkbox" && !hasBallotRun(child)) {
+            // Degenerate control: Word always writes the glyph run, but a
+            // generator might not. Emit the token virtually so it stays three
+            // characters wide instead of collapsing to `[]`. The NORMAL case is
+            // absent by design — the glyph run substitutes itself at run
+            // emission, which covers every path that reaches a run.
+            yield { type: "checkbox_start", info } as SdtEvent;
+            yield { type: "checkbox_mark", info } as SdtEvent;
+            yield { type: "checkbox_end", info } as SdtEvent;
+          } else if (!info || !isAnchored(info)) {
             yield* traverse_node(child);
+          } else {
+            yield { type: "sdt_start", info } as SdtEvent;
+            if (!info.showingPlaceholder) {
+              yield* traverse_node(child);
+            }
+            // Ghost text NEVER projects as body text (spec §3, A1.4). The
+            // placeholder run lives in sdtContent like any other run, so
+            // descending would emit "Click or tap here to enter text." as if
+            // the user had typed it. The bubble that replaces it is chrome,
+            // added by the consumer, because only the consumer knows whether
+            // this is the clean view.
+            yield { type: "sdt_end", info } as SdtEvent;
           }
-          // Ghost text NEVER projects as body text (spec §3, A1.4). The
-          // placeholder run lives in sdtContent like any other run, so
-          // descending would emit "Click or tap here to enter text." as if
-          // the user had typed it. The bubble that replaces it is chrome,
-          // added by the consumer, because only the consumer knows whether
-          // this is the clean view.
-          yield { type: "sdt_end", info } as SdtEvent;
+        } finally {
+          if (pushed) sdtStack.pop();
         }
       }
     }
