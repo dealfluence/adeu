@@ -66,6 +66,16 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     mostly legacy form fields then A1.8 as written misses most real checkboxes, and that
     is worth knowing BEFORE the projection is wired, not after. Touches tests + spec
     only until 1a lands, so it cannot collide with osx's `classify_sdt` work.
+    **Recon done** (2026-08-21, PROGRESS.md): §4 confirmed implementable as written,
+    no amendment needed. Corpus is 100% `w14:checkbox`, zero legacy form fields, all
+    `MS Gothic` 2612/2610, and **not one of ~7,700 is ticked** — the corpus cannot
+    test `[x]` at all. Word rejects-restore `w14:checked` (licenses projecting from
+    the attribute), writes the glyph as literal `w:t` not `w:sym` (licenses the
+    mapper's width accounting), and *refuses* prose inside a checkbox with no lock
+    set (so A3.8 reproduces Word rather than inventing policy). Trap for the wiring:
+    `odot_uic_drywell` has 2 bare `☐` in prose outside any control that must stay
+    `☐` — substitute on the character and you invent two checkboxes. Still to do:
+    the projection itself, both engines, once 1a lands.
   - **1d — chrome-stripping protection** (unclaimed): A1.6, outline
     `_strip_inline_formatting` + search `_emphasizedSnippet`. Needs 1b.
   - **1e — anchor fabrication refusal** (unclaimed): A1.7, validation layer. Needs 1b.

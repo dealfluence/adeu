@@ -252,3 +252,151 @@ def test_a5_8_negative_sdt_id_round_trips_untouched():
     saved = RedlineEngine(io.BytesIO(data)).save_to_stream().getvalue()
 
     assert sdt_ids(saved) == before, "a no-op save rewrote the sdt ids"
+
+
+# ---------------------------------------------------------------------------
+# CC-1c — checkbox census
+#
+# Engine-independent corpus facts, so no node twin: these read XML, not
+# projections. They exist because spec-projection.md §4 makes assumptions about
+# what checkboxes look like in the wild, and the wild is right here.
+# ---------------------------------------------------------------------------
+
+_W14_CHECKBOX = re.compile(r"<w14:checkbox\b.*?</w14:checkbox>", re.S)
+_W14_CHECKED = re.compile(r'<w14:checked\s+w14:val="([^"]*)"')
+_CHECKED_STATE = re.compile(r"<w14:checkedState\s+([^/>]*)/>")
+_UNCHECKED_STATE = re.compile(r"<w14:uncheckedState\s+([^/>]*)/>")
+_LEGACY_CHECKBOX = re.compile(r"<w:checkBox>.*?</w:checkBox>", re.S)
+_SDT_ELEMENT = re.compile(r"<w:sdt>.*?</w:sdt>", re.S)
+
+BALLOT_EMPTY = "\u2610"
+BALLOT_X = "\u2612"
+
+# key -> (w14:checkbox count, checked count). Every corpus document; the zeros
+# are as load-bearing as the counts, since a document that GAINS checkboxes
+# changes what §4 has to cope with.
+CHECKBOX_CENSUS = {
+    "ca_talent_recruitment": (0, 0),
+    "dau_acquisition_plan": (0, 0),
+    "fedramp_sar": (0, 0),
+    "fedramp_ssp_appx_a_moderate": (3_804, 0),
+    "fedramp_ssp_rev4": (3_881, 0),
+    "fedramp_ssp_rev5": (3, 0),
+    "hc_diagnostic_nonlab": (0, 0),
+    "odot_uic_drywell": (19, 0),
+    "on_juries_form1": (0, 0),
+    "wawd_esi_agreement": (0, 0),
+}
+
+
+def _word_xml(data: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        return "\n".join(
+            package.read(name).decode("utf-8", "replace")
+            for name in package.namelist()
+            if name.startswith("word/") and name.endswith(".xml")
+        )
+
+
+@pytest.mark.parametrize("key", sorted(CHECKBOX_CENSUS))
+def test_cc1c_checkbox_census_is_pinned(key):
+    """How many checkboxes each corpus document has, and how many are ticked."""
+    data = corpus_path(key).read_bytes()
+    xml = _word_xml(data)
+
+    total = len(_W14_CHECKBOX.findall(xml))
+    checked = sum(1 for value in _W14_CHECKED.findall(xml) if value in ("1", "true"))
+
+    assert (total, checked) == CHECKBOX_CENSUS[key], (
+        f"{key}: {total} checkboxes / {checked} checked, expected {CHECKBOX_CENSUS[key]}"
+    )
+
+
+def test_cc1c_the_corpus_contains_no_legacy_form_field_checkboxes():
+    """`w14:checkbox` is the only checkbox mechanism here — the legacy one is absent.
+
+    Word has two: the modern content control (`w14:checkbox`, Word 2010+) and the
+    legacy form field (`w:fldChar` + `w:ffData/w:checkBox`, Word 97 era), which is
+    NOT a content control and would not be reached by any of this initiative's
+    traversal work. spec-projection.md §4 only describes the modern one.
+
+    Across ~7,700 checkboxes in ten real government documents there is not one
+    legacy field, which is what makes that scope choice safe rather than lucky.
+    Pinned so that adding a corpus document containing legacy fields fails here
+    and forces the scope question to be re-asked, instead of silently projecting
+    nothing where a form has checkboxes.
+    """
+    legacy = {}
+    for key in sorted(CHECKBOX_CENSUS):
+        xml = _word_xml(corpus_path(key).read_bytes())
+        found = len(_LEGACY_CHECKBOX.findall(xml))
+        if found:
+            legacy[key] = found
+
+    assert legacy == {}, f"legacy w:checkBox form fields found, §4 does not cover these: {legacy}"
+
+
+def test_cc1c_every_corpus_checkbox_uses_the_same_glyph_pair():
+    """`MS Gothic` 2612/2610 throughout — the state glyphs are not per-document.
+
+    `w14:checkedState`/`w14:uncheckedState` are free-form (font + code point), so
+    a document may legitimately use Wingdings `F0FE`, a private-use code point
+    whose meaning depends entirely on the font. That case would break any
+    projection that recognises checkboxes by their character.
+
+    It does not occur here: all four documents that have checkboxes use the same
+    pair. This is the empirical half of why §4 projects from `w14:checked` rather
+    than from the glyph — the glyph is *usually* recognisable, and "usually" is
+    not a contract.
+    """
+    pairs = set()
+    for key in sorted(k for k, (total, _) in CHECKBOX_CENSUS.items() if total):
+        xml = _word_xml(corpus_path(key).read_bytes())
+        pairs.update(_CHECKED_STATE.findall(xml))
+        pairs.update(_UNCHECKED_STATE.findall(xml))
+
+    fonts = {re.search(r'w14:font="([^"]*)"', p).group(1) for p in pairs if 'w14:font="' in p}
+    vals = {re.search(r'w14:val="([^"]*)"', p).group(1) for p in pairs if 'w14:val="' in p}
+
+    assert fonts == {"MS Gothic"}, f"unexpected checkbox state fonts: {fonts}"
+    assert vals == {"2612", "2610"}, f"unexpected checkbox state code points: {vals}"
+
+
+def test_cc1c_the_corpus_has_ballot_glyphs_that_are_not_checkboxes():
+    """Two bare `☐` characters in `odot_uic_drywell`, outside every content control.
+
+    Segoe UI Symbol runs in ordinary prose — a human typing a box rather than
+    inserting a control. They are TEXT, and must survive projection as `☐`.
+
+    This is the trap for CC-1c's implementation half. The obvious way to satisfy
+    A1.8 ("the view contains `[x]`/`[ ]` and NO `☒`/`☐` characters") is to
+    substitute on the character; do that and these two turn into `[ ]`, inventing
+    two checkboxes that do not exist, in a document that has 19 real ones to hide
+    among. The substitution has to be driven by the `w14:checkbox` control, and
+    A1.8's "no glyphs" clause has to be read as scoped to control content.
+    """
+    xml = _word_xml(corpus_path("odot_uic_drywell").read_bytes())
+    outside = _SDT_ELEMENT.sub("", xml)
+
+    assert xml.count(BALLOT_EMPTY) == 21
+    assert outside.count(BALLOT_EMPTY) == 2, "bare ballot glyphs outside any control"
+    assert BALLOT_X not in xml, "no ticked glyph anywhere in the corpus"
+
+
+def test_cc1c_no_corpus_checkbox_is_ticked():
+    """Nothing in the corpus exercises the `[x]` half of A1.8.
+
+    ~7,700 checkboxes, every one unchecked: these are blank templates, which is
+    what public bodies publish. So the corpus can validate `[ ]` at scale and can
+    say nothing at all about `[x]`, and a corpus-driven implementation would be
+    half-tested while looking thoroughly exercised.
+
+    The checked path is covered by synthetic fixtures and by the live-Word probes
+    in `test_live_word_content_controls.py` instead. Recorded as a test so the
+    gap is a stated fact rather than an omission nobody noticed.
+    """
+    ticked = {
+        key: sum(1 for v in _W14_CHECKED.findall(_word_xml(corpus_path(key).read_bytes())) if v in ("1", "true"))
+        for key in sorted(k for k, (total, _) in CHECKBOX_CENSUS.items() if total)
+    }
+    assert set(ticked.values()) == {0}, f"a corpus document now has ticked checkboxes: {ticked}"

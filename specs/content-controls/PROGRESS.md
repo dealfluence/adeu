@@ -669,3 +669,72 @@ placeholder ghost text currently projects as bare body text ("This Agreement is
 made between Click or tap here to enter text. and the Government of Example."),
 which is the A1.4 violation CC-1b removes, and the CC:6 checkbox still projects
 the raw glyph. Both are the point of the task.
+
+## 2026-08-21 — CC-1c reconnaissance: what checkboxes actually are (opencode-windows)
+
+CC-1c claimed. 1a is still in flight, so the implementation half cannot be wired
+without colliding with osx's `classify_sdt`; this is the half that needed doing
+first anyway, because it decides whether §4 is implementable as written. It is —
+every finding confirms the frozen spec. No amendment requested.
+
+**Corpus census (10 documents, ~7,700 checkboxes).** All `w14:checkbox`; **zero**
+legacy `w:fldChar`+`w:ffData/w:checkBox` form fields. That was the open risk in
+the claim note — the legacy field is not a content control and no traversal in
+this initiative would reach it, so if the wild were full of them A1.8 would cover
+almost nothing. It isn't. Scope confirmed, and pinned so that adding a corpus
+document with legacy fields re-opens the question loudly.
+
+All state glyphs are `MS Gothic` 2612/2610, no Wingdings private-use code points.
+Convenient, but pinned as *empirical*, not contractual: `w14:checkedState` is
+free-form font+code-point, so recognising a checkbox by its character would work
+on all ten of these documents and remain wrong. This is the evidence for §4
+projecting from `w14:checked`.
+
+**Not one checkbox in the corpus is ticked.** All ~7,700 are `w14:val="0"`; these
+are blank published templates. The corpus can validate `[ ]` at production scale
+and can say *nothing* about `[x]`, so a corpus-driven implementation would be
+half-tested while looking thoroughly exercised. Written up as a test so the gap
+is a stated fact. The `[x]` path is covered synthetically and by live Word.
+
+**The trap for the implementation half.** `odot_uic_drywell` has 21 `☐`
+characters and 19 checkboxes. The other two are Segoe UI Symbol runs in ordinary
+prose — a human typing a box instead of inserting a control. They are text and
+must project as `☐`. The obvious way to satisfy A1.8's "NO `☒`/`☐` characters" is
+to substitute on the character, which invents two checkboxes that do not exist,
+in a document with 19 real ones to hide among. A1.8's no-glyph clause must be
+read as scoped to control content; the substitution has to be driven by the
+`w14:checkbox` control.
+
+**Three live-Word probes** (`test_live_word_content_controls.py`, now 18 COM
+tests):
+
+1. *Rejecting a toggle restores `w14:checked`.* CC-6(b) established the attribute
+   is untracked while the glyph swap is tracked — the exact shape that produced
+   the bound-store asymmetry in CC-6(e). If reject restored the glyph and
+   stranded the attribute, a document would read `☐` on screen and `checked="1"`
+   in the file, and §4 would render `[x]` under a visibly empty box. Word rolls
+   the attribute back with the revision. This is what licenses §4, and nothing in
+   the schema guarantees it, so it is pinned.
+2. *Word writes the glyph as literal `w:t` text, not `w:sym`.* Load-bearing for
+   the mapper: a 3-character token maps onto a 1-character run only if there is
+   one. `<w:sym/>` projects as nothing (node drops it deliberately, per CC-12),
+   which would shift every offset after it. Measured on Word's own inserted run,
+   not on our fixture's.
+3. *Word refuses plain-text edits inside a checkbox* — "You are not allowed to
+   edit this selection because it is protected", with no `w:lock` and no
+   `w:documentProtection` in the fixture. **Probed expecting the opposite.** The
+   hypothesis was that Word would let you overwrite the glyph with prose, leaving
+   a `w14:checkbox` whose content is not a glyph and whose `w14:checked`
+   describes nothing. It won't. So §4 may assume the content IS the glyph run for
+   any document Word produced, and A3.8's rejection of textual mutations other
+   than `[ ]` ↔ `[x]` is not an Adeu house rule — it reproduces Word's own
+   refusal, which is a much better footing for the error message. Such documents
+   remain hand-constructible (we built one to test with), so the projection
+   should not crash on prose inside a checkbox; it is malformed input, not a
+   shape Word makes.
+
+Remaining for CC-1c, once 1a lands: the projection itself (`[x]`/`[ ]` from
+`w14:checked`, no anchor pair, mapper width accounting), both engines.
+
+Verification: python ruff + format + mypy clean, 1614 passed / 7 skipped, of
+which 18 are live-Word COM tests on real Word 16.0.

@@ -620,3 +620,129 @@ def test_placeholder_returns_when_the_pending_deletion_is_accepted(word_app, tmp
     assert "<w:showingPlcHdr/>" in sdt
     assert "[Counterparty legal name]" in sdt
     assert "ACME Corp" not in sdt
+
+
+# --------------------------------------------------------------------------
+# CC-1c — is `w14:checked` authoritative for the projection?
+#
+# spec-projection.md §4 says "Project as `[x]` (checked per `w14:checked
+# w14:val` ∈ {"1","true"}) or `[ ]` — never the raw glyph run". That picks the
+# state attribute over the glyph, which is only safe if the two cannot disagree.
+# CC-6(b) already showed the attribute is untracked: Word flips it with no
+# revision of its own. An untracked attribute riding alongside a TRACKED glyph
+# swap is exactly the shape that produced the bound-store asymmetry in CC-6(e),
+# so it needs the same reject probe before §4 can be trusted.
+# --------------------------------------------------------------------------
+
+
+def test_rejecting_a_checkbox_toggle_restores_the_state_attribute(word_app, tmp_path: Path):
+    """CC-1c: Word keeps `w14:checked` and the glyph consistent across a reject.
+
+    The glyph swap is tracked (`w:ins` + `w:del`) but `w14:checked` is not, so
+    rejecting could plausibly restore the glyph and strand the attribute — the
+    document would then read `☐` on screen and `checked="1"` in the file, and
+    spec-projection.md §4's "project per `w14:checked`" would render `[x]` under
+    a visibly empty box. Word does not do that: it rolls the attribute back with
+    the revision.
+
+    That is what licenses §4. Pinned because the licence is Word's behaviour,
+    not a property of the format — nothing in the schema ties the attribute to
+    the run, and a future Word that forgot would silently turn every rejected
+    toggle into a projection lie.
+    """
+    body = para("Probe.") + _checkbox("confidential", 126, "0", "\u2610")
+    source = build_sdt_docx(tmp_path / "cbrej_src.docx", body)
+
+    toggled = tmp_path / "cbrej_toggled.docx"
+    edit_and_save(
+        word_app,
+        source,
+        toggled,
+        lambda document: setattr(document.ContentControls(1), "Checked", True),
+        track=True,
+    )
+    assert '<w14:checked w14:val="1"/>' in _sdt_of(document_xml(toggled), "confidential")
+
+    def reject(document):
+        document.Revisions.RejectAll()
+        return document.ContentControls(1).Checked
+
+    checked = edit_and_save(word_app, toggled, tmp_path / "cbrej.docx", reject, track=False)
+
+    assert checked is False, "Word reports the control unchecked again"
+    sdt = _sdt_of(document_xml(tmp_path / "cbrej.docx"), "confidential")
+    assert '<w14:checked w14:val="0"/>' in sdt, (
+        "the untracked state attribute rolled back with the tracked glyph — "
+        "this is what makes spec-projection.md §4 safe"
+    )
+    assert "\u2610" in sdt and "\u2612" not in sdt
+    assert "<w:ins " not in sdt and "<w:del " not in sdt
+
+
+def test_word_writes_the_checkbox_glyph_as_literal_text_not_w_sym(word_app, tmp_path: Path):
+    """CC-1c: the glyph is a `w:t` character, so the projection can see it.
+
+    This is a load-bearing assumption of A1.8's "NO `☒`/`☐` characters" check and
+    of the mapper's width accounting: a 3-character token maps onto a
+    1-character run only if there IS a 1-character run. Word could legitimately
+    have used `<w:sym w:font="MS Gothic" w:char="F0FE"/>`, which projects as
+    nothing at all today (the node engine drops `w:sym` deliberately, CC-12) —
+    the token would then map onto a zero-width run and every offset after it
+    would shift.
+
+    Measured on a toggle, not just on the fixture, because the fixture's run is
+    ours; the inserted run is Word's.
+    """
+    body = para("Probe.") + _checkbox("waiver", 136, "0", "\u2610")
+    source = build_sdt_docx(tmp_path / "cbsym_src.docx", body)
+
+    edit_and_save(
+        word_app,
+        source,
+        tmp_path / "cbsym.docx",
+        lambda document: setattr(document.ContentControls(1), "Checked", True),
+        track=True,
+    )
+
+    sdt = _sdt_of(document_xml(tmp_path / "cbsym.docx"), "waiver")
+    assert "<w:sym" not in sdt, "Word wrote the glyph as a symbol run, not text"
+    assert "<w:t>\u2612</w:t>" in sdt, "the checked glyph is one literal character in a w:t"
+
+
+def test_word_refuses_plain_text_edits_inside_a_checkbox(word_app, tmp_path: Path):
+    """CC-1c: a checkbox's content is protected by Word itself, with no lock set.
+
+    Probed expecting the opposite. The hypothesis was that Word would let you
+    overwrite the glyph with arbitrary text, leaving a `w14:checkbox` whose
+    content is not a ballot glyph and whose `w14:checked` describes nothing —
+    which would have meant the projection must never assume the content of a
+    checkbox is a glyph. Word refuses outright:
+
+        "You are not allowed to edit this selection because it is protected."
+
+    The fixture sets no `w:lock` and no `w:documentProtection`. The protection is
+    intrinsic to the checkbox control type. Two consequences:
+
+    * spec-projection.md §4 may assume the content IS the glyph run, so mapping a
+      3-character token onto it is sound for every document Word produced.
+    * A3.8's rejection of any textual mutation other than `[ ]` ↔ `[x]` is not an
+      Adeu house rule; it reproduces Word's own refusal. That is a much stronger
+      footing for the error message, which can now say what Word says.
+
+    A document with prose inside a `w14:checkbox` remains constructible by hand
+    (we just built one to test with), so the projection should still not CRASH on
+    it — but it is malformed input, not a shape Word makes.
+    """
+    body = para("Probe.") + _checkbox("waiver", 146, "0", "\u2610")
+    source = build_sdt_docx(tmp_path / "cbtext_src.docx", body)
+
+    def overwrite(document):
+        return _refusal(lambda: setattr(document.ContentControls(1).Range, "Text", "maybe"))
+
+    refusal = edit_and_save(word_app, source, tmp_path / "cbtext.docx", overwrite, track=False)
+
+    assert refusal is not None, "Word allowed arbitrary text into a checkbox control"
+    assert "protected" in refusal, f"refused, but not as a protection error: {refusal}"
+
+    sdt = _sdt_of(document_xml(tmp_path / "cbtext.docx"), "waiver")
+    assert "\u2610" in sdt and "maybe" not in sdt, "the refusal left the glyph intact"
