@@ -83,6 +83,28 @@ def _extract_failed_indices(errors: List[str]) -> List[Tuple[int, str]]:
     return failed
 
 
+def _trim_shared_trailing_paragraph_mark(target: str, new: str) -> Tuple[str, str]:
+    """
+    Drop paragraph marks that BOTH sides of a replacement end with (CC-14).
+
+    A "\\n\\n" the target and the replacement share is structural context, not
+    text to rewrite, and must never reach the apply layer: that layer
+    track-deletes a trailing mark inside a target -- a genuine paragraph merge,
+    "A.\\n\\n" -> "Z.", depends on it -- but does not re-create the one the
+    replacement asks for. The break silently disappears while the batch still
+    reports the edit applied.
+
+    Trims from the END only, so a caller-pinned start index stays valid. The
+    real merge shape (target ends with a mark, replacement does not) is left
+    alone, as is a shared LEADING mark, which the apply layer handles
+    correctly today.
+    """
+    while target.endswith("\n\n") and new.endswith("\n\n"):
+        target = target[:-2]
+        new = new[:-2]
+    return target, new
+
+
 class BatchValidationError(Exception):
     """Raised when text edits fail location validation."""
 
@@ -3154,6 +3176,24 @@ class RedlineEngine:
             if edit._resolved_start_idx is not None or edit._match_start_index is not None:
                 if edit._resolved_start_idx is None:
                     edit._resolved_start_idx = edit._match_start_index
+                # CC-14: caller-pinned edits skip resolution entirely and go
+                # straight to the apply layer, so the shared-trailing-mark
+                # normalisation the resolution path performs has to happen here
+                # too. make_edits_self_contained widens a target to make it
+                # unique and routinely produces this shape WITH a pinned index
+                # (129 of 4,000 randomised paragraph edits); such a batch
+                # applied in-process — no JSON round trip to drop the index —
+                # silently lost a paragraph break. Structural ops carry an
+                # explicit _internal_op and are left alone.
+                if (
+                    isinstance(edit, ModifyText)
+                    and getattr(edit, "_internal_op", None) is None
+                    and edit.target_text
+                    and edit.new_text
+                ):
+                    edit.target_text, edit.new_text = _trim_shared_trailing_paragraph_mark(
+                        edit.target_text, edit.new_text
+                    )
                 # Caller-pinned indices (diff output) are CLEAN-view character
                 # offsets; the raw-view mapper fallback would mis-anchor them
                 # on documents whose views differ (AP-05).
@@ -3940,6 +3980,12 @@ class RedlineEngine:
             final_target = target_str[prefix_len : len(target_str) - suffix_len]
             final_new = new_str[prefix_len : len(new_str) - suffix_len]
             start = base_offset + prefix_len
+
+            # CC-14: see _trim_shared_trailing_paragraph_mark. trim_common_context
+            # is word-boundary aware and will not trim across "\n\n", so a
+            # commented change like "A.\n\n" -> "Z.\n\nY.\n\n" arrives whole.
+            final_target, final_new = _trim_shared_trailing_paragraph_mark(final_target, final_new)
+
             if not final_target and final_new:
                 op = EditOperationType.INSERTION
             elif final_target and not final_new:
@@ -4215,8 +4261,23 @@ class RedlineEngine:
             proxy_edit._active_mapper_ref = active_mapper
             return proxy_edit
 
-        if effective_new_text.startswith(actual_doc_text.rstrip()) and len(effective_new_text) > len(
-            actual_doc_text.rstrip()
+        if (
+            effective_new_text.startswith(actual_doc_text.rstrip())
+            and len(effective_new_text) > len(actual_doc_text.rstrip())
+            # CC-14: ...but NOT when the replacement introduces a paragraph
+            # break the target does not have. This branch preserves the
+            # target's trailing whitespace by inserting BEFORE it, which is
+            # right for a separator space inside one paragraph ("Section 1 " →
+            # "Section 1 Revised" must not glue the next word on) and wrong the
+            # moment a "\n\n" lands in the remainder: the preserved space is
+            # then stranded at the START of the new paragraph. A paragraph
+            # split at a space is exactly the shape the diff emits for
+            # "0 0." → "0.\n\n0.", which applied cleanly and produced
+            # "0.\n\n 0." — accepted, reported successful, silently wrong.
+            # The F1 rule below already resolves this shape correctly, as one
+            # atomic modification consuming the WHOLE matched span, so fall
+            # through to it rather than duplicating the reasoning here.
+            and not ("\n\n" in effective_new_text and "\n\n" not in actual_doc_text)
         ):
             # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space).
             # It only applies when the new text genuinely EXTENDS the rstripped target: when the

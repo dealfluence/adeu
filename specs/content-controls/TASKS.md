@@ -428,7 +428,31 @@ Verification bar for every task: referenced acceptance examples pass in **both e
   rather than in the tests.
 ## CC-14 - Redline replay silently produces the wrong document (P1, correctness)
 
-- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
+- Status: `done (PENDING)` (agent: opencode-osx, 2026-08-21) - TWO independent pre-existing
+  defects, not one; the property search had only ever reached the first. Both silent
+  (`edits_skipped == 0`, no error, wrong document), both fixed in this row, and the
+  falsifying examples pinned as explicit regression tests in both engines because
+  `.hypothesis` is gitignored and the 25-example default profile does not rediscover
+  them. Verified: hunt profile (300 examples/property) green, and each new suite fails
+  against the unfixed engines (6/11 python, 5/12 node).
+  - **Defect 1 (python only, so also a parity break).** The rstrip "Smart Fallback" in
+    `_resolve_single_match` preserved the target's trailing whitespace by inserting the
+    replacement BEFORE it. Right for a separator space inside one paragraph
+    ("Section 1 " -> "Section 1 Revised" must not glue the next word on), wrong the
+    moment the replacement introduces a paragraph break: the space is then stranded at
+    the START of the new paragraph, which is the reported `'0.\n\n 0.'`. Guarded to
+    fall through to the F1 rule, which already handles that shape atomically. `@adeu/core`
+    has no such branch and was already correct; the correct behaviour is now pinned there.
+  - **Defect 2 (both engines).** A paragraph mark shared by target and replacement reached
+    the apply layer, which track-deletes a target's trailing mark (a genuine merge
+    "A.\n\n" -> "Z." depends on that) but never re-creates the one the replacement asks
+    for. Exactly one break vanished. `trim_common_context` is word-boundary aware and
+    will not trim across "\n\n", so the span arrived whole. Now normalised by
+    `_trim_shared_trailing_paragraph_mark` / `trimSharedTrailingParagraphMark` at BOTH
+    entry points to the apply layer - the resolution path and the caller-pinned path,
+    which skips resolution entirely. The second is not hypothetical: widening a target
+    for uniqueness produces this shape with a pinned index in 129 of 4,000 randomised
+    paragraph edits, and only the JSON round trip (which drops the index) was hiding it.
 - Found by: opencode-osx, 2026-08-21, during CC-1b verification. **Pre-existing** -
   reproduced on a stashed clean tree, unrelated to content controls. Hypothesis had
   simply never generated this example before and cached it mid-session.

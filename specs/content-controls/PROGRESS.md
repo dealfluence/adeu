@@ -1032,3 +1032,63 @@ Note this makes the cc rule stricter than the neighbouring footnote and image
 checks, which remain multiset comparisons; that is deliberate, not drift.
 
 Both suites were run against the unfixed engines first: 10 of 17 failed in each.
+
+## 2026-08-21 — CC-14: redline replay silently produced the wrong document (osx)
+
+The row was filed as one bug. It was two, independent, both pre-existing, and
+the property search had only ever reached the first — fixing it immediately
+surfaced the second from the same test.
+
+**Defect 1 — python only.** `"0 0." → "0.\n\n0."` diffs to target `"0 "` /
+new `"0.\n\n"`. The rstrip "Smart Fallback" in `_resolve_single_match` rstrips
+the target to `"0"`, sees the replacement extend it, and inserts the remainder
+BEFORE the document's trailing space. That is correct for a separator space
+inside one paragraph — `"Section 1 " → "Section 1 Revised"` must not glue the
+following word on — and wrong as soon as the remainder carries a paragraph
+break, because the preserved space becomes the first character of the new
+paragraph: `'0.\n\n 0.'`. Guarded so that shape falls through to the F1 rule
+ninety lines below, which already resolves it as one atomic modification over
+the whole matched span.
+
+`@adeu/core` has no equivalent branch and was already right, so this was a
+dual-engine parity break as well as a correctness bug. The correct Node
+behaviour is now pinned so it cannot regress toward Python's.
+
+**Defect 2 — both engines.** With defect 1 fixed the property immediately found
+`['0.','0 0.','A.','00.'] → [...,'0.','A.','0.',...]`, which produced `'0.A.'`:
+a lost paragraph break. `trim_common_context` is word-boundary aware and
+deliberately will not trim across `"\n\n"`, so `_single_commented_sub_edit`
+received the span whole, mark included. The apply layer then track-deletes a
+trailing mark inside a target — a genuine merge `"A.\n\n" → "Z."` depends on
+exactly that — but never re-creates the one the replacement asks for.
+
+Rather than reverse-engineer the apply layer's paragraph accounting, a shape
+matrix established precisely what is broken: a mark shared by BOTH sides. A
+shared LEADING mark is fine, a genuine merge is fine, a mark-free split is
+fine. So the fix normalises the span before the apply layer ever sees it,
+reducing every broken case to one already verified correct, and leaving the
+merge shape untouched.
+
+**Only found because the fix was checked at both entry points.** The first
+version of the fix lived in the resolution path alone, and the new tests
+(written to drive the apply layer directly, by pinning an index) still failed.
+Caller-pinned edits skip resolution entirely. Measuring rather than guessing:
+`make_edits_self_contained` widens targets for uniqueness and emits this exact
+shape WITH a pinned index in 129 of 4,000 randomised paragraph edits. The
+property test never caught that half because its JSON round trip drops the
+private index — so an in-process caller was silently losing paragraph breaks on
+a path the property suite structurally could not reach. Both entry points now
+normalise through one shared helper.
+
+**Note for CI.** `.hypothesis` is gitignored and the default profile is 25
+examples; on a cleared cache neither defect reproduces. Confirmed by running
+the clean tree — the property passes. Both falsifying examples are therefore
+pinned as explicit regression tests, with the underlying shape matrices, in
+both engines.
+
+Unrelated observation while verifying: the two `_loads_in_libreoffice` tests in
+`test_repro_qa_2026_07_18.py` fail intermittently under xdist (a different one
+each run, sometimes neither) and pass 55/55 serially. Reproduced on a clean
+tree at 2 of 3 full-suite runs, so it is pre-existing and not CC-14's. It is
+the same class as the flake already noted for `TestC1FooterBoundary`; worth its
+own row if it starts costing anyone time.

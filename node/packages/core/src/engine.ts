@@ -266,6 +266,32 @@ function sequential_context_hint(applied_so_far: number): string {
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
 // CC-1e: content-control anchors, open or close, with or without flag words.
+/**
+ * Drop paragraph marks that BOTH sides of a replacement end with (CC-14).
+ *
+ * A "\n\n" the target and the replacement share is structural context, not
+ * text to rewrite, and must never reach the apply layer: that layer
+ * track-deletes a trailing mark inside a target -- a genuine paragraph merge,
+ * "A.\n\n" -> "Z.", depends on it -- but does not re-create the one the
+ * replacement asks for. The break silently disappears while the batch still
+ * reports the edit applied.
+ *
+ * Trims from the END only, so a caller-pinned start index stays valid. The
+ * real merge shape (target ends with a mark, replacement does not) is left
+ * alone, as is a shared LEADING mark, which the apply layer handles correctly
+ * today.
+ */
+function trimSharedTrailingParagraphMark(
+  target: string,
+  next: string,
+): [string, string] {
+  while (target.endsWith("\n\n") && next.endsWith("\n\n")) {
+    target = target.slice(0, -2);
+    next = next.slice(0, -2);
+  }
+  return [target, next];
+}
+
 const CC_ANCHOR_RE = /\{#\/?cc:\d+[^}]*\}/g;
 
 // The sanctioned empty-pair fill target (spec-projection.md §3): an open and
@@ -668,6 +694,15 @@ export class RedlineEngine {
       final_target = target_str.slice(prefix_len, target_str.length - suffix_len);
       final_new = new_str.slice(prefix_len, new_str.length - suffix_len);
       start = base_offset + prefix_len;
+
+      // CC-14: see trimSharedTrailingParagraphMark. trim_common_context is
+      // word-boundary aware and will not trim across "\n\n", so a commented
+      // change like "A.\n\n" -> "Z.\n\nY.\n\n" arrives here whole.
+      [final_target, final_new] = trimSharedTrailingParagraphMark(
+        final_target,
+        final_new,
+      );
+
       if (!final_target && final_new) {
         op = "INSERTION";
       } else if (final_target && !final_new) {
@@ -4283,6 +4318,24 @@ export class RedlineEngine {
           edit._resolved_start_idx === null
         ) {
           edit._resolved_start_idx = edit._match_start_index;
+        }
+        // CC-14: caller-pinned edits skip resolution entirely and go straight
+        // to the apply layer, so the shared-trailing-mark normalisation the
+        // resolution path performs has to happen here too. Widening a target
+        // to make it unique routinely produces this shape WITH a pinned index,
+        // and such a batch applied in-process -- no JSON round trip to drop
+        // the index -- silently lost a paragraph break. Structural ops carry
+        // an explicit _internal_op and are left alone.
+        if (
+          edit.type === "modify" &&
+          !edit._internal_op &&
+          edit.target_text &&
+          edit.new_text
+        ) {
+          [edit.target_text, edit.new_text] = trimSharedTrailingParagraphMark(
+            edit.target_text,
+            edit.new_text,
+          );
         }
         // Caller-pinned indices (diff output) are CLEAN-view character
         // offsets; the raw-view mapper fallback would mis-anchor them on
