@@ -22,6 +22,8 @@ from adeu.utils.docx import (
     iter_block_items,
     iter_document_parts_with_kind,
     iter_paragraph_content,
+    iter_row_cell_elements,
+    iter_table_row_elements,
     markers_from_flags,
     paragraph_mark_is_deleted,
     split_boundary_whitespace,
@@ -453,7 +455,7 @@ class DocumentMapper:
 
         tbl = table._element if hasattr(table, "_element") else table
 
-        for tr in tbl.iterchildren(qn("w:tr")):
+        for tr in iter_table_row_elements(tbl):
             # Structural Row Tracking
             trPr = tr.find(qn("w:trPr"))
             ins = trPr.find(qn("w:ins")) if trPr is not None else None
@@ -479,7 +481,7 @@ class DocumentMapper:
             seen_cells = set()
             cells_processed = 0
 
-            for tc in tr.iterchildren(qn("w:tc")):
+            for tc in iter_row_cell_elements(tr):
                 if tc in seen_cells:
                     continue
                 seen_cells.add(tc)
@@ -536,7 +538,7 @@ class DocumentMapper:
             if rows_processed == 1:
                 seen_cells_first = set()
                 num_cols = 0
-                for tc in tr.iterchildren(qn("w:tc")):
+                for tc in iter_row_cell_elements(tr):
                     if tc in seen_cells_first:
                         continue
                     seen_cells_first.add(tc)

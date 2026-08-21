@@ -1,4 +1,4 @@
-import { findChild } from './dom.js';
+import { findChild, findChildrenSdtTransparent } from './dom.js';
 
 export class Paragraph {
   constructor(public _element: Element, public _parent: any) {}
@@ -24,9 +24,10 @@ export class Cell {
 export class Row {
   public cells: Cell[] = [];
   constructor(public _element: Element, public _parent: any) {
-    const tcs = this._element.getElementsByTagName('w:tc');
-    for (let i = 0; i < tcs.length; i++) {
-      this.cells.push(new Cell(tcs[i], this));
+    // Direct children only (sdt-transparent). getElementsByTagName() is
+    // recursive and would pull the cells of a nested table into this row.
+    for (const tc of findChildrenSdtTransparent(this._element, 'w:tc')) {
+      this.cells.push(new Cell(tc, this));
     }
   }
 }
@@ -34,9 +35,10 @@ export class Row {
 export class Table {
   public rows: Row[] = [];
   constructor(public _element: Element, public _parent: any) {
-    const trs = this._element.getElementsByTagName('w:tr');
-    for (let i = 0; i < trs.length; i++) {
-      this.rows.push(new Row(trs[i], this));
+    // Direct children only (sdt-transparent). getElementsByTagName() is
+    // recursive and would re-emit a nested table's rows as rows of this table.
+    for (const tr of findChildrenSdtTransparent(this._element, 'w:tr')) {
+      this.rows.push(new Row(tr, this));
     }
   }
 }
