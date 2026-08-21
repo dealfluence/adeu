@@ -42,7 +42,26 @@ Verification bar for every task: referenced acceptance examples pass in **both e
 
 ## CC-1 â€” Projection: sdt events, anchors, flags, checkboxes, placeholder bubbles (P1)
 
-- Status: `pending`
+- Status: `in-progress` (agent: opencode-osx, since: 2026-08-21, branch: content-controls-specs)
+- **Decomposition** (osx, 2026-08-21). CC-1 is multi-session; slicing it so the two
+  agents can work in parallel without fighting over the same files. I am taking
+  **1a then 1b** (they are one design and splitting them would mean writing the event
+  payload twice). The rest are independently claimable once 1a lands — claim by
+  editing the sub-item, not this Status line:
+  - **1a — foundation** (`pending`→osx): shared `classify_sdt` helper (class, flags,
+    alias, tag, placeholder, options) + the ordinal pre-pass + `sdt_start`/`sdt_end`
+    events from `traverse_node` and the block iterators, both engines. Per
+    spec-projection.md §9 the ordinal pre-pass MUST be one shared helper consumed by
+    ingest AND mapper, so the Virtual Text contract holds by construction rather than
+    by two implementations agreeing.
+  - **1b — anchored leaves + groups + clean view** (osx): A1.1-A1.5, A1.10.
+  - **1c — checkboxes** (unclaimed): A1.8. Needs 1a only.
+  - **1d — chrome-stripping protection** (unclaimed): A1.6, outline
+    `_strip_inline_formatting` + search `_emphasizedSnippet`. Needs 1b.
+  - **1e — anchor fabrication refusal** (unclaimed): A1.7, validation layer. Needs 1b.
+  - **1f — banner** (unclaimed): A1.9. Touches CLI + both MCP servers and overlaps
+    CC-2's surface work — probably belongs WITH CC-2 rather than here; whoever takes
+    CC-2 should take it.
 - Depends on: CC-0
 - Acceptance: [A1](acceptance/A1-projection.md) (all examples), golden fixture in
   [acceptance/fixture-standard.md](acceptance/fixture-standard.md)
