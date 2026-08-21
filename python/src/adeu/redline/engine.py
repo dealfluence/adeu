@@ -100,6 +100,14 @@ class BatchValidationError(Exception):
 # lxml instead of a clean per-edit error (QA 2026-07-17 F11).
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
+# CC-1e: content-control anchors, open or close, with or without flag words.
+_CC_ANCHOR_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
+
+# The sanctioned empty-pair fill target (spec-projection.md §3): an open and
+# close anchor for the SAME ordinal with nothing between them but an optional
+# placeholder bubble.
+_CC_EMPTY_PAIR_RE = re.compile(r"^\{#cc:(\d+)[^}]*\}(?:\{>>placeholder:[^<]*<<\})?\{#/cc:\1\}$")
+
 # Children of a properties container that the corresponding tracked-change
 # record cannot store, and which must therefore survive rejecting it.
 #
@@ -362,6 +370,38 @@ def validate_edit_strings(
                         "These represent structural XML bookmarks."
                     )
                     break
+
+        # CC-1e / A1.7: content-control anchors are structural in BOTH
+        # directions. VAL-OBS-9 above only counts anchors that GAINED copies,
+        # so it catches fabrication and rewriting but not deletion: a target
+        # covering `{#/cc:3}` whose new_text omits it passed cleanly and
+        # silently unbalanced the pair in the projection.
+        #
+        # Scoped to `cc` anchors rather than made symmetric for every `{#...}`
+        # token, because two anchor classes are deliberate TARGETING surfaces
+        # that a symmetric rule would break: `{#cell:paraId}` empty-cell writes
+        # (engine.py `^\{#cell:[^}]+\}$`) and the empty pair below.
+        if "{#" in t_text and "cc:" in t_text or "cc:" in n_text:
+            t_cc = _CC_ANCHOR_RE.findall(t_text)
+            n_cc = _CC_ANCHOR_RE.findall(n_text)
+            # Sanctioned edit surface #1 (spec-projection.md §3): the empty
+            # pair is deliberately matchable and is the text-first fill. The
+            # anchors are not being deleted there — the wrapper survives and
+            # only the control's CONTENT changes — so the fill must stay legal
+            # for CC-4/CC-5 to route through set_field semantics.
+            fills_empty_pair = _CC_EMPTY_PAIR_RE.match(t_text.strip()) is not None
+            # ORDERED comparison, unlike the footnote/image checks above, which
+            # compare multisets. A multiset lets `{#cc:3}A{#/cc:3}` become
+            # `{#/cc:3}A{#cc:3}` — same tokens, inverted pair. Text replacement
+            # cannot move an sdt wrapper anyway, so reordering controls is never
+            # a legitimate edit and order is the honest invariant.
+            if t_cc != n_cc and not fills_empty_pair:
+                errors.append(
+                    f"- Edit {i + 1} Failed: Cannot insert, alter, or remove content-control "
+                    "anchor markers (`{#cc:N}` / `{#/cc:N}`). They are read-only projections "
+                    "of the control's structure, not text. Edit the content BETWEEN the "
+                    "anchors, keeping both tokens in `new_text` exactly as they appear."
+                )
 
         # Heading level > 6 (only meaningful for ModifyText with new_text)
         if isinstance(edit, ModifyText) and edit.new_text:

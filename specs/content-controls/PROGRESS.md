@@ -991,3 +991,44 @@ it would have amplified a latent parity bug.
 Every one of the three new suites was run against the unfixed code first:
 13/30, 2/9 and 6/10 failed respectively. A regression test that does not fail
 on the bug is decoration.
+
+## 2026-08-21 — CC-1e: anchor fabrication, mutation and deletion refused (A1.7, osx)
+
+Two of A1.7's three cases were already refused before this task. VAL-OBS-9
+("Internal Anchor Structural Integrity") compares anchor counts, but only in
+one direction: it iterates the anchors in `new_text` and fires when one gained
+copies. That covers (a) fabricating `{#cc:99}` and (c) rewriting
+`{#cc:7 locked}` to `{#cc:7}` — the latter because the flag-stripped form is a
+new distinct token.
+
+It does not cover (b), deletion. With `new_text` holding no anchors there is
+nothing to iterate, so an edit whose target covered `{#/cc:3}` and whose
+replacement omitted it passed validation and left the pair unbalanced in the
+projection. That is the whole of the new rule.
+
+**Why it is scoped to `cc` and not made symmetric for every `{#...}`.** The
+obvious fix — compare the full anchor multiset both ways, as the footnote and
+image checks already do — would have closed two deliberate targeting surfaces:
+
+- `{#cell:paraId}`, the empty-cell write, matched by
+  `^\{#cell:[^}]+\}$` in both engines' apply paths.
+- The empty pair `{#cc:N}{#/cc:N}`, which spec-projection.md §3 names as
+  sanctioned edit surface #1 and which CC-4/CC-5 will route through set_field
+  fill semantics.
+
+In both, an anchor legitimately disappears from `new_text` while the wrapper
+survives in the document — the control's CONTENT is what changes. A symmetric
+rule cannot tell that from a deletion, so the check is `cc`-scoped with the
+empty pair (with or without its placeholder bubble, and requiring the SAME
+ordinal on both halves) carved out explicitly. Both carve-outs are pinned by
+tests, so a later tightening cannot quietly close them.
+
+**Ordered, not multiset.** The first implementation compared sorted lists and
+one of its own tests caught the hole: `{#cc:3}A{#/cc:3}` → `{#/cc:3}A{#cc:3}`
+has an identical multiset while inverting the pair. Comparing the anchors in
+document order refuses that, and costs nothing legitimate — text replacement
+cannot move a `w:sdt` wrapper, so reordering controls is never a valid edit.
+Note this makes the cc rule stricter than the neighbouring footnote and image
+checks, which remain multiset comparisons; that is deliberate, not drift.
+
+Both suites were run against the unfixed engines first: 10 of 17 failed in each.

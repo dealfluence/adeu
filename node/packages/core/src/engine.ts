@@ -265,6 +265,15 @@ function sequential_context_hint(applied_so_far: number): string {
 // (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
+// CC-1e: content-control anchors, open or close, with or without flag words.
+const CC_ANCHOR_RE = /\{#\/?cc:\d+[^}]*\}/g;
+
+// The sanctioned empty-pair fill target (spec-projection.md §3): an open and
+// close anchor for the SAME ordinal with nothing between them but an optional
+// placeholder bubble.
+const CC_EMPTY_PAIR_RE =
+  /^\{#cc:(\d+)[^}]*\}(?:\{>>placeholder:[^<]*<<\})?\{#\/cc:\1\}$/;
+
 /**
  * Children of a properties container that the corresponding tracked-change
  * record cannot store, and which must therefore survive rejecting it.
@@ -469,6 +478,40 @@ export function validate_edit_strings(
           );
           break;
         }
+      }
+    }
+
+    // CC-1e / A1.7: content-control anchors are structural in BOTH
+    // directions. The VAL-OBS-9 loop above only counts anchors that GAINED
+    // copies, so it catches fabrication and rewriting but not deletion: a
+    // target covering `{#/cc:3}` whose new_text omits it passed cleanly and
+    // silently unbalanced the pair in the projection.
+    //
+    // Scoped to `cc` anchors rather than made symmetric for every `{#...}`
+    // token, because two anchor classes are deliberate TARGETING surfaces that
+    // a symmetric rule would break: `{#cell:paraId}` empty-cell writes and the
+    // empty pair below.
+    if ((t_text.includes("{#") && t_text.includes("cc:")) || n_text.includes("cc:")) {
+      // ORDERED, unlike the footnote/image checks above, which compare
+      // multisets. A multiset lets `{#cc:3}A{#/cc:3}` become
+      // `{#/cc:3}A{#cc:3}` — same tokens, inverted pair. Text replacement
+      // cannot move an sdt wrapper anyway, so reordering controls is never a
+      // legitimate edit and order is the honest invariant.
+      const t_cc = t_text.match(CC_ANCHOR_RE) || [];
+      const n_cc = n_text.match(CC_ANCHOR_RE) || [];
+      // Sanctioned edit surface #1 (spec-projection.md §3): the empty pair is
+      // deliberately matchable and is the text-first fill. The anchors are not
+      // being deleted there — the wrapper survives and only the control's
+      // CONTENT changes — so the fill must stay legal for CC-4/CC-5 to route
+      // through set_field semantics.
+      const fills_empty_pair = CC_EMPTY_PAIR_RE.test(t_text.trim());
+      if (
+        !fills_empty_pair &&
+        (t_cc.length !== n_cc.length || t_cc.some((v: string, k: number) => v !== n_cc[k]))
+      ) {
+        errors.push(
+          `- Edit ${i + 1 + index_offset} Failed: Cannot insert, alter, or remove content-control anchor markers (\`{#cc:N}\` / \`{#/cc:N}\`). They are read-only projections of the control's structure, not text. Edit the content BETWEEN the anchors, keeping both tokens in \`new_text\` exactly as they appear.`,
+        );
       }
     }
 

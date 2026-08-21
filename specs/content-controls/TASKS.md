@@ -96,7 +96,17 @@ Verification bar for every task: referenced acceptance examples pass in **both e
     likely. Suites: `test_cc_anchor_chrome_protection.py` (38),
     `cc_anchor_chrome_protection.test.ts` in core (9, outline) and mcp-server
     (10, search); each verified to FAIL against the unfixed code.
-  - **1e — anchor fabrication refusal** (unclaimed): A1.7, validation layer. Needs 1b.
+  - **1e — anchor fabrication refusal** (`done (PENDING)`, osx): A1.7. Two of the three
+    named cases were ALREADY refused by VAL-OBS-9 (fabrication and flag-rewriting), which
+    counts anchors that gained copies. The hole was deletion: that loop iterates
+    `new_text`'s anchors, so a target covering `{#/cc:3}` whose `new_text` omits it had
+    nothing to iterate and passed, unbalancing the pair. Now an ORDERED comparison of the
+    `cc` anchors in target vs new_text, scoped to `cc` so the two deliberate targeting
+    surfaces stay open — `{#cell:paraId}` empty-cell writes and the empty pair
+    `{#cc:N}{#/cc:N}` (spec-projection §3 surface #1, which CC-4/CC-5 build the
+    text-first fill on). Both carve-outs are pinned. Suites:
+    `test_cc_anchor_fabrication_refusal.py` (17) and its node twin (17); both fail 10/17
+    against the unfixed code.
   - **1f — banner** (unclaimed): A1.9. Touches CLI + both MCP servers and overlaps
     CC-2's surface work — probably belongs WITH CC-2 rather than here; whoever takes
     CC-2 should take it.
