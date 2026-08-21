@@ -54,5 +54,6 @@ Run commands from the respective package directory:
 ## Key Reference Documents
 
 - `AI_CONTEXT.md`: Architectural invariants (Virtual Text contract, boundary whitespace rules, block-level table parsing, OPC part boundaries, XML surgical mode).
+- `specs/content-controls/`: **active initiative** — content-control (`w:sdt`) support. Frozen v1 specs, ATDD acceptance examples, and the task board (`TASKS.md`) live there; read its `README.md` before touching any `w:sdt`-related behavior, and claim tasks on the board before starting them.
 - `GEMINI.md`: Tool specification and parameters (`read_docx`, `process_document_batch`, `accept_all_changes`).
 - `CONTRIBUTING.md`: Dev environment setup, git hooks (`.githooks`), and PR guidelines.

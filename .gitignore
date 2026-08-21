@@ -230,3 +230,9 @@ dist/
 desktop-extension/*.js
 desktop-extension/assets/
 desktop-extension/templates/
+
+# Content-controls corpus: real government documents are fetched, never committed.
+# See specs/content-controls/spec-corpus.md + scripts/fetch_corpus.py
+shared/corpus/*
+!shared/corpus/README.md
+!shared/corpus/manifest.json
