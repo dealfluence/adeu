@@ -91,6 +91,7 @@ export interface SdtInfo {
   bindingXpath: string | null;
   showingPlaceholder: boolean;
   placeholderText: string | null;
+  temporary: boolean;
   options: ReadonlyArray<readonly [string, string]>;
   checked: boolean | null;
   dateFormat: string | null;
@@ -196,6 +197,16 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
 
   const showingPlaceholder = !!(sdtPr && findChild(sdtPr, "w:showingPlcHdr"));
 
+  // w:temporary marks a control Word removes as soon as its contents are
+  // edited. Ledger-only (spec-fields-ledger §3 segment 6): it changes nothing
+  // about the projection, but an agent planning a write needs to know the
+  // control will not survive the edit.
+  const temporaryEl = sdtPr ? findChild(sdtPr, "w:temporary") : null;
+  const temporaryVal = temporaryEl ? val(temporaryEl) : null;
+  const temporary =
+    !!temporaryEl &&
+    (temporaryVal === null || ["1", "true", "on"].includes(temporaryVal));
+
   const content = findChild(sdtElement, QN_W_SDTCONTENT);
   let placeholderText: string | null = null;
   if (showingPlaceholder && content) {
@@ -260,6 +271,7 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
     bindingXpath,
     showingPlaceholder,
     placeholderText,
+    temporary,
     options,
     checked,
     dateFormat,

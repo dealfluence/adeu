@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, List, Tuple
 
-from adeu.outline import _offset_to_page, extract_outline
+from adeu.outline import _offset_to_page, extract_outline, heading_path_at
 from adeu.pagination import (
     PAGE_RANGE_MAX_PAGES,
     PaginationResult,
@@ -1067,46 +1067,9 @@ def build_search_response(
             )
         return head
 
-    def clean_breadcrumb(raw: str) -> str:
-        # Breadcrumbs render CLEAN-view heading text: a heading carrying a
-        # pending tracked change must not leak raw CriticMarkup into the Path
-        # line (QA 2026-07-23 F22b). Deletions vanish, insertions/highlights
-        # unwrap to their text, meta bubbles drop. Because we operate on ONE
-        # line of the projection, a multi-line `{>>…<<}` bubble can be clipped
-        # by the line break — drop the unterminated tail too, then sweep any
-        # leftover delimiter fragments.
-        s = re.sub(r"\{--.*?--\}", "", raw)
-        s = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", s)
-        s = re.sub(r"\{==(.*?)==\}", r"\1", s)
-        s = re.sub(r"\{>>.*?<<\}", "", s)
-        s = re.sub(r"\{(?:>>|--).*$", "", s)  # line-clipped bubble/deletion tail
-        s = re.sub(r"\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}", "", s)  # stray fragments
-        s = re.sub(r"\*\*|__|[*_]", "", s)
-        return re.sub(r"\{#[^}]+\}", "", s).strip()
-
-    def get_heading(idx, txt):
-        path: list[str] = []
-        current_level = 999
-        # Scan through the END of the line containing the match: slicing at
-        # the match offset cuts the line in half, so a hit INSIDE a heading
-        # reported a truncated path ("Master" for a match on "Services" in
-        # "# Master Services Agreement", QA 2026-07-19 F-17).
-        line_end = txt.find("\n", idx)
-        if line_end == -1:
-            line_end = len(txt)
-        for line in reversed(txt[:line_end].split("\n")):
-            m = re.match(r"^(#{1,6})\s+(.*)", line)
-            if m:
-                level = len(m.group(1))
-                if level < current_level:
-                    clean_heading = clean_breadcrumb(m.group(2))
-                    if len(clean_heading) > 80:
-                        clean_heading = clean_heading[:80] + "..."
-                    path.insert(0, clean_heading)
-                    current_level = level
-                    if level == 1:
-                        break
-        return " > ".join(path) if path else ""
+    # Hoisted to adeu.outline for CC-2 so the fields ledger renders identical
+    # breadcrumbs from the same projection rather than a second dialect.
+    get_heading = heading_path_at
 
     # Match index is preserved from the FULL match list so an LLM that sees
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.

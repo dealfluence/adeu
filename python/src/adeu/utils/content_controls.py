@@ -105,6 +105,7 @@ class SdtInfo:
     binding_xpath: Optional[str] = None
     showing_placeholder: bool = False
     placeholder_text: Optional[str] = None
+    temporary: bool = False
     options: Tuple[Tuple[str, str], ...] = ()
     checked: Optional[bool] = None
     date_format: Optional[str] = None
@@ -231,6 +232,13 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
 
     showing_placeholder = _first_child(sdtPr, _w("showingPlcHdr")) is not None
 
+    # w:temporary marks a control Word removes as soon as its contents are
+    # edited. Ledger-only (spec-fields-ledger §3 segment 6): it changes nothing
+    # about the projection, but an agent planning a write needs to know the
+    # control will not survive the edit.
+    temporary_el = _first_child(sdtPr, _w("temporary"))
+    temporary = temporary_el is not None and _is_true(_val(temporary_el))
+
     content = _first_child(sdt_element, QN_W_SDTCONTENT)
     placeholder_text: Optional[str] = None
     if showing_placeholder and content is not None:
@@ -287,6 +295,7 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
         binding_xpath=binding_xpath,
         showing_placeholder=showing_placeholder,
         placeholder_text=placeholder_text,
+        temporary=temporary,
         options=options,
         checked=checked,
         date_format=date_format,
