@@ -5408,6 +5408,201 @@ class RedlineEngine:
             se._split_group_id = start_idx
         return sub_edits
 
+    def _apply_url_retarget(self, edit: ModifyText, active_mapper: Any, start_idx: int) -> bool:
+        target_spans = [s for s in active_mapper.spans if s.start <= start_idx < s.end]
+        if target_spans and target_spans[0].hyperlink_id:
+            owner = target_spans[0].paragraph
+            part = owner.part if owner is not None and getattr(owner, "part", None) is not None else self.doc.part
+            try:
+                rel = part.rels[target_spans[0].hyperlink_id]
+            except KeyError:
+                logger.warning(
+                    "Hyperlink relationship not found; skipping URL retarget",
+                    r_id=target_spans[0].hyperlink_id,
+                )
+                return False
+            rel._target = edit.new_text
+            return True
+        return False
+
+    def _apply_comment_only(
+        self,
+        edit: ModifyText,
+        active_mapper: Any,
+        start_idx: int,
+        length: int,
+        rebuild_map: bool,
+    ) -> bool:
+        target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
+        if not target_runs:
+            return False
+        if edit.comment:
+            first_el = target_runs[0]._element
+            last_el = target_runs[-1]._element
+            start_p = first_el.getparent()
+            while start_p is not None and start_p.tag != qn("w:p"):
+                start_p = start_p.getparent()
+            end_p = last_el.getparent()
+            while end_p is not None and end_p.tag != qn("w:p"):
+                end_p = end_p.getparent()
+
+            def _ascend_to_paragraph_child(el, p):
+                cur = el
+                while cur.getparent() is not None and cur.getparent() is not p:
+                    cur = cur.getparent()
+                return cur
+
+            if start_p is not None and end_p is not None:
+                first_anchor = _ascend_to_paragraph_child(first_el, start_p)
+                last_anchor = _ascend_to_paragraph_child(last_el, end_p)
+                if start_p == end_p:
+                    self._attach_comment(start_p, first_anchor, last_anchor, edit.comment)
+                else:
+                    self._attach_comment_spanning(start_p, first_anchor, end_p, last_anchor, edit.comment)
+        return True
+
+    def _apply_insertion_op(
+        self,
+        edit: ModifyText,
+        active_mapper: Any,
+        start_idx: int,
+        suppress_emphasis: bool,
+        ins_id: Optional[str],
+        rebuild_map: bool,
+    ) -> bool:
+        final_new_text = edit.new_text or ""
+
+        boundary_anchor: Optional[TextSpan] = None
+        boundary = active_mapper.part_boundary_at(start_idx) if hasattr(active_mapper, "part_boundary_at") else None
+        is_machine_pure_insertion = not edit.target_text and getattr(edit, "_parent_edit_ref", None) is None
+        if boundary is not None and is_machine_pure_insertion:
+            prev_i, next_i = boundary
+            prev_kind = active_mapper.part_kind_of(prev_i)
+            next_kind = active_mapper.part_kind_of(next_i)
+            if prev_kind == "body" and next_kind != "body":
+                real_before = [s for s in active_mapper.spans if s.run is not None and s.part_index == prev_i]
+                if real_before:
+                    boundary_anchor = real_before[-1]
+
+        if boundary_anchor is not None:
+            anchor_run, anchor_paragraph = boundary_anchor.run, boundary_anchor.paragraph
+            if not final_new_text.startswith("\n"):
+                final_new_text = "\n\n" + final_new_text
+        elif edit._insert_host_el is not None:
+            anchor_run, anchor_paragraph = None, None
+        else:
+            anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
+        if not anchor_run and not anchor_paragraph and edit._insert_host_el is None:
+            return False
+
+        insert_before = False
+        if anchor_run is None and anchor_paragraph is not None:
+            preceding = [s for s in active_mapper.spans if s.end == start_idx and s.paragraph == anchor_paragraph]
+            if preceding and preceding[-1].text != "\n\n":
+                insert_before = True
+
+        parent = None
+        index = 0
+        if edit._insert_host_el is not None:
+            parent = edit._insert_host_el
+            index = len(parent)
+        elif anchor_run:
+            parent = anchor_run._element.getparent()
+            index = parent.index(anchor_run._element)
+            if parent.tag == qn("w:del"):
+                del_wrapper = parent
+                parent = del_wrapper.getparent()
+                if parent is not None:
+                    index = parent.index(del_wrapper)
+        elif anchor_paragraph:
+            parent = anchor_paragraph._element
+            for i, child in enumerate(parent):
+                if child.tag == qn("w:pPr"):
+                    index = i + 1
+                else:
+                    break
+
+        if parent is None:
+            return False
+
+        if self._introduces_table_row_text(active_mapper, start_idx, 1, "", final_new_text):
+            return False
+
+        if start_idx == 0:
+            ins_elem, last_p = self.track_insert(
+                final_new_text,
+                anchor_run=anchor_run,
+                anchor_paragraph=anchor_paragraph,
+                comment=edit.comment,
+                suppress_inherited=suppress_emphasis,
+                insert_before=True,
+                reuse_id=ins_id,
+            )
+            if ins_elem is not None:
+                if parent.tag == qn("w:ins"):
+                    self._insert_and_split_ins(parent, index, ins_elem)
+                    actual_parent = parent.getparent()
+                else:
+                    parent.insert(index, ins_elem)
+                    actual_parent = parent
+
+                if edit.comment:
+                    if last_p is not None:
+                        last_ins_candidates = [
+                            node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                        ]
+                        if last_ins_candidates:
+                            last_ins = last_ins_candidates[-1]
+                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                        else:
+                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+                    else:
+                        self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+        else:
+            if anchor_run:
+                next_run = self._get_next_run(anchor_run)
+                style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
+            else:
+                style_run = None
+
+            ins_elem, last_p = self.track_insert(
+                final_new_text,
+                anchor_run=style_run,
+                anchor_paragraph=anchor_paragraph,
+                comment=edit.comment,
+                suppress_inherited=suppress_emphasis,
+                insert_before=insert_before,
+                reuse_id=ins_id,
+                positional_anchor_run=anchor_run,
+            )
+            if ins_elem is not None:
+                if parent.tag == qn("w:ins"):
+                    self._insert_and_split_ins(parent, index + 1, ins_elem)
+                    actual_parent = parent.getparent()
+                else:
+                    insert_idx = index + 1 if anchor_run else index
+                    parent.insert(insert_idx, ins_elem)
+                    actual_parent = parent
+
+                if edit.comment:
+                    if last_p is not None:
+                        last_ins_candidates = [
+                            node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
+                        ]
+                        if last_ins_candidates:
+                            last_ins = last_ins_candidates[-1]
+                            self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
+                        else:
+                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+                    else:
+                        self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
+            elif last_p is not None and edit.comment:
+                ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
+                if ins_list:
+                    self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
+        self._record_used_revision_ids(edit, ins_id)
+        return True
+
     def _apply_single_edit_indexed(
         self,
         edit: ModifyText,
@@ -5456,223 +5651,13 @@ class RedlineEngine:
             ins_id = self._get_next_id()
 
         if op == "URL_RETARGET":
-            target_spans = [s for s in active_mapper.spans if s.start <= start_idx < s.end]
-            if target_spans and target_spans[0].hyperlink_id:
-                # Resolve the relationship on the part that owns the hyperlink
-                # (a footer link's rel lives on the footer part, not the main
-                # document part). A missing id is a clean per-edit failure,
-                # never a raw KeyError('rIdN') traceback (QA 2026-07-18 H3).
-                owner = target_spans[0].paragraph
-                part = owner.part if owner is not None and getattr(owner, "part", None) is not None else self.doc.part
-                try:
-                    rel = part.rels[target_spans[0].hyperlink_id]
-                except KeyError:
-                    logger.warning(
-                        "Hyperlink relationship not found; skipping URL retarget",
-                        r_id=target_spans[0].hyperlink_id,
-                    )
-                    return False
-                rel._target = edit.new_text
-                return True
-            return False
+            return self._apply_url_retarget(edit, active_mapper, start_idx)
 
         if op == "COMMENT_ONLY":
-            target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)
-            if not target_runs:
-                return False
-            if edit.comment:
-                first_el = target_runs[0]._element
-                last_el = target_runs[-1]._element
-                start_p = first_el.getparent()
-                while start_p is not None and start_p.tag != qn("w:p"):
-                    start_p = start_p.getparent()
-                end_p = last_el.getparent()
-                while end_p is not None and end_p.tag != qn("w:p"):
-                    end_p = end_p.getparent()
-
-                # first_el / last_el may live inside a <w:ins> or <w:del> (e.g. a
-                # comment-only edit anchored on another author's tracked
-                # insertion). _attach_comment needs an element that is a DIRECT
-                # child of the paragraph, so ascend to the child-of-paragraph
-                # ancestor; the comment markers then wrap the whole ins/del.
-                def _ascend_to_paragraph_child(el, p):
-                    cur = el
-                    while cur.getparent() is not None and cur.getparent() is not p:
-                        cur = cur.getparent()
-                    return cur
-
-                if start_p is not None and end_p is not None:
-                    first_anchor = _ascend_to_paragraph_child(first_el, start_p)
-                    last_anchor = _ascend_to_paragraph_child(last_el, end_p)
-                    if start_p == end_p:
-                        self._attach_comment(start_p, first_anchor, last_anchor, edit.comment)
-                    else:
-                        self._attach_comment_spanning(start_p, first_anchor, end_p, last_anchor, edit.comment)
-            return True
+            return self._apply_comment_only(edit, active_mapper, start_idx, length, rebuild_map)
 
         if op == EditOperationType.INSERTION:
-            final_new_text = edit.new_text or ""
-
-            # A MACHINE-PINNED pure insertion (diff/text round-trip output:
-            # authored with an empty target and no parent edit) positioned in
-            # the separator gap between the body and a following part anchors
-            # to the end of the BODY with forced new-paragraph semantics —
-            # anchoring on the next part's first paragraph writes the new
-            # final body paragraph into word/footer1.xml. Insertions DERIVED
-            # from a target-anchored edit (parent ref set — e.g. prepending
-            # "DRAFT " to "FOOTER MARKER") keep the user's chosen anchor:
-            # their context names the part they meant.
-            boundary_anchor: Optional[TextSpan] = None
-            boundary = active_mapper.part_boundary_at(start_idx) if hasattr(active_mapper, "part_boundary_at") else None
-            is_machine_pure_insertion = not edit.target_text and getattr(edit, "_parent_edit_ref", None) is None
-            if boundary is not None and is_machine_pure_insertion:
-                prev_i, next_i = boundary
-                prev_kind = active_mapper.part_kind_of(prev_i)
-                next_kind = active_mapper.part_kind_of(next_i)
-                if prev_kind == "body" and next_kind != "body":
-                    real_before = [s for s in active_mapper.spans if s.run is not None and s.part_index == prev_i]
-                    if real_before:
-                        boundary_anchor = real_before[-1]
-
-            if boundary_anchor is not None:
-                anchor_run, anchor_paragraph = boundary_anchor.run, boundary_anchor.paragraph
-                if not final_new_text.startswith("\n"):
-                    final_new_text = "\n\n" + final_new_text
-            elif edit._insert_host_el is not None:
-                # An empty content control names its host explicitly, because
-                # position alone can no longer reach it: once the ghost run is
-                # gone there is no run inside `w:sdtContent` to anchor to, and
-                # the nearest run by offset lives OUTSIDE the control. The
-                # insertion would then land next to the field instead of in
-                # it - a filled-looking document whose control is still empty,
-                # and whose value Word will not treat as the field's content.
-                # Same shape as the OPC part boundary: a wall that offsets
-                # cannot see, so the container is carried explicitly.
-                anchor_run, anchor_paragraph = None, None
-            else:
-                anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
-            if not anchor_run and not anchor_paragraph and edit._insert_host_el is None:
-                return False
-
-            insert_before = False
-            if anchor_run is None and anchor_paragraph is not None:
-                preceding = [s for s in active_mapper.spans if s.end == start_idx and s.paragraph == anchor_paragraph]
-                if preceding and preceding[-1].text != "\n\n":
-                    insert_before = True
-
-            parent = None
-            index = 0
-            if edit._insert_host_el is not None:
-                parent = edit._insert_host_el
-                index = len(parent)
-            elif anchor_run:
-                parent = anchor_run._element.getparent()
-                index = parent.index(anchor_run._element)
-                # A tracked-deleted anchor (run inside <w:del>) cannot host
-                # the new <w:ins> as a child — an insertion nested inside a
-                # deletion is invalid revision XML. Lift the anchor to the
-                # <w:del> wrapper so the insert lands beside the whole block.
-                if parent.tag == qn("w:del"):
-                    del_wrapper = parent
-                    parent = del_wrapper.getparent()
-                    if parent is not None:
-                        index = parent.index(del_wrapper)
-            elif anchor_paragraph:
-                parent = anchor_paragraph._element
-                for i, child in enumerate(parent):
-                    if child.tag == qn("w:pPr"):
-                        index = i + 1
-                    else:
-                        break
-
-            if parent is None:
-                return False
-
-            # QA 2026-07-18 C2 (apply-level backstop, pinned edits bypass
-            # validate_edits): refuse insertions that would write row-shaped
-            # pipe text into a table cell.
-            if self._introduces_table_row_text(active_mapper, start_idx, 1, "", final_new_text):
-                return False
-
-            if start_idx == 0:
-                ins_elem, last_p = self.track_insert(
-                    final_new_text,
-                    anchor_run=anchor_run,
-                    anchor_paragraph=anchor_paragraph,
-                    comment=edit.comment,
-                    suppress_inherited=suppress_emphasis,
-                    insert_before=True,
-                    reuse_id=ins_id,
-                )
-                if ins_elem is not None:
-                    if parent.tag == qn("w:ins"):
-                        self._insert_and_split_ins(parent, index, ins_elem)
-                        actual_parent = parent.getparent()
-                    else:
-                        parent.insert(index, ins_elem)
-                        actual_parent = parent
-
-                    if edit.comment:
-                        if last_p is not None:
-                            last_ins_candidates = [
-                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
-                            ]
-                            if last_ins_candidates:
-                                last_ins = last_ins_candidates[-1]
-                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
-                            else:
-                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
-                        else:
-                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
-            else:
-                if anchor_run:
-                    next_run = self._get_next_run(anchor_run)
-                    style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
-                else:
-                    style_run = None
-
-                ins_elem, last_p = self.track_insert(
-                    final_new_text,
-                    anchor_run=style_run,
-                    anchor_paragraph=anchor_paragraph,
-                    comment=edit.comment,
-                    suppress_inherited=suppress_emphasis,
-                    insert_before=insert_before,
-                    reuse_id=ins_id,
-                    # style_run may be the run AFTER the insertion point (it
-                    # carries formatting only); the insertion physically
-                    # follows anchor_run — suffix relocation keys on it.
-                    positional_anchor_run=anchor_run,
-                )
-                if ins_elem is not None:
-                    if parent.tag == qn("w:ins"):
-                        self._insert_and_split_ins(parent, index + 1, ins_elem)
-                        actual_parent = parent.getparent()
-                    else:
-                        insert_idx = index + 1 if anchor_run else index
-                        parent.insert(insert_idx, ins_elem)
-                        actual_parent = parent
-
-                    if edit.comment:
-                        if last_p is not None:
-                            last_ins_candidates = [
-                                node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)
-                            ]
-                            if last_ins_candidates:
-                                last_ins = last_ins_candidates[-1]
-                                self._attach_comment_spanning(actual_parent, ins_elem, last_p, last_ins, edit.comment)
-                            else:
-                                self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
-                        else:
-                            self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
-                elif last_p is not None and edit.comment:
-                    # Leading "\n\n" insertions (boundary re-anchors) create
-                    # only new paragraphs — anchor the comment on the last one.
-                    ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
-                    if ins_list:
-                        self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
-            self._record_used_revision_ids(edit, ins_id)
-            return True
+            return self._apply_insertion_op(edit, active_mapper, start_idx, suppress_emphasis, ins_id, rebuild_map)
 
         # QA 2026-07-18 C1 (apply-level backstop, pinned edits bypass
         # validate_edits): a modification/deletion may never mutate real text

@@ -7530,6 +7530,56 @@ export class RedlineEngine {
     grandparent.removeChild(parent_ins);
   }
 
+  private _apply_comment_only(
+    edit: any,
+    active_mapper: any,
+    start_idx: number,
+    length: number,
+    rebuild_map: boolean,
+  ): boolean {
+    const target_runs = active_mapper.find_target_runs_by_index(
+      start_idx,
+      length,
+      rebuild_map,
+    );
+    if (target_runs.length === 0) return false;
+    if (!edit.comment) return true;
+
+    const first_el = target_runs[0]._element;
+    const last_el = target_runs[target_runs.length - 1]._element;
+
+    let start_p: Element | null = first_el;
+    while (start_p && start_p.tagName !== "w:p")
+      start_p = start_p.parentNode as Element;
+    let end_p: Element | null = last_el;
+    while (end_p && end_p.tagName !== "w:p")
+      end_p = end_p.parentNode as Element;
+    if (!start_p || !end_p) return false;
+
+    const ascend_to_paragraph_child = (el: Element, p: Element): Element => {
+      let cur: Element = el;
+      while (cur.parentNode && cur.parentNode !== p) {
+        cur = cur.parentNode as Element;
+      }
+      return cur;
+    };
+    const first_anchor = ascend_to_paragraph_child(first_el, start_p);
+    const last_anchor = ascend_to_paragraph_child(last_el, end_p);
+
+    if (start_p === end_p) {
+      this._attach_comment(start_p, first_anchor, last_anchor, edit.comment);
+    } else {
+      this._attach_comment_spanning(
+        start_p,
+        first_anchor,
+        end_p,
+        last_anchor,
+        edit.comment,
+      );
+    }
+    return true;
+  }
+
   private _apply_single_edit_indexed(
     edit: any,
     orig_new: string | null,
@@ -7688,53 +7738,7 @@ export class RedlineEngine {
     }
 
     if (op === "COMMENT_ONLY") {
-      // Resolve the runs covering [start_idx, start_idx+length) and attach a
-      // comment around them. No tracked-change is produced.
-      const target_runs = active_mapper.find_target_runs_by_index(
-        start_idx,
-        length,
-        rebuild_map,
-      );
-      if (target_runs.length === 0) return false;
-      if (!edit.comment) return true;
-
-      const first_el = target_runs[0]._element;
-      const last_el = target_runs[target_runs.length - 1]._element;
-
-      // Walk up from the first/last run to their containing <w:p>.
-      let start_p: Element | null = first_el;
-      while (start_p && start_p.tagName !== "w:p")
-        start_p = start_p.parentNode as Element;
-      let end_p: Element | null = last_el;
-      while (end_p && end_p.tagName !== "w:p")
-        end_p = end_p.parentNode as Element;
-      if (!start_p || !end_p) return false;
-
-      // first_el / last_el may live inside a <w:ins> or <w:del>. We need their
-      // top-level child-of-paragraph ancestor so the comment markers become
-      // siblings of those wrappers, not children.
-      const ascend_to_paragraph_child = (el: Element, p: Element): Element => {
-        let cur: Element = el;
-        while (cur.parentNode && cur.parentNode !== p) {
-          cur = cur.parentNode as Element;
-        }
-        return cur;
-      };
-      const first_anchor = ascend_to_paragraph_child(first_el, start_p);
-      const last_anchor = ascend_to_paragraph_child(last_el, end_p);
-
-      if (start_p === end_p) {
-        this._attach_comment(start_p, first_anchor, last_anchor, edit.comment);
-      } else {
-        this._attach_comment_spanning(
-          start_p,
-          first_anchor,
-          end_p,
-          last_anchor,
-          edit.comment,
-        );
-      }
-      return true;
+      return this._apply_comment_only(edit, active_mapper, start_idx, length, rebuild_map);
     }
     if (op === "INSERTION") {
       let final_new_text = edit.new_text || "";
