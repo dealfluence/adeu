@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { DocumentObject } from "@adeu/core";
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
 async function createTestDocument(): Promise<DocumentObject> {
   const fixturePath = resolve(__dirname, "../../../../shared/fixtures/initial.docx");
@@ -34,7 +34,7 @@ function addParagraph(doc: DocumentObject, text: string): Element {
 }
 
 describe("QA Regression Test - read_docx search_query paragraph filtering", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let testDocPath: string;
 
   beforeAll(async () => {
@@ -50,49 +50,16 @@ describe("QA Regression Test - read_docx search_query paragraph filtering", () =
 
     writeFileSync(testDocPath, await doc.save());
 
-    // 2. Boot the compiled MCP server
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error(
-        "MCP server not built. Run 'npm run build' before running tests.",
-      );
-    }
-
-    serverProc = spawn("node", [serverPath]);
+    server = await startTestServer("agy-search");
   });
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (existsSync(testDocPath)) unlinkSync(testDocPath);
   });
 
-  // Helper to interact with the stdio JSON-RPC server
-  function sendRpc(method: string, params: any, id: number = 1): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("RPC Timeout")), 5000);
-
-      const listener = (data: Buffer) => {
-        const lines = data.toString().trim().split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("{")) continue;
-          try {
-            const res = JSON.parse(line);
-            if (res.id === id) {
-              clearTimeout(timeout);
-              serverProc.stdout?.removeListener("data", listener);
-              resolve(res);
-            }
-          } catch (e) {
-            // Ignore incomplete chunks
-          }
-        }
-      };
-
-      serverProc.stdout?.on("data", listener);
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
+  function sendRpc(method: string, params: any): Promise<any> {
+    return server.rpc(method, params);
   }
 
   it("should filter results to matching paragraphs when search_query is provided", async () => {

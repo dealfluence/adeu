@@ -1,69 +1,31 @@
 // FILE: node/packages/mcp-server/src/parity_live.test.ts
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
-// Each Python CLI invocation spawns a fresh interpreter costing ~3-5s on
-// Windows even when warm, so tests that shell out to Python need more than
-// vitest's 5s default timeout.
 const PYTHON_PARITY_TIMEOUT_MS = 60_000;
 
 describe("Parity Live Server Integration Verification", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   const fixturePath = resolve(
     __dirname,
     "../tests/fixtures/gap2_minimal_repro.docx",
   );
 
   beforeAll(async () => {
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error(
-        "MCP server not built. Run 'npm run build' before tests.",
-      );
-    }
     if (!existsSync(fixturePath)) {
       throw new Error(`Fixture not found: ${fixturePath}`);
     }
-
-    // Spawn server process
-    serverProc = spawn("node", [serverPath]);
+    server = await startTestServer("parity-live");
   });
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) {
-      serverProc.kill();
-    }
+    server?.stop();
   });
 
-  // Helper to interact with the stdio JSON-RPC server
-  function sendRpc(method: string, params: any, id: number = 1): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("RPC Timeout")), 5000);
-
-      const listener = (data: Buffer) => {
-        const lines = data.toString().trim().split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("{")) continue;
-          try {
-            const res = JSON.parse(line);
-            if (res.id === id) {
-              clearTimeout(timeout);
-              serverProc.stdout?.removeListener("data", listener);
-              resolve(res);
-            }
-          } catch (e) {
-            // Ignore incomplete chunks
-          }
-        }
-      };
-
-      serverProc.stdout?.on("data", listener);
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
+  function sendRpc(method: string, params: any): Promise<any> {
+    return server.rpc(method, params);
   }
 
   it("does not expose the server_info tool anymore", async () => {

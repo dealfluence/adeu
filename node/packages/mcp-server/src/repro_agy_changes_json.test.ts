@@ -1,17 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
-// There is exactly ONE changes parameter. A second `changes_json` spelling
-// forced the model to choose between two ways to say the same thing, and the
-// two engines had drifted into opposite rules for which one wins. `changes`
-// stays a REQUIRED, typed array: per-item stringification is repaired, and a
-// wholly stringified payload is rejected with an error the caller can act on
-// rather than being silently treated as an empty batch.
 describe("QA Regression Test - process_document_batch changes payload shapes", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let docPath: string;
   let outputDocPath: string;
 
@@ -27,48 +21,17 @@ describe("QA Regression Test - process_document_batch changes payload shapes", (
     const fixtureBuf = readFileSync(fixturePath);
     writeFileSync(docPath, fixtureBuf);
 
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error(
-        "MCP server not built. Run 'npm run build' before running tests.",
-      );
-    }
-
-    serverProc = spawn("node", [serverPath]);
+    server = await startTestServer("agy-changes-json");
   });
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (existsSync(docPath)) unlinkSync(docPath);
     if (existsSync(outputDocPath)) unlinkSync(outputDocPath);
   });
 
-  function sendRpc(method: string, params: any, id: number = 1): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("RPC Timeout")), 5000);
-
-      const listener = (data: Buffer) => {
-        const lines = data.toString().trim().split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("{")) continue;
-          try {
-            const res = JSON.parse(line);
-            if (res.id === id) {
-              clearTimeout(timeout);
-              serverProc.stdout?.removeListener("data", listener);
-              resolve(res);
-            }
-          } catch (e) {
-            // Ignore incomplete chunks
-          }
-        }
-      };
-
-      serverProc.stdout?.on("data", listener);
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
+  function sendRpc(method: string, params: any): Promise<any> {
+    return server.rpc(method, params);
   }
 
   it("repairs per-item stringified changes (the Gemini double-serialize quirk)", async () => {

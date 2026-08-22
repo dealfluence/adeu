@@ -1,18 +1,17 @@
 // FILE: node/packages/mcp-server/src/mcp.bugs.test.ts
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { DocumentObject, RedlineEngine } from "@adeu/core";
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
 describe("Resolved Bugs MCP Server Verification", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let cleanDocPath: string;
   let dirtyDocPath: string;
 
   beforeAll(async () => {
-    // 1. Grab the shared golden fixture from the monorepo root
     const fixturePath = resolve(
       __dirname,
       "../../../../shared/fixtures/golden.docx",
@@ -21,15 +20,12 @@ describe("Resolved Bugs MCP Server Verification", () => {
     cleanDocPath = join(tmpdir(), `adeu_clean_${Date.now()}.docx`);
     dirtyDocPath = join(tmpdir(), `adeu_dirty_${Date.now()}.docx`);
 
-    // Save a clean copy
     const fixtureBuf = readFileSync(fixturePath);
     writeFileSync(cleanDocPath, fixtureBuf);
 
-    // Load it via the public API, dirty it, and save a dirty copy
     const doc = await DocumentObject.load(fixtureBuf);
     const engine = new RedlineEngine(doc, "Reviewer");
 
-    // "document" is original base text, so we won't trigger the cross-author nested redline constraint
     engine.process_batch([
       {
         type: "modify",
@@ -39,50 +35,17 @@ describe("Resolved Bugs MCP Server Verification", () => {
     ]);
     writeFileSync(dirtyDocPath, await doc.save());
 
-    // 2. Boot the compiled MCP server
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error(
-        "MCP server not built. Run 'npm run build' before tests.",
-      );
-    }
-
-    serverProc = spawn("node", [serverPath]);
+    server = await startTestServer("mcp-bugs");
   });
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (existsSync(cleanDocPath)) unlinkSync(cleanDocPath);
     if (existsSync(dirtyDocPath)) unlinkSync(dirtyDocPath);
   });
 
-  // Helper to interact with the stdio JSON-RPC server
-  function sendRpc(method: string, params: any, id: number = 1): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("RPC Timeout")), 5000);
-
-      const listener = (data: Buffer) => {
-        const lines = data.toString().trim().split("\n");
-        for (const line of lines) {
-          if (!line.startsWith("{")) continue;
-          try {
-            const res = JSON.parse(line);
-            if (res.id === id) {
-              clearTimeout(timeout);
-              serverProc.stdout?.removeListener("data", listener);
-              resolve(res);
-            }
-          } catch (e) {
-            // Ignore incomplete chunks
-          }
-        }
-      };
-
-      serverProc.stdout?.on("data", listener);
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
+  function sendRpc(method: string, params: any): Promise<any> {
+    return server.rpc(method, params);
   }
 
   it("BUG-5: Rejects empty changes array early without writing files", async () => {
