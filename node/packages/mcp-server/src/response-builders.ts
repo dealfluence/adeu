@@ -20,6 +20,19 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+function makeBuilderResult(
+  llmContent: string,
+  structuredContent?: any,
+): ToolResult {
+  const res: ToolResult = {
+    content: [{ type: "text", text: llmContent }],
+  };
+  if (structuredContent !== undefined) {
+    res.structuredContent = structuredContent;
+  }
+  return res;
+}
+
 /**
  * Precomputed projection products (doc-cache): the split body/appendix and
  * the body pagination that every builder would otherwise recompute per call.
@@ -546,14 +559,11 @@ export function build_full_document_response(
   const llm_content = no_chrome
     ? ui_markdown
     : with_path_header(file_path, fields_banner, ui_markdown);
-  return {
-    content: [{ type: "text", text: llm_content }],
-    structuredContent: {
-      markdown: ui_markdown,
-      file_path: resolve(file_path),
-      title: basename(file_path),
-    },
-  };
+  return makeBuilderResult(llm_content, {
+    markdown: ui_markdown,
+    file_path: resolve(file_path),
+    title: basename(file_path),
+  });
 }
 
 /**
@@ -649,15 +659,11 @@ export function build_paginated_response(
     llm_content = with_path_header(file_path, fields_banner, ui_markdown);
   }
 
-  return {
-    content: [{ type: "text", text: llm_content }],
-    // Include structuredContent for the UI to render the markdown
-    structuredContent: {
-      markdown: ui_markdown,
-      file_path: resolve(file_path),
-      title: basename(file_path),
-    },
-  };
+  return makeBuilderResult(llm_content, {
+    markdown: ui_markdown,
+    file_path: resolve(file_path),
+    title: basename(file_path),
+  });
 }
 
 export function build_page_range_response(
@@ -707,10 +713,11 @@ export function build_page_range_response(
   }
   const ui_markdown = ui_parts.join("\n\n");
   const llm_content = no_chrome ? ui_markdown : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
-  return {
-    content: [{ type: "text", text: llm_content }],
-    structuredContent: { markdown: ui_markdown, file_path: resolve(file_path), title: basename(file_path) },
-  };
+  return makeBuilderResult(llm_content, {
+    markdown: ui_markdown,
+    file_path: resolve(file_path),
+    title: basename(file_path),
+  });
 }
 
 export function build_outline_response(
@@ -795,14 +802,11 @@ export function render_outline_response(
     llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
   }
 
-  return {
-    content: [{ type: "text", text: llm_content }],
-    structuredContent: {
-      markdown: ui_markdown,
-      file_path: resolve(file_path),
-      title: `Outline: ${basename(file_path)}`,
-    },
-  };
+  return makeBuilderResult(llm_content, {
+    markdown: ui_markdown,
+    file_path: resolve(file_path),
+    title: `Outline: ${basename(file_path)}`,
+  });
 }
 
 export function build_appendix_response(
@@ -826,14 +830,11 @@ export function build_appendix_response(
     const llm_content = no_chrome
       ? ui_markdown
       : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
-    return {
-      content: [{ type: "text", text: llm_content }],
-      structuredContent: {
-        markdown: ui_markdown,
-        file_path: resolve(file_path),
-        title: `Appendix: ${basename(file_path)}`,
-      },
-    };
+    return makeBuilderResult(llm_content, {
+      markdown: ui_markdown,
+      file_path: resolve(file_path),
+      title: `Appendix: ${basename(file_path)}`,
+    });
   }
 
   const result = paginate(appendix, "");
@@ -874,14 +875,11 @@ export function build_appendix_response(
     llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
   }
 
-  return {
-    content: [{ type: "text", text: llm_content }],
-    structuredContent: {
-      markdown: ui_markdown,
-      file_path: resolve(file_path),
-      title: `Appendix: ${basename(file_path)}`,
-    },
-  };
+  return makeBuilderResult(llm_content, {
+    markdown: ui_markdown,
+    file_path: resolve(file_path),
+    title: `Appendix: ${basename(file_path)}`,
+  });
 }
 
 /** One hit, carrying its document page and its GLOBAL 1-based match index. */
