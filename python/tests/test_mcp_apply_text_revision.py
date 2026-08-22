@@ -364,3 +364,10 @@ def test_cli_text_apply_batch_rejection_json_is_a_failure_envelope(tmp_path, cap
     envelope = json.loads(stdout)
     assert envelope["error"] == "batch_validation_failed"
     assert not out.exists()
+
+
+def test_strip_cell_anchors():
+    from adeu.text_revision import strip_cell_anchors
+
+    assert strip_cell_anchors("Widget B | {#cell:05856B27} | $250.00") == "Widget B |  | $250.00"
+    assert strip_cell_anchors("Widget B | Audit {#cell:05856B27} | $250.00") == "Widget B | Audit | $250.00"
