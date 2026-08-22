@@ -550,22 +550,6 @@ function _determine_heading_style(paragraph: Paragraph): string {
   return "(heuristic)";
 }
 
-function _safe_style_name(
-  paragraph: Paragraph,
-  style_cache: any,
-  default_pstyle: any,
-): string | null {
-  const pPr = findChild(paragraph._element, "w:pPr");
-  let style_id = default_pstyle;
-  if (pPr) {
-    const pStyle = findChild(pPr, "w:pStyle");
-    if (pStyle) style_id = pStyle.getAttribute("w:val") || default_pstyle;
-  }
-  return style_id && style_cache && style_cache[style_id]
-    ? style_cache[style_id].name
-    : style_id;
-}
-
 function _find_owned_end(
   block_records: _BlockRecord[],
   heading_indices: number[],

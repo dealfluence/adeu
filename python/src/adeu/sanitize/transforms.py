@@ -290,41 +290,6 @@ def get_comments_summary(doc: DocumentObject) -> dict:
     }
 
 
-def _eject_comment_parts(doc: DocumentObject):
-    """Completely eject all comment XML parts from the DOCX package."""
-    pkg = doc.part.package
-    comment_partnames = set()
-    for part in pkg.parts:
-        if str(part.partname).startswith("/word/comments"):
-            comment_partnames.add(part.partname)
-
-    if not comment_partnames:
-        return
-
-    # Sever from package root rels
-    root_rels_to_remove = [
-        rId
-        for rId, rel in pkg.rels.items()
-        if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
-    ]
-    for rId in root_rels_to_remove:
-        del pkg.rels[rId]
-
-    # Sever from all other parts
-    for part in pkg.parts:
-        part_rels_to_remove = [
-            rId
-            for rId, rel in part.rels.items()
-            if not rel.is_external and getattr(rel.target_part, "partname", None) in comment_partnames
-        ]
-        for rId in part_rels_to_remove:
-            del part.rels[rId]
-
-    # Remove from package parts list
-    if hasattr(pkg, "_parts") and isinstance(pkg._parts, list):
-        pkg._parts = [p for p in pkg._parts if p.partname not in comment_partnames]
-
-
 def remove_all_comments(doc: DocumentObject) -> list[str]:
     """Remove all comments from the document."""
     cm = CommentsManager(doc)

@@ -897,22 +897,6 @@ class RedlineEngine:
 
         return critic_markup, clean_text
 
-    def _first_live_match(self, target_text: str, is_regex: bool = False) -> Tuple[int, int]:
-        all_matches = self.mapper.find_all_match_indices(target_text, is_regex=is_regex)
-        if len(all_matches) <= 1:
-            return self.mapper.find_match_index(target_text, is_regex=is_regex)
-        for start, length in all_matches:
-            real_spans = [
-                s for s in self.mapper.spans if s.run is not None and s.end > start and s.start < start + length
-            ]
-            if not real_spans:
-                # Virtual-only range (meta bubble, marker): not document text
-                # (ADEU-QA-002 C) — never a live match.
-                continue
-            if any(not s.del_id for s in real_spans):
-                return start, length
-        return self.mapper.find_match_index(target_text, is_regex=is_regex)
-
     _PAIR_WALK_SKIP_TAGS = (
         "w:commentRangeStart",
         "w:commentRangeEnd",
@@ -2434,6 +2418,144 @@ class RedlineEngine:
                         self._overridden_controls.append(info)
         return None
 
+    def _resolve_structural_table_edit(
+        self, edit: Union[InsertTableRow, DeleteTableRow]
+    ) -> Tuple[List[Tuple[Union[InsertTableRow, DeleteTableRow], Optional[str]]], Optional[str]]:
+        matches = self.mapper.drop_virtual_only_matches(self.mapper.find_all_match_indices(edit.target_text))
+        resolved_mapper = self.mapper
+        if not matches:
+            if not self.clean_mapper:
+                self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+            matches = self.clean_mapper.drop_virtual_only_matches(
+                self.clean_mapper.find_all_match_indices(edit.target_text)
+            )
+            resolved_mapper = self.clean_mapper
+
+        if not matches:
+            target_snippet = edit.target_text.strip()[:40]
+            return [], f"- Failed to apply structural edit targeting: '{target_snippet}...'"
+
+        match_mode = getattr(edit, "match_mode", "strict")
+        unique_matches = []
+        seen_trs = set()
+
+        for m_start, m_len in matches:
+            anchor_run, anchor_paragraph = resolved_mapper.get_insertion_anchor(m_start, rebuild_map=False)
+            target_element = (
+                anchor_run._element if anchor_run else (anchor_paragraph._element if anchor_paragraph else None)
+            )
+            tr = None
+            curr = target_element
+            while curr is not None:
+                if curr.tag == qn("w:tr"):
+                    tr = curr
+                    break
+                curr = curr.getparent()
+
+            if tr is not None and tr not in seen_trs:
+                seen_trs.add(tr)
+                unique_matches.append((m_start, m_len))
+
+        if not unique_matches:
+            target_snippet = edit.target_text.strip()[:40]
+            return [], f"- Failed to locate row target: '{target_snippet}...'"
+
+        matches_to_apply = unique_matches
+        if match_mode in ("strict", "first"):
+            matches_to_apply = unique_matches[:1]
+
+        res: List[Tuple[Union[InsertTableRow, DeleteTableRow], Optional[str]]] = []
+        if match_mode == "all" or len(matches_to_apply) > 1:
+            for m_start, _m_len in matches_to_apply:
+                sub_edit = deepcopy(edit)
+                sub_edit._resolved_start_idx = m_start
+                sub_edit._active_mapper_ref = resolved_mapper
+                sub_edit._parent_edit_ref = edit
+                res.append((sub_edit, None))
+        else:
+            edit._resolved_start_idx = matches_to_apply[0][0]
+            edit._active_mapper_ref = resolved_mapper
+            res.append((edit, None))
+
+        return res, None
+
+    def _validate_set_field_edit(self, edit: SetField, edit_idx: int) -> List[str]:
+        from adeu.fields import FieldResolutionError
+        from adeu.redline.gates import CHECKBOX_STATES
+        from adeu.utils.field_write import parse_checkbox_value, refuse_class, refuse_value
+
+        errors: List[str] = []
+        try:
+            hits = self._resolve_set_field_targets(edit)
+        except FieldResolutionError as fe:
+            return [f"- Edit {edit_idx} Failed: {fe}"]
+
+        refusal = None
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            cls = info.cls if info is not None else entry.cls_word
+            refusal = refuse_class(cls, entry.ordinal)
+            if refusal is None and info is not None:
+                refusal = refuse_value(info, entry.ordinal, edit.value)
+            if refusal is not None:
+                return [f"- Edit {edit_idx} Failed: {refusal}"]
+
+        for entry in hits:
+            span = self._cc_content_range(entry.ordinal)
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if span is None:
+                if info is None or info.cls != "checkbox":
+                    continue
+                wanted = parse_checkbox_value(edit.value)
+                current = CHECKBOX_STATES[1] if info.checked else CHECKBOX_STATES[0]
+                new_token = CHECKBOX_STATES[1] if wanted else CHECKBOX_STATES[0]
+                gate_err = self._check_control_gates(
+                    edit_idx,
+                    ModifyText(
+                        type="modify",
+                        target_text=current,
+                        new_text=new_token,
+                        comment=edit.comment,
+                    ),
+                    self.mapper,
+                    0,
+                    0,
+                    final_target=current,
+                    final_new=new_token,
+                    known_controls=[info],
+                    from_set_field=True,
+                )
+                if gate_err:
+                    errors.append(gate_err)
+                    break
+                continue
+
+            start, end = span
+            current = self.mapper.full_text[start:end]
+            probe = ModifyText(
+                type="modify",
+                target_text=current,
+                new_text=edit.value,
+                comment=edit.comment,
+            )
+            probe._parent_edit_ref = edit
+            gate_err = self._check_control_gates(
+                edit_idx,
+                probe,
+                self.mapper,
+                start,
+                end - start,
+                final_target=current,
+                final_new=edit.value,
+                known_controls=[info] if info is not None else None,
+                from_set_field=True,
+            )
+            if gate_err:
+                errors.append(gate_err)
+                break
+
+        return errors
+
     def validate_edits(
         self,
         edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
@@ -2467,123 +2589,7 @@ class RedlineEngine:
             # coincidentally matches unrelated text (a comment timestamp, an
             # earlier redline). The string-shape checks above still apply.
             if isinstance(edit, SetField):
-                from adeu.fields import FieldResolutionError
-                from adeu.utils.field_write import refuse_class, refuse_value
-
-                # Resolve the field NOW, before anything is written. An
-                # unresolvable or ambiguous target is the recoverable half of
-                # A4.2, and the batch contract promises those fail the whole
-                # run without touching the document.
-                try:
-                    hits = self._resolve_set_field_targets(edit)
-                except FieldResolutionError as fe:
-                    errors.append(f"- Edit {i + 1} Failed: {fe}")
-                    continue
-                # A4.12: a fill is gated exactly as any other edit, WITH the
-                # same teaching error. The apply-layer backstop already
-                # refused locked controls, but it answers with a generic
-                # "failed to apply" - so the caller learned that something
-                # went wrong and nothing about what or how to proceed, which
-                # is the whole thing CC-4's error contract exists to prevent.
-                # Class and structure refusals come BEFORE the gates, and the
-                # order is load-bearing. A group is not a value-bearing field
-                # at all, so filling one is meaningless rather than merely
-                # forbidden - and CC-4's lock gate, reached first, answered
-                # with "pass ignore_control_locks to override", which is
-                # advice that would still be wrong after the override: the
-                # group's "content" is the controls inside it.
-                refusal = None
-                for entry in hits:
-                    info = self._sdt_info_for_ordinal(entry.ordinal)
-                    cls = info.cls if info is not None else entry.cls_word
-                    refusal = refuse_class(cls, entry.ordinal)
-                    if refusal is None and info is not None:
-                        refusal = refuse_value(info, entry.ordinal, edit.value)
-                    if refusal is not None:
-                        errors.append(f"- Edit {i + 1} Failed: {refusal}")
-                        break
-                if refusal is not None:
-                    continue
-
-                for entry in hits:
-                    span = self._cc_content_range(entry.ordinal)
-                    info = self._sdt_info_for_ordinal(entry.ordinal)
-                    if span is None:
-                        # No ANCHOR is not the same as no content span, and
-                        # conflating them opened a hole (CC-21): a checkbox is
-                        # deliberately unanchored for projection economy
-                        # (CC-1: 3,800+ per document), so `continue` here
-                        # skipped EVERY control gate for a checkbox fill -
-                        # read-only protection, forms protection, the
-                        # untracked-write gate and the content lock alike. A
-                        # `set_field` toggled a locked checkbox in a read-only
-                        # document with no override, silently.
-                        #
-                        # The genuinely span-less classes (group, repeating,
-                        # repeating-item) never reach this loop: `refuse_class`
-                        # rejects them above as not value-bearing. So anything
-                        # arriving here without a span is gateable, and the
-                        # honest default is to gate it rather than wave it
-                        # through.
-                        if info is None or info.cls != "checkbox":
-                            continue
-                        # Gated as the toggle it will become. G11 reads the
-                        # target/new pair and only sanctions the `[ ]`/`[x]`
-                        # swap, so handing it the raw value ("false") would
-                        # refuse the very operation `set_field` exists to do.
-                        from adeu.redline.gates import CHECKBOX_STATES
-                        from adeu.utils.field_write import parse_checkbox_value
-
-                        wanted = parse_checkbox_value(edit.value)
-                        current = CHECKBOX_STATES[1] if info.checked else CHECKBOX_STATES[0]
-                        new_token = CHECKBOX_STATES[1] if wanted else CHECKBOX_STATES[0]
-                        gate_err = self._check_control_gates(
-                            i + 1,
-                            ModifyText(
-                                type="modify",
-                                target_text=current,
-                                new_text=new_token,
-                                comment=edit.comment,
-                            ),
-                            self.mapper,
-                            0,
-                            0,
-                            final_target=current,
-                            final_new=new_token,
-                            known_controls=[info],
-                            from_set_field=True,
-                        )
-                        if gate_err:
-                            errors.append(gate_err)
-                            break
-                        continue
-                    start, end = span
-                    current = self.mapper.full_text[start:end]
-                    # Gated as the edit it will BECOME, not as the SetField:
-                    # the desugared ModifyText is what reaches the apply
-                    # layer, so checking anything else here would let
-                    # validation and application disagree.
-                    probe = ModifyText(
-                        type="modify",
-                        target_text=current,
-                        new_text=edit.value,
-                        comment=edit.comment,
-                    )
-                    probe._parent_edit_ref = edit
-                    gate_err = self._check_control_gates(
-                        i + 1,
-                        probe,
-                        self.mapper,
-                        start,
-                        end - start,
-                        final_target=current,
-                        final_new=edit.value,
-                        known_controls=[info] if info is not None else None,
-                        from_set_field=True,
-                    )
-                    if gate_err:
-                        errors.append(gate_err)
-                        break
+                errors.extend(self._validate_set_field_edit(edit, i + 1))
                 continue
             if (
                 getattr(edit, "_match_start_index", None) is not None
@@ -4186,71 +4192,14 @@ class RedlineEngine:
                         edit._insert_host_el = host
                 resolved_edits.append((edit, getattr(edit, "new_text", None)))
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
-                # Simplified resolution for structural edits
-                matches = self.mapper.drop_virtual_only_matches(self.mapper.find_all_match_indices(edit.target_text))
-                resolved_mapper = self.mapper
-                if not matches:
-                    # Try clean view
-                    if not self.clean_mapper:
-                        self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
-                    matches = self.clean_mapper.drop_virtual_only_matches(
-                        self.clean_mapper.find_all_match_indices(edit.target_text)
-                    )
-                    resolved_mapper = self.clean_mapper
-
-                if matches:
-                    match_mode = getattr(edit, "match_mode", "strict")
-
-                    unique_matches = []
-                    seen_trs = set()
-
-                    for m_start, m_len in matches:
-                        anchor_run, anchor_paragraph = resolved_mapper.get_insertion_anchor(m_start, rebuild_map=False)
-                        target_element = None
-                        if anchor_run:
-                            target_element = anchor_run._element
-                        elif anchor_paragraph:
-                            target_element = anchor_paragraph._element
-
-                        tr = None
-                        curr = target_element
-                        while curr is not None:
-                            if curr.tag == qn("w:tr"):
-                                tr = curr
-                                break
-                            curr = curr.getparent()
-
-                        if tr is not None and tr not in seen_trs:
-                            seen_trs.add(tr)
-                            unique_matches.append((m_start, m_len))
-
-                    if unique_matches:
-                        matches_to_apply = unique_matches
-                        if match_mode in ("strict", "first"):
-                            matches_to_apply = unique_matches[:1]
-
-                        if match_mode == "all" or len(matches_to_apply) > 1:
-                            for m_start, _m_len in matches_to_apply:
-                                sub_edit = deepcopy(edit)
-                                sub_edit._resolved_start_idx = m_start
-                                sub_edit._active_mapper_ref = resolved_mapper
-                                sub_edit._parent_edit_ref = edit
-                                resolved_edits.append((sub_edit, None))
-                        else:
-                            edit._resolved_start_idx = matches_to_apply[0][0]
-                            edit._active_mapper_ref = resolved_mapper
-                            resolved_edits.append((edit, None))
-                    else:
-                        skipped += 1
-                        edit._applied_status = False
-                        target_snippet = edit.target_text.strip()[:40]
-                        msg = f"- Failed to locate row target: '{target_snippet}...'"
-                        self.skipped_details.append(msg)
-                        edit._error_msg = msg
-                else:
+                sub_edits, err_msg = self._resolve_structural_table_edit(edit)
+                if err_msg:
                     skipped += 1
-                    target_snippet = edit.target_text.strip()[:40]
-                    self.skipped_details.append(f"- Failed to apply structural edit targeting: '{target_snippet}...'")
+                    edit._applied_status = False
+                    self.skipped_details.append(err_msg)
+                    edit._error_msg = err_msg
+                else:
+                    resolved_edits.extend(sub_edits)
             else:
                 try:
                     resolved = self._pre_resolve_heuristic_edit(edit, index_offset=edit_idx)

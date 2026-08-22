@@ -375,31 +375,6 @@ def _heading_text_fast(
     return _truncate_outline_text(cleaned.strip())
 
 
-def _collect_footnote_ids_fast(owned_items: list) -> List[str]:
-    """
-    Walks owned (kind, item) tuples, collecting footnote/endnote references
-    in document order, deduplicated, with first-seen order preserved.
-    """
-    seen: set = set()
-    ordered: List[str] = []
-
-    for kind, item in owned_items:
-        if kind != "p":
-            continue
-        for event in _iter_paragraph_events(item):
-            if event.type == "footnote":
-                fn_id = f"fn-{event.id}"
-            elif event.type == "endnote":
-                fn_id = f"en-{event.id}"
-            else:
-                continue
-            if fn_id not in seen:
-                seen.add(fn_id)
-                ordered.append(fn_id)
-
-    return ordered
-
-
 _NO_FOOTNOTE_IDS: List[str] = []
 
 

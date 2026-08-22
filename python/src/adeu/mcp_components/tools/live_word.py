@@ -1245,38 +1245,6 @@ if sys.platform == "win32":
         mapping.append(len(raw_text))
         return "".join(clean_chars), mapping
 
-    def _process_accept_change(stats, revisions_map, change):
-        if change.target_id in revisions_map:
-            revisions_map[change.target_id].Accept()
-            stats["applied"] += 1
-        else:
-            stats["failed"] += 1
-            stats["skipped_details"].append(f"- Revision {change.target_id} not found or lost to drift.")
-            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
-
-    def _process_reject_change(stats, revisions_map, change):
-        if change.target_id in revisions_map:
-            revisions_map[change.target_id].Reject()
-            stats["applied"] += 1
-        else:
-            stats["failed"] += 1
-            stats["skipped_details"].append(f"- Revision {change.target_id} not found or lost to drift.")
-            logger.warning(f"Revision {change.target_id} not found or lost to drift.")
-
-    def _process_reply_comment(stats, doc, change):
-        try:
-            target_idx = int(change.target_id.split(":")[1]) + 1
-            com_to_reply = doc.Comments(target_idx)
-            try:
-                com_to_reply.Replies.Add(com_to_reply.Range, change.text)
-            except Exception:
-                doc.Comments.Add(com_to_reply.Range, change.text)
-            stats["applied"] += 1
-        except Exception as e:
-            stats["failed"] += 1
-            stats["skipped_details"].append(f"- Comment {change.target_id} not found.")
-            logger.warning(f"Comment {change.target_id} not found. {e}")
-
     async def process_active_word_batch(
         ctx: Context,
         changes: List[DocumentChange],

@@ -576,16 +576,6 @@ def _extract_schema_failures(exc: "ValidationError") -> tuple[list[tuple[int, st
     return failed, prose
 
 
-def _format_batch_validation_error(exc: "ValidationError") -> str:
-    """
-    Renders a Pydantic ValidationError on the changes batch as a plain-language
-    message. The raw dump leaks discriminated-union internals and a pydantic.dev
-    URL without ever naming the valid 'type' values (QA M5).
-    """
-    _, prose = _extract_schema_failures(exc)
-    return prose
-
-
 def _load_batch_from_json(path: Path) -> List[DocumentChange]:
     """
     Loads a batch of changes from a JSON file in the unified

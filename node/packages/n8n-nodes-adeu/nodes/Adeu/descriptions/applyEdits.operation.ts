@@ -22,6 +22,13 @@ import {
   parseJsonParameter,
 } from "../GenericFunctions";
 
+const applyEditsDisplayOptions = {
+  show: {
+    resource: ["document"],
+    operation: ["applyEdits"],
+  },
+};
+
 export const applyEditsDescription: INodeProperties[] = [
   {
     displayName: "Reasoning",
@@ -33,12 +40,7 @@ export const applyEditsDescription: INodeProperties[] = [
     },
     description:
       "Why these edits are being made. State your reasoning BEFORE the changes — what you intend to change and why — then produce the Changes (JSON) array. This field is captured for auditability and is NOT forwarded into the redline engine; its only purpose is to make the AI reason first, which improves edit quality. Safe to leave empty in deterministic (non-AI) pipelines.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Input Binary Property",
@@ -49,12 +51,7 @@ export const applyEditsDescription: INodeProperties[] = [
     placeholder: "e.g. data",
     description:
       "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. The file must be a valid .docx.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Output Binary Property",
@@ -65,12 +62,7 @@ export const applyEditsDescription: INodeProperties[] = [
     placeholder: "e.g. data",
     description:
       "Name of the binary property on the outgoing item that will hold the redlined .docx file (string, e.g. 'data'). If equal to the input property name, the original binary is overwritten on the outgoing item.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Author",
@@ -80,12 +72,7 @@ export const applyEditsDescription: INodeProperties[] = [
     placeholder: "e.g. AI Reviewer",
     description:
       "Author name attached to all tracked changes and comments produced by this operation (string, e.g. 'AI Reviewer'). Shows up in Word's review pane as the author of every redline and comment created in this batch.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Edits Source",
@@ -109,12 +96,7 @@ export const applyEditsDescription: INodeProperties[] = [
           "Read the array from a property on the upstream item's JSON. Use for deterministic pipelines where a non-AI node has pre-populated the changes array.",
       },
     ],
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "JSON Path on Input Item",
@@ -172,12 +154,7 @@ export const applyEditsDescription: INodeProperties[] = [
     default: true,
     description:
       "Whether to auto-extract the post-edit document as Markdown (with CriticMarkup) and include it in the outgoing JSON under the 'markdown' field. Useful for feeding the updated state back into a downstream AI Agent for review or further edits. Adds extraction overhead per call.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Allow Partial Application",
@@ -189,12 +166,7 @@ export const applyEditsDescription: INodeProperties[] = [
       "False (default) is transactional: if any single change is invalid, nothing is applied and the document is returned untouched. " +
       "True is salvage mode: valid changes are applied and saved, 'status' on the output JSON reads 'partial', and 'stats.failed' lists each failure with its 0-based index in the submitted array. " +
       "Salvage mode is for AI Agent loops that will fix and resubmit the rejected changes; do not use it where a half-applied redline would be shipped as final.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   // CC-4 write-gate overrides (spec-gates.md §1). Three separate toggles
   // rather than one "force": they license different things, and a single
@@ -208,12 +180,7 @@ export const applyEditsDescription: INodeProperties[] = [
       "Whether to apply edits even inside content-locked or grouped content controls. " +
       "Word itself refuses these edits, so by default Adeu rejects them rather than reporting a success " +
       "the document will not contain. Enable only when the document owner has accepted that the lock is wrong.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Ignore Document Protection",
@@ -224,12 +191,7 @@ export const applyEditsDescription: INodeProperties[] = [
       "Whether to apply changes even when the document carries enforced editing protection " +
       "(read-only, fill-in-forms, comments-only or tracked-changes-only). " +
       "The restriction is honoured as the author's stated intent, not cracked; this bypasses it deliberately.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
   {
     displayName: "Allow Untracked Writes",
@@ -241,12 +203,7 @@ export const applyEditsDescription: INodeProperties[] = [
       "fill-in-forms-protected documents, where Word does not record revisions at all and Adeu cannot " +
       "honour its always-tracked guarantee. Separate from Ignore Document Protection because it concedes " +
       "Adeu's own output guarantee rather than bypassing the author's restriction; every such write is flagged.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyEdits"],
-      },
-    },
+    displayOptions: applyEditsDisplayOptions,
   },
 ];
 export async function executeApplyEdits(

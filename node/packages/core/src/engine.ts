@@ -3725,6 +3725,158 @@ export class RedlineEngine {
     return null;
   }
 
+  private _resolve_structural_table_edit(edit: any): {
+    sub_edits: Array<[any, string | null]>;
+    err_msg: string | null;
+  } {
+    let matches = this.mapper.drop_virtual_only_matches(
+      this.mapper.find_all_match_indices(edit.target_text),
+    );
+    let resolved_mapper = this.mapper;
+    if (matches.length === 0) {
+      if (!this.clean_mapper) {
+        this.clean_mapper = new DocumentMapper(this.doc, true);
+      }
+      matches = this.clean_mapper.drop_virtual_only_matches(
+        this.clean_mapper.find_all_match_indices(edit.target_text),
+      );
+      resolved_mapper = this.clean_mapper;
+    }
+
+    if (matches.length === 0) {
+      const target_snippet = (edit.target_text || "").trim().substring(0, 40);
+      return {
+        sub_edits: [],
+        err_msg: `- Failed to apply structural edit targeting: '${target_snippet}...'`,
+      };
+    }
+
+    const match_mode = edit.match_mode || "strict";
+    const unique_matches: [number, number][] = [];
+    const seen_trs = new Set<any>();
+
+    for (const match of matches) {
+      const start_idx = match[0];
+      const [anchor_run, anchor_para] = resolved_mapper.get_insertion_anchor(start_idx, false);
+      let target_element: Element | null = null;
+      if (anchor_run) target_element = anchor_run._element;
+      else if (anchor_para) target_element = anchor_para._element;
+
+      let tr: Element | null = target_element;
+      while (tr && tr.tagName !== "w:tr") tr = tr.parentNode as Element;
+
+      if (tr && !seen_trs.has(tr)) {
+        seen_trs.add(tr);
+        unique_matches.push(match);
+      }
+    }
+
+    if (unique_matches.length === 0) {
+      const target_snippet = (edit.target_text || "").trim().substring(0, 40);
+      return {
+        sub_edits: [],
+        err_msg: `- Failed to locate row target: '${target_snippet}...'`,
+      };
+    }
+
+    let matches_to_apply = unique_matches;
+    if (match_mode === "strict" || match_mode === "first") {
+      matches_to_apply = unique_matches.slice(0, 1);
+    }
+
+    const sub_edits: Array<[any, string | null]> = [];
+    if (match_mode === "all" || matches_to_apply.length > 1) {
+      for (const m of matches_to_apply) {
+        const sub_edit = {
+          ...edit,
+          _resolved_start_idx: m[0],
+          _active_mapper_ref: resolved_mapper,
+          _parent_edit_ref: edit,
+        };
+        sub_edits.push([sub_edit, null]);
+      }
+    } else {
+      edit._resolved_start_idx = matches_to_apply[0][0];
+      edit._active_mapper_ref = resolved_mapper;
+      sub_edits.push([edit, null]);
+    }
+
+    return { sub_edits, err_msg: null };
+  }
+
+  private _validate_set_field_edit(edit: any, edit_idx: number): string[] {
+    const errors: string[] = [];
+    let hits: FieldEntry[];
+    try {
+      hits = this._resolve_set_field_targets(edit);
+    } catch (e: any) {
+      return [`- Edit ${edit_idx} Failed: ${e?.message ?? e}`];
+    }
+
+    let refusal: string | null = null;
+    for (const entry of hits) {
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+      refusal = refuseClass(info ? info.cls : entry.cls_word, entry.ordinal);
+      if (!refusal && info) refusal = refuseValue(info, entry.ordinal, edit.value);
+      if (refusal) {
+        return [`- Edit ${edit_idx} Failed: ${refusal}`];
+      }
+    }
+
+    for (const entry of hits) {
+      const span = this._cc_content_range(entry.ordinal);
+      const info = this._sdt_info_for_ordinal(entry.ordinal);
+      if (!span) {
+        if (!info || info.cls !== "checkbox") continue;
+        const wanted = parseCheckboxValue(edit.value);
+        const cbCurrent = info.checked ? CHECKBOX_STATES[1] : CHECKBOX_STATES[0];
+        const cbNew = wanted ? CHECKBOX_STATES[1] : CHECKBOX_STATES[0];
+        const cbErr = this._check_control_gates(
+          edit_idx,
+          { type: "modify", target_text: cbCurrent, new_text: cbNew, comment: null } as any,
+          this.mapper,
+          0,
+          0,
+          cbCurrent,
+          cbNew,
+          [info],
+          true,
+        );
+        if (cbErr) {
+          errors.push(cbErr);
+          break;
+        }
+        continue;
+      }
+      const [start, end] = span;
+      const current = this.mapper.full_text.slice(start, end);
+      const probe: any = {
+        type: "modify",
+        target_text: current,
+        new_text: edit.value,
+        comment: edit.comment ?? null,
+      };
+      probe._parent_edit_ref = edit;
+      const gate_err = this._check_control_gates(
+        edit_idx,
+        probe,
+        this.mapper,
+        start,
+        end - start,
+        current,
+        edit.value,
+        info ? [info] : null,
+        true,
+      );
+      if (gate_err) {
+        errors.push(gate_err);
+        break;
+      }
+    }
+
+    return errors;
+  }
+
   public validate_edits(edits: any[], index_offset: number = 0): string[] {
     const errors: string[] = [];
     if (!this.mapper.full_text) this.mapper["_build_map"]();
@@ -3746,109 +3898,7 @@ export class RedlineEngine {
       // string-shape checks above still apply. Checked BEFORE the empty-target
       // rejection below: pinned pure insertions legitimately carry no target.
       if (edit.type === "set_field") {
-        // Resolve the field NOW, before anything is written. An unresolvable
-        // or ambiguous target is the recoverable half of A4.2, and the batch
-        // contract promises those fail the whole run without touching the
-        // document.
-        let hits: FieldEntry[];
-        try {
-          hits = this._resolve_set_field_targets(edit);
-        } catch (e: any) {
-          errors.push(`- Edit ${i + 1 + index_offset} Failed: ${e?.message ?? e}`);
-          continue;
-        }
-
-        // Class and structure refusals come BEFORE the gates, and the order
-        // is load-bearing. A group is not a value-bearing field at all, so
-        // filling one is meaningless rather than merely forbidden - and the
-        // lock gate, reached first, answered with "pass ignore_control_locks
-        // to override", advice that would still be wrong after the override.
-        let refusal: string | null = null;
-        for (const entry of hits) {
-          const info = this._sdt_info_for_ordinal(entry.ordinal);
-          refusal = refuseClass(info ? info.cls : entry.cls_word, entry.ordinal);
-          if (!refusal && info) refusal = refuseValue(info, entry.ordinal, edit.value);
-          if (refusal) {
-            errors.push(`- Edit ${i + 1 + index_offset} Failed: ${refusal}`);
-            break;
-          }
-        }
-        if (refusal) continue;
-
-        // A4.12: a fill is gated exactly as any other edit, WITH the same
-        // teaching error. The apply-layer backstop already refuses locked
-        // controls, but it answers generically - so the caller learns that
-        // something went wrong and nothing about what or how to proceed.
-        for (const entry of hits) {
-          const span = this._cc_content_range(entry.ordinal);
-          const info = this._sdt_info_for_ordinal(entry.ordinal);
-          if (!span) {
-            // No ANCHOR is not the same as no content span, and conflating
-            // them opened a hole (CC-21): a checkbox is deliberately
-            // unanchored for projection economy (CC-1: 3,800+ per document),
-            // so `continue` here skipped EVERY control gate for a checkbox
-            // fill - read-only protection, forms protection, the
-            // untracked-write gate and the content lock alike. A `set_field`
-            // toggled a locked checkbox in a read-only document with no
-            // override, silently.
-            //
-            // The genuinely span-less classes (group, repeating,
-            // repeating-item) never reach this loop: `refuseClass` rejects
-            // them above as not value-bearing. So anything arriving here
-            // without a span is gateable, and the honest default is to gate it
-            // rather than wave it through.
-            if (!info || info.cls !== "checkbox") continue;
-            // Gated as the toggle it will become. G11 reads the target/new
-            // pair and only sanctions the `[ ]`/`[x]` swap, so handing it the
-            // raw value ("false") would refuse the very operation `set_field`
-            // exists to do.
-            const wanted = parseCheckboxValue(edit.value);
-            const cbCurrent = info.checked ? CHECKBOX_STATES[1] : CHECKBOX_STATES[0];
-            const cbNew = wanted ? CHECKBOX_STATES[1] : CHECKBOX_STATES[0];
-            const cbErr = this._check_control_gates(
-              i + 1 + index_offset,
-              { type: "modify", target_text: cbCurrent, new_text: cbNew, comment: null } as any,
-              this.mapper,
-              0,
-              0,
-              cbCurrent,
-              cbNew,
-              [info],
-              true,
-            );
-            if (cbErr) {
-              errors.push(cbErr);
-              break;
-            }
-            continue;
-          }
-          const [start, end] = span;
-          const current = this.mapper.full_text.slice(start, end);
-          // Gated as the edit it will BECOME, not as the SetField: the
-          // desugared ModifyText is what reaches the apply layer.
-          const probe: any = {
-            type: "modify",
-            target_text: current,
-            new_text: edit.value,
-            comment: edit.comment ?? null,
-          };
-          probe._parent_edit_ref = edit;
-          const gate_err = this._check_control_gates(
-            i + 1 + index_offset,
-            probe,
-            this.mapper,
-            start,
-            end - start,
-            current,
-            edit.value,
-            info ? [info] : null,
-            true,
-          );
-          if (gate_err) {
-            errors.push(gate_err);
-            break;
-          }
-        }
+        errors.push(...this._validate_set_field_edit(edit, i + 1 + index_offset));
         continue;
       }
       if (
@@ -5339,88 +5389,14 @@ export class RedlineEngine {
         }
         resolved_edits.push([edit, edit.new_text || null]);
       } else if (edit.type === "insert_row" || edit.type === "delete_row") {
-        let matches = this.mapper.drop_virtual_only_matches(
-          this.mapper.find_all_match_indices(edit.target_text),
-        );
-        let resolved_mapper = this.mapper;
-        if (matches.length === 0) {
-          if (!this.clean_mapper) {
-            this.clean_mapper = new DocumentMapper(this.doc, true);
-          }
-          matches = this.clean_mapper.drop_virtual_only_matches(
-            this.clean_mapper.find_all_match_indices(edit.target_text),
-          );
-          resolved_mapper = this.clean_mapper;
-        }
-
-        if (matches.length > 0) {
-          const match_mode = edit.match_mode || "strict";
-
-          // We need to resolve matches to unique w:tr elements to deduplicate them.
-          const unique_matches: [number, number][] = [];
-          const seen_trs = new Set<any>();
-
-          for (const match of matches) {
-            const start_idx = match[0];
-            const [anchor_run, anchor_para] = resolved_mapper.get_insertion_anchor(start_idx, false);
-            let target_element: Element | null = null;
-            if (anchor_run) target_element = anchor_run._element;
-            else if (anchor_para) target_element = anchor_para._element;
-
-            let tr: Element | null = target_element;
-            while (tr && tr.tagName !== "w:tr") tr = tr.parentNode as Element;
-
-            if (tr) {
-              if (!seen_trs.has(tr)) {
-                seen_trs.add(tr);
-                unique_matches.push(match);
-              }
-            }
-          }
-
-          if (unique_matches.length > 0) {
-            let matches_to_apply = unique_matches;
-            if (match_mode === "strict" || match_mode === "first") {
-              matches_to_apply = unique_matches.slice(0, 1);
-            }
-
-            if (match_mode === "all" || matches_to_apply.length > 1) {
-              // Create sub-edits for each match so that they are processed as independent operations,
-              // and the occurrences_modified and applied_status are tracked correctly on the parent.
-              for (const m of matches_to_apply) {
-                const sub_edit = {
-                  ...edit,
-                  _resolved_start_idx: m[0],
-                  _active_mapper_ref: resolved_mapper,
-                  _parent_edit_ref: edit,
-                };
-                resolved_edits.push([sub_edit, null]);
-              }
-            } else {
-              // Single match case for non-"all" modes
-              edit._resolved_start_idx = matches_to_apply[0][0];
-              edit._active_mapper_ref = resolved_mapper;
-              resolved_edits.push([edit, null]);
-            }
-          } else {
-            skipped++;
-            edit._applied_status = false;
-            const target_snippet = (edit.target_text || "")
-              .trim()
-              .substring(0, 40);
-            const msg = `- Failed to locate row target: '${target_snippet}...'`;
-            this.skipped_details.push(msg);
-            edit._error_msg = msg;
-          }
-        } else {
+        const { sub_edits, err_msg } = this._resolve_structural_table_edit(edit);
+        if (err_msg) {
           skipped++;
           edit._applied_status = false;
-          const target_snippet = (edit.target_text || "")
-            .trim()
-            .substring(0, 40);
-          const msg = `- Failed to locate row target: '${target_snippet}...'`;
-          this.skipped_details.push(msg);
-          edit._error_msg = msg;
+          this.skipped_details.push(err_msg);
+          edit._error_msg = err_msg;
+        } else {
+          resolved_edits.push(...sub_edits);
         }
       } else {
         let resolved: any;
