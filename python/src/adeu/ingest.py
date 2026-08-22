@@ -568,6 +568,15 @@ def build_paragraph_text(
     # used only to decide whether the next incoming run can elide adjacent markers.
     current_style = ("", "")
 
+    def flush_pending() -> None:
+        nonlocal pending_text, current_wrappers, current_style
+        if pending_text:
+            s_tok, e_tok = current_wrappers
+            parts.append(f"{s_tok}{pending_text}{e_tok}")
+            pending_text = ""
+            current_wrappers = ("", "")
+            current_style = ("", "")
+
     items = list(iter_paragraph_content(paragraph, part=part, sdt_infos=sdt_infos))
 
     # Heading-leading-whitespace strip: in heading paragraphs, leading runs
@@ -643,9 +652,7 @@ def build_paragraph_text(
                     current_style = new_style
                 else:
                     # FLUSH: wrapper group boundary.
-                    if pending_text:
-                        s_tok, e_tok = current_wrappers
-                        parts.append(f"{s_tok}{pending_text}{e_tok}")
+                    flush_pending()
                     pending_text = seg
                     current_wrappers = new_wrappers
                     current_style = new_style
@@ -722,12 +729,7 @@ def build_paragraph_text(
                                 # box closes.
                                 pending_meta_block = meta_block
                             else:
-                                if pending_text:
-                                    s_tok, e_tok = current_wrappers
-                                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                                    pending_text = ""
-                                    current_wrappers = ("", "")
-                                    current_style = ("", "")
+                                flush_pending()
                                 parts.append(f"{{>>{meta_block}<<}}")
                         deferred_meta_states = []
 
@@ -800,12 +802,7 @@ def build_paragraph_text(
 
             # Anchor tokens are structural and must NOT be swept into the
             # emphasis/CriticMarkup group being accumulated.
-            if pending_text:
-                s_tok, e_tok = current_wrappers
-                parts.append(f"{s_tok}{pending_text}{e_tok}")
-                pending_text = ""
-                current_wrappers = ("", "")
-                current_style = ("", "")
+            flush_pending()
             if item.type == "sdt_start":
                 parts.append(info.open_token)
                 # The placeholder bubble is virtual chrome: raw view only,
@@ -831,12 +828,7 @@ def build_paragraph_text(
                 "fmt_start",
                 "fmt_end",
             ):
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
 
             if item.type == "start":
                 active_comments.add(item.id)
@@ -857,67 +849,30 @@ def build_paragraph_text(
             elif item.type == "image":
                 if clean_view and active_del:
                     continue
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 alt = (item.date or "image").replace("]", ")").replace("\n", " ")
                 parts.append(f"![{alt}](docx-image:{item.id})")
             elif item.type in ("footnote", "endnote"):
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 prefix_str = "fn" if item.type == "footnote" else "en"
                 parts.append(f"[^{prefix_str}-{item.id}]")
             elif item.type == "hyperlink_start":
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 parts.append("[")
             elif item.type == "hyperlink_end":
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 parts.append(f"]({item.date})")
             elif item.type == "xref_start":
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 parts.append("[~")
             elif item.type == "xref_end":
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 parts.append(f"~](#{item.id})")
             elif item.type == "bookmark":
-                if pending_text:
-                    s_tok, e_tok = current_wrappers
-                    parts.append(f"{s_tok}{pending_text}{e_tok}")
-                    pending_text = ""
-                    current_wrappers = ("", "")
-                    current_style = ("", "")
+                flush_pending()
                 parts.append(f"{{#{item.id}}}")
 
-    if pending_text:
-        s_tok, e_tok = current_wrappers
-        parts.append(f"{s_tok}{pending_text}{e_tok}")
+    flush_pending()
 
     if deferred_meta_states:
         meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)

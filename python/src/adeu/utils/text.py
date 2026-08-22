@@ -6,9 +6,7 @@ from typing import List
 from diff_match_patch import diff_match_patch
 
 # Default cap for echoing caller-supplied strings (target_text/new_text) back
-# in batch reports and error messages. Reports feed straight into LLM context
-# windows via MCP, so an oversized edit value must never be reflected in full
-# (QA C2: a 2MB new_text was echoed twice, unbounded, in the apply report).
+# in batch reports and error messages.
 REPORT_ECHO_CAP = 500
 
 # Tighter cap for the inline redline preview snippets ({--...--}{++...++}),

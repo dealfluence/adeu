@@ -18,14 +18,7 @@ def levenshtein_distance(s1: str, s2: str) -> int:
 
 
 _TERM_BODY = r"[A-Z][A-Za-z0-9\s\-&\'’]{1,60}"
-# Definition typography, matched repeatedly within a paragraph (QA 2026-07-18
-# M7 — a paragraph defining Alpha, Beta AND Gamma must yield all three):
-#   1. paragraph-leading quoted term (optionally after a numbering token)
-#   2. sentence-leading quoted term (after . ; : ! ?)
-#   3. parenthesized inline definition — (the "Term")
 _LEADING_TERM_RE = re.compile(rf"^(?:[\d\.\-\(\)a-zA-Z]+\s*)?[\"“]({_TERM_BODY})[\"”]")
-# Like the leading pattern, a sentence-start definition may carry a numbering
-# token ('… the product. 2.2 "Beta" means …').
 _SENTENCE_TERM_RE = re.compile(rf"(?<=[\.\;\:\!\?])\s+(?:[\d\.\-\(\)a-zA-Z]+\s+)?[\"“]({_TERM_BODY})[\"”]")
 _INLINE_TERM_RE = re.compile(rf'\([^)]*?["“]({_TERM_BODY})["”][^)]*?\)')
 

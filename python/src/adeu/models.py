@@ -20,22 +20,7 @@ _MATCH_MODE_SYNONYMS = {
 
 
 def const_to_enum(schema: Any) -> None:
-    """Recursively rewrite JSON-Schema ``const`` to a one-member ``enum``.
-
-    Pydantic v2 serializes a single-value ``Literal["x"]`` to ``{"const": "x"}``.
-    Gemini's function-calling API rejects ``const`` outright, so any Gemini-based
-    client hitting this server fails — most visibly on the
-    ``process_document_batch.changes`` discriminator (a ``Literal`` per variant),
-    but also on plain literals nested in unions such as ``read_docx``'s
-    ``page`` (``Literal["all"]``). ``{"enum": ["x"]}`` is semantically identical
-    (a one-member enum) and is accepted everywhere, matching how the Node server
-    declares these. See issue #37.
-
-    Designed to be passed as a Pydantic ``json_schema_extra`` callable: it mutates
-    the field's schema dict in place and recurses into nested ``anyOf``/``oneOf``
-    branches. Validation behaviour is unchanged — Pydantic still enforces the
-    underlying ``Literal``.
-    """
+    """Recursively rewrite JSON-Schema ``const`` to a one-member ``enum`` for schema compatibility."""
     if isinstance(schema, dict):
         if "const" in schema:
             schema["enum"] = [schema.pop("const")]

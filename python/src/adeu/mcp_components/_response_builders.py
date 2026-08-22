@@ -102,6 +102,18 @@ def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _make_builder_result(llm_content: Any, ui_markdown: str, file_path: str) -> BuilderResult:
+    p = Path(file_path)
+    return BuilderResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ui_markdown,
+            "title": p.name,
+            "file_path": str(p.resolve()),
+        },
+    )
+
+
 SEARCH_TOKENS_PER_MATCH = 60
 CHARS_PER_TOKEN = 4
 SNIPPET_RADIUS_LADDER = (120, 60, 30, 16)
@@ -345,14 +357,7 @@ def build_full_document_response(
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
     llm_content = ui_markdown if no_chrome else _with_path_header(file_path, fields_banner, ui_markdown)
-    return BuilderResult(
-        content=llm_content,
-        structured_content={
-            "markdown": ui_markdown,
-            "title": Path(file_path).name,
-            "file_path": str(Path(file_path).resolve()),
-        },
-    )
+    return _make_builder_result(llm_content, ui_markdown, file_path)
 
 
 def build_paginated_response(
@@ -403,14 +408,7 @@ def build_paginated_response(
         # Prepend the path ONLY for the LLM
         llm_content = _with_path_header(file_path, fields_banner, ui_markdown)
 
-    return BuilderResult(
-        content=llm_content,
-        structured_content={
-            "markdown": ui_markdown,
-            "title": Path(file_path).name,
-            "file_path": str(Path(file_path).resolve()),
-        },
-    )
+    return _make_builder_result(llm_content, ui_markdown, file_path)
 
 
 def build_page_range_response(
@@ -476,14 +474,7 @@ def build_page_range_response(
     ui_markdown = "\n\n".join(ui_parts)
     llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
-    return BuilderResult(
-        content=llm_content,
-        structured_content={
-            "markdown": ui_markdown,
-            "title": Path(file_path).name,
-            "file_path": str(Path(file_path).resolve()),
-        },
-    )
+    return _make_builder_result(llm_content, ui_markdown, file_path)
 
 
 def build_outline_response(
@@ -572,14 +563,7 @@ def build_outline_response(
         # Prepend the path ONLY for the LLM
         llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
 
-    return BuilderResult(
-        content=llm_content,
-        structured_content={
-            "markdown": ui_markdown,
-            "title": Path(file_path).name,
-            "file_path": str(Path(file_path).resolve()),
-        },
-    )
+    return _make_builder_result(llm_content, ui_markdown, file_path)
 
 
 def build_budget_guard_message(

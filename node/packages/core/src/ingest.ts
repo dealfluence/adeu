@@ -480,6 +480,15 @@ export function build_paragraph_text(
   );
   let leading_strip_active = is_heading;
 
+  const flushPending = () => {
+    if (pending_text) {
+      parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+      pending_text = "";
+      current_wrappers = ["", ""];
+      current_style = ["", ""];
+    }
+  };
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
 
@@ -546,10 +555,7 @@ export function build_paragraph_text(
           }
           current_style = new_style;
         } else {
-          if (pending_text)
-            parts.push(
-              `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-            );
+          flushPending();
           pending_text = seg;
           current_wrappers = new_wrappers;
           current_style = new_style;
@@ -632,14 +638,7 @@ export function build_paragraph_text(
                 // multi-line annotation. Hold it until the box closes.
                 pending_meta_block = meta_block;
               } else {
-                if (pending_text) {
-                  parts.push(
-                    `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-                  );
-                  pending_text = "";
-                  current_wrappers = ["", ""];
-                  current_style = ["", ""];
-                }
+                flushPending();
                 parts.push(`{>>${meta_block}<<}`);
               }
             }
@@ -715,12 +714,7 @@ export function build_paragraph_text(
 
       // Anchor tokens are structural and must NOT be swept into the emphasis /
       // CriticMarkup group being accumulated.
-      if (pending_text) {
-        parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
-        pending_text = "";
-        current_wrappers = ["", ""];
-        current_style = ["", ""];
-      }
+      flushPending();
       if (item.type === "sdt_start") {
         parts.push(openToken(info));
         // The placeholder bubble is virtual chrome: raw view only, dropped in
@@ -746,14 +740,7 @@ export function build_paragraph_text(
           "fmt_end",
         ].includes(ev.type)
       ) {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
       }
 
       if (ev.type === "start") active_comments.add(ev.id);
@@ -774,71 +761,28 @@ export function build_paragraph_text(
           parts.push(`![${alt}](docx-image:${ev.id})`);
         }
       } else if (ev.type === "footnote" || ev.type === "endnote") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push(`[^${ev.type === "footnote" ? "fn" : "en"}-${ev.id}]`);
       } else if (ev.type === "hyperlink_start") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push("[");
       } else if (ev.type === "hyperlink_end") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push(`](${ev.date})`);
       } else if (ev.type === "xref_start") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push("[~");
       } else if (ev.type === "xref_end") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push(`~](#${ev.id})`);
       } else if (ev.type === "bookmark") {
-        if (pending_text) {
-          parts.push(
-            `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-          );
-          pending_text = "";
-          current_wrappers = ["", ""];
-          current_style = ["", ""];
-        }
+        flushPending();
         parts.push(`{#${ev.id}}`);
       }
     }
   }
 
-  if (pending_text)
-    parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+  flushPending();
 
   if (deferred_meta_states.length > 0) {
     const meta_block = _build_merged_meta_block(

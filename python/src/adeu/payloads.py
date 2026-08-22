@@ -222,27 +222,7 @@ def _shrink_prose(edit: Dict[str, Any], key: str, value: str, floor: int) -> Non
 
 
 def _fit_to_budget(edit: Dict[str, Any]) -> None:
-    """
-    Spends the per-edit budget in priority order, in place.
-
-    The engine's verification evidence outranks the locator: `pages` already
-    says where the edit landed, so the preview's context and then the heading
-    path are surrendered before a CriticMarkup bubble is touched. An engine
-    `warning` is clamped next: it is prose about a change the preview shows as
-    markup (a surviving "$1" appears verbatim in the {++…++} bubble), and at
-    ~260 chars the surviving-$N advisory alone is six times the whole budget.
-    It is clamped, never dropped — an edit the caller must re-check may not go
-    unflagged. Only then are the bubble bodies clamped, in place so the markup
-    stays valid, and then `pages`: a fan-out across a dozen pages is a page list
-    no preview shrink can pay for.
-
-    The last resort is the preview itself. A warned fan-out cannot hold bounded
-    bubbles, a span count, counters AND an advisory in 40 approx-tokens, and of
-    those the preview is the one the agent can re-derive (read the document
-    again); an advisory it never saw is gone for good. Dropping it whole also
-    keeps the promise the shrink makes about markup: what ships is either valid
-    CriticMarkup or nothing.
-    """
+    """Spends the per-edit budget in priority order, in place."""
     markup = edit.get("critic_markup")
     if markup:
         span = _changed_span(markup)
