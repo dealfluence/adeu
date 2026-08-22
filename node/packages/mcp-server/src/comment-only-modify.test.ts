@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, createTestDocument, extract_comments_data } from "@adeu/core";
+import { DocumentObject, extract_comments_data } from "@adeu/core";
+import { createTestDocument } from "../../core/src/test-utils.js";
 import { coerceChangeItemInPlace, CHANGE_ITEM_SCHEMA } from "./index.js";
 import { startTestServer, TestServer } from "./test-rpc.js";
 

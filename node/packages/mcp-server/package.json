@@ -15,7 +15,7 @@
     "build": "tsup && tsc --emitDeclarationOnly",
     "postbuild": "npm run build:verify",
     "build:verify": "node scripts/verify-bundle.js",
-    "test": "vitest run",
+    "test": "vitest run --fileParallelism=false",
     "start": "node ./dist/index.js"
   },
   "repository": {

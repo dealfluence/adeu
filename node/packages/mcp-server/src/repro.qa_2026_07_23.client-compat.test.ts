@@ -50,7 +50,8 @@ import {
   mkdtempSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, createTestDocument, addParagraph } from "@adeu/core";
+import { DocumentObject } from "@adeu/core";
+import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 

@@ -25,7 +25,8 @@ import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, createTestDocument, addParagraph } from "@adeu/core";
+import { DocumentObject } from "@adeu/core";
+import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 

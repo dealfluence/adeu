@@ -34,7 +34,8 @@ import {
   mkdtempSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, RedlineEngine, createTestDocument, addParagraph } from "@adeu/core";
+import { DocumentObject, RedlineEngine } from "@adeu/core";
+import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
