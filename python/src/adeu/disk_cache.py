@@ -1,10 +1,3 @@
-"""
-On-disk projection cache for Adeu CLI reads.
-
-Skips DOCX parsing and Virtual Text projection on repeated CLI reads (`adeu extract`)
-of unchanged files.
-"""
-
 import dataclasses
 import hashlib
 import json
@@ -18,21 +11,17 @@ from adeu.outline import OutlineNode
 
 
 def get_default_cache_dir() -> Path:
-    env_dir = os.environ.get("ADEU_CACHE_DIR")
-    if env_dir:
+    if env_dir := os.environ.get("ADEU_CACHE_DIR"):
         return Path(env_dir)
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if base:
+        if base := (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")):
             return Path(base) / "adeu" / "Cache"
         return Path.home() / ".cache" / "adeu"
-    elif sys.platform == "darwin":
+    if sys.platform == "darwin":
         return Path.home() / "Library" / "Caches" / "adeu"
-    else:
-        xdg = os.environ.get("XDG_CACHE_HOME")
-        if xdg:
-            return Path(xdg) / "adeu"
-        return Path.home() / ".cache" / "adeu"
+    if xdg := os.environ.get("XDG_CACHE_HOME"):
+        return Path(xdg) / "adeu"
+    return Path.home() / ".cache" / "adeu"
 
 
 def is_cache_disabled() -> bool:
@@ -44,7 +33,7 @@ def is_cache_disabled() -> bool:
 def serialize_outline_nodes(nodes: Optional[List[Any]]) -> Optional[List[Dict[str, Any]]]:
     if nodes is None:
         return None
-    res = []
+    res: List[Dict[str, Any]] = []
     for node in nodes:
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             res.append(dataclasses.asdict(node))
@@ -83,9 +72,7 @@ class DiskProjectionCache:
 
     @property
     def cache_dir(self) -> Path:
-        if self._custom_cache_dir is not None:
-            return self._custom_cache_dir
-        return get_default_cache_dir()
+        return self._custom_cache_dir if self._custom_cache_dir is not None else get_default_cache_dir()
 
     @cache_dir.setter
     def cache_dir(self, value: Optional[Union[Path, str]]) -> None:
@@ -112,10 +99,6 @@ class DiskProjectionCache:
         return self.cache_dir / f"{key_hash}.json"
 
     def get(self, file_path: Union[Path, str], clean_view: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        Retrieves cached projection dict for `file_path` and `clean_view`.
-        Returns None if cache is disabled, entry is missing, invalid, or corrupt.
-        """
         if is_cache_disabled():
             return None
 
@@ -131,25 +114,18 @@ class DiskProjectionCache:
                 self._misses += 1
                 return None
 
-            text_data = cache_file.read_text(encoding="utf-8")
-            data = json.loads(text_data)
-
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
             key = data.get("key")
-            if not isinstance(key, dict):
-                self._misses += 1
-                return None
+            views = data.get("views")
 
             if (
-                key.get("abspath") != abspath
+                not isinstance(key, dict)
+                or not isinstance(views, dict)
+                or key.get("abspath") != abspath
                 or key.get("mtime_ns") != mtime_ns
                 or key.get("size") != size
                 or key.get("version") != __version__
             ):
-                self._misses += 1
-                return None
-
-            views = data.get("views")
-            if not isinstance(views, dict):
                 self._misses += 1
                 return None
 
@@ -161,7 +137,7 @@ class DiskProjectionCache:
 
             self._hits += 1
             res = dict(view_data)
-            if "outline_nodes" in res and res["outline_nodes"] is not None:
+            if res.get("outline_nodes") is not None:
                 res["outline_nodes"] = deserialize_outline_nodes(res["outline_nodes"])
             return res
 
@@ -170,10 +146,6 @@ class DiskProjectionCache:
             return None
 
     def put(self, file_path: Union[Path, str], clean_view: bool, view_data: Dict[str, Any]) -> None:
-        """
-        Stores view projection dict into cache for `file_path` and `clean_view`.
-        Fails silently on any I/O / permission error.
-        """
         if is_cache_disabled():
             return
 
@@ -199,8 +171,7 @@ class DiskProjectionCache:
 
             if cache_file.is_file():
                 try:
-                    existing_raw = cache_file.read_text(encoding="utf-8")
-                    existing_data = json.loads(existing_raw)
+                    existing_data = json.loads(cache_file.read_text(encoding="utf-8"))
                     if (
                         isinstance(existing_data, dict)
                         and existing_data.get("key") == key_dict
@@ -212,7 +183,7 @@ class DiskProjectionCache:
 
             view_key = "clean" if clean_view else "raw"
             serializable_view = dict(view_data)
-            if "outline_nodes" in serializable_view and serializable_view["outline_nodes"] is not None:
+            if serializable_view.get("outline_nodes") is not None:
                 serializable_view["outline_nodes"] = serialize_outline_nodes(serializable_view["outline_nodes"])
 
             views = data.setdefault("views", {})
@@ -222,7 +193,6 @@ class DiskProjectionCache:
             else:
                 views[view_key] = serializable_view
 
-            # Serialize and write
             content = json.dumps(data, ensure_ascii=False)
             tmp_file = cache_file.with_suffix(".tmp")
             tmp_file.write_text(content, encoding="utf-8")
