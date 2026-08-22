@@ -5,13 +5,24 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
 
 import structlog
-from docx import Document
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from adeu.domain import build_structural_appendix
 from adeu.redline.comments import CommentsManager
+from adeu.utils.content_controls import (
+    CHECKBOX_CHROME_EVENTS,
+    CHECKBOX_CLOSE,
+    CHECKBOX_OPEN,
+    QN_W_SDTCONTENT,
+    BlockSdt,
+    SdtEvent,
+    assign_ordinals,
+    next_closes_checkbox,
+    part_element,
+    wrapping_sdt,
+)
 from adeu.utils.docx import (
     DocxEvent,
     ProjectedRun,
@@ -30,6 +41,7 @@ from adeu.utils.docx import (
     paragraph_mark_is_deleted,
     strip_bom_from_docx_bytes,
 )
+from adeu.utils.opc import load_document as Document
 from adeu.utils.text import escape_critic_tokens
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +77,17 @@ class ExtractStructure:
 
     part_ranges: List[Tuple[int, int, str]] = field(default_factory=list)  # (start, end, kind)
     tables: List[TableGeometry] = field(default_factory=list)
+
+
+def _anchored_wrapper(element: Any, sdt_infos: dict | None):
+    """The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors."""
+    if not sdt_infos:
+        return None
+    sdt = wrapping_sdt(element)
+    if sdt is None:
+        return None
+    info = sdt_infos.get(id(sdt))
+    return info if info is not None and info.anchored else None
 
 
 def extract_text_from_stream(
@@ -136,6 +159,13 @@ def _extract_text_from_doc(
     comments_mgr = CommentsManager(doc)
     comments_map = comments_mgr.extract_comments_data()
 
+    # Ordinals are assigned ONCE, over the parts in projection order, and the
+    # resulting map is threaded through every level below. Spec-projection.md
+    # §9 requires this to be a single shared pre-pass rather than a counter
+    # each producer maintains: a counter is exactly the shape of bug CC-12 was
+    # (two producers agreeing with each other and both wrong).
+    sdt_infos = assign_ordinals(part_element(part) for part, _kind in iter_document_parts_with_kind(doc))
+
     full_text: list[str] = []
     # Store the lxml proxy as the 3rd tuple item to keep it alive, preventing
     # CPython from recycling the id() memory address between passes.
@@ -154,6 +184,7 @@ def _extract_text_from_doc(
             offset_map=offset_map,
             cursor=part_cursor,
             table_acc=structure.tables if structure is not None else None,
+            sdt_infos=sdt_infos,
         )
         if part_text:
             if full_text:
@@ -190,6 +221,8 @@ def _extract_blocks(
     style_cache: dict | None = None,
     default_pstyle: str | None = None,
     part: Any = None,
+    sdt_infos: dict | None = None,
+    in_cell: bool = False,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
@@ -222,7 +255,7 @@ def _extract_blocks(
     is_first_block = len(blocks) == 0
 
     is_first_para = True
-    for item in iter_block_items(container):
+    for item in iter_block_items(container, emit_sdt=sdt_infos is not None):
         i_type = type(item).__name__
 
         if not is_first_block:
@@ -230,13 +263,53 @@ def _extract_blocks(
 
         block_start = local_cursor
 
-        if i_type == "FootnoteItem":
+        if isinstance(item, BlockSdt):
+            # A block-level content control. Recurse into its contents exactly
+            # as a Table recurses into its rows, then bracket the result with
+            # token lines: open token on its own line, a single "\n" joining it
+            # to the wrapped content, close token on its own line (spec §3/§5).
+            # The surrounding "\n\n" comes from the block join, as for any
+            # other block.
+            info = sdt_infos.get(id(item.element)) if sdt_infos else None
+            # Spec §3 exception: inside a table cell a block-level anchor
+            # renders INLINE. A row is one projected line, so token lines would
+            # break the "|" grammar and desynchronise the column count.
+            joiner = "" if in_cell else "\n"
+            open_tok = close_tok = ""
+            if info is not None and info.anchored:
+                open_tok = f"{info.open_token}{joiner}"
+                close_tok = f"{joiner}{info.close_token}"
+            inner = _extract_blocks(
+                item.element.find(QN_W_SDTCONTENT),
+                comments_map,
+                clean_view,
+                offset_map=offset_map,
+                cursor=block_start + len(open_tok),
+                sdt_infos=sdt_infos,
+                style_cache=style_cache,
+                default_pstyle=default_pstyle,
+                part=part,
+                in_cell=in_cell,
+            )
+            if inner:
+                full = f"{open_tok}{inner}{close_tok}"
+                blocks.append(full)
+                local_cursor = block_start + len(full)
+                is_first_block = False
+            elif not is_first_block:
+                # Projects nothing: the reader drops the block AND its
+                # separator, same contract as an empty table.
+                local_cursor -= 2
+            is_first_para = False
+
+        elif i_type == "FootnoteItem":
             fn_text = _extract_blocks(
                 item,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
                 cursor=block_start,
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
             )
@@ -265,6 +338,7 @@ def _extract_blocks(
                 default_pstyle,
                 paragraph_prefix=style_prefix,
                 part=part,
+                sdt_infos=sdt_infos,
             )
             if clean_view and not p_text and paragraph_mark_is_deleted(p_elem):
                 # Accepting a tracked paragraph-mark deletion merges the
@@ -297,6 +371,7 @@ def _extract_blocks(
                 offset_map=offset_map,
                 cursor=block_start,
                 geometry=geometry,
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
@@ -326,6 +401,7 @@ def extract_table(
     style_cache: dict | None = None,
     default_pstyle: str | None = None,
     part: Any = None,
+    sdt_infos: dict | None = None,
 ) -> str:
     """
     Args:
@@ -374,16 +450,24 @@ def extract_table(
             if not first_cell:
                 cell_cursor += 3  # " | " between cells
 
+            cell_info = _anchored_wrapper(tc, sdt_infos)
+            cell_open = cell_info.open_token if cell_info else ""
             cell_content = _extract_blocks(
                 tc,
                 comments_map,
                 clean_view,
                 offset_map=offset_map,
-                cursor=cell_cursor,
+                cursor=cell_cursor + len(cell_open),
+                sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
+                in_cell=True,
             )
+            if cell_info is not None:
+                # Cell-level control (sdtContent > w:tc): anchors render inline
+                # inside this cell's segment (spec §3).
+                cell_content = f"{cell_open}{cell_content}{cell_info.close_token}"
             if not clean_view:
                 first_p_list = tc.findall(".//" + qn("w:p"))
                 firstP = first_p_list[0] if first_p_list else None
@@ -397,6 +481,16 @@ def extract_table(
             first_cell = False
 
         row_str = " | ".join(cell_texts)
+
+        # Row-level control (sdtContent > w:tr): open token before the first
+        # cell's text, close after the last, on the row's line (spec §3).
+        # Applied before the tracked-change wrapper below so a row that is both
+        # controlled and inserted reads "{++ {#cc:N}...{#/cc:N} ++}" — the
+        # CriticMarkup is about the row's existence, the anchor about its
+        # identity, and the anchor is the inner of the two.
+        row_info = _anchored_wrapper(tr, sdt_infos)
+        if row_info is not None:
+            row_str = f"{row_info.open_token}{row_str}{row_info.close_token}"
 
         if not clean_view:
             # The change bubble is SEPARATED from cell content, mirroring the
@@ -435,6 +529,7 @@ def build_paragraph_text(
     default_pstyle: Optional[str] = None,
     paragraph_prefix: Optional[str] = None,
     part: Any = None,
+    sdt_infos: Optional[dict] = None,
 ):
     """
     Flatten overlapping comments into sequential CriticMarkup blocks.
@@ -463,6 +558,9 @@ def build_paragraph_text(
     active_fmt: dict[str, DocxEvent] = {}
 
     deferred_meta_states = []
+    #: A change annotation built but held back because the checkbox it belongs
+    #: to has not closed yet (CC-19). Emitted at `checkbox_end`.
+    pending_meta_block: Optional[str] = None
 
     pending_text = ""
     current_wrappers = ("", "")  # CriticMarkup tokens, e.g. ("{++", "++}")
@@ -470,7 +568,7 @@ def build_paragraph_text(
     # used only to decide whether the next incoming run can elide adjacent markers.
     current_style = ("", "")
 
-    items = list(iter_paragraph_content(paragraph, part=part))
+    items = list(iter_paragraph_content(paragraph, part=part, sdt_infos=sdt_infos))
 
     # Heading-leading-whitespace strip: in heading paragraphs, leading runs
     # whose text is whitespace-only (e.g. a lone <w:br/> or <w:tab/>) are
@@ -615,14 +713,108 @@ def build_paragraph_text(
                     if not should_defer and deferred_meta_states:
                         meta_block = _build_merged_meta_block(deferred_meta_states, comments_map)
                         if meta_block:
-                            if pending_text:
-                                s_tok, e_tok = current_wrappers
-                                parts.append(f"{s_tok}{pending_text}{e_tok}")
-                                pending_text = ""
-                                current_wrappers = ("", "")
-                                current_style = ("", "")
-                            parts.append(f"{{>>{meta_block}<<}}")
+                            if next_closes_checkbox(items, i):
+                                # CC-19: this run is a checkbox's mark, and the
+                                # closing bracket has not been emitted yet.
+                                # Emitting the bubble now would split the box -
+                                # `[{--x--}{>>...<<}]` - leaving the `]` orphaned
+                                # after a multi-line annotation. Hold it until the
+                                # box closes.
+                                pending_meta_block = meta_block
+                            else:
+                                if pending_text:
+                                    s_tok, e_tok = current_wrappers
+                                    parts.append(f"{s_tok}{pending_text}{e_tok}")
+                                    pending_text = ""
+                                    current_wrappers = ("", "")
+                                    current_style = ("", "")
+                                parts.append(f"{{>>{meta_block}<<}}")
                         deferred_meta_states = []
+
+        elif isinstance(item, SdtEvent):
+            # Content-control boundary. A sibling of the DocxEvent branch
+            # rather than a member of it: DocxEvent is a 4-field NamedTuple
+            # keyed on strings, and an anchor needs the whole SdtInfo (flags,
+            # class, placeholder text), so widening DocxEvent would have meant
+            # a parallel out-of-band lookup at every consumer.
+            #
+            # Heading content has begun: an anchor is addressable text, so
+            # the leading-whitespace strip stops here exactly as it does for
+            # every other non-Run event.
+            leading_strip_active = False
+            info = item.info
+
+            # Checkbox chrome JOINS the accumulating group; anchors break it.
+            #
+            # The two look alike and are not (CC-19). An anchor delimits a
+            # region and must sit outside any wrapper, or a control inside a
+            # bold span emits `**{#cc:3}text**` and every marker-stripping pass
+            # mangles the token. A checkbox's brackets are part of the token
+            # they enclose: flushing before them put the box OUTSIDE the
+            # CriticMarkup, so a tracked toggle rendered `[{++ ++}][{--x--}]` -
+            # one checkbox drawn as two, because the chrome fires per glyph run
+            # and a toggle has two. Inside the wrapper it reads
+            # `{++[ ]++}{--[x]--}`: two states of one box, which is what
+            # happened. Emphasis is already materialised into each segment
+            # before it reaches `pending_text`, so joining the group cannot
+            # sweep a bracket inside a `**` pair.
+            if item.type in CHECKBOX_CHROME_EVENTS:
+                # The DELETED half of a tracked toggle is dropped whole in the
+                # clean view: its brackets are chrome around content the clean
+                # view discards, and keeping them renders `[ ][]` - two
+                # checkboxes where the document has one, the second
+                # permanently empty. Same rule the image branch applies.
+                if clean_view and active_del:
+                    continue
+                if item.type == "checkbox_start":
+                    chrome = CHECKBOX_OPEN
+                elif item.type == "checkbox_end":
+                    chrome = CHECKBOX_CLOSE
+                else:
+                    # Fallback only - the mark is normally a real run emitted by
+                    # the traversal, arriving through the ProjectedRun branch.
+                    chrome = info.checkbox_mark
+                new_wrappers = (
+                    ("", "") if clean_view else _get_wrappers(active_ins, active_del, active_comments, active_fmt)
+                )
+                if pending_text and new_wrappers != current_wrappers:
+                    s_tok, e_tok = current_wrappers
+                    parts.append(f"{s_tok}{pending_text}{e_tok}")
+                    pending_text = ""
+                if not pending_text:
+                    current_wrappers = new_wrappers
+                pending_text += chrome
+                # Chrome is unstyled, so the trailing segment now carries no
+                # emphasis markers for the next run to elide against.
+                current_style = ("", "")
+                if item.type == "checkbox_end" and pending_meta_block:
+                    # The box is closed; the annotation belongs after it, and
+                    # outside it.
+                    s_tok, e_tok = current_wrappers
+                    parts.append(f"{s_tok}{pending_text}{e_tok}")
+                    pending_text = ""
+                    current_wrappers = ("", "")
+                    parts.append(f"{{>>{pending_meta_block}<<}}")
+                    pending_meta_block = None
+                continue
+
+            # Anchor tokens are structural and must NOT be swept into the
+            # emphasis/CriticMarkup group being accumulated.
+            if pending_text:
+                s_tok, e_tok = current_wrappers
+                parts.append(f"{s_tok}{pending_text}{e_tok}")
+                pending_text = ""
+                current_wrappers = ("", "")
+                current_style = ("", "")
+            if item.type == "sdt_start":
+                parts.append(info.open_token)
+                # The placeholder bubble is virtual chrome: raw view only,
+                # dropped in the clean view because an unfilled field has no
+                # accepted-state content (spec §6).
+                if not clean_view and info.showing_placeholder and info.placeholder_text:
+                    parts.append(f"{{>>placeholder: {info.placeholder_text}<<}}")
+            else:
+                parts.append(info.close_token)
 
         elif isinstance(item, DocxEvent):
             # Once we see any event, real heading content has effectively begun

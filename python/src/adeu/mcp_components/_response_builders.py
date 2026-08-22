@@ -49,13 +49,15 @@ appendix text passed AS the body input.
 
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, List, Tuple
 
-from adeu.outline import _offset_to_page, extract_outline
+from adeu.fields import collect_fields, read_document_protection, render_ledger
+from adeu.outline import _offset_to_page, extract_outline, heading_path_at
 from adeu.pagination import (
     PAGE_RANGE_MAX_PAGES,
     PaginationResult,
@@ -207,6 +209,11 @@ _SNIPPET_CLOSER_OF = dict(_SNIPPET_MARKUP_PAIRS)
 _SNIPPET_OPENER_OF = {closer: opener for opener, closer in _SNIPPET_MARKUP_PAIRS}
 _SNIPPET_MARKUP_TOKEN_RE = re.compile("|".join(re.escape(t) for t in (*_SNIPPET_CLOSER_OF, *_SNIPPET_OPENER_OF)))
 
+# `{#anchor}` tokens — bookmark anchors and CC-1's `{#cc:N}` content-control
+# anchors. A snippet window or an outline truncation that lands inside one must
+# not emit the fragment (CC-1 A1.6).
+_ANCHOR_TOKEN_RE = re.compile(r"\{#[^}\n]*\}")
+
 
 def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
     """
@@ -231,10 +238,29 @@ def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
     Widening past a line break is safe: the snippet renderer quotes each line
     it spans, and the response budget drops trailing entries if the wider
     window costs too much.
+
+    `{#anchor}` tokens are kept whole on the same terms (CC-1 A1.6). They are
+    not a paired construct, so they need no depth counter — a window edge
+    landing strictly inside one just moves out to the token's own edge. A split
+    anchor is worse than a missing one: `{#cc:` is a plausible-looking target
+    an agent will copy, and the radius ladder makes it reachable in production
+    whenever a result set exceeds the response budget.
     """
     while True:
         depth = dict.fromkeys(_SNIPPET_CLOSER_OF, 0)
         widened = False
+
+        for tok in _ANCHOR_TOKEN_RE.finditer(body):
+            if tok.start() < start < tok.end():
+                start = tok.start()
+                widened = True
+            if tok.start() < end < tok.end():
+                end = tok.end()
+                widened = True
+            if tok.start() >= end:
+                break
+        if widened:
+            continue
 
         for tok in _SNIPPET_MARKUP_TOKEN_RE.finditer(body, start, end):
             token = tok.group(0)
@@ -402,7 +428,22 @@ def render_outline_tree(
     return "\n".join(lines)
 
 
-def build_full_document_response(text: str, file_path: str, no_chrome: bool = False) -> BuilderResult:
+def _with_path_header(file_path: str, fields_banner: str | None, ui_markdown: str) -> str:
+    """The LLM-only header block: File Path, then the fields banner.
+
+    spec-projection §7 puts the banner immediately after the File Path line, so
+    the two render as one blockquote. Both are chrome and both vanish under
+    `no_chrome`, which exists so the projection can round-trip.
+    """
+    header = f"> **File Path:** `{file_path}`"
+    if fields_banner:
+        header += f"\n{fields_banner}"
+    return f"{header}\n\n{ui_markdown}"
+
+
+def build_full_document_response(
+    text: str, file_path: str, no_chrome: bool = False, fields_banner: str | None = None
+) -> BuilderResult:
     """
     Returns the ENTIRE document body in one response, with no page banner,
     continuation footer, or appendix pointer.
@@ -414,7 +455,7 @@ def build_full_document_response(text: str, file_path: str, no_chrome: bool = Fa
     """
     body, _appendix = split_structural_appendix(text)
     ui_markdown = body
-    llm_content = ui_markdown if no_chrome else f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+    llm_content = ui_markdown if no_chrome else _with_path_header(file_path, fields_banner, ui_markdown)
     return BuilderResult(
         content=llm_content,
         structured_content={
@@ -432,6 +473,7 @@ def build_paginated_response(
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,
     no_chrome: bool = False,
+    fields_banner: str | None = None,
 ) -> BuilderResult:
     """
     Splits projected Markdown into pages and returns the requested page.
@@ -470,7 +512,7 @@ def build_paginated_response(
         ui_markdown = banner + selected.page_content + footer + appendix_pointer
 
         # Prepend the path ONLY for the LLM
-        llm_content = f"> **File Path:** `{file_path}`\n\n{ui_markdown}"
+        llm_content = _with_path_header(file_path, fields_banner, ui_markdown)
 
     return BuilderResult(
         content=llm_content,
@@ -1043,46 +1085,9 @@ def build_search_response(
             )
         return head
 
-    def clean_breadcrumb(raw: str) -> str:
-        # Breadcrumbs render CLEAN-view heading text: a heading carrying a
-        # pending tracked change must not leak raw CriticMarkup into the Path
-        # line (QA 2026-07-23 F22b). Deletions vanish, insertions/highlights
-        # unwrap to their text, meta bubbles drop. Because we operate on ONE
-        # line of the projection, a multi-line `{>>…<<}` bubble can be clipped
-        # by the line break — drop the unterminated tail too, then sweep any
-        # leftover delimiter fragments.
-        s = re.sub(r"\{--.*?--\}", "", raw)
-        s = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", s)
-        s = re.sub(r"\{==(.*?)==\}", r"\1", s)
-        s = re.sub(r"\{>>.*?<<\}", "", s)
-        s = re.sub(r"\{(?:>>|--).*$", "", s)  # line-clipped bubble/deletion tail
-        s = re.sub(r"\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}", "", s)  # stray fragments
-        s = re.sub(r"\*\*|__|[*_]", "", s)
-        return re.sub(r"\{#[^}]+\}", "", s).strip()
-
-    def get_heading(idx, txt):
-        path: list[str] = []
-        current_level = 999
-        # Scan through the END of the line containing the match: slicing at
-        # the match offset cuts the line in half, so a hit INSIDE a heading
-        # reported a truncated path ("Master" for a match on "Services" in
-        # "# Master Services Agreement", QA 2026-07-19 F-17).
-        line_end = txt.find("\n", idx)
-        if line_end == -1:
-            line_end = len(txt)
-        for line in reversed(txt[:line_end].split("\n")):
-            m = re.match(r"^(#{1,6})\s+(.*)", line)
-            if m:
-                level = len(m.group(1))
-                if level < current_level:
-                    clean_heading = clean_breadcrumb(m.group(2))
-                    if len(clean_heading) > 80:
-                        clean_heading = clean_heading[:80] + "..."
-                    path.insert(0, clean_heading)
-                    current_level = level
-                    if level == 1:
-                        break
-        return " > ".join(path) if path else ""
+    # Hoisted to adeu.outline for CC-2 so the fields ledger renders identical
+    # breadcrumbs from the same projection rather than a second dialect.
+    get_heading = heading_path_at
 
     # Match index is preserved from the FULL match list so an LLM that sees
     # "Match 7 (p3)" knows it is the 7th match overall, not the 7th on this page.
@@ -1386,6 +1391,55 @@ def _parse_com_header(slice_text: str) -> tuple[str, str, int]:
         return author, body, delim_offset
 
     return "", slice_text.strip(), -1
+
+
+def fields_discovery_hint(file_path: str, is_cli: bool = False) -> str:
+    """The surface-aware pointer at the fields ledger (spec-projection §7).
+
+    Surface-aware for the QA F11 reason: telling an MCP client to run a shell
+    command, or a CLI user to call a tool, is advice they cannot act on.
+    """
+    if is_cli:
+        return f" \u00b7 run `adeu extract {file_path} --mode fields` for the field ledger"
+    return ' \u00b7 read mode="fields" for the field ledger'
+
+
+def build_fields_response(
+    doc: Any,
+    text: str,
+    file_path: str,
+    offset: int = 0,
+    is_cli: bool = False,
+    pagination_result: "PaginationResult | None" = None,
+    no_chrome: bool = False,
+) -> BuilderResult:
+    """Render ``mode="fields"`` — the content-control ledger (spec §2-§4).
+
+    ``text`` must be the RAW projection: the ledger previews values by reading
+    the text between a control's anchors, so a clean view (which drops the
+    placeholder bubbles) would report a different document than the one the
+    agent edits.
+    """
+    body, _appendix = split_structural_appendix(text)
+    pag_res = pagination_result if pagination_result is not None else paginate(body, structural_appendix="")
+
+    entries = collect_fields(doc, body, pag_res.body_page_offsets)
+    protection = read_document_protection(doc)
+    ledger = render_ledger(os.path.basename(file_path) or file_path, entries, protection, offset=offset)
+
+    if no_chrome:
+        llm_content = ledger
+    else:
+        llm_content = f"> **File Path:** `{file_path}`\n\n{ledger}"
+
+    return BuilderResult(
+        content=llm_content,
+        structured_content={
+            "markdown": ledger,
+            "title": os.path.basename(file_path),
+            "file_path": file_path,
+        },
+    )
 
 
 def build_changes_response(

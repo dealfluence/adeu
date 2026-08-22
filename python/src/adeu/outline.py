@@ -17,7 +17,7 @@ footnote_ids are computed over that owned range.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, List, Optional, Sequence
 
 from docx.document import Document as DocumentObject
 from docx.table import Table
@@ -954,7 +954,16 @@ _PROTECTED_UNDERSCORE_RE = re.compile(r"\{#[^}]+\}|_{3,}")
 
 def _truncate_outline_text(text: str) -> str:
     if len(text) > _OUTLINE_TEXT_MAX_CHARS:
-        return text[:_OUTLINE_TEXT_MAX_CHARS].rstrip() + "…"
+        cut = text[:_OUTLINE_TEXT_MAX_CHARS]
+        # Never ship a SPLIT anchor token. The cut can land inside `{#cc:3}` or
+        # `{#_Ref444615940}` and emit `{#cc:`, which is not obviously broken to
+        # an agent reading the outline — it is a plausible target that resolves
+        # to nothing. A1.6 allows dropping the token entirely but never
+        # splitting it, so a dangling opener is trimmed back to its `{#`.
+        # Only an UNCLOSED fragment matches: a whole token keeps its `}`.
+        if (dangling := re.search(r"\{#[^}\n]*$", cut)) is not None:
+            cut = cut[: dangling.start()]
+        return cut.rstrip() + "…"
     return text
 
 
@@ -1181,6 +1190,63 @@ def _iter_paragraph_events(paragraph: Paragraph) -> Iterator[DocxEvent]:
 # ---------------------------------------------------------------------------
 # Internal: offset → page mapping
 # ---------------------------------------------------------------------------
+
+
+def clean_breadcrumb(raw: str) -> str:
+    """Render one projection fragment as plain prose for a breadcrumb.
+
+    Breadcrumbs show CLEAN-view heading text: a heading carrying a pending
+    tracked change must not leak raw CriticMarkup into the Path line (QA
+    2026-07-23 F22b). Deletions vanish, insertions/highlights unwrap to their
+    text, meta bubbles drop. Because callers operate on ONE line of the
+    projection, a multi-line ``{>>…<<}`` bubble can be clipped by the line
+    break — drop the unterminated tail too, then sweep leftover fragments.
+
+    Hoisted from ``build_search_response`` for CC-2: the fields ledger renders
+    the same breadcrumbs from the same projection, and two copies of these
+    substitutions would be two dialects of "clean".
+    """
+    s = re.sub(r"\{--.*?--\}", "", raw)
+    s = re.sub(r"\{\+\+(.*?)\+\+\}", r"\1", s)
+    s = re.sub(r"\{==(.*?)==\}", r"\1", s)
+    s = re.sub(r"\{>>.*?<<\}", "", s)
+    s = re.sub(r"\{(?:>>|--).*$", "", s)  # line-clipped bubble/deletion tail
+    s = re.sub(r"\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}", "", s)  # stray fragments
+    s = re.sub(r"\*\*|__|[*_]", "", s)
+    return re.sub(r"\{#[^}]+\}", "", s).strip()
+
+
+def heading_path_at(idx: int, txt: str) -> str:
+    """The heading breadcrumb for the position ``idx`` in projection ``txt``.
+
+    Scans through the END of the line containing ``idx``: slicing at the offset
+    itself cuts the line in half, so a hit INSIDE a heading reported a
+    truncated path ("Master" for a match on "Services" in "# Master Services
+    Agreement", QA 2026-07-19 F-17).
+    """
+    path: List[str] = []
+    current_level = 999
+    line_end = txt.find("\n", idx)
+    if line_end == -1:
+        line_end = len(txt)
+    for line in reversed(txt[:line_end].split("\n")):
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            level = len(m.group(1))
+            if level < current_level:
+                clean_heading = clean_breadcrumb(m.group(2))
+                if len(clean_heading) > 80:
+                    clean_heading = clean_heading[:80] + "..."
+                path.insert(0, clean_heading)
+                current_level = level
+                if level == 1:
+                    break
+    return " > ".join(path) if path else ""
+
+
+def offset_to_page(offset: int, body_page_offsets: Optional[Sequence[int]]) -> int:
+    """Public alias of :func:`_offset_to_page` (CC-2 needs it outside outline)."""
+    return _offset_to_page(offset, list(body_page_offsets or []))
 
 
 def _offset_to_page(offset: int, body_page_offsets: List[int]) -> int:

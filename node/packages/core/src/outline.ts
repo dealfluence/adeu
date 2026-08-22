@@ -439,7 +439,19 @@ function _heading_text(paragraph: Paragraph, comments_map: any): string {
 
 function _truncate_outline_text(text: string): string {
   if (text.length <= _OUTLINE_TEXT_MAX_CHARS) return text;
-  return text.substring(0, _OUTLINE_TEXT_MAX_CHARS) + "…";
+  let cut = text.substring(0, _OUTLINE_TEXT_MAX_CHARS);
+  // Never ship a SPLIT anchor token. The cut can land inside `{#cc:3}` or
+  // `{#_Ref444615940}` and emit `{#cc:`, which is not obviously broken to an
+  // agent reading the outline — it is a plausible target that resolves to
+  // nothing. A1.6 allows dropping the token entirely but never splitting it,
+  // so a dangling opener is trimmed back to its `{#`. Only an UNCLOSED
+  // fragment matches: a whole token keeps its `}`.
+  const dangling = /\{#[^}\n]*$/.exec(cut);
+  if (dangling !== null) cut = cut.substring(0, dangling.index);
+  // trimEnd() matches Python's .rstrip(). That was a live parity divergence
+  // before this change and trimming a dangling anchor makes trailing
+  // whitespace the common case rather than the rare one.
+  return cut.trimEnd() + "…";
 }
 
 function _strip_critic_markup(text: string): string {
@@ -591,6 +603,62 @@ function _collect_footnote_ids(owned_blocks: _BlockRecord[]): string[] {
     }
   }
   return ordered;
+}
+
+/**
+ * Render one projection fragment as plain prose for a breadcrumb.
+ *
+ * Breadcrumbs show CLEAN-view heading text: a heading carrying a pending
+ * tracked change must not leak raw CriticMarkup into the Path line (QA
+ * 2026-07-23 F22b). Deletions vanish, insertions/highlights unwrap, meta
+ * bubbles drop. Because callers operate on ONE line of the projection, a
+ * multi-line `{>>…<<}` bubble can be clipped by the line break — drop the
+ * unterminated tail too, then sweep leftover fragments.
+ *
+ * Hoisted from `build_search_response` for CC-2: the fields ledger renders the
+ * same breadcrumbs from the same projection, and two copies of these
+ * substitutions would be two dialects of "clean".
+ */
+export function clean_breadcrumb(raw: string): string {
+  return raw
+    .replace(/\{--.*?--\}/g, "")
+    .replace(/\{\+\+(.*?)\+\+\}/g, "$1")
+    .replace(/\{==(.*?)==\}/g, "$1")
+    .replace(/\{>>.*?<<\}/g, "")
+    .replace(/\{(?:>>|--).*$/g, "")
+    .replace(/\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}/g, "")
+    .replace(/\*\*|__|[*_]/g, "")
+    .replace(/\{#[^}]+\}/g, "")
+    .trim();
+}
+
+/**
+ * The heading breadcrumb for position `idx` in projection `txt`.
+ *
+ * Scans through the END of the line containing `idx`: slicing at the offset
+ * itself cuts the line in half, so a hit INSIDE a heading reported a truncated
+ * path ("Master" for a match on "Services" in "# Master Services Agreement",
+ * QA 2026-07-19 F-17).
+ */
+export function heading_path_at(idx: number, txt: string): string {
+  const path: string[] = [];
+  let current_level = 999;
+  const nl = txt.indexOf("\n", idx);
+  const line_end = nl === -1 ? txt.length : nl;
+  const lines = txt.slice(0, line_end).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^(#{1,6})\s+(.*)/);
+    if (!m) continue;
+    const level = m[1].length;
+    if (level >= current_level) continue;
+    let clean_heading = clean_breadcrumb(m[2]);
+    if (clean_heading.length > 80)
+      clean_heading = clean_heading.slice(0, 80) + "...";
+    path.unshift(clean_heading);
+    current_level = level;
+    if (level === 1) break;
+  }
+  return path.join(" > ");
 }
 
 export function offset_to_page(offset: number, body_page_offsets: number[]): number {

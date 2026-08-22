@@ -1,0 +1,207 @@
+{
+  "version": 1,
+  "snapshot_date": "2026-08-21",
+  "note": "Real public-sector documents exercising Word content controls. NEVER commit the documents themselves (gitignored) - fetch via scripts/fetch_corpus.py. sha256/bytes are drift indicators for the snapshot date, not hard pins. sdt_facts are the scan snapshot that corpus acceptance floors derive from.",
+  "documents": {
+    "fedramp_ssp_rev4": {
+      "file": "fedramp_ssp_rev4.docx",
+      "url": "https://www.fedramp.gov/resources/documents/rev4/REV_4_FedRAMP-SSP-Moderate-Baseline-Template.docx",
+      "landing_page": null,
+      "org": "GSA / FedRAMP PMO",
+      "title": "FedRAMP System Security Plan (SSP) Moderate Baseline Template (Rev 4)",
+      "sha256": "bb6afaadb0e8dd34205b49a3d14f5301ca17c9a612fe5714b61bdee336c818f6",
+      "bytes": 725342,
+      "sdt_facts": {
+        "total": 5007,
+        "checkbox": 3881,
+        "text": 459,
+        "date": 334,
+        "richtext": 277,
+        "combobox": 27,
+        "dropdown": 21,
+        "picture": 5,
+        "building_block": 3,
+        "bound": 94,
+        "placeholders": 718,
+        "temporary": 3,
+        "cell_level": 371,
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Scale stress-test: every control class, cell-level SDTs, w:temporary, data bindings. No landing page: FedRAMP's 2025 redesign removed the rev4 archive listing; the direct URL still serves the file (verified 200, exact size)."
+    },
+    "fedramp_ssp_appx_a_moderate": {
+      "file": "fedramp_ssp_appx_a_moderate.docx",
+      "url": "https://www.fedramp.gov/resources/templates/SSP-Appendix-A-Moderate-FedRAMP-Security-Controls.docx",
+      "landing_page": "https://www.fedramp.gov/legacy/",
+      "org": "GSA / FedRAMP PMO",
+      "title": "SSP Appendix A: Moderate FedRAMP Security Controls (Rev 5)",
+      "sha256": "b8b695d3a5b6c013f9d2e3045e6452402b95d006abce2c3695d2de7037ebc56b",
+      "bytes": 500641,
+      "sdt_facts": {
+        "total": 3805,
+        "checkbox": 3804,
+        "richtext": 1,
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Checkbox wall - [x]/[ ] projection and ledger pagination stress. FedRAMP marks rev5 as legacy (20x transition); a renamed LEGACY copy exists under /legacy/assets/, original URL still live."
+    },
+    "fedramp_ssp_rev5": {
+      "file": "fedramp_ssp_rev5.docx",
+      "url": "https://www.fedramp.gov/resources/templates/FedRAMP-High-Moderate-Low-LI-SaaS-Baseline-System-Security-Plan-(SSP).docx",
+      "landing_page": "https://www.fedramp.gov/legacy/",
+      "org": "GSA / FedRAMP PMO",
+      "title": "FedRAMP High Moderate Low LI-SaaS Baseline System Security Plan (SSP) (Rev 5)",
+      "sha256": "e05d7fb0021cf42f7fe15eed5c21362e99a0182ccb6f428b1015babc59226c48",
+      "bytes": 220001,
+      "sdt_facts": {
+        "total": 76,
+        "text": 43,
+        "date": 12,
+        "richtext": 11,
+        "checkbox": 3,
+        "building_block": 7,
+        "bound": 55,
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Binding-heavy modern template."
+    },
+    "fedramp_sar": {
+      "file": "fedramp_sar.docx",
+      "url": "https://www.fedramp.gov/resources/templates/FedRAMP-Security-Assessment-Report-(SAR)-Template.docx",
+      "landing_page": "https://www.fedramp.gov/legacy/",
+      "org": "GSA / FedRAMP PMO",
+      "title": "FedRAMP Security Assessment Report (SAR) Template (Rev 5)",
+      "sha256": "a779218bd12a5c52f26f8a5edd8896fcd8515801975e9a5f7c09f8228864b9a7",
+      "bytes": 149146,
+      "sdt_facts": {
+        "total": 14,
+        "richtext": 9,
+        "building_block": 5,
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Building-block controls mixed with rich text."
+    },
+    "dau_acquisition_plan": {
+      "file": "dau_acquisition_plan.docx",
+      "url": "https://www.dau.edu/sites/default/files/Migrated/CopDocuments/Acquisition%20Plan%20ADDM%20Template%20v2.2.docx",
+      "landing_page": "https://www.dau.edu/artifact/acquisition-plan-template",
+      "org": "Defense Acquisition University (DoD)",
+      "title": "Acquisition Plan ADDM Template v2.2",
+      "sha256": "759aeac72a3b144b1232ea52693ee19cbed4530591b9c7498ad955a935b3b8d5",
+      "bytes": 90993,
+      "sdt_facts": {
+        "total": 162,
+        "richtext": 159,
+        "building_block": 2,
+        "text": 1,
+        "locks": {
+          "sdtContentLocked": 27,
+          "contentLocked": 21
+        },
+        "placeholders": 40,
+        "protection": null
+      },
+      "notes": "48 locked controls; ZERO tags/aliases (anonymous-control reality); custom instructional placeholders. dau.edu 301-redirects to waru.edu (official rebrand after the Department of War renaming); redirect served by the official dau.edu host, file intact (exact size verified). ADDM = Acquisition Document Development & Management."
+    },
+    "ca_talent_recruitment": {
+      "file": "ca_talent_recruitment.docx",
+      "url": "https://talent.canada.ca/static/documents/Digital_Recruitment_Template_EN.docx",
+      "landing_page": "https://talent.canada.ca/en/directive-on-digital-talent",
+      "org": "Treasury Board of Canada Secretariat, Office of the CIO / GC Digital Talent",
+      "title": "Digital Recruitment Template (EN)",
+      "sha256": "e8923d989e5bd32855c44102e528a8f8942e5a04b300fa086be751f27e9883ab",
+      "bytes": 90730,
+      "sdt_facts": {
+        "total": 10,
+        "richtext": 7,
+        "date": 2,
+        "dropdown": 1,
+        "cell_level": 1,
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Canadian federal; dropdown's first listItem is its own prompt ('Choose a type.'). canada.ca bot-blocks automated fetches - manual download may be required. Unlike www.canada.ca, talent.canada.ca answered plain curl (200 + 206 PK probe) - automated fetch may work."
+    },
+    "wawd_esi_agreement": {
+      "file": "wawd_esi_agreement.docx",
+      "url": "https://www.wawd.uscourts.gov/sites/wawd/files/Model%20ESI%20Agreement.docx",
+      "landing_page": "https://www.wawd.uscourts.gov/court-forms",
+      "org": "US District Court, Western District of Washington",
+      "title": "Model Agreement Regarding Discovery of Electronically Stored Information",
+      "sha256": "0a105d27ede4e6e4359b4ef15b55c1a8fd63eaa98353cab4cbcdf35a1382f034",
+      "bytes": 53716,
+      "sdt_facts": {
+        "total": 3,
+        "text": 3,
+        "bound": 3,
+        "placeholders": 3,
+        "tags": [
+          "Plaintiff",
+          "Defendant",
+          "Case #"
+        ],
+        "locks": {},
+        "protection": null
+      },
+      "notes": "Court document; every field data-bound + placeholder; tags contain spaces and '#'. The court concurrently serves newer revisions (ModelESIAgreement.docx, ModelESIAgreement_CLEAN_2.1.23.docx - the one currently linked); our snapshot is the older space-named file, still live at exact size."
+    },
+    "odot_uic_drywell": {
+      "file": "odot_uic_drywell.dotx",
+      "url": "https://www.oregon.gov/odot/hydraulics/Documents/FSM_Template_UIC_Drywell.dotx",
+      "landing_page": "https://www.oregon.gov/odot/hydraulics/pages/stormwater-facility-maintenance.aspx",
+      "org": "Oregon DOT, Hydraulics / Stormwater Facility Maintenance",
+      "title": "Facility Specific Manual (FSM) Template - UIC Drywell",
+      "sha256": "a38109b250d368d7fc52671d9ba700e3fc472d456b1e89fe13456ba3f5e83f29",
+      "bytes": 99276,
+      "sdt_facts": {
+        "total": 38,
+        "text": 10,
+        "picture": 5,
+        "checkbox": 19,
+        "building_block": 4,
+        "bound": 10,
+        "placeholders": 5,
+        "cell_level": 12,
+        "locks": {},
+        "protection": null
+      },
+      "notes": ".dotx handling; picture controls; cell-level controls. FSM = Facility Specific (O&M) Manual. Sibling FSM .dotx templates live in the same /Documents/ path."
+    },
+    "on_juries_form1": {
+      "file": "on_juries_form1.docx",
+      "url": "https://ontariocourtforms.on.ca/static/media/uploads/courtforms/jury/1/juries-form-1-en-feb2026-web.docx",
+      "landing_page": "https://ontariocourtforms.on.ca/en/juries-act-forms/1/",
+      "org": "Ontario Ministry of the Attorney General / Ontario Court Forms",
+      "title": "Form 1, Juries Act - Jury Eligibility Form (EN, Feb 2026 web)",
+      "sha256": "7a02a64fd090b85a4b38a87af3232922576ae1c321de1311f45dd659316ded31",
+      "bytes": 44694,
+      "sdt_facts": {
+        "total": 0,
+        "locks": {},
+        "protection": "edit=forms enforcement=1 (password hash present)"
+      },
+      "notes": "Zero SDTs but ENFORCED fill-in-forms protection - the G4/G5 gate exemplar on a real court form. Snapshot is the feb2026 revision the landing page links; older revisions live in the Juries Act Forms Archive."
+    },
+    "hc_diagnostic_nonlab": {
+      "file": "hc_diagnostic_nonlab.docx",
+      "url": "https://www.canada.ca/content/dam/hc-sc/documents/services/drugs-health-products/covid19-industry/medical-devices/testing/antigen-devices/fda-guidance-template-manufacturers-molecular-antigen-diagnostic-tests-non-laboratory-use/diagnostic-nonlab-template-eng.docx",
+      "landing_page": "https://www.canada.ca/en/health-canada/services/drugs-health-products/covid19-industry/medical-devices/testing/antigen-devices/fda-guidance-template-manufacturers-molecular-antigen-diagnostic-tests-non-laboratory-use.html",
+      "org": "Health Canada",
+      "title": "Template for manufacturers of molecular and antigen diagnostic COVID-19 tests for non-laboratory use",
+      "sha256": "efd254f60327044fba0a6641affaff1df76f74a50899b5939ca28d7815f1f1a2",
+      "bytes": 70169,
+      "sdt_facts": {
+        "total": 1,
+        "building_block": 1,
+        "locks": {},
+        "protection": null,
+        "negative_id": true
+      },
+      "notes": "Building-block chrome only; negative w:sdt id in the wild. canada.ca bot-blocks automated fetches. www.canada.ca TLS-resets curl (Akamai) - expect the fetcher to fall back to manual instructions; URL verified via a real browser (200, Word MIME, PK magic)."
+    }
+  }
+}

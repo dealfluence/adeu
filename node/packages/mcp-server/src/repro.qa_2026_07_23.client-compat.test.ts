@@ -177,6 +177,27 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
     ).toEqual([]);
   });
 
+  it("the fields ledger surface survives client stripping (A2.7)", () => {
+    // The generic walkers below already cover every property, but CC-2 added a
+    // mode and an offset to the most heavily used tool in the server, so the
+    // acceptance criterion is pinned by name rather than left implicit.
+    const readDocx = allTools.find((t) => t.name === "read_docx")!;
+    const props: any = readDocx.inputSchema.properties;
+
+    expect(props.mode.enum).toContain("fields");
+    expect(props.mode.type).toBe("string");
+    expect(props.mode.anyOf ?? props.mode.oneOf).toBeUndefined();
+    expect(props.fields_offset).toBeDefined();
+    expect(props.fields_offset.anyOf ?? props.fields_offset.oneOf).toBeUndefined();
+
+    // Documented, or the model cannot reach it: the description is the only
+    // channel guaranteed to survive to the client.
+    expect(readDocx.description).toContain("mode='fields'");
+    expect(readDocx.description.length).toBeLessThanOrEqual(
+      CLIENT_DESCRIPTION_BUDGET,
+    );
+  });
+
   it("no property schema publishes a type union — clients strip anyOf/oneOf to {}", () => {
     // Walk every property schema (including array item schemas). A schema
     // node "publishes a union" if it carries anyOf/oneOf, and it is "bare"

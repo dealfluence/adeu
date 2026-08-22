@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import structlog
-from docx import Document as load_document
 from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -22,6 +21,7 @@ from adeu.models import DeleteTableRow, InsertTableRow
 from adeu.pagination import parse_page_arg
 from adeu.redline.engine import validate_edit_strings, validate_review_action_batch
 from adeu.redline.mapper import DocumentMapper, renumber_snapshot_ids
+from adeu.utils.opc import load_document
 from adeu.utils.text import batch_details_header
 
 logger = structlog.get_logger(__name__)
@@ -212,6 +212,7 @@ if sys.platform == "win32":
         ModifyText,
         RejectChange,
         ReplyComment,
+        SetField,
     )
 
     def is_document_open_in_word(file_path: Optional[str]) -> bool:
@@ -289,8 +290,6 @@ if sys.platform == "win32":
         and avoids the COM round-trip overhead that dominated the old character-by-
         character traversal.
         """
-        from docx import Document as load_document
-
         from adeu.ingest import _extract_text_from_doc
 
         pythoncom.CoInitialize()
@@ -340,6 +339,7 @@ if sys.platform == "win32":
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,
@@ -457,6 +457,25 @@ if sys.platform == "win32":
                         assert isinstance(page_val, int)
                         page_num = page_val
                     res = build_appendix_response(final_text, page_num, actual_path)
+                elif mode == "fields":
+                    # CC-2 added mode="fields" to the disk path and to this
+                    # tool's schema, but the live path never grew a branch for
+                    # it — so it fell through to `full` below and returned the
+                    # WHOLE DOCUMENT to a caller who asked for the ledger, with
+                    # nothing anywhere saying so.
+                    #
+                    # Refused loudly instead of guessed at. Not implemented
+                    # here rather than wired up because the ledger needs the
+                    # w:sdt tree and this path holds a COM snapshot; doing it
+                    # properly is CC-2's call, not a drive-by. Found on
+                    # Windows only: both the caller and this branch live under
+                    # `if sys.platform == "win32"`, which mypy skips on macOS.
+                    raise ToolError(
+                        "mode='fields' is not available for a document open in Word. "
+                        "The fields ledger is built from the file's content-control tree, "
+                        "which the live canvas does not expose. Close the document, or pass "
+                        "original_docx_path to read the file on disk instead."
+                    )
                 else:
                     # mode == "full"
                     page_num = 1
@@ -569,7 +588,10 @@ if sys.platform == "win32":
         return None
 
     def _process_active_word_batch_core(
-        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+        changes: List[DocumentChange],
+        author_name: str,
+        file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> dict[str, Any]:
         stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
@@ -648,7 +670,29 @@ if sys.platform == "win32":
             cached_mapping = None
 
         actions = [c for c in changes if isinstance(c, (AcceptChange, RejectChange, ReplyComment))]
-        edits = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
+        edits: list = [c for c in changes if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))]
+
+        # `set_field` is not implemented on the Live Word path: it applies
+        # changes through COM, not through the engine's apply layer, and the
+        # fill writers (attribute syncs, bound-store dual-writes, placeholder
+        # clearing) exist only in the latter.
+        #
+        # Refused explicitly rather than filtered out. Both of the lists above
+        # exclude SetField, so a fill sent here would otherwise be neither an
+        # action nor an edit — silently dropped, reported as a successful
+        # batch, with the field never filled. That is the exact failure class
+        # spec-gates §7 calls the most expensive bug an agent can consume, and
+        # it is invisible to the non-Windows engine because this whole branch
+        # is `if sys.platform == "win32"`.
+        unsupported = [c for c in changes if isinstance(c, SetField)]
+        if unsupported:
+            stats["failed"] = len(unsupported)
+            stats["skipped_details"].append(
+                f"- {len(unsupported)} set_field change(s) cannot be applied to the live Word "
+                "document: fills are implemented on the file-based path only. Close the document "
+                "in Word, or pass original_docx_path to edit the file on disk instead."
+            )
+            return stats
 
         # Category A: document-context-free string-shape validation — the same
         # checks the disk pipeline runs (blank replies and duplicate/conflicting
@@ -669,7 +713,10 @@ if sys.platform == "win32":
                 xml_str = doc.WordOpenXML
                 snapshot_stream = _build_mock_docx_stream(xml_str)
                 snapshot_engine = RedlineEngine(
-                    snapshot_stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT
+                    snapshot_stream,
+                    author=author_name,
+                    id_discovery_hint=MCP_ID_DISCOVERY_HINT,
+                    **(gate_overrides or {}),
                 )
                 # Bug 5: renumber the snapshot's IDs so that any error messages
                 # mention the same Chg:N / Com:N values the agent saw when it
@@ -1235,6 +1282,7 @@ if sys.platform == "win32":
         changes: List[DocumentChange],
         author_name: str,
         file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> str:
         if not changes:
             return "No changes provided."
@@ -1244,7 +1292,7 @@ if sys.platform == "win32":
 
         await ctx.info(f"Applying {len(changes)} changes to live Word document...")
         try:
-            stats = _process_active_word_batch_core(changes, author_name, file_path)
+            stats = _process_active_word_batch_core(changes, author_name, file_path, gate_overrides)
             await ctx.info(f"Live Word batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}.")
             res = f"[Live Word Mode] Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
             if "author_overridden_by_word" in stats:
@@ -1327,7 +1375,10 @@ else:
         return False
 
     def _process_active_word_batch_core(
-        changes: List[DocumentChange], author_name: str, file_path: Optional[str] = None
+        changes: List[DocumentChange],
+        author_name: str,
+        file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> dict[str, Any]:
         raise NotImplementedError("Live Word is only supported on Windows.")
 
@@ -1345,6 +1396,7 @@ else:
         search_case_sensitive: bool = True,
         changes_author: Optional[str] = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
         max_matches: int = 20,
         match_offset: int = 0,
         full_paragraph: bool = False,
@@ -1356,6 +1408,7 @@ else:
         changes: List[DocumentChange],
         author_name: str,
         file_path: Optional[str] = None,
+        gate_overrides: Optional[dict] = None,
     ) -> str:
         raise NotImplementedError("Live Word is only supported on Windows.")
 

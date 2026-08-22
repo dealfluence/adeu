@@ -29,6 +29,7 @@ Virtual Text contract, so every assertion below is made against both.
 """
 
 import io
+import re
 
 import pytest
 from docx import Document
@@ -36,8 +37,11 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
+from adeu.models import ModifyText
 from adeu.outline import extract_outline
+from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
+from tests.utils import assert_word_readable_ids, corpus_path
 
 NS = (
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -54,11 +58,20 @@ def _tc(text: str) -> str:
     return f'<w:tc {NS}><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>{_p(text)}</w:tc>'
 
 
-# Row 1: a plain cell followed by a CELL-level sdt.
-# Row 2: the whole row wrapped in a ROW-level sdt.
-# Row 3: a plain row whose second cell holds a BLOCK-level sdt around a w:p.
-# Row 4: a row behind two nested sdt levels, the FedRAMP repeating-section
-#        shape (w15:repeatingSection > w15:repeatingSectionItem > w:tr).
+# The table portion of the normative standard fixture
+# (shared/fixtures/fixture-standard.md), which A0 declares
+# sufficient for A0.1-A0.4. Tags and w:id values are reproduced verbatim so
+# CC-1 can layer {#cc:N} anchors onto this same shape:
+#
+#   Row 1 - plain cell + CELL-level sdt          (fixture CC:14, tag cell_role)
+#   Row 2 - whole row wrapped in a ROW-level sdt (fixture CC:15, tag row_approver)
+#   Row 3 - plain row, BLOCK-level sdt in cell 2 (fixture CC:16, tag cell_notes)
+#
+# Row 4 has no counterpart in the standard fixture: A0.4 requires a
+# w15:repeatingSectionItem row nested one level inside another sdt (the
+# FedRAMP shape), and the fixture only carries repeating sections at block
+# level (CC:11-13). It is appended here rather than added to the fixture so
+# the fixture's normative goldens stay untouched.
 TABLE_XML = f"""<w:tbl {NS}>
   <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
   <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
@@ -66,7 +79,7 @@ TABLE_XML = f"""<w:tbl {NS}>
   <w:tr>
     {_tc("Role")}
     <w:sdt>
-      <w:sdtPr><w:alias w:val="OfficerCell"/><w:id w:val="101"/></w:sdtPr>
+      <w:sdtPr><w:tag w:val="cell_role"/><w:id w:val="201"/><w:text/></w:sdtPr>
       <w:sdtContent>
         {_tc("Contracting Officer")}
       </w:sdtContent>
@@ -74,7 +87,7 @@ TABLE_XML = f"""<w:tbl {NS}>
   </w:tr>
 
   <w:sdt>
-    <w:sdtPr><w:alias w:val="ApproverRow"/><w:id w:val="102"/></w:sdtPr>
+    <w:sdtPr><w:tag w:val="row_approver"/><w:id w:val="202"/></w:sdtPr>
     <w:sdtContent>
       <w:tr>
         {_tc("Approver")}
@@ -88,9 +101,9 @@ TABLE_XML = f"""<w:tbl {NS}>
     <w:tc>
       <w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
       <w:sdt>
-        <w:sdtPr><w:alias w:val="NoteBlock"/><w:id w:val="103"/></w:sdtPr>
+        <w:sdtPr><w:tag w:val="cell_notes"/><w:id w:val="203"/></w:sdtPr>
         <w:sdtContent>
-          {_p("Block Level Note")}
+          {_p("Approved without conditions.")}
         </w:sdtContent>
       </w:sdt>
     </w:tc>
@@ -98,12 +111,12 @@ TABLE_XML = f"""<w:tbl {NS}>
 
   <w:sdt>
     <w:sdtPr>
-      <w:alias w:val="RepeatSection"/><w:id w:val="104"/>
+      <w:tag w:val="deliverable_rows"/><w:id w:val="204"/>
       <w15:repeatingSection/>
     </w:sdtPr>
     <w:sdtContent>
       <w:sdt>
-        <w:sdtPr><w:id w:val="105"/><w15:repeatingSectionItem/></w:sdtPr>
+        <w:sdtPr><w:id w:val="205"/><w15:repeatingSectionItem/></w:sdtPr>
         <w:sdtContent>
           <w:tr>
             {_tc("Repeated")}
@@ -145,10 +158,24 @@ def _mapper_text(data: bytes, clean_view: bool) -> str:
     return DocumentMapper(Document(io.BytesIO(data)), clean_view=clean_view).full_text
 
 
+_CC_TOKEN_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
+
+
+def _strip_cc(text: str) -> str:
+    """Drop content-control anchors so CC-0's assertions stay about ROWS.
+
+    CC-1b started projecting `{#cc:N}` pairs around these very controls. That
+    is correct and asserted separately below; this suite's subject is whether
+    the wrapped rows and cells are VISIBLE AT ALL, which must keep reading the
+    same way regardless of how much chrome CC-1 adds around them.
+    """
+    return _CC_TOKEN_RE.sub("", text)
+
+
 def _row_line(text: str, first_cell: str) -> str:
     for line in text.splitlines():
-        if line.startswith(first_cell):
-            return line
+        if _strip_cc(line).startswith(first_cell):
+            return _strip_cc(line)
     raise AssertionError(f"no projected row starting with {first_cell!r} in:\n{text}")
 
 
@@ -205,6 +232,7 @@ def test_nested_repeating_section_row_is_projected(sdt_table_bytes, clean_view):
 def test_rows_project_in_document_order_exactly_once(sdt_table_bytes):
     text = _project(sdt_table_bytes, clean_view=True)
     lines = [ln for ln in text.splitlines() if ln.strip()]
+    lines = [_strip_cc(ln) for ln in lines]
     assert lines[0] == "Intro paragraph."
     assert lines[1] == "Role | Contracting Officer"
     assert lines[2] == "--- | ---"
@@ -227,7 +255,7 @@ def test_block_level_sdt_inside_a_cell_is_projected(sdt_table_bytes, clean_view)
     template placeholders.
     """
     line = _row_line(_project(sdt_table_bytes, clean_view), "Notes")
-    assert "Block Level Note" in line, f"block-level sdt still dropped: {line}"
+    assert "Approved without conditions." in line, f"block-level sdt still dropped: {line}"
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +280,93 @@ def test_mapper_offsets_resolve_sdt_wrapped_content(sdt_table_bytes, target):
     covering = [s for s in mapper.spans if s.run is not None and s.start < end and s.end > start]
     assert covering, f"no run-backed virtual-text span covers {target!r} at offset {start}"
     assert "".join(s.text for s in covering) == target
+
+
+# ---------------------------------------------------------------------------
+# A0.3 (apply half): visible must also mean editable. An edit whose target sits
+# inside a row-level content control has to resolve, and its tracked change has
+# to land INSIDE the wrapper rather than being hoisted out of it — otherwise
+# accepting the revision would detach the text from the control.
+# ---------------------------------------------------------------------------
+def _tr_count(data: bytes) -> int:
+    """Every w:tr in the package, including sdt-wrapped ones.
+
+    python-docx's ``len(table.rows)`` reads ``./w:tr`` (direct children only),
+    so it cannot see a row behind an sdt wrapper — the very rows under test.
+    """
+    return len(Document(io.BytesIO(data)).element.xpath("//w:tr"))
+
+
+def test_modify_inside_row_level_sdt_applies_as_a_tracked_change(sdt_table_bytes):
+    engine = RedlineEngine(io.BytesIO(sdt_table_bytes), author="A0 Reviewer")
+    stats = engine.process_batch([ModifyText(target_text="Jane Roe", new_text="John Roe")])
+    assert stats["edits_applied"] == 1, f"edit inside a row-level sdt did not resolve: {stats}"
+    assert stats["edits_skipped"] == 0, f"edit inside a row-level sdt was skipped: {stats}"
+
+    out = engine.save_to_stream().getvalue()
+    root = Document(io.BytesIO(out)).element
+
+    # Structure: the revision marks must be descendants of the wrapped w:tr.
+    wrapped_row = root.xpath("//w:sdt/w:sdtContent/w:tr[.//w:t[contains(text(),'Approver')]]")
+    assert wrapped_row, "the row-level content control no longer wraps a w:tr"
+    # The engine diffs at token level: "Jane Roe" -> "John Roe" shares " Roe",
+    # so only the differing token is redlined.
+    ins_text = "".join(t.text or "" for t in wrapped_row[0].xpath(".//w:ins//w:t"))
+    del_text = "".join(t.text or "" for t in wrapped_row[0].xpath(".//w:del//w:delText"))
+    assert "John" in ins_text, f"insertion did not land inside the control (got {ins_text!r})"
+    assert "Jane" in del_text, f"deletion did not land inside the control (got {del_text!r})"
+
+    # Geometry: tracked edits must not add or drop rows.
+    assert _tr_count(out) == _tr_count(sdt_table_bytes), "table row count changed"
+
+    # Projection: raw view shows the CriticMarkup pair, clean view the result.
+    assert "{--Jane--}{++John++}" in _project(out, clean_view=False)
+    clean_line = _row_line(_project(out, clean_view=True), "Approver")
+    assert clean_line.startswith("Approver | John Roe"), clean_line
+
+    assert_word_readable_ids(out, "after editing inside a row-level content control: ")
+
+
+def test_accepting_the_row_level_sdt_edit_keeps_the_control(sdt_table_bytes):
+    """Accept must leave the control in place with the new value inside it."""
+    engine = RedlineEngine(io.BytesIO(sdt_table_bytes), author="A0 Reviewer")
+    engine.process_batch([ModifyText(target_text="Jane Roe", new_text="John Roe")])
+
+    accept_engine = RedlineEngine(engine.save_to_stream(), author="A0 Reviewer")
+    accept_engine.accept_all_revisions()
+    accepted = accept_engine.save_to_stream().getvalue()
+
+    root = Document(io.BytesIO(accepted)).element
+    assert root.xpath("//w:sdt/w:sdtContent/w:tr"), "accept dissolved the row-level content control"
+    assert _tr_count(accepted) == _tr_count(sdt_table_bytes), "accept changed the table row count"
+
+    text = _project(accepted, clean_view=True)
+    assert _row_line(text, "Approver").startswith("Approver | John Roe")
+    assert "Jane Roe" not in text
+
+
+# ---------------------------------------------------------------------------
+# A5.0 — corpus scale check (skips cleanly when the document is absent).
+#
+# Was A0.5; moved into A5 on 2026-08-21 because it needs `corpus_path()`, a
+# CC-3 deliverable, while CC-3 depends on CC-0. Now on that shared helper (the
+# local resolver this file carried has been removed, as its author asked).
+#
+# Measured 2026-08-21 on the real template: 498,800 chars, floor comfortably
+# cleared. Do NOT read a green run as proof that sdt traversal works — with
+# row/cell sdt descent disabled the same document still projects 490,345 chars,
+# so this floor passes with the bug present. The discriminating check is CC-3's
+# tests/test_corpus_validation.py::test_a5_1_cell_level_sdt_content_is_visible
+# _at_scale, which asserts on text reachable ONLY through a cell-level sdt and
+# derives it from the document rather than hardcoding it. Keep both: this one
+# guards scale, that one guards the repair. See PROGRESS.md.
+# ---------------------------------------------------------------------------
+def test_fedramp_corpus_projects_at_full_scale():
+    text = _project(corpus_path("fedramp_ssp_rev4").read_bytes(), clean_view=True)
+    assert len(text) > 400_000, f"clean view projected only {len(text):,} chars"
+
+    # The shape CC-0 actually repaired: 371 cell-level SDTs in this template.
+    assert "Information System Abbreviation" in text
 
 
 # ---------------------------------------------------------------------------
@@ -327,3 +442,19 @@ def test_merged_cells_still_deduplicate():
         assert text.count(token) == 1, f"{token!r} projected {text.count(token)} times:\n{text}"
     assert "R0C2" in text.split("\n---")[0], f"merged row lost its trailing cell:\n{text}"
     assert _mapper_text(data, clean_view=True) == text
+
+
+# ---------------------------------------------------------------------------
+# CC-1b — the same controls now carry anchors. Asserted here, next to the
+# visibility guarantees, so a future change cannot restore visibility while
+# silently dropping the anchors (or vice versa).
+# ---------------------------------------------------------------------------
+def test_row_and_cell_controls_carry_anchors(sdt_table_bytes):
+    text = _project(sdt_table_bytes, clean_view=False)
+    assert "Role | {#cc:1}Contracting Officer{#/cc:1}" in text, "cell-level control lost its inline anchors"
+    assert "{#cc:2}Approver | Jane Roe{#/cc:2}" in text, "row-level control must bracket the whole row line"
+    assert "Notes | {#cc:3}Approved without conditions.{#/cc:3}" in text, (
+        "a block-level control inside a cell must anchor INLINE, not on its "
+        "own lines — token lines would break the '|' row grammar"
+    )
+    assert _mapper_text(sdt_table_bytes, clean_view=False) == text

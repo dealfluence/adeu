@@ -128,8 +128,18 @@ async function buildDoc(tableXml: string): Promise<Buffer> {
   return doc.save();
 }
 
+const CC_TOKEN_RE = /\{#\/?cc:\d+[^}]*\}/g;
+
+/**
+ * Non-blank projected lines, with content-control anchors stripped. This
+ * suite's subject is whether the sdt-transparent walk STOPS at a nested
+ * `w:tbl` — structural, and must read the same however much chrome CC-1 adds.
+ */
 function lines(text: string): string[] {
-  return text.split("\n").filter((l) => l.trim().length > 0);
+  return text
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => l.replace(CC_TOKEN_RE, ""));
 }
 
 describe("nested tables do not leak rows or cells into the outer table", () => {

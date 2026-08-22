@@ -7,7 +7,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import lxml.etree as etree
 import structlog
-from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
 from docx.text.paragraph import Paragraph
@@ -24,11 +23,31 @@ from adeu.models import (
     ModifyText,
     RejectChange,
     ReplyComment,
+    SetField,
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
+from adeu.redline.gates import (
+    GateOverrides,
+    check_block_merge_across_control,
+    check_bound_control,
+    check_checkbox_edit,
+    check_content_lock,
+    check_delete_lock,
+    check_group_region,
+    check_placeholder_target,
+    check_protection_blocks_edit,
+    check_protection_blocks_review,
+    check_untracked_write,
+    crossed_control_walls,
+    describe_control,
+    overrides_note,
+    segmentation_note,
+)
 from adeu.redline.mapper import DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
+from adeu.utils.opc import load_document as Document
+from adeu.utils.protection import read_document_protection
 from adeu.utils.safe_regex import RegexTimeoutError
 from adeu.utils.text import (
     PREVIEW_TEXT_CAP,
@@ -83,6 +102,28 @@ def _extract_failed_indices(errors: List[str]) -> List[Tuple[int, str]]:
     return failed
 
 
+def _trim_shared_trailing_paragraph_mark(target: str, new: str) -> Tuple[str, str]:
+    """
+    Drop paragraph marks that BOTH sides of a replacement end with (CC-14).
+
+    A "\\n\\n" the target and the replacement share is structural context, not
+    text to rewrite, and must never reach the apply layer: that layer
+    track-deletes a trailing mark inside a target -- a genuine paragraph merge,
+    "A.\\n\\n" -> "Z.", depends on it -- but does not re-create the one the
+    replacement asks for. The break silently disappears while the batch still
+    reports the edit applied.
+
+    Trims from the END only, so a caller-pinned start index stays valid. The
+    real merge shape (target ends with a mark, replacement does not) is left
+    alone, as is a shared LEADING mark, which the apply layer handles
+    correctly today.
+    """
+    while target.endswith("\n\n") and new.endswith("\n\n"):
+        target = target[:-2]
+        new = new[:-2]
+    return target, new
+
+
 class BatchValidationError(Exception):
     """Raised when text edits fail location validation."""
 
@@ -99,6 +140,15 @@ class BatchValidationError(Exception):
 # as a raw "All strings must be XML compatible" traceback from deep inside
 # lxml instead of a clean per-edit error (QA 2026-07-17 F11).
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+# CC-1e: content-control anchors, open or close, with or without flag words.
+_CC_ANCHOR_SCAN_RE = re.compile(r"\{#(/?)cc:(\d+)(?: [^}]*)?\}")
+_CC_ANCHOR_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
+
+# The sanctioned empty-pair fill target (spec-projection.md §3): an open and
+# close anchor for the SAME ordinal with nothing between them but an optional
+# placeholder bubble.
+_CC_EMPTY_PAIR_RE = re.compile(r"^\{#cc:(\d+)[^}]*\}(?:\{>>placeholder:[^<]*<<\})?\{#/cc:\1\}$")
 
 # Children of a properties container that the corresponding tracked-change
 # record cannot store, and which must therefore survive rejecting it.
@@ -195,7 +245,7 @@ def validate_review_action_batch(
 
 
 def validate_edit_strings(
-    edits: List[Union["ModifyText", "InsertTableRow", "DeleteTableRow"]],
+    edits: List[Union["ModifyText", "InsertTableRow", "DeleteTableRow", "SetField"]],
     index_offset: int = 0,
 ) -> List[str]:
     """
@@ -232,8 +282,17 @@ def validate_edit_strings(
     errors: List[str] = []
 
     for i, edit in enumerate(edits, start=index_offset):
-        t_text = edit.target_text or ""
-        n_text = getattr(edit, "new_text", "") or ""
+        # `set_field` has no target_text - it addresses a control by id rather
+        # than by content - but its `value` is written into the document and
+        # must clear exactly the same bar as any other inserted string. A
+        # value containing `{#cc:3}` or raw CriticMarkup would fabricate
+        # anchors and reviewer names as prose (CC-1e), and routing it here is
+        # what stops `set_field` becoming a hole in that check.
+        t_text = getattr(edit, "target_text", None) or ""
+        n_text = getattr(edit, "new_text", None)
+        if n_text is None:
+            n_text = getattr(edit, "value", None)
+        n_text = n_text or ""
 
         # VAL-CRIT-8: XML-illegal control characters. These can never be
         # written into a DOCX (lxml refuses), so reject them here with a clean
@@ -363,6 +422,38 @@ def validate_edit_strings(
                     )
                     break
 
+        # CC-1e / A1.7: content-control anchors are structural in BOTH
+        # directions. VAL-OBS-9 above only counts anchors that GAINED copies,
+        # so it catches fabrication and rewriting but not deletion: a target
+        # covering `{#/cc:3}` whose new_text omits it passed cleanly and
+        # silently unbalanced the pair in the projection.
+        #
+        # Scoped to `cc` anchors rather than made symmetric for every `{#...}`
+        # token, because two anchor classes are deliberate TARGETING surfaces
+        # that a symmetric rule would break: `{#cell:paraId}` empty-cell writes
+        # (engine.py `^\{#cell:[^}]+\}$`) and the empty pair below.
+        if "{#" in t_text and "cc:" in t_text or "cc:" in n_text:
+            t_cc = _CC_ANCHOR_RE.findall(t_text)
+            n_cc = _CC_ANCHOR_RE.findall(n_text)
+            # Sanctioned edit surface #1 (spec-projection.md §3): the empty
+            # pair is deliberately matchable and is the text-first fill. The
+            # anchors are not being deleted there — the wrapper survives and
+            # only the control's CONTENT changes — so the fill must stay legal
+            # for CC-4/CC-5 to route through set_field semantics.
+            fills_empty_pair = _CC_EMPTY_PAIR_RE.match(t_text.strip()) is not None
+            # ORDERED comparison, unlike the footnote/image checks above, which
+            # compare multisets. A multiset lets `{#cc:3}A{#/cc:3}` become
+            # `{#/cc:3}A{#cc:3}` — same tokens, inverted pair. Text replacement
+            # cannot move an sdt wrapper anyway, so reordering controls is never
+            # a legitimate edit and order is the honest invariant.
+            if t_cc != n_cc and not fills_empty_pair:
+                errors.append(
+                    f"- Edit {i + 1} Failed: Cannot insert, alter, or remove content-control "
+                    "anchor markers (`{#cc:N}` / `{#/cc:N}`). They are read-only projections "
+                    "of the control's structure, not text. Edit the content BETWEEN the "
+                    "anchors, keeping both tokens in `new_text` exactly as they appear."
+                )
+
         # Heading level > 6 (only meaningful for ModifyText with new_text)
         if isinstance(edit, ModifyText) and edit.new_text:
             for line in edit.new_text.splitlines():
@@ -395,8 +486,23 @@ class RedlineEngine:
         author: str = "Adeu AI",
         id_discovery_hint: Optional[str] = None,
         terse_errors: bool = False,
+        ignore_control_locks: bool = False,
+        ignore_document_protection: bool = False,
+        allow_untracked_writes: bool = False,
     ):
         self.terse_errors = terse_errors
+        # CC-4 write-gate overrides. Engine kwargs rather than process_batch
+        # arguments because the gates run in three places — validate_edits,
+        # the resolver and the apply-path backstop — and only the first takes
+        # batch arguments today. Same route terse_errors takes.
+        self.gate_overrides = GateOverrides(
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
+        )
+        # Controls whose locks an override actually bypassed, for the report
+        # disclosure (spec-gates §5). Reset per batch.
+        self._overridden_controls: List[Any] = []
         # Surface-aware advice for "how do I list the current Chg:/Com: ids":
         # the CLI default points at CLI commands; the MCP layer passes a
         # read_docx-based hint because MCP callers cannot run the CLI
@@ -419,6 +525,11 @@ class RedlineEngine:
         # collected three identical replies that way).
         self.rollback_verified = True
         self.doc = Document(BytesIO(sanitized_bytes))
+        # Read once at load (spec-gates §3), not per gate: it lives in
+        # word/settings.xml, which nothing else in a batch touches, and the
+        # gates, the projection banner and the fields ledger must all report
+        # the same state.
+        self.protection = read_document_protection(self.doc)
 
         # No part is stamped with the w16du namespace up front. Tracked-change
         # writes (w16du:dateUtc attributes) self-declare the prefix locally on
@@ -441,6 +552,10 @@ class RedlineEngine:
         )
         self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
+        # Offsets into mapper.full_text; rebuilt whenever the mapper is.
+        self._cc_anchor_pairs: "list[tuple[int, int, int]] | None" = None
+        # (projection text, ledger rows) - see _field_entries.
+        self._field_entries_cache: Optional[Tuple[str, List[Any]]] = None
         self.comments_manager = CommentsManager(self.doc)
         self.clean_mapper: Optional[DocumentMapper] = None
         self.original_mapper: Optional[DocumentMapper] = None
@@ -2032,9 +2147,186 @@ class RedlineEngine:
         except ValueError:
             pass
 
+    def _control_gate_context(self, mapper: Any, start: int, length: int):
+        """(intersecting, at_start, at_end) control stacks for a changed range."""
+        intersecting = mapper.controls_intersecting(start, length) if hasattr(mapper, "controls_intersecting") else []
+        at_start = mapper.controls_at(start) if hasattr(mapper, "controls_at") else []
+        at_end = mapper.controls_at(max(start + length - 1, start)) if hasattr(mapper, "controls_at") else []
+        return intersecting, at_start, at_end
+
+    def _deletes_entire_control(self, mapper: Any, info: Any, start: int, length: int, final_new: str) -> bool:
+        """Would this edit dissolve ``info``'s wrapper rather than empty it?
+
+        G2 protects a control's EXISTENCE, not its text: emptying a
+        delete-locked control is allowed and leaves the wrapper with an empty
+        pair (A3.3). Only a deletion that also consumes text outside the
+        control would have to hoist the wrapper away, so the test is "covers
+        all of the content AND reaches past it".
+        """
+        if final_new.strip():
+            return False
+        rng = next((r for r in getattr(mapper, "control_ranges", []) if r[2] is info), None)
+        if rng is None:
+            return False
+        c_start, c_end, _ = rng
+        covers_all = start <= c_start and start + length >= c_end
+        reaches_outside = start < c_start or start + length > c_end
+        return covers_all and reaches_outside
+
+    def _apply_gate_refusal(self, mapper: Any, start: int, length: int, edit: Any = None) -> Optional[str]:
+        """The apply-path subset of the gate matrix; a reason string, or None.
+
+        Only the document-property gates run here — content locks, group
+        regions, data binding and protection. Deliberately not the whole
+        matrix: G8 and G11 depend on the target STRING, and G14/G15 on the
+        edit's shape, none of which a positionally-pinned edit has resolved
+        in a form this layer can trust. Those stay validate-only, exactly as
+        the paragraph-merge refusal does.
+        """
+        overrides = self.gate_overrides
+        if self.protection.active and not overrides.ignore_document_protection and self.protection.edit == "readOnly":
+            return "document is read-only protected"
+        controls = mapper.controls_intersecting(start, length) if hasattr(mapper, "controls_intersecting") else []
+        if not controls:
+            return None
+        # G13 refuses TEXT edits to bound content and points the caller at
+        # set_field. A fill desugars into pinned ModifyText sub-edits, so
+        # without this exemption the backstop would refuse the very operation
+        # the error recommends — and the recommendation would be a dead end.
+        # set_field is safe here precisely because it dual-writes the store,
+        # which is the whole reason the text path is not.
+        from_set_field = isinstance(getattr(edit, "_parent_edit_ref", None), SetField)
+        info = next((i for i in controls if getattr(i, "bound", False)), None)
+        if info is not None and not from_set_field:
+            return f"{describe_control(info)} is data-bound"
+        if overrides.ignore_control_locks:
+            return None
+        info = next((i for i in controls if getattr(i, "content_locked", False)), None)
+        if info is not None:
+            return f"{describe_control(info)} is content-locked"
+        return None
+
+    def _check_control_gates(
+        self,
+        edit_number: int,
+        edit: Any,
+        mapper: Any,
+        start: int,
+        length: int,
+        *,
+        final_target: str = "",
+        final_new: str = "",
+        known_controls: Optional[List[Any]] = None,
+        from_set_field: bool = False,
+    ) -> Optional[str]:
+        """Run the CC-4 gate matrix over one resolved edit; first failure wins.
+
+        Order is deliberate, most-fundamental first: document protection binds
+        regardless of where the edit lands, so it is checked before anything
+        about the control; then the two category errors that no override can
+        reasonably bypass (bound content, placeholder ghosts), because telling
+        the caller "this text is not what you think it is" is more useful than
+        telling them a lock stopped them; then the lock gates; then structure.
+        """
+        overrides = self.gate_overrides
+        infos = list(getattr(mapper, "_sdt_infos", {}).values())
+        intersecting, at_start, at_end = self._control_gate_context(mapper, start, length)
+        if known_controls is not None:
+            # A `set_field` names its target; it does not infer it from a
+            # range. That matters for an EMPTY control, whose content span is
+            # zero-length, so nothing intersects it - and G5 would then refuse
+            # the fill as "body text outside a content control", which is the
+            # single most common legitimate operation under forms protection.
+            intersecting = known_controls
+
+        is_comment_only = bool(getattr(edit, "comment", None)) and (edit.new_text or "") == (edit.target_text or "")
+
+        err = check_protection_blocks_edit(
+            edit_number,
+            self.protection,
+            controls=intersecting,
+            is_comment_only=is_comment_only,
+            overrides=overrides,
+        )
+        if err:
+            return err
+        # Comment-only edits mutate no text, so the tracking guarantee that
+        # G5's untracked-write gate defends is not at stake for them.
+        if not is_comment_only:
+            err = check_untracked_write(edit_number, self.protection, overrides)
+            if err:
+                return err
+
+        # G8 works off the target string, not the range: an empty control has
+        # no content spans to intersect (see gates.check_placeholder_target).
+        err = check_placeholder_target(edit_number, edit.target_text or "", infos)
+        if err:
+            return err
+
+        if not intersecting:
+            return None
+
+        # G13 refuses TEXT edits to bound content and recommends set_field.
+        # Running it against a set_field would refuse the recommendation
+        # (674c8c0 fixed the same contradiction at the apply layer).
+        if not from_set_field:
+            err = check_bound_control(edit_number, intersecting)
+            if err:
+                return err
+        err = check_checkbox_edit(edit_number, intersecting, edit.target_text or "", edit.new_text or "")
+        if err:
+            return err
+        err = check_content_lock(edit_number, intersecting, overrides)
+        if err:
+            return err
+        err = check_group_region(edit_number, intersecting, overrides)
+        if err:
+            return err
+        for info in intersecting:
+            if self._deletes_entire_control(mapper, info, start, length, final_new):
+                err = check_delete_lock(
+                    edit_number,
+                    [info],
+                    deletes_entire_control=True,
+                    overrides=overrides,
+                )
+                if err:
+                    return err
+
+        # G15: a merge is what makes a wall crossing structural rather than
+        # segmentable. Without a paragraph break being consumed, a crossing is
+        # G14's business (auto-segment), not a refusal.
+        if "\n\n" in final_target and "\n\n" not in final_new:
+            crossed = crossed_control_walls(intersecting, at_start, at_end)
+            err = check_block_merge_across_control(edit_number, crossed)
+            if err:
+                return err
+
+        # G14: the edit is valid on both sides of a wall it crosses, so it
+        # applies — the word-level sub-edit splitter already lands each half
+        # on its own side. What was missing is the disclosure: an agent that
+        # asked to change text "in CC:3" and silently got a change half
+        # outside it has been told something untrue by omission.
+        crossed = crossed_control_walls(intersecting, at_start, at_end)
+        if crossed:
+            try:
+                edit._warning = segmentation_note(crossed)
+            except (AttributeError, ValueError):
+                # Report notes are advisory; never fail an otherwise-valid
+                # edit because a model object would not take the attribute.
+                pass
+
+        # Record what an override let through, for the report disclosure.
+        if overrides.ignore_control_locks:
+            for info in intersecting:
+                if getattr(info, "content_locked", False) or getattr(info, "cls", None) == "group":
+                    if not any(x is info for x in self._overridden_controls):
+                        self._overridden_controls.append(info)
+        return None
+
     def validate_edits(
         self,
-        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]],
+        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
         index_offset: int = 0,
     ) -> List[str]:
         """
@@ -2064,6 +2356,125 @@ class RedlineEngine:
             # are meaningless for them and false-positive whenever the target
             # coincidentally matches unrelated text (a comment timestamp, an
             # earlier redline). The string-shape checks above still apply.
+            if isinstance(edit, SetField):
+                from adeu.fields import FieldResolutionError
+                from adeu.utils.field_write import refuse_class, refuse_value
+
+                # Resolve the field NOW, before anything is written. An
+                # unresolvable or ambiguous target is the recoverable half of
+                # A4.2, and the batch contract promises those fail the whole
+                # run without touching the document.
+                try:
+                    hits = self._resolve_set_field_targets(edit)
+                except FieldResolutionError as fe:
+                    errors.append(f"- Edit {i + 1} Failed: {fe}")
+                    continue
+                # A4.12: a fill is gated exactly as any other edit, WITH the
+                # same teaching error. The apply-layer backstop already
+                # refused locked controls, but it answers with a generic
+                # "failed to apply" - so the caller learned that something
+                # went wrong and nothing about what or how to proceed, which
+                # is the whole thing CC-4's error contract exists to prevent.
+                # Class and structure refusals come BEFORE the gates, and the
+                # order is load-bearing. A group is not a value-bearing field
+                # at all, so filling one is meaningless rather than merely
+                # forbidden - and CC-4's lock gate, reached first, answered
+                # with "pass ignore_control_locks to override", which is
+                # advice that would still be wrong after the override: the
+                # group's "content" is the controls inside it.
+                refusal = None
+                for entry in hits:
+                    info = self._sdt_info_for_ordinal(entry.ordinal)
+                    cls = info.cls if info is not None else entry.cls_word
+                    refusal = refuse_class(cls, entry.ordinal)
+                    if refusal is None and info is not None:
+                        refusal = refuse_value(info, entry.ordinal, edit.value)
+                    if refusal is not None:
+                        errors.append(f"- Edit {i + 1} Failed: {refusal}")
+                        break
+                if refusal is not None:
+                    continue
+
+                for entry in hits:
+                    span = self._cc_content_range(entry.ordinal)
+                    info = self._sdt_info_for_ordinal(entry.ordinal)
+                    if span is None:
+                        # No ANCHOR is not the same as no content span, and
+                        # conflating them opened a hole (CC-21): a checkbox is
+                        # deliberately unanchored for projection economy
+                        # (CC-1: 3,800+ per document), so `continue` here
+                        # skipped EVERY control gate for a checkbox fill -
+                        # read-only protection, forms protection, the
+                        # untracked-write gate and the content lock alike. A
+                        # `set_field` toggled a locked checkbox in a read-only
+                        # document with no override, silently.
+                        #
+                        # The genuinely span-less classes (group, repeating,
+                        # repeating-item) never reach this loop: `refuse_class`
+                        # rejects them above as not value-bearing. So anything
+                        # arriving here without a span is gateable, and the
+                        # honest default is to gate it rather than wave it
+                        # through.
+                        if info is None or info.cls != "checkbox":
+                            continue
+                        # Gated as the toggle it will become. G11 reads the
+                        # target/new pair and only sanctions the `[ ]`/`[x]`
+                        # swap, so handing it the raw value ("false") would
+                        # refuse the very operation `set_field` exists to do.
+                        from adeu.redline.gates import CHECKBOX_STATES
+                        from adeu.utils.field_write import parse_checkbox_value
+
+                        wanted = parse_checkbox_value(edit.value)
+                        current = CHECKBOX_STATES[1] if info.checked else CHECKBOX_STATES[0]
+                        new_token = CHECKBOX_STATES[1] if wanted else CHECKBOX_STATES[0]
+                        gate_err = self._check_control_gates(
+                            i + 1,
+                            ModifyText(
+                                type="modify",
+                                target_text=current,
+                                new_text=new_token,
+                                comment=edit.comment,
+                            ),
+                            self.mapper,
+                            0,
+                            0,
+                            final_target=current,
+                            final_new=new_token,
+                            known_controls=[info],
+                            from_set_field=True,
+                        )
+                        if gate_err:
+                            errors.append(gate_err)
+                            break
+                        continue
+                    start, end = span
+                    current = self.mapper.full_text[start:end]
+                    # Gated as the edit it will BECOME, not as the SetField:
+                    # the desugared ModifyText is what reaches the apply
+                    # layer, so checking anything else here would let
+                    # validation and application disagree.
+                    probe = ModifyText(
+                        type="modify",
+                        target_text=current,
+                        new_text=edit.value,
+                        comment=edit.comment,
+                    )
+                    probe._parent_edit_ref = edit
+                    gate_err = self._check_control_gates(
+                        i + 1,
+                        probe,
+                        self.mapper,
+                        start,
+                        end - start,
+                        final_target=current,
+                        final_new=edit.value,
+                        known_controls=[info] if info is not None else None,
+                        from_set_field=True,
+                    )
+                    if gate_err:
+                        errors.append(gate_err)
+                        break
+                continue
             if (
                 getattr(edit, "_match_start_index", None) is not None
                 or getattr(edit, "_resolved_start_idx", None) is not None
@@ -2240,6 +2651,29 @@ class RedlineEngine:
                 # the shared context are fine.
                 eff_start = start + prefix_len
                 eff_end = start + length - suffix_len
+
+                # CC-4 content-control gates (spec-gates §2). Same shape as
+                # the part-boundary refusal above, for the same reason: a
+                # control wall is a place where an edit that looks fine in the
+                # flattened projection cannot be applied to the XML.
+                #
+                # The CHANGED range (eff_*), not the raw match, so shared
+                # context reaching into a locked control does not by itself
+                # refuse the edit — the caller is not modifying it. This is
+                # the image-marker gate's rule, not the part gate's: the part
+                # gate uses the raw range because the insertion ANCHOR is
+                # ambiguous at a part gap, which has no analogue here.
+                gate_error = self._check_control_gates(
+                    i + 1,
+                    edit,
+                    target_mapper,
+                    eff_start,
+                    max(eff_end - eff_start, 0),
+                    final_target=final_target,
+                    final_new=final_new,
+                )
+                if gate_error:
+                    errors.append(gate_error)
                 if eff_end > eff_start:
                     overlapping = [
                         s
@@ -2490,6 +2924,8 @@ class RedlineEngine:
         engine, which re-creates its mapper after each applied edit.
         """
         self.mapper = DocumentMapper(self.doc)
+        # Offsets into mapper.full_text; rebuilt whenever the mapper is.
+        self._cc_anchor_pairs = None
         self.clean_mapper = None
         self.original_mapper = None
 
@@ -2631,6 +3067,7 @@ class RedlineEngine:
             "clean_text": clean_text,
             "pages": getattr(edit, "_pages", []),
             "heading_path": getattr(edit, "_heading_path", ""),
+            "field": getattr(edit, "_field", ""),
             "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
@@ -2645,6 +3082,52 @@ class RedlineEngine:
         Processes a unified batch of actions and edits safely.
         """
         return self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
+
+    def _field_label_at(self, offset: int) -> str:
+        """``CC:<N> "<alias>" (tag: <tag>)`` for the control containing ``offset``.
+
+        Audit-trail symmetry with ``heading_path`` (spec-fields-ledger §6): a
+        reviewer reading the report needs to know an edit landed inside a
+        content control, because that is what decides whether Word will let a
+        human keep it.
+
+        Resolves the INNERMOST containing control — an edit inside CC:9 reports
+        CC:9, not the group CC:8 that wraps it, which is the more specific and
+        more actionable answer.
+        """
+        pairs = self._cc_anchor_pairs
+        if pairs is None:
+            pairs = []
+            text = self.mapper.full_text
+            opens: dict[int, tuple[int, int]] = {}
+            for m in _CC_ANCHOR_SCAN_RE.finditer(text):
+                ordinal = int(m.group(2))
+                if m.group(1):
+                    if ordinal in opens:
+                        _open_start, open_end = opens.pop(ordinal)
+                        pairs.append((open_end, m.start(), ordinal))
+                else:
+                    opens[ordinal] = (m.start(), m.end())
+            self._cc_anchor_pairs = pairs
+
+        best: tuple[int, int, int] | None = None
+        for start, end, ordinal in pairs:
+            if start <= offset <= end and (best is None or (end - start) < (best[1] - best[0])):
+                best = (start, end, ordinal)
+        if best is None:
+            return ""
+
+        ordinal = best[2]
+        info = next(
+            (i for i in getattr(self.mapper, "_sdt_infos", {}).values() if i.ordinal == ordinal),
+            None,
+        )
+        label = f"CC:{ordinal}"
+        if info is not None and info.alias:
+            label += f' "{info.alias}"'
+        if info is not None and info.tag:
+            label += f" (tag: {info.tag})"
+        return label
 
     def _get_heading_path_and_page(self, start_idx: int, text: str, page_offsets: List[int]) -> Tuple[str, int]:
         page = 1
@@ -2757,6 +3240,7 @@ class RedlineEngine:
             )
 
         self.skipped_details = []
+        self._overridden_controls = []
         failed_list: List[Tuple[int, str]] = []
 
         actions_with_idx = [
@@ -2767,7 +3251,7 @@ class RedlineEngine:
         edits_with_idx = [
             (original_indices[i] if original_indices else i, c)
             for i, c in enumerate(changes)
-            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow))
+            if isinstance(c, (ModifyText, InsertTableRow, DeleteTableRow, SetField))
         ]
 
         actions = [c for _, c in actions_with_idx]
@@ -2810,6 +3294,26 @@ class RedlineEngine:
                 pre_batch_fingerprint = self._batch_fingerprint()
 
         if actions:
+            # G7/G4 (spec-gates §2): protection gates review actions BEFORE
+            # the id-existence check, because "that id does not exist" would
+            # be a misleading answer to "why did my Accept fail" in a document
+            # where no Accept can succeed at all.
+            protection_errors = [
+                err
+                for err in (
+                    check_protection_blocks_review(
+                        idx + 1,
+                        getattr(act, "type", ""),
+                        self.protection,
+                        self.gate_overrides,
+                    )
+                    for idx, act in zip(action_indices, actions, strict=True)
+                )
+                if err
+            ]
+            if protection_errors:
+                failed_list.extend(_extract_failed_indices(protection_errors))
+                raise BatchValidationError(protection_errors, failed=failed_list)
             action_shape_errors = validate_review_action_batch(actions, indices=action_indices)
             if action_shape_errors:
                 failed_list.extend(_extract_failed_indices(action_shape_errors))
@@ -3013,6 +3517,10 @@ class RedlineEngine:
             "skipped_details": self.skipped_details,
             "edits": edits_reports,
             "author_impersonation_warning": author_impersonation_warning,
+            # spec-gates §5: an override that was actually exercised is
+            # disclosed in the report header. Silence here would let a batch
+            # bypass a safety rail with no trace for the human reviewing it.
+            "overrides_note": overrides_note(self.gate_overrides, self._overridden_controls),
             "engine": "python",
             "version": __version__,
         }
@@ -3079,9 +3587,410 @@ class RedlineEngine:
                 edit._reserved_ins_id = self._get_next_id()
             # COMMENT_ONLY / URL_RETARGET consume no revision ids.
 
+    # ------------------------------------------------------------------
+    # set_field (CC-5, spec-set-field.md)
+    # ------------------------------------------------------------------
+
+    def _field_entries(self) -> List[Any]:
+        """The ledger rows for the CURRENT document state.
+
+        Deliberately re-collected whenever the projection has been rebuilt: a
+        `set_field` earlier in the batch may have filled, cleared or unwrapped
+        a control, and resolving a later one against a stale ledger would
+        target an offset that no longer means what it did.
+        """
+        from adeu.fields import collect_fields
+
+        cached: Optional[Tuple[str, List[Any]]] = self._field_entries_cache
+        if cached is not None and cached[0] is self.mapper.full_text:
+            return cached[1]
+        entries = collect_fields(self.doc, self.mapper.full_text, None)
+        self._field_entries_cache = (self.mapper.full_text, entries)
+        return entries
+
+    def _resolve_set_field_targets(self, edit: "SetField") -> List[Any]:
+        """The controls this `set_field` names, or a FieldResolutionError."""
+        from adeu.fields import resolve_field
+
+        return resolve_field(self._field_entries(), edit.field, edit.match_mode)
+
+    def _sdt_info_for_ordinal(self, ordinal: int) -> Any:
+        return next(
+            (i for i in getattr(self.mapper, "_sdt_infos", {}).values() if i.ordinal == ordinal),
+            None,
+        )
+
+    def _cc_content_range(self, ordinal: int) -> Optional[Tuple[int, int]]:
+        """The projection offsets BETWEEN this control's anchor pair.
+
+        `None` when the control does not anchor (spec §1 leaves groups,
+        repeating sections and nested-rich-text ledger-only), which is the
+        signal that it has no single editable content span.
+        """
+        self._field_label_at(0)  # builds _cc_anchor_pairs if cold
+        for start, end, ord_ in self._cc_anchor_pairs or []:
+            if ord_ == ordinal:
+                return (start, end)
+        return None
+
+    def _resolve_set_field(
+        self,
+        edit: "SetField",
+        resolved_edits: List[Tuple[Union[ModifyText, InsertTableRow, DeleteTableRow], Any]],
+    ) -> None:
+        """Desugar one `set_field` into pinned `ModifyText` sub-edits.
+
+        This is the whole design of CC-5 in one method. `set_field` writes
+        nothing itself: it performs the untracked teardown Word performs
+        (placeholder state, §4.1-4.2), then hands the actual content change to
+        the ordinary edit pipeline as a position-pinned `ModifyText`. That is
+        what makes A4.12 true by construction — the gates, atomicity, author
+        resolution and reporting all see a normal edit, so `set_field` cannot
+        acquire a special pass through any of them by accident.
+        """
+        from adeu.fields import FieldResolutionError
+        from adeu.utils.field_write import (
+            clear_placeholder,
+            find_bound_store,
+            option_is_listed,
+            parse_iso_date,
+            refuse_class,
+            refuse_value,
+            render_date,
+            resolve_option,
+            sdt_content,
+            set_dropdown_last_value,
+            set_full_date,
+            write_bound_value,
+        )
+
+        try:
+            hits = self._resolve_set_field_targets(edit)
+        except FieldResolutionError as fe:
+            edit._applied_status = False
+            edit._error_msg = str(fe)
+            self.skipped_details.append(f"- {fe}")
+            return
+
+        # Phase 0: refuse before touching anything. Class first (A4.11), then
+        # the structure rules (A4.7). Both are checked for EVERY target before
+        # any is written, so a match_mode="all" fan-out cannot half-apply and
+        # leave the document in a state no single call could have produced.
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            cls = info.cls if info is not None else entry.cls_word
+            msg = refuse_class(cls, entry.ordinal)
+            if msg is None and info is not None:
+                msg = refuse_value(info, entry.ordinal, edit.value)
+            if msg is not None:
+                edit._applied_status = False
+                edit._error_msg = msg
+                self.skipped_details.append(f"- {msg}")
+                return
+
+        # Phase 1: the untracked teardown, for every target, before any
+        # offsets are read. Clearing a placeholder deletes the ghost text from
+        # the projection, so ranges computed before it would be stale by
+        # exactly the length of the prompt.
+        touched = False
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is not None and info.showing_placeholder:
+                if clear_placeholder(info):
+                    touched = True
+        if touched:
+            self._mutated_since_load = True
+            self._invalidate_projection_caches()
+
+        # Phase 1b: per-class value translation. The caller's string is not
+        # always what gets written: a dropdown's `w:value` resolves to its
+        # display text, and a date renders through the control's own format.
+        # Computed per target because two controls sharing a tag may declare
+        # different formats or option lists.
+        effective: dict = {}
+        notes: dict = {}
+        for entry in hits:
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is None:
+                continue
+            if info.cls in ("dropdown", "combobox"):
+                display, err = resolve_option(info, edit.value)
+                if err is not None:
+                    msg = f"CC:{entry.ordinal}: {err}"
+                    edit._applied_status = False
+                    edit._error_msg = msg
+                    self.skipped_details.append(f"- {msg}")
+                    return
+                effective[entry.ordinal] = display
+                if info.cls == "combobox" and not option_is_listed(info, display):
+                    notes[entry.ordinal] = f"'{display}' is not in the option list"
+            elif info.cls == "date":
+                parts = parse_iso_date(edit.value)
+                if parts is None:
+                    msg = (
+                        f"CC:{entry.ordinal} is a date control; '{edit.value}' is not a date. "
+                        "Use the canonical YYYY-MM-DD form (e.g. 2026-03-01)."
+                    )
+                    edit._applied_status = False
+                    edit._error_msg = msg
+                    self.skipped_details.append(f"- {msg}")
+                    return
+                text, unsupported = render_date(parts, info.date_format)
+                effective[entry.ordinal] = text
+                if unsupported:
+                    notes[entry.ordinal] = (
+                        f"the control's date format '{info.date_format}' is not supported in v1; "
+                        f"wrote the canonical {text}"
+                    )
+
+        # Phase 2: checkboxes are written directly; everything else desugars.
+        def _cls_of(e: Any) -> str:
+            info = self._sdt_info_for_ordinal(e.ordinal)
+            return info.cls if info is not None else e.cls_word
+
+        direct = [e for e in hits if _cls_of(e) == "checkbox"]
+        if direct:
+            ok = True
+            for entry in direct:
+                info = self._sdt_info_for_ordinal(entry.ordinal)
+                if info is None or not self._apply_checkbox_set_field(edit, entry, info):
+                    ok = False
+            if ok:
+                self._invalidate_projection_caches()
+            return
+
+        # Phase 2b: one pinned sub-edit per target.
+        for entry in hits:
+            span = self._cc_content_range(entry.ordinal)
+            if span is None:
+                msg = (
+                    f"CC:{entry.ordinal} is a {entry.cls_word} and is not a value-bearing field. "
+                    "set_field fills text, rich-text, dropdown, combobox, date and checkbox controls."
+                )
+                edit._applied_status = False
+                edit._error_msg = msg
+                self.skipped_details.append(f"- {msg}")
+                return
+
+            start, end = span
+            current = self.mapper.full_text[start:end]
+            value = effective.get(entry.ordinal, edit.value)
+            sub = ModifyText(
+                type="modify",
+                target_text=current,
+                new_text=value,
+                comment=edit.comment,
+            )
+            # Always atomic, comment or not (spec §3): a fill is one logical
+            # act, and word-splitting it would scatter a single field update
+            # across several review entries.
+            sub._internal_op = (
+                EditOperationType.INSERTION
+                if not current
+                else (EditOperationType.DELETION if not edit.value else EditOperationType.MODIFICATION)
+            )
+            sub._resolved_start_idx = start
+            sub._active_mapper_ref = self.mapper
+            sub._parent_edit_ref = edit
+            if not current:
+                # Nothing left inside the control to anchor to; name the host.
+                info = self._sdt_info_for_ordinal(entry.ordinal)
+                if info is not None:
+                    sub._insert_host_el = sdt_content(info.element)
+            if edit._resolved_start_idx is None:
+                edit._resolved_start_idx = start
+                edit._resolved_proxy_edit = sub
+            # The attribute syncs ride along with the content change and take
+            # no revision of their own (spec §5, the URL_RETARGET class): the
+            # visible text carries the redline, and a second revision for the
+            # attribute would show a reviewer two changes for one act.
+            info = self._sdt_info_for_ordinal(entry.ordinal)
+            if info is not None:
+                if info.cls in ("dropdown", "combobox"):
+                    set_dropdown_last_value(info, value)
+                elif info.cls == "date":
+                    parts = parse_iso_date(edit.value)
+                    if parts is not None:
+                        set_full_date(info, parts)
+            # A bound control dual-writes: the tracked content change above,
+            # and the CustomXML node it mirrors. The store WINS ON OPEN
+            # (CC-6(e)), so content-only writing to a bound control is data
+            # loss with extra steps - Word silently rewrites the content back
+            # from the store, discarding the edit with no revision to show
+            # for it. A store that cannot be resolved downgrades to
+            # content-only plus a warning, because dangling bindings exist in
+            # the wild and refusing the edit would be worse than disclosing.
+            if info is not None and info.bound:
+                store = find_bound_store(self.doc, info.store_item_id)
+                wrote = store is not None and write_bound_value(store, info.binding_xpath, value, info.prefix_mappings)
+                if wrote:
+                    notes[entry.ordinal] = f"bound store {info.binding_xpath} updated to match" + (
+                        f"; {notes[entry.ordinal]}" if entry.ordinal in notes else ""
+                    )
+                else:
+                    notes[entry.ordinal] = (
+                        f"WARNING: this field is bound to {info.binding_xpath} but the data store "
+                        "could not be resolved, so only the visible text was updated. If the store "
+                        "is restored later, Word will overwrite this edit from it."
+                        + (f"; {notes[entry.ordinal]}" if entry.ordinal in notes else "")
+                    )
+
+            note = notes.get(entry.ordinal)
+            if note:
+                existing = edit._warning
+                edit._warning = f"{existing}; {note}" if existing else note
+            # A `w:temporary` control does not survive being edited: Word
+            # unwraps it on ANY content change, tracked or not (CC-6(c)). The
+            # unwrap is one-way - the revision outlives the wrapper, so
+            # rejecting the fill restores the old text but not the control -
+            # and matching Word here is what keeps a round trip stable.
+            if info is not None and info.temporary:
+                sub._unwrap_sdt_after = info.element
+                existing_note = notes.get(entry.ordinal)
+                unwrap_note = "this control was temporary and has been unwrapped, as Word does on any edit"
+                notes[entry.ordinal] = f"{existing_note}; {unwrap_note}" if existing_note else unwrap_note
+                note = notes.get(entry.ordinal)
+                if note:
+                    edit._warning = note
+
+            resolved_edits.append((sub, value))
+
+    def _apply_checkbox_set_field(self, edit: "SetField", entry: Any, info: Any) -> bool:
+        """The checkbox fill (A4.6), which cannot desugar into a ModifyText.
+
+        A checkbox has no anchor pair and no editable content span - it
+        projects as virtual `[x]` text - so there is no offset for a pinned
+        edit to target. It is written directly instead: the state attribute
+        flips silently, and the glyph swap carries the redline.
+
+        `w:ins` goes BEFORE `w:del`, which is Word's own order (CC-6(b)) and
+        is visible rather than cosmetic: the projection reads document order,
+        so the reverse would render `{--Y--}{++N++}` where Word renders
+        `{++N++}{--Y--}`.
+        """
+        from copy import deepcopy
+
+        from adeu.utils.field_write import (
+            checkbox_glyph,
+            glyph_run,
+            parse_checkbox_value,
+            set_checkbox_checked,
+        )
+
+        checked = parse_checkbox_value(edit.value)
+        if checked is None:
+            msg = (
+                f"CC:{entry.ordinal} is a checkbox; '{edit.value}' is neither checked nor unchecked. "
+                "Use true/false (also accepted: x, [x], 1, 0, yes, no)."
+            )
+            edit._applied_status = False
+            edit._error_msg = msg
+            self.skipped_details.append(f"- {msg}")
+            return False
+
+        old_run = glyph_run(info)
+        char, font = checkbox_glyph(info, checked)
+
+        new_run = deepcopy(old_run) if old_run is not None else create_element("w:r")
+        assert new_run is not None
+        for t in new_run.findall(qn("w:t")):
+            new_run.remove(t)
+        t_el = create_element("w:t")
+        t_el.text = char
+        new_run.append(t_el)
+        if font:
+            rpr = new_run.find(qn("w:rPr"))
+            if rpr is None:
+                rpr = create_element("w:rPr")
+                new_run.insert(0, rpr)
+            for existing in rpr.findall(qn("w:rFonts")):
+                rpr.remove(existing)
+            fonts = create_element("w:rFonts")
+            for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+                fonts.set(qn(attr), font)
+            rpr.insert(0, fonts)
+
+        ins = self._create_track_change_tag("w:ins", reuse_id=self._get_next_id())
+        ins.append(new_run)
+
+        parent = old_run.getparent() if old_run is not None else None
+        if parent is None:
+            from adeu.utils.field_write import sdt_content
+
+            parent = sdt_content(info.element)
+            if parent is None:
+                return False
+            parent.append(ins)
+        else:
+            # `parent` is non-None only when old_run is, so the old glyph is
+            # always available to wrap as the deletion half of the pair.
+            assert old_run is not None
+            index = list(parent).index(old_run)
+            parent.insert(index, ins)
+            del_tag = self._create_track_change_tag("w:del", reuse_id=self._get_next_id())
+            del_run = deepcopy(old_run)
+            for t in del_run.findall(qn("w:t")):
+                t.tag = qn("w:delText")
+            del_tag.append(del_run)
+            parent.replace(old_run, del_tag)
+
+        set_checkbox_checked(info, checked)
+        self._mutated_since_load = True
+        edit._applied_status = True
+        edit._occurrences_modified = (edit._occurrences_modified or 0) + 1
+        return True
+
+    def _empty_control_fill_host(self, mapper: Any, offset: int) -> Optional[Any]:
+        """`w:sdtContent` when `offset` is the content position of an EMPTY control.
+
+        This is the "empty-pair insertion" surface (A4.10): the sanctioned way
+        to fill a field with a text-first edit is to type between its anchors,
+        which produces an insertion at the exact offset where the pair's open
+        and close tokens meet. Offsets alone cannot express "inside" there -
+        the control contains no run to anchor to - so without this the value
+        lands NEXT TO the field, and the document reads
+        `Acme Ltd.{#cc:2}{#/cc:2}` with the control still empty.
+
+        Shared with `set_field` deliberately: A4.10 requires the two routes to
+        produce identical XML, and the only way to guarantee that is for them
+        to run the same code rather than to agree by inspection.
+        """
+        from adeu.utils.field_write import clear_placeholder, sdt_content
+
+        text = getattr(mapper, "full_text", "") or ""
+        if not text:
+            return None
+        opens: dict = {}
+        for m in _CC_ANCHOR_SCAN_RE.finditer(text):
+            ordinal = int(m.group(2))
+            if m.group(1):
+                if ordinal in opens:
+                    _s, open_end = opens.pop(ordinal)
+                    if open_end == m.start() == offset:
+                        info = self._sdt_info_for_ordinal(ordinal)
+                        if info is None:
+                            return None
+                        # Same untracked teardown Word performs, so a
+                        # text-first fill of a placeholder control does not
+                        # leave the ghost styling behind (CC-6(a)).
+                        if info.showing_placeholder and clear_placeholder(info):
+                            self._mutated_since_load = True
+                            self._cc_anchor_pairs = None
+                            self._field_entries_cache = None
+                        return sdt_content(info.element)
+            else:
+                opens[ordinal] = (m.start(), m.end())
+        return None
+
+    def _invalidate_projection_caches(self) -> None:
+        """Drop everything keyed on the projection after an untracked write."""
+        self.mapper._build_map()
+        self._cc_anchor_pairs = None
+        self._field_entries_cache = None
+
     def apply_edits(
         self,
-        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow]],
+        edits: List[Union[ModifyText, InsertTableRow, DeleteTableRow, SetField]],
         page_offsets: Optional[List[int]] = None,
         index_offset: int = 0,
     ) -> tuple[int, int]:
@@ -3106,14 +4015,44 @@ class RedlineEngine:
             edit._error_msg = None
             edit._any_sub_failure = False
 
-        resolved_edits = []
+        # SetField is absent from this union on purpose: it resolves INTO
+        # pinned ModifyText sub-edits and never reaches the apply layer
+        # itself, which is what lets the gates and the reporting treat a fill
+        # as the ordinary edit it becomes.
+        resolved_edits: List[Tuple[Union[ModifyText, InsertTableRow, DeleteTableRow], Any]] = []
 
         # Pre-resolve phase: locate all edits against initial clean state
         for idx, edit in enumerate(edits):
             edit_idx = index_offset + idx
-            if edit._resolved_start_idx is not None or edit._match_start_index is not None:
+            if isinstance(edit, SetField):
+                # Before the pinned branch: `set_field` addresses its target
+                # by id, so a caller-supplied offset would be meaningless -
+                # and taking the pinned path would hand the apply layer a
+                # change with no target_text at all.
+                self._resolve_set_field(edit, resolved_edits)
+                if edit._error_msg:
+                    skipped += 1
+            elif edit._resolved_start_idx is not None or edit._match_start_index is not None:
                 if edit._resolved_start_idx is None:
                     edit._resolved_start_idx = edit._match_start_index
+                # CC-14: caller-pinned edits skip resolution entirely and go
+                # straight to the apply layer, so the shared-trailing-mark
+                # normalisation the resolution path performs has to happen here
+                # too. make_edits_self_contained widens a target to make it
+                # unique and routinely produces this shape WITH a pinned index
+                # (129 of 4,000 randomised paragraph edits); such a batch
+                # applied in-process — no JSON round trip to drop the index —
+                # silently lost a paragraph break. Structural ops carry an
+                # explicit _internal_op and are left alone.
+                if (
+                    isinstance(edit, ModifyText)
+                    and getattr(edit, "_internal_op", None) is None
+                    and edit.target_text
+                    and edit.new_text
+                ):
+                    edit.target_text, edit.new_text = _trim_shared_trailing_paragraph_mark(
+                        edit.target_text, edit.new_text
+                    )
                 # Caller-pinned indices (diff output) are CLEAN-view character
                 # offsets; the raw-view mapper fallback would mis-anchor them
                 # on documents whose views differ (AP-05).
@@ -3121,6 +4060,17 @@ class RedlineEngine:
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
                     edit._active_mapper_ref = self.clean_mapper
+                # A pure insertion landing exactly between an empty control's
+                # anchors is a field fill expressed as text (A4.10).
+                if (
+                    isinstance(edit, ModifyText)
+                    and not edit.target_text
+                    and edit.new_text
+                    and edit._insert_host_el is None
+                ):
+                    host = self._empty_control_fill_host(edit._active_mapper_ref, edit._resolved_start_idx or 0)
+                    if host is not None:
+                        edit._insert_host_el = host
                 resolved_edits.append((edit, getattr(edit, "new_text", None)))
             elif isinstance(edit, (InsertTableRow, DeleteTableRow)):
                 # Simplified resolution for structural edits
@@ -3315,6 +4265,15 @@ class RedlineEngine:
                 # 500 matches took 78s instead of ~2s (QA 2026-07-19 F-06).
                 success = self._apply_single_edit_indexed(edit, original_new_text=orig_new, rebuild_map=False)
 
+            if success and edit._unwrap_sdt_after is not None:
+                # After the content change, never before: the edit resolves
+                # against offsets inside the control, and dissolving the
+                # wrapper first would move them.
+                from adeu.utils.content_controls import SdtInfo as _SdtInfo
+                from adeu.utils.field_write import unwrap_sdt
+
+                unwrap_sdt(_SdtInfo(element=edit._unwrap_sdt_after, cls="text"))
+
             if success:
                 # A balanced multi-paragraph split fans one logical edit into
                 # several paragraph sub-edits sharing a _split_group_id; count it
@@ -3338,6 +4297,7 @@ class RedlineEngine:
                         pages.insert(0, page)
                     parent._pages = pages
                     parent._heading_path = path
+                    parent._field = self._field_label_at(start)
                 else:
                     if first_in_group:
                         edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
@@ -3347,6 +4307,7 @@ class RedlineEngine:
                         pages.insert(0, page)
                     edit._pages = pages
                     edit._heading_path = path
+                    edit._field = self._field_label_at(start)
             else:
                 skipped += 1
 
@@ -3900,6 +4861,12 @@ class RedlineEngine:
             final_target = target_str[prefix_len : len(target_str) - suffix_len]
             final_new = new_str[prefix_len : len(new_str) - suffix_len]
             start = base_offset + prefix_len
+
+            # CC-14: see _trim_shared_trailing_paragraph_mark. trim_common_context
+            # is word-boundary aware and will not trim across "\n\n", so a
+            # commented change like "A.\n\n" -> "Z.\n\nY.\n\n" arrives whole.
+            final_target, final_new = _trim_shared_trailing_paragraph_mark(final_target, final_new)
+
             if not final_target and final_new:
                 op = EditOperationType.INSERTION
             elif final_target and not final_new:
@@ -4175,8 +5142,23 @@ class RedlineEngine:
             proxy_edit._active_mapper_ref = active_mapper
             return proxy_edit
 
-        if effective_new_text.startswith(actual_doc_text.rstrip()) and len(effective_new_text) > len(
-            actual_doc_text.rstrip()
+        if (
+            effective_new_text.startswith(actual_doc_text.rstrip())
+            and len(effective_new_text) > len(actual_doc_text.rstrip())
+            # CC-14: ...but NOT when the replacement introduces a paragraph
+            # break the target does not have. This branch preserves the
+            # target's trailing whitespace by inserting BEFORE it, which is
+            # right for a separator space inside one paragraph ("Section 1 " →
+            # "Section 1 Revised" must not glue the next word on) and wrong the
+            # moment a "\n\n" lands in the remainder: the preserved space is
+            # then stranded at the START of the new paragraph. A paragraph
+            # split at a space is exactly the shape the diff emits for
+            # "0 0." → "0.\n\n0.", which applied cleanly and produced
+            # "0.\n\n 0." — accepted, reported successful, silently wrong.
+            # The F1 rule below already resolves this shape correctly, as one
+            # atomic modification consuming the WHOLE matched span, so fall
+            # through to it rather than duplicating the reasoning here.
+            and not ("\n\n" in effective_new_text and "\n\n" not in actual_doc_text)
         ):
             # Smart Fallback: Handle trailing space omissions (e.g. LLM appended \n without the space).
             # It only applies when the new text genuinely EXTENDS the rstripped target: when the
@@ -4494,9 +5476,20 @@ class RedlineEngine:
                 anchor_run, anchor_paragraph = boundary_anchor.run, boundary_anchor.paragraph
                 if not final_new_text.startswith("\n"):
                     final_new_text = "\n\n" + final_new_text
+            elif edit._insert_host_el is not None:
+                # An empty content control names its host explicitly, because
+                # position alone can no longer reach it: once the ghost run is
+                # gone there is no run inside `w:sdtContent` to anchor to, and
+                # the nearest run by offset lives OUTSIDE the control. The
+                # insertion would then land next to the field instead of in
+                # it - a filled-looking document whose control is still empty,
+                # and whose value Word will not treat as the field's content.
+                # Same shape as the OPC part boundary: a wall that offsets
+                # cannot see, so the container is carried explicitly.
+                anchor_run, anchor_paragraph = None, None
             else:
                 anchor_run, anchor_paragraph = active_mapper.get_insertion_anchor(start_idx, rebuild_map=rebuild_map)
-            if not anchor_run and not anchor_paragraph:
+            if not anchor_run and not anchor_paragraph and edit._insert_host_el is None:
                 return False
 
             insert_before = False
@@ -4507,7 +5500,10 @@ class RedlineEngine:
 
             parent = None
             index = 0
-            if anchor_run:
+            if edit._insert_host_el is not None:
+                parent = edit._insert_host_el
+                index = len(parent)
+            elif anchor_run:
                 parent = anchor_run._element.getparent()
                 index = parent.index(anchor_run._element)
                 # A tracked-deleted anchor (run inside <w:del>) cannot host
@@ -4635,6 +5631,24 @@ class RedlineEngine:
                     start=start_idx,
                     parts=sorted(crossed_parts),
                 )
+                return False
+
+        # CC-4 (apply-level backstop, same reason as C1 above): pinned edits
+        # skip validate_edits AND the resolver, so a diff-generated batch
+        # reaches here with no gate having run. Only the gates whose answer
+        # cannot change between validate and apply are repeated — locks,
+        # binding and protection are properties of the document, not of the
+        # match, so re-deriving them here is cheap and cannot disagree.
+        if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and length:
+            blocked = self._apply_gate_refusal(active_mapper, start_idx, length, edit)
+            if blocked:
+                logger.warning(
+                    "Refusing edit inside a gated content control",
+                    start=start_idx,
+                    reason=blocked,
+                )
+                if getattr(edit, "_error_msg", None) in (None, ""):
+                    edit._error_msg = blocked
                 return False
 
         target_runs = active_mapper.find_target_runs_by_index(start_idx, length, rebuild_map=rebuild_map)

@@ -34,8 +34,8 @@ Once connected, your AI agent will have access to the following tools.
 
 ### Document tools
 
-- `read_docx`: Reads a DOCX file and returns LLM-friendly text with inline CriticMarkup (`{++inserted++}`, `{--deleted--}`) for Tracked Changes and Comments. Supports pagination, structural outlining, and semantic appendix extraction.
-- `process_document_batch`: Applies a batch of search-and-replace text modifications, table edits, and comment replies to a document. Translates the LLM's edits into perfectly formatted native Word Track Changes.
+- `read_docx`: Reads a DOCX file and returns LLM-friendly text with inline CriticMarkup (`{++inserted++}`, `{--deleted--}`) for Tracked Changes and Comments. Supports pagination, structural outlining, form fields discovery (`mode="fields"`), and semantic appendix extraction.
+- `process_document_batch`: Applies a batch of search-and-replace text modifications, form field edits (`set_field`), table edits, and comment replies to a document. Translates the LLM's edits into perfectly formatted native Word Track Changes.
 - `accept_all_changes`: Accepts all tracked changes to produce a finalized clean document. `remove_comments` (default `true`) also deletes every comment; pass `remove_comments=false` to keep them. Deleted comments are reported by id and author.
 - `diff_docx_files`: Compares two DOCX files and returns a unified sub-word diff of their text content.
 - `finalize_document`: Prepares a document for signature by applying native OOXML read-only locking and deep metadata sanitization.

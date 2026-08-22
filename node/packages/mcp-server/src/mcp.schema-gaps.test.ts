@@ -456,6 +456,41 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
       expect(props.changes_offset.default).toBe(0);
     });
 
+    it("advertises 'fields' in the mode enum with a numeric fields_offset (A2.7)", () => {
+      const readDocx = getTool("read_docx");
+      const modeProp = readDocx.inputSchema.properties.mode;
+
+      // A plain string enum, NOT a union: real clients strip property-level
+      // anyOf/oneOf to {}, which would lose the type and the docs entirely.
+      expect(modeProp.enum).toContain("fields");
+      expect(modeProp.type).toBe("string");
+      expect(modeProp.anyOf).toBeUndefined();
+      expect(modeProp.oneOf).toBeUndefined();
+
+      const offsetProp = readDocx.inputSchema.properties.fields_offset;
+      const changesOffsetProp = readDocx.inputSchema.properties.changes_offset;
+      expect(offsetProp).toBeDefined();
+      expect(offsetProp.default).toBe(0);
+      expect(offsetProp.anyOf).toBeUndefined();
+      expect(offsetProp.oneOf).toBeUndefined();
+
+      // spec-fields-ledger §1 contradicts itself on this one: it says
+      // fields_offset "mirrors changes_offset" (integer) AND that it
+      // "publishes type: number". The implemented convention wins, and the
+      // assertion is written as PARITY rather than a literal so it keeps
+      // tracking changes_offset if that ever moves. Both z.coerce.number()
+      // .int() schemas emit "integer"; what A2.7 actually guards against is a
+      // union, asserted above.
+      expect(offsetProp.type).toBe(changesOffsetProp.type);
+      expect(typeof offsetProp.type).toBe("string");
+    });
+
+    it("mentions mode='fields' in read_docx description for discoverability", () => {
+      // The description is the only channel guaranteed to reach the model, so
+      // an undocumented mode is an unreachable one.
+      expect(getTool("read_docx").description).toContain("mode='fields'");
+    });
+
     it("mentions mode='changes' in read_docx description for discoverability", () => {
       const readDocx = getTool("read_docx");
       expect(readDocx.description).toContain("mode='changes'");

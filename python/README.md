@@ -32,6 +32,9 @@ uvx adeu extract contract.docx -o output.md
 # Extract only the structural heading outline
 uvx adeu extract contract.docx --mode outline
 
+# Extract the form fields ledger (content controls)
+uvx adeu extract contract.docx --mode fields
+
 # Strip navigation prose and headers for raw token efficiency
 uvx adeu extract contract.docx --no-chrome
 

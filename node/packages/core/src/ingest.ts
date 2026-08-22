@@ -4,6 +4,7 @@ import {
   _get_style_cache,
   compute_change_pair_map,
   get_paragraph_prefix,
+  paragraph_mark_is_deleted,
   is_heading_paragraph,
   is_native_heading,
   get_run_style_markers,
@@ -14,6 +15,22 @@ import {
   iter_paragraph_content,
 } from "./utils/docx.js";
 import { findChild } from "./docx/dom.js";
+import {
+  assignOrdinals,
+  BlockSdt,
+  CHECKBOX_CHROME_EVENTS,
+  CHECKBOX_CLOSE,
+  CHECKBOX_OPEN,
+  checkboxMark,
+  closeToken,
+  isAnchored,
+  isSdtEvent,
+  nextClosesCheckbox,
+  openToken,
+  partElement,
+  wrappingSdt,
+  type SdtInfo,
+} from "./utils/content-controls.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
 import { build_structural_appendix } from "./domain.js";
 import { extract_comments_data } from "./comments.js";
@@ -73,6 +90,17 @@ export function _extractTextFromDoc(
     : null;
   let cursor = 0;
 
+  // Ordinals are assigned ONCE, over the parts in projection order, and the
+  // resulting map is threaded through every level below. Spec-projection.md §9
+  // requires this to be a single shared pre-pass rather than a counter each
+  // producer maintains: a counter is exactly the shape of bug CC-12 was (two
+  // producers agreeing with each other and both wrong).
+  const sdtInfos = assignOrdinals(
+    Array.from(iter_document_parts_with_kind(doc)).map(([part]) =>
+      partElement(part),
+    ),
+  );
+
   for (const [part, part_kind] of iter_document_parts_with_kind(doc)) {
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
     const part_text = _extract_blocks(
@@ -82,6 +110,7 @@ export function _extractTextFromDoc(
       part_cursor,
       return_paragraph_offsets ? paragraph_offsets : undefined,
       structure ? structure.tables : undefined,
+      sdtInfos,
     );
     if (part_text) {
       if (full_text.length > 0) cursor += 2;
@@ -121,6 +150,8 @@ function _extract_blocks(
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
   table_acc?: TableGeometry[],
+  sdtInfos?: Map<any, SdtInfo>,
+  inCell = false,
 ): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
@@ -139,17 +170,64 @@ function _extract_blocks(
     is_first_block = false;
   }
 
-  for (const item of iter_block_items(container)) {
+  for (const item of iter_block_items(container, !!sdtInfos)) {
     if (!is_first_block) local_cursor += 2;
     const block_start = local_cursor;
 
-    if (item.constructor.name === "FootnoteItem") {
+    if (item instanceof BlockSdt) {
+      // A block-level content control. Recurse into its contents exactly as a
+      // Table recurses into its rows, then bracket the result with token
+      // lines: open token on its own line, a single "\n" joining it to the
+      // wrapped content, close token on its own line (spec §3/§5). The
+      // surrounding "\n\n" comes from the block join, as for any other block.
+      const info = sdtInfos ? sdtInfos.get(item.element) : undefined;
+      const anchored = !!info && isAnchored(info);
+      // Spec §3 exception: inside a table cell a block-level anchor renders
+      // INLINE. A row is one projected line, so token lines would break the
+      // "|" grammar and desynchronise the column count.
+      const joiner = inCell ? "" : "\n";
+      const open_tok = anchored ? `${openToken(info!)}${joiner}` : "";
+      // Pass a container SHIM, not the bare sdtContent element: this engine
+      // derives the OPC part via `container.part`, and handing it a raw
+      // element silently lost the part — which broke hyperlink relationship
+      // resolution inside every block-level control ("[text](mailto:...)"
+      // degraded to bare text). Python takes `part=` as an explicit argument
+      // and so never had the hazard.
+      const inner = _extract_blocks(
+        {
+          _element: findChild(item.element, "w:sdtContent"),
+          part: (container as any).part || container,
+        },
+        comments_map,
+        cleanView,
+        block_start + open_tok.length,
+        paragraph_offsets,
+        undefined,
+        sdtInfos,
+        inCell,
+      );
+      if (inner) {
+        const full = anchored
+          ? `${open_tok}${inner}${joiner}${closeToken(info!)}`
+          : inner;
+        blocks.push(full);
+        local_cursor = block_start + full.length;
+        is_first_block = false;
+      } else if (!is_first_block) {
+        // Projects nothing: the reader drops the block AND its separator,
+        // same contract as an empty table.
+        local_cursor -= 2;
+      }
+      is_first_para = false;
+    } else if (item.constructor.name === "FootnoteItem") {
       const fn_text = _extract_blocks(
         item,
         comments_map,
         cleanView,
         block_start,
         paragraph_offsets,
+        undefined,
+        sdtInfos,
       );
       if (fn_text) {
         blocks.push(fn_text);
@@ -169,7 +247,19 @@ function _extract_blocks(
         cleanView,
         style_cache,
         default_pstyle,
+        sdtInfos,
       );
+      if (cleanView && !p_text && paragraph_mark_is_deleted(item._element)) {
+        // Accepting a tracked paragraph-mark deletion merges the paragraph
+        // away; when nothing visible survives inside it, the accepted view
+        // must not render an empty container. Twin of python
+        // ingest._extract_blocks (QA round 3, finding 2.4) — without it the
+        // clean view grew a stray blank line per deleted-mark paragraph
+        // ("Alpha\n\n\n\nBeta" where python gives "Alpha\n\nBeta").
+        if (!is_first_block) local_cursor -= 2;
+        is_first_para = false;
+        continue;
+      }
       const full_block = prefix + p_text;
       blocks.push(full_block);
       if (paragraph_offsets) {
@@ -189,6 +279,7 @@ function _extract_blocks(
         block_start,
         paragraph_offsets,
         geometry,
+        sdtInfos,
       );
       if (table_text) {
         blocks.push(table_text);
@@ -208,6 +299,18 @@ function _extract_blocks(
   return blocks.join("\n\n");
 }
 
+/** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
+function anchoredWrapper(
+  element: any,
+  sdtInfos?: Map<any, SdtInfo>,
+): SdtInfo | null {
+  if (!sdtInfos) return null;
+  const sdt = wrappingSdt(element);
+  if (!sdt) return null;
+  const info = sdtInfos.get(sdt);
+  return info && isAnchored(info) ? info : null;
+}
+
 export function extract_table(
   table: Table,
   comments_map: any,
@@ -215,6 +318,7 @@ export function extract_table(
   cursor: number,
   paragraph_offsets?: Map<any, [number, number]>,
   geometry?: TableGeometry | null,
+  sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const rows_text: string[] = [];
   let rows_processed = 0;
@@ -243,13 +347,23 @@ export function extract_table(
 
       if (!first_cell) cell_cursor += 3;
 
+      const cellInfo = anchoredWrapper(cell._element, sdtInfos);
+      const cellOpen = cellInfo ? openToken(cellInfo) : "";
       let cell_content = _extract_blocks(
         cell,
         comments_map,
         cleanView,
-        cell_cursor,
+        cell_cursor + cellOpen.length,
         paragraph_offsets,
+        undefined,
+        sdtInfos,
+        true,
       );
+      if (cellInfo) {
+        // Cell-level control (sdtContent > w:tc): anchors render inline inside
+        // this cell's segment (spec §3).
+        cell_content = `${cellOpen}${cell_content}${closeToken(cellInfo)}`;
+      }
       // Emit a stable, document-native anchor for this cell so empty/short
       // value cells are addressable by the engine. Reuses the {#...} bookmark
       // projection (already protected by validate_edit_strings and resolvable
@@ -264,9 +378,14 @@ export function extract_table(
           !cell_content || cell_content.trim() === "",
         );
         if (paraId) {
-          const space_pad = cell_content ? " " : "";
-          const anchor = `${space_pad}{#cell:${paraId}}`;
-          cell_content = cell_content + anchor;
+          // Only pad when the cell text does not already end in a space:
+          // emphasis hoists trailing whitespace out of its closing marker, so
+          // a bold cell commonly ends "**Label** " and padding unconditionally
+          // produced "**Label**  {#cell:...}" — two spaces where python emits
+          // one. Mirrors python ingest.py's `separator`.
+          const space_pad =
+            cell_content && !cell_content.endsWith(" ") ? " " : "";
+          cell_content = cell_content + `${space_pad}{#cell:${paraId}}`;
         }
       }
       cell_texts.push(cell_content);
@@ -275,6 +394,16 @@ export function extract_table(
     }
 
     let row_str = cell_texts.join(" | ");
+
+    // Row-level control (sdtContent > w:tr): open token before the first
+    // cell's text, close after the last, on the row's line (spec §3). Applied
+    // before the tracked-change wrapper below so a row that is both controlled
+    // and inserted reads "{++ {#cc:N}...{#/cc:N} ++}" — the CriticMarkup is
+    // about the row's existence, the anchor about its identity.
+    const rowInfo = anchoredWrapper(row._element, sdtInfos);
+    if (rowInfo) {
+      row_str = `${openToken(rowInfo)}${row_str}${closeToken(rowInfo)}`;
+    }
 
     if (!cleanView) {
       // The change bubble is SEPARATED from the cell content (mirroring the
@@ -320,6 +449,7 @@ export function build_paragraph_text(
   cleanView: boolean,
   style_cache?: any,
   default_pstyle?: string | null,
+  sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const parts: string[] = [];
   const active_ins: Record<string, DocxEvent> = {};
@@ -327,12 +457,17 @@ export function build_paragraph_text(
   const active_comments: Set<string> = new Set();
   const active_fmt: Record<string, DocxEvent> = {};
   const deferred_meta_states: any[] = [];
+  /**
+   * A change annotation built but held back because the checkbox it belongs to
+   * has not closed yet (CC-19). Emitted at `checkbox_end`.
+   */
+  let pending_meta_block: string | null = null;
 
   let pending_text = "";
   let current_wrappers: [string, string] = ["", ""];
   let current_style: [string, string] = ["", ""];
 
-  const items = Array.from(iter_paragraph_content(paragraph));
+  const items = Array.from(iter_paragraph_content(paragraph, sdtInfos));
   const is_heading = is_heading_paragraph(
     paragraph,
     style_cache,
@@ -379,15 +514,31 @@ export function build_paragraph_text(
             new_style[0] !== "" || new_style[1] !== ""
               ? seg.match(new RegExp("^(\\s*)" + escaped_prefix))
               : null;
+          // Trailing whitespace is hoisted OUT of the closing marker, so the
+          // pending group commonly ends "**A** " rather than "**A**". Testing
+          // endsWith() against the literal tail therefore misses the elision
+          // and yields "**A** **B**" instead of "**A B**". Ignore trailing
+          // whitespace for the test, then put it back. Mirrors python
+          // ingest.build_paragraph_text exactly (CC-10 follow-up).
+          let trailing_ws = "";
+          for (let k = pending_text.length - 1; k >= 0; k--) {
+            const ch = pending_text[k]!;
+            if (/\s/.test(ch)) trailing_ws = ch + trailing_ws;
+            else break;
+          }
+          const pending_without_ws = trailing_ws
+            ? pending_text.slice(0, -trailing_ws.length)
+            : pending_text;
           if (
             new_style[0] === current_style[0] &&
             new_style[1] === current_style[1] &&
-            current_style[0] !== "" &&
-            pending_text.endsWith(current_style[1]) &&
+            !(current_style[0] === "" && current_style[1] === "") &&
+            pending_without_ws.endsWith(current_style[1]) &&
             lead_match !== null
           ) {
             pending_text =
-              pending_text.slice(0, -current_style[1].length) +
+              pending_without_ws.slice(0, -current_style[1].length) +
+              trailing_ws +
               lead_match[1] +
               seg.slice(lead_match[0].length);
           } else {
@@ -474,19 +625,112 @@ export function build_paragraph_text(
               comments_map,
             );
             if (meta_block) {
-              if (pending_text) {
-                parts.push(
-                  `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
-                );
-                pending_text = "";
-                current_wrappers = ["", ""];
-                current_style = ["", ""];
+              if (nextClosesCheckbox(items, i)) {
+                // CC-19: this run is a checkbox's mark and the closing bracket
+                // has not been emitted yet. Emitting the bubble now splits the
+                // box - `[{--x--}{>>...<<}]` - leaving `]` orphaned after a
+                // multi-line annotation. Hold it until the box closes.
+                pending_meta_block = meta_block;
+              } else {
+                if (pending_text) {
+                  parts.push(
+                    `${current_wrappers[0]}${pending_text}${current_wrappers[1]}`,
+                  );
+                  pending_text = "";
+                  current_wrappers = ["", ""];
+                  current_style = ["", ""];
+                }
+                parts.push(`{>>${meta_block}<<}`);
               }
-              parts.push(`{>>${meta_block}<<}`);
             }
             deferred_meta_states.length = 0; // clear
           }
         }
+      }
+    } else if (isSdtEvent(item)) {
+      // Content-control boundary. Handled BEFORE the DocxEvent branch and as a
+      // distinct shape rather than another `ev.type` case: DocxEvent is a
+      // four-string record, and an anchor needs the whole SdtInfo (flags,
+      // class, placeholder text), so folding it in would have meant a parallel
+      // out-of-band lookup at every consumer.
+      //
+      // Heading content has begun: an anchor is addressable text, so the
+      // leading-whitespace strip stops here exactly as it does for every other
+      // non-Run event.
+      leading_strip_active = false;
+      const info = item.info;
+
+      // Checkbox chrome JOINS the accumulating group; anchors break it.
+      //
+      // The two look alike and are not (CC-19). An anchor delimits a region
+      // and must sit outside any wrapper, or a control inside a bold span
+      // emits `**{#cc:3}text**` and every marker-stripping pass mangles the
+      // token. A checkbox's brackets are part of the token they enclose:
+      // flushing before them put the box OUTSIDE the CriticMarkup, so a
+      // tracked toggle rendered `[{++ ++}][{--x--}]` - one checkbox drawn as
+      // two, because the chrome fires per glyph run and a toggle has two.
+      // Inside the wrapper it reads `{++[ ]++}{--[x]--}`: two states of one
+      // box. Emphasis is already materialised into each segment before it
+      // reaches `pending_text`, so joining the group cannot sweep a bracket
+      // inside a `**` pair.
+      if (CHECKBOX_CHROME_EVENTS.includes(item.type)) {
+        // The DELETED half of a tracked toggle is dropped whole in the clean
+        // view: its brackets are chrome around content the clean view
+        // discards, and keeping them renders two checkboxes where the document
+        // has one, the second permanently empty.
+        if (cleanView && Object.keys(active_del).length > 0) continue;
+        const chrome =
+          item.type === "checkbox_start"
+            ? CHECKBOX_OPEN
+            : item.type === "checkbox_end"
+              ? CHECKBOX_CLOSE
+              : // Fallback only - the mark is normally a real run emitted by
+                // the traversal, arriving through the Run branch.
+                checkboxMark(info);
+        const new_wrappers: [string, string] = cleanView
+          ? ["", ""]
+          : _get_wrappers(active_ins, active_del, active_comments, active_fmt);
+        if (
+          pending_text &&
+          (new_wrappers[0] !== current_wrappers[0] || new_wrappers[1] !== current_wrappers[1])
+        ) {
+          parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+          pending_text = "";
+        }
+        if (!pending_text) current_wrappers = new_wrappers;
+        pending_text += chrome;
+        // Chrome is unstyled, so the trailing segment carries no emphasis
+        // markers for the next run to elide against.
+        current_style = ["", ""];
+        if (item.type === "checkbox_end" && pending_meta_block) {
+          // The box is closed; the annotation belongs after it, and outside it.
+          parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+          pending_text = "";
+          current_wrappers = ["", ""];
+          parts.push(`{>>${pending_meta_block}<<}`);
+          pending_meta_block = null;
+        }
+        continue;
+      }
+
+      // Anchor tokens are structural and must NOT be swept into the emphasis /
+      // CriticMarkup group being accumulated.
+      if (pending_text) {
+        parts.push(`${current_wrappers[0]}${pending_text}${current_wrappers[1]}`);
+        pending_text = "";
+        current_wrappers = ["", ""];
+        current_style = ["", ""];
+      }
+      if (item.type === "sdt_start") {
+        parts.push(openToken(info));
+        // The placeholder bubble is virtual chrome: raw view only, dropped in
+        // the clean view because an unfilled field has no accepted-state
+        // content (spec §6).
+        if (!cleanView && info.showingPlaceholder && info.placeholderText) {
+          parts.push(`{>>placeholder: ${info.placeholderText}<<}`);
+        }
+      } else {
+        parts.push(closeToken(info));
       }
     } else {
       const ev = item as DocxEvent;
