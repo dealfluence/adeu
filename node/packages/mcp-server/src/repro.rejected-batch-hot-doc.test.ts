@@ -36,7 +36,7 @@ import {
   statSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, RedlineEngine } from "@adeu/core";
+import { DocumentObject, RedlineEngine, createTestDocument, addParagraph } from "@adeu/core";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -117,22 +117,8 @@ describe("BUG 2026-08-12 - a rejected batch must not leave its reply in the hot 
   beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "adeu_bug20260812_"));
 
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-    const xmlDoc = body.ownerDocument!;
-    const p = xmlDoc.createElement("w:p");
-    const r = xmlDoc.createElement("w:r");
-    const t = xmlDoc.createElement("w:t");
-    t.textContent = BODY;
-    t.setAttribute("xml:space", "preserve");
-    r.appendChild(t);
-    p.appendChild(r);
-    body.appendChild(p);
+    const doc = await createTestDocument();
+    addParagraph(doc, BODY);
 
     // One reviewer comment, no tracked changes - the reported shape.
     new RedlineEngine(doc, REVIEWER).process_batch([
