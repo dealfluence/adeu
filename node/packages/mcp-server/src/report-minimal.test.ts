@@ -1,27 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { formatBatchResult } from "./index.js";
-import { approxTokens, projectFixture } from "./conformance-utils.js";
+import { approxTokens, projectFixture, createTestStats } from "./conformance-utils.js";
 import { RedlineEngine } from "@adeu/core";
 
 describe("Minimal Batch Report Rendering (Task 8)", () => {
   it("applied edit renders path, mode, occurrences, single CriticMarkup preview, and no clean preview", () => {
-    const stats = {
-      actions_applied: 0,
-      actions_skipped: 0,
-      edits_applied: 1,
-      edits_skipped: 0,
-      edits: [
-        {
-          status: "applied",
-          heading_path: "1. Intro",
-          match_mode: "strict",
-          occurrences_modified: 1,
-          pages: [1],
-          critic_markup: "The {--quick--}{++fast++} fox",
-          clean_text: "The fast fox"
-        }
-      ]
-    };
+    const stats = createTestStats([
+      {
+        status: "applied",
+        heading_path: "1. Intro",
+        match_mode: "strict",
+        occurrences_modified: 1,
+        pages: [1],
+        critic_markup: "The {--quick--}{++fast++} fox",
+        clean_text: "The fast fox"
+      }
+    ]);
     const res = formatBatchResult(stats, "output.docx");
     expect(res).toContain("### Edit 1 ✅ [applied] (p1)");
     expect(res).toContain("**Path:** `1. Intro`");
@@ -32,22 +26,16 @@ describe("Minimal Batch Report Rendering (Task 8)", () => {
   });
 
   it("renders comment line between Mode and warning when present", () => {
-    const stats = {
-      actions_applied: 0,
-      actions_skipped: 0,
-      edits_applied: 1,
-      edits_skipped: 0,
-      edits: [
-        {
-          status: "applied",
-          match_mode: "strict",
-          occurrences_modified: 1,
-          comment: "Clarifying definition of term",
-          warning: "Target contains punctuation.",
-          critic_markup: "{--old--}{++new++}"
-        }
-      ]
-    };
+    const stats = createTestStats([
+      {
+        status: "applied",
+        match_mode: "strict",
+        occurrences_modified: 1,
+        comment: "Clarifying definition of term",
+        warning: "Target contains punctuation.",
+        critic_markup: "{--old--}{++new++}"
+      }
+    ]);
     const res = formatBatchResult(stats, "output.docx");
     expect(res).toContain('**Mode:** `strict` (1 occurrence modified)\n**Comment:** "Clarifying definition of term"\n*Warning:* Target contains punctuation.');
   });

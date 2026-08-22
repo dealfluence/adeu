@@ -33,6 +33,19 @@ export const GOLDEN_DIR = resolve(CONFORMANCE_DIR, "goldens");
 /** The budget unit the spec's token ceilings are expressed in. */
 export const approxTokens = (s: string) => Math.floor(s.length / 4);
 
+/** Helper for constructing minimal test batch stats objects. */
+export function createTestStats(edits: any[] = [], overrides: Record<string, any> = {}) {
+  return {
+    actions_applied: 0,
+    actions_skipped: 0,
+    edits_applied: edits.filter((e) => e.status === "applied").length || (edits.length ? 0 : 1),
+    edits_skipped: edits.filter((e) => e.status === "failed" || e.status === "skipped").length,
+    edits,
+    skipped_details: [],
+    ...overrides,
+  };
+}
+
 /**
  * The golden text for `case`, or null when it has not been captured. Line
  * endings are normalised: capture_goldens.py writes "\n", but git on Windows

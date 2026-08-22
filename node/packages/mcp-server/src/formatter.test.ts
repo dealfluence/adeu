@@ -1,30 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { formatBatchResult } from "./index.js";
+import { createTestStats } from "./conformance-utils.js";
 
 describe("MCP Server Tool Output Formatter", () => {
   it("formats a successful batch result correctly", () => {
-    const stats = {
-      actions_applied: 0,
-      actions_skipped: 0,
-      edits_applied: 1,
-      edits_skipped: 0,
-      edits: [
-        {
-          status: "applied",
-          target_text: "quick brown fox",
-          new_text: "fast red fox",
-          warning: "Warning: target_text contains punctuation.",
-          error: null,
-          critic_markup: "The {--quick brown fox--}{++fast red fox++} jumps over",
-          clean_text: "The fast red fox jumps over",
-          match_mode: "strict",
-          occurrences_modified: 1,
-          pages: [1],
-          heading_path: "1. Intro"
-        }
-      ],
-      skipped_details: []
-    };
+    const stats = createTestStats([
+      {
+        status: "applied",
+        target_text: "quick brown fox",
+        new_text: "fast red fox",
+        warning: "Warning: target_text contains punctuation.",
+        error: null,
+        critic_markup: "The {--quick brown fox--}{++fast red fox++} jumps over",
+        clean_text: "The fast red fox jumps over",
+        match_mode: "strict",
+        occurrences_modified: 1,
+        pages: [1],
+        heading_path: "1. Intro"
+      }
+    ]);
 
     const res = formatBatchResult(stats, "dummy_processed.docx");
 

@@ -1,31 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { formatBatchResult } from "./index.js";
+import { createTestStats } from "./conformance-utils.js";
 
 describe("QA Report V2: Formatter Parity", () => {
   it("F3 & F4: Formats match_mode, occurrences_modified, heading_path, and pages correctly", () => {
-    // Mock the stats object that the engine produces when `all` mode is successful
-    const stats = {
-      actions_applied: 0,
-      actions_skipped: 0,
-      edits_applied: 1,
-      edits_skipped: 0,
-      edits: [
-        {
-          status: "applied",
-          target_text: "the Board of Directors",
-          new_text: "the Governing Body",
-          warning: null,
-          error: null,
-          critic_markup: "the {--Board of Directors--}{++Governing Body++}",
-          clean_text: "the Governing Body",
-          pages: [3, 12],
-          heading_path: "6. Term > 6.1",
-          occurrences_modified: 33,
-          match_mode: "all"
-        }
-      ],
-      skipped_details: []
-    };
+    const stats = createTestStats([
+      {
+        status: "applied",
+        target_text: "the Board of Directors",
+        new_text: "the Governing Body",
+        warning: null,
+        error: null,
+        critic_markup: "the {--Board of Directors--}{++Governing Body++}",
+        clean_text: "the Governing Body",
+        pages: [3, 12],
+        heading_path: "6. Term > 6.1",
+        occurrences_modified: 33,
+        match_mode: "all"
+      }
+    ]);
 
     const res = formatBatchResult(stats, "dummy.docx");
 
@@ -39,28 +32,21 @@ describe("QA Report V2: Formatter Parity", () => {
   });
 
   it("R1: Formats results with full enrichment fields", () => {
-    const stats = {
-      actions_applied: 0,
-      actions_skipped: 0,
-      edits_applied: 1,
-      edits_skipped: 0,
-      edits: [
-        {
-          status: "applied",
-          target_text: "Target",
-          new_text: "Replaced",
-          warning: null,
-          error: null,
-          critic_markup: "{--Target--}{++Replaced++}",
-          clean_text: "Replaced",
-          pages: [1],
-          heading_path: "1. Intro",
-          occurrences_modified: 1,
-          match_mode: "all"
-        }
-      ],
-      skipped_details: []
-    };
+    const stats = createTestStats([
+      {
+        status: "applied",
+        target_text: "Target",
+        new_text: "Replaced",
+        warning: null,
+        error: null,
+        critic_markup: "{--Target--}{++Replaced++}",
+        clean_text: "Replaced",
+        pages: [1],
+        heading_path: "1. Intro",
+        occurrences_modified: 1,
+        match_mode: "all"
+      }
+    ]);
 
     const res = formatBatchResult(stats, "dummy.docx");
     expect(res).toContain("**Path:** `1. Intro`");
