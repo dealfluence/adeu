@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger, for the optional corpus-validation job below.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -126,3 +128,63 @@ jobs:
       - name: Run Tests
         working-directory: ./langchain
         run: uv run pytest
+
+  # Optional: fetch the real-document corpus and run the A5 validation suite.
+  #
+  # Never part of the default gate. The corpus is a set of real government
+  # documents that are fetched from their publishers on demand (never
+  # committed), so wiring it into
+  # every PR would make the build depend on third-party web servers staying up
+  # and on those documents never being revised in place. Both of those fail
+  # regularly, and a red build nobody can fix teaches people to ignore red
+  # builds.
+  #
+  # Run it: Actions -> CI -> "Run workflow" (workflow_dispatch), or set the
+  # repository variable ADEU_FETCH_CORPUS=1 to include it on pushes.
+  #
+  # The suite itself skips every corpus test whose document is missing, so a
+  # partial fetch (Canada.ca bot-blocks some entries) still produces a useful
+  # run rather than a failure.
+  corpus-validation:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || vars.ADEU_FETCH_CORPUS == '1'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "python/uv.lock"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install Python Dependencies
+        working-directory: ./python
+        run: uv sync --all-extras --dev
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.x"
+      - name: Install Node dependencies
+        working-directory: ./node
+        run: npm ci
+
+      # Exit 1 when an entry could not be fetched. Reported, not fatal: some
+      # publishers bot-block CI runners, and the tests skip those documents.
+      - name: Fetch corpus
+        continue-on-error: true
+        run: python scripts/fetch_corpus.py
+
+      - name: Corpus inventory
+        run: python scripts/fetch_corpus.py --list
+
+      - name: A5 corpus validation (Python)
+        working-directory: ./python
+        run: uv run pytest tests/test_corpus_validation.py -v
+
+      - name: A5 corpus validation (Node)
+        working-directory: ./node
+        run: |
+          npm run build
+          npm test --workspace @adeu/core -- corpus_validation

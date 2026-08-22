@@ -16,6 +16,8 @@ from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
+from adeu.utils.content_controls import BALLOT_GLYPHS, BlockSdt, SdtEvent
+
 logger = structlog.get_logger(__name__)
 
 
@@ -35,6 +37,17 @@ QN_W_DELTEXT = qn("w:delText")
 QN_W_TAB = qn("w:tab")
 QN_W_BR = qn("w:br")
 QN_W_CR = qn("w:cr")
+# Rendered run content that used to fall through the projection silently:
+#   w:noBreakHyphen is a real hyphen glyph, so dropping it merged the word
+#     either side of it ("e-mail" projected as "email").
+#   w:ptab is an absolute-position tab; it separates content like w:tab.
+# w:softHyphen is deliberately NOT here: it is an optional break hint Word
+# renders only when it actually breaks the line, so projecting nothing is
+# correct. w:sym is also still dropped - see AI_CONTEXT / CC-1, it needs a
+# font-aware decision (symbol fonts map glyphs into the private-use area,
+# so the code point alone does not identify the character).
+QN_W_NOBREAKHYPHEN = qn("w:noBreakHyphen")
+QN_W_PTAB = qn("w:ptab")
 QN_W_RPR = qn("w:rPr")
 QN_W_RPRCHANGE = qn("w:rPrChange")
 QN_W_COMMENTREFERENCE = qn("w:commentReference")
@@ -92,9 +105,17 @@ _TEXTBOX_DISCLOSURE_CAP = 300
 # Toggle-property "off" values: <w:b w:val="0|false|off"/> means NOT bold.
 # Any other value (including a missing w:val) means the toggle is on.
 _OFF_VALS = ("0", "false", "off")
-# A page break projects as its literal markup so downstream consumers can
-# round-trip it; see get_run_text / get_run_text_and_markers.
-_PAGE_BREAK_TOKEN = '<w:br w:type="page"/>'
+# A page break projects as U+000C FORM FEED — the conventional plain-text page
+# separator — so that pagination can find manual breaks without putting markup
+# in the character stream an LLM reads. Kept identical in the Node engine
+# (utils/docx.ts get_run_text) and consumed by pagination._tokenize_into_atomic_blocks.
+#
+# It was literal `<w:br w:type="page"/>` markup until 2026-08-21 (CC-10): 22 characters
+# of XML in the projection, and a silent parity break, since Node emitted "\n".
+_PAGE_BREAK_TOKEN = "\f"
+# Public alias: pagination imports this rather than re-spelling the character,
+# so the producer and the consumer of the signal cannot drift apart.
+PAGE_BREAK_TOKEN = _PAGE_BREAK_TOKEN
 
 
 def _textbox_text(graphic_el) -> str:
@@ -536,6 +557,20 @@ class ProjectedRun:
     proj_text: str
     proj_bold: bool
     proj_italic: bool
+    #: The content controls enclosing this run, outermost first, or `()`.
+    #:
+    #: Carried on the run rather than derived later because the traversal is
+    #: the only place that knows it cheaply - it already walks into every
+    #: `w:sdt`, so maintaining a stack costs one push and one pop per control,
+    #: whereas recovering the same fact afterwards means an ancestor walk per
+    #: run and there are 559 K of them on the stress document.
+    #:
+    #: This deliberately tracks EVERY control, not just the anchored ones that
+    #: project `{#cc:N}` tokens. The write gates (CC-4) must see picture,
+    #: repeating and building-block controls too - a lock on one of those is
+    #: just as real - and those emit no `sdt_start`/`sdt_end` events at all.
+    #: Structure and projection are separate concerns; this is the structure.
+    sdt_stack: Tuple[Any, ...] = ()
 
     @property
     def text(self) -> str:
@@ -889,12 +924,75 @@ def apply_formatting_to_segments(text: str, prefix: str, suffix: str) -> str:
     return "\n".join(wrap(p) if p else "" for p in parts)
 
 
-def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[ParagraphItem]:
+def _revision_ballot_mark(r_element, text: str) -> Optional[str]:
+    """The mark for a ballot run that sits inside a tracked revision.
+
+    `None` when the run is not inside one, which is the ordinary case and
+    keeps `w14:checked` authoritative.
+    """
+    node = r_element.getparent()
+    while node is not None:
+        if node.tag in (QN_W_INS, QN_W_DEL):
+            return "x" if text in ("\u2611", "\u2612") else " "
+        node = node.getparent()
+    return None
+
+
+def _has_ballot_run(sdt_el) -> bool:
+    """Does this control contain a ballot-glyph run to hang the mark on?"""
+    content = sdt_el.find(QN_W_SDTCONTENT)
+    if content is None:
+        return False
+    for r in content.iter(QN_W_R):
+        if "".join(t.text or "" for t in r.iter(QN_W_T)) in BALLOT_GLYPHS:
+            return True
+    return False
+
+
+def _enclosing_checkbox(r_element, text: str, sdt_infos: Optional[dict]):
+    """The checkbox control this run is the glyph of, or ``None``.
+
+    Gated on the run's text being a ballot glyph FIRST, which is what keeps
+    this affordable: the walk runs for roughly 7,700 runs in the largest
+    corpus document rather than for all 559,000 of them.
+
+    The gate is also the correctness boundary. `odot_uic_drywell` carries two
+    bare ``U+2610`` runs in ordinary prose, outside any control, and the
+    nearest enclosing ``w:sdt`` decides their fate: no control, or a control
+    that is not a checkbox, means the glyph is prose and stays a glyph.
+    Substituting on the character alone would fabricate two checkboxes in a
+    document that has 19 real ones for them to hide among.
+    """
+    if not sdt_infos or text not in BALLOT_GLYPHS:
+        return None
+    node = r_element.getparent()
+    while node is not None:
+        if node.tag == QN_W_SDT:
+            info = sdt_infos.get(id(node))
+            return info if info is not None and info.cls == "checkbox" else None
+        node = node.getparent()
+    return None
+
+
+def iter_paragraph_content(
+    paragraph: Any, part: Any = None, sdt_infos: Optional[dict] = None
+) -> Iterator[ParagraphItem]:
     """
     Iterates over the content of a paragraph, yielding both Runs and Comment events.
     This allows reconstruction of text with inline comments using CriticMarkup.
+
+    ``sdt_infos`` is the ``id(element) -> SdtInfo`` map from
+    ``content_controls.assign_ordinals``. Supplying it turns inline content
+    controls from transparent wrappers into ``SdtEvent`` boundaries; omitting it
+    preserves the historical behaviour exactly, which is what callers like
+    outline and sanitize want (they must not grow anchor tokens).
     """
     doc_part = part if part is not None else _get_part_safely(paragraph)
+    # The content controls currently open around the walk position, outermost
+    # first. Stamped onto every `ProjectedRun` so consumers can answer "which
+    # controls enclose this text" without an ancestor walk per run. Tracks
+    # every control, anchored or not - see `ProjectedRun.sdt_stack`.
+    sdt_stack: list = []
     # State for complex fields (w:fldChar)
     in_complex_field = False
     current_instr = ""
@@ -937,8 +1035,10 @@ def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[Paragra
                 i = child.find(QN_W_I)
                 if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
                     is_italic = True
-            elif tag == QN_W_TAB:
+            elif tag == QN_W_TAB or tag == QN_W_PTAB:
                 text_parts.append(" ")
+            elif tag == QN_W_NOBREAKHYPHEN:
+                text_parts.append("-")
             elif tag == QN_W_CR:
                 text_parts.append("\n")
             elif tag == QN_W_BR:
@@ -1013,7 +1113,45 @@ def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[Paragra
                 text = text_parts[0]
             else:
                 text = "".join(text_parts)
-            yield ProjectedRun(r_element, text, is_bold, is_italic)
+            cb_info = _enclosing_checkbox(r_element, text, sdt_infos)
+            if cb_info is not None:
+                # Spec §4. `[` and `]` are virtual chrome; the mark is a REAL
+                # run-backed span, which is what "virtual + real span mix"
+                # means. The substitution is one character for one character
+                # (U+2612 -> `x`), so no offset arithmetic anywhere has to
+                # learn about a width difference: the mapper already builds
+                # spans from `proj_text`, so a run projecting `x` while its
+                # `w:t` holds the glyph needs no new invariant.
+                #
+                # Done HERE, at run emission, rather than in the `w:sdt`
+                # branch, because a checkbox control is not always inline. In
+                # the corpus, 11 of `odot_uic_drywell`'s 19 checkboxes wrap a
+                # whole `w:tc` (a checkbox column in a form table), and that
+                # path never passes through the sdt branch. Substituting where
+                # the run is emitted covers every path by construction.
+                #
+                # Emphasis is forced off: the mark is chrome, and a bold glyph
+                # run would otherwise project `[**x**]` for the marker-
+                # stripping passes to mangle (the QA F4/F22b class).
+                #
+                # The mark normally comes from `w14:checked` (the settled
+                # value - see SdtInfo.checkbox_mark), but a run inside a
+                # revision projects ITS OWN glyph instead. A tracked toggle
+                # writes two glyph runs, an inserted new state and a deleted
+                # old one, and the attribute can only describe one of them:
+                # taking it for both rendered `{++[ ]++}{--[ ]--}`, a toggle
+                # that appears to change nothing. Reading each revision run's
+                # own glyph makes the pending change legible as
+                # `{++[ ]++}{--[x]--}`, and the clean view keeps exactly one
+                # box because the deleted half never reaches it (A4.6).
+                mark = _revision_ballot_mark(r_element, text)
+                if mark is None:
+                    mark = cb_info.checkbox_mark
+                yield SdtEvent("checkbox_start", cb_info)
+                yield ProjectedRun(r_element, mark, False, False, tuple(sdt_stack))
+                yield SdtEvent("checkbox_end", cb_info)
+            else:
+                yield ProjectedRun(r_element, text, is_bold, is_italic, tuple(sdt_stack))
 
         if c_id is not None:
             yield DocxEvent("fmt_end", c_id)
@@ -1080,7 +1218,53 @@ def iter_paragraph_content(paragraph: Any, part: Any = None) -> Iterator[Paragra
                 if b_name and (not b_name.startswith("_") or b_name.startswith("_Ref")):
                     yield DocxEvent("bookmark", b_name)
             elif tag in (QN_W_SDT, QN_W_SMARTTAG, QN_W_SDTCONTENT):
-                yield from traverse_node(child)
+                # Content controls were historically transparent here: the
+                # boundary was erased and only the contents projected. When the
+                # caller supplies the ordinal map (ingest and the mapper do;
+                # outline/sanitize deliberately do not) the boundary becomes
+                # visible as a pair of events, and an ANCHORED control's
+                # contents are bracketed by them.
+                info = sdt_infos.get(id(child)) if sdt_infos is not None else None
+                # Track the control regardless of whether it ANCHORS. Anchoring
+                # decides whether a `{#cc:N}` token projects; enclosure decides
+                # which gates apply, and the two are not the same question. A
+                # `sdtContentLocked` picture control projects no token and is
+                # still locked.
+                pushed = info is not None and tag == QN_W_SDT
+                if pushed:
+                    sdt_stack.append(info)
+                try:
+                    if info is not None and info.cls == "checkbox" and not _has_ballot_run(child):
+                        # Degenerate control: Word always writes the glyph run,
+                        # but a generator might not. Emit the whole token
+                        # virtually so it stays three characters wide instead
+                        # of collapsing to `[]`, which no edit surface expects.
+                        #
+                        # The NORMAL case is deliberately absent from this
+                        # branch: a checkbox's glyph run substitutes itself
+                        # where runs are emitted, so it works on every path
+                        # that reaches a run — inline, in a cell, or wrapping
+                        # one. See the run branch.
+                        yield SdtEvent("checkbox_start", info)
+                        yield SdtEvent("checkbox_mark", info)
+                        yield SdtEvent("checkbox_end", info)
+                    elif info is None or not info.anchored:
+                        yield from traverse_node(child)
+                    else:
+                        yield SdtEvent("sdt_start", info)
+                        if not info.showing_placeholder:
+                            yield from traverse_node(child)
+                        # Ghost text NEVER projects as body text (spec §3,
+                        # A1.4). The placeholder run lives in sdtContent like
+                        # any other run, so descending would emit "Click or tap
+                        # here to enter text." as if the user had typed it. The
+                        # bubble that replaces it is chrome, added by the
+                        # consumer, because only the consumer knows whether
+                        # this is the clean view.
+                        yield SdtEvent("sdt_end", info)
+                finally:
+                    if pushed:
+                        sdt_stack.pop()
 
     p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     yield from traverse_node(p_el)
@@ -1174,8 +1358,10 @@ def run_text_and_flags(r_element) -> tuple[str, bool, bool]:
             i = child.find(QN_W_I)
             if i is not None and i.get(QN_W_VAL) not in _OFF_VALS:
                 is_italic = True
-        elif tag == QN_W_TAB:
+        elif tag == QN_W_TAB or tag == QN_W_PTAB:
             parts.append(" ")
+        elif tag == QN_W_NOBREAKHYPHEN:
+            parts.append("-")
         elif tag == QN_W_BR:
             parts.append(_PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n")
         elif tag == QN_W_CR:
@@ -1199,13 +1385,12 @@ def get_run_text(run: Run) -> str:
             # Fix 5.1: Normalize literal tabs to spaces to match w:tab behavior
             raw = child.text or ""
             text += raw.replace("\t", " ")
-        elif child.tag == QN_W_TAB:
+        elif child.tag == QN_W_TAB or child.tag == QN_W_PTAB:
             text += " "  # Convert tab to space
+        elif child.tag == QN_W_NOBREAKHYPHEN:
+            text += "-"
         elif child.tag == QN_W_BR:
-            if child.get(qn("w:type")) == "page":
-                text += '<w:br w:type="page"/>'
-            else:
-                text += "\n"
+            text += _PAGE_BREAK_TOKEN if child.get(QN_W_TYPE) == "page" else "\n"
         elif child.tag == QN_W_CR:
             text += "\n"
     return text
@@ -1334,6 +1519,58 @@ def iter_document_parts(doc: DocumentObject):
         yield container
 
 
+def iter_sections_including_wrapped(doc: DocumentObject):
+    """
+    Every section in document order, including the ones python-docx cannot see.
+
+    python-docx enumerates sections with ``./w:body/w:p/w:pPr/w:sectPr`` plus the
+    body-level ``w:sectPr``. That XPath takes only DIRECT children of the body, so
+    a section-terminating paragraph wrapped in a content control lives at
+    ``w:body/w:sdt/w:sdtContent/w:p/w:pPr/w:sectPr`` and does not match — the
+    section does not exist as far as ``doc.sections`` is concerned, and the header
+    it references is never walked (CC-17: 5 data-bound controls in a real SSP's
+    running header, unreachable by ``set_field``).
+
+    Wrapping a section break in an ``w:sdt`` is ordinary Word behaviour: a cover
+    page or a title block inserted as a document-part gallery control carries its
+    own section break inside the control.
+
+    Descends through ``w:sdt``/``w:sdtContent`` only, recursively for nested
+    controls. It deliberately does NOT use a blanket ``.//w:sectPr``: that would
+    also match ``w:sectPr`` inside a text box (``w:txbxContent``), which is not a
+    section break, and re-introduce the over-collection the node port was already
+    corrected for.
+    """
+    from docx.section import Section
+
+    body = doc.element.body
+    sect_prs = []
+
+    def _walk(el):
+        for child in el:
+            tag = child.tag
+            if tag == qn("w:p"):
+                pPr = child.find(qn("w:pPr"))
+                if pPr is not None:
+                    sect_pr = pPr.find(qn("w:sectPr"))
+                    if sect_pr is not None:
+                        sect_prs.append(sect_pr)
+            elif tag == qn("w:sdt"):
+                content = child.find(qn("w:sdtContent"))
+                if content is not None:
+                    _walk(content)
+
+    _walk(body)
+
+    # The body-level sectPr terminates the final section and is always last.
+    tail = body.find(qn("w:sectPr"))
+    if tail is not None:
+        sect_prs.append(tail)
+
+    for sect_pr in sect_prs:
+        yield Section(sect_pr, doc.part)
+
+
 def iter_document_parts_with_kind(doc: DocumentObject):
     """
     Like iter_document_parts, but yields (container, kind) where kind is one
@@ -1371,8 +1608,13 @@ def iter_document_parts_with_kind(doc: DocumentObject):
             if not even.is_linked_to_previous:
                 yield even
 
+    # Resolved once: the walk is O(body children) and both loops below need it.
+    # `doc.sections` is deliberately NOT used — it cannot see a section break
+    # wrapped in a content control (CC-17).
+    sections = list(iter_sections_including_wrapped(doc))
+
     # 1. Headers
-    for section in doc.sections:
+    for section in sections:
         for part in _iter_section_parts(section, "header"):
             yield part, "header"
 
@@ -1380,7 +1622,7 @@ def iter_document_parts_with_kind(doc: DocumentObject):
     yield doc, "body"
 
     # 3. Footers
-    for section in doc.sections:
+    for section in sections:
         for part in _iter_section_parts(section, "footer"):
             yield part, "footer"
 
@@ -1556,11 +1798,16 @@ def iter_row_cells(row: _Row) -> list:
     return cells
 
 
-def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
+def iter_block_items(parent, emit_sdt: bool = False) -> Iterator[Union[Paragraph, Table, FootnoteItem, "BlockSdt"]]:
     """
     Yields Paragraph or Table objects in the order they appear in the XML.
     Supports Document, Header, Footer, and Cell objects.
     Recursion is left to the caller.
+
+    With ``emit_sdt`` a block-level content control arrives as a
+    :class:`BlockSdt` instead of being flattened into its contents, so the
+    caller can bracket it. Opt-in for the reason given on
+    ``_iter_block_children``.
     """
     if isinstance(parent, DocumentObject):
         parent_elm = parent.element.body
@@ -1592,18 +1839,30 @@ def iter_block_items(parent) -> Iterator[Union[Paragraph, Table, FootnoteItem]]:
         else:
             parent_elm = parent
 
-    for kind, child_elm in _iter_block_children(parent_elm):
+    for kind, child_elm in _iter_block_children(parent_elm, emit_sdt):
         if kind == "p":
             yield Paragraph(child_elm, parent)
         elif kind == "tbl":
             yield Table(child_elm, parent)
+        elif kind == "sdt":
+            # A block-level control, undescended. Callers that do not opt in
+            # never see this (emit_sdt defaults False), so outline, domain,
+            # sanitize and _normalize_table keep the historical transparent
+            # behaviour.
+            yield BlockSdt(child_elm)
 
 
-def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
+def _iter_block_children(parent_elm, emit_sdt: bool = False) -> Iterator[Tuple[str, Any]]:
     """
     Yields (kind, child_elem) tuples among `parent_elm`'s children, descending
     into block-level w:sdt content controls.
-    kind is "p" or "tbl".
+    kind is "p", "tbl", or — only when `emit_sdt` — "sdt" for a block-level
+    content control, yielded UNDESCENDED so the caller can wrap it.
+
+    The boundary is opt-in because every other consumer of this iterator
+    (outline, domain, sanitize, _normalize_table) treats block children as a
+    flat list of paragraphs and tables; handing them a third kind unannounced
+    would silently drop content in whichever branch fell through.
     """
     for child in parent_elm.iterchildren():
         tag = child.tag
@@ -1614,7 +1873,17 @@ def _iter_block_children(parent_elm) -> Iterator[Tuple[str, Any]]:
         elif tag == qn("w:sdt"):
             sdt_content = child.find(qn("w:sdtContent"))
             if sdt_content is not None:
-                yield from _iter_block_children(sdt_content)
+                if emit_sdt:
+                    # Yield the control as ONE unit and do NOT descend: the
+                    # consumer recurses into sdtContent itself, exactly as it
+                    # already does for a Table. That is what makes a
+                    # block-level control a single block that can be wrapped in
+                    # its token lines — paired boundary events would instead
+                    # have forced every consumer to grow a nesting stack and to
+                    # re-derive the block separators inside it.
+                    yield ("sdt", child)
+                else:
+                    yield from _iter_block_children(sdt_content, emit_sdt)
 
 
 def suggest_sibling_docx(path: Union[str, Path], limit: int = 5) -> Tuple[list[str], int]:
@@ -1731,9 +2000,9 @@ def _validate_docx_main_part(sanitized_bytes: bytes) -> None:
         raise ValueError("not a valid DOCX file (got bad zip signature)") from e
 
     try:
-        from docx import Document
+        from adeu.utils.opc import load_document
 
-        Document(io.BytesIO(sanitized_bytes))
+        load_document(io.BytesIO(sanitized_bytes))
     except Exception as e:
         if isinstance(e, ValueError) and "not a valid DOCX file" in str(e):
             raise

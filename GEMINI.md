@@ -15,6 +15,8 @@ Reads a DOCX file and returns its content as CriticMarkup-annotated text:
 - `clean_view=true`: returns the accepted/final text with no markup — use this first to understand context
 - `mode="outline"`: returns a heading map only — start here on large documents before reading in full
 - `mode="appendix"`: returns defined terms and cross-reference anchors — consult before editing legal docs
+- `mode="fields"`: returns a ledger of all form fields (content controls) with CC:<N> ID, tag, alias, type, state, and options
+- `fields_offset=N`: 0-indexed pagination offset for mode="fields"
 - `page=N`: navigate paginated full-text output
 - `search_query="text"`: search document for specific text matches
 - `max_matches=N`: cap number of search matches returned (default 20)
@@ -29,9 +31,13 @@ Applies a list of edits to a DOCX. Edits apply **sequentially** — each one eva
 - `file_path` (required): absolute path to the `.docx` file
 - `changes` (required): list of change objects
 - `partial=true` (default `true`): non-transactional batch execution — valid edits apply while failing edits return detailed error reports. Pass `partial=false` for transactional rollback if any edit fails validation.
+- `ignore_control_locks=true`: permit writes to content-locked controls (`sdtContentLocked`)
+- `ignore_document_protection=true`: permit writes to read-only or comments-protected documents
+- `allow_untracked_writes=true`: permit writes in fill-in-forms protected documents (where Word suppresses change tracking)
 
 **Change types:**
 - `modify`: search-and-replace. `target_text` must uniquely identify the passage. `new_text` supports Markdown headings, bold, italic, and `\n\n` for paragraph breaks. Empty `new_text` deletes the passage.
+- `set_field`: fill a form field (content control) by `field` ("CC:<N>", tag, or alias) and `value`. Automatically dual-writes bound data stores.
 - `accept` / `reject`: finalize or revert a tracked change by `target_id` (e.g. `Chg:12`)
 - `reply`: reply to a comment by `target_id` (e.g. `Com:5`)
 

@@ -23,6 +23,7 @@ from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
     build_changes_response,
+    build_fields_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -78,7 +79,7 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
 
     clean_view = bool(req.get("clean_view", False))
     mode = req.get("mode", "full")
-    if mode not in ("full", "outline", "appendix", "changes"):
+    if mode not in ("full", "outline", "appendix", "changes", "fields"):
         _emit_error("invalid_input", f"Invalid mode: '{mode}'")
         return
 
@@ -164,6 +165,18 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
                 outline_verbose=bool(req.get("outline_verbose", False)),
                 is_cli=True,
                 outline_nodes=outline_nodes,
+                no_chrome=no_chrome,
+            )
+        elif mode == "fields":
+            # RAW projection: the ledger previews values from the text between a
+            # control's anchors, which the clean view rewrites.
+            text, _ = doc_cache.get_pagination(entry, clean_view=False)
+            res = build_fields_response(
+                _load_docx_or_exit(path),
+                text,
+                str(path),
+                offset=int(req.get("fields_offset", 0)),
+                is_cli=True,
                 no_chrome=no_chrome,
             )
         elif mode == "changes":
@@ -283,6 +296,13 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
     author = req.get("author")
     partial = bool(req.get("partial", False))
     terse_errors = bool(req.get("terse_errors", False))
+    # CC-4 write-gate overrides (spec-gates.md §1), default off like every
+    # other surface.
+    gate_overrides = {
+        "ignore_control_locks": bool(req.get("ignore_control_locks", False)),
+        "ignore_document_protection": bool(req.get("ignore_document_protection", False)),
+        "allow_untracked_writes": bool(req.get("allow_untracked_writes", False)),
+    }
     report_style = req.get("report", "standard")
     output_path_str = req.get("output") or req.get("output_path")
     output_path = Path(output_path_str) if output_path_str else None
@@ -309,7 +329,9 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             _emit_error("invalid_input", "Invalid 'changes' format; expected array or file path string.")
             return
 
-        engine = _open_redline_engine_or_exit(path, author=author, terse_errors=terse_errors)
+        engine = _open_redline_engine_or_exit(
+            path, author=author, terse_errors=terse_errors, gate_overrides=gate_overrides
+        )
         stats = engine.process_batch(changes, partial=partial)
 
         applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)

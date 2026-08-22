@@ -26,6 +26,7 @@ Visibility only — no edit/apply semantics are exercised here.
 """
 
 import io
+import re
 
 import pytest
 from docx import Document
@@ -119,8 +120,19 @@ def _project(data: bytes, clean_view: bool = True) -> str:
     return extract_text_from_stream(io.BytesIO(data), clean_view=clean_view, include_appendix=False)
 
 
+_CC_TOKEN_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
+
+
 def _lines(text: str) -> list[str]:
-    return [line for line in text.splitlines() if line.strip()]
+    """Non-blank projected lines, with content-control anchors stripped.
+
+    CC-1b projects `{#cc:N}` pairs around the very controls this suite wraps
+    its fixtures in. This suite's subject is whether the sdt-transparent walk
+    STOPS at a nested `w:tbl` — a structural question that must read the same
+    however much chrome CC-1 adds. The anchors themselves are asserted in the
+    CC-1 suites.
+    """
+    return [_CC_TOKEN_RE.sub("", line) for line in text.splitlines() if line.strip()]
 
 
 @pytest.fixture(scope="module")

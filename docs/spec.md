@@ -26,6 +26,10 @@ graph LR
 **Goal**: Provide text to the LLM that maps 1:1 with the underlying XML runs.
 *   **Mechanism**: It does *not* use `docx.Paragraph.text`. Instead, it iterates over visible XML runs, resolving `<w:tab/>` and `<w:br/>` tags to prevent text merging.
 *   **Structural Signals**: It detects Paragraph Styles and Outline Levels to inject "Virtual Markdown" (e.g., `# Header`) into the text stream. This gives the LLM structural context without modifying the document content.
+*   **Content Controls (`w:sdt`)**:
+    *   *Anchored Projection*: Leaf controls project anchor pairs `{#cc:N}`…`{#/cc:N}`. Open tokens carry flags (`locked`, `bound`, `group`). Empty fields display prompt text in `{>>placeholder: …<<}` bubbles in raw view. Checkboxes project as `[x]` / `[ ]`.
+    *   *Fields Ledger*: `read_docx(mode="fields")` lists all form fields with ordinals, tags, aliases, classes, states, and option lists.
+    *   *Field Editing & Gates*: `set_field` fills controls by `CC:N` ordinal, tag, or alias with type validation and dual-write to `customXml` or `core.xml`. Gated by control locks (`ignore_control_locks`), document protection (`ignore_document_protection`), and untracked writes (`allow_untracked_writes`).
 *   **Comments**: DOCX Comments are ingested as **CriticMarkup** (`{==Text==}{>>Metadata: Comment<<}`). This preserves the precise scope of the comment and includes Author, Date, and Resolution status. Overlapping comments are flattened into sequential blocks.
 
 ### 2.2 The Mapper (`src/adeu/redline/mapper.py`)
@@ -57,12 +61,21 @@ class ModifyText(BaseModel):
     new_text: str
     comment: Optional[str]
 
+class SetField(BaseModel):
+    type: Literal["set_field"]
+    field: str  # "CC:N", tag, or alias
+    value: str
+    match_mode: Optional[Literal["strict", "first", "all"]]
+    comment: Optional[str]
+
 class AcceptChange(BaseModel): ...
 class RejectChange(BaseModel): ...
 class ReplyComment(BaseModel): ...
+class InsertRow(BaseModel): ...
+class DeleteRow(BaseModel): ...
 
 DocumentChange = Annotated[
-    Union[AcceptChange, RejectChange, ReplyComment, ModifyText],
+    Union[AcceptChange, RejectChange, ReplyComment, ModifyText, SetField, InsertRow, DeleteRow, ...],
     Field(discriminator="type")
 ]
 ```
@@ -86,5 +99,5 @@ DocumentChange = Annotated[
 
 ## 5. Known Limitations
 
-1.  **Table Structure Changes**: Adeu can edit text *inside* table cells, but it cannot currently merge cells, add rows, or delete columns via the structured edit interface.
+1.  **Table Structure Changes**: Adeu supports inserting and deleting table rows (`insert_row`, `delete_row`), but cell merging and column deletion are not supported via the structured edit interface.
 2.  **Complex Field Codes**: Edits inside complex field codes (like automated dates or TOCs) may result in broken fields.

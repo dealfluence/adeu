@@ -21,6 +21,7 @@ from adeu.mcp_components._response_builders import (
     BuilderResult,
     build_appendix_response,
     build_changes_response,
+    build_fields_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -338,6 +339,17 @@ def _schedule_background_fill(entry, clean_view: bool) -> None:
             entry.clean_fill_scheduled = False
 
 
+def _mcp_fields_banner(file_path: str) -> "str | None":
+    """The A1.9 banner for an MCP full-view read, or None.
+
+    Surface-aware hint (QA F11): an MCP client cannot run a shell command, so
+    it is pointed at the read mode instead of the CLI flag.
+    """
+    from adeu.fields import banner_for_path
+
+    return banner_for_path(file_path, hint=' \u00b7 read mode="fields" for the field ledger')
+
+
 async def _read_docx_disk(
     file_path: str,
     ctx: Context,
@@ -352,6 +364,7 @@ async def _read_docx_disk(
     search_case_sensitive: bool = True,
     changes_author: Optional[str] = None,
     changes_offset: int = 0,
+    fields_offset: int = 0,
     max_matches: int = 20,
     match_offset: int = 0,
     full_paragraph: bool = False,
@@ -464,6 +477,28 @@ async def _read_docx_disk(
                     )
                 )
 
+            if mode == "fields":
+                # RAW projection: the ledger previews values from the text
+                # between a control's anchors, and the clean view drops the
+                # placeholder bubbles that distinguish an empty control.
+                text, pagination = await asyncio.to_thread(
+                    doc_cache.get_pagination, entry, clean_view=False, cb=relay.callback
+                )
+                await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                from adeu.cli import _load_docx_or_exit
+
+                doc = await asyncio.to_thread(_load_docx_or_exit, Path(file_path))
+                return _as_tool_result(
+                    build_fields_response(
+                        doc,
+                        text,
+                        file_path,
+                        offset=fields_offset,
+                        is_cli=False,
+                        pagination_result=pagination,
+                    )
+                )
+
             if mode == "appendix":
                 text = await asyncio.to_thread(doc_cache.get_text_with_appendix, entry, clean_view, relay.callback)
                 await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
@@ -526,7 +561,9 @@ async def _read_docx_disk(
                                 pagination_result=pagination,
                             )
                         )
-                    return _as_tool_result(build_full_document_response(text, file_path))
+                    return _as_tool_result(
+                        build_full_document_response(text, file_path, fields_banner=_mcp_fields_banner(file_path))
+                    )
                 if kind == "range":
                     assert isinstance(page_val, tuple)
                     start_p, end_p = page_val
@@ -541,7 +578,15 @@ async def _read_docx_disk(
                     )
                 assert isinstance(page_val, int)
                 page_num = page_val
-            return _as_tool_result(build_paginated_response(text, page_num, file_path, pagination_result=pagination))
+            return _as_tool_result(
+                build_paginated_response(
+                    text,
+                    page_num,
+                    file_path,
+                    pagination_result=pagination,
+                    fields_banner=_mcp_fields_banner(file_path),
+                )
+            )
         finally:
             await relay.finish()
             # Warm the clean view in the background after a cold RAW ingest —
@@ -574,6 +619,9 @@ async def _process_document_batch_disk(
     output_path: Optional[str],
     rejected_notes: Optional[RejectedNotes] = None,
     partial: bool = True,
+    ignore_control_locks: bool = False,
+    ignore_document_protection: bool = False,
+    allow_untracked_writes: bool = False,
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -630,7 +678,14 @@ async def _process_document_batch_disk(
 
     def _run_batch_sync() -> tuple[bool, Any, str, str]:
         stream = read_file_bytes(original_docx_path)
-        engine = RedlineEngine(stream, author=author_name, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
+        engine = RedlineEngine(
+            stream,
+            author=author_name,
+            id_discovery_hint=MCP_ID_DISCOVERY_HINT,
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
+        )
 
         valid_indices = getattr(rejected_notes, "valid_indices", None)
         try:
@@ -769,6 +824,11 @@ async def _process_document_batch_disk(
         # replaces (never stacks with) the rejection preamble.
         res = (partial_header or rejection_prefix) + f"Batch complete. Saved to: {final_output_path}{overwrite_note}\n"
 
+        # spec-gates §5: an exercised override is disclosed in the report
+        # header, beside the impersonation warning, because both are "this
+        # batch did something the default would not have".
+        if stats.get("overrides_note"):
+            res += f"\n*{stats['overrides_note']}*\n"
         if stats.get("author_impersonation_warning"):
             await ctx.warning(stats["author_impersonation_warning"])
             res += f"\n*Warning:* {stats['author_impersonation_warning']}\n"
@@ -793,6 +853,11 @@ async def _process_document_batch_disk(
                 res += f"### Edit {i + 1} {status_indicator}{page_suffix}\n"
                 if report.get("heading_path"):
                     res += f"**Path:** `{report['heading_path']}`\n"
+                if report.get("field"):
+                    # Audit-trail symmetry with Path: an edit inside a content
+                    # control is subject to that control's locks and binding,
+                    # which decides whether a human can keep it.
+                    res += f"field: {report['field']}\n"
 
                 occ = report.get("occurrences_modified", 0)
                 occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
@@ -1263,6 +1328,32 @@ PROCESS_BATCH_COMMON_DESC = (
     "Validation failures reject the whole batch transactionally: nothing is "
     "applied until every change resolves.\n\n"
 )
+# CC-4 override parameters (spec-gates.md §1). Defined once and reused by both
+# tool registrations so the win32 and non-win32 surfaces cannot drift in either
+# their defaults or their prose — the two have drifted before.
+#
+# All three default False. spec-gates §1 requires it: a truthy default survives
+# client stripping, and a gate that defaults to off is a gate that does not
+# exist. The defaults are restated in the description text per the §7a rule,
+# because some clients show the caller only the prose.
+IgnoreControlLocksParam = Annotated[
+    bool,
+    "Apply edits even inside content-locked or grouped content controls. Defaults to False. "
+    "Word refuses such edits, so overriding means the document owner has accepted the lock is wrong.",
+]
+IgnoreDocumentProtectionParam = Annotated[
+    bool,
+    "Apply changes even when the document carries enforced editing protection "
+    "(read-only, fill-in-forms, comments-only, tracked-changes-only). Defaults to False.",
+]
+AllowUntrackedWritesParam = Annotated[
+    bool,
+    "Permit writes that Word records WITHOUT tracked changes. Defaults to False. Applies only to "
+    "fill-in-forms-protected documents, where Word does not record revisions at all; every such "
+    "write is flagged in the report. This is separate from ignore_document_protection because it "
+    "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
+]
+
 PROCESS_BATCH_WIN32_EXTRA = (
     "If the file is open in Word, edits run live on the canvas. "
     "Leave original_docx_path empty to edit whatever document is currently active.\n\n"
@@ -1276,7 +1367,12 @@ PROCESS_BATCH_OPERATIONS_DESC = (
     "CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n"
     "2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n"
     "3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n"
-    "4. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
+    "4. 'set_field': Fill a content control (form field) — `field` is its 'CC:<N>' id, "
+    "tag or alias, `value` the text; list them with `read_docx` mode='fields'. Checkboxes "
+    "take true/false, dates YYYY-MM-DD, dropdowns a listed option. Data-bound controls "
+    "update their store too. A locked or protected control refuses and names the override "
+    "that permits it.\n"
+    "5. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
     "ID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. "
     "Always call `read_docx` immediately before any accept/reject/reply — "
     "do not reuse IDs from earlier in the conversation.\n\n"
@@ -1317,10 +1413,11 @@ if sys.platform == "win32":
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix", "changes"],
+            Literal["full", "outline", "appendix", "changes", "fields"],
             "'full' returns body content (paginated). 'outline' returns a structural "
             "heading map. 'appendix' returns defined terms, anchors, and diagnostics. "
-            "'changes' returns a tracked changes & comments ledger.",
+            "'changes' returns a tracked changes & comments ledger. 'fields' returns "
+            "the content-control ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1374,6 +1471,10 @@ if sys.platform == "win32":
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        fields_offset: Annotated[
+            int,
+            "For mode='fields' only: entry offset for paginating the content-control ledger.",
+        ] = 0,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to read this docx document? State this reason before any other parameter.",
@@ -1403,6 +1504,7 @@ if sys.platform == "win32":
                 search_case_sensitive=search_case_sensitive,
                 changes_author=changes_author,
                 changes_offset=changes_offset,
+                fields_offset=fields_offset,
                 max_matches=max_matches,
                 match_offset=match_offset,
                 full_paragraph=full_paragraph,
@@ -1432,6 +1534,7 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        fields_offset=fields_offset,
                         max_matches=max_matches,
                         match_offset=match_offset,
                         full_paragraph=full_paragraph,
@@ -1460,6 +1563,7 @@ if sys.platform == "win32":
                         search_case_sensitive=search_case_sensitive,
                         changes_author=changes_author,
                         changes_offset=changes_offset,
+                        fields_offset=fields_offset,
                         max_matches=max_matches,
                         match_offset=match_offset,
                         full_paragraph=full_paragraph,
@@ -1479,6 +1583,7 @@ if sys.platform == "win32":
                     search_case_sensitive=search_case_sensitive,
                     changes_author=changes_author,
                     changes_offset=changes_offset,
+                    fields_offset=fields_offset,
                     max_matches=max_matches,
                     match_offset=match_offset,
                     full_paragraph=full_paragraph,
@@ -1512,6 +1617,9 @@ if sys.platform == "win32":
             bool,
             "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
         ] = True,
+        ignore_control_locks: IgnoreControlLocksParam = False,
+        ignore_document_protection: IgnoreDocumentProtectionParam = False,
+        allow_untracked_writes: AllowUntrackedWritesParam = False,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1541,7 +1649,17 @@ if sys.platform == "win32":
             )
         if not original_docx_path:
             # Edit active document directly. No disk fallback available.
-            res = await process_active_word_batch(ctx, changes, author_name, None)
+            res = await process_active_word_batch(
+                ctx,
+                changes,
+                author_name,
+                None,
+                {
+                    "ignore_control_locks": ignore_control_locks,
+                    "ignore_document_protection": ignore_document_protection,
+                    "allow_untracked_writes": allow_untracked_writes,
+                },
+            )
         elif is_document_open_in_word(original_docx_path):
             # The file is open in Word: apply edits to the live canvas so the
             # agent's changes land where the user is looking. If the probe matched
@@ -1549,7 +1667,17 @@ if sys.platform == "win32":
             # (which the explicit path makes authoritative) instead of erroring.
             await ctx.debug("Document is open in live Word; editing the canvas.")
             try:
-                res = await process_active_word_batch(ctx, changes, author_name, original_docx_path)
+                res = await process_active_word_batch(
+                    ctx,
+                    changes,
+                    author_name,
+                    original_docx_path,
+                    {
+                        "ignore_control_locks": ignore_control_locks,
+                        "ignore_document_protection": ignore_document_protection,
+                        "allow_untracked_writes": allow_untracked_writes,
+                    },
+                )
             except LiveWordUnavailableError:
                 await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk edit.")
                 res = await _process_document_batch_disk(
@@ -1560,6 +1688,9 @@ if sys.platform == "win32":
                     output_path,
                     rejected_notes=rejected_notes,
                     partial=partial,
+                    ignore_control_locks=ignore_control_locks,
+                    ignore_document_protection=ignore_document_protection,
+                    allow_untracked_writes=allow_untracked_writes,
                 )
         else:
             # Not open in Word (or Word not running): the file on disk is
@@ -1572,6 +1703,9 @@ if sys.platform == "win32":
                 output_path,
                 rejected_notes=rejected_notes,
                 partial=partial,
+                ignore_control_locks=ignore_control_locks,
+                ignore_document_protection=ignore_document_protection,
+                allow_untracked_writes=allow_untracked_writes,
             )
         return add_timing_if_debug(start_time, res)
 
@@ -1710,11 +1844,12 @@ else:
             "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ] = False,
         mode: Annotated[
-            Literal["full", "outline", "appendix", "changes"],
+            Literal["full", "outline", "appendix", "changes", "fields"],
             "'full' returns body content (paginated for large docs). 'outline' returns "
             "a structural heading map with page numbers; body content is omitted. "
             "'appendix' returns defined terms, anchors, and diagnostics — consult before "
-            "editing. 'changes' returns a tracked changes & comments ledger.",
+            "editing. 'changes' returns a tracked changes & comments ledger. 'fields' "
+            "returns the content-control ledger.",
         ] = "full",
         page: Annotated[
             Optional[Union[int, str]],
@@ -1768,6 +1903,10 @@ else:
             int,
             "For mode='changes' only: entry offset for paginating tracked changes ledger.",
         ] = 0,
+        fields_offset: Annotated[
+            int,
+            "For mode='fields' only: entry offset for paginating the content-control ledger.",
+        ] = 0,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to read this docx document? State this reason before any other parameter.",
@@ -1791,6 +1930,7 @@ else:
             search_case_sensitive=search_case_sensitive,
             changes_author=changes_author,
             changes_offset=changes_offset,
+            fields_offset=fields_offset,
             max_matches=max_matches,
             match_offset=match_offset,
             full_paragraph=full_paragraph,
@@ -1818,6 +1958,9 @@ else:
             bool,
             "Whether to apply valid edits when some fail (salvage mode). Defaults to True.",
         ] = True,
+        ignore_control_locks: IgnoreControlLocksParam = False,
+        ignore_document_protection: IgnoreDocumentProtectionParam = False,
+        allow_untracked_writes: AllowUntrackedWritesParam = False,
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1849,5 +1992,8 @@ else:
             output_path,
             rejected_notes=rejected_notes,
             partial=partial,
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
         )
         return add_timing_if_debug(start_time, res)

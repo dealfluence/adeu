@@ -52,8 +52,8 @@ CT_EXTENSIBLE = "application/vnd.openxmlformats-officedocument.wordprocessingml.
 #
 # The generators guarantee that every id Adeu MINTS is one Word will keep. They
 # can say nothing about the ids Adeu READS. A document arriving with
-# `w14:paraId="D2AEAE20"` â€” legal against the schema, discarded by Word on load
-# â€” takes the reply threaded onto it down with it, and no amount of correct
+# `w14:paraId="D2AEAE20"` — legal against the schema, discarded by Word on load
+# — takes the reply threaded onto it down with it, and no amount of correct
 # minting prevents that (2026-08-12 B6, western-district demo).
 #
 # Repairing means rewriting a value that other parts point AT, so the attribute
@@ -72,7 +72,7 @@ DURABLE_ID_ATTRIBUTES = ("w16cid:durableId", "w16cex:durableId")
 #: ST_LongHexNumbers nothing else references, so they can be folded in place.
 #: Folding (rather than re-minting) keeps equal rsids equal, which is the only
 #: thing an rsid means, and keeps `w14:textId` on the element whose `w14:paraId`
-#: it versions â€” [MS-DOCX] 2.6.2.6 requires the two to travel together.
+#: it versions — [MS-DOCX] 2.6.2.6 requires the two to travel together.
 STANDALONE_ID_ATTRIBUTES = (
     "w14:textId",
     "w:rsidR",
@@ -376,7 +376,7 @@ class CommentsManager:
     # These stay as named aliases only so the call sites read as what they
     # mint; they must never diverge. Word parses ST_LongHexNumber as a SIGNED
     # 32-bit integer for ALL of them, silently discarding and regenerating
-    # anything outside (0x00000000, 0x80000000) â€” an out-of-range paraId drops
+    # anything outside (0x00000000, 0x80000000) — an out-of-range paraId drops
     # replies out of their thread (B5), an out-of-range durableId collapses the
     # comment's anchor (B3), and a zero paraId makes Word reject the file
     # outright. The earlier belief that only durableId was constrained is what
@@ -384,15 +384,15 @@ class CommentsManager:
     # BUG_paraId_signed_int32_thread_collapse.md.
 
     def _generate_para_id(self) -> str:
-        """`w14:paraId` â€” the identity `w15:paraIdParent` threads onto."""
+        """`w14:paraId` — the identity `w15:paraIdParent` threads onto."""
         return generate_long_hex_number()
 
     def _generate_durable_id(self) -> str:
-        """`w16cid:durableId` â€” the identity the comment anchor binds to."""
+        """`w16cid:durableId` — the identity the comment anchor binds to."""
         return generate_long_hex_number()
 
     def _generate_rsid(self) -> str:
-        """`w:rsidR` / `w:rsidRDefault` / `w:rsidP` â€” revision-save grouping."""
+        """`w:rsidR` / `w:rsidRDefault` / `w:rsidP` — revision-save grouping."""
         return generate_long_hex_number()
 
     def _get_initials(self, author: str) -> str:
@@ -492,8 +492,8 @@ class CommentsManager:
         was handed a comment carrying `w14:paraId="D2AEAE20"`,
         `_adopt_into_modern_comments` reused it verbatim because it was
         present, and the reply's `w15:paraIdParent` was written to point at a
-        value Word discards on load. Every check passed on the way out â€” the
-        reply IS parented, `CommentThreadingError` correctly did not fire â€” and
+        value Word discards on load. Every check passed on the way out — the
+        reply IS parented, `CommentThreadingError` correctly did not fire — and
         the thread still collapsed the moment the document was opened.
 
         Whole-part, not just the comment being replied to: Word renumbers a
@@ -562,8 +562,8 @@ class CommentsManager:
         thread onto it, and returns that paraId (None if the comment does not
         exist at all).
 
-        A comment written by pre-2013 Word â€” or by any generator that skips the
-        modern-comments extensions â€” has no `w14:paraId`, so
+        A comment written by pre-2013 Word — or by any generator that skips the
+        modern-comments extensions — has no `w14:paraId`, so
         `_find_thread_root_para_id` resolves nothing and `w15:paraIdParent`
         never gets written: the "reply" silently becomes a second top-level
         thread (B1). Minting the missing identity is the repair; it is
@@ -625,7 +625,7 @@ class CommentsManager:
 
         The root lookup runs next so a reply-to-a-reply still flattens onto the
         thread root (modern Word's model). The adoption pass then runs
-        unconditionally â€” it is idempotent, and it also backfills a parent that
+        unconditionally — it is idempotent, and it also backfills a parent that
         HAS a w14:paraId but is missing from commentsExtended / commentsIds:
         Word consults both, so a paraIdParent pointing at an unregistered
         paragraph drops the reply out of its thread just as surely as a missing
@@ -685,7 +685,7 @@ class CommentsManager:
 
         # Resolve threading BEFORE writing anything. A reply whose parent
         # cannot be resolved used to be written anyway, minus its
-        # w15:paraIdParent â€” i.e. as a brand-new top-level thread, reported as
+        # w15:paraIdParent — i.e. as a brand-new top-level thread, reported as
         # applied (B1). Failing here leaves the document untouched.
         parent_para_id: Optional[str] = None
         if parent_id is not None:

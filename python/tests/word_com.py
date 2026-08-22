@@ -197,6 +197,38 @@ def round_trip(app, source: Path, destination: Path) -> Path:
     return destination
 
 
+def edit_and_save(app, source: Path, destination: Path, action, *, track: Optional[bool] = True):
+    """Open `source` read-WRITE, run `action(document)`, save to `destination`.
+
+    The oracle for behaviour Word only exhibits while editing: what it does to a
+    `w:sdt` when you type into it (CC-6). `round_trip` cannot answer those —
+    Word rewrites nothing on an untouched document.
+
+    `track=None` skips touching `TrackRevisions` entirely, and that is not
+    optional under `w:documentProtection w:edit="forms"`: **reading** the
+    property throws there just as assigning it does ("The TrackRevisions method
+    or property is not available because the document is a protected
+    document"). A probe that reads it to restore it later dies before it
+    measures anything.
+
+    Staging is the same defence as everywhere else in this module, applied
+    twice: to the source (Word keys documents by base name) and to the
+    destination (an earlier run's file is still Word's idea of that name).
+    """
+    staged_source = _stage(source)
+    document = app.Documents.Open(str(staged_source), False, False, False)
+    try:
+        if track is not None:
+            document.TrackRevisions = bool(track)
+        result = action(document)
+        staged_destination = destination.parent / f"{uuid.uuid4().hex[:12]}_{destination.name}"
+        document.SaveAs2(str(staged_destination), WD_FORMAT_DOCUMENT_DEFAULT)
+    finally:
+        document.Close(WD_DO_NOT_SAVE_CHANGES)
+    destination.write_bytes(staged_destination.read_bytes())
+    return result
+
+
 def author_document(app, destination: Path, rows: int = 8, cols: int = 2) -> Path:
     """A DOCX written from scratch BY Word, carrying Word's own ids.
 

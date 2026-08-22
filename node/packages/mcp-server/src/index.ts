@@ -41,6 +41,9 @@ import {
   build_search_response,
   render_outline_response,
   build_changes_response,
+  build_fields_response,
+  banner_for_path,
+  fields_discovery_hint,
 } from "./response-builders.js";
 import { docCache } from "./doc-cache.js";
 import type { ProgressFn } from "./doc-cache.js";
@@ -79,6 +82,8 @@ export function coerceChangeItemInPlace(item: any): void {
     if ("cells" in item) item.type = "insert_row";
     else if ("text" in item && "target_id" in item) item.type = "reply";
     else if ("target_text" in item && "new_text" in item) item.type = "modify";
+    // Parity with python models.py `_infer_type_in_place`.
+    else if ("field" in item && "value" in item) item.type = "set_field";
   }
 
   // Normalize match_mode: canonical passes through, synonyms map, anything else
@@ -247,8 +252,20 @@ const READ_DOCX_COMMON_DESC =
 // `page` guidance lives HERE, not only on the parameter: real MCP clients
 // drop optional-parameter descriptions in transit, so the tool description is
 // the only channel guaranteed to reach the model (QA 2026-07-23 client-compat).
+/**
+ * The A1.9 banner for an MCP full-view read, or null.
+ *
+ * Surface-aware hint (QA F11): an MCP client cannot run a shell command, so it
+ * is pointed at the read mode rather than the CLI flag.
+ */
+async function mcpFieldsBanner(file_path: string): Promise<string | null> {
+  return banner_for_path(file_path, fields_discovery_hint(), async (p) =>
+    loadDocxOrThrow(readFileSync(p), p),
+  );
+}
+
 const READ_DOCX_TAIL =
-  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome; oversized documents are refused with an outline and a bounded-read recipe unless force=true. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
+  "Modes:\n- 'full' (default): paginated body content. Use page=N to navigate.\n- 'outline': heading map only — start here for large docs to plan targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n- 'appendix': defined terms, anchors, and cross-reference targets. Consult before editing legal/technical docs to avoid breaking references.\n- 'changes' (mode='changes'): a ledger of every tracked change and comment (id, type, author, page, snippet) — start here for review work instead of reading pages. Filter with changes_author, page, and changes_offset.\n- 'fields' (mode='fields'): a ledger of every content control (ordinal, class, alias/tag, location, lock/binding state, current value) — start here to discover fillable fields. Paginate with fields_offset; `page` and `search_query` do not apply.\n\n`page`: a positive integer (1-indexed, default 1), a page RANGE like '2-6' (returns up to 8 pages in one call, then names the next range), or 'all'. Pages are synthetic length-based chunks sized for LLM consumption, NOT printed Word pages. In mode='full', page='all' returns the whole body with no page chrome; oversized documents are refused with an outline and a bounded-read recipe unless force=true. With `search_query`, `page` instead restricts matches to that page (default: search all pages).";
 
 // BUDGET: real MCP clients truncate tool descriptions at ~2048 chars — the
 // tail (wherever it falls) is invisible to the model. COMMON + OPERATIONS +
@@ -258,9 +275,9 @@ const READ_DOCX_TAIL =
 // the row-op fields (`cells` etc.) must be named in prose because clients
 // strip the typed item schema to {} in transit (QA F10).
 const PROCESS_BATCH_COMMON_DESC =
-  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change validates against state from prior changes; later edits may target text an earlier edit introduced. Valid changes apply when others fail (salvage default): response LEADS with `PARTIAL: applied K of N` listing unapplied changes — resubmit only those. Pass partial=false for all-or-nothing.\n\n";
+  "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change validates against state from prior changes. Valid changes apply when others fail (salvage default): response LEADS with `PARTIAL: applied K of N` listing unapplied changes. Pass partial=false for all-or-nothing.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', default) — add context or set `match_mode`:'first'/'all'. Set `regex`:true for regex matching (groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split. Omit it (with a comment) to annotate without changing the text; an explicit empty string deletes. Never write CriticMarkup ({++, {--, {>>) manually — use the `comment` field.\n   • EMPTY CELLS: blank cells carry `{#cell:<id>}` anchors — set `target_text` to the anchor and value in `new_text`. Pipes are display separators, not text.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'insert_row': add a table row — `target_text` anchors on an existing row's text, `cells` holds cell values (left to right), `position` is 'above'/'below' (default below). 'delete_row': remove row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between states — call `read_docx` before accept/reject/reply; never reuse ids from earlier turns. `{#cell:<id>}` anchors are stable across edits, but finalize/sanitize regenerates them.\n\n`author_name` sets Track Changes attribution; defaults to 'Adeu AI (TS)' when omitted.";
+  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', default) — add context or set `match_mode`:'first'/'all'. Set `regex`:true for regex matching (groups in `new_text` as $1, $2…). `new_text` supports Markdown: '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph split. Omit it (with a comment) to annotate without changing text; empty string deletes. Never write CriticMarkup manually — use `comment`.\n   • EMPTY CELLS: blank cells carry `{#cell:<id>}` anchors — set `target_text` to the anchor and value in `new_text`. Pipes are display separators.\n2. 'accept'/'reject': finalize or revert a tracked change by `target_id` (e.g. 'Chg:12').\n3. 'reply': reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n4. 'set_field': fill a form field — `field` is its 'CC:<N>' id, tag or alias, `value` the text; list via `read_docx` `mode`:'fields'. Checkboxes take true/false, dates YYYY-MM-DD, dropdowns a listed option. Dual-writes bound stores. A locked/protected control refuses and names the override permitting it.\n5. 'insert_row': add table row — `target_text` anchors on an existing row's text, `cells` holds cell values (left-to-right), `position` is 'above'/'below' (default below). 'delete_row': remove row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' ids shift between states — call `read_docx` before accept/reject/reply; never reuse ids from earlier turns.\n\n`author_name` sets Track Changes attribution; defaults to 'Adeu AI (TS)' when omitted.";
 
 const DIFF_DOCX_DESC =
   "Compares two DOCX files and returns a compact `@@ Word Patch @@` diff — Adeu's token-level, sub-word patch format — of their text content. Useful for analyzing differences between versions before editing.";
@@ -399,10 +416,10 @@ registerAppTool(
           "If False (default), returns the 'Raw' text with inline CriticMarkup. If True, returns 'Accepted' text.",
         ),
       mode: z
-        .enum(["full", "outline", "appendix", "changes"])
+        .enum(["full", "outline", "appendix", "changes", "fields"])
         .default("full")
         .describe(
-          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms. 'changes' returns tracked changes and comments ledger.",
+          "'full' returns body content. 'outline' returns a structural heading map. 'appendix' returns defined terms. 'changes' returns tracked changes and comments ledger. 'fields' returns the content-control ledger.",
         ),
       // ONE published JSON type (string) — real MCP clients strip
       // property-level anyOf/oneOf to {}, losing the type and docs entirely
@@ -447,6 +464,13 @@ registerAppTool(
         .default(0)
         .describe(
           "For mode='changes' only: entry offset for paginating tracked changes ledger.",
+        ),
+      fields_offset: z.coerce
+        .number()
+        .int()
+        .default(0)
+        .describe(
+          "For mode='fields' only: entry offset for paginating the content-control ledger.",
         ),
       search_query: z
         .string()
@@ -506,6 +530,7 @@ registerAppTool(
       full_paragraph,
       changes_author,
       changes_offset,
+      fields_offset,
     },
     extra?: any,
   ) => {
@@ -636,6 +661,19 @@ registerAppTool(
         return res as any;
       }
 
+      if (mode === "fields") {
+        // RAW projection: the ledger previews values from the text between a
+        // control's anchors, and the clean view drops the placeholder bubbles
+        // that distinguish an empty control.
+        const entryF = await getEntry();
+        const docF = await loadDocxOrThrow(readBytes(), file_path);
+        const res = build_fields_response(docF, entryF.raw_text, file_path, {
+          offset: fields_offset,
+          bundle: entryF.raw_bundle,
+        });
+        return res as any;
+      }
+
       let pageKind: PageArgKind = "single";
       let pageVal: number | [number, number] | null = 1;
       try {
@@ -721,7 +759,9 @@ registerAppTool(
               ],
             } as any;
           }
-          const res = build_full_document_response(text, file_path, bundle);
+          const res = build_full_document_response(text, file_path, bundle, {
+            fields_banner: await mcpFieldsBanner(file_path),
+          });
           return res as any;
         }
         if (pageKind === "range") {
@@ -743,6 +783,7 @@ registerAppTool(
         resolvedPage,
         file_path,
         bundle,
+        { fields_banner: await mcpFieldsBanner(file_path) },
       );
       return res as any;
     } catch (e: any) {
@@ -775,7 +816,7 @@ export const CHANGE_ITEM_SCHEMA = z
       .string()
       .optional()
       .describe(
-        "Change kind: 'modify' (search-and-replace), 'accept'/'reject' (resolve a tracked change by id), 'reply' (reply to a comment by id), 'insert_row'/'delete_row' (table edits; disk mode only). If omitted it is inferred when unambiguous from the other fields.",
+        "Change kind: 'modify' (search-and-replace), 'accept'/'reject' (resolve a tracked change by id), 'reply' (reply to a comment by id), 'set_field' (fill a content control), 'insert_row'/'delete_row' (table edits; disk mode only). If omitted it is inferred when unambiguous from the other fields.",
       ),
     target_text: z
       .string()
@@ -788,6 +829,21 @@ export const CHANGE_ITEM_SCHEMA = z
       .optional()
       .describe(
         "modify: replacement text. Supports Markdown (headings, **bold**, _italic_, '\\n\\n' paragraph splits); empty string deletes. Regex capture groups are available as $1, $2… Omit it (with a comment) to annotate without changing the text; an explicit empty string deletes.",
+      ),
+    // Primitive strings, deliberately: real MCP clients strip property-level
+    // anyOf/oneOf to {} (QA 2026-07-23), so a union here would erase both the
+    // type and this guidance client-side.
+    field: z
+      .string()
+      .optional()
+      .describe(
+        "set_field only: which control to fill - the 'CC:<N>' id, its tag, or its alias. Run read_docx with mode='fields' to list them.",
+      ),
+    value: z
+      .string()
+      .optional()
+      .describe(
+        "set_field only: the value to write. Checkboxes take true/false; dates take YYYY-MM-DD; dropdowns must match a listed option. Empty string clears the field.",
       ),
     target_id: z
       .string()
@@ -907,6 +963,34 @@ server.registerTool(
         .describe(
           "Whether to apply valid edits when some fail (salvage mode). Defaults to true.",
         ),
+      // CC-4 write-gate overrides (spec-gates.md §1). All default FALSE:
+      // §1 requires it because a truthy default survives client stripping,
+      // and a gate that defaults to off is a gate that does not exist.
+      // .default() rather than required, per the author_name note above:
+      // real clients drop primitive entries from required[].
+      ignore_control_locks: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Apply edits even inside content-locked or grouped content controls. Defaults to false. " +
+            "Word refuses such edits, so overriding means the document owner has accepted the lock is wrong.",
+        ),
+      ignore_document_protection: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Apply changes even when the document carries enforced editing protection " +
+            "(read-only, fill-in-forms, comments-only, tracked-changes-only). Defaults to false.",
+        ),
+      allow_untracked_writes: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Permit writes that Word records WITHOUT tracked changes. Defaults to false. Applies only " +
+            "to fill-in-forms-protected documents, where Word does not record revisions at all; every " +
+            "such write is flagged in the report. Separate from ignore_document_protection because it " +
+            "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
+        ),
     },
   },
   async ({
@@ -916,6 +1000,9 @@ server.registerTool(
     changes,
     output_path,
     partial,
+    ignore_control_locks,
+    ignore_document_protection,
+    allow_untracked_writes,
   }) => {
     try {
       void reasoning;
@@ -990,6 +1077,7 @@ server.registerTool(
         "accept",
         "reject",
         "reply",
+        "set_field",
         "insert_row",
         "delete_row",
       ]);
@@ -1005,7 +1093,7 @@ server.registerTool(
           (!c.type || !VALID_TYPES.has(c.type))
         ) {
           const fused = has_fused_json_marker(c.type) ? ` ${FUSED_JSON_HINT}` : "";
-          const reason = `missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].${fused}`;
+          const reason = `missing or unrecognized "type". Use one of: modify (needs target_text + new_text), accept/reject (needs target_id like "Chg:12"), reply (needs target_id like "Com:5" + text), set_field (needs field + value), insert_row (needs target_text + cells), delete_row (needs target_text). Received keys: [${Object.keys(c).join(", ")}].${fused}`;
           typeErrors.push(`- Change ${i + 1}: ${reason}`);
           typeFailed.push([i, reason]);
         }
@@ -1056,6 +1144,9 @@ server.registerTool(
       }
       const engine = new RedlineEngine(doc, author_name, {
         id_discovery_hint: MCP_ID_DISCOVERY_HINT,
+        ignore_control_locks,
+        ignore_document_protection,
+        allow_untracked_writes,
       });
 
       let stats;
@@ -1620,6 +1711,12 @@ server.registerTool(
 export function formatBatchResult(stats: any, outPath: string): string {
   // Rendered markdown is the minimal form for MCP tool output; see payloads.ts for structured consumers.
   let res = `Batch complete. Saved to: ${outPath}\n`;
+  // spec-gates §5: an exercised override is disclosed in the report header,
+  // beside the impersonation warning, because both are "this batch did
+  // something the default would not have".
+  if (stats.overrides_note) {
+    res += `\n*${stats.overrides_note}*\n`;
+  }
   if (stats.author_impersonation_warning) {
     res += `\n*Warning:* ${stats.author_impersonation_warning}\n`;
   }
@@ -1658,6 +1755,13 @@ export function formatBatchResult(stats: any, outPath: string): string {
 
       if (report.heading_path) {
         res += `**Path:** \`${report.heading_path}\`\n`;
+      }
+
+      if (report.field) {
+        // Audit-trail symmetry with Path: an edit inside a content control is
+        // subject to that control's locks and binding, which decides whether a
+        // human can keep it.
+        res += `field: ${report.field}\n`;
       }
 
       const occ = report.occurrences_modified ?? 0;

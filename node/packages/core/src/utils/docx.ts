@@ -1,5 +1,13 @@
 import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
 import {
+  BALLOT_GLYPHS,
+  BlockSdt,
+  checkboxMark,
+  isAnchored,
+  type SdtEvent,
+  type SdtInfo,
+} from "./content-controls.js";
+import {
   Paragraph,
   Table,
   Run,
@@ -15,6 +23,17 @@ export const QN_W_DELTEXT = "w:delText";
 export const QN_W_TAB = "w:tab";
 export const QN_W_BR = "w:br";
 export const QN_W_CR = "w:cr";
+
+/**
+ * A page break projects as U+000C FORM FEED — the conventional plain-text page
+ * separator — rather than as a newline, so that pagination can find manual
+ * breaks without putting markup in the character stream an LLM reads.
+ *
+ * Must stay identical to python's `adeu.utils.docx.PAGE_BREAK_TOKEN`. Until
+ * 2026-08-21 (CC-10) the engines disagreed here: node emitted "\n" while python
+ * emitted 22 characters of literal `<w:br w:type="page"/>` markup.
+ */
+export const PAGE_BREAK_TOKEN = "\f";
 export const QN_W_RPR = "w:rPr";
 export const QN_W_RPRCHANGE = "w:rPrChange";
 export const QN_W_COMMENTREFERENCE = "w:commentReference";
@@ -381,6 +400,23 @@ function _detect_heading_level_from_name(name: string): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
+/**
+ * True when the paragraph's own break is a pending tracked deletion
+ * (`<w:del>` inside pPr/rPr) — accepting it removes the paragraph container.
+ *
+ * Twin of python `adeu.utils.docx.paragraph_mark_is_deleted`. Shared by both
+ * Virtual Text producers: `_extract_blocks` drops such a paragraph from the
+ * clean view when nothing visible survives inside it, and
+ * `DocumentMapper._map_blocks` must drop it identically. Keeping ONE predicate
+ * is what keeps the twins byte-identical.
+ */
+export function paragraph_mark_is_deleted(p_element: any): boolean {
+  const pPr = findChild(p_element, QN_W_PPR);
+  if (!pPr) return false;
+  const rPr = findChild(pPr, QN_W_RPR);
+  return !!rPr && !!findChild(rPr, QN_W_DEL);
+}
+
 export function is_native_heading(
   paragraph: Paragraph,
   style_cache?: Record<string, any>,
@@ -598,6 +634,9 @@ export function get_run_style_markers(
   run: Run,
   is_heading: boolean | null = null,
 ): [string, string] {
+  // The checkbox mark is chrome, not prose: emphasis on it would project
+  // `[**x**]` and hand every marker-stripping pass something to mangle.
+  if (run.projTextOverride !== undefined) return ["", ""];
   let prefix = "";
   let suffix = "";
 
@@ -757,7 +796,68 @@ export function apply_formatting_to_segments(
   return parts.map((p) => (p ? wrap(p) : "")).join("\n");
 }
 
+/** Does this control contain a ballot-glyph run to hang the mark on? */
+/**
+ * The mark for a ballot run that sits inside a tracked revision.
+ *
+ * `undefined` when the run is not inside one, which is the ordinary case and
+ * keeps `w14:checked` authoritative.
+ */
+function revisionBallotMark(rElement: Element, text: string): string | undefined {
+  let node: any = rElement.parentNode;
+  while (node) {
+    const tag = node.tagName;
+    if (tag === "w:ins" || tag === "w:del") {
+      return text === "\u2611" || text === "\u2612" ? "x" : " ";
+    }
+    node = node.parentNode;
+  }
+  return undefined;
+}
+
+function hasBallotRun(sdtEl: Element): boolean {
+  const content = findChild(sdtEl, QN_W_SDTCONTENT);
+  if (!content) return false;
+  for (const r of findAllDescendants(content, QN_W_R)) {
+    let text = "";
+    for (const t of findAllDescendants(r, QN_W_T)) text += t.textContent || "";
+    if (BALLOT_GLYPHS.has(text)) return true;
+  }
+  return false;
+}
+
+/**
+ * The checkbox control this run is the glyph of, or `undefined`.
+ *
+ * Gated on the run's text being a ballot glyph FIRST, which is what keeps this
+ * affordable: the walk runs for roughly 7,700 runs in the largest corpus
+ * document rather than for all 559,000 of them.
+ *
+ * The gate is also the correctness boundary. `odot_uic_drywell` carries two
+ * bare `U+2610` runs in ordinary prose, and the nearest enclosing `w:sdt`
+ * decides their fate: no control, or a control that is not a checkbox, means
+ * the glyph is prose and stays a glyph.
+ */
+function enclosingCheckbox(
+  rElement: Element,
+  text: string,
+  sdtInfos?: Map<Element, SdtInfo>,
+): SdtInfo | undefined {
+  if (!sdtInfos || !BALLOT_GLYPHS.has(text)) return undefined;
+  let node = rElement.parentNode as Element | null;
+  while (node && node.nodeType === 1) {
+    if (node.tagName === QN_W_SDT) {
+      const info = sdtInfos.get(node);
+      return info && info.cls === "checkbox" ? info : undefined;
+    }
+    node = node.parentNode as Element | null;
+  }
+  return undefined;
+}
+
 export function get_run_text(run: Run): string {
+  // A checkbox mark projects its own character, not the glyph in `w:t`.
+  if (run.projTextOverride !== undefined) return run.projTextOverride;
   let text = "";
   for (let i = 0; i < run._element.childNodes.length; i++) {
     const child = run._element.childNodes[i] as Element;
@@ -766,9 +866,22 @@ export function get_run_text(run: Run): string {
     if (child.tagName === QN_W_T || child.tagName === QN_W_DELTEXT) {
       const raw = child.textContent || "";
       text += raw.replace(/\t/g, " ");
-    } else if (child.tagName === QN_W_TAB) {
+    } else if (child.tagName === QN_W_TAB || child.tagName === "w:ptab") {
+      // w:ptab is an absolute-position tab; it separates content like w:tab.
       text += " ";
-    } else if (child.tagName === QN_W_BR || child.tagName === QN_W_CR) {
+    } else if (child.tagName === "w:noBreakHyphen") {
+      // A real hyphen glyph. Dropping it merged the words either side
+      // ("e-mail" projected as "email"). w:softHyphen is deliberately NOT
+      // handled: it is an optional break hint Word renders only when the line
+      // actually breaks, so projecting nothing is correct. w:sym is likewise
+      // still dropped — symbol fonts map glyphs into the Unicode private-use
+      // area, so the code point alone does not identify the character; that
+      // needs a font-aware decision (CC-1 owns checkbox glyphs).
+      text += "-";
+    } else if (child.tagName === QN_W_BR) {
+      text +=
+        child.getAttribute("w:type") === "page" ? PAGE_BREAK_TOKEN : "\n";
+    } else if (child.tagName === QN_W_CR) {
       text += "\n";
     }
   }
@@ -777,7 +890,8 @@ export function get_run_text(run: Run): string {
 
 export function* iter_block_items(
   parent: any,
-): Generator<Paragraph | Table | FootnoteItem> {
+  emit_sdt = false,
+): Generator<Paragraph | Table | FootnoteItem | BlockSdt> {
   const parent_elm = parent._element || parent.element || parent;
 
   if (parent.constructor.name === "NotesPart") {
@@ -805,7 +919,7 @@ export function* iter_block_items(
     return;
   }
 
-  yield* _iter_block_children(parent_elm, parent);
+  yield* _iter_block_children(parent_elm, parent, emit_sdt);
 }
 
 /**
@@ -818,7 +932,8 @@ export function* iter_block_items(
 function* _iter_block_children(
   parent_elm: Element,
   parent: any,
-): Generator<Paragraph | Table> {
+  emit_sdt = false,
+): Generator<Paragraph | Table | BlockSdt> {
   for (let i = 0; i < parent_elm.childNodes.length; i++) {
     const child = parent_elm.childNodes[i] as Element;
     if (child.nodeType !== 1) continue;
@@ -830,7 +945,17 @@ function* _iter_block_children(
     } else if (child.tagName === QN_W_SDT) {
       const sdt_content = findChild(child, QN_W_SDTCONTENT);
       if (sdt_content) {
-        yield* _iter_block_children(sdt_content, parent);
+        if (emit_sdt) {
+          // Yield the control as ONE unit and do NOT descend: the consumer
+          // recurses into sdtContent itself, exactly as it already does for a
+          // Table. That is what makes a block-level control a single block
+          // that can be wrapped in its token lines — paired boundary events
+          // would instead have forced every consumer to grow a nesting stack
+          // and to re-derive the block separators inside it.
+          yield new BlockSdt(child);
+        } else {
+          yield* _iter_block_children(sdt_content, parent, emit_sdt);
+        }
       }
     }
   }
@@ -852,27 +977,119 @@ export function* iter_document_parts(doc: any): Generator<any> {
  * an OPC part boundary — the QA 2026-07-18 C1 failure wrote a final body
  * paragraph into word/footer1.xml.
  */
+/**
+ * Every `w:sectPr` in document order: one per section-terminating paragraph
+ * (`w:p/w:pPr/w:sectPr`), with the body-level `w:sectPr` last.
+ *
+ * Descends through `w:sdt`/`w:sdtContent`, recursively for nested controls.
+ * Taking only DIRECT children of the body — which is what this did, and what
+ * python-docx's `./w:body/w:p/w:pPr/w:sectPr` still does — misses a section
+ * break inside a content control, and a cover page or title block inserted as a
+ * document-part gallery control carries exactly that. The section then does not
+ * exist, and the header it references is never walked (CC-17: 5 data-bound
+ * controls in a real SSP's running header, unreachable by `set_field`).
+ *
+ * Deliberately not a blanket `.//w:sectPr`: that would also match `w:sectPr`
+ * inside a text box (`w:txbxContent`), which is not a section break, and
+ * re-introduce the over-collection this port was already corrected for.
+ */
+function* _iter_sect_pr(doc: any): Generator<Element> {
+  const body: Element = doc.element;
+
+  function* walk(el: Element): Generator<Element> {
+    for (let i = 0; i < el.childNodes.length; i++) {
+      const child = el.childNodes[i] as Element;
+      if (child.nodeType !== 1) continue;
+      if (child.tagName === QN_W_P) {
+        const pPr = findChild(child, "w:pPr");
+        const sectPr = pPr && findChild(pPr, "w:sectPr");
+        if (sectPr) yield sectPr;
+      } else if (child.tagName === QN_W_SDT) {
+        const content = findChild(child, "w:sdtContent");
+        if (content) yield* walk(content);
+      }
+    }
+  }
+
+  yield* walk(body);
+
+  const bodySectPr = findChild(body, "w:sectPr");
+  if (bodySectPr) yield bodySectPr;
+}
+
+/** `w:settings/w:evenAndOddHeaders` — the document-wide even/odd toggle. */
+function _odd_and_even_pages(doc: any): boolean {
+  const settings = doc.pkg.getPartByPath("word/settings.xml");
+  if (!settings) return false;
+  return findChild(settings._element, "w:evenAndOddHeaders") !== null;
+}
+
+/**
+ * Header/footer parts a section actually references, in Word's own precedence
+ * order: primary, then first-page (only when the section sets `w:titlePg`),
+ * then even-page (only when the document sets `w:evenAndOddHeaders`).
+ *
+ * A section that carries no reference of a given type inherits the previous
+ * section's — Word's "Link to Previous" — so skipping the absent reference is
+ * exactly what stops inherited headers from projecting twice.
+ *
+ * This mirrors python `iter_document_parts_with_kind._iter_section_parts`.
+ * Before this existed the TS port simply listed every header/footer part in
+ * the package, which projected parts Word never renders: unreferenced orphans,
+ * first-page headers in sections without `w:titlePg`, and even-page headers in
+ * documents without `w:evenAndOddHeaders`.
+ */
+function* _iter_section_parts(
+  doc: any,
+  kind: "header" | "footer",
+): Generator<any> {
+  const refTag = kind === "header" ? "w:headerReference" : "w:footerReference";
+  const oddAndEven = _odd_and_even_pages(doc);
+
+  for (const sectPr of _iter_sect_pr(doc)) {
+    const refs = findChildren(sectPr, refTag);
+    const byType = (t: string) =>
+      refs.find((r) => (r.getAttribute("w:type") || "default") === t);
+
+    const resolve = (ref: Element | undefined): any => {
+      if (!ref) return undefined;
+      const rId = ref.getAttribute("r:id");
+      if (!rId) return undefined;
+      const rel = doc.part.rels.get(rId);
+      if (!rel) return undefined;
+      const target = rel.target.replace(/^\/?word\//, "").replace(/^\//, "");
+      return doc.pkg.getPartByPath("word/" + target);
+    };
+
+    // 1. Primary
+    const primary = resolve(byType("default"));
+    if (primary) yield primary;
+
+    // 2. First page — only when this section opts in.
+    if (findChild(sectPr, "w:titlePg") !== null) {
+      const first = resolve(byType("first"));
+      if (first) yield first;
+    }
+
+    // 3. Even page — only when the document opts in.
+    if (oddAndEven) {
+      const even = resolve(byType("even"));
+      if (even) yield even;
+    }
+  }
+}
+
 export function* iter_document_parts_with_kind(
   doc: any,
 ): Generator<[any, string]> {
   // 1. Headers
-  const headers = doc.pkg.parts.filter(
-    (p: any) =>
-      p.contentType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
-  );
-  for (const h of headers) yield [h, "header"];
+  for (const h of _iter_section_parts(doc, "header")) yield [h, "header"];
 
   // 2. Main Document Body
   yield [doc, "body"];
 
   // 3. Footers
-  const footers = doc.pkg.parts.filter(
-    (p: any) =>
-      p.contentType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
-  );
-  for (const f of footers) yield [f, "footer"];
+  for (const f of _iter_section_parts(doc, "footer")) yield [f, "footer"];
 
   // 4. Notes
   const fnPart = doc.pkg.getPartByPath("word/footnotes.xml");
@@ -899,14 +1116,20 @@ export function _get_part(parent: any): any {
 
 export function* iter_paragraph_content(
   paragraph: Paragraph,
-): Generator<Run | DocxEvent> {
+  sdtInfos?: Map<any, SdtInfo>,
+): Generator<Run | DocxEvent | SdtEvent> {
   let in_complex_field = false;
   let current_instr = "";
   let hide_result = false;
+  // The content controls currently open around the walk position, outermost
+  // first. Snapshotted onto every `Run` so consumers can answer "which
+  // controls enclose this text" without an ancestor walk per run. Tracks every
+  // control, anchored or not - see `Run.sdtStack`.
+  const sdtStack: SdtInfo[] = [];
 
   function* process_run_element(
     r_element: Element,
-  ): Generator<Run | DocxEvent> {
+  ): Generator<Run | DocxEvent | SdtEvent> {
     let c_id: string | null = null;
     const rPr = findChild(r_element, QN_W_RPR);
     if (rPr) {
@@ -988,11 +1211,47 @@ export function* iter_paragraph_content(
       }
     }
 
-    if (!hide_result) yield new Run(r_element, paragraph);
+    if (!hide_result) {
+      const run = new Run(r_element, paragraph);
+      // Snapshot, not the live array: the stack keeps mutating as the walk
+      // continues, and a shared reference would leave every run reporting the
+      // controls open at the END of the paragraph. Empty stacks share one
+      // frozen array, which is the common case by a wide margin.
+      if (sdtStack.length) run.sdtStack = sdtStack.slice();
+      const cbInfo = enclosingCheckbox(r_element, get_run_text(run), sdtInfos);
+      if (cbInfo) {
+        // Spec §4, twin of the python branch. `[` and `]` are virtual chrome;
+        // the mark is a REAL run-backed span. One character replaces one
+        // character (U+2612 -> `x`), so no offset arithmetic downstream has to
+        // learn about a width difference.
+        //
+        // Done HERE, at run emission, rather than in the `w:sdt` branch,
+        // because a checkbox control is not always inline: 11 of
+        // `odot_uic_drywell`'s 19 checkboxes wrap a whole `w:tc` (a checkbox
+        // column in a form table), and that path never reaches the sdt branch.
+        //
+        // The mark normally comes from `w14:checked` (the settled value - see
+        // checkboxMark), but a run inside a revision projects ITS OWN glyph
+        // instead. A tracked toggle writes two glyph runs, an inserted new
+        // state and a deleted old one, and the attribute can only describe
+        // one of them: taking it for both rendered two identical boxes, a
+        // toggle that appears to change nothing. Reading each revision run's
+        // own glyph makes the pending change legible, and the clean view
+        // keeps exactly one box because the deleted half never reaches it
+        // (A4.6).
+        const runText = get_run_text(run);
+        run.projTextOverride = revisionBallotMark(r_element, runText) ?? checkboxMark(cbInfo);
+        yield { type: "checkbox_start", info: cbInfo } as SdtEvent;
+        yield run;
+        yield { type: "checkbox_end", info: cbInfo } as SdtEvent;
+      } else {
+        yield run;
+      }
+    }
     if (c_id !== null) yield { type: "fmt_end", id: c_id };
   }
 
-  function* traverse_node(node: Element): Generator<Run | DocxEvent> {
+  function* traverse_node(node: Element): Generator<Run | DocxEvent | SdtEvent> {
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i] as Element;
       if (child.nodeType !== 1) continue;
@@ -1050,7 +1309,47 @@ export function* iter_paragraph_content(
         tag === QN_W_SMARTTAG ||
         tag === QN_W_SDTCONTENT
       ) {
-        yield* traverse_node(child);
+        // Content controls were historically transparent here: the boundary
+        // was erased and only the contents projected. When the caller supplies
+        // the ordinal map (ingest and the mapper do; outline/sanitize
+        // deliberately do not) the boundary becomes visible as a pair of
+        // events, and an ANCHORED control's contents are bracketed by them.
+        const info = sdtInfos ? sdtInfos.get(child) : undefined;
+        // Track the control regardless of whether it ANCHORS. Anchoring
+        // decides whether a `{#cc:N}` token projects; enclosure decides which
+        // gates apply, and the two are not the same question. A
+        // `sdtContentLocked` picture control projects no token and is still
+        // locked.
+        const pushed = !!info && tag === QN_W_SDT;
+        if (pushed) sdtStack.push(info);
+        try {
+          if (info && info.cls === "checkbox" && !hasBallotRun(child)) {
+            // Degenerate control: Word always writes the glyph run, but a
+            // generator might not. Emit the token virtually so it stays three
+            // characters wide instead of collapsing to `[]`. The NORMAL case is
+            // absent by design — the glyph run substitutes itself at run
+            // emission, which covers every path that reaches a run.
+            yield { type: "checkbox_start", info } as SdtEvent;
+            yield { type: "checkbox_mark", info } as SdtEvent;
+            yield { type: "checkbox_end", info } as SdtEvent;
+          } else if (!info || !isAnchored(info)) {
+            yield* traverse_node(child);
+          } else {
+            yield { type: "sdt_start", info } as SdtEvent;
+            if (!info.showingPlaceholder) {
+              yield* traverse_node(child);
+            }
+            // Ghost text NEVER projects as body text (spec §3, A1.4). The
+            // placeholder run lives in sdtContent like any other run, so
+            // descending would emit "Click or tap here to enter text." as if
+            // the user had typed it. The bubble that replaces it is chrome,
+            // added by the consumer, because only the consumer knows whether
+            // this is the clean view.
+            yield { type: "sdt_end", info } as SdtEvent;
+          }
+        } finally {
+          if (pushed) sdtStack.pop();
+        }
       }
     }
   }

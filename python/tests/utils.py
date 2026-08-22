@@ -1,12 +1,17 @@
 import asyncio
+import json
+import os
 import re
 import subprocess
 import sys
 import zipfile
+from functools import lru_cache
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, List, Tuple
 from unittest.mock import AsyncMock
 
+import pytest
 from fastmcp.tools import ToolResult
 
 from adeu.utils.long_hex_number import is_word_readable_long_hex_number
@@ -221,3 +226,51 @@ def edge_of_range_randint(high: bool) -> Callable[[int, int], int]:
         return min(max(value, a), b)
 
     return randint
+
+
+# ---------------------------------------------------------------------------
+# Real-document corpus
+# ---------------------------------------------------------------------------
+
+#: Manifest of the fetch-on-demand corpus. The documents themselves are real
+#: government files that are deliberately NOT committed, so every corpus test
+#: has to tolerate their absence — CI runs green without ever downloading one.
+CORPUS_MANIFEST = Path(__file__).resolve().parents[2] / "shared" / "corpus" / "manifest.json"
+
+
+def corpus_dir() -> Path:
+    """Where corpus documents live. `ADEU_CORPUS_DIR` relocates it.
+
+    Mirrors `scripts/fetch_corpus.py.corpus_dir()`; the fetcher and the tests
+    must agree or a fetch lands somewhere the suite cannot see.
+    """
+    override = os.environ.get("ADEU_CORPUS_DIR")
+    return Path(override) if override else CORPUS_MANIFEST.parent
+
+
+@lru_cache(maxsize=1)
+def _corpus_manifest() -> dict:
+    with open(CORPUS_MANIFEST, encoding="utf-8") as handle:
+        return json.load(handle)["documents"]
+
+
+def corpus_path(key: str) -> Path:
+    """Path to corpus document `key`, or `pytest.skip` when it is not on disk.
+
+    The two failure modes are deliberately NOT the same, and conflating them is
+    the trap this helper exists to avoid. An **absent document** is normal: the
+    corpus is fetch-on-demand, so the test skips with the exact command that
+    would fix it. An **unknown key** is a typo, and a typo that skipped would
+    make the test vacuously green forever — the silent no-op this repo treats as
+    the most expensive bug — so it raises instead, listing the valid keys.
+
+    Never downloads. Fetching inside a test would make the suite depend on
+    government web servers being up and on the network being there at all.
+    """
+    documents = _corpus_manifest()
+    if key not in documents:
+        raise KeyError(f"unknown corpus key {key!r}; manifest defines: {', '.join(sorted(documents))}")
+    path = corpus_dir() / documents[key]["file"]
+    if not path.exists():
+        pytest.skip(f"corpus document {key!r} absent at {path} — run `python scripts/fetch_corpus.py --only {key}`")
+    return path

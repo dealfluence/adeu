@@ -440,10 +440,40 @@ def _next_word_boundary(text: str, pos: int) -> int:
 _MAX_CONTEXT_EXPANSIONS = 60
 
 
+#: `{#cc:7 locked}` / `{#cc:8 group}` — an anchor with at least one flag.
+#: Only flagged controls are walls: an ordinary `{#cc:3}` is editable, and
+#: clamping on it would block legitimate widening for no safety gain.
+_CC_WALL_OPEN = re.compile(r"\{#cc:(\d+)((?:\s+[a-z]+)+)\}")
+
+
+def _locked_control_walls(text: str) -> List[Tuple[int, int]]:
+    """(start, end) of every locked or grouped control's anchored span.
+
+    Read back out of the projection rather than taken from the mapper, so the
+    walls always describe the very text being widened (see
+    `make_edits_self_contained`). Bounds include the anchor tokens: widening
+    that swallowed half an anchor pair would trip the CC-1e tampering gate
+    even before the lock gates saw it.
+    """
+    walls: List[Tuple[int, int]] = []
+    for m in _CC_WALL_OPEN.finditer(text):
+        flags = m.group(2).split()
+        if "locked" not in flags and "group" not in flags:
+            continue
+        close = text.find(f"{{#/cc:{m.group(1)}}}", m.end())
+        if close == -1:
+            # Unbalanced anchors are CC-1e's problem, not this function's;
+            # skipping is the conservative choice (no clamp, not a bogus one).
+            continue
+        walls.append((m.start(), close + len(f"{{#/cc:{m.group(1)}}}")))
+    return walls
+
+
 def make_edits_self_contained(
     edits: List[ModifyText],
     original_text: str,
     part_ranges: Optional[List[Tuple[int, int, str]]] = None,
+    control_walls: Optional[List[Tuple[int, int]]] = None,
 ) -> List[ModifyText]:
     """
     Rewrites diff-generated edits so each one can be re-applied by TEXT MATCHING
@@ -476,6 +506,22 @@ def make_edits_self_contained(
         a body edit into footer text produced exactly the cross-part targets
         that corrupted documents in QA 2026-07-18 C1.
 
+      - Expansion never crosses a LOCKED content-control wall (spec-gates §4).
+        Same failure mode one level down: widening a body edit into a locked
+        control's text produces a target the gates then refuse, so `diff`
+        output would stop being closed under `apply` — the tool would emit a
+        batch its own engine rejects. Only locked controls and group walls
+        clamp; an ordinary editable control is not a wall, and treating it as
+        one would block legitimate widening.
+
+        The walls are derived from `original_text` itself (see
+        `_locked_control_walls`) rather than passed in from the mapper. The
+        projection already states which controls are locked — that is what the
+        `locked` and `group` flags in `{#cc:N locked}` are for — so reading
+        them back from the text keeps this function total over its own input
+        and makes it impossible for the wall list to describe a different
+        document than the one being widened.
+
       - Expansion never absorbs ANOTHER edit's hunk. Batches apply
         sequentially, so a later edit whose anchor context contains an earlier
         edit's original text can only match inside that edit's tracked
@@ -493,8 +539,9 @@ def make_edits_self_contained(
     value rather than the input list.
     """
     n = len(original_text)
+    walls = _locked_control_walls(original_text) if control_walls is None else control_walls
 
-    def _bounds_for(idx: int) -> Tuple[int, int]:
+    def _part_bounds_for(idx: int) -> Tuple[int, int]:
         ranges = [(s, e) for s, e, _k in (part_ranges or []) if e > s]
         prev: Optional[Tuple[int, int]] = None
         for p_start, p_end in ranges:
@@ -508,6 +555,27 @@ def make_edits_self_contained(
         if prev is not None:
             return prev
         return 0, n
+
+    def _bounds_for(idx: int) -> Tuple[int, int]:
+        """Widening bounds at `idx`: the OPC part clamp, narrowed by any
+        locked-control wall between `idx` and the part's edges."""
+        lo, hi = _part_bounds_for(idx)
+        for c_start, c_end in walls:
+            if c_end <= c_start:
+                continue
+            if c_start <= idx < c_end:
+                # Inside the wall: widening may use the control's own text but
+                # must not escape it, or the widened target would straddle the
+                # boundary and be refused by G14/G1 at apply time.
+                lo = max(lo, c_start)
+                hi = min(hi, c_end)
+            elif c_end <= idx:
+                # Wall entirely before us: it is a floor.
+                lo = max(lo, c_end)
+            elif c_start >= idx:
+                # Wall entirely after us: it is a ceiling.
+                hi = min(hi, c_start)
+        return lo, hi
 
     # Snapshot each pinned edit's RAW hunk (pre-widening coordinates). Edits
     # without a trustworthy pin pass through untouched and never block others.

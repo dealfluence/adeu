@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { createTestDocument, addParagraph } from "./test-utils.js";
+import {
+  createTestDocument,
+  addParagraph,
+  attachHeaderFooter,
+} from "./test-utils.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import { parseXml, serializeXml } from "./docx/dom.js";
@@ -11,20 +15,13 @@ describe("Resolved Bugs Core Engine Verification", () => {
   it("BUG-3 & BUG-4: Links parts to package and yields headers for extraction", async () => {
     const doc = await createTestDocument();
 
-    // Inject a raw header part
-    const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-      <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-        <w:p><w:r><w:t>My Secret Header</w:t></w:r></w:p>
-      </w:hdr>`;
-
-    const headerPart = doc.pkg.addPart(
-      "/word/header1.xml",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
-      xml,
-    );
-    doc.relateTo(
-      headerPart,
-      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+    // Attach a header the way Word does: part + relationship + a
+    // w:headerReference in the body's w:sectPr. An orphan part is invisible
+    // to iter_document_parts_with_kind, exactly as it is invisible in Word.
+    const headerPart = attachHeaderFooter(
+      doc,
+      "header",
+      `<w:p><w:r><w:t>My Secret Header</w:t></w:r></w:p>`,
     );
 
     // BUG-3a Fix: Ensure part.package is assigned so style cache traversal works

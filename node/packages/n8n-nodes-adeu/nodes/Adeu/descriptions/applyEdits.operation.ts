@@ -196,6 +196,58 @@ export const applyEditsDescription: INodeProperties[] = [
       },
     },
   },
+  // CC-4 write-gate overrides (spec-gates.md §1). Three separate toggles
+  // rather than one "force": they license different things, and a single
+  // switch would make a user who wanted one silently accept all three.
+  {
+    displayName: "Ignore Content Control Locks",
+    name: "ignoreControlLocks",
+    type: "boolean",
+    default: false,
+    description:
+      "Whether to apply edits even inside content-locked or grouped content controls. " +
+      "Word itself refuses these edits, so by default Adeu rejects them rather than reporting a success " +
+      "the document will not contain. Enable only when the document owner has accepted that the lock is wrong.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
+      },
+    },
+  },
+  {
+    displayName: "Ignore Document Protection",
+    name: "ignoreDocumentProtection",
+    type: "boolean",
+    default: false,
+    description:
+      "Whether to apply changes even when the document carries enforced editing protection " +
+      "(read-only, fill-in-forms, comments-only or tracked-changes-only). " +
+      "The restriction is honoured as the author's stated intent, not cracked; this bypasses it deliberately.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
+      },
+    },
+  },
+  {
+    displayName: "Allow Untracked Writes",
+    name: "allowUntrackedWrites",
+    type: "boolean",
+    default: false,
+    description:
+      "Whether to permit writes that Word records WITHOUT tracked changes. Applies only to " +
+      "fill-in-forms-protected documents, where Word does not record revisions at all and Adeu cannot " +
+      "honour its always-tracked guarantee. Separate from Ignore Document Protection because it concedes " +
+      "Adeu's own output guarantee rather than bypassing the author's restriction; every such write is flagged.",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["applyEdits"],
+      },
+    },
+  },
 ];
 export async function executeApplyEdits(
   this: IExecuteFunctions,
@@ -217,6 +269,21 @@ export async function executeApplyEdits(
   ) as boolean;
   const allowPartial = this.getNodeParameter(
     "allowPartial",
+    itemIndex,
+    false,
+  ) as boolean;
+  const ignoreControlLocks = this.getNodeParameter(
+    "ignoreControlLocks",
+    itemIndex,
+    false,
+  ) as boolean;
+  const ignoreDocumentProtection = this.getNodeParameter(
+    "ignoreDocumentProtection",
+    itemIndex,
+    false,
+  ) as boolean;
+  const allowUntrackedWrites = this.getNodeParameter(
+    "allowUntrackedWrites",
     itemIndex,
     false,
   ) as boolean;
@@ -280,6 +347,9 @@ export async function executeApplyEdits(
   const doc = await DocumentObject.load(buffer);
   const engine = new RedlineEngine(doc, author, {
     id_discovery_hint: N8N_ID_DISCOVERY_HINT,
+    ignore_control_locks: ignoreControlLocks,
+    ignore_document_protection: ignoreDocumentProtection,
+    allow_untracked_writes: allowUntrackedWrites,
   });
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],

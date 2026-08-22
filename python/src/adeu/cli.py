@@ -525,7 +525,9 @@ _CHANGE_TYPE_REFERENCE = (
     '  reply      — {"type": "reply", "target_id": "Com:N", "text": "..."}\n'
     '  insert_row — {"type": "insert_row", "target_text": "...", "cells": ["...", "..."]}'
     ' (optional: position "above"/"below")\n'
-    '  delete_row — {"type": "delete_row", "target_text": "..."}'
+    '  delete_row — {"type": "delete_row", "target_text": "..."}\n'
+    '  set_field  — {"type": "set_field", "field": "CC:4"|tag|alias, "value": "..."}'
+    " (optional: match_mode, comment; run `adeu extract --mode fields` to list fields)"
 )
 
 
@@ -673,6 +675,46 @@ def _warn_ignored_extract_flags(args) -> None:
             print(f"⚠️  --changes-author is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
         if getattr(args, "changes_offset", 0) != 0:
             print(f"⚠️  --changes-offset is ignored with --mode {args.mode} (changes mode only).", file=sys.stderr)
+    if args.mode != "fields":
+        if getattr(args, "fields_offset", 0) != 0:
+            print(f"⚠️  --fields-offset is ignored with --mode {args.mode} (fields mode only).", file=sys.stderr)
+    elif args.page is not None:
+        # spec-fields-ledger §1: `page` does not apply to the ledger, which
+        # paginates by entry count via --fields-offset instead.
+        print(
+            "⚠️  --page is ignored with --mode fields (use --fields-offset to paginate the ledger).",
+            file=sys.stderr,
+        )
+
+
+def _fields_banner_for(doc, args, no_chrome: bool) -> "str | None":
+    """The A1.9 banner for a CLI full-view read, or None.
+
+    Returns None when there is nothing to say (no controls, no protection) so a
+    plain document gains zero noise, and under `no_chrome`, which exists so the
+    projection can round-trip.
+
+    Counts come from `field_summary`, which walks the DOM only — this runs on
+    the hot read path and must not pay for value previews nothing renders.
+    """
+    if no_chrome:
+        return None
+    try:
+        from adeu.fields import banner_for_document, banner_for_path
+
+        live = getattr(args, "live", False)
+        target = "Active Document" if live else str(args.input)
+        hint = f" \u00b7 run `adeu extract {target} --mode fields` for the field ledger"
+        if doc is not None:
+            return banner_for_document(doc, hint=hint)
+        if live or not getattr(args, "input", None):
+            return None
+        # Not loaded on this path: go through the stat-keyed memo rather than
+        # re-opening the package on every read.
+        return banner_for_path(str(args.input), hint=hint)
+    except Exception:
+        # Advisory chrome. A malformed settings part must not fail the read.
+        return None
 
 
 def handle_extract(args):
@@ -881,6 +923,19 @@ def handle_extract(args):
                 outline_nodes=cached_outline_nodes,
                 no_chrome=no_chrome,
             )
+        elif args.mode == "fields":
+            from adeu.mcp_components._response_builders import build_fields_response
+
+            if doc is None:
+                doc = _load_docx_or_exit(input_path)
+            res = build_fields_response(
+                doc,
+                text,
+                str(input_path),
+                offset=args.fields_offset,
+                is_cli=True,
+            )
+
         elif args.mode == "changes":
             from adeu.mcp_components._response_builders import build_changes_response
             from adeu.redline.comments import CommentsManager
@@ -986,6 +1041,7 @@ def handle_extract(args):
                 text,
                 "Active Document" if args.live else str(args.input),
                 no_chrome=no_chrome,
+                fields_banner=_fields_banner_for(doc, args, no_chrome),
             )
         else:
             res = build_paginated_response(
@@ -994,6 +1050,7 @@ def handle_extract(args):
                 "Active Document" if args.live else str(args.input),
                 is_cli=True,
                 no_chrome=no_chrome,
+                fields_banner=_fields_banner_for(doc, args, no_chrome),
             )
 
         if isinstance(res.content, list):
@@ -1073,7 +1130,7 @@ def _load_docx_or_exit(path: Path):
         from adeu.utils.docx import strip_bom_from_docx_bytes
 
         sanitized_bytes = strip_bom_from_docx_bytes(stream.getvalue())
-        from docx import Document as load_document
+        from adeu.utils.opc import load_document
 
         return load_document(BytesIO(sanitized_bytes))
     except Exception as e:
@@ -1087,17 +1144,23 @@ def _load_docx_or_exit(path: Path):
         raise
 
 
-def _open_redline_engine_or_exit(path: Path, author: "str | None" = None, terse_errors: bool = False) -> RedlineEngine:
+def _open_redline_engine_or_exit(
+    path: Path,
+    author: "str | None" = None,
+    terse_errors: bool = False,
+    gate_overrides: "dict | None" = None,
+) -> RedlineEngine:
     """Opens a RedlineEngine on `path` through the single shared error path."""
     _require_input_file(path)
     import zipfile
 
+    gates = gate_overrides or {}
     try:
         with open(path, "rb") as f:
             stream = BytesIO(f.read())
         if author is not None:
-            return RedlineEngine(stream, author=author, terse_errors=terse_errors)
-        return RedlineEngine(stream, terse_errors=terse_errors)
+            return RedlineEngine(stream, author=author, terse_errors=terse_errors, **gates)
+        return RedlineEngine(stream, terse_errors=terse_errors, **gates)
     except SystemExit:
         raise
     except Exception as e:
@@ -1369,6 +1432,11 @@ def handle_apply(args):
         args.original,
         author=args.author,
         terse_errors=getattr(args, "terse_errors", False),
+        gate_overrides={
+            "ignore_control_locks": getattr(args, "ignore_control_locks", False),
+            "ignore_document_protection": getattr(args, "ignore_document_protection", False),
+            "allow_untracked_writes": getattr(args, "allow_untracked_writes", False),
+        },
     )
     try:
         stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
@@ -1496,6 +1564,10 @@ def handle_apply(args):
                 for item in failed_items:
                     print(f"  - Change #{item['index'] + 1} Failed: {item['reason']}", file=sys.stderr)
             print(f"Batch complete. Saved to: {output_path}", file=sys.stderr)
+            if stats.get("overrides_note"):
+                # spec-gates §5. stderr, like the impersonation warning: it is
+                # a note about how the batch ran, not part of the result.
+                print(f"⚠️  {stats['overrides_note']}", file=sys.stderr)
             if stats.get("author_impersonation_warning"):
                 print(f"⚠️  {stats['author_impersonation_warning']}", file=sys.stderr)
 
@@ -2041,11 +2113,12 @@ def _main_impl():
     p_extract.add_argument(
         "--mode",
         type=str,
-        choices=["full", "outline", "appendix", "changes"],
+        choices=["full", "outline", "appendix", "changes", "fields"],
         default="full",
         help=(
             "Extraction mode: 'full' for body text, 'outline' for headings, "
-            "'appendix' for defined terms, 'changes' for tracked change ledger."
+            "'appendix' for defined terms, 'changes' for tracked change ledger, "
+            "'fields' for the content-control ledger."
         ),
     )
     p_extract.add_argument(
@@ -2059,6 +2132,12 @@ def _main_impl():
         type=int,
         default=0,
         help="For mode='changes' only: entry offset for paginating tracked changes ledger.",
+    )
+    p_extract.add_argument(
+        "--fields-offset",
+        type=int,
+        default=0,
+        help="For mode='fields' only: entry offset for paginating the content-control ledger.",
     )
     p_extract.add_argument(
         "--page",
@@ -2231,6 +2310,27 @@ def _main_impl():
         "--terse-errors",
         action="store_true",
         help="Reduce ambiguity examples (2 max, ±25 chars context) and listed stale IDs (8 max) in error payloads.",
+    )
+    # CC-4 write-gate overrides (spec-gates.md §1). Three separate flags, not
+    # one --force: they license different things, and a single flag would make
+    # a caller who wanted one silently accept all three.
+    p_apply.add_argument(
+        "--ignore-control-locks",
+        action="store_true",
+        help="Apply edits even inside content-locked or grouped content controls (Word refuses these).",
+    )
+    p_apply.add_argument(
+        "--ignore-document-protection",
+        action="store_true",
+        help="Apply changes even when the document carries enforced editing protection.",
+    )
+    p_apply.add_argument(
+        "--allow-untracked-writes",
+        action="store_true",
+        help=(
+            "Permit writes Word records WITHOUT tracked changes (fill-in-forms-protected documents only). "
+            "Concedes Adeu's always-tracked guarantee; every such write is flagged in the report."
+        ),
     )
     p_apply.add_argument(
         "--json",

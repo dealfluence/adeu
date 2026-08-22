@@ -9,10 +9,12 @@ Read a `.docx` and return text with inline CriticMarkup.
 **Parameters:**
 - `file_path` (str, required) — absolute path.
 - `clean_view` (bool, default `false`) — `false` shows raw text with CriticMarkup for all pending changes; `true` shows the text as if every pending change were accepted.
-- `mode` (`"full"` | `"outline"` | `"appendix"`, default `"full"`):
+- `mode` (`"full"` | `"outline"` | `"appendix"` | `"fields"`, default `"full"`):
   - `full` — body content, paginated.
   - `outline` — heading map only. Start here for large docs to plan targeted reads. Defaults to L1–L2 headings; pass `outline_max_level=3..6` for deeper structure.
   - `appendix` — defined terms, cross-reference targets, bookmarks, footnotes. Consult before editing legal/technical docs to avoid breaking references.
+  - `fields` — ledger of form fields (content controls) with CC:<N> ID, tag, alias, class, state, option lists, and data bindings.
+- `fields_offset` (int, default 0) — 0-indexed pagination offset for `mode="fields"`.
 - `page` (int or `"all"`) — without `search_query`: which body page to show (defaults to 1). With `search_query`: which page to restrict matches to (defaults to all).
 - `search_query` (str) — substring or regex. Filters results to matching paragraphs across the requested page scope.
 - `search_regex` (bool, default `false`) — interpret `search_query` as regex.
@@ -31,6 +33,9 @@ Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates
 - `author_name` (str, required) — appears in Track Changes (e.g. `"AI Reviewer"`).
 - `changes` (array, required) — see the discriminated union below.
 - `output_path` (str, optional) — defaults to `<original>_processed.docx`.
+- `ignore_control_locks` (bool, default `false`) — permit writes to content-locked controls (`sdtContentLocked`).
+- `ignore_document_protection` (bool, default `false`) — permit writes to read-only or comments-protected documents.
+- `allow_untracked_writes` (bool, default `false`) — permit untracked fills in forms-protected documents where Word suppresses revision tracking.
 
 ### The `changes` discriminated union
 
@@ -47,6 +52,12 @@ Each entry must include a `type` field. The other fields depend on `type`.
 - `comment` (str, optional) — margin comment attached to the change.
 
 **Never put CriticMarkup syntax (`{++`, `{--`, `{>>`, `{==`) into `new_text`.** Use `comment` for comments.
+
+#### `type: "set_field"` — fill or toggle a form field (content control)
+- `field` (str, required) — `"CC:<N>"` ordinal ID, tag, or alias.
+- `value` (str, required) — value to set (e.g. date `"YYYY-MM-DD"`, dropdown choice, or `"true"`/`"false"` for checkboxes).
+- `match_mode` (`"strict"` | `"first"` | `"all"`, default `"strict"`).
+- `comment` (str, optional).
 
 #### `type: "accept"` / `type: "reject"` — resolve an existing tracked change
 - `target_id` (str, required) — e.g. `"Chg:12"`. Must come from a `read_docx` call made *immediately before* this batch.

@@ -11,7 +11,16 @@
 // package has no CLI.
 
 import { resolve, basename } from "node:path";
-import { offset_to_page, paginate, parse_page_arg } from "@adeu/core";
+import { statSync } from "node:fs";
+import {
+  offset_to_page,
+  paginate,
+  parse_page_arg,
+  collectFields,
+  readDocumentProtection,
+  renderLedger,
+  bannerForDocument,
+} from "@adeu/core";
 import type { ProjectionBundle, ToolResult } from "./response-builders.js";
 import { split_projection } from "./shared.js";
 
@@ -129,6 +138,110 @@ function addPair(pair_map: Map<string, string[]>, from: string, to: string): voi
   } else if (!partners.includes(to)) {
     partners.push(to);
   }
+}
+
+/**
+ * The surface-aware pointer at the fields ledger (spec-projection §7).
+ *
+ * Surface-aware for the QA F11 reason: telling an MCP client to run a shell
+ * command, or a CLI user to call a tool, is advice they cannot act on. Node
+ * has no CLI, so this is the MCP wording only.
+ */
+/**
+ * (path, mtimeMs, size) -> banner. The banner is a pure function of the file
+ * bytes, and the agent loop is read → edit → read, so the same version is
+ * asked for repeatedly. Bounded because a long-lived server must not grow a
+ * map keyed by every file it has ever seen.
+ *
+ * Measured on fedramp_ssp_rev4 (5,007 controls): 68ms to load the package and
+ * 82ms to classify every control — 150ms a full-view read would otherwise
+ * repeat every call, for four numbers that cannot change while the bytes do
+ * not.
+ */
+const BANNER_MEMO = new Map<string, string | null>();
+const BANNER_MEMO_MAX = 32;
+
+export async function banner_for_path(
+  path: string,
+  hint: string,
+  load: (p: string) => Promise<any>,
+): Promise<string | null> {
+  let key: string;
+  try {
+    const st = statSync(path);
+    key = `${resolve(path)}|${st.mtimeMs}|${st.size}`;
+  } catch {
+    return null;
+  }
+
+  if (BANNER_MEMO.has(key)) {
+    const cached = BANNER_MEMO.get(key)!;
+    return cached && hint ? `${cached}${hint}` : cached;
+  }
+
+  let banner: string | null = null;
+  try {
+    banner = bannerForDocument(await load(path));
+  } catch {
+    // Advisory chrome. A malformed settings part must not fail the read it
+    // decorates.
+    banner = null;
+  }
+
+  BANNER_MEMO.set(key, banner);
+  if (BANNER_MEMO.size > BANNER_MEMO_MAX) {
+    BANNER_MEMO.delete(BANNER_MEMO.keys().next().value as string);
+  }
+  return banner && hint ? `${banner}${hint}` : banner;
+}
+
+export function fields_discovery_hint(): string {
+  return ' \u00b7 read mode="fields" for the field ledger';
+}
+
+/**
+ * Render `mode="fields"` — the content-control ledger (spec §2-§4).
+ *
+ * `text` must be the RAW projection: the ledger previews values by reading the
+ * text between a control's anchors, so a clean view (which drops placeholder
+ * bubbles) would report a different document than the one the agent edits.
+ */
+export function build_fields_response(
+  doc: any,
+  text: string,
+  file_path: string,
+  opts: {
+    offset?: number;
+    bundle?: ProjectionBundle;
+    no_chrome?: boolean;
+  } = {},
+): ToolResult {
+  const { offset = 0, bundle = undefined, no_chrome = false } = opts;
+
+  const body = bundle ? bundle.body : split_projection(text)[0];
+  const pag_res = bundle ? bundle.pagination : paginate(body, "");
+
+  const entries = collectFields(doc, body, pag_res.body_page_offsets);
+  const protection = readDocumentProtection(doc);
+  const ledger = renderLedger(
+    basename(file_path) || file_path,
+    entries,
+    protection,
+    offset,
+  );
+
+  const llm_content = no_chrome
+    ? ledger
+    : `> **File Path:** \`${file_path}\`\n\n${ledger}`;
+
+  return {
+    content: [{ type: "text", text: llm_content }],
+    structuredContent: {
+      markdown: ledger,
+      file_path: resolve(file_path),
+      title: basename(file_path),
+    },
+  };
 }
 
 export function build_changes_response(

@@ -53,6 +53,6 @@ Run commands from the respective package directory:
 
 ## Key Reference Documents
 
-- `AI_CONTEXT.md`: Architectural invariants (Virtual Text contract, boundary whitespace rules, block-level table parsing, OPC part boundaries, XML surgical mode).
+- `AI_CONTEXT.md`: Architectural invariants (Virtual Text contract, boundary whitespace rules, block-level table parsing, OPC part boundaries, content-control projection dialect, XML surgical mode).
 - `GEMINI.md`: Tool specification and parameters (`read_docx`, `process_document_batch`, `accept_all_changes`).
 - `CONTRIBUTING.md`: Dev environment setup, git hooks (`.githooks`), and PR guidelines.

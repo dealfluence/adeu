@@ -26,6 +26,7 @@ from adeu.mcp_components._response_builders import (
     build_appendix_response,
     build_budget_guard_message,
     build_changes_response,
+    build_fields_response,
     build_full_document_response,
     build_outline_response,
     build_page_range_response,
@@ -71,7 +72,7 @@ class AdeuReadDocxInput(BaseModel):
             "'Accepted' text without any markup."
         ),
     )
-    mode: Literal["full", "outline", "appendix", "changes"] = Field(
+    mode: Literal["full", "outline", "appendix", "changes", "fields"] = Field(
         default="full",
         description=(
             "Read mode. 'full' (default) returns paginated body content. "
@@ -84,7 +85,10 @@ class AdeuReadDocxInput(BaseModel):
             "'changes' returns a concise ledger of every tracked change and "
             "comment with its id, author, page, and text — use this before any "
             "accept/reject/reply, and instead of reading full pages just to "
-            "find ids."
+            "find ids. "
+            "'fields' returns a form-fields ledger listing every content control "
+            "with its CC:<N> id, tag, alias, type, state, and option list — "
+            "use this before set_field."
         ),
     )
     page: int | str | None = Field(
@@ -179,6 +183,10 @@ class AdeuReadDocxInput(BaseModel):
         default=0,
         description="For mode='changes' only: 0-based entry offset for paging through a long ledger.",
     )
+    fields_offset: int = Field(
+        default=0,
+        description="For mode='fields' only: 0-based entry offset for paging through a long fields ledger.",
+    )
 
 
 _DESCRIPTION = (
@@ -224,7 +232,7 @@ class AdeuReadDocx(BaseTool):
         reasoning: str,
         file_path: str,
         clean_view: bool = False,
-        mode: Literal["full", "outline", "appendix", "changes"] = "full",
+        mode: Literal["full", "outline", "appendix", "changes", "fields"] = "full",
         page: int | str | None = None,
         force: bool = False,
         outline_max_level: int = 2,
@@ -237,6 +245,7 @@ class AdeuReadDocx(BaseTool):
         full_paragraph: bool = False,
         changes_author: str | None = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
         path = validate_docx_path(file_path, label="DOCX file")
 
@@ -284,6 +293,8 @@ class AdeuReadDocx(BaseTool):
                 match_offset=match_offset,
                 full_paragraph=full_paragraph,
             )
+        elif mode == "fields":
+            result = build_fields_response(doc, text, str(path), offset=fields_offset)
         elif mode == "changes":
             # One engine load serves both enrichments the ledger wants:
             # comments_data (author + reply threading) and the authoritative set
@@ -356,7 +367,7 @@ class AdeuReadDocx(BaseTool):
         reasoning: str,
         file_path: str,
         clean_view: bool = False,
-        mode: Literal["full", "outline", "appendix", "changes"] = "full",
+        mode: Literal["full", "outline", "appendix", "changes", "fields"] = "full",
         page: int | str | None = None,
         force: bool = False,
         outline_max_level: int = 2,
@@ -369,6 +380,7 @@ class AdeuReadDocx(BaseTool):
         full_paragraph: bool = False,
         changes_author: str | None = None,
         changes_offset: int = 0,
+        fields_offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
             self._run,
@@ -388,6 +400,7 @@ class AdeuReadDocx(BaseTool):
             full_paragraph,
             changes_author,
             changes_offset,
+            fields_offset,
         )
 
 

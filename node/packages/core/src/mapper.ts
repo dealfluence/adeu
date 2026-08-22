@@ -2,6 +2,22 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { resolve_cell_anchor } from "./docx/cell-anchor.js";
+import {
+  assignOrdinals,
+  BlockSdt,
+  CHECKBOX_CHROME_EVENTS,
+  CHECKBOX_CLOSE,
+  CHECKBOX_OPEN,
+  checkboxMark,
+  closeToken,
+  isAnchored,
+  isSdtEvent,
+  nextClosesCheckbox,
+  openToken,
+  partElement,
+  wrappingSdt,
+  type SdtInfo,
+} from "./utils/content-controls.js";
 import { extract_comments_data } from "./comments.js";
 import { escape_critic_tokens } from "./utils/text.js";
 import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-regex.js";
@@ -17,6 +33,7 @@ import {
   iter_block_items,
   iter_document_parts_with_kind,
   iter_paragraph_content,
+  paragraph_mark_is_deleted,
 } from "./utils/docx.js";
 
 export interface TextSpan {
@@ -41,6 +58,18 @@ export interface TextSpan {
   // as core + trailing-space spans, and only the first starts at run
   // offset 0. All span->run local-offset arithmetic must add this.
   run_offset?: number;
+  // Which content controls (w:sdt) enclose this span, outermost first.
+  // The CC-4 write gates are all one question — "does this edit's text sit
+  // inside control X, and what does X permit?" — and this is the field that
+  // answers it, exactly as part_index answers it for OPC part walls.
+  //
+  // Block-level controls come from the mapper's own cursor and inline ones
+  // ride in on Run.sdtStack, so the array spans both nesting kinds. It
+  // tracks UN-anchored controls too (checkbox, picture, repeating …), which
+  // project no {#cc:N} token: anchoring decides whether a token appears in
+  // the text, enclosure decides which gates apply, and a sdtContentLocked
+  // picture control is locked while projecting nothing.
+  sdt_stack?: readonly SdtInfo[];
 }
 
 export function renumber_snapshot_ids(
@@ -141,6 +170,19 @@ export class DocumentMapper {
   // or re-anchor edits at OPC part boundaries (QA 2026-07-18 C1).
   public part_ranges: [number, number, string][] = [];
   private _current_part_index = 0;
+  // Block-level controls enclosing the block currently being walked,
+  // outermost first. Inline controls are NOT tracked here: they arrive
+  // per-run on Run.sdtStack, because only the run walk knows where inside a
+  // paragraph they open and close. Spans concatenate the two (_spanSdtStack).
+  private _current_block_sdt_stack: SdtInfo[] = [];
+  // (start, end, SdtInfo) per control that projected any text, in projection
+  // order — the control-wall twin of part_ranges. Derived from the stamped
+  // spans in one post-pass (_buildControlRanges) rather than bookkept at each
+  // branch: block controls, inline controls and table-cell controls open in
+  // three different places, and three separate range calculations is three
+  // chances to disagree about where a wall is. The spans already know.
+  public control_ranges: [number, number, SdtInfo][] = [];
+  private _sdt_infos: Map<any, SdtInfo> = new Map();
   private _text_chunks: string[] = [];
   private _plain_projection: [string, number[]] | null = null;
 
@@ -164,34 +206,125 @@ export class DocumentMapper {
     this._plain_projection = null;
     this.part_ranges = [];
     this._current_part_index = 0;
+    this._current_block_sdt_stack = [];
+    this.control_ranges = [];
+
+    // Parts join with "\n\n" the same way blocks do: emit the separator
+    // BEFORE a part (once something has been emitted) and roll it back if the
+    // part projects nothing.
+    //
+    // Appending after each part and stripping trailing separators is NOT
+    // equivalent. A part that emits only zero-width anchor spans is empty to
+    // the reader, but a non-empty `spans` array made the old check believe it
+    // had emitted, so an empty header put a stray "\n\n" at the front of the
+    // mapper's text.
+    // THE SAME pre-pass ingest runs, over the same parts in the same order.
+    // Not a second implementation of ordinal assignment: spec-projection.md §9
+    // requires one shared helper precisely so the two producers cannot
+    // disagree about which control is CC:7 (CC-12 is what disagreement costs).
+    this._sdt_infos = assignOrdinals(
+      Array.from(iter_document_parts_with_kind(this.doc)).map(([part]) =>
+        partElement(part),
+      ),
+    );
 
     let part_idx = 0;
+    let emitted_any_part = false;
     for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
       this._current_part_index = part_idx;
-      const part_start = current_offset;
-      current_offset = this._map_blocks(part, current_offset);
-      this.part_ranges.push([part_start, current_offset, part_kind]);
+      const spans_mark = this.spans.length;
+      const chunks_mark = this._text_chunks.length;
+      const offset_mark = current_offset;
 
-      if (
-        this.spans.length > 0 &&
-        this.spans[this.spans.length - 1].text !== "\n\n"
-      ) {
+      if (emitted_any_part) {
         this._add_virtual_text("\n\n", current_offset, null);
         current_offset += 2;
+      }
+      const part_start = current_offset;
+      current_offset = this._map_blocks(part, current_offset);
+
+      if (current_offset === part_start) {
+        this.spans.length = spans_mark;
+        this._text_chunks.length = chunks_mark;
+        current_offset = offset_mark;
+        this.part_ranges.push([current_offset, current_offset, part_kind]);
+      } else {
+        emitted_any_part = true;
+        this.part_ranges.push([part_start, current_offset, part_kind]);
       }
       part_idx++;
     }
 
-    while (
-      this.spans.length > 0 &&
-      this.spans[this.spans.length - 1].text === "\n\n"
-    ) {
-      this.spans.pop();
-      this._text_chunks.pop();
-    }
-
     this.full_text = this._text_chunks.join("");
+    this._buildControlRanges();
     this.appendix_start_index = -1;
+  }
+
+  /**
+   * The controls enclosing a span being emitted right now, outermost first.
+   *
+   * Two sources, concatenated in nesting order. Block-level controls come
+   * from this mapper's own cursor, because a block control wraps whole
+   * paragraphs and only `_map_blocks` sees it open. Inline controls ride in
+   * on the Run, because only the run walk knows where inside a paragraph
+   * they open and close. A block control always encloses an inline one,
+   * never the reverse, so plain concatenation is the correct nesting order.
+   */
+  private _spanSdtStack(run?: Run | null): readonly SdtInfo[] {
+    const block = this._current_block_sdt_stack;
+    const inline = (run?.sdtStack ?? []) as readonly SdtInfo[];
+    if (block.length === 0) return inline;
+    if (inline.length === 0) return block.slice();
+    return [...block, ...inline];
+  }
+
+  /**
+   * Collapse the per-span stacks into one [start, end, info] per control.
+   *
+   * A control's range is the extent of the CONTENT it encloses, not its own
+   * `{#cc:N}` anchor chrome — the anchors are already protected by the CC-1e
+   * tampering gate, and gates ask about content. Controls that projected no
+   * text get no range, matching part_ranges' treatment of empty parts.
+   */
+  private _buildControlRanges(): void {
+    const bounds = new Map<SdtInfo, [number, number]>();
+    for (const s of this.spans) {
+      if (!s.sdt_stack || s.sdt_stack.length === 0) continue;
+      for (const info of s.sdt_stack) {
+        const cur = bounds.get(info);
+        if (cur === undefined) {
+          bounds.set(info, [s.start, s.end]);
+        } else {
+          if (s.start < cur[0]) cur[0] = s.start;
+          if (s.end > cur[1]) cur[1] = s.end;
+        }
+      }
+    }
+    this.control_ranges = Array.from(bounds.entries())
+      .map(([info, [start, end]]) => [start, end, info] as [number, number, SdtInfo])
+      .sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  }
+
+  /** The controls whose content contains `index`, outermost first. */
+  public controls_at(index: number): SdtInfo[] {
+    return this.control_ranges
+      .filter(([start, end]) => start <= index && index < end)
+      .map(([, , info]) => info);
+  }
+
+  /**
+   * Controls whose content overlaps `[start, start+length)`.
+   *
+   * Real text only: the caller decides what to do about zero-length ranges,
+   * so an insertion point exactly on a wall reports nothing and is handled
+   * by the boundary logic rather than by a lock refusal.
+   */
+  public controls_intersecting(start: number, length: number): SdtInfo[] {
+    if (length <= 0) return [];
+    const end = start + length;
+    return this.control_ranges
+      .filter(([cs, ce]) => ce > start && cs < end)
+      .map(([, , info]) => info);
   }
 
   /** [part_index, start, end, kind] for parts that projected any text. */
@@ -239,11 +372,25 @@ export class DocumentMapper {
     return null;
   }
 
-  private _map_blocks(container: any, offset: number): number {
+  private _map_blocks(container: any, offset: number, inCell = false): number {
     let current = offset;
     const c_type = container.constructor.name;
     const part = container.part || container;
     const [style_cache, default_pstyle] = _get_style_cache(part);
+
+    // Block-join semantics mirror _extract_blocks exactly:
+    // "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when it
+    // projects empty text), a Table or FootnoteItem is a block only when it
+    // projects text, and the NotesPart header is that container's first block
+    // (the "\n\n" after it comes from the join, never eagerly).
+    //
+    // `emitted_any_block` is the reader's blocks.length > 0. It is NOT the
+    // same flag as `is_first_para`, which the reader keeps separately to place
+    // the footnote definition label and which is flipped by paragraphs AND
+    // tables (even empty ones) but not by footnote entries. Conflating the two
+    // — as this method used to — makes the separator decision wrong for every
+    // container whose first block projects nothing.
+    let emitted_any_block = false;
 
     if (c_type === "NotesPart") {
       const header =
@@ -251,27 +398,111 @@ export class DocumentMapper {
       const sep = `---\n${header}`;
       this._add_virtual_text(sep, current, null);
       current += sep.length;
-      this._add_virtual_text("\n\n", current, null);
-      current += 2;
+      emitted_any_block = true;
     }
 
     let is_first_para = true;
     let previous_item: any = null;
 
-    for (const item of iter_block_items(container)) {
+    for (const item of iter_block_items(container, true)) {
       const i_type = item.constructor.name;
+      // Marks for rolling back a tentative separator (plus any zero-width
+      // anchor spans) when the block turns out to project nothing.
+      const spans_mark = this.spans.length;
+      const chunks_mark = this._text_chunks.length;
+      const offset_mark = current;
 
-      if (i_type === "FootnoteItem") {
+      if (item instanceof BlockSdt) {
+        // Twin of the ingest branch: recurse into sdtContent as a Table
+        // recurses into its rows, then bracket with token lines.
+        if (emitted_any_block) {
+          const prev_para =
+            previous_item instanceof Paragraph ? previous_item : null;
+          this._add_virtual_text("\n\n", current, prev_para);
+          current += 2;
+        }
+        const info = this._sdt_infos.get(item.element);
+        const anchored = !!info && isAnchored(info);
+        // Spec §3 exception: inside a table cell the anchors render inline,
+        // because a row is one projected line.
+        const joiner = inCell ? "" : "\n";
+        if (anchored) {
+          const tok = `${openToken(info!)}${joiner}`;
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
+        const inner_start = current;
+        // Container SHIM, not the bare element — see the ingest twin: this
+        // engine derives the OPC part from `container.part`, and a raw element
+        // loses it, breaking hyperlink resolution inside the control.
+        //
+        // Enclose the recursion, not just the runs: a block control wraps
+        // whole paragraphs, so every span emitted below belongs to it.
+        // try/finally because _map_blocks can throw on malformed XML and a
+        // leaked stack would mis-attribute the REST of the document to a
+        // control it already left.
+        if (info) this._current_block_sdt_stack.push(info);
+        try {
+          current = this._map_blocks(
+            {
+              _element: findChild(item.element, "w:sdtContent"),
+              part: (container as any).part || container,
+            },
+            current,
+            inCell,
+          );
+        } finally {
+          if (info) this._current_block_sdt_stack.pop();
+        }
+        if (current === inner_start) {
+          // Projects nothing: roll back the open token AND the separator,
+          // same contract as an empty table.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          if (anchored) {
+            const tok = `${joiner}${closeToken(info!)}`;
+            this._add_virtual_text(tok, current, null);
+            current += tok.length;
+          }
+          emitted_any_block = true;
+        }
+        is_first_para = false;
+      } else if (i_type === "FootnoteItem") {
+        if (emitted_any_block) {
+          const prev_para =
+            previous_item instanceof Paragraph ? previous_item : null;
+          this._add_virtual_text("\n\n", current, prev_para);
+          current += 2;
+        }
+        const block_start = current;
         current = this._map_blocks(item, current);
+        if (current === block_start) {
+          // Empty footnote entry: the reader drops the block, so roll back
+          // the separator and any zero-width spans.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          emitted_any_block = true;
+        }
       } else if (item instanceof Paragraph) {
-        if (!is_first_para) {
+        if (emitted_any_block) {
+          // Attach the newline to the previous paragraph so merges work
+          // correctly.
           const prev_para =
             previous_item instanceof Paragraph ? previous_item : null;
           this._add_virtual_text("\n\n", current, prev_para);
           current += 2;
         }
 
-        let prefix = get_paragraph_prefix(item, style_cache, default_pstyle);
+        const style_prefix = get_paragraph_prefix(
+          item,
+          style_cache,
+          default_pstyle,
+        );
+        let prefix = style_prefix;
         if (is_first_para && c_type === "FootnoteItem") {
           prefix = `[^${container.note_type}-${container.id}]: ` + prefix;
         }
@@ -280,28 +511,77 @@ export class DocumentMapper {
           current += prefix.length;
         }
 
+        const content_start = current;
         current = this._map_paragraph_content(
           item,
           current,
           style_cache,
           default_pstyle,
         );
+        if (
+          this.clean_view &&
+          current === content_start &&
+          paragraph_mark_is_deleted(item._element)
+        ) {
+          // Twin of the reader's skip in _extract_blocks: accepting a tracked
+          // paragraph-mark deletion merges the paragraph away, so when nothing
+          // visible survives inside it the accepted view renders no container
+          // at all. The reader drops the whole `prefix + p_text` block, so the
+          // rollback must undo the prefix and the separator too — and the
+          // paragraph must NOT count as a block, or the next separator lands
+          // twice.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+          is_first_para = false;
+          continue;
+        }
         is_first_para = false;
+        emitted_any_block = true;
         previous_item = item;
       } else if (item instanceof Table) {
-        if (!is_first_para) {
+        if (emitted_any_block) {
           const prev_para =
             previous_item instanceof Paragraph ? previous_item : null;
           this._add_virtual_text("\n\n", current, prev_para);
           current += 2;
         }
+        const block_start = current;
         current = this._map_table(item, current);
+        if (current === block_start) {
+          // Empty table (e.g. every row skipped in this view): the reader
+          // drops the block AND its separator.
+          this.spans.length = spans_mark;
+          this._text_chunks.length = chunks_mark;
+          current = offset_mark;
+        } else {
+          emitted_any_block = true;
+        }
         is_first_para = false;
         previous_item = item;
       }
     }
 
     return current;
+  }
+
+  /**
+   * The SdtInfo of the control wrapping this w:tr/w:tc, anchored or not.
+   *
+   * Gates ask about enclosure, which is independent of whether the control
+   * projects a `{#cc:N}` token — the same distinction _spanSdtStack draws
+   * for inline controls.
+   */
+  private _wrappingControl(element: any): SdtInfo | null {
+    const sdt = wrappingSdt(element);
+    if (!sdt) return null;
+    return this._sdt_infos.get(sdt) ?? null;
+  }
+
+  /** The SdtInfo of the control wrapping this w:tr/w:tc, when it anchors. */
+  private _anchoredWrapper(element: any): SdtInfo | null {
+    const info = this._wrappingControl(element);
+    return info && isAnchored(info) ? info : null;
   }
 
   private _map_table(table: Table, offset: number): number {
@@ -330,6 +610,17 @@ export class DocumentMapper {
         current += 4;
       }
 
+      // Row-level control (sdtContent > w:tr): the anchor is the INNER of the
+      // two wrappers — CriticMarkup is about the row's existence, the anchor
+      // about its identity. Twin of ingest.extract_table.
+      const rowControl = this._wrappingControl(tr);
+      const rowInfo = this._anchoredWrapper(tr);
+      if (rowInfo) {
+        const tok = openToken(rowInfo);
+        this._add_virtual_text(tok, current, null);
+        current += tok.length;
+      }
+
       const seen_cells = new Set();
       let cells_processed = 0;
 
@@ -342,8 +633,37 @@ export class DocumentMapper {
           current += 3;
         }
 
+        const cellControl = this._wrappingControl(cell._element);
+        const cellInfo = this._anchoredWrapper(cell._element);
+        if (cellInfo) {
+          // Cell-level control: anchors inline in this cell's segment.
+          const tok = openToken(cellInfo);
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
+
         const cell_start = current;
-        current = this._map_blocks(cell, current);
+        // Row- and cell-level controls are pushed together HERE rather than
+        // at their own structural levels because every span a row emits comes
+        // from this call: the rest is virtual chrome (separators, anchors,
+        // change bubbles), which by design sits outside content ranges. One
+        // push site, one unwind.
+        const enclosing = [rowControl, cellControl].filter(
+          (c): c is SdtInfo => c !== null,
+        );
+        this._current_block_sdt_stack.push(...enclosing);
+        try {
+          current = this._map_blocks(cell, current, true);
+        } finally {
+          for (let n = 0; n < enclosing.length; n++) {
+            this._current_block_sdt_stack.pop();
+          }
+        }
+        if (cellInfo) {
+          const tok = closeToken(cellInfo);
+          this._add_virtual_text(tok, current, null);
+          current += tok.length;
+        }
 
         // Parity with ingest.extract_table: emit a {#cell:<paraId>} anchor and
         // bind a zero-width span to the cell's first paragraph so the engine
@@ -362,10 +682,25 @@ export class DocumentMapper {
             // token offset so resolution targets THIS cell, not a neighbour.
             const cellPara = new Paragraph(firstP, cell);
             this._add_virtual_text("", current, cellPara);
-            const has_content = current > cell_start;
-            if (has_content) {
-              this._add_virtual_text(" ", current, cellPara);
-              current += 1;
+            if (cell_start < current) {
+              // Separator only when the projected cell text does not already
+              // end with a space — mirrors ingest's endsWith(" ") check.
+              // Emphasis hoists trailing whitespace out of its closing marker,
+              // so a bold cell commonly ends "**Label** "; padding
+              // unconditionally emitted two spaces before the anchor and broke
+              // the Virtual Text contract against ingest.
+              let last_char = "";
+              for (let ci = this._text_chunks.length - 1; ci >= 0; ci--) {
+                const chunk = this._text_chunks[ci]!;
+                if (chunk) {
+                  last_char = chunk[chunk.length - 1]!;
+                  break;
+                }
+              }
+              if (last_char !== " ") {
+                this._add_virtual_text(" ", current, cellPara);
+                current += 1;
+              }
             }
             const anchor = `{#cell:${paraId}}`;
             this._add_virtual_text(anchor, current, cellPara);
@@ -373,6 +708,12 @@ export class DocumentMapper {
           }
         }
         cells_processed += 1;
+      }
+
+      if (rowInfo) {
+        const tok = closeToken(rowInfo);
+        this._add_virtual_text(tok, current, null);
+        current += tok.length;
       }
 
       if (ins && !this.clean_view && !this.original_view) {
@@ -436,6 +777,7 @@ export class DocumentMapper {
       run: null,
       paragraph,
       part_index: this._current_part_index,
+      sdt_stack: this._spanSdtStack(),
     };
     this.spans.push(span);
 
@@ -445,6 +787,11 @@ export class DocumentMapper {
     const active_fmt: Record<string, DocxEvent> = {};
 
     let deferred_meta_states: any[] = [];
+    /**
+     * A change annotation built but held back because the checkbox it belongs
+     * to has not closed yet (CC-19). Emitted at `checkbox_end`.
+     */
+    let pending_meta_block: string | null = null;
     let current_wrappers: [string, string] = ["", ""];
     let current_style: [string, string] = ["", ""];
     let active_hyperlink_id: string | null = null;
@@ -482,6 +829,7 @@ export class DocumentMapper {
             comment_ids: c_ids.length > 0 ? c_ids : undefined,
             part_index: this._current_part_index,
             run_offset: r_off,
+            sdt_stack: this._spanSdtStack(r_obj),
           };
           this.spans.push(s);
           this._text_chunks.push(txt);
@@ -495,7 +843,7 @@ export class DocumentMapper {
       pending_runs = [];
     };
 
-    const items = Array.from(iter_paragraph_content(paragraph));
+    const items = Array.from(iter_paragraph_content(paragraph, this._sdt_infos));
     const is_heading = is_heading_paragraph(
       paragraph,
       style_cache,
@@ -562,11 +910,14 @@ export class DocumentMapper {
           }
         } else if ((prefix || suffix) && text) {
           append_wrapped(text);
-        } else {
-          if (prefix) run_parts.push(["virtual", prefix, null, 0]);
-          if (text) run_parts.push(["real", text, item, 0]);
-          if (suffix) run_parts.push(["virtual", suffix, null, 0]);
+        } else if (text) {
+          run_parts.push(["real", text, item, 0]);
         }
+        // An EMPTY-text run contributes nothing — not even its style markers.
+        // A styled run whose only child is a footnote reference or a drawing
+        // otherwise leaves a dangling marker pair ("[^fn-5]__",
+        // "(docx-image:1)****") that the reader never emits, because
+        // apply_formatting_to_segments("") is "".
 
         if (this.clean_view && Object.keys(active_del).length > 0) {
           // pass
@@ -600,28 +951,47 @@ export class DocumentMapper {
             new_wrappers[0] === current_wrappers[0] &&
             new_wrappers[1] === current_wrappers[1]
           ) {
-            let skip_leading_prefix = false;
+            // Adjacent same-style marker elision must mirror
+            // ingest.buildParagraphText EXACTLY. Two historical faults, both
+            // fixed on the python side and ported here (CC-10 follow-up):
+            // (a) the check looked only at the LITERAL last pending part, so
+            //     any boundary whitespace defeated it — "**Request for**
+            //     **Bids**" instead of "**Request for Bids**"; and
+            // (b) it popped the closing marker WITHOUT confirming the incoming
+            //     run really opens with the matching prefix, so a
+            //     whitespace-only same-style run following it lost marker
+            //     balance outright ("**March 2012 " with no closer).
+            const isWs = (s: string) => s.length > 0 && /^\s+$/.test(s);
+            let incoming = run_parts;
             if (
               new_style[0] === current_style[0] &&
               new_style[1] === current_style[1] &&
-              current_style[0] !== "" &&
-              pending_runs[pending_runs.length - 1][0] === "virtual" &&
-              pending_runs[pending_runs.length - 1][1] === current_style[1]
+              !(current_style[0] === "" && current_style[1] === "")
             ) {
-              pending_runs.pop();
-              skip_leading_prefix = true;
+              let k = pending_runs.length - 1;
+              while (k >= 0 && pending_runs[k][0] === "real" && isWs(pending_runs[k][1]))
+                k--;
+              const pending_ends_with_suffix =
+                k >= 0 &&
+                pending_runs[k][0] === "virtual" &&
+                pending_runs[k][1] === current_style[1];
+
+              let m = 0;
+              while (m < run_parts.length && run_parts[m][0] === "real" && isWs(run_parts[m][1]))
+                m++;
+              const incoming_starts_with_prefix =
+                m < run_parts.length &&
+                run_parts[m][0] === "virtual" &&
+                run_parts[m][1] === new_style[0];
+
+              if (pending_ends_with_suffix && incoming_starts_with_prefix) {
+                pending_runs.splice(k, 1);
+                incoming = run_parts.slice(0, m).concat(run_parts.slice(m + 1));
+              }
             }
 
             const curr_comment_ids = Array.from(active_ids);
-            for (const [kind, txt, r_obj, r_off] of run_parts) {
-              if (
-                skip_leading_prefix &&
-                kind === "virtual" &&
-                txt === new_style[0]
-              ) {
-                skip_leading_prefix = false;
-                continue;
-              }
+            for (const [kind, txt, r_obj, r_off] of incoming) {
               pending_runs.push([
                 kind,
                 txt,
@@ -722,16 +1092,104 @@ export class DocumentMapper {
             const meta_block =
               this._build_merged_meta_block(deferred_meta_states);
             if (meta_block) {
-              flush_pending_runs();
-              current_wrappers = ["", ""];
-              current_style = ["", ""];
-              const full_meta = `{>>${meta_block}<<}`;
-              this._add_virtual_text(full_meta, current, paragraph);
-              current += full_meta.length;
+              if (nextClosesCheckbox(items, i)) {
+                // CC-19, twin of ingest: the closing bracket is still to come,
+                // and splitting the box around a multi-line annotation orphans
+                // it.
+                pending_meta_block = meta_block;
+              } else {
+                flush_pending_runs();
+                current_wrappers = ["", ""];
+                current_style = ["", ""];
+                const full_meta = `{>>${meta_block}<<}`;
+                this._add_virtual_text(full_meta, current, paragraph);
+                current += full_meta.length;
+              }
             }
             deferred_meta_states = [];
           }
         }
+      } else if (isSdtEvent(item)) {
+        // Content-control boundary. Twin of the ingest branch — the tokens are
+        // VIRTUAL spans (run=null), so they occupy offsets in the projection
+        // but map back to no run, exactly like the `{#cell:}` anchors and
+        // bookmark tokens. Flush first, for the same reason ingest flushes
+        // `pending_text`: an anchor must never end up inside an emphasis or
+        // CriticMarkup group.
+        leading_strip_active = false;
+        const info = item.info;
+
+        // Checkbox chrome JOINS the pending wrapper group; anchors break it.
+        // Twin of the ingest branch, and the reasoning is there (CC-19): the
+        // brackets belong INSIDE the CriticMarkup, or a tracked toggle renders
+        // one checkbox as two. Here they join `pending_runs` as virtual
+        // entries, so they still map back to no run while sharing the group's
+        // wrappers - a divergence from ingest is the CC-12 defect class
+        // (offsets that disagree with the text the caller was shown).
+        if (CHECKBOX_CHROME_EVENTS.includes(item.type)) {
+          // The deleted half is dropped whole in the clean view: chrome around
+          // discarded content renders a second, permanently empty box.
+          if (this.clean_view && Object.keys(active_del).length > 0) continue;
+          const chrome =
+            item.type === "checkbox_start"
+              ? CHECKBOX_OPEN
+              : item.type === "checkbox_end"
+                ? CHECKBOX_CLOSE
+                : // Fallback only; normally the mark is a real run-backed span
+                  // emitted through the Run branch (spec §4).
+                  checkboxMark(info);
+          const new_wrappers: [string, string] =
+            this.clean_view || this.original_view
+              ? ["", ""]
+              : // Derived exactly as the Run branch derives it (last id wins),
+                // so chrome and mark always land in the same wrapper group.
+                this._get_wrappers(
+                  Object.keys(active_ins).pop() || null,
+                  Object.keys(active_del).pop() || null,
+                  active_ids,
+                  active_fmt,
+                );
+          if (
+            pending_runs.length > 0 &&
+            (new_wrappers[0] !== current_wrappers[0] ||
+              new_wrappers[1] !== current_wrappers[1])
+          ) {
+            flush_pending_runs();
+          }
+          if (pending_runs.length === 0) current_wrappers = new_wrappers;
+          pending_runs.push(["virtual", chrome, null, 0, null, null, []]);
+          current_style = ["", ""];
+          if (item.type === "checkbox_end" && pending_meta_block) {
+            flush_pending_runs();
+            current_wrappers = ["", ""];
+            const full_meta = `{>>${pending_meta_block}<<}`;
+            this._add_virtual_text(full_meta, current, paragraph);
+            current += full_meta.length;
+            pending_meta_block = null;
+          }
+          continue;
+        }
+
+        // Anchors are structural: they must never end up inside an emphasis or
+        // CriticMarkup group.
+        flush_pending_runs();
+        current_wrappers = ["", ""];
+        current_style = ["", ""];
+        let txt: string;
+        if (item.type === "sdt_start") {
+          txt = openToken(info);
+          if (
+            !this.clean_view &&
+            info.showingPlaceholder &&
+            info.placeholderText
+          ) {
+            txt += `{>>placeholder: ${info.placeholderText}<<}`;
+          }
+        } else {
+          txt = closeToken(info);
+        }
+        this._add_virtual_text(txt, current, paragraph);
+        current += txt.length;
       } else {
         const ev = item as DocxEvent;
         leading_strip_active = false;
@@ -913,6 +1371,7 @@ export class DocumentMapper {
       hyperlink_id: hyperlink_id || undefined,
       part_index: this._current_part_index,
       is_image_marker: is_image_marker || undefined,
+      sdt_stack: this._spanSdtStack(),
     };
     this.spans.push(span);
     this._text_chunks.push(text);

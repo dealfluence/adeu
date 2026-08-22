@@ -9,6 +9,7 @@ import {
   PAGE_RANGE_MAX_PAGES,
   response_budget_limit,
   whole_doc_guard_message,
+  heading_path_at,
 } from "@adeu/core";
 import { split_projection } from "./shared.js";
 
@@ -34,7 +35,12 @@ export interface ProjectionBundle {
 // The changes ledger lives in its own module (440 lines of bubble parsing) but
 // belongs to this module's public surface: every caller — index.ts and the
 // conformance suite — reaches the builders through here.
-export { build_changes_response } from "./ledger.js";
+export {
+  build_changes_response,
+  build_fields_response,
+  fields_discovery_hint,
+  banner_for_path,
+} from "./ledger.js";
 
 // Projection style markers: `**bold**` always; `_italic_` only where the
 // underscore is not intra-word (identifiers like snake_case are literal text —
@@ -47,6 +53,12 @@ const STYLE_MARKER_RE = /\*\*|(?<![\w])_(?=\S)|(?<=\S)_(?![\w])/g;
 // anchor's leading underscore, handing agents a nonexistent anchor
 // (QA 2026-07-23 F4).
 const PROTECTED_TOKEN_RE = /\{#[^}]+\}|_{3,}/g;
+
+// `{#anchor}` tokens — bookmark anchors and CC-1's `{#cc:N}` content-control
+// anchors. A snippet window that lands inside one must not emit the fragment
+// (CC-1 A1.6). Source form: the matcher is rebuilt per use because it is
+// stateful under /g.
+const ANCHOR_TOKEN_SRC = "\\{#[^}\\n]*\\}";
 
 /**
  * Renders `prefix **match** suffix` with the document's own bold/italic
@@ -211,6 +223,29 @@ export function balanceSnippetWindow(
     for (const opener of Object.keys(SNIPPET_CLOSER_OF)) depth[opener] = 0;
     let widened = false;
 
+    // `{#anchor}` tokens are kept whole on the same terms (CC-1 A1.6). They
+    // are not a paired construct, so they need no depth counter — a window
+    // edge landing strictly inside one just moves out to the token's own edge.
+    // A split anchor is worse than a missing one: `{#cc:` is a
+    // plausible-looking target an agent will copy, and the radius ladder makes
+    // it reachable whenever a result set exceeds the response budget.
+    const anchor_re = new RegExp(ANCHOR_TOKEN_SRC, "g");
+    let a: RegExpExecArray | null;
+    while ((a = anchor_re.exec(body)) !== null) {
+      const a_start = a.index;
+      const a_end = a.index + a[0].length;
+      if (a_start < start && start < a_end) {
+        start = a_start;
+        widened = true;
+      }
+      if (a_start < end && end < a_end) {
+        end = a_end;
+        widened = true;
+      }
+      if (a_start >= end) break;
+    }
+    if (widened) continue;
+
     const token_re = new RegExp(SNIPPET_MARKUP_TOKEN_SRC, "g");
     token_re.lastIndex = start;
     let tok: RegExpExecArray | null;
@@ -370,12 +405,37 @@ function snapCodePointBoundary(
   return [start, end];
 }
 
+/**
+ * The LLM-only header block: File Path, then the fields banner.
+ *
+ * spec-projection §7 puts the banner immediately after the File Path line, so
+ * the two render as one blockquote. Both are chrome and both vanish under
+ * `no_chrome`, which exists so the projection can round-trip.
+ */
+function with_path_header(
+  file_path: string,
+  fields_banner: string | null | undefined,
+  ui_markdown: string,
+): string {
+  let header = `> **File Path:** \`${resolve(file_path)}\``;
+  if (fields_banner) header += `\n${fields_banner}`;
+  return `${header}\n\n${ui_markdown}`;
+}
+
 function parseBundleAndOptions(
-  arg3?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  arg4?: boolean | { no_chrome?: boolean },
-): { bundle?: ProjectionBundle; no_chrome: boolean } {
+  arg3?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  arg4?: boolean | { no_chrome?: boolean; fields_banner?: string | null },
+): {
+  bundle?: ProjectionBundle;
+  no_chrome: boolean;
+  fields_banner?: string | null;
+} {
   let bundle: ProjectionBundle | undefined;
   let no_chrome = false;
+  let fields_banner: string | null | undefined;
 
   if (typeof arg3 === "boolean") {
     no_chrome = arg3;
@@ -385,15 +445,19 @@ function parseBundleAndOptions(
     if ("no_chrome" in arg3 && arg3.no_chrome !== undefined) {
       no_chrome = Boolean(arg3.no_chrome);
     }
+    if ("fields_banner" in arg3) fields_banner = arg3.fields_banner;
   }
 
   if (typeof arg4 === "boolean") {
     no_chrome = arg4;
-  } else if (arg4 && typeof arg4 === "object" && "no_chrome" in arg4 && arg4.no_chrome !== undefined) {
-    no_chrome = Boolean(arg4.no_chrome);
+  } else if (arg4 && typeof arg4 === "object") {
+    if ("no_chrome" in arg4 && arg4.no_chrome !== undefined) {
+      no_chrome = Boolean(arg4.no_chrome);
+    }
+    if ("fields_banner" in arg4) fields_banner = arg4.fields_banner;
   }
 
-  return { bundle, no_chrome };
+  return { bundle, no_chrome, fields_banner };
 }
 
 function _build_appendix_pointer(has_appendix: boolean): string {
@@ -462,13 +526,18 @@ export function render_outline_tree(
 export function build_full_document_response(
   text: string,
   file_path: string,
-  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  no_chrome_param?: boolean | { no_chrome?: boolean },
+  bundleOrOpts?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  no_chrome_param?:
+    | boolean
+    | { no_chrome?: boolean; fields_banner?: string | null },
 ): ToolResult {
   // The ENTIRE document body with no page banner, continuation footer, or
   // appendix pointer — the round-trip artifact for text-based apply/diff
   // (QA 2026-07-17 F1; mirrors Python's build_full_document_response).
-  const { bundle, no_chrome } = parseBundleAndOptions(
+  const { bundle, no_chrome, fields_banner } = parseBundleAndOptions(
     bundleOrOpts,
     no_chrome_param,
   );
@@ -476,7 +545,7 @@ export function build_full_document_response(
   const ui_markdown = body;
   const llm_content = no_chrome
     ? ui_markdown
-    : `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    : with_path_header(file_path, fields_banner, ui_markdown);
   return {
     content: [{ type: "text", text: llm_content }],
     structuredContent: {
@@ -530,10 +599,15 @@ export function build_paginated_response(
   text: string,
   page: number,
   file_path: string,
-  bundleOrOpts?: ProjectionBundle | { no_chrome?: boolean } | boolean,
-  no_chrome_param?: boolean | { no_chrome?: boolean },
+  bundleOrOpts?:
+    | ProjectionBundle
+    | { no_chrome?: boolean; fields_banner?: string | null }
+    | boolean,
+  no_chrome_param?:
+    | boolean
+    | { no_chrome?: boolean; fields_banner?: string | null },
 ): ToolResult {
-  const { bundle, no_chrome } = parseBundleAndOptions(
+  const { bundle, no_chrome, fields_banner } = parseBundleAndOptions(
     bundleOrOpts,
     no_chrome_param,
   );
@@ -572,7 +646,7 @@ export function build_paginated_response(
     const appendix_pointer = _build_appendix_pointer(has_appendix);
 
     ui_markdown = banner + selected.page_content + footer + appendix_pointer;
-    llm_content = `> **File Path:** \`${resolve(file_path)}\`\n\n${ui_markdown}`;
+    llm_content = with_path_header(file_path, fields_banner, ui_markdown);
   }
 
   return {
@@ -1151,43 +1225,10 @@ export function build_search_response(
   // text, meta bubbles drop. Because we operate on ONE line of the projection,
   // a multi-line `{>>…<<}` bubble can be clipped by the line break — drop the
   // unterminated tail too, then sweep any leftover delimiter fragments.
-  function clean_breadcrumb(raw: string): string {
-    return raw
-      .replace(/\{--.*?--\}/g, "")
-      .replace(/\{\+\+(.*?)\+\+\}/g, "$1")
-      .replace(/\{==(.*?)==\}/g, "$1")
-      .replace(/\{>>.*?<<\}/g, "")
-      .replace(/\{(?:>>|--).*$/g, "")
-      .replace(/\{\+\+|\{==|--\}|\+\+\}|<<\}|==\}/g, "")
-      .replace(/\*\*|__|[*_]/g, "")
-      .replace(/\{#[^}]+\}/g, "")
-      .trim();
-  }
-
-  function get_heading(idx: number, txt: string): string {
-    const path: string[] = [];
-    let current_level = 999;
-    // Scan through the END of the line containing the match: slicing at the
-    // match offset cuts the line in half, so a hit INSIDE a heading reported a
-    // truncated path ("Master" for a match on "Services" in "# Master Services
-    // Agreement", QA 2026-07-19 F-17).
-    const nl = txt.indexOf("\n", idx);
-    const line_end = nl === -1 ? txt.length : nl;
-    const lines = txt.slice(0, line_end).split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const m = lines[i].match(/^(#{1,6})\s+(.*)/);
-      if (!m) continue;
-      const level = m[1].length;
-      if (level >= current_level) continue;
-      let clean_heading = clean_breadcrumb(m[2]);
-      if (clean_heading.length > 80)
-        clean_heading = clean_heading.slice(0, 80) + "...";
-      path.unshift(clean_heading);
-      current_level = level;
-      if (level === 1) break;
-    }
-    return path.join(" > ");
-  }
+  // Hoisted to @adeu/core's outline module for CC-2 so the fields ledger
+  // renders identical breadcrumbs from the same projection rather than a
+  // second dialect.
+  const get_heading = heading_path_at;
 
   /**
    * Groups hits by their containing projection line: one paragraph renders as

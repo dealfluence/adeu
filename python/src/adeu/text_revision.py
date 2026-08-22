@@ -4,13 +4,12 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-from docx import Document
-
 from adeu.diff import generate_edits_via_paragraph_alignment
 from adeu.ingest import _extract_text_from_doc
 from adeu.models import DocumentChange
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.opc import load_document as Document
 
 # Only the OPEN tokens: a bare closing token is ordinary prose far more often
 # than it is markup ("A ~> B", "rate++}"), and markup view never emits one
