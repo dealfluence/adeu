@@ -1,19 +1,5 @@
 # FILE: src/adeu/outline.py
-"""
-Structural outline extractor.
-
-Walks a python-docx Document in document order, identifies headings (matching
-the same rules used by ingest.get_paragraph_prefix), and emits a flat list of
-OutlineNode records with per-heading metadata.
-
-Used by read_docx mode='outline'. The outline is computed from the live
-Document object — same source as the projected body — so heading text and
-page assignments stay consistent with what mode='full' returns.
-
-Heading ownership: a heading owns the document range from its position up to
-(but not including) the next heading of equal or higher level. has_table and
-footnote_ids are computed over that owned range.
-"""
+"""Structural outline extractor."""
 
 import re
 from dataclasses import dataclass, field
@@ -204,26 +190,7 @@ def _extract_outline_fast(
     body_page_offsets: List[int],
     paragraph_offsets: dict,
 ) -> List[OutlineNode]:
-    """
-    Fast outline extraction using the pre-computed paragraph offset map.
-
-    For each paragraph in the document, we already know its (start, length) in
-    projected_body. Heading text is extracted by slicing projected_body and
-    stripping markdown markers — no per-paragraph re-projection.
-
-    PERF (2026-07-24): three per-heading costs made this path scale badly on
-    heading-dense documents (7,066 headings → ~11 s):
-      - style resolution went through python-docx's `paragraph.style`, whose
-        part lookup rescans the document part's relationship list on EVERY
-        access (52M probes on a 3,547-rel document) — replaced with the
-        package-level style cache;
-      - footnote collection re-projected paragraph events over each heading's
-        owned range, and owned ranges overlap (L2 ranges nest inside L1) —
-        replaced with one lxml prefilter for reference-carrying paragraphs
-        plus a per-paragraph memo;
-      - `_is_heading`/`_heading_level` were recomputed inside the owned-range
-        scans — now computed once per item during identification.
-    """
+    """Fast outline extraction using the pre-computed paragraph offset map."""
     # Walk paragraphs and tables in projection order, but ONLY to detect
     # heading-eligible paragraphs. We do not re-project text.
     paragraphs_and_tables: list = []

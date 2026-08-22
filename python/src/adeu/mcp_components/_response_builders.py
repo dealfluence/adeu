@@ -1,51 +1,5 @@
 # FILE: src/adeu/mcp_components/_response_builders.py
-"""
-Shared response builders for read_docx mode dispatch.
-
-Lives in mcp_components (not in tools/) because both tools/document.py and
-tools/live_word.py call into it. Keeping it here avoids the circular import
-that would result if these helpers lived in document.py and live_word.py
-imported them at module load time.
-
-PARITY INVARIANT
-----------------
-Both the disk path (_read_docx_disk) and the Live Word path
-(read_active_word_document) MUST converge on these builders for outline and
-pagination output. The contract is:
-
-  Given the same DOCX content (whether read from disk or extracted via
-  WordOpenXML from a saved-state Live Word doc), build_paginated_response and
-  build_outline_response MUST return byte-identical results.
-
-This invariant is what justifies the design — there is no Live-Word-specific
-pagination or outline code. Any future feature that touches projection,
-pagination, or outline should be added to ingest/pagination/outline so both
-paths inherit the change automatically.
-
-CHANNEL CONTRACT
-----------------
-Per the MCP spec, `content` is LLM-facing markdown and `structured_content` is
-machine-facing JSON for the host UI. We do NOT mirror them; instead we ensure
-each channel is self-sufficient for its audience:
-
-  - `content`: contains the projected document text PLUS an inline pagination
-    banner (top, and bottom-of-page when has_next) so the LLM knows its
-    position in the document without consulting structured_content.
-
-  - `structured_content`: contains only fields the markdown UI widget actually
-    reads — `markdown`, `title`, `file_path`. Nothing else is consumed.
-
-APPENDIX SEPARATION
--------------------
-The Structural Appendix (defined terms, anchors, diagnostics) is NOT included
-in body pages. It is fetched on demand via mode='appendix', and body pages get
-a small one-line footer pointing the agent at the appendix mode. Rationale: on
-large legal documents the appendix can exceed 400KB, which (a) blows the
-per-page payload ceiling and (b) gets silently chunked by the MCP client.
-
-The appendix is paginated using the same paginator as the body, with the
-appendix text passed AS the body input.
-"""
+"""Shared response builders for read_docx mode dispatch across disk and Live Word paths."""
 
 from __future__ import annotations
 
@@ -148,53 +102,17 @@ def _emphasized_snippet(region: str, spans: List[Tuple[int, int]]) -> str:
     return "".join(parts)
 
 
-# Search-response size budget. A search response is sized at ~60 tokens per
-# requested match; tokens are estimated at 4 characters each (the same crude
-# ratio the test suite measures with). SNIPPET_RADIUS_LADDER is the descending
-# set of per-hit context radii the renderer tries, widest first: 120 chars is
-# the documented clamp, the rest are fallbacks for documents whose paragraphs
-# are long enough that 20 full-width snippets would not fit the budget. The
-# ladder does NOT bottom out at 0: a `...**Supplier**...` snippet costs chrome
-# to tell the agent only what it already typed, so 16 chars each side is the
-# floor and the budget pass drops trailing entries instead.
 SEARCH_TOKENS_PER_MATCH = 60
 CHARS_PER_TOKEN = 4
 SNIPPET_RADIUS_LADDER = (120, 60, 30, 16)
 
-# `max_matches * 60` is an allowance for match CONTENT, but a response also
-# carries chrome that no radius can shrink. Measured on a 50-hit document at
-# max_matches=1: the `> **File Path:**` line 7 tokens, the results header 23,
-# the cross-page distribution summary 33, the continuation note 20 and the
-# trim note 15 — ~110 fixed, plus ~22 per entry for the `---` rule, the
-# `### Match N (pX)` heading, the `**Path:**` breadcrumb and the
-# `*Occurrences:*` line, and ~13 for a floor-radius snippet. So one entry
-# costs ~140 tokens no matter how hard the snippet is squeezed, and a budget
-# of `1 * 60` was unreachable at ANY radius: every rung of the ladder
-# "failed", the response shipped a context-free `...**hit**...`, and at
-# max_matches=2..3 entries the caller had explicitly asked for were dropped
-# (QA finding 1). Sizing from chrome + a minimum snippet per entry keeps
-# every requested entry payable, and leaves the max_matches=5 and 20 ceilings
-# at the content-derived 300 and 1200 they already were.
 SEARCH_FIXED_CHROME_TOKENS = 120
 SEARCH_ENTRY_CHROME_TOKENS = 22
 SEARCH_MIN_SNIPPET_TOKENS = 13
 
 
 def search_budget_tokens(max_matches: int, rendered_count: int | None = None) -> int:
-    """
-    Approximate-token ceiling for a search response that was ASKED for
-    `max_matches` hits and actually rendered `rendered_count` of them
-    (defaults to all of them). Never below the fixed chrome plus a usable
-    snippet per rendered hit, so small pages stay renderable instead of
-    degenerating to context-free hits.
-
-    The chrome term is sized on hits RENDERED, not hits requested: it exists
-    to keep every requested hit payable, so once the budget pass starts
-    dropping hits it must stop granting per-hit allowance for hits that are
-    no longer in the response. Because `rendered_count <= max_matches`, the
-    result never exceeds `search_budget_tokens(max_matches)` — the ceiling the
-    caller's `max_matches` promises.
-    """
+    """Approximate-token ceiling for a search response."""
     if max_matches < 1:
         return SEARCH_FIXED_CHROME_TOKENS
     rendered = max_matches if rendered_count is None else min(max_matches, max(rendered_count, 0))
@@ -216,36 +134,7 @@ _ANCHOR_TOKEN_RE = re.compile(r"\{#[^}\n]*\}")
 
 
 def _balance_snippet_window(body: str, start: int, end: int) -> tuple[int, int]:
-    """
-    Extends a snippet window until every CriticMarkup span it overlaps is
-    whole. {>>…<<} meta bubbles are MULTI-line and a clamped window cuts spans
-    on BOTH edges, so agents could not harvest ids/pairings from search
-    results (QA round 3, finding 3.12).
-
-    Delimiters are walked IN ORDER with a depth counter per pair, never
-    counted: a window holding one stray `--}` on the left and one stray `{--`
-    on the right balances arithmetically while reading `l1--}…{--del` (QA
-    round 4, finding 1). A closer seen at depth 0 belongs to a span that
-    opened before `start`, so `start` moves back to that opener; a pair still
-    open when the scan reaches `end` pushes `end` forward to its closer. Each
-    step strictly widens the window, so the loop terminates.
-
-    The backward search for a missing opener spans the WHOLE body, not the
-    hit's own projection line: a bubble is multi-line by nature, so a hit
-    sitting after the closer on the bubble's second line has its opener on an
-    earlier line, and a line-bounded search left the stray `<<}` in the
-    snippet — the exact construct this function exists for (QA finding 2).
-    Widening past a line break is safe: the snippet renderer quotes each line
-    it spans, and the response budget drops trailing entries if the wider
-    window costs too much.
-
-    `{#anchor}` tokens are kept whole on the same terms (CC-1 A1.6). They are
-    not a paired construct, so they need no depth counter — a window edge
-    landing strictly inside one just moves out to the token's own edge. A split
-    anchor is worse than a missing one: `{#cc:` is a plausible-looking target
-    an agent will copy, and the radius ladder makes it reachable in production
-    whenever a result set exceeds the response budget.
-    """
+    """Extends a snippet window until every CriticMarkup span and anchor token it overlaps is whole."""
     while True:
         depth = dict.fromkeys(_SNIPPET_CLOSER_OF, 0)
         widened = False

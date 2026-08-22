@@ -1,13 +1,4 @@
-"""CC-5 — the XML half of `set_field` (spec-set-field.md §4/§5).
-
-The *tracked* half of a fill is not here: `set_field` desugars into an ordinary
-`ModifyText` so it inherits atomicity, author resolution, affix trimming,
-comment wrapping and the write gates rather than reimplementing them. What
-lives here is everything a `ModifyText` cannot express — the untracked
-placeholder teardown Word performs, and the attribute syncs (`w:date/@w:fullDate`,
-`w14:checked`, `w:dropDownList/@w:lastValue`) that Word writes with no revision
-of their own, the URL_RETARGET precedent.
-"""
+"""XML manipulations for content control field updates."""
 
 import re
 from typing import Any, List, Optional

@@ -1,18 +1,4 @@
-/**
- * CC-5 - the XML half of `set_field` (spec-set-field.md §4/§5).
- *
- * Twin of `python/src/adeu/utils/field_write.py`. The *tracked* half of a
- * fill is not here: `set_field` desugars into an ordinary `ModifyText` so it
- * inherits atomicity, author resolution, affix trimming, comment wrapping and
- * the write gates rather than reimplementing them. What lives here is
- * everything a `ModifyText` cannot express - the untracked placeholder
- * teardown Word performs, and the attribute syncs (`w:date/@w:fullDate`,
- * `w14:checked`, `w:dropDownList/@w:lastValue`) that Word writes with no
- * revision of their own, the URL_RETARGET precedent.
- *
- * Namespace note: this DOM uses PREFIXED tag names (`w14:checkbox`), not the
- * Clark notation the Python twin needs - see utils/content-controls.ts.
- */
+/** XML manipulations for content control field updates. */
 
 import type { SdtInfo } from "./content-controls.js";
 

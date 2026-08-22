@@ -1,29 +1,4 @@
-"""Write-path gates for content controls (spec-gates.md, acceptance A3).
-
-House doctrine, stated in spec-gates.md §7: **a silent no-op — or a silently
-doomed op — is the most expensive bug an agent can consume.** Word will not
-apply an edit inside a locked control, and a document-protected file rejects
-whole classes of write. If Adeu passed those through, the agent would be told
-its edit succeeded and the user would open a file that does not contain it.
-Every gate here converts that silence into a refusal the caller can act on.
-
-Every gate error carries the same FOUR components (spec-gates.md §2), because
-an error that only says "no" makes the agent guess, and a guessing agent
-retries the same edit:
-
-1. which control, as ``CC:N`` plus its alias/tag when it has one;
-2. the rule, stated as a fact about Word rather than about Adeu;
-3. the sanctioned alternative — what to do instead;
-4. the override parameter, when one exists.
-
-A3 pins those four as substrings and explicitly does NOT pin the full
-sentences, so wording can improve without breaking tests. `_gate_error` is the
-single constructor, so a gate cannot accidentally ship three of the four.
-
-The TypeScript twin is `node/packages/core/src/redline/gates.ts` and must stay
-behaviourally identical: same gate order, same components, same override
-semantics.
-"""
+"""Write-path gates for content controls and document protection."""
 
 from __future__ import annotations
 

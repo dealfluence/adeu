@@ -1,28 +1,5 @@
 // FILE: node/packages/mcp-server/src/doc-cache.ts
-/**
- * Server-layer projection cache (docs/PERFORMANCE.md §5.1).
- *
- * read_docx used to re-run the whole pipeline (unzip → parse every XML part →
- * project → paginate) on EVERY call — a page turn on a 45 MB document.xml
- * cost ~16 s of work identical to the previous call's. This cache keeps the
- * finished PRODUCTS of one ingest (projected text, pagination, outline
- * nodes) keyed by (resolved path, mtime, size), so any later read of the
- * same document VERSION is string slicing.
- *
- * Deliberate properties:
- * - The parsed DOM is never cached (gigabytes); only its products (a few MB).
- * - Freshness is stat-checked on every call: any rewrite changes mtime/size,
- *   so a new document version can never be served stale. (Accepted edge: a
- *   rewrite that preserves BOTH mtime and size — e.g. some sync tools —
- *   is indistinguishable without hashing the file on every page turn.)
- * - Responses must be byte-identical cached vs uncached — this module only
- *   precomputes what response-builders would compute from the same text.
- * - Clean-view text is filled in the BACKGROUND after the first response is
- *   sent (single-flight), so the first read pays only for what it returns,
- *   and a later clean_view request finds the text already warm.
- * - Cache lives in the MCP server layer only; @adeu/core stays stateless
- *   (cross-engine parity: the Python server can mirror this 1:1).
- */
+/** Server-layer projection cache keyed by path, mtime, and size. */
 
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
