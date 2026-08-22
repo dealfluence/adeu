@@ -123,6 +123,13 @@ function createMockExecuteFunctions(): IExecuteFunctions {
     },
   } as unknown as IExecuteFunctions;
 }
+function mockParams(execFns: IExecuteFunctions, params: Record<string, any>) {
+  (execFns.getNodeParameter as ReturnType<typeof vi.fn>).mockImplementation(
+    (paramName: string, _itemIndex?: number, fallback?: any) =>
+      paramName in params ? params[paramName] : fallback,
+  );
+}
+
 describe("Test Adeu n8n Node", () => {
   let node: Adeu;
   let mockExecuteFunctions: ReturnType<typeof createMockExecuteFunctions>;
@@ -145,14 +152,11 @@ describe("Test Adeu n8n Node", () => {
           typeof vi.fn
         >
       ).mockResolvedValue(goldenBuffer);
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "extractMarkdown";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "cleanView") return false;
-        return undefined;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        cleanView: false,
       });
     });
 
@@ -170,15 +174,12 @@ describe("Test Adeu n8n Node", () => {
     });
 
     it("should return paginated output with pagination metadata when Page >= 1", async () => {
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "extractMarkdown";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "cleanView") return false;
-        if (paramName === "page") return 1;
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        cleanView: false,
+        page: 1,
       });
 
       const result = await node.execute.call(mockExecuteFunctions);
@@ -193,16 +194,14 @@ describe("Test Adeu n8n Node", () => {
       expect(typeof item.json.total_pages).toBe("number");
       expect((item.json.total_pages as number) >= 1).toBe(true);
     });
+
     it("should throw when Page exceeds total_pages", async () => {
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "extractMarkdown";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "cleanView") return false;
-        if (paramName === "page") return 999;
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        cleanView: false,
+        page: 999,
       });
 
       await expect(node.execute.call(mockExecuteFunctions)).rejects.toThrow(
@@ -211,15 +210,12 @@ describe("Test Adeu n8n Node", () => {
     });
 
     it("should omit the structural appendix when includeAppendix is false", async () => {
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "extractMarkdown";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "cleanView") return false;
-        if (paramName === "includeAppendix") return false;
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        cleanView: false,
+        includeAppendix: false,
       });
 
       const result = await node.execute.call(mockExecuteFunctions);
@@ -242,13 +238,10 @@ describe("Test Adeu n8n Node", () => {
           typeof vi.fn
         >
       ).mockResolvedValue(goldenBuffer);
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "extractOutline";
-        if (paramName === "binaryPropertyName") return "data";
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractOutline",
+        binaryPropertyName: "data",
       });
     });
 
@@ -361,34 +354,27 @@ describe("Test Adeu n8n Node", () => {
           typeof vi.fn
         >
       ).mockResolvedValue(goldenBuffer);
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "applyEdits";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "outputBinaryPropertyName") return "data";
-        if (paramName === "author") return "n8n AI";
-        if (paramName === "editsSource") return "fromInputJson";
-        if (paramName === "editsJsonPath") return "changes";
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "applyEdits",
+        binaryPropertyName: "data",
+        outputBinaryPropertyName: "data",
+        author: "n8n AI",
+        editsSource: "fromInputJson",
+        editsJsonPath: "changes",
       });
     });
 
     it("should echo reasoning into the output JSON when supplied", async () => {
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "applyEdits";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "outputBinaryPropertyName") return "data";
-        if (paramName === "author") return "n8n AI";
-        if (paramName === "editsSource") return "fromInputJson";
-        if (paramName === "editsJsonPath") return "changes";
-        if (paramName === "reasoning")
-          return "Standardizing governing law per playbook.";
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "applyEdits",
+        binaryPropertyName: "data",
+        outputBinaryPropertyName: "data",
+        author: "n8n AI",
+        editsSource: "fromInputJson",
+        editsJsonPath: "changes",
+        reasoning: "Standardizing governing law per playbook.",
       });
 
       const result = await node.execute.call(mockExecuteFunctions);
@@ -616,18 +602,14 @@ describe("Test Adeu n8n Node", () => {
           typeof vi.fn
         >
       ).mockResolvedValue(initialBuffer);
-      (
-        mockExecuteFunctions.getNodeParameter as ReturnType<typeof vi.fn>
-      ).mockImplementation((paramName: string, _itemIndex, fallback?) => {
-        if (paramName === "resource") return "document";
-        if (paramName === "operation") return "applyTextRevision";
-        if (paramName === "binaryPropertyName") return "data";
-        if (paramName === "outputBinaryPropertyName") return "data";
-        if (paramName === "author") return "n8n AI";
-        if (paramName === "revisedText")
-          return "This is the revised initial document";
-        if (paramName === "allowMajorDeletions") return false;
-        return fallback;
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "applyTextRevision",
+        binaryPropertyName: "data",
+        outputBinaryPropertyName: "data",
+        author: "n8n AI",
+        revisedText: "This is the revised initial document",
+        allowMajorDeletions: false,
       });
     });
 
