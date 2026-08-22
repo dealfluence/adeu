@@ -25,7 +25,7 @@ import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject } from "@adeu/core";
+import { DocumentObject, createTestDocument, addParagraph } from "@adeu/core";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -86,25 +86,8 @@ describe("MCP tools — advertised schema/docs match real capability", () => {
   // clearing its body — `@adeu/core` does not export its test-utils). Tracks the
   // path for cleanup.
   async function buildDoc(paragraphs: string[]): Promise<string> {
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-
-    for (const text of paragraphs) {
-      const xmlDoc = body.ownerDocument!;
-      const p = xmlDoc.createElement("w:p");
-      const r = xmlDoc.createElement("w:r");
-      const t = xmlDoc.createElement("w:t");
-      t.textContent = text;
-      if (/\s/.test(text)) t.setAttribute("xml:space", "preserve");
-      r.appendChild(t);
-      p.appendChild(r);
-      body.appendChild(p);
-    }
+    const doc = await createTestDocument();
+    for (const text of paragraphs) addParagraph(doc, text);
 
     const outPath = join(
       tmpdir(),

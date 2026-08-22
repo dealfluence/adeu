@@ -6,17 +6,24 @@ import { DocumentObject } from './docx/bridge.js';
 import { parseFastXml } from './docx/fast-xml.js';
 import { isWordReadableLongHexNumber } from './docx/long-hex-number.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const _filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+const _dirname = typeof __dirname !== 'undefined' ? __dirname : dirname(_filename);
+
+/**
+ * Loads a pristine DOCX fixture from `shared/fixtures/`.
+ */
+export async function loadFixtureDoc(filename = 'initial.docx'): Promise<DocumentObject> {
+  const fixturePath = resolve(_dirname, '../../../../shared/fixtures', filename);
+  const buf = readFileSync(fixturePath);
+  return await DocumentObject.load(buf);
+}
 
 /**
  * Loads a pristine empty DOCX fixture and clears its body to allow
  * dynamic document construction in tests, mimicking `python-docx`.
  */
 export async function createTestDocument(): Promise<DocumentObject> {
-  const fixturePath = resolve(__dirname, '../../../../shared/fixtures/initial.docx');
-  const buf = readFileSync(fixturePath);
-  const doc = await DocumentObject.load(buf);
+  const doc = await loadFixtureDoc('initial.docx');
   
   // Clear the body completely
   const body = doc.element;

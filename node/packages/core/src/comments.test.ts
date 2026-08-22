@@ -1,19 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { DocumentObject } from './docx/bridge.js';
 import { CommentsManager, extract_comments_data } from './comments.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { loadFixtureDoc } from './test-utils.js';
 
 describe('CommentsManager & DOM Serialization', () => {
   it('should safely add a comment and serialize to buffer', async () => {
     // 1. Load the golden DOCX from shared fixtures
-    const fixturePath = resolve(__dirname, '../../../../shared/fixtures/golden.docx');
-    const buf = readFileSync(fixturePath);
-    const doc = await DocumentObject.load(buf);
+    const doc = await loadFixtureDoc('golden.docx');
     
     // 2. Perform a mutation via the TS implementation of CommentsManager
     const mgr = new CommentsManager(doc);

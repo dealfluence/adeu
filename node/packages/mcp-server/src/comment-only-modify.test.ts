@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, extract_comments_data } from "@adeu/core";
+import { DocumentObject, createTestDocument, extract_comments_data } from "@adeu/core";
 import { coerceChangeItemInPlace, CHANGE_ITEM_SCHEMA } from "./index.js";
 import { startTestServer, TestServer } from "./test-rpc.js";
 
@@ -80,14 +80,8 @@ describe("comment-only modify through process_document_batch (live MCP server)",
 
     // Fixture: a Heading 2 "Term" (which `read_docx` renders as "## Term", the
     // form an agent copies into target_text) plus one ordinary paragraph.
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-    const xmlDoc = body.ownerDocument!;
+    const doc = await createTestDocument();
+    const xmlDoc = doc.element.ownerDocument!;
 
     const heading = xmlDoc.createElement("w:p");
     const pPr = xmlDoc.createElement("w:pPr");
@@ -100,7 +94,7 @@ describe("comment-only modify through process_document_batch (live MCP server)",
     hText.textContent = "Term";
     hRun.appendChild(hText);
     heading.appendChild(hRun);
-    body.appendChild(heading);
+    doc.element.appendChild(heading);
 
     const para = xmlDoc.createElement("w:p");
     const pRun = xmlDoc.createElement("w:r");
@@ -108,7 +102,7 @@ describe("comment-only modify through process_document_batch (live MCP server)",
     pText.textContent = "Normal paragraph text.";
     pRun.appendChild(pText);
     para.appendChild(pRun);
-    body.appendChild(para);
+    doc.element.appendChild(para);
 
     headingDocPath = server.tempOut("heading_doc");
     writeFileSync(headingDocPath, await doc.save());

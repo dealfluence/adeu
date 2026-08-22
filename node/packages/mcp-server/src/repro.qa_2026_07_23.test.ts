@@ -56,7 +56,7 @@ import {
   mkdtempSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, RedlineEngine } from "@adeu/core";
+import { DocumentObject, RedlineEngine, createTestDocument, addParagraph } from "@adeu/core";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -107,24 +107,8 @@ describe("QA 2026-07-23 — MCP server repro tests (real server over stdio)", ()
   // Build a docx from paragraph strings by cloning the empty shared fixture
   // and clearing its body (same technique as mcp.schema-gaps.test.ts).
   async function buildDoc(paragraphs: string[]): Promise<Buffer> {
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-    const xmlDoc = body.ownerDocument!;
-    for (const text of paragraphs) {
-      const p = xmlDoc.createElement("w:p");
-      const r = xmlDoc.createElement("w:r");
-      const t = xmlDoc.createElement("w:t");
-      t.textContent = text;
-      t.setAttribute("xml:space", "preserve");
-      r.appendChild(t);
-      p.appendChild(r);
-      body.appendChild(p);
-    }
+    const doc = await createTestDocument();
+    for (const text of paragraphs) addParagraph(doc, text);
     return doc.save();
   }
 

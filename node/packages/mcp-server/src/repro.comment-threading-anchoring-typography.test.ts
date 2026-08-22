@@ -34,7 +34,7 @@ import {
   mkdtempSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { DocumentObject, RedlineEngine } from "@adeu/core";
+import { DocumentObject, RedlineEngine, createTestDocument, addParagraph } from "@adeu/core";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -79,24 +79,8 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
   }
 
   async function buildDoc(paragraphs: string[]): Promise<Buffer> {
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-    const xmlDoc = body.ownerDocument!;
-    for (const text of paragraphs) {
-      const p = xmlDoc.createElement("w:p");
-      const r = xmlDoc.createElement("w:r");
-      const t = xmlDoc.createElement("w:t");
-      t.textContent = text;
-      t.setAttribute("xml:space", "preserve");
-      r.appendChild(t);
-      p.appendChild(r);
-      body.appendChild(p);
-    }
+    const doc = await createTestDocument();
+    for (const text of paragraphs) addParagraph(doc, text);
     return doc.save();
   }
 
@@ -297,22 +281,8 @@ describe("BUG 2026-08-11 — an unthreadable reply is an error, not a stray comm
   beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "adeu_bug20260811_b1_"));
 
-    const initialPath = resolve(
-      __dirname,
-      "../../../../shared/fixtures/initial.docx",
-    );
-    const doc = await DocumentObject.load(readFileSync(initialPath));
-    const body = doc.element;
-    while (body.firstChild) body.removeChild(body.firstChild);
-    const xmlDoc = body.ownerDocument!;
-    const p = xmlDoc.createElement("w:p");
-    const r = xmlDoc.createElement("w:r");
-    const t = xmlDoc.createElement("w:t");
-    t.textContent = "The receiving party shall bear the cost of production.";
-    t.setAttribute("xml:space", "preserve");
-    r.appendChild(t);
-    p.appendChild(r);
-    body.appendChild(p);
+    const doc = await createTestDocument();
+    addParagraph(doc, "The receiving party shall bear the cost of production.");
 
     new RedlineEngine(doc, REVIEWER).process_batch([
       {

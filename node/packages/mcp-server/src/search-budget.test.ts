@@ -104,19 +104,24 @@ function assertMarkupTerminatedInOrder(md: string): void {
   ).toBe(0);
 }
 
-describe("A2: search paging", () => {
-  it("1. honours max_matches and names the offset to continue from", () => {
-    const res = build_search_response(
-      haystack(50),
-      "Supplier",
+function searchDoc(text: string, options: any, query = "Supplier") {
+  return mdOf(
+    build_search_response(
+      text,
+      query,
       false,
       true,
       undefined,
       "doc.docx",
       undefined,
-      { max_matches: 5 },
-    );
-    const md = mdOf(res);
+      options,
+    ),
+  );
+}
+
+describe("A2: search paging", () => {
+  it("1. honours max_matches and names the offset to continue from", () => {
+    const md = searchDoc(haystack(50), { max_matches: 5 });
     expect(countEntries(md)).toBe(5);
     expect(md).toContain(
       "> **Note:** Only 5 matches shown (max_matches=5). Continue with `match_offset=5`.",
@@ -124,18 +129,7 @@ describe("A2: search paging", () => {
   });
 
   it("2. match_offset windows the hit list and keeps GLOBAL match indices", () => {
-    const md = mdOf(
-      build_search_response(
-        haystack(50),
-        "Supplier",
-        false,
-        true,
-        undefined,
-        "doc.docx",
-        undefined,
-        { max_matches: 5, match_offset: 5 },
-      ),
-    );
+    const md = searchDoc(haystack(50), { max_matches: 5, match_offset: 5 });
     expect(countEntries(md)).toBe(5);
     for (const idx of [6, 7, 8, 9, 10]) {
       expect(md).toContain(`### Match ${idx} (p1)`);
@@ -147,18 +141,7 @@ describe("A2: search paging", () => {
   });
 
   it("3. a match_offset past the last hit is a note, not an error", () => {
-    const md = mdOf(
-      build_search_response(
-        haystack(50),
-        "Supplier",
-        false,
-        true,
-        undefined,
-        "doc.docx",
-        undefined,
-        { match_offset: 99 },
-      ),
-    );
+    const md = searchDoc(haystack(50), { match_offset: 99 });
     expect(countEntries(md)).toBe(0);
     expect(md).toContain(
       "> **Note:** No matches in this window (match_offset=99, total matches=50).",
@@ -166,18 +149,7 @@ describe("A2: search paging", () => {
   });
 
   it("4. max_matches=0 renders nothing and is never rewritten to 20", () => {
-    const md = mdOf(
-      build_search_response(
-        haystack(50),
-        "Supplier",
-        false,
-        true,
-        undefined,
-        "doc.docx",
-        undefined,
-        { max_matches: 0 },
-      ),
-    );
+    const md = searchDoc(haystack(50), { max_matches: 0 });
     expect(countEntries(md)).toBe(0);
     expect(md).toContain(
       "> **Note:** No matches shown (max_matches=0, total matches=50). " +
@@ -188,18 +160,7 @@ describe("A2: search paging", () => {
   });
 
   it("5. a negative match_offset is coerced to 0", () => {
-    const md = mdOf(
-      build_search_response(
-        haystack(50),
-        "Supplier",
-        false,
-        true,
-        undefined,
-        "doc.docx",
-        undefined,
-        { max_matches: 5, match_offset: -7 },
-      ),
-    );
+    const md = searchDoc(haystack(50), { max_matches: 5, match_offset: -7 });
     expect(countEntries(md)).toBe(5);
     expect(md).toContain("### Match 1 (p1)");
     expect(md).toContain("### Match 5 (p1)");

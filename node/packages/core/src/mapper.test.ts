@@ -1,19 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { DocumentObject } from './docx/bridge.js';
 import { DocumentMapper } from './mapper.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { loadFixtureDoc } from './test-utils.js';
 
 describe('Virtual DOM Mapper (Node.js Port)', () => {
   it('should construct a full virtual map from the DOCX', async () => {
-    const fixturePath = resolve(__dirname, '../../../../shared/fixtures/golden.docx');
-    const buf = readFileSync(fixturePath);
-    const doc = await DocumentObject.load(buf);
-
+    const doc = await loadFixtureDoc('golden.docx');
     const mapper = new DocumentMapper(doc);
 
     // Verify full_text was structurally mapped identically to what `ingest.ts` would produce
@@ -24,9 +15,7 @@ describe('Virtual DOM Mapper (Node.js Port)', () => {
   });
 
   it('should locate target string matches via find_match_index', async () => {
-    const fixturePath = resolve(__dirname, '../../../../shared/fixtures/golden.docx');
-    const buf = readFileSync(fixturePath);
-    const doc = await DocumentObject.load(buf);
+    const doc = await loadFixtureDoc('golden.docx');
     const mapper = new DocumentMapper(doc);
 
     // Search for a word we know exists in golden.docx
@@ -37,9 +26,7 @@ describe('Virtual DOM Mapper (Node.js Port)', () => {
   });
 
   it('should resolve strings back to physical Run elements', async () => {
-    const fixturePath = resolve(__dirname, '../../../../shared/fixtures/golden.docx');
-    const buf = readFileSync(fixturePath);
-    const doc = await DocumentObject.load(buf);
+    const doc = await loadFixtureDoc('golden.docx');
     const mapper = new DocumentMapper(doc);
 
     // Find the backing physical Run elements for the target string
@@ -55,9 +42,7 @@ describe('Virtual DOM Mapper (Node.js Port)', () => {
   });
 
   it('should safely return empty arrays for non-existent text', async () => {
-    const fixturePath = resolve(__dirname, '../../../../shared/fixtures/golden.docx');
-    const buf = readFileSync(fixturePath);
-    const doc = await DocumentObject.load(buf);
+    const doc = await loadFixtureDoc('golden.docx');
     const mapper = new DocumentMapper(doc);
     
     const runs = mapper.find_target_runs('NON_EXISTENT_TEXT_12345');
