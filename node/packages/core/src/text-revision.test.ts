@@ -26,6 +26,7 @@ import {
   check_criticmarkup,
   check_major_deletions,
   strip_page_chrome,
+  strip_cell_anchors,
   verify_clean_text,
 } from "./text-revision.js";
 
@@ -513,3 +514,15 @@ describe("apply_text_revision_core — author resolution", () => {
     }
   });
 });
+
+describe("strip_cell_anchors", () => {
+  it("9. strips cell anchors correctly from empty and non-empty cells", () => {
+    expect(strip_cell_anchors("Widget B | {#cell:05856B27} | $250.00")).toBe(
+      "Widget B |  | $250.00",
+    );
+    expect(strip_cell_anchors("Widget B | Audit {#cell:05856B27} | $250.00")).toBe(
+      "Widget B | Audit | $250.00",
+    );
+  });
+});
+

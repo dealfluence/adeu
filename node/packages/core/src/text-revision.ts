@@ -152,14 +152,21 @@ export function check_major_deletions(
   );
 }
 
+/** Strips synthetic {#cell:<paraId>} anchor tokens from clean-text payloads. */
+export function strip_cell_anchors(text: string): string {
+  text = text.replace(/([^|])\s+\{#cell:[^}]+\}/g, "$1");
+  text = text.replace(/\{#cell:[^}]+\}/g, "");
+  return text;
+}
+
 /** Extracts clean accepted text from a document (no generated appendix). */
 function _extract_clean_text_from_doc(doc: DocumentObject): string {
   return _extractTextFromDoc(doc, true, false) as string;
 }
 
-/** Normalizes Markdown heading chrome for clean-text verification. */
+/** Normalizes Markdown heading chrome and synthetic anchors for clean-text verification. */
 function _normalize_virtual_projection_text(text: string): string {
-  return text.replace(/^#+\s*/gm, "");
+  return strip_cell_anchors(text.replace(/^#+\s*/gm, ""));
 }
 
 // Python's `str.isprintable()` is False for every code point in category Other
@@ -218,21 +225,20 @@ export function verify_clean_text(
     // window, and `_repr` then quotes a lone `\ud83d` into the one excerpt this
     // message exists to show. `div` is therefore a code-point index too —
     // Python's number, and nothing else consumes it.
-    const actual_cp = Array.from(actual_norm);
-    const expected_cp = Array.from(expected_norm);
-    const shared = Math.min(actual_cp.length, expected_cp.length);
-    let div = shared;
-    for (let k = 0; k < shared; k++) {
-      if (actual_cp[k] !== expected_cp[k]) {
-        div = k;
-        break;
-      }
-    }
+    const actual_cps = Array.from(actual_norm);
+    const expected_cps = Array.from(expected_norm);
+    let div = 0;
+    const minLen = Math.min(actual_cps.length, expected_cps.length);
+    while (div < minLen && actual_cps[div] === expected_cps[div]) div++;
+
+    const actual_slice = actual_cps.slice(div, div + 40).join("");
+    const expected_slice = expected_cps.slice(div, div + 40).join("");
+
     const msg =
       "Post-apply verification failed: the applied document's clean text does not match " +
       `the supplied text (first divergence at character ${div}: ` +
-      `applied reads ${_repr(actual_cp.slice(div, div + 40).join(""))}, supplied text reads ` +
-      `${_repr(expected_cp.slice(div, div + 40).join(""))}). The document structure could not fully realize ` +
+      `applied reads ${_repr(actual_slice)}, supplied text reads ` +
+      `${_repr(expected_slice)}). The document structure could not fully realize ` +
       "the requested text (e.g. headings or table cells cannot be deleted via text replacement).";
     return [false, msg];
   }
@@ -240,19 +246,15 @@ export function verify_clean_text(
 }
 
 /** `x.docx` → `x_redlined.docx`; an already-suffixed artifact stays in place. */
-function _default_output_path(input_path: string): string {
-  const stem = basename(input_path, extname(input_path));
-  // Idempotency guard (parity with text_revision.py:243-246): a second pass
-  // over an artifact must not compound the suffix into
-  // contract_redlined_redlined.docx and fragment the agent's document state.
+export function _default_output_path(input_path: string): string {
+  const dir = dirname(input_path);
+  const base = basename(input_path);
+  const dot = base.lastIndexOf(".");
+  const stem = dot === -1 ? base : base.slice(0, dot);
   if (stem.endsWith("_redlined") || stem.endsWith("_processed")) {
     return input_path;
   }
-  // The extension is REPLACED, not inherited (`with_name(f"{stem}_redlined.docx")`,
-  // text_revision.py:246): what gets written is a DOCX, so `contract` and
-  // `contract.DOCX` both become contract_redlined.docx — inheriting the input's
-  // extension would write a DOCX to an extensionless path.
-  return join(dirname(input_path), `${stem}_redlined.docx`);
+  return join(dir, `${stem}_redlined.docx`);
 }
 
 /** `<target stem>.unverified.docx`, the diagnostic sibling's path. */
@@ -281,7 +283,8 @@ export async function apply_text_revision_core(opts: {
   unverified?: { path: string; bytes: Uint8Array };
 }> {
   const { doc, input_path, revised_text } = opts;
-  const { text: text_clean_input, page, total } = strip_page_chrome(revised_text);
+  const { text: raw_text_clean, page, total } = strip_page_chrome(revised_text);
+  const text_clean_input = strip_cell_anchors(raw_text_clean);
   if (total !== null && total > 1) {
     throw new TextRevisionError(
       `Text revision looks like page ${page || "?"} of ${total} of a paginated extract — ` +
@@ -304,7 +307,6 @@ export async function apply_text_revision_core(opts: {
     text_orig,
     text_clean_input,
   );
-
   const engine = new RedlineEngine(doc, get_default_author(opts.author));
   const stats = engine.process_batch(changes as any);
 
