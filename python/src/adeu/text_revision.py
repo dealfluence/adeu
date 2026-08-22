@@ -143,9 +143,17 @@ def _extract_clean_text_from_doc(doc: Any) -> str:
     return str(res)
 
 
+def strip_cell_anchors(text: str) -> str:
+    """Strips synthetic {#cell:<paraId>} anchor tokens from clean-text payloads."""
+    text = re.sub(r"([^|])\s+\{#cell:[^}]+\}", r"\1", text)
+    text = re.sub(r"\{#cell:[^}]+\}", "", text)
+    return text
+
+
 def _normalize_virtual_projection_text(text: str) -> str:
-    """Normalizes Markdown heading chrome for clean-text verification."""
-    return re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    """Normalizes Markdown heading chrome and synthetic anchors for clean-text verification."""
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    return strip_cell_anchors(text)
 
 
 def verify_clean_text(
@@ -214,7 +222,8 @@ def apply_text_revision_core(
 ) -> Tuple[Dict[str, Any], Path]:
     """Core whole-text diff->tracked-changes primitive with clean-text verification gate."""
     p_input = Path(file_path)
-    text_clean_input, page, total = _strip_page_chrome(revised_text)
+    raw_text_clean, page, total = _strip_page_chrome(revised_text)
+    text_clean_input = strip_cell_anchors(raw_text_clean)
     if total is not None and total > 1:
         raise ValueError(
             f"Text revision looks like page {page or '?'} of {total} of a paginated extract — "
