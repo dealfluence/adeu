@@ -23,8 +23,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   readFileSync,
@@ -33,11 +32,9 @@ import {
   rmSync,
   mkdtempSync,
 } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { DocumentObject, RedlineEngine } from "@adeu/core";
 import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
-
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
 const REVIEWER = "Sarah Chen";
 const STANDALONE_NOTE = "Standalone reviewer note.";
@@ -47,37 +44,10 @@ const BODY = [
 ];
 
 describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let workDir: string;
   let allTools: any[] = [];
   let annotatedPath: string;
-
-  const pending = new Map<number, (msg: any) => void>();
-  let rpcId = 8100;
-  let stdoutBuffer = "";
-
-  function rpc(method: string, params: any): Promise<any> {
-    const id = ++rpcId;
-    return new Promise((resolveRpc, rejectRpc) => {
-      const timeout = setTimeout(
-        () => rejectRpc(new Error(`RPC timeout for ${method}`)),
-        15000,
-      );
-      pending.set(id, (msg) => {
-        clearTimeout(timeout);
-        resolveRpc(msg);
-      });
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
-  }
-
-  function notify(method: string, params: any): void {
-    serverProc.stdin?.write(
-      JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n",
-    );
-  }
 
   async function buildDoc(paragraphs: string[]): Promise<Buffer> {
     const doc = await createTestDocument();
@@ -88,8 +58,6 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
   beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "adeu_bug20260811_"));
 
-    // A reviewer's comment on text the agent never touches, plus a tracked
-    // change elsewhere — the reported run's shape.
     const plain = await buildDoc(BODY);
     const reviewed = await DocumentObject.load(plain);
     new RedlineEngine(reviewed, REVIEWER).process_batch([
@@ -113,51 +81,16 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
     annotatedPath = join(workDir, "protective_order.docx");
     writeFileSync(annotatedPath, await edited.save());
 
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error("MCP server not built. Run 'npm run build' before tests.");
-    }
-    serverProc = spawn("node", [serverPath]);
-    serverProc.stdout?.on("data", (data: Buffer) => {
-      stdoutBuffer += data.toString();
-      let idx: number;
-      while ((idx = stdoutBuffer.indexOf("\n")) !== -1) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        if (!line.startsWith("{")) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id !== undefined && pending.has(msg.id)) {
-            const cb = pending.get(msg.id)!;
-            pending.delete(msg.id);
-            cb(msg);
-          }
-        } catch {
-          /* ignore non-JSON / partial lines */
-        }
-      }
-    });
-
-    await rpc("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "bug-2026-08-11-repro", version: "0.0.0" },
-    });
-    notify("notifications/initialized", {});
-    allTools = (await rpc("tools/list", {})).result.tools ?? [];
+    server = await startTestServer("bug-2026-08-11-repro");
+    allTools = (await server.rpc("tools/list", {})).result.tools ?? [];
   }, 30000);
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (workDir && existsSync(workDir))
       rmSync(workDir, { recursive: true, force: true });
   });
 
-  /**
-   * Comment body texts straight from the saved package. Deliberately raw: the
-   * published @adeu/core entrypoint does not re-export extract_comments_data,
-   * and this is a black-box assertion about a file on disk anyway.
-   */
   async function commentTexts(path: string): Promise<string[]> {
     const doc = await DocumentObject.load(readFileSync(path));
     const part = doc.pkg.parts.find((p) =>
@@ -174,40 +107,21 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
     expect(tool, "accept_all_changes must be advertised").toBeDefined();
 
     const prop = tool.inputSchema?.properties?.remove_comments;
-    expect(
-      prop,
-      "accept_all_changes must expose comment removal as a caller CHOICE rather " +
-        "than hard-coding it — the inversion B2 reported was that it could not " +
-        "be opted out of",
-    ).toBeDefined();
-    // Real MCP clients strip property-level anyOf/oneOf to {} (AI_CONTEXT §7a),
-    // so this must publish exactly ONE JSON type.
+    expect(prop).toBeDefined();
     expect(prop.type).toBe("boolean");
     expect(prop.default).toBe(true);
     expect(tool.inputSchema?.required ?? []).not.toContain("remove_comments");
 
-    // §7a again: optional-property descriptions are dropped in transit and the
-    // description truncates at ~2048 chars, so the operative guidance — the
-    // destructive DEFAULT and how to opt out — has to fit in the description.
     const description: string = tool.description ?? "";
     expect(description).toMatch(/remove_comments/);
-    expect(
-      description,
-      "the description must state that comment removal is the DEFAULT:\n" + description,
-    ).toMatch(/default\w*\s+true/i);
-    expect(
-      description,
-      "the description must tell the caller how to opt out:\n" + description,
-    ).toMatch(/remove_comments=false/i);
+    expect(description).toMatch(/default\w*\s+true/i);
+    expect(description).toMatch(/remove_comments=false/i);
     expect(description.length).toBeLessThan(2048);
   });
 
   it("removes every comment by default, naming each one and its author", async () => {
-    // The tool produces a DISTRIBUTABLE clean document, so removal stays the
-    // default (QA_ISSUES_DISCOVERED #10 logged the opposite as a
-    // confidentiality risk). What changed is that it is no longer silent.
     const out = join(workDir, "accepted_default.docx");
-    const res = await rpc("tools/call", {
+    const res = await server.rpc("tools/call", {
       name: "accept_all_changes",
       arguments: {
         reasoning: "test",
@@ -221,15 +135,12 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
       STANDALONE_NOTE,
     );
     expect(text).toMatch(/Comments removed: [1-9]/);
-    expect(
-      text,
-      "the response must name whose review content it destroyed:\n" + text,
-    ).toContain(REVIEWER);
+    expect(text).toContain(REVIEWER);
   });
 
   it("keeps comments when remove_comments=false is requested", async () => {
     const out = join(workDir, "accepted_annotated.docx");
-    const res = await rpc("tools/call", {
+    const res = await server.rpc("tools/call", {
       name: "accept_all_changes",
       arguments: {
         reasoning: "test",
@@ -248,36 +159,9 @@ describe("BUG 2026-08-11 — comment destruction is opt-in at the MCP boundary",
 });
 
 describe("BUG 2026-08-11 — an unthreadable reply is an error, not a stray comment", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let workDir: string;
   let brokenParentPath: string;
-
-  const pending = new Map<number, (msg: any) => void>();
-  let rpcId = 8200;
-  let stdoutBuffer = "";
-
-  function rpc(method: string, params: any): Promise<any> {
-    const id = ++rpcId;
-    return new Promise((resolveRpc, rejectRpc) => {
-      const timeout = setTimeout(
-        () => rejectRpc(new Error(`RPC timeout for ${method}`)),
-        15000,
-      );
-      pending.set(id, (msg) => {
-        clearTimeout(timeout);
-        resolveRpc(msg);
-      });
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
-  }
-
-  function notify(method: string, params: any): void {
-    serverProc.stdin?.write(
-      JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n",
-    );
-  }
 
   beforeAll(async () => {
     workDir = mkdtempSync(join(tmpdir(), "adeu_bug20260811_b1_"));
@@ -294,9 +178,6 @@ describe("BUG 2026-08-11 — an unthreadable reply is an error, not a stray comm
       } as any,
     ]);
 
-    // Empty every comment body: `EG_BlockLevelElts` is minOccurs="0", so this is
-    // schema-legal and it is the one shape where a paragraph identity genuinely
-    // cannot be minted — i.e. threading is truly impossible.
     const reloaded = await DocumentObject.load(await doc.save());
     const commentsPart = reloaded.pkg.parts.find((pt) =>
       pt.contentType.endsWith("comments+xml"),
@@ -318,48 +199,18 @@ describe("BUG 2026-08-11 — an unthreadable reply is an error, not a stray comm
     brokenParentPath = join(workDir, "unthreadable.docx");
     writeFileSync(brokenParentPath, await reloaded.save());
 
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error("MCP server not built. Run 'npm run build' before tests.");
-    }
-    serverProc = spawn("node", [serverPath]);
-    serverProc.stdout?.on("data", (data: Buffer) => {
-      stdoutBuffer += data.toString();
-      let idx: number;
-      while ((idx = stdoutBuffer.indexOf("\n")) !== -1) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        if (!line.startsWith("{")) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id !== undefined && pending.has(msg.id)) {
-            const cb = pending.get(msg.id)!;
-            pending.delete(msg.id);
-            cb(msg);
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-    });
-
-    await rpc("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "bug-2026-08-11-b1", version: "0.0.0" },
-    });
-    notify("notifications/initialized", {});
+    server = await startTestServer("bug-2026-08-11-b1");
   }, 30000);
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (workDir && existsSync(workDir))
       rmSync(workDir, { recursive: true, force: true });
   });
 
   it("reports an error instead of a silent extra comment", async () => {
     const out = join(workDir, "replied.docx");
-    const res = await rpc("tools/call", {
+    const res = await server.rpc("tools/call", {
       name: "process_document_batch",
       arguments: {
         reasoning: "test",
@@ -376,7 +227,6 @@ describe("BUG 2026-08-11 — an unthreadable reply is an error, not a stray comm
       `a reply that cannot be threaded must not report success: ${text}`,
     ).toBe(true);
     expect(text.toLowerCase()).toContain("thread");
-    // And nothing was written: the caller's file must not exist.
     expect(existsSync(out)).toBe(false);
   }, 20000);
 });

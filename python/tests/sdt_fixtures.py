@@ -32,6 +32,12 @@ from pathlib import Path
 
 W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
+
+def load_shared_fixture_xml(filename: str) -> str:
+    path = Path(__file__).resolve().parents[2] / "shared" / "fixtures" / filename
+    return path.read_text(encoding="utf-8").strip()
+
+
 _HEADER = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
     '<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '

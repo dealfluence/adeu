@@ -24,8 +24,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   readFileSync,
@@ -35,11 +34,9 @@ import {
   mkdtempSync,
   statSync,
 } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { DocumentObject, RedlineEngine } from "@adeu/core";
 import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
-
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
 const REVIEWER = "Sarah Chen";
 const AGENT = "Adeu AI (TS)";
@@ -52,37 +49,14 @@ const BODY =
 const NO_SUCH_TEXT = "TEXT THAT IS NOT ANYWHERE IN THIS DOCUMENT";
 
 describe("BUG 2026-08-12 - a rejected batch must not leave its reply in the hot DOM", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let workDir: string;
   let inputPath: string;
   let outputPath: string;
   let commentId: string;
 
-  const pending = new Map<number, (msg: any) => void>();
-  let rpcId = 9200;
-  let stdoutBuffer = "";
-
   function rpc(method: string, params: any): Promise<any> {
-    const id = ++rpcId;
-    return new Promise((resolveRpc, rejectRpc) => {
-      const timeout = setTimeout(
-        () => rejectRpc(new Error(`RPC timeout for ${method}`)),
-        20000,
-      );
-      pending.set(id, (msg) => {
-        clearTimeout(timeout);
-        resolveRpc(msg);
-      });
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
-  }
-
-  function notify(method: string, params: any): void {
-    serverProc.stdin?.write(
-      JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n",
-    );
+    return server.rpc(method, params);
   }
 
   function batch(changes: any[]): Promise<any> {
@@ -146,41 +120,11 @@ describe("BUG 2026-08-12 - a rejected batch must not leave its reply in the hot 
       .toString()
       .match(/<w:comment\b[^>]*\bw:id="(\d+)"/)![1];
 
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error("MCP server not built. Run 'npm run build' before tests.");
-    }
-    serverProc = spawn("node", [serverPath]);
-    serverProc.stdout?.on("data", (data: Buffer) => {
-      stdoutBuffer += data.toString();
-      let idx: number;
-      while ((idx = stdoutBuffer.indexOf("\n")) !== -1) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        if (!line.startsWith("{")) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id !== undefined && pending.has(msg.id)) {
-            const cb = pending.get(msg.id)!;
-            pending.delete(msg.id);
-            cb(msg);
-          }
-        } catch {
-          /* ignore non-JSON / partial lines */
-        }
-      }
-    });
-
-    await rpc("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "bug-2026-08-12-repro", version: "0.0.0" },
-    });
-    notify("notifications/initialized", {});
+    server = await startTestServer("bug-2026-08-12-repro");
   }, 30000);
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (workDir && existsSync(workDir))
       rmSync(workDir, { recursive: true, force: true });
   });

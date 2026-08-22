@@ -44,9 +44,6 @@
 //         property-level unions to `{}`, which is exactly what the QA saw.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, ChildProcess } from "node:child_process";
-import { resolve, join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   readFileSync,
   writeFileSync,
@@ -55,14 +52,14 @@ import {
   rmSync,
   mkdtempSync,
 } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { DocumentObject, RedlineEngine } from "@adeu/core";
 import { createTestDocument, addParagraph } from "../../core/src/test-utils.js";
-
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+import { startTestServer, type TestServer } from "./test-rpc.js";
 
 describe("QA 2026-07-23 — MCP server repro tests (real server over stdio)", () => {
-  let serverProc: ChildProcess;
+  let server: TestServer;
   let workDir: string;
   let allTools: any[] = [];
 
@@ -77,32 +74,8 @@ describe("QA 2026-07-23 — MCP server repro tests (real server over stdio)", ()
 
   const getTool = (name: string) => allTools.find((t) => t.name === name);
 
-  // --- Line-buffered JSON-RPC plumbing over stdio (as in mcp.schema-gaps) ---
-  const pending = new Map<number, (msg: any) => void>();
-  let rpcId = 700;
-  let stdoutBuffer = "";
-
   function rpc(method: string, params: any): Promise<any> {
-    const id = ++rpcId;
-    return new Promise((resolveRpc, rejectRpc) => {
-      const timeout = setTimeout(
-        () => rejectRpc(new Error(`RPC timeout for ${method}`)),
-        15000,
-      );
-      pending.set(id, (msg) => {
-        clearTimeout(timeout);
-        resolveRpc(msg);
-      });
-      serverProc.stdin?.write(
-        JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
-      );
-    });
-  }
-
-  function notify(method: string, params: any): void {
-    serverProc.stdin?.write(
-      JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n",
-    );
+    return server.rpc(method, params);
   }
 
   // Build a docx from paragraph strings by cloning the empty shared fixture
@@ -156,46 +129,13 @@ describe("QA 2026-07-23 — MCP server repro tests (real server over stdio)", ()
       "This is definitely not a zip archive, just plain text bytes.\n",
     );
 
-    const serverPath = resolve(__dirname, "../dist/index.js");
-    if (!existsSync(serverPath)) {
-      throw new Error(
-        "MCP server not built. Run 'npm run build' before tests.",
-      );
-    }
-    serverProc = spawn("node", [serverPath]);
-    serverProc.stdout?.on("data", (data: Buffer) => {
-      stdoutBuffer += data.toString();
-      let idx: number;
-      while ((idx = stdoutBuffer.indexOf("\n")) !== -1) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        if (!line.startsWith("{")) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.id !== undefined && pending.has(msg.id)) {
-            const cb = pending.get(msg.id)!;
-            pending.delete(msg.id);
-            cb(msg);
-          }
-        } catch {
-          // ignore non-JSON / partial lines
-        }
-      }
-    });
-
-    await rpc("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "qa-2026-07-23-repro", version: "0.0.0" },
-    });
-    notify("notifications/initialized", {});
-
-    const list = await rpc("tools/list", {});
+    server = await startTestServer("qa-2026-07-23-repro");
+    const list = await server.rpc("tools/list", {});
     allTools = list.result.tools ?? [];
   }, 30000);
 
   afterAll(() => {
-    if (serverProc && !serverProc.killed) serverProc.kill();
+    server?.stop();
     if (workDir && existsSync(workDir))
       rmSync(workDir, { recursive: true, force: true });
   });

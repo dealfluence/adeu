@@ -35,6 +35,7 @@ from docx.oxml.ns import qn
 
 from adeu.ingest import extract_text_from_stream
 from adeu.redline.mapper import DocumentMapper
+from tests.sdt_fixtures import load_shared_fixture_xml
 
 NS = (
     'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -51,21 +52,7 @@ def _tc(inner: str) -> str:
     return f'<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>{inner}</w:tc>'
 
 
-_INNER = f"""<w:tbl>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>
-  <w:tr>{_tc(_p("InnerA1"))}{_tc(_p("InnerB1"))}</w:tr>
-  <w:tr>{_tc(_p("InnerA2"))}{_tc(_p("InnerB2"))}</w:tr>
-</w:tbl>"""
-
-# Outer 2x2 table whose bottom-left cell holds the nested table plus a
-# trailing paragraph, so we can also prove the cell's own text survives.
-OUTER_XML = f"""<w:tbl {NS}>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
-  <w:tr>{_tc(_p("OuterA1"))}{_tc(_p("OuterB1"))}</w:tr>
-  <w:tr>{_tc(_INNER + _p("AfterInner"))}{_tc(_p("OuterB2"))}</w:tr>
-</w:tbl>"""
+OUTER_XML = load_shared_fixture_xml("nested_table_leakage.xml")
 
 # Same shape, but the outer row and the inner row are behind content controls.
 # This is where a naive "just use direct children" fix breaks: the traversal

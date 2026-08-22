@@ -30,7 +30,7 @@
 
 import { describe, it, expect } from "vitest";
 import { parseFastXml } from "./docx/fast-xml.js";
-import { createTestDocument, addParagraph, appendRawXml } from "./test-utils.js";
+import { createTestDocument, addParagraph, appendRawXml, loadSharedFixtureXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extractTextFromBuffer } from "./ingest.js";
@@ -38,75 +38,7 @@ import { DocumentMapper } from "./mapper.js";
 import { RedlineEngine } from "./engine.js";
 import { ModifyText } from "./models.js";
 
-const NS =
-  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
-  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" ' +
-  'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
-
-const p = (text: string) =>
-  `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
-
-const tc = (text: string) =>
-  `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p(text)}</w:tc>`;
-
-/**
- * The table portion of the normative standard fixture
- * (shared/fixtures/fixture-standard.md), which A0 declares
- * sufficient for A0.1-A0.4. Tags and w:id values are reproduced verbatim so
- * CC-1 can layer {#cc:N} anchors onto this same shape.
- *
- * Row 1: plain cell + a CELL-level sdt          (fixture CC:14, tag cell_role)
- * Row 2: the whole row behind a ROW-level sdt   (fixture CC:15, tag row_approver)
- * Row 3: plain row, BLOCK-level sdt in cell 2   (fixture CC:16, tag cell_notes)
- *
- * Row 4 has no counterpart in the standard fixture: A0.4 requires a
- * w15:repeatingSectionItem row nested one level inside another sdt, and the
- * fixture only carries repeating sections at block level (CC:11-13).
- */
-const TABLE_XML = `<w:tbl ${NS}>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
-
-  <w:tr>
-    ${tc("Role")}
-    <w:sdt>
-      <w:sdtPr><w:tag w:val="cell_role"/><w:id w:val="201"/><w:text/></w:sdtPr>
-      <w:sdtContent>${tc("Contracting Officer")}</w:sdtContent>
-    </w:sdt>
-  </w:tr>
-
-  <w:sdt>
-    <w:sdtPr><w:tag w:val="row_approver"/><w:id w:val="202"/></w:sdtPr>
-    <w:sdtContent>
-      <w:tr>${tc("Approver")}${tc("Jane Roe")}</w:tr>
-    </w:sdtContent>
-  </w:sdt>
-
-  <w:tr>
-    ${tc("Notes")}
-    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
-      <w:sdt>
-        <w:sdtPr><w:tag w:val="cell_notes"/><w:id w:val="203"/></w:sdtPr>
-        <w:sdtContent>${p("Approved without conditions.")}</w:sdtContent>
-      </w:sdt>
-    </w:tc>
-  </w:tr>
-
-  <w:sdt>
-    <w:sdtPr>
-      <w:tag w:val="deliverable_rows"/><w:id w:val="204"/>
-      <w15:repeatingSection/>
-    </w:sdtPr>
-    <w:sdtContent>
-      <w:sdt>
-        <w:sdtPr><w:id w:val="205"/><w15:repeatingSectionItem/></w:sdtPr>
-        <w:sdtContent>
-          <w:tr>${tc("Repeated")}${tc("Item One")}</w:tr>
-        </w:sdtContent>
-      </w:sdt>
-    </w:sdtContent>
-  </w:sdt>
-</w:tbl>`;
+const TABLE_XML = loadSharedFixtureXml("sdt_table.xml");
 
 async function buildSdtTableDoc(): Promise<Buffer> {
   const doc = await createTestDocument();

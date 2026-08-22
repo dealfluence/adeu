@@ -26,7 +26,7 @@
 
 import { describe, it, expect } from "vitest";
 import { parseFastXml } from "./docx/fast-xml.js";
-import { createTestDocument, addParagraph, appendRawXml } from "./test-utils.js";
+import { createTestDocument, addParagraph, appendRawXml, loadSharedFixtureXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
@@ -42,19 +42,7 @@ const p = (text: string) =>
 const tc = (inner: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${inner}</w:tc>`;
 
-const INNER = `<w:tbl>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>
-  <w:tr>${tc(p("InnerA1"))}${tc(p("InnerB1"))}</w:tr>
-  <w:tr>${tc(p("InnerA2"))}${tc(p("InnerB2"))}</w:tr>
-</w:tbl>`;
-
-const OUTER = `<w:tbl ${NS}>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
-  <w:tr>${tc(p("OuterA1"))}${tc(p("OuterB1"))}</w:tr>
-  <w:tr>${tc(INNER + p("AfterInner"))}${tc(p("OuterB2"))}</w:tr>
-</w:tbl>`;
+const OUTER = loadSharedFixtureXml("nested_table_leakage.xml");
 
 /** Outer table whose nested table is additionally wrapped in content controls. */
 const OUTER_SDT = `<w:tbl ${NS}>

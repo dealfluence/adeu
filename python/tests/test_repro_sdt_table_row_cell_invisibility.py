@@ -41,6 +41,7 @@ from adeu.models import ModifyText
 from adeu.outline import extract_outline
 from adeu.redline.engine import RedlineEngine
 from adeu.redline.mapper import DocumentMapper
+from tests.sdt_fixtures import load_shared_fixture_xml
 from tests.utils import assert_word_readable_ids, corpus_path
 
 NS = (
@@ -54,79 +55,7 @@ def _p(text: str) -> str:
     return f'<w:p {NS}><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>'
 
 
-def _tc(text: str) -> str:
-    return f'<w:tc {NS}><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>{_p(text)}</w:tc>'
-
-
-# The table portion of the normative standard fixture
-# (shared/fixtures/fixture-standard.md), which A0 declares
-# sufficient for A0.1-A0.4. Tags and w:id values are reproduced verbatim so
-# CC-1 can layer {#cc:N} anchors onto this same shape:
-#
-#   Row 1 - plain cell + CELL-level sdt          (fixture CC:14, tag cell_role)
-#   Row 2 - whole row wrapped in a ROW-level sdt (fixture CC:15, tag row_approver)
-#   Row 3 - plain row, BLOCK-level sdt in cell 2 (fixture CC:16, tag cell_notes)
-#
-# Row 4 has no counterpart in the standard fixture: A0.4 requires a
-# w15:repeatingSectionItem row nested one level inside another sdt (the
-# FedRAMP shape), and the fixture only carries repeating sections at block
-# level (CC:11-13). It is appended here rather than added to the fixture so
-# the fixture's normative goldens stay untouched.
-TABLE_XML = f"""<w:tbl {NS}>
-  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
-  <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
-
-  <w:tr>
-    {_tc("Role")}
-    <w:sdt>
-      <w:sdtPr><w:tag w:val="cell_role"/><w:id w:val="201"/><w:text/></w:sdtPr>
-      <w:sdtContent>
-        {_tc("Contracting Officer")}
-      </w:sdtContent>
-    </w:sdt>
-  </w:tr>
-
-  <w:sdt>
-    <w:sdtPr><w:tag w:val="row_approver"/><w:id w:val="202"/></w:sdtPr>
-    <w:sdtContent>
-      <w:tr>
-        {_tc("Approver")}
-        {_tc("Jane Roe")}
-      </w:tr>
-    </w:sdtContent>
-  </w:sdt>
-
-  <w:tr>
-    {_tc("Notes")}
-    <w:tc>
-      <w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
-      <w:sdt>
-        <w:sdtPr><w:tag w:val="cell_notes"/><w:id w:val="203"/></w:sdtPr>
-        <w:sdtContent>
-          {_p("Approved without conditions.")}
-        </w:sdtContent>
-      </w:sdt>
-    </w:tc>
-  </w:tr>
-
-  <w:sdt>
-    <w:sdtPr>
-      <w:tag w:val="deliverable_rows"/><w:id w:val="204"/>
-      <w15:repeatingSection/>
-    </w:sdtPr>
-    <w:sdtContent>
-      <w:sdt>
-        <w:sdtPr><w:id w:val="205"/><w15:repeatingSectionItem/></w:sdtPr>
-        <w:sdtContent>
-          <w:tr>
-            {_tc("Repeated")}
-            {_tc("Item One")}
-          </w:tr>
-        </w:sdtContent>
-      </w:sdt>
-    </w:sdtContent>
-  </w:sdt>
-</w:tbl>"""
+TABLE_XML = load_shared_fixture_xml("sdt_table.xml")
 
 
 def _build_sdt_table_docx() -> bytes:

@@ -1,0 +1,51 @@
+<w:tbl xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">
+  <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+  <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Role</w:t></w:r></w:p></w:tc>
+    <w:sdt>
+      <w:sdtPr><w:tag w:val="cell_role"/><w:id w:val="201"/><w:text/></w:sdtPr>
+      <w:sdtContent>
+        <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Contracting Officer</w:t></w:r></w:p></w:tc>
+      </w:sdtContent>
+    </w:sdt>
+  </w:tr>
+  <w:sdt>
+    <w:sdtPr><w:tag w:val="row_approver"/><w:id w:val="202"/></w:sdtPr>
+    <w:sdtContent>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Approver</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Jane Roe</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:sdtContent>
+  </w:sdt>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Notes</w:t></w:r></w:p></w:tc>
+    <w:tc>
+      <w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+      <w:sdt>
+        <w:sdtPr><w:tag w:val="cell_notes"/><w:id w:val="203"/></w:sdtPr>
+        <w:sdtContent>
+          <w:p><w:r><w:t xml:space="preserve">Approved without conditions.</w:t></w:r></w:p>
+        </w:sdtContent>
+      </w:sdt>
+    </w:tc>
+  </w:tr>
+  <w:sdt>
+    <w:sdtPr>
+      <w:tag w:val="deliverable_rows"/><w:id w:val="204"/>
+      <w15:repeatingSection/>
+    </w:sdtPr>
+    <w:sdtContent>
+      <w:sdt>
+        <w:sdtPr><w:id w:val="205"/><w15:repeatingSectionItem/></w:sdtPr>
+        <w:sdtContent>
+          <w:tr>
+            <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Repeated</w:t></w:r></w:p></w:tc>
+            <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">Item One</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:sdtContent>
+      </w:sdt>
+    </w:sdtContent>
+  </w:sdt>
+</w:tbl>

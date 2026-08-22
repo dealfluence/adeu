@@ -19,6 +19,11 @@ export async function loadFixtureDoc(filename = 'initial.docx'): Promise<Documen
   return await DocumentObject.load(buf);
 }
 
+export function loadSharedFixtureXml(filename: string): string {
+  const fixturePath = resolve(_dirname, '../../../../shared/fixtures', filename);
+  return readFileSync(fixturePath, 'utf-8').trim();
+}
+
 /**
  * Loads a pristine empty DOCX fixture and clears its body to allow
  * dynamic document construction in tests, mimicking `python-docx`.
