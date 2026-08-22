@@ -16,6 +16,15 @@ export const DOCX_MIME_TYPE =
 export const N8N_ID_DISCOVERY_HINT =
   "Run the Extract Markdown operation on the current document again to list the current change (Chg:) and comment (Com:) ids — ids shift between document states.";
 
+export function docOpDisplayOptions(operation: string) {
+  return {
+    show: {
+      resource: ["document"],
+      operation: [operation],
+    },
+  };
+}
+
 /**
  * Resolves a dot-notation JSON path (e.g., "body.data.changes") safely.
  */

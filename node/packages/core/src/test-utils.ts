@@ -10,6 +10,11 @@ import { extractTextFromBuffer } from './ingest.js';
 const _filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
 const _dirname = typeof __dirname !== 'undefined' ? __dirname : dirname(_filename);
 
+export const WORD_XMLNS =
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" ' +
+  'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
+
 /**
  * Loads a pristine DOCX fixture from `shared/fixtures/`.
  */
@@ -736,6 +741,72 @@ export function ccFixtureBytes(
     );
   }
   return zipSync(files);
+}
+
+/**
+ * Build a minimal valid OOXML DOCX package (zip bytes) containing a document
+ * body and an optional comments part.
+ */
+export function createTestPackageWithComments(
+  bodyXml: string,
+  commentsXml?: string,
+): Buffer {
+  const hasComments = Boolean(commentsXml);
+  const decl = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  const contentTypes = decl +
+    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>${
+    hasComments
+      ? '\n  <Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+      : ''
+  }
+</Types>`;
+
+  const rootRels = decl +
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+  const docRels = decl +
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${
+    hasComments
+      ? '\n  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+      : ''
+  }
+</Relationships>`;
+
+  const documentXml = decl +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">
+  <w:body>
+${bodyXml}
+  </w:body>
+</w:document>`;
+
+  const files: Record<string, Uint8Array> = {
+    '[Content_Types].xml': strToU8(contentTypes),
+    '_rels/.rels': strToU8(rootRels),
+    'word/document.xml': strToU8(documentXml),
+    'word/_rels/document.xml.rels': strToU8(docRels),
+  };
+  if (commentsXml) {
+    files['word/comments.xml'] = strToU8(
+      commentsXml.startsWith('<?xml') ? commentsXml : decl + commentsXml,
+    );
+  }
+
+  return Buffer.from(zipSync(files));
+}
+
+/**
+ * Build and parse a DocumentObject containing body XML and optional comments.
+ */
+export async function createTestDocumentWithComments(
+  bodyXml: string,
+  commentsXml?: string,
+): Promise<DocumentObject> {
+  return DocumentObject.load(createTestPackageWithComments(bodyXml, commentsXml));
 }
 
 /**

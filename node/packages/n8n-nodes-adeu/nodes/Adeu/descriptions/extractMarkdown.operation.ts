@@ -13,8 +13,11 @@ import {
 
 import {
   type BinarySource,
+  docOpDisplayOptions,
   getDocxBufferFromSource,
 } from "../GenericFunctions";
+
+const displayOptions = docOpDisplayOptions("extractMarkdown");
 
 export const extractMarkdownDescription: INodeProperties[] = [
   {
@@ -26,12 +29,7 @@ export const extractMarkdownDescription: INodeProperties[] = [
     placeholder: "e.g. data",
     description:
       "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. Must be a valid .docx (not .doc, .pdf, or another format).",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["extractMarkdown"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Clean View",
@@ -40,12 +38,7 @@ export const extractMarkdownDescription: INodeProperties[] = [
     default: false,
     description:
       "Whether to project the document as if all pending tracked changes were accepted (simulates Accept All). When false (default), all tracked changes are surfaced inline as CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) so an AI can review and resolve them. Use false to review counterparty edits; use true to generate net-new redlines against a clean baseline.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["extractMarkdown"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Include Appendix",
@@ -54,12 +47,7 @@ export const extractMarkdownDescription: INodeProperties[] = [
     default: true,
     description:
       "Whether to include the Structural Appendix (defined terms, cross-reference anchors, and potential typos) at the end of the projection. True by default for rich LLM context.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["extractMarkdown"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Page",

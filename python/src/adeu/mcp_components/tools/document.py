@@ -1491,27 +1491,27 @@ if sys.platform == "win32":
         # response builder distinguish "omitted" from "explicit 1".
         if search_query is None and mode != "changes" and page is None:
             page = 1
+
+        opts: dict[str, Any] = {
+            "mode": mode,
+            "page": page,
+            "force": force,
+            "outline_max_level": outline_max_level,
+            "outline_verbose": outline_verbose,
+            "search_query": search_query,
+            "search_regex": search_regex,
+            "search_case_sensitive": search_case_sensitive,
+            "changes_author": changes_author,
+            "changes_offset": changes_offset,
+            "fields_offset": fields_offset,
+            "max_matches": max_matches,
+            "match_offset": match_offset,
+            "full_paragraph": full_paragraph,
+        }
+
         if not file_path:
             # Read active document directly. No disk fallback available if this fails.
-            res = await read_active_word_document(
-                ctx,
-                clean_view,
-                None,
-                mode=mode,
-                page=page,
-                force=force,
-                outline_max_level=outline_max_level,
-                outline_verbose=outline_verbose,
-                search_query=search_query,
-                search_regex=search_regex,
-                search_case_sensitive=search_case_sensitive,
-                changes_author=changes_author,
-                changes_offset=changes_offset,
-                fields_offset=fields_offset,
-                max_matches=max_matches,
-                match_offset=match_offset,
-                full_paragraph=full_paragraph,
-            )
+            res = await read_active_word_document(ctx, clean_view, None, **opts)
         else:
             # An explicit file_path means the file on disk is authoritative:
             # read from disk UNLESS Word already has that exact file open (in
@@ -1523,25 +1523,7 @@ if sys.platform == "win32":
             if is_document_open_in_word(file_path):
                 await ctx.debug("Document is open in live Word; reading from the canvas.")
                 try:
-                    res = await read_active_word_document(
-                        ctx,
-                        clean_view,
-                        file_path,
-                        mode=mode,
-                        page=page,
-                        force=force,
-                        outline_max_level=outline_max_level,
-                        outline_verbose=outline_verbose,
-                        search_query=search_query,
-                        search_regex=search_regex,
-                        search_case_sensitive=search_case_sensitive,
-                        changes_author=changes_author,
-                        changes_offset=changes_offset,
-                        fields_offset=fields_offset,
-                        max_matches=max_matches,
-                        match_offset=match_offset,
-                        full_paragraph=full_paragraph,
-                    )
+                    res = await read_active_word_document(ctx, clean_view, file_path, **opts)
                 except LiveWordUnavailableError:
                     # The probe reported the file open, but Word/COM turned out to
                     # be unusable (dead or zombie instance). Since we hold an
@@ -1552,45 +1534,9 @@ if sys.platform == "win32":
                     # propagate. Only reachable when a file_path exists; the
                     # active-document mode above has no disk fallback by design.
                     await ctx.debug("Live Word probe matched but COM was unavailable; falling back to disk read.")
-                    res = await _read_docx_disk(
-                        file_path,
-                        ctx,
-                        clean_view,
-                        mode,
-                        page,
-                        force=force,
-                        outline_max_level=outline_max_level,
-                        outline_verbose=outline_verbose,
-                        search_query=search_query,
-                        search_regex=search_regex,
-                        search_case_sensitive=search_case_sensitive,
-                        changes_author=changes_author,
-                        changes_offset=changes_offset,
-                        fields_offset=fields_offset,
-                        max_matches=max_matches,
-                        match_offset=match_offset,
-                        full_paragraph=full_paragraph,
-                    )
+                    res = await _read_docx_disk(file_path, ctx, clean_view, **opts)
             else:
-                res = await _read_docx_disk(
-                    file_path,
-                    ctx,
-                    clean_view,
-                    mode,
-                    page,
-                    force=force,
-                    outline_max_level=outline_max_level,
-                    outline_verbose=outline_verbose,
-                    search_query=search_query,
-                    search_regex=search_regex,
-                    search_case_sensitive=search_case_sensitive,
-                    changes_author=changes_author,
-                    changes_offset=changes_offset,
-                    fields_offset=fields_offset,
-                    max_matches=max_matches,
-                    match_offset=match_offset,
-                    full_paragraph=full_paragraph,
-                )
+                res = await _read_docx_disk(file_path, ctx, clean_view, **opts)
         return add_timing_if_debug(start_time, res)
 
     @tool(

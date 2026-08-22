@@ -11,8 +11,11 @@ import {
   type BinarySource,
   DOCX_MIME_TYPE,
   buildOutputFileName,
+  docOpDisplayOptions,
   getDocxBufferFromSource,
 } from "../GenericFunctions";
+
+const displayOptions = docOpDisplayOptions("applyTextRevision");
 
 export const applyTextRevisionDescription: INodeProperties[] = [
   {
@@ -25,12 +28,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
     },
     description:
       "Why this revision is being applied. State your reasoning BEFORE the revised text — what you intend to change and why. This field is captured for auditability and is NOT forwarded into the redline engine; its only purpose is to make the AI reason first. Safe to leave empty in deterministic (non-AI) pipelines.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Input Binary Property",
@@ -41,12 +39,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
     placeholder: "e.g. data",
     description:
       "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. The file must be a valid .docx.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Output Binary Property",
@@ -57,12 +50,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
     placeholder: "e.g. data",
     description:
       "Name of the binary property on the outgoing item that will hold the redlined .docx file (string, e.g. 'data'). If equal to the input property name, the original binary is overwritten on the outgoing item.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Author",
@@ -72,12 +60,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
     placeholder: "e.g. AI Reviewer",
     description:
       "Author name attached to every tracked change this revision produces (string, e.g. 'AI Reviewer'). Shows up in Word's review pane as the author of each redline.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Revised Text",
@@ -94,12 +77,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
       "Never send a single page of a paginated extract: everything missing from this text is applied as a tracked deletion. " +
       "A revision that removes more than 50% of the characters (75% for documents under 2,000 characters) is refused unless 'Allow Major Deletions' is on. " +
       "After applying, the engine re-reads the document's clean text and compares it to this value; if they differ, nothing is returned and the operation fails, because some structure (headings, table rows, footnotes) cannot be removed by text replacement.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
   {
     displayName: "Allow Major Deletions",
@@ -108,12 +86,7 @@ export const applyTextRevisionDescription: INodeProperties[] = [
     default: false,
     description:
       "Whether to allow a revision that deletes more than 50% of the document's characters (more than 75% for documents under 2,000 characters). False (default) refuses such a revision on the assumption that the supplied text is a partial extract rather than the whole document.",
-    displayOptions: {
-      show: {
-        resource: ["document"],
-        operation: ["applyTextRevision"],
-      },
-    },
+    displayOptions,
   },
 ];
 

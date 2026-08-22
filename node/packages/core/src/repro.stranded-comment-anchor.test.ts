@@ -24,9 +24,9 @@
 // The Python twin is python/tests/test_repro_stranded_comment_anchor.py.
 
 import { describe, it, expect } from "vitest";
-import { zipSync, strToU8 } from "fflate";
 import { DocumentObject } from "./docx/bridge.js";
 import { RedlineEngine } from "./engine.js";
+import { createTestPackageWithComments } from "./test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Fixture builder (same shape as repro.comment-range-modify.test.ts)
@@ -36,47 +36,12 @@ const NS_W =
   'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
 const NS_W14 =
   'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
-const NS_R =
-  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 
 function buildDocx(bodyXml: string, commentsListXml: string = ""): Buffer {
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document ${NS_W} ${NS_W14} ${NS_R}>
-  <w:body>${bodyXml}</w:body>
-</w:document>`;
-
-  const commentsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:comments ${NS_W} ${NS_W14}>${commentsListXml}</w:comments>`;
-
-  const hasComments = commentsListXml.length > 0;
-
-  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  ${hasComments ? '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>' : ""}
-</Types>`;
-
-  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`;
-
-  const docRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${hasComments ? '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>' : ""}
-</Relationships>`;
-
-  const files: Record<string, Uint8Array> = {
-    "[Content_Types].xml": strToU8(contentTypesXml),
-    "_rels/.rels": strToU8(rootRelsXml),
-    "word/document.xml": strToU8(documentXml),
-    "word/_rels/document.xml.rels": strToU8(docRelsXml),
-  };
-  if (hasComments) files["word/comments.xml"] = strToU8(commentsXml);
-
-  return Buffer.from(zipSync(files));
+  const commentsXml = commentsListXml.length > 0
+    ? `<w:comments ${NS_W} ${NS_W14}>${commentsListXml}</w:comments>`
+    : undefined;
+  return createTestPackageWithComments(bodyXml, commentsXml);
 }
 
 const SARAH_COMMENT = `<w:comment w:id="1" w:author="Sarah Chen" w:date="2026-08-01T09:00:00Z" w:initials="SC">

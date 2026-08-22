@@ -54,32 +54,48 @@ class TestAdeuApplyChangesStandard(ToolsIntegrationTests):
         }
 
 
+def _make_args(
+    file_path: Path,
+    changes: list,
+    output_path: Path | None = None,
+    reasoning: str = "test",
+    author: str = "AI Reviewer",
+) -> dict:
+    args = {
+        "reasoning": reasoning,
+        "file_path": str(file_path),
+        "author_name": author,
+        "changes": changes,
+    }
+    if output_path is not None:
+        args["output_path"] = str(output_path)
+    return args
+
+
+def _make_call(
+    file_path: Path,
+    changes: list,
+    output_path: Path | None = None,
+    call_id: str = "test-call",
+) -> dict:
+    return {
+        "name": "adeu_apply_changes",
+        "args": _make_args(file_path, changes, output_path),
+        "id": call_id,
+        "type": "tool_call",
+    }
+
+
 class TestAdeuApplyChangesBehavior:
     def test_successful_modify_writes_file_and_artifact(self, working_docx: Path, output_path: Path) -> None:
-        # _UNIQUE_TARGET appears once in golden.docx outside any
-        # CriticMarkup wrapper, so the edit must succeed cleanly.
         tool = AdeuApplyChanges()
-        tool_call = {
-            "name": "adeu_apply_changes",
-            "args": {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": _UNIQUE_TARGET,
-                        "new_text": _REPLACEMENT,
-                    }
-                ],
-                "output_path": str(output_path),
-            },
-            "id": "test-apply-1",
-            "type": "tool_call",
-        }
+        tool_call = _make_call(
+            working_docx,
+            [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT}],
+            output_path,
+            "test-apply-1",
+        )
         msg = tool.invoke(tool_call)
-        # If this fails, surface the engine's complaint so the next
-        # adjustment is informed by the real reason, not a guess.
         assert msg.artifact["success"] is True, (
             f"apply_changes rejected the edit. Validation errors: "
             f"{msg.artifact.get('validation_errors')!r}. Content head: "
@@ -91,27 +107,14 @@ class TestAdeuApplyChangesBehavior:
         assert output_path.exists()
 
     def test_modification_is_visible_in_output(self, working_docx: Path, output_path: Path) -> None:
-        # Round-trip: apply edit → read result → verify the new text
-        # appears in the projected output (as a tracked insertion).
         apply_tool = AdeuApplyChanges()
         apply_msg_content = apply_tool.invoke(
-            {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": _UNIQUE_TARGET,
-                        "new_text": _REPLACEMENT,
-                    }
-                ],
-                "output_path": str(output_path),
-            }
+            _make_args(
+                working_docx,
+                [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT}],
+                output_path,
+            )
         )
-        # If apply_changes rejected the edit, the round-trip is
-        # meaningless. Surface the rejection reason rather than letting
-        # the next read fail with a confusing "file not found".
         assert output_path.exists(), (
             f"apply_changes did not write an output file. Content head: {apply_msg_content[:300]}"
         )
@@ -124,42 +127,22 @@ class TestAdeuApplyChangesBehavior:
         original_bytes = working_docx.read_bytes()
         tool = AdeuApplyChanges()
         tool.invoke(
-            {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": _UNIQUE_TARGET,
-                        "new_text": _REPLACEMENT,
-                    }
-                ],
-                "output_path": str(output_path),
-            }
+            _make_args(
+                working_docx,
+                [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT}],
+                output_path,
+            )
         )
         assert working_docx.read_bytes() == original_bytes
 
     def test_batch_validation_error_returns_failure_artifact(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
-        tool_call = {
-            "name": "adeu_apply_changes",
-            "args": {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": "PHRASE_NOT_IN_DOCUMENT_xyz123",
-                        "new_text": "anything",
-                    }
-                ],
-                "output_path": str(output_path),
-            },
-            "id": "test-apply-fail",
-            "type": "tool_call",
-        }
+        tool_call = _make_call(
+            working_docx,
+            [{"type": "modify", "target_text": "PHRASE_NOT_IN_DOCUMENT_xyz123", "new_text": "anything"}],
+            output_path,
+            "test-apply-fail",
+        )
         msg = tool.invoke(tool_call)
         assert msg.artifact["success"] is False
         assert msg.artifact["output_path"] is None
@@ -169,18 +152,12 @@ class TestAdeuApplyChangesBehavior:
 
     def test_schema_validation_failure_returns_failure_artifact(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
-        tool_call = {
-            "name": "adeu_apply_changes",
-            "args": {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [{"type": "invalid_change_type_xyz"}],
-                "output_path": str(output_path),
-            },
-            "id": "test-apply-schema-fail",
-            "type": "tool_call",
-        }
+        tool_call = _make_call(
+            working_docx,
+            [{"type": "invalid_change_type_xyz"}],
+            output_path,
+            "test-apply-schema-fail",
+        )
         msg = tool.invoke(tool_call)
         assert msg.artifact["success"] is False
         assert msg.artifact["output_path"] is None
@@ -191,46 +168,23 @@ class TestAdeuApplyChangesBehavior:
     async def test_ainvoke_applies_edit(self, working_docx: Path, output_path: Path) -> None:
         tool = AdeuApplyChanges()
         result = await tool.ainvoke(
-            {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": _UNIQUE_TARGET,
-                        "new_text": _REPLACEMENT,
-                    }
-                ],
-                "output_path": str(output_path),
-            }
+            _make_args(
+                working_docx,
+                [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT}],
+                output_path,
+            )
         )
         assert output_path.exists(), f"ainvoke did not write an output file. Result head: {result[:300]}"
         assert "Batch complete" in result
 
     def test_successful_batch_carries_per_edit_preview_reports(self, working_docx: Path, output_path: Path) -> None:
-        # A committed batch must still return the per-edit report payload
-        # (status, target/new text, CriticMarkup or clean-text preview) so
-        # the agent can self-review what landed and plan follow-up edits.
         tool = AdeuApplyChanges()
-        tool_call = {
-            "name": "adeu_apply_changes",
-            "args": {
-                "reasoning": "test",
-                "file_path": str(working_docx),
-                "author_name": "AI Reviewer",
-                "changes": [
-                    {
-                        "type": "modify",
-                        "target_text": _UNIQUE_TARGET,
-                        "new_text": _REPLACEMENT,
-                    }
-                ],
-                "output_path": str(output_path),
-            },
-            "id": "test-wet-report-1",
-            "type": "tool_call",
-        }
+        tool_call = _make_call(
+            working_docx,
+            [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT}],
+            output_path,
+            "test-wet-report-1",
+        )
         msg = tool.invoke(tool_call)
 
         assert msg.artifact["success"] is True
