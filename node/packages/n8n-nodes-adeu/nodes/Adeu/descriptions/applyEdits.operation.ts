@@ -146,8 +146,8 @@ export const applyEditsDescription: INodeProperties[] = [
       "Optional match_mode (one of 'strict' | 'first' | 'all', default 'strict'): 'strict' fails on ambiguous matches; 'first' silently anchors to the first occurrence; 'all' applies the same replacement to every occurrence in linear document order. " +
       "Optional regex (boolean, default false): when true, target_text is interpreted as an ES2022 RegExp pattern and new_text may reference capture groups via $1, $2, etc. Combine with match_mode='all' for global regex replacements. " +
       "Never include CriticMarkup tags like {++ ++} or {-- --} in new_text — the engine applies tracking automatically. Never target text already inside another author's pending tracked change. " +
-      "type='accept': requires target_id (string like 'Chg:12' from the Markdown projection); optional comment. " +
-      "type='reject': requires target_id (string like 'Chg:12'); optional comment. " +
+      "type='accept': requires target_id (string like 'Chg:12' from the Markdown projection); optional part (string like 'word/header1.xml' — revision ids are numbered per package part, so pass it only when the same id exists in several parts and the batch reports the ambiguity); optional comment. " +
+      "type='reject': requires target_id (string like 'Chg:12'); optional part as for accept; optional comment. " +
       "type='reply': requires target_id (string like 'Com:45') and text (string). " +
       "type='insert_row': requires target_text (string anchoring a table cell), position ('above' or 'below'), and cells (array of strings, one per column). " +
       "type='delete_row': requires target_text (string anchoring the row to delete). " +

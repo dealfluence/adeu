@@ -190,6 +190,15 @@ class AcceptChange(BaseModel):
         json_schema_extra=const_to_enum,
     )
     target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
+    part: Optional[str] = Field(
+        None,
+        description=(
+            "OPC part holding the change, e.g. 'word/header1.xml'. Revision ids are numbered per "
+            "part, so the same Chg:N can name unrelated changes in different parts; a bare "
+            "ambiguous id is refused with an error listing the parts, and this field picks one. "
+            "Omit whenever the id is unique in the package (the usual case)."
+        ),
+    )
     comment: Optional[str] = Field(None, description="Optional rationale.")
 
 
@@ -200,6 +209,13 @@ class RejectChange(BaseModel):
         json_schema_extra=const_to_enum,
     )
     target_id: str = Field(..., description="The full ID string from the document text (e.g. 'Chg:12').")
+    part: Optional[str] = Field(
+        None,
+        description=(
+            "OPC part holding the change, e.g. 'word/header1.xml' — as on 'accept': disambiguates "
+            "a target_id present in several parts. Omit whenever the id is unique in the package."
+        ),
+    )
     comment: Optional[str] = Field(None, description="Optional rationale.")
 
 

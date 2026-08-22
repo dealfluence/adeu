@@ -374,7 +374,17 @@ def test_continuation_hint_mcp_empty_filepath():
     assert "file_path=" not in content
 
 
-def test_read_docx_changes_ignores_header_footer_change_ids(tmp_path: Path):
+def test_read_docx_changes_lists_header_footer_change_ids(tmp_path: Path):
+    """The changes ledger and the engine's actionable-id list must agree.
+
+    Until issue #114 the engine's revision reads were body-only, so header/
+    footer change ids were filtered OUT of the ledger — advertising them
+    would have invited accept/reject calls that failed. With revision state
+    read across every story part those ids are actionable, so the ledger
+    lists them; the invariant under test is unchanged: the ledger's Chg ids
+    equal _existing_change_ids() exactly.
+    """
+
     doc = Document()
     doc.add_paragraph("Body text with a change.")
     section = doc.sections[0]
@@ -409,7 +419,7 @@ def test_read_docx_changes_ignores_header_footer_change_ids(tmp_path: Path):
         check_engine = RedlineEngine(BytesIO(f.read()))
 
     expected_change_ids = check_engine._existing_change_ids()
-    assert "999" not in expected_change_ids
+    assert "999" in expected_change_ids  # header revisions are actionable (issue #114)
 
     tool_res = run_async(
         read_docx(

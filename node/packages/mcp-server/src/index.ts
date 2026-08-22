@@ -851,6 +851,12 @@ export const CHANGE_ITEM_SCHEMA = z
       .describe(
         "accept / reject / reply: the 'Chg:N' or 'Com:N' id taken from a fresh read_docx.",
       ),
+    part: z
+      .string()
+      .optional()
+      .describe(
+        "accept / reject: the package part holding the change, e.g. 'word/header1.xml'. Revision ids are numbered per part, so the same Chg:N can name unrelated changes in different parts; a bare ambiguous id is refused with an error listing the parts, and this field picks one. Omit whenever the id is unique (the usual case).",
+      ),
     text: z.string().optional().describe("reply: the reply body."),
     comment: z
       .string()

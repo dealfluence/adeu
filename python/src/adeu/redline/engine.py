@@ -223,7 +223,15 @@ def validate_review_action_batch(
                 )
             seen_replies.add(reply_key)
         elif act_type in ("accept", "reject"):
-            prior = seen_resolutions.get(target_id)
+            # Ids are numbered per OPC part (issue #114): the same target_id
+            # with different explicit `part` selectors names two unrelated
+            # changes, so duplicates/conflicts are tracked per (part, id).
+            # Bare ids keep one shared bucket — two bare actions on one id
+            # are the same target today as before.
+            part_attr = getattr(act, "part", None)
+            part_key = part_attr.lstrip("/") if isinstance(part_attr, str) else ""
+            resolution_key = (part_key, target_id)
+            prior = seen_resolutions.get(resolution_key)
             if prior is not None:
                 first_pos, first_type = prior
                 first_batch_idx = indices[first_pos] if indices else first_pos
@@ -240,7 +248,7 @@ def validate_review_action_batch(
                         f"'{act_type}'. Decide the outcome and keep exactly one of them."
                     )
             else:
-                seen_resolutions[target_id] = (i, act_type)
+                seen_resolutions[resolution_key] = (i, act_type)
     return errors
 
 
@@ -1023,21 +1031,123 @@ class RedlineEngine:
 
         return list(pairs)
 
+    # Content types of the parts revisions can be authored in and targeted
+    # from — the story parts the mapper projects. Deliberately narrower than
+    # the accept_all/reject_all traversal: a w:ins inside e.g. a comment's
+    # body is resolved by the bulk paths but is not an addressable document
+    # revision (issue #114).
+    _STORY_PART_CONTENT_TYPES = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+    )
+
+    @staticmethod
+    def _part_revision_element(part):
+        """Root element of a non-main part, parsing and caching from the blob
+        when python-docx does not model the part (footnotes/endnotes)."""
+        if hasattr(part, "_element"):
+            return part._element
+        if not hasattr(part, "_adeu_element"):
+            part._adeu_element = parse_xml(part.blob)
+        return part._adeu_element
+
+    def _revision_roots(self) -> list:
+        """
+        Every root a bulk revision pass must traverse: the main document
+        element plus every other wordprocessingml XML part (headers, footers,
+        notes, comments, ...). Shared by accept_all_revisions /
+        reject_all_revisions / _scan_existing_ids (issue #114 — the id scan
+        used to read the main part only, so a fresh engine minted duplicates
+        of ids already present in a header).
+        """
+        roots = [self.doc.element]
+        for part in self.doc.part.package.parts:
+            if part == self.doc.part:
+                continue
+            if "wordprocessingml" in part.content_type and part.content_type.endswith("+xml"):
+                roots.append(self._part_revision_element(part))
+        return roots
+
+    def _story_roots(self) -> List[tuple]:
+        """
+        [(element, part path)] for every part a targeted accept/reject can
+        address: the main document plus the story parts the mapper projects.
+        This is where revision ids live per part (issue #114); part paths are
+        normalized without the leading "/" python-docx partnames carry.
+        """
+        roots: List[tuple] = [(self.doc.element, str(self.doc.part.partname).lstrip("/"))]
+        for part in self.doc.part.package.parts:
+            if part == self.doc.part:
+                continue
+            if part.content_type in self._STORY_PART_CONTENT_TYPES:
+                roots.append((self._part_revision_element(part), str(part.partname).lstrip("/")))
+        return roots
+
+    def _story_findall(self, tag: str, part: Optional[str] = None) -> list:
+        """Elements of `tag` (a "w:..." name) across every story part, scoped
+        to one normalized part path when given (issue #114)."""
+        out: list = []
+        for root, name in self._story_roots():
+            if part is not None and name != part:
+                continue
+            out.extend(root.findall(f".//{qn(tag)}"))
+        return out
+
+    def _parts_holding_id(self, target_id: str) -> List[str]:
+        """
+        Distinct normalized part paths holding a revision element (w:ins/w:del
+        or a format-change record) with `target_id`, in story-root order. More
+        than one entry means the bare id is ambiguous (issue #114): ids are
+        numbered per part.
+        """
+        parts: List[str] = []
+        for root, name in self._story_roots():
+            for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS:
+                if any(n.get(qn("w:id")) == target_id for n in root.findall(f".//{qn(tag)}")):
+                    parts.append(name)
+                    break
+        return parts
+
+    def _action_part_filter(self, act) -> Tuple[Optional[str], Optional[str]]:
+        """
+        (normalized story-part path, error) for an action's optional `part`
+        selector; the error is set when the selector names no part a targeted
+        action can address. Part None = no restriction (bare id).
+        """
+        raw = getattr(act, "part", None)
+        if raw is None or raw == "":
+            return None, None
+        story_parts = [name for _, name in self._story_roots()]
+        if not isinstance(raw, str):
+            return None, (f"`part` must be a string naming a package part (one of: {', '.join(story_parts)}).")
+        wanted = raw.lstrip("/")
+        if wanted not in story_parts:
+            return None, (
+                f"part '{raw}' is not a package part that can carry tracked changes. "
+                f"Parts addressable by accept/reject: {', '.join(story_parts)}."
+            )
+        return wanted, None
+
     def _scan_existing_ids(self) -> int:
         """
-        Scans the document body for existing w:id attributes in w:ins and w:del
-        to ensure new IDs do not collide.
+        Scans existing w:id attributes in w:ins and w:del to ensure new IDs do
+        not collide. The scan spans every wordprocessingml part: ids are
+        numbered per part, but this engine mints one ascending sequence for
+        the whole package, so the seed must clear the maximum ANYWHERE or a
+        header edit reuses a header's own id (issue #114 F4).
         """
         max_id = 0
-        for tag in ["w:ins", "w:del"]:
-            elements = self.doc.element.xpath(f"//{tag}")
-            for el in elements:
-                try:
-                    val = int(el.get(qn("w:id")))
-                    if val > max_id:
-                        max_id = val
-                except (ValueError, TypeError):
-                    pass
+        for root in self._revision_roots():
+            for tag in ["w:ins", "w:del"]:
+                for el in root.findall(f".//{qn(tag)}"):
+                    try:
+                        val = int(el.get(qn("w:id")))
+                        if val > max_id:
+                            max_id = val
+                    except (ValueError, TypeError):
+                        pass
         return max_id
 
     def _get_next_id(self):
@@ -2965,7 +3075,10 @@ class RedlineEngine:
         revisions = [
             n
             for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS
-            for n in self.doc.element.findall(f".//{qn(tag)}")
+            # Story parts included: targeted accept/reject reach headers/
+            # footers/notes too (issue #114), so a leak there must fail the
+            # rollback verification exactly like one in the body.
+            for n in self._story_findall(tag)
         ]
         return "|".join(
             (
@@ -6062,7 +6175,7 @@ class RedlineEngine:
         return output
 
     def _duplicate_revision_id_error(
-        self, target_id: str, action_type: str, batch_idx: Optional[int] = None
+        self, target_id: str, action_type: str, batch_idx: Optional[int] = None, part: Optional[str] = None
     ) -> Optional[str]:
         """
         Refuses accept/reject on a w:id shared by revisions from DIFFERENT
@@ -6072,12 +6185,13 @@ class RedlineEngine:
         several unrelated changes (QA 2026-07-17 F9). Same-author reuse is
         legitimate — this engine itself mints one id across every element of
         a single logical edit — so authorship is the discriminator.
+
+        `part` scopes the check to the part the action acts on (issue #114):
+        the same number in another part is an unrelated change, reported by
+        the cross-part ambiguity refusal instead.
         """
         nodes = [
-            n
-            for tag in ("w:ins", "w:del")
-            for n in self.doc.element.findall(f".//{qn(tag)}")
-            if n.get(qn("w:id")) == target_id
+            n for tag in ("w:ins", "w:del") for n in self._story_findall(tag, part) if n.get(qn("w:id")) == target_id
         ]
         authors = sorted({n.get(qn("w:author")) or "Unknown" for n in nodes})
         if len(authors) <= 1:
@@ -6094,11 +6208,11 @@ class RedlineEngine:
 
     def _existing_change_ids(self) -> List[str]:
         """Distinct tracked-change ids (w:id on w:ins/w:del and format-change
-        elements — all of them actionable) in the main story."""
+        elements — all of them actionable) across every story part."""
         ids = {
             n.get(qn("w:id"))
             for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS
-            for n in self.doc.element.findall(f".//{qn(tag)}")
+            for n in self._story_findall(tag)
             if n.get(qn("w:id"))
         }
         return sorted(ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
@@ -6323,6 +6437,44 @@ class RedlineEngine:
             "(it may already have been accepted or rejected, or the id is stale). " + avail + find_hint
         )
 
+    def _not_found_in_part_error(
+        self, raw_id: str, target_id: str, act, part: str, batch_idx: Optional[int] = None
+    ) -> str:
+        """Not-found variant for an action that named an explicit `part`
+        (issue #114): says where the id DOES live instead of denying it
+        exists."""
+        prefix = f"- Action {batch_idx + 1} Failed: " if batch_idx is not None else "- Failed to apply action: "
+        echo = raw_id if raw_id.startswith("Chg:") else f"Chg:{target_id}"
+        elsewhere = self._parts_holding_id(target_id)
+        where = f"Revisions with that id exist in: {', '.join(elsewhere)}. " if elsewhere else ""
+        find_hint = self.id_discovery_hint or (
+            "Run `adeu extract <file> --mode changes` to list the current change (Chg:) and comment (Com:) ids."
+        )
+        return (
+            f"{prefix}{act.type} on {echo} — no tracked change with w:id={target_id} exists "
+            f"in part '{part}'. " + where + find_hint
+        )
+
+    def _ambiguous_part_error(
+        self, raw_id: str, action_type: str, parts: List[str], batch_idx: Optional[int] = None
+    ) -> str:
+        """
+        Refusal for a bare id matching revisions in several OPC parts (issue
+        #114). Mirrors the same-id-different-authors guard's principle: when
+        an id cannot name one change, refuse rather than guess — but unlike
+        that terminal case, this one is actionable, so the message says
+        exactly how.
+        """
+        prefix = f"- Action {batch_idx + 1} Failed: " if batch_idx is not None else "- Failed to apply action: "
+        bare = raw_id[4:] if raw_id.startswith("Chg:") else raw_id
+        return (
+            f"{prefix}{action_type} on Chg:{bare} is ambiguous: revisions with "
+            f"w:id={bare} exist in {len(parts)} document parts ({', '.join(parts)}). "
+            "Revision ids are numbered per part, so the bare id cannot name one change. "
+            "Re-issue the action with `part` set to the part whose change you mean, "
+            f'e.g. {{"type": "{action_type}", "target_id": "{bare}", "part": "{parts[0]}"}}.'
+        )
+
     @staticmethod
     def _expand_group_with_nested(all_ins: set, all_del: set) -> None:
         """
@@ -6346,15 +6498,20 @@ class RedlineEngine:
                     all_del.add(nested)
                     stack.append(nested)
 
-    def _resolution_group_ids(self, target_id: str) -> set:
+    def _resolution_group_ids(self, target_id: str, part: Optional[str] = None) -> set:
         """
         All revision ids that resolve as ONE unit with `target_id`: the ids of
         every contiguous same-author <w:ins>/<w:del> sibling of its elements
         (a replacement's del+ins pair), plus nested revisions those elements
         contain (chained-edit transients), plus the id itself.
+
+        `part` scopes the lookup to one OPC part. Ids are numbered per part
+        (issue #114), so a group is only well-defined within one part —
+        callers that pass None accept matches from anywhere and must have
+        established the id is unambiguous first.
         """
-        nodes = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
-        nodes += [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
+        nodes = [n for n in self._story_findall("w:ins", part) if n.get(qn("w:id")) == target_id]
+        nodes += [n for n in self._story_findall("w:del", part) if n.get(qn("w:id")) == target_id]
         group = {target_id} if nodes else set()
         group_ins: set = set()
         group_del: set = set()
@@ -6392,12 +6549,26 @@ class RedlineEngine:
             if raw_id.startswith("Com:"):
                 continue
             target_id = raw_id[4:] if raw_id.startswith("Chg:") else raw_id
-            group = self._resolution_group_ids(target_id)
+            # Groups are per-part (issue #114): accepting header1's Chg:1 and
+            # rejecting the body's Chg:1 is NOT a contradiction. Scope to the
+            # action's explicit part, else to the only part holding the id;
+            # an ambiguous or unknown bare id is skipped here — apply reports
+            # those with its own errors.
+            requested_part, part_error = self._action_part_filter(act)
+            if part_error:
+                continue
+            scope = requested_part
+            if scope is None:
+                parts_with_id = self._parts_holding_id(target_id)
+                if len(parts_with_id) != 1:
+                    continue
+                scope = parts_with_id[0]
+            group = self._resolution_group_ids(target_id, part=scope)
             if not group:
                 continue  # unknown ids fail with their own not-found error later
             conflict = None
             for gid in group:
-                prior = group_first.get(gid)
+                prior = group_first.get((scope, gid))
                 if prior is not None and prior[1] != act.type:
                     conflict = prior
                     break
@@ -6414,7 +6585,7 @@ class RedlineEngine:
                 )
                 continue
             for gid in group:
-                group_first.setdefault(gid, (pos, act.type, target_id))
+                group_first.setdefault((scope, gid), (pos, act.type, target_id))
         return errors
 
     def apply_review_actions(
@@ -6458,31 +6629,66 @@ class RedlineEngine:
                 is_change = True
                 is_comment = True
 
-            if is_change and isinstance(act, (AcceptChange, RejectChange)) and target_id in resolved_history:
-                prior_type = resolved_history[target_id]
-                if prior_type == act.type:
-                    # Consistent follow-up on the pair: legitimate agent
-                    # workflow ("accept both ids of the replacement"), but no
-                    # state transition happens — report it accurately.
-                    already_resolved += 1
+            # Issue #114: the action may carry an explicit `part` selector,
+            # and a bare id is honored only while it names revisions in
+            # exactly one part — ids are numbered per part, so one w:id in
+            # two parts names two unrelated changes, and resolving whichever
+            # a body-first walk happens to find is exactly the silent
+            # mis-resolution this refuses. Same principle as the
+            # different-authors guard below — refuse over guess — but this
+            # one is actionable: the error says which parts and how to choose.
+            requested_part: Optional[str] = None
+            acting_part: Optional[str] = None
+            if is_change and isinstance(act, (AcceptChange, RejectChange)):
+                requested_part, part_error = self._action_part_filter(act)
+                if part_error:
                     self.skipped_details.append(
-                        f"- Note: Action {batch_idx + 1} ('{act.type}' on {raw_id}) had no additional effect — "
-                        "the change was already resolved together with its replacement pair by an "
-                        "earlier action in this batch. Counted as already_resolved, not applied."
+                        f"- Action {batch_idx + 1} Failed: {act.type} on {raw_id} — {part_error}"
                     )
+                    skipped += 1
                     continue
-                # Contradiction. validate_action_pairing rejects this shape
-                # before anything mutates; this guard covers direct callers.
-                self.skipped_details.append(
-                    f"- Action {batch_idx + 1} Failed: contradictory action — '{act.type}' on {raw_id}, but "
-                    f"the change was already resolved as '{prior_type}' together with its replacement "
-                    "pair by an earlier action in this batch."
-                )
-                skipped += 1
-                continue
+
+            if is_change and isinstance(act, (AcceptChange, RejectChange)) and target_id in resolved_history:
+                prior_type, prior_part = resolved_history[target_id]
+                if requested_part is None or requested_part == prior_part:
+                    if prior_type == act.type:
+                        # Consistent follow-up on the pair: legitimate agent
+                        # workflow ("accept both ids of the replacement"), but no
+                        # state transition happens — report it accurately.
+                        already_resolved += 1
+                        self.skipped_details.append(
+                            f"- Note: Action {batch_idx + 1} ('{act.type}' on {raw_id}) had no additional effect — "
+                            "the change was already resolved together with its replacement pair by an "
+                            "earlier action in this batch. Counted as already_resolved, not applied."
+                        )
+                        continue
+                    # Contradiction. validate_action_pairing rejects this shape
+                    # before anything mutates; this guard covers direct callers.
+                    self.skipped_details.append(
+                        f"- Action {batch_idx + 1} Failed: contradictory action — '{act.type}' on {raw_id}, but "
+                        f"the change was already resolved as '{prior_type}' together with its replacement "
+                        "pair by an earlier action in this batch."
+                    )
+                    skipped += 1
+                    continue
+                # An explicit different part is a fresh lookup, not a
+                # duplicate of the history entry (issue #114).
 
             if is_change and isinstance(act, (AcceptChange, RejectChange)):
-                dup_error = self._duplicate_revision_id_error(target_id, act.type, batch_idx=batch_idx)
+                acting_part = requested_part
+                if acting_part is None:
+                    parts_with_id = self._parts_holding_id(target_id)
+                    if len(parts_with_id) > 1:
+                        self.skipped_details.append(
+                            self._ambiguous_part_error(raw_id, act.type, parts_with_id, batch_idx=batch_idx)
+                        )
+                        skipped += 1
+                        continue
+                    acting_part = parts_with_id[0] if parts_with_id else None
+
+                dup_error = self._duplicate_revision_id_error(
+                    target_id, act.type, batch_idx=batch_idx, part=acting_part
+                )
                 if dup_error:
                     self.skipped_details.append(dup_error)
                     skipped += 1
@@ -6507,11 +6713,11 @@ class RedlineEngine:
 
             if isinstance(act, AcceptChange):
                 if is_change:
-                    resolved_now = self._accept_change(target_id)
+                    resolved_now = self._accept_change(target_id, part=acting_part)
                     success = bool(resolved_now)
             elif isinstance(act, RejectChange):
                 if is_change:
-                    resolved_now = self._reject_change(target_id)
+                    resolved_now = self._reject_change(target_id, part=acting_part)
                     success = bool(resolved_now)
             elif isinstance(act, ReplyComment):
                 if is_comment:
@@ -6521,7 +6727,9 @@ class RedlineEngine:
             if success:
                 for rid in resolved_now:
                     if rid:
-                        resolved_history[rid] = act.type
+                        # acting_part is set whenever a change resolved: the
+                        # lookup that succeeded was scoped to it (issue #114).
+                        resolved_history[rid] = (act.type, acting_part)
                 applied += 1
                 if comments_before:
                     removed = comments_before - set(self._existing_comment_ids())
@@ -6540,6 +6748,13 @@ class RedlineEngine:
                     f"- Action {batch_idx + 1} Failed: reply on {raw_id} — {self._reply_threading_error}"
                 )
                 self._reply_threading_error = None
+                skipped += 1
+            elif isinstance(act, (AcceptChange, RejectChange)) and requested_part is not None:
+                # A miss under an explicit part says where the id DOES live
+                # instead of denying it exists (issue #114).
+                self.skipped_details.append(
+                    self._not_found_in_part_error(raw_id, target_id, act, requested_part, batch_idx=batch_idx)
+                )
                 skipped += 1
             else:
                 self.skipped_details.append(self._action_not_found_error(raw_id, target_id, act, batch_idx=batch_idx))
@@ -6643,15 +6858,18 @@ class RedlineEngine:
                         if node.get(qn("w:id")) == c_id and node.getparent() is not None:
                             node.getparent().remove(node)
 
-    def _accept_change(self, target_id: str) -> set:
-        primary_ins = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
-        primary_del = [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
+    def _accept_change(self, target_id: str, part: Optional[str] = None) -> set:
+        # `part` scopes every lookup to one OPC part (issue #114): ids are
+        # numbered per part, so the same number elsewhere is an unrelated
+        # change that must not resolve along with this one.
+        primary_ins = [n for n in self._story_findall("w:ins", part) if n.get(qn("w:id")) == target_id]
+        primary_del = [n for n in self._story_findall("w:del", part) if n.get(qn("w:id")) == target_id]
 
         if not primary_ins and not primary_del:
             # Format-only tracked changes (w:rPrChange/w:pPrChange) carry ids
             # the projection advertises; they must be actionable by id too
             # (QA round 3, finding 2.2).
-            return self._resolve_format_change(target_id, accept=True)
+            return self._resolve_format_change(target_id, accept=True, part=part)
 
         all_ins = set(primary_ins)
         all_del = set(primary_del)
@@ -6720,14 +6938,16 @@ class RedlineEngine:
 
         return resolved_ids
 
-    def _reject_change(self, target_id: str) -> set:
-        primary_ins = [n for n in self.doc.element.findall(f".//{qn('w:ins')}") if n.get(qn("w:id")) == target_id]
-        primary_del = [n for n in self.doc.element.findall(f".//{qn('w:del')}") if n.get(qn("w:id")) == target_id]
+    def _reject_change(self, target_id: str, part: Optional[str] = None) -> set:
+        # `part` scopes every lookup to one OPC part (issue #114) — see
+        # _accept_change.
+        primary_ins = [n for n in self._story_findall("w:ins", part) if n.get(qn("w:id")) == target_id]
+        primary_del = [n for n in self._story_findall("w:del", part) if n.get(qn("w:id")) == target_id]
 
         if not primary_ins and not primary_del:
             # Format-only tracked changes: restore the stored original
             # properties (QA round 3, finding 2.2).
-            return self._resolve_format_change(target_id, accept=False)
+            return self._resolve_format_change(target_id, accept=False, part=part)
 
         all_ins = set(primary_ins)
         all_del = set(primary_del)
@@ -6805,7 +7025,7 @@ class RedlineEngine:
 
     _FORMAT_CHANGE_TAGS = ("w:rPrChange", "w:pPrChange", "w:sectPrChange")
 
-    def _resolve_format_change(self, target_id: str, accept: bool) -> set:
+    def _resolve_format_change(self, target_id: str, accept: bool, part: Optional[str] = None) -> set:
         """
         Accept/reject a FORMAT-only tracked change (<w:rPrChange>,
         <w:pPrChange>, <w:sectPrChange>) by id. The projection advertises
@@ -6816,10 +7036,12 @@ class RedlineEngine:
         the original. Reject restores the original: the change element's
         single child holds the pre-change properties — swap them into the
         live properties container.
+
+        `part` scopes the lookup to one OPC part (issue #114).
         """
         resolved: set = set()
         for tag in self._FORMAT_CHANGE_TAGS:
-            for change in self.doc.element.findall(f".//{qn(tag)}"):
+            for change in self._story_findall(tag, part):
                 if change.get(qn("w:id")) != target_id:
                     continue
                 parent = change.getparent()
@@ -6924,20 +7146,7 @@ class RedlineEngine:
         # than only when a count is non-zero — comment removal and the
         # non-main parts mutate too.
         self._mutated_since_load = True
-        parts_to_process = [self.doc.element]
-
-        for part in self.doc.part.package.parts:
-            if part == self.doc.part:
-                continue
-            if "wordprocessingml" in part.content_type and part.content_type.endswith("+xml"):
-                element_to_process = None
-                if hasattr(part, "_element"):
-                    element_to_process = part._element
-                else:
-                    if not hasattr(part, "_adeu_element"):
-                        part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
-                    element_to_process = part._adeu_element  # type: ignore[attr-defined]
-                parts_to_process.append(element_to_process)
+        parts_to_process = self._revision_roots()
 
         # Pre-count revisions and comments before modifying the XML structures.
         # The unit is REVISION ELEMENTS, matching sanitize's
@@ -7145,20 +7354,7 @@ class RedlineEngine:
         # See accept_all_revisions: flag before mutating, or a later batch's
         # rollback restores pre-reject bytes and resurrects the revisions.
         self._mutated_since_load = True
-        parts_to_process = [self.doc.element]
-
-        for part in self.doc.part.package.parts:
-            if part == self.doc.part:
-                continue
-            if "wordprocessingml" in part.content_type and part.content_type.endswith("+xml"):
-                element_to_process = None
-                if hasattr(part, "_element"):
-                    element_to_process = part._element
-                else:
-                    if not hasattr(part, "_adeu_element"):
-                        part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
-                    element_to_process = part._adeu_element  # type: ignore[attr-defined]
-                parts_to_process.append(element_to_process)
+        parts_to_process = self._revision_roots()
 
         for root_element in parts_to_process:
             # 1. Reject insertions: drop the <w:ins> and everything inside it.
