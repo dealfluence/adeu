@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from "vitest";
 import { parseFastXml } from "./docx/fast-xml.js";
-import { createTestDocument } from "./test-utils.js";
+import { createTestDocument, appendRawXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
@@ -26,36 +26,6 @@ const NS =
 
 const PAGE_BREAK_RUN = `<w:p ${NS}><w:r><w:t>A</w:t><w:br w:type="page"/><w:t>B</w:t></w:r></w:p>`;
 const LINE_BREAK_RUN = `<w:p ${NS}><w:r><w:t>C</w:t><w:br/><w:t>D</w:t></w:r></w:p>`;
-
-/**
- * Appends raw XML by re-creating nodes through the target document's factory:
- * the fast-xml shim implements neither importNode nor adoptNode.
- */
-function appendRawXml(doc: DocumentObject, xml: string): void {
-  const target = doc.element.ownerDocument!;
-  const build = (src: any): any => {
-    if (src.nodeType === 3 || src.nodeType === 4) {
-      return target.createTextNode(src.data ?? src.nodeValue ?? "");
-    }
-    const el = target.createElement(src.tagName);
-    const attrs = src.attributes;
-    if (attrs) {
-      for (let i = 0; i < attrs.length; i++) {
-        const a = attrs[i] ?? attrs.item?.(i);
-        if (a) el.setAttribute(a.name ?? a.nodeName, a.value ?? a.nodeValue);
-      }
-    }
-    const kids = src.childNodes ?? [];
-    for (let i = 0; i < kids.length; i++) {
-      const k = kids[i];
-      if (k.nodeType === 1 || k.nodeType === 3 || k.nodeType === 4) {
-        el.appendChild(build(k));
-      }
-    }
-    return el;
-  };
-  doc.element.appendChild(build(parseFastXml(xml).documentElement));
-}
 
 async function project(xml: string[], cleanView = true): Promise<string> {
   const doc = await createTestDocument();

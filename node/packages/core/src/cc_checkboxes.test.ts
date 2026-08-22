@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { ccFixtureBytes } from "./test-utils.js";
+import { ccFixtureBytes, makeCheckboxSdtXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
@@ -32,21 +32,9 @@ import { DocumentMapper } from "./mapper.js";
 const CHECKED_GLYPH = "\u2612";
 const UNCHECKED_GLYPH = "\u2610";
 
-const MS_GOTHIC =
-  '<w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic"/></w:rPr>';
-
 /** A `w14:checkbox` control shaped exactly as Word writes one. */
 function checkbox(sdtId: number, checked: boolean, glyph?: string): string {
-  const g = glyph === undefined ? (checked ? CHECKED_GLYPH : UNCHECKED_GLYPH) : glyph;
-  const val = checked ? "1" : "0";
-  const content = g ? `<w:r>${MS_GOTHIC}<w:t>${g}</w:t></w:r>` : "";
-  return (
-    `<w:sdt><w:sdtPr><w:tag w:val="cb${sdtId}"/><w:id w:val="${sdtId}"/>` +
-    `<w14:checkbox><w14:checked w14:val="${val}"/>` +
-    '<w14:checkedState w14:val="2612" w14:font="MS Gothic"/>' +
-    '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>' +
-    `</w14:checkbox></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`
-  );
+  return makeCheckboxSdtXml(sdtId, checked, undefined, undefined, glyph);
 }
 
 const para = (...fragments: string[]) => `<w:p>${fragments.join("")}</w:p>`;

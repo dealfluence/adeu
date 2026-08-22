@@ -84,6 +84,64 @@ def run(text: str) -> str:
     return f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
 
 
+def make_sdt_xml(
+    *,
+    sdt_id: str | int = 100,
+    alias: str | None = None,
+    tag: str | None = None,
+    content: str = "",
+    sdt_type_xml: str = "<w:text/>",
+    lock: str | None = None,
+    temporary: bool = False,
+    showing_plc_hdr: bool = False,
+) -> str:
+    """Builds a complete <w:sdt> element string with specified sdtPr properties."""
+    parts = ["<w:sdt><w:sdtPr>"]
+    if alias:
+        parts.append(f'<w:alias w:val="{alias}"/>')
+    if tag:
+        parts.append(f'<w:tag w:val="{tag}"/>')
+    parts.append(f'<w:id w:val="{sdt_id}"/>')
+    if lock:
+        parts.append(f'<w:lock w:val="{lock}"/>')
+    if temporary:
+        parts.append("<w:temporary/>")
+    if showing_plc_hdr:
+        parts.append("<w:showingPlcHdr/>")
+    if sdt_type_xml:
+        parts.append(sdt_type_xml)
+    parts.append(f"</w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>")
+    return "".join(parts)
+
+
+def make_checkbox_sdt_xml(
+    sdt_id: str | int,
+    checked: bool,
+    alias: str | None = None,
+    tag: str | None = None,
+    glyph: str | None = None,
+) -> str:
+    """Builds a w14:checkbox SDT element string."""
+    val = "1" if checked else "0"
+    if glyph is None:
+        glyph = "\u2612" if checked else "\u2610"
+    content = (
+        '<w:r><w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic"/></w:rPr>'
+        f"<w:t>{glyph}</w:t></w:r>"
+        if glyph
+        else ""
+    )
+    type_xml = (
+        f'<w14:checkbox><w14:checked w14:val="{val}"/>'
+        '<w14:checkedState w14:val="2612" w14:font="MS Gothic"/>'
+        '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>'
+        "</w14:checkbox>"
+    )
+    return make_sdt_xml(
+        sdt_id=sdt_id, alias=alias or f"cb{sdt_id}", tag=tag or f"cb{sdt_id}", content=content, sdt_type_xml=type_xml
+    )
+
+
 def build_sdt_docx(
     path: Path,
     body: str,

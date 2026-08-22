@@ -13,42 +13,10 @@
  * exporting internals just to test them would widen the API for no one.
  */
 import { describe, it, expect } from "vitest";
-import { createTestDocument } from "./test-utils.js";
-import { parseFastXml } from "./docx/fast-xml.js";
+import { createTestDocument, appendRawXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extract_outline } from "./outline.js";
 import { _extractTextFromDoc } from "./ingest.js";
-
-// Local copy, as in the three sibling repro suites: this helper is duplicated
-// per test file in this package rather than living in test-utils.
-function appendRawXml(doc: DocumentObject, xml: string): void {
-  const target = doc.element.ownerDocument!;
-  const parsed = parseFastXml(xml);
-
-  const importNode = (src: any): any => {
-    if (src.nodeType === 3 || src.nodeType === 4) {
-      return target.createTextNode(src.data ?? src.nodeValue ?? "");
-    }
-    const el = target.createElement(src.tagName);
-    const attrs = src.attributes;
-    if (attrs) {
-      for (let i = 0; i < attrs.length; i++) {
-        const a = attrs[i] ?? attrs.item?.(i);
-        if (a) el.setAttribute(a.name ?? a.nodeName, a.value ?? a.nodeValue);
-      }
-    }
-    const kids = src.childNodes ?? [];
-    for (let i = 0; i < kids.length; i++) {
-      const k = kids[i];
-      if (k.nodeType === 1 || k.nodeType === 3 || k.nodeType === 4) {
-        el.appendChild(importNode(k));
-      }
-    }
-    return el;
-  };
-
-  doc.element.appendChild(importNode(parsed.documentElement));
-}
 
 /** A Heading 1 whose text runs past the 200-char cap, with an inline control
  *  placed so the cut lands inside its `{#cc:N}` anchor.

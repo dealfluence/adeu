@@ -29,27 +29,15 @@ from docx import Document
 
 from adeu.ingest import extract_text_from_stream
 from adeu.redline.mapper import DocumentMapper
-from tests.sdt_fixtures import build_sdt_docx
+from tests.sdt_fixtures import build_sdt_docx, make_checkbox_sdt_xml
 
 CHECKED_GLYPH = "\u2612"
 UNCHECKED_GLYPH = "\u2610"
 
-_MS_GOTHIC = '<w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic"/></w:rPr>'
-
 
 def _checkbox(sdt_id: int, checked: bool, glyph: str | None = None) -> str:
     """A `w14:checkbox` control shaped exactly as Word writes one."""
-    if glyph is None:
-        glyph = CHECKED_GLYPH if checked else UNCHECKED_GLYPH
-    val = "1" if checked else "0"
-    content = f"<w:r>{_MS_GOTHIC}<w:t>{glyph}</w:t></w:r>" if glyph else ""
-    return (
-        f'<w:sdt><w:sdtPr><w:tag w:val="cb{sdt_id}"/><w:id w:val="{sdt_id}"/>'
-        f'<w14:checkbox><w14:checked w14:val="{val}"/>'
-        '<w14:checkedState w14:val="2612" w14:font="MS Gothic"/>'
-        '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>'
-        f"</w14:checkbox></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"
-    )
+    return make_checkbox_sdt_xml(sdt_id, checked, glyph=glyph)
 
 
 def _para(*fragments: str) -> str:

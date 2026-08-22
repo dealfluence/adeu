@@ -744,6 +744,35 @@ export function ccFixtureBytes(
  * looks like a projection bug and is not one. The python twin has no such
  * problem because `Path.read_text()` does universal-newline translation.
  */
+export function appendRawXml(doc: DocumentObject, xml: string): void {
+  const target = doc.element.ownerDocument!;
+  const parsed = parseFastXml(xml);
+
+  const importNode = (src: any): any => {
+    if (src.nodeType === 3 || src.nodeType === 4) {
+      return target.createTextNode(src.data ?? src.nodeValue ?? "");
+    }
+    const el = target.createElement(src.tagName);
+    const attrs = src.attributes;
+    if (attrs) {
+      for (let i = 0; i < attrs.length; i++) {
+        const a = attrs[i] ?? attrs.item?.(i);
+        if (a) el.setAttribute(a.name ?? a.nodeName, a.value ?? a.nodeValue);
+      }
+    }
+    const kids = src.childNodes ?? [];
+    for (let i = 0; i < kids.length; i++) {
+      const k = kids[i];
+      if (k.nodeType === 1 || k.nodeType === 3 || k.nodeType === 4) {
+        el.appendChild(importNode(k));
+      }
+    }
+    return el;
+  };
+
+  doc.element.appendChild(importNode(parsed.documentElement));
+}
+
 export function ccGolden(section: string): string {
   const md = readFileSync(
     resolve(
@@ -757,4 +786,46 @@ export function ccGolden(section: string): string {
   ).exec(md);
   if (!m) throw new Error(`golden section not found: ${section}`);
   return m[1].replace(/\n+$/, "");
+}
+
+export function makeSdtXml(opts: {
+  sdtId?: string | number;
+  alias?: string;
+  tag?: string;
+  content?: string;
+  sdtTypeXml?: string;
+  lock?: string;
+  temporary?: boolean;
+  showingPlcHdr?: boolean;
+}): string {
+  const parts = ["<w:sdt><w:sdtPr>"];
+  if (opts.alias) parts.push(`<w:alias w:val="${opts.alias}"/>`);
+  if (opts.tag) parts.push(`<w:tag w:val="${opts.tag}"/>`);
+  parts.push(`<w:id w:val="${opts.sdtId ?? 100}"/>`);
+  if (opts.lock) parts.push(`<w:lock w:val="${opts.lock}"/>`);
+  if (opts.temporary) parts.push("<w:temporary/>");
+  if (opts.showingPlcHdr) parts.push("<w:showingPlcHdr/>");
+  parts.push(opts.sdtTypeXml ?? "<w:text/>");
+  parts.push(`</w:sdtPr><w:sdtContent>${opts.content ?? ""}</w:sdtContent></w:sdt>`);
+  return parts.join("");
+}
+
+export function makeCheckboxSdtXml(
+  sdtId: string | number,
+  checked: boolean,
+  alias?: string,
+  tag?: string,
+  glyph?: string,
+): string {
+  const val = checked ? "1" : "0";
+  const g = glyph === undefined ? (checked ? "\u2612" : "\u2610") : glyph;
+  const content = g ? `<w:r><w:rPr><w:rFonts w:ascii="MS Gothic" w:eastAsia="MS Gothic" w:hAnsi="MS Gothic"/></w:rPr><w:t>${g}</w:t></w:r>` : "";
+  const typeXml = `<w14:checkbox><w14:checked w14:val="${val}"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox>`;
+  return makeSdtXml({
+    sdtId,
+    alias: alias ?? `cb${sdtId}`,
+    tag: tag ?? `cb${sdtId}`,
+    content,
+    sdtTypeXml: typeXml,
+  });
 }

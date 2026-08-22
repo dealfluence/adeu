@@ -30,7 +30,7 @@
 
 import { describe, it, expect } from "vitest";
 import { parseFastXml } from "./docx/fast-xml.js";
-import { createTestDocument, addParagraph } from "./test-utils.js";
+import { createTestDocument, addParagraph, appendRawXml } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { findAllDescendants, findChild } from "./docx/dom.js";
 import { extractTextFromBuffer } from "./ingest.js";
@@ -107,44 +107,6 @@ const TABLE_XML = `<w:tbl ${NS}>
     </w:sdtContent>
   </w:sdt>
 </w:tbl>`;
-
-/**
- * Appends a raw XML fragment to the body.
- *
- * Built by re-creating nodes through the target document's own factory rather
- * than importNode/adoptNode: the engine's DOM is the fast-xml shim
- * (src/docx/fast-xml.ts), which implements neither. Only createElement,
- * setAttribute and createTextNode are used, so this works on any of the DOM
- * implementations the engine has shipped.
- */
-function appendRawXml(doc: DocumentObject, xml: string): void {
-  const target = doc.element.ownerDocument!;
-  const parsed = parseFastXml(xml);
-
-  const importNode = (src: any): any => {
-    if (src.nodeType === 3 || src.nodeType === 4) {
-      return target.createTextNode(src.data ?? src.nodeValue ?? "");
-    }
-    const el = target.createElement(src.tagName);
-    const attrs = src.attributes;
-    if (attrs) {
-      for (let i = 0; i < attrs.length; i++) {
-        const a = attrs[i] ?? attrs.item?.(i);
-        if (a) el.setAttribute(a.name ?? a.nodeName, a.value ?? a.nodeValue);
-      }
-    }
-    const kids = src.childNodes ?? [];
-    for (let i = 0; i < kids.length; i++) {
-      const k = kids[i];
-      if (k.nodeType === 1 || k.nodeType === 3 || k.nodeType === 4) {
-        el.appendChild(importNode(k));
-      }
-    }
-    return el;
-  };
-
-  doc.element.appendChild(importNode(parsed.documentElement));
-}
 
 async function buildSdtTableDoc(): Promise<Buffer> {
   const doc = await createTestDocument();

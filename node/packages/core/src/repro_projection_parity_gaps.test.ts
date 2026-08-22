@@ -31,37 +31,13 @@ import {
   enableEvenAndOddHeaders,
   corpusBuffer,
   corpusSkipReason,
+  appendRawXml,
 } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extractTextFromBuffer } from "./ingest.js";
 import { DocumentMapper } from "./mapper.js";
 
 const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-
-function appendRawXml(doc: DocumentObject, xml: string): void {
-  const target = doc.element.ownerDocument!;
-  const build = (src: any): any => {
-    if (src.nodeType === 3 || src.nodeType === 4) {
-      return target.createTextNode(src.data ?? src.nodeValue ?? "");
-    }
-    const el = target.createElement(src.tagName);
-    const attrs = src.attributes;
-    if (attrs) {
-      for (let i = 0; i < attrs.length; i++) {
-        const a = attrs[i] ?? attrs.item?.(i);
-        if (a) el.setAttribute(a.name ?? a.nodeName, a.value ?? a.nodeValue);
-      }
-    }
-    const kids = src.childNodes ?? [];
-    for (let i = 0; i < kids.length; i++) {
-      const k = kids[i];
-      if (k.nodeType === 1 || k.nodeType === 3 || k.nodeType === 4)
-        el.appendChild(build(k));
-    }
-    return el;
-  };
-  doc.element.appendChild(build(parseFastXml(xml).documentElement));
-}
 
 /** A paragraph of runs, each `[text, rPrXml]`. */
 function paragraphOf(runs: [string, string][]): string {
