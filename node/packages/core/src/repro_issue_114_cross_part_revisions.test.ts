@@ -24,7 +24,7 @@
 // accept/reject picks the part explicitly.
 
 import { describe, it, expect } from "vitest";
-import { createTestDocument, addParagraph } from "./test-utils.js";
+import { createTestDocument, addParagraph, attachHeaderFooter } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { serializeXml } from "./docx/dom.js";
 import { RedlineEngine, BatchValidationError } from "./engine.js";
@@ -37,11 +37,11 @@ const CT_HEADER =
 /** Adds word/header1.xml holding "HEADER MARKER" plus optional extra OOXML
  *  inside the same w:p (raw node injection, as the 2026-07-18 builders do). */
 function addHeader(doc: DocumentObject, extraInnerXml = "") {
-  doc.pkg.addPart(
-    "/word/header1.xml",
-    CT_HEADER,
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-      `<w:hdr xmlns:w="${W_NS}"><w:p><w:r><w:t xml:space="preserve">HEADER MARKER</w:t></w:r>${extraInnerXml}</w:p></w:hdr>`,
+  attachHeaderFooter(
+    doc,
+    "header",
+    `<w:p><w:r><w:t xml:space="preserve">HEADER MARKER</w:t></w:r>${extraInnerXml}</w:p>`,
+    { path: "/word/header1.xml" },
   );
 }
 
