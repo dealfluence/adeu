@@ -43,21 +43,22 @@ def _project(data: bytes, clean_view: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _run_fetch_script(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "fetch_corpus.py"), *args],
+        capture_output=True,
+        encoding=CLI_OUTPUT_ENCODING,
+        cwd=REPO_ROOT,
+    )
+
+
 def test_a5_9_fetch_corpus_list_reports_every_manifest_key():
     """`fetch_corpus.py --list` exits 0 and reports presence per manifest key.
 
     The one part of the corpus machinery that must work on a machine with no
     corpus and no network — it is how a developer finds out what to download.
     """
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "fetch_corpus.py"), "--list"],
-        capture_output=True,
-        # Explicit: the default decodes with the host ANSI code page and dies in
-        # a reader thread on Windows (see run_cli's docstring).
-        encoding=CLI_OUTPUT_ENCODING,
-        cwd=REPO_ROOT,
-    )
-
+    result = _run_fetch_script("--list")
     assert result.returncode == 0, result.stderr
     keys = json.loads(CORPUS_MANIFEST.read_text(encoding="utf-8"))["documents"]
     for key in keys:
@@ -72,18 +73,7 @@ def test_a5_9_fetch_corpus_rejects_an_unknown_key():
     `--only` naming a key that does not exist is the shape that would otherwise
     let the optional CI job "succeed" having downloaded nothing at all.
     """
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "fetch_corpus.py"),
-            "--only",
-            "no_such_document",
-        ],
-        capture_output=True,
-        encoding=CLI_OUTPUT_ENCODING,
-        cwd=REPO_ROOT,
-    )
-
+    result = _run_fetch_script("--only", "no_such_document")
     assert result.returncode == 2
     assert "unknown manifest key" in result.stderr
     assert "known keys:" in result.stderr, "the error must be self-service"
