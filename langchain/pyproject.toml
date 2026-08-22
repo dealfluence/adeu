@@ -1,6 +1,6 @@
 [project]
 name = "langchain-adeu"
-version = "2.4.1"
+version = "3.0.0"
 description = "LangChain integration for Adeu — track-changes for DOCX in the LLM era"
 authors = [
     { name = "Mikko Korpela" },
