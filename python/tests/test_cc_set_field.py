@@ -17,21 +17,14 @@ from tests.cc_fixture import (
     SHAREPOINT_STORE_AMBIGUOUS,
     SHAREPOINT_STORE_DEFAULT_NS,
     cc_fixture_bytes,
+    extract_fixture_text,
+    load_cc_fixture_doc_and_text,
 )
 
 
 @pytest.fixture(scope="module")
 def entries():
-    import io
-
-    from docx import Document
-
-    from adeu.ingest import _extract_text_from_doc
-
-    doc = Document(io.BytesIO(cc_fixture_bytes()))
-    text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
-    if isinstance(text, tuple):
-        text = text[0]
+    doc, text = load_cc_fixture_doc_and_text()
     return collect_fields(doc, text, None)
 
 
@@ -212,26 +205,12 @@ class TestA41FillEmptyTextField:
         assert rep["field"] == 'CC:2 "Client Name" (tag: client_name)'
 
     def test_raw_view_shows_the_insertion_inside_the_anchor_pair(self, filled):
-        import io
-
         raw, _ = filled
-        from adeu.ingest import extract_text_from_stream
-
-        text = extract_text_from_stream(io.BytesIO(raw), clean_view=False, include_appendix=False)
-        if isinstance(text, tuple):
-            text = text[0]
-        assert "{#cc:2}{++Acme Legal Services Ltd.++}" in text
+        assert "{#cc:2}{++Acme Legal Services Ltd.++}" in extract_fixture_text(raw, clean_view=False)
 
     def test_clean_view_shows_the_value_as_settled_text(self, filled):
-        import io
-
         raw, _ = filled
-        from adeu.ingest import extract_text_from_stream
-
-        text = extract_text_from_stream(io.BytesIO(raw), clean_view=True, include_appendix=False)
-        if isinstance(text, tuple):
-            text = text[0]
-        assert "{#cc:2}Acme Legal Services Ltd.{#/cc:2}" in text
+        assert "{#cc:2}Acme Legal Services Ltd.{#/cc:2}" in extract_fixture_text(raw, clean_view=True)
 
 
 # ---------------------------------------------------------------------------
@@ -486,13 +465,7 @@ class TestA46Checkbox:
         assert _saved_sdt(raw, 6).find(f".//{W14}checked").get(f"{W14}val") == "1"
 
     def _raw_line(self, raw):
-        import io
-
-        from adeu.ingest import extract_text_from_stream
-
-        text = extract_text_from_stream(io.BytesIO(raw), clean_view=False, include_appendix=False)
-        if isinstance(text, tuple):
-            text = text[0]
+        text = extract_fixture_text(raw, clean_view=False)
         return next(ln for ln in text.split("\n") if "Confidentiality" in ln)
 
     def test_raw_view_shows_the_pending_toggle(self, unchecked):
@@ -1030,16 +1003,12 @@ class TestA410TextFirstParity:
 
     @staticmethod
     def _text_first(tmp_path):
-        import io
-
-        from adeu.ingest import extract_text_from_stream
         from adeu.text_revision import apply_text_revision_core
 
         src = tmp_path / "cc.docx"
-        src.write_bytes(cc_fixture_bytes())
-        clean = extract_text_from_stream(io.BytesIO(src.read_bytes()), clean_view=True, include_appendix=False)
-        if isinstance(clean, tuple):
-            clean = clean[0]
+        raw_bytes = cc_fixture_bytes()
+        src.write_bytes(raw_bytes)
+        clean = extract_fixture_text(raw_bytes, clean_view=True)
         assert "{#cc:2}{#/cc:2}" in clean, "the empty pair is the edit surface A4.10 describes"
         revised = clean.replace("{#cc:2}{#/cc:2}", "{#cc:2}Acme Legal Services Ltd.{#/cc:2}")
         _res, out = apply_text_revision_core(src, revised, output_path=tmp_path / "out.docx", author="Test Author")

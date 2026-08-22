@@ -7,10 +7,9 @@
  * for character rather than asserting "contains".
  */
 import { describe, it, expect } from "vitest";
-import { ccFixtureBytes, ccGolden } from "./test-utils.js";
+import { ccFixtureBytes, ccGolden, loadCcFixtureDocAndText } from "./test-utils.js";
 import { heading_path_at } from "./outline.js";
 import { DocumentObject } from "./docx/bridge.js";
-import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import {
   collectFields,
@@ -27,10 +26,7 @@ import {
 const PLAIN_BODY = "<w:p><w:r><w:t>Plain paragraph.</w:t></w:r></w:p>";
 
 async function load(protection?: any, bodyXml?: string) {
-  const buf = Buffer.from(ccFixtureBytes(protection, bodyXml));
-  const doc = await DocumentObject.load(buf);
-  const text = await extractTextFromBuffer(buf, false, false);
-  return { doc, text };
+  return loadCcFixtureDocAndText(protection, bodyXml);
 }
 
 async function ledger(

@@ -260,3 +260,22 @@ def cc_fixture_bytes(
                 "</Relationships>",
             )
     return buf.getvalue()
+
+
+def extract_fixture_text(raw_bytes: bytes, clean_view: bool = False) -> str:
+    """Extract raw or clean projection text from package bytes."""
+    from adeu.ingest import extract_text_from_stream
+
+    text = extract_text_from_stream(io.BytesIO(raw_bytes), clean_view=clean_view, include_appendix=False)
+    return text[0] if isinstance(text, tuple) else text
+
+
+def load_cc_fixture_doc_and_text(protection: str | None = None, body_xml: str | None = None):
+    """Load a Document instance and raw projection text for the CC fixture."""
+    from docx import Document
+
+    from adeu.ingest import _extract_text_from_doc
+
+    doc = Document(io.BytesIO(cc_fixture_bytes(protection=protection, body_xml=body_xml)))
+    text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
+    return doc, (text[0] if isinstance(text, tuple) else text)

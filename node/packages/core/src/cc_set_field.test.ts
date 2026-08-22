@@ -8,6 +8,8 @@
 import { describe, it, expect } from "vitest";
 import {
   ccFixtureBytes,
+  extractCcFixtureText,
+  loadCcFixtureDocAndText,
   CC_SHAREPOINT_BOUND_BODY,
   CC_SHAREPOINT_PREFIX_MAPPINGS,
   CC_SHAREPOINT_STORE,
@@ -16,7 +18,6 @@ import {
 } from "./test-utils.js";
 import { parsePrefixMappings } from "./utils/field-write.js";
 import { DocumentObject } from "./docx/bridge.js";
-import { extractTextFromBuffer } from "./ingest.js";
 import { RedlineEngine } from "./engine.js";
 import { collectFields, resolveField, FieldResolutionError, type FieldEntry } from "./fields.js";
 import { parseXml, findAllDescendants } from "./docx/dom.js";
@@ -25,10 +26,8 @@ import { unzipSync, strFromU8 } from "fflate";
 const W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
 
 async function entriesOf(): Promise<FieldEntry[]> {
-  const buf = Buffer.from(ccFixtureBytes());
-  const doc = await DocumentObject.load(buf);
-  const text = await extractTextFromBuffer(buf, false, false);
-  return collectFields(doc, typeof text === "string" ? text : (text as any).text);
+  const { doc, text } = await loadCcFixtureDocAndText();
+  return collectFields(doc, text);
 }
 
 /** Run one `set_field` through the real batch pipeline; return saved bytes. */
@@ -218,16 +217,12 @@ describe("A4.1 — fill an empty text field by tag", () => {
 
   it("shows the insertion inside the anchor pair in the raw view", async () => {
     const { saved } = await filled();
-    const text = await extractTextFromBuffer(saved, false, false);
-    const s = typeof text === "string" ? text : (text as any).text;
-    expect(s).toContain("{#cc:2}{++Acme Legal Services Ltd.++}");
+    expect(await extractCcFixtureText(saved, false)).toContain("{#cc:2}{++Acme Legal Services Ltd.++}");
   });
 
   it("shows the value as settled text in the clean view", async () => {
     const { saved } = await filled();
-    const text = await extractTextFromBuffer(saved, true, false);
-    const s = typeof text === "string" ? text : (text as any).text;
-    expect(s).toContain("{#cc:2}Acme Legal Services Ltd.{#/cc:2}");
+    expect(await extractCcFixtureText(saved, true)).toContain("{#cc:2}Acme Legal Services Ltd.{#/cc:2}");
   });
 });
 
@@ -330,8 +325,7 @@ describe("A4.6 — the checkbox toggle", () => {
 
   const rawLine = async () => {
     const { saved } = await unchecked();
-    const text = await extractTextFromBuffer(saved, false, false);
-    const s = typeof text === "string" ? text : (text as any).text;
+    const s = await extractCcFixtureText(saved, false);
     return s.split("\n").find((l: string) => l.includes("Confidentiality"))! as string;
   };
 
@@ -366,8 +360,7 @@ describe("A4.6 — the checkbox toggle", () => {
   it("shows exactly one checkbox in the clean view", async () => {
     // The deleted half must not leave a second, permanently empty box.
     const { saved } = await unchecked();
-    const text = await extractTextFromBuffer(saved, true, false);
-    const s = typeof text === "string" ? text : (text as any).text;
+    const s = await extractCcFixtureText(saved, true);
     const line = s.split("\n").find((l: string) => l.includes("Confidentiality"))!;
     expect((line.match(/\[/g) || []).length).toBe(1);
     expect((line.match(/\]/g) || []).length).toBe(1);
@@ -703,8 +696,7 @@ describe("A4.9 — a temporary control unwraps on fill", () => {
   it("drops it from the ledger", async () => {
     const { saved } = await filled();
     const doc = await DocumentObject.load(saved);
-    const text = await extractTextFromBuffer(saved, false, false);
-    const s = typeof text === "string" ? text : (text as any).text;
+    const s = await extractCcFixtureText(saved, false);
     expect(collectFields(doc, s)).toEqual([]);
   });
 

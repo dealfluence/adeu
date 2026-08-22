@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 
 import pytest
-from docx import Document
 
 from adeu.fields import (
     collect_fields,
@@ -24,7 +23,9 @@ from adeu.fields import (
     summary_counts,
 )
 from adeu.ingest import _extract_text_from_doc
-from tests.cc_fixture import cc_fixture_bytes
+from tests.cc_fixture import cc_fixture_bytes, load_cc_fixture_doc_and_text
+
+_load = load_cc_fixture_doc_and_text
 
 _FIXTURE_STANDARD = Path(__file__).resolve().parents[2] / "shared" / "fixtures" / "fixture-standard.md"
 
@@ -37,17 +38,8 @@ def golden(section: str) -> str:
     return m.group(1).rstrip("\n")
 
 
-def _load(protection=None, body_xml=None):
-    raw = cc_fixture_bytes(protection=protection, body_xml=body_xml)
-    doc = Document(io.BytesIO(raw))
-    text = _extract_text_from_doc(doc, clean_view=False, include_appendix=False)
-    if isinstance(text, tuple):
-        text = text[0]
-    return doc, text
-
-
 def _ledger(protection=None, body_xml=None, offset=0, name="cc_fixture.docx"):
-    doc, text = _load(protection, body_xml)
+    doc, text = load_cc_fixture_doc_and_text(protection, body_xml)
     entries = collect_fields(doc, text, None)
     return render_ledger(name, entries, read_document_protection(doc), offset=offset)
 

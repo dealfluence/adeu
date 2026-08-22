@@ -5,6 +5,7 @@ import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import { DocumentObject } from './docx/bridge.js';
 import { parseFastXml } from './docx/fast-xml.js';
 import { isWordReadableLongHexNumber } from './docx/long-hex-number.js';
+import { extractTextFromBuffer } from './ingest.js';
 
 const _filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
 const _dirname = typeof __dirname !== 'undefined' ? __dirname : dirname(_filename);
@@ -828,4 +829,23 @@ export function makeCheckboxSdtXml(
     content,
     sdtTypeXml: typeXml,
   });
+}
+
+export async function extractCcFixtureText(
+  buf: Buffer,
+  cleanView: boolean = false,
+): Promise<string> {
+  const text = await extractTextFromBuffer(buf, cleanView, false);
+  return typeof text === 'string' ? text : (text as any).text;
+}
+
+export async function loadCcFixtureDocAndText(
+  protection?: 'forms' | 'readOnly' | 'comments' | 'trackedChanges',
+  bodyXml?: string,
+  customXml?: string,
+): Promise<{ doc: DocumentObject; text: string }> {
+  const buf = Buffer.from(ccFixtureBytes(protection, bodyXml, '1', customXml));
+  const doc = await DocumentObject.load(buf);
+  const text = await extractCcFixtureText(buf, false);
+  return { doc, text };
 }
