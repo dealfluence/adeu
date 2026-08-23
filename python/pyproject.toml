@@ -24,7 +24,7 @@ dependencies = [
     "pydantic>=2.12",
     "lxml>=5.0.0",
     "diff-match-patch>=20230430",
-    "fastmcp[apps]==4.0.0b1",
+    "fastmcp[apps]==4.0.0b3",
     "jinja2>=3.1.6",
     "pywin32; sys_platform == 'win32'",
     "rapidfuzz>=3.14.5",
