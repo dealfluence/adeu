@@ -87,7 +87,7 @@ def _batch_tool_schema() -> dict:
 
     tools = asyncio.run(mcp.list_tools())
     tool = next(t for t in tools if t.name == "process_document_batch")
-    schema = getattr(tool, "input_schema", None) or getattr(tool, "parameters", None)
+    schema = getattr(tool, "inputSchema", None) or getattr(tool, "parameters", None)
     assert schema, "process_document_batch published no input schema"
     return schema
 
