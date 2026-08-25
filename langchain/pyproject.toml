@@ -54,10 +54,6 @@ test = [
     "langchain-tests>=0.3.0",
 ]
 
-# FastMCP 4 is a prerelease; `fastmcp-slim` arrives transitively through `adeu`.
-[tool.uv]
-constraint-dependencies = ["fastmcp-slim==4.0.0b1"]
-
 # Local development: use the sibling adeu package directly so changes
 # to the core SDK are picked up without republishing. Published wheels
 # resolve `adeu` from PyPI as declared in [project.dependencies].
