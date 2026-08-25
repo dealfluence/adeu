@@ -24,7 +24,7 @@ dependencies = [
     "pydantic>=2.12",
     "lxml>=5.0.0",
     "diff-match-patch>=20230430",
-    "fastmcp[apps]==4.0.0b1",
+    "fastmcp[apps]>=3.4.7,<4",
     "jinja2>=3.1.6",
     "pywin32; sys_platform == 'win32'",
     "rapidfuzz>=3.14.5",
@@ -39,14 +39,6 @@ Repository = "https://github.com/dealfluence/adeu"
 [project.scripts]
 adeu = "adeu.cli:main"
 adeu-server = "adeu.server:main"
-
-# FastMCP 4 is a prerelease. uv only allows prereleases for packages named
-# directly, and `fastmcp` pulls `fastmcp-slim` transitively at the same
-# version, so the constraint has to be spelled out here. Do NOT add an
-# `mcp` constraint: mcp 2.0.0 ships stable and a prerelease pin there makes
-# the resolution unsatisfiable.
-[tool.uv]
-constraint-dependencies = ["fastmcp-slim==4.0.0b1"]
 
 [build-system]
 requires = ["hatchling"]

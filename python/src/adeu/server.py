@@ -69,7 +69,7 @@ logo_path = Path(__file__).parent / "assets" / "logo.png"
 if logo_path.exists():
     try:
         img = Image(path=str(logo_path))
-        server_icons.append(Icon(src=img.to_data_uri(), mime_type="image/png"))
+        server_icons.append(Icon(src=img.to_data_uri(), mimeType="image/png"))
     except Exception as e:
         logging.warning(f"Failed to load server icon: {e}")
 
@@ -84,16 +84,20 @@ class AdeuBuildTag(Transform):
     """Appends the build stamp to every listed tool description and applies
     the `--scope` tag filter.
 
-    Replaces the FastMCP 3-era monkeypatching of `provider.list_tools` and
-    `FastMCP.list_tools`; `Transform` is the supported v4 seam for altering
-    how components are presented (spec: Transforms Overview -> Custom
-    Transforms). `list_tools` is a pure function in v4, so tools are copied
-    rather than mutated in place.
+    `Transform` is FastMCP's supported seam for altering how components are
+    presented, and it exists on the 3.4 line as well as on 4.x: server-level
+    transforms are applied inside `Provider.list_tools()`, which
+    `FastMCP.list_tools()` calls, so both a real client and the internal
+    `list_tools()` see the tagged descriptions. It replaces the older
+    monkeypatching of `provider.list_tools` / `FastMCP.list_tools`.
 
-    Only `list_tools` is overridden, deliberately: the 3.x code filtered by
-    scope on LISTING only, never on `get_tool`, so a scoped-out tool stayed
-    callable by name. Overriding `get_tool` here would silently tighten
-    that; scope is a presentation hint, not an access control.
+    `list_tools` is a pure function here, so tools are copied
+    (`model_copy`) rather than mutated in place.
+
+    Only `list_tools` is overridden, deliberately: the pre-transform code
+    filtered by scope on LISTING only, never on `get_tool`, so a scoped-out
+    tool stayed callable by name. Overriding `get_tool` here would silently
+    tighten that; scope is a presentation hint, not an access control.
     """
 
     async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
