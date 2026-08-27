@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-adeu",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "n8n community node for Adeu — apply AI-driven tracked changes, generate diffs, and sanitize Microsoft Word (.docx) documents.",
   "keywords": [
     "n8n-community-node-package",
@@ -49,7 +49,7 @@
     "n8n-workflow": "*"
   },
   "devDependencies": {
-    "@adeu/core": "^3.0.1",
+    "@adeu/core": "^3.0.2",
     "@n8n/eslint-plugin-community-nodes": "^0.29.0",
     "@types/node": "^26.2.0",
     "@typescript-eslint/parser": "^8.67.0",
