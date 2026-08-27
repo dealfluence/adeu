@@ -742,12 +742,16 @@ export function extract_comments_data(pkg: DocxPackage): Record<string, any> {
   } as unknown as DocumentObject;
   
   const mgr = new CommentsManager(docObj);
-  const data: Record<string, any> = {};
+  // Null-prototype: keyed on w:id / w14:paraId values read out of the package.
+  // On a `{}` literal, an id of "__proto__" hits the prototype setter (the
+  // comment is silently dropped) and an id of "constructor" makes the
+  // `data[c_id]` guard below true, writing parent_id onto the global Object.
+  const data: Record<string, any> = Object.create(null);
   
   const part = pkg.parts.find(p => p.contentType === CT.COMMENTS);
   if (!part) return data;
 
-  const para_id_to_cid: Record<string, string> = {};
+  const para_id_to_cid: Record<string, string> = Object.create(null);
   const comments = findAllDescendants(part._element, 'w:comment');
 
   for (const c of comments) {
