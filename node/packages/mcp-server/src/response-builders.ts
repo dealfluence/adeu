@@ -1075,7 +1075,11 @@ export function build_search_response(
   const total_matches = all_hits.length;
 
   // Global occurrence map and page distribution — never filtered.
-  const occurrences_map: Record<string, number> = {};
+  // Null-prototype: keyed on the matched document substring, so a query for
+  // "constructor" or "toString" must not resolve through Object.prototype —
+  // `(occurrences_map[hit.text] || 0) + 1` would string-concatenate onto the
+  // inherited member and render a stringified function as the count.
+  const occurrences_map: Record<string, number> = Object.create(null);
   const page_distribution = new Map<number, number>();
   for (const hit of all_hits) {
     occurrences_map[hit.text] = (occurrences_map[hit.text] || 0) + 1;
