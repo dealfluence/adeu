@@ -452,10 +452,13 @@ export function build_paragraph_text(
   sdtInfos?: Map<any, SdtInfo>,
 ): string {
   const parts: string[] = [];
-  const active_ins: Record<string, DocxEvent> = {};
-  const active_del: Record<string, DocxEvent> = {};
+  // Null-prototype: keyed on revision w:id from the document. On a `{}` literal
+  // an id of "__proto__" would set the prototype instead of registering the
+  // revision, and the run's {++…++} wrapper would be lost.
+  const active_ins: Record<string, DocxEvent> = Object.create(null);
+  const active_del: Record<string, DocxEvent> = Object.create(null);
   const active_comments: Set<string> = new Set();
-  const active_fmt: Record<string, DocxEvent> = {};
+  const active_fmt: Record<string, DocxEvent> = Object.create(null);
   const deferred_meta_states: any[] = [];
   /**
    * A change annotation built but held back because the checkbox it belongs to

@@ -786,9 +786,10 @@ export class DocumentMapper {
     this.spans.push(span);
 
     const active_ids = new Set<string>();
-    const active_ins: Record<string, DocxEvent> = {};
-    const active_del: Record<string, DocxEvent> = {};
-    const active_fmt: Record<string, DocxEvent> = {};
+    // Null-prototype: keyed on revision w:id (mirrors ingest.ts).
+    const active_ins: Record<string, DocxEvent> = Object.create(null);
+    const active_del: Record<string, DocxEvent> = Object.create(null);
+    const active_fmt: Record<string, DocxEvent> = Object.create(null);
 
     let deferred_meta_states: any[] = [];
     /**

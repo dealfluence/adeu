@@ -173,9 +173,13 @@ export function _get_style_cache(
     return pkg._adeu_style_cache;
   }
 
-  const cache: Record<string, any> = {};
+  // Null-prototype: keyed on w:styleId. On a `{}` literal, a document with a
+  // style named "constructor" makes `if (cache[s_id]) return cache[s_id]`
+  // (below) hand the Object constructor back as a resolved style, and
+  // outline.ts then reads .name/.outline_level off it as undefined.
+  const cache: Record<string, any> = Object.create(null);
   let default_pstyle: string | null = null;
-  const raw_styles: Record<string, any> = {};
+  const raw_styles: Record<string, any> = Object.create(null);
 
   const stylesPart = pkg?.getPartByPath("word/styles.xml");
   if (!stylesPart) {
@@ -321,7 +325,8 @@ export function _get_numbering_cache(
   if (!pkg) return {};
   if (pkg._adeu_numbering_cache) return pkg._adeu_numbering_cache;
 
-  const cache: Record<string, Record<number, string>> = {};
+  // Null-prototype: keyed on w:numId (see _get_style_cache above).
+  const cache: Record<string, Record<number, string>> = Object.create(null);
   let numbering_root: Element | null = null;
   try {
     const numberingPart = (pkg.parts || []).find((p: any) =>
@@ -333,7 +338,10 @@ export function _get_numbering_cache(
   }
 
   if (numbering_root) {
-    const abstract_fmts: Record<string, Record<number, string>> = {};
+    // Null-prototype: keyed on w:abstractNumId; the `!== undefined` guard below
+    // would otherwise accept an inherited member as a real level map.
+    const abstract_fmts: Record<string, Record<number, string>> =
+      Object.create(null);
     for (const abstract of findAllDescendants(numbering_root, "w:abstractNum")) {
       const a_id = abstract.getAttribute("w:abstractNumId");
       if (a_id === null) continue;
