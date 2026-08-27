@@ -96,7 +96,13 @@ export function coerceChangeItemInPlace(item: any): void {
     if (typeof raw !== "string") {
       delete item.match_mode;
     } else {
-      const mapped = MATCH_MODE_SYNONYMS[raw.trim().toLowerCase()];
+      // Own keys only: `raw` is caller-supplied, so "constructor" and
+      // "__proto__" must miss the table (and be dropped) instead of resolving
+      // through Object.prototype and being assigned as a match_mode.
+      const key = raw.trim().toLowerCase();
+      const mapped = Object.hasOwn(MATCH_MODE_SYNONYMS, key)
+        ? MATCH_MODE_SYNONYMS[key]
+        : undefined;
       if (mapped === undefined) delete item.match_mode;
       else item.match_mode = mapped;
     }
