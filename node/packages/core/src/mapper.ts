@@ -75,7 +75,11 @@ export interface TextSpan {
 export function renumber_snapshot_ids(
   doc: DocumentObject,
 ): [Record<string, string>, Record<string, string>] {
-  const chg_remap: Record<string, string> = {};
+  // Null-prototype: keyed on w:id values read out of the document, so an id of
+  // "constructor" or "__proto__" must not resolve through Object.prototype —
+  // that made the presence check below true and wrote the stringified
+  // prototype member into w:id, producing invalid OOXML.
+  const chg_remap: Record<string, string> = Object.create(null);
   let next_chg = 1;
   const body_root = doc.element;
 
@@ -100,7 +104,7 @@ export function renumber_snapshot_ids(
     next_chg++;
   }
 
-  const com_remap: Record<string, string> = {};
+  const com_remap: Record<string, string> = Object.create(null);
   let next_com = 1;
   const comments_part = doc.pkg.parts.find(
     (p) =>
