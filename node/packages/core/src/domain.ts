@@ -111,12 +111,18 @@ export function extract_all_domain_metadata(
   string[],
   Record<string, { anchored_to: string; referenced_from: string[] }>,
 ] {
-  const definitions: Record<string, { count: number }> = {};
+  // Null-prototype throughout: these dictionaries are keyed on strings taken
+  // from the document (defined terms, w:bookmarkStart/@w:name), so a name like
+  // "toString" or "constructor" must be an ordinary entry. On a `{}` literal
+  // the presence checks below read Object.prototype instead: the anchor is
+  // never registered, and the REF back-fill at the bottom of this function then
+  // dies in `raw_anchors[target].referenced_from.push(...)`.
+  const definitions: Record<string, { count: number }> = Object.create(null);
   const duplicates = new Set<string>();
   const raw_anchors: Record<
     string,
     { anchored_to: string; referenced_from: string[] }
-  > = {};
+  > = Object.create(null);
   const raw_references: [string, string][] = [];
 
   for (const item of iter_block_items(doc)) {
@@ -240,7 +246,7 @@ export function extract_all_domain_metadata(
     terms_by_first_letter[fl].push(term);
   }
 
-  const candidates_by_term: Record<string, string[]> = {};
+  const candidates_by_term: Record<string, string[]> = Object.create(null);
 
   for (const raw_candidate of all_caps) {
     let candidate = raw_candidate.trim();
