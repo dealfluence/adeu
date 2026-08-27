@@ -32,12 +32,15 @@ export function getNestedProperty(
   obj: Record<string, unknown>,
   path: string,
 ): unknown {
-  return path.split(".").reduce((acc, part) => {
-    if (acc && typeof acc === "object") {
-      return (acc as Record<string, unknown>)[part];
-    }
-    return undefined;
-  }, obj as unknown);
+  return path.split(".").reduce<unknown>((acc, part) => {
+    // Own properties only: the path is a user-supplied node parameter, so a
+    // segment like "constructor" or "__proto__" must resolve to undefined —
+    // which surfaces the actionable "No property … found" error in
+    // applyEdits.operation.ts — instead of leaking an Object.prototype member.
+    if (typeof acc !== "object" || acc === null) return undefined;
+    if (!Object.hasOwn(acc, part)) return undefined;
+    return (acc as Record<string, unknown>)[part];
+  }, obj);
 }
 
 /**
@@ -324,7 +327,12 @@ export function coerceChangeItemInPlace(item: any): void {
     if (typeof raw !== "string") {
       delete item.match_mode;
     } else {
-      const mapped = MATCH_MODE_SYNONYMS[raw.trim().toLowerCase()];
+      // Own keys only: "constructor" and "__proto__" must miss the table and be
+      // dropped, not resolve through Object.prototype.
+      const key = raw.trim().toLowerCase();
+      const mapped = Object.hasOwn(MATCH_MODE_SYNONYMS, key)
+        ? MATCH_MODE_SYNONYMS[key]
+        : undefined;
       if (mapped === undefined) delete item.match_mode;
       else item.match_mode = mapped;
     }
