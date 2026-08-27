@@ -256,7 +256,15 @@ function _words_to_chars(
   text2: string,
 ): [string, string, string[]] {
   const token_array: string[] = [];
-  const token_hash: Record<string, number> = {};
+  // Null-prototype: the keys are raw document words, so "constructor",
+  // "toString" and "__proto__" must be plain entries. On a `{}` literal they
+  // resolve through Object.prototype — `token in token_hash` is true before the
+  // token has ever been seen, and String.fromCharCode(<inherited value>) is
+  // "\u0000", which decodes back as token_array[0]: the wrong word, and a
+  // decoded length that undercounts the original, shifting _match_start_index
+  // for every later edit. Python's dict (python/src/adeu/diff.py:382) has no
+  // such chain, so this restores dual-engine parity.
+  const token_hash: Record<string, number> = Object.create(null);
 
   // RegExp equivalent to Python's r"(\s+|\w+|[^\w\s])" with unicode support
   const split_pattern = /(\s+|[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s])/gu;
