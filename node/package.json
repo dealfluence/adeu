@@ -30,7 +30,7 @@
     "See BUG_cli_test_encoding_and_n8n_lint_toolchain.md."
   ],
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "tsup": "^8.5.1",
     "typescript": "~6.0.3",
     "vitest": "^4.1.11",
