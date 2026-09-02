@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@adeu/core": "^3.0.2",
-    "@n8n/eslint-plugin-community-nodes": "^0.29.0",
+    "@n8n/eslint-plugin-community-nodes": "^0.30.0",
     "@types/node": "^26.4.0",
     "@typescript-eslint/parser": "^8.68.0",
     "copyfiles": "^2.4.1",
