@@ -1,5 +1,5 @@
 import { DocxPackage, Part, DocumentObject } from './docx/bridge.js';
-import { findAllDescendants, findChild, parseXml } from './docx/dom.js';
+import { findAllDescendants, findChild, findChildren, parseXml } from './docx/dom.js';
 import {
   generateLongHexNumber,
   isWordReadableLongHexNumber,
@@ -19,14 +19,16 @@ const CT = {
   COMMENTS: 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml',
   EXTENDED: 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml',
   IDS: 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml',
-  EXTENSIBLE: 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml'
+  EXTENSIBLE: 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml',
+  STYLES: 'application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'
 };
 
 const RT = {
   COMMENTS: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments',
   EXTENDED: 'http://schemas.microsoft.com/office/2011/relationships/commentsExtended',
   IDS: 'http://schemas.microsoft.com/office/2016/09/relationships/commentsIds',
-  EXTENSIBLE: 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible'
+  EXTENSIBLE: 'http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible',
+  STYLES: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles'
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,45 @@ export const STANDALONE_ID_ATTRIBUTES = [
   'w:rsidP',
   'w:rsidDel',
   'w:rsidTr',
+];
+
+/**
+ * The two styles every comment Adeu writes REFERENCES but never used to
+ * DEFINE. `word/document.xml` wraps each `w:commentReference` in
+ * `<w:rStyle w:val="CommentReference"/>` and every comment paragraph in
+ * `word/comments.xml` carries `<w:pStyle w:val="CommentText"/>`. When
+ * `word/styles.xml` defines neither, Word and LibreOffice silently ignore the
+ * dangling reference and render the marker at the surrounding body size
+ * (11-12pt) instead of the 8pt superscript Word writes natively, and every
+ * extraction tool warns that the ids are referenced but not defined.
+ *
+ * `half_points` is the ECMA-376 `w:sz`/`w:szCs` unit: 16 = 8pt, 20 = 10pt.
+ *
+ * `based_on` is written ONLY when the document already defines that styleId
+ * (see `_buildCommentStyle`). A minimal package —
+ * `shared/fixtures/base.docx` — has no `DefaultParagraphFont`, and pointing at
+ * it there would swap one dangling style reference for another, re-creating the
+ * warning this whole change exists to remove.
+ *
+ * Field-for-field twin of `COMMENT_STYLE_SPECS` in
+ * python/src/adeu/redline/comments.py — snake_case keys included, so the two
+ * literals diff line-for-line. The two engines must emit identical XML.
+ */
+export const COMMENT_STYLE_SPECS: ReadonlyArray<Record<string, string>> = [
+  {
+    style_id: 'CommentReference',
+    type: 'character',
+    name: 'annotation reference',
+    based_on: 'DefaultParagraphFont',
+    half_points: '16',
+  },
+  {
+    style_id: 'CommentText',
+    type: 'paragraph',
+    name: 'annotation text',
+    based_on: 'Normal',
+    half_points: '20',
+  },
 ];
 
 /**
@@ -219,6 +260,121 @@ export class CommentsManager {
         root.setAttribute(attr, uri);
       }
     }
+  }
+
+  /**
+   * Defines `CommentReference` / `CommentText` in word/styles.xml unless the
+   * document already carries them.
+   *
+   * Word resolves `<w:rStyle w:val="CommentReference"/>` against styles.xml and
+   * silently ignores an undefined id, so without these definitions the
+   * reference marker inherits the surrounding run size instead of the 8pt
+   * superscript Word writes natively. See COMMENT_STYLE_SPECS.
+   *
+   * Mirrors `_ensure_comment_styles` in python/src/adeu/redline/comments.py.
+   */
+  private _ensureCommentStyles(): void {
+    const stylesPart = this._getOrCreateStylesPart();
+    const stylesEl = stylesPart._element;
+
+    const definedIds = new Set<string>();
+    const definedNames = new Set<string>();
+    for (const s of findChildren(stylesEl, 'w:style')) {
+      const sid = s.getAttribute('w:styleId');
+      if (sid) definedIds.add(sid);
+      const nameEl = findChild(s, 'w:name');
+      const name = nameEl ? nameEl.getAttribute('w:val') : null;
+      if (name) definedNames.add(name.trim().toLowerCase());
+    }
+
+    const xmlDoc = stylesEl.ownerDocument!;
+    let added = 0;
+    for (const spec of COMMENT_STYLE_SPECS) {
+      if (definedIds.has(spec.style_id)) continue;
+      // The same style under a different id (a renamed or localised template).
+      // A second definition of "annotation reference" is a duplicate, not a fix.
+      if (definedNames.has(spec.name)) continue;
+      // CT_Styles is `docDefaults?, latentStyles?, style*`, so appending last is
+      // always in sequence.
+      stylesEl.appendChild(
+        CommentsManager._buildCommentStyle(xmlDoc, spec, definedIds),
+      );
+      definedIds.add(spec.style_id);
+      definedNames.add(spec.name);
+      added++;
+    }
+
+    if (added === 0) return;
+
+    // The projection's O(1) style cache was built from the styles.xml just
+    // changed (utils/docx.ts _get_style_cache).
+    delete (this.doc.pkg as any)._adeu_style_cache;
+  }
+
+  /**
+   * The document's `<w:styles>` part, created (with its content-type override
+   * and its document relationship) when the package has none.
+   *
+   * Content type first, partname second: a package may keep its styles at a
+   * non-canonical partname, and adding a SECOND styles part next to it would
+   * leave two `styles` relationships for Word to choose between.
+   */
+  private _getOrCreateStylesPart(): Part {
+    const existing =
+      this._getExistingPartByType(CT.STYLES) ??
+      this.doc.pkg.getPartByPath('word/styles.xml');
+    if (existing) return this._linkPart(existing, RT.STYLES);
+
+    const xml = `<w:styles xmlns:w="${NS.w}"></w:styles>`;
+    const part = this.doc.pkg.addPart('/word/styles.xml', CT.STYLES, xml);
+    this.doc.relateTo(part, RT.STYLES);
+    return part;
+  }
+
+  /**
+   * One `<w:style>` in ISO/IEC 29500 CT_Style child order: name, basedOn,
+   * uiPriority, semiHidden, unhideWhenUsed, rPr. Do not reorder.
+   *
+   * Takes the owning document because element creation goes through it; the
+   * Python twin is a plain staticmethod for the same reason lxml does not need
+   * one.
+   */
+  private static _buildCommentStyle(
+    xmlDoc: Document,
+    spec: Record<string, string>,
+    definedIds: Set<string>,
+  ): Element {
+    const style = xmlDoc.createElement('w:style');
+    style.setAttribute('w:type', spec.type);
+    style.setAttribute('w:styleId', spec.style_id);
+
+    const nameEl = xmlDoc.createElement('w:name');
+    nameEl.setAttribute('w:val', spec.name);
+    style.appendChild(nameEl);
+
+    // Only when the base is really defined here — see COMMENT_STYLE_SPECS.
+    if (definedIds.has(spec.based_on)) {
+      const basedOn = xmlDoc.createElement('w:basedOn');
+      basedOn.setAttribute('w:val', spec.based_on);
+      style.appendChild(basedOn);
+    }
+
+    const uiPriority = xmlDoc.createElement('w:uiPriority');
+    uiPriority.setAttribute('w:val', '99');
+    style.appendChild(uiPriority);
+    style.appendChild(xmlDoc.createElement('w:semiHidden'));
+    style.appendChild(xmlDoc.createElement('w:unhideWhenUsed'));
+
+    const rPr = xmlDoc.createElement('w:rPr');
+    const sz = xmlDoc.createElement('w:sz');
+    sz.setAttribute('w:val', spec.half_points);
+    rPr.appendChild(sz);
+    const szCs = xmlDoc.createElement('w:szCs');
+    szCs.setAttribute('w:val', spec.half_points);
+    rPr.appendChild(szCs);
+    style.appendChild(rPr);
+
+    return style;
   }
 
   private _getNextCommentId(): number {
@@ -545,6 +701,11 @@ export class CommentsManager {
         );
       }
     }
+
+    // Define the styles the comment XML below references. AFTER the threading
+    // gate above, never before: an unthreadable reply must leave the document
+    // untouched (B1).
+    this._ensureCommentStyles();
 
     const commentId = this.nextId.toString();
     this.nextId++;
