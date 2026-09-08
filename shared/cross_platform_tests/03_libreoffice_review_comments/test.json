@@ -1,0 +1,5 @@
+{
+  "name": "libreoffice_review_comments",
+  "description": "Producer: LibreOfficeDev 26.8.0.0.alpha0 (build 2c87e51eeaa2b413ff4ae097b2705eea1995d8e5). Projects three existing comments by synthetic foreign reviewers, a table, and header/footer text. LibreOffice table-cell style references and custom XML. No tracked insertions or deletions. Source: Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, evidence/docx-beta/sources/review-heavy-01.docx (MIT).",
+  "read_only": true
+}
