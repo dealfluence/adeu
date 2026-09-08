@@ -1,0 +1,14 @@
+{
+  "name": "agent_table_accept_reject",
+  "description": "Producer: agent editing run t2_pres; engine/model version not recorded in the pinned corpus (package Application: corpus-builder). Using IDs reported by adeu extract: accepts the Agent Discovery-fee replacement EUR 12,000 -> EUR 14,000 via insertion Chg:202 paired with deletion Chg:201; rejects the Delivery-date replacement 2026-12-01 -> 2027-01-15 via deletion Chg:203 paired with insertion Chg:204. Retains inserted row Chg:205, the earlier A. Counsel revisions, two comments and two footnote references. Copied from Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, runs/t2_pres/agreement.docx (sha256 3e86542ed700ae7a7826902da185e0280ab8eab0570f60d9297fcbd23af9e330; MIT), then w:author=\"Claude\" was replaced with w:author=\"Agent\" in word/document.xml (11 occurrences). No other package-part content bytes changed; ZIP entry order and metadata were preserved. Result sha256: 8a75fb6e1297a8e9dd5e7d38faa361d17a62340bd608554e2662fb34ac37ad9a.",
+  "changes": [
+    {
+      "type": "accept",
+      "target_id": "Chg:202"
+    },
+    {
+      "type": "reject",
+      "target_id": "Chg:203"
+    }
+  ]
+}

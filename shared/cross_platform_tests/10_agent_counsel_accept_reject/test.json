@@ -1,0 +1,14 @@
+{
+  "name": "agent_counsel_accept_reject",
+  "description": "Producer: agent editing run t2_bare; engine/model version not recorded in the pinned corpus (package Application: corpus-builder). Using IDs reported by adeu extract: accepts A. Counsel insertion Chg:101 (professional indemnity insurance) and rejects the annual-fee replacement EUR 40,000 -> EUR 44,500 via deletion Chg:102 paired with insertion Chg:103. Two comments and two footnote references remain. Copied from Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, runs/t2_bare/agreement.docx (sha256 08dfdb78f9093526e2021376be992019935a0cb3cfee401505a8464754de6b9a; MIT). t2_bare is unmodified from the corpus, including the original ZIP bytes. Result sha256: 08dfdb78f9093526e2021376be992019935a0cb3cfee401505a8464754de6b9a.",
+  "changes": [
+    {
+      "type": "accept",
+      "target_id": "Chg:101"
+    },
+    {
+      "type": "reject",
+      "target_id": "Chg:102"
+    }
+  ]
+}

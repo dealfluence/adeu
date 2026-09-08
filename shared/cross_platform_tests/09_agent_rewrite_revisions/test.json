@@ -1,0 +1,5 @@
+{
+  "name": "agent_rewrite_revisions",
+  "description": "Producer: agent editing run t5_rewrite_pres; engine/model version not recorded in the pinned corpus (package Application: corpus-builder). Read-only projection of multi-author paragraph rewrites and earlier pending revisions, with two comments, two footnote references, a content control and table preserved. Copied from Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, runs/t5_rewrite_pres/agreement.docx (sha256 cda096d9efad4fbacc7d3fe43d93ea1b641236de12c2692a0aeeee4ac15ca240; MIT), then w:author=\"Claude\" was replaced with w:author=\"Agent\" in word/document.xml (6 occurrences). No other package-part content bytes changed; ZIP entry order and metadata were preserved. Result sha256: 239bb9e0ce5629904bfc9ac2f13910ecf2bff07d3d179c439d530ae3cfb791ab.",
+  "read_only": true
+}

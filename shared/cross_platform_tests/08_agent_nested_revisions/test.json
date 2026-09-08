@@ -1,0 +1,5 @@
+{
+  "name": "agent_nested_revisions",
+  "description": "Producer: agent editing run t1_bare; engine/model version not recorded in the pinned corpus (package Application: corpus-builder). Read-only projection of foreign revisions, including a nested w:ins > w:del, two existing comments, two footnote references, a content control, a table, hyperlink and image placeholder. Copied from Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, runs/t1_bare/agreement.docx (sha256 45e7577092fb7ef730cb1cf2feae5f8f4c047f5db637fe437e636ace89d055e4; MIT), then w:author=\"Claude\" was replaced with w:author=\"Agent\" in word/document.xml (4 occurrences). No other package-part content bytes changed; ZIP entry order and metadata were preserved. Result sha256: aea576d0c6df3fda5aabd55a6b8507a171593fa44db2d69b8184de1954a1105d.",
+  "read_only": true
+}
