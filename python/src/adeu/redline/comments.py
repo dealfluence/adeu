@@ -1,6 +1,6 @@
 import datetime
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import structlog
 from docx.opc.constants import CONTENT_TYPE as CT
@@ -81,6 +81,42 @@ STANDALONE_ID_ATTRIBUTES = (
     "w:rsidP",
     "w:rsidDel",
     "w:rsidTr",
+)
+
+#: The two styles every comment Adeu writes REFERENCES but never used to
+#: DEFINE. `word/document.xml` wraps each `w:commentReference` in
+#: `<w:rStyle w:val="CommentReference"/>` and every comment paragraph in
+#: `word/comments.xml` carries `<w:pStyle w:val="CommentText"/>`. When
+#: `word/styles.xml` defines neither, Word and LibreOffice silently ignore the
+#: dangling reference and render the marker at the surrounding body size
+#: (11-12pt) instead of the 8pt superscript Word writes natively, and every
+#: extraction tool warns that the ids are referenced but not defined.
+#:
+#: `half_points` is the ECMA-376 `w:sz`/`w:szCs` unit: 16 = 8pt, 20 = 10pt.
+#:
+#: `based_on` is written ONLY when the document already defines that styleId
+#: (see `_build_comment_style`). A minimal package —
+#: `shared/fixtures/base.docx` — has no `DefaultParagraphFont`, and pointing at
+#: it there would swap one dangling style reference for another, re-creating the
+#: warning this whole change exists to remove.
+#:
+#: Field-for-field twin of `COMMENT_STYLE_SPECS` in
+#: node/packages/core/src/comments.ts. The two engines must emit identical XML.
+COMMENT_STYLE_SPECS: tuple[Dict[str, str], ...] = (
+    {
+        "style_id": "CommentReference",
+        "type": "character",
+        "name": "annotation reference",
+        "based_on": "DefaultParagraphFont",
+        "half_points": "16",
+    },
+    {
+        "style_id": "CommentText",
+        "type": "paragraph",
+        "name": "annotation text",
+        "based_on": "Normal",
+        "half_points": "20",
+    },
 )
 
 
@@ -358,6 +394,102 @@ class CommentsManager:
         # Replace the matched tag with our new tag(s)
         new_xml = xml_str.replace(original_tag, replacement, 1)
         self._comments_part._element = parse_xml(new_xml)
+
+    def _ensure_comment_styles(self) -> None:
+        """
+        Defines `CommentReference` / `CommentText` in word/styles.xml unless the
+        document already carries them.
+
+        Word resolves `<w:rStyle w:val="CommentReference"/>` against
+        styles.xml and silently ignores an undefined id, so without these
+        definitions the reference marker inherits the surrounding run size
+        instead of the 8pt superscript Word writes natively. See
+        COMMENT_STYLE_SPECS.
+
+        `doc.part.styles` CREATES /word/styles.xml from python-docx's default
+        template when the package has none, and python-docx rebuilds
+        [Content_Types].xml from the part list and writes the relationship at
+        save time — so the missing-part case needs nothing extra here.
+        """
+        try:
+            styles_el = self.doc.part.styles.element
+        except Exception as e:
+            logger.warning("Cannot reach word/styles.xml; comment styles not ensured", error=str(e))
+            return
+
+        existing = styles_el.findall(qn("w:style"))
+        defined_ids = {s.get(qn("w:styleId")) for s in existing}
+        defined_names = set()
+        for s in existing:
+            name_el = s.find(qn("w:name"))
+            if name_el is None:
+                continue
+            val = name_el.get(qn("w:val"))
+            if val:
+                defined_names.add(val.strip().lower())
+
+        added = []
+        for spec in COMMENT_STYLE_SPECS:
+            if spec["style_id"] in defined_ids:
+                continue
+            if spec["name"] in defined_names:
+                # The same style under a different id (a renamed or localised
+                # template). A second definition of "annotation reference" is a
+                # duplicate, not a fix.
+                continue
+            # CT_Styles is `docDefaults?, latentStyles?, style*`, so appending
+            # last is always in sequence.
+            styles_el.append(self._build_comment_style(spec, defined_ids))
+            defined_ids.add(spec["style_id"])
+            defined_names.add(spec["name"])
+            added.append(spec["style_id"])
+
+        if not added:
+            return
+
+        # The projection's O(1) style cache was built from the styles.xml just
+        # changed (adeu.utils.docx._get_style_cache).
+        package = self.doc.part.package
+        if hasattr(package, "_adeu_style_cache"):
+            del package._adeu_style_cache
+        logger.info("Defined missing comment styles in word/styles.xml", styles=added)
+
+    @staticmethod
+    def _build_comment_style(spec: Dict[str, str], defined_ids: set) -> Any:
+        """
+        One `<w:style>` in ISO/IEC 29500 CT_Style child order: name, basedOn,
+        uiPriority, semiHidden, unhideWhenUsed, rPr. Do not reorder.
+        """
+        style = OxmlElement("w:style")
+        style.set(qn("w:type"), spec["type"])
+        style.set(qn("w:styleId"), spec["style_id"])
+
+        name_el = OxmlElement("w:name")
+        name_el.set(qn("w:val"), spec["name"])
+        style.append(name_el)
+
+        # Only when the base is really defined here — see COMMENT_STYLE_SPECS.
+        if spec["based_on"] in defined_ids:
+            based_on = OxmlElement("w:basedOn")
+            based_on.set(qn("w:val"), spec["based_on"])
+            style.append(based_on)
+
+        ui_priority = OxmlElement("w:uiPriority")
+        ui_priority.set(qn("w:val"), "99")
+        style.append(ui_priority)
+        style.append(OxmlElement("w:semiHidden"))
+        style.append(OxmlElement("w:unhideWhenUsed"))
+
+        rPr = OxmlElement("w:rPr")
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), spec["half_points"])
+        rPr.append(sz)
+        szCs = OxmlElement("w:szCs")
+        szCs.set(qn("w:val"), spec["half_points"])
+        rPr.append(szCs)
+        style.append(rPr)
+
+        return style
 
     def _get_next_comment_id(self) -> int:
         ids = [0]
@@ -697,6 +829,11 @@ class CommentsManager:
                     "would render the reply as a separate top-level comment instead of a reply. "
                     "Refusing to create an unthreaded comment."
                 )
+
+        # Define the styles the comment XML below references. AFTER the
+        # threading gate above, never before: an unthreadable reply must leave
+        # the document untouched (B1).
+        self._ensure_comment_styles()
 
         comment_id = str(self.next_id)
         self.next_id += 1
