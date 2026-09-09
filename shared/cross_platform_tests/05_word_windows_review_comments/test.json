@@ -1,0 +1,5 @@
+{
+  "name": "word_windows_review_comments",
+  "description": "Producer: Microsoft Word for Windows 16.0.14334.20848 (x64). Projects three existing comments by synthetic foreign reviewers, a table, and header/footer text. Extended comment metadata (commentsExtended.xml and commentsIds.xml). No tracked insertions or deletions. Source: Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, evidence/docx-beta/sources/windows-review-heavy-01.docx (MIT).",
+  "read_only": true
+}
