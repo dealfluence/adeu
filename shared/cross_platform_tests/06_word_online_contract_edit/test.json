@@ -1,0 +1,11 @@
+{
+  "name": "word_online_contract_edit",
+  "description": "Producer session: Word for the web, 2026-09-06; service build not exposed. Before generated with python-docx 1.2.0. after.docx sha256: f4f3860271936360a9074d945bed25daf6523a28c2bd1ba8610ad8e7968bf323. Source: Dmitry-Kov/ooxml-integrity@e07ee5cdb1993786aff293e7799e62d32c2f04bd, MIT. Regression: adeu#139.",
+  "changes": [
+    {
+      "type": "modify",
+      "target_text": "WEBINPUT",
+      "new_text": "WEBSAVED"
+    }
+  ]
+}

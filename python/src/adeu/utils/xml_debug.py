@@ -1,6 +1,10 @@
 import re
 import zipfile
-from xml.dom.minidom import parseString
+from xml.dom.minidom import Element, Text, parseString
+from xml.parsers.expat import ExpatError
+
+W16DU_NAMESPACE = "http://schemas.microsoft.com/office/word/2023/wordml/word16du"
+XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
 
 def abstract_docx_xml(xml_str: str, filename: str) -> str:
@@ -62,53 +66,80 @@ def abstract_docx_xml(xml_str: str, filename: str) -> str:
     return xml_str
 
 
+def _normalize_w16du_namespace(root: Element, filename: str) -> None:
+    elements = [root, *root.getElementsByTagName("*")]
+    declarations = []
+    used = False
+    value_reference = False
+    for element in elements:
+        used |= element.prefix == "w16du"
+        for attribute in list(element.attributes.values()):
+            if attribute.name == "xmlns:w16du":
+                if attribute.value != W16DU_NAMESPACE:
+                    raise ValueError(f"{filename}: invalid w16du namespace binding {attribute.value!r}")
+                declarations.append(element)
+            elif attribute.namespaceURI != XMLNS_NAMESPACE:
+                used |= attribute.prefix == "w16du"
+                value_reference |= "w16du" in attribute.value
+        value_reference |= any(isinstance(child, Text) and "w16du" in child.data for child in element.childNodes)
+
+    # ponytail: normalize the known name-only prefix use, not arbitrary QName
+    # values. Preserve scope when values/text mention it; a general namespace
+    # canonicalizer needs a separate, explicit QName-value contract.
+    if value_reference:
+        return
+    for element in declarations:
+        element.removeAttribute("xmlns:w16du")
+    if used:
+        root.setAttributeNS(XMLNS_NAMESPACE, "xmlns:w16du", W16DU_NAMESPACE)
+
+
 def format_and_sort_xml(xml_bytes: bytes, filename: str) -> str:
-    """
-    Parses XML, Sorts Relationships if applicable, and Pretty Prints.
-    """
+    """Strictly parse XML, normalize known namespace noise, sort and format."""
     if xml_bytes.startswith(b"\xef\xbb\xbf"):
         xml_bytes = xml_bytes[3:]
     try:
         dom = parseString(xml_bytes)
+    except ExpatError as exc:
+        raise ValueError(f"{filename}: invalid XML: {exc}") from exc
 
-        def sort_node_attributes(node):
-            if node.nodeType == node.ELEMENT_NODE and node.attributes:
-                attrs = sorted(node.attributes.keys())
-                attr_vals = [(k, node.getAttribute(k)) for k in attrs]
-                for k in attrs:
-                    node.removeAttribute(k)
-                for k, v in attr_vals:
-                    node.setAttribute(k, v)
-            for child in node.childNodes:
-                sort_node_attributes(child)
+    def sort_node_attributes(node):
+        if node.nodeType == node.ELEMENT_NODE and node.attributes:
+            attrs = sorted(node.attributes.keys())
+            attr_vals = [(k, node.getAttribute(k)) for k in attrs]
+            for k in attrs:
+                node.removeAttribute(k)
+            for k, v in attr_vals:
+                node.setAttribute(k, v)
+        for child in node.childNodes:
+            sort_node_attributes(child)
 
-        if dom.documentElement:
-            sort_node_attributes(dom.documentElement)
+    if dom.documentElement:
+        _normalize_w16du_namespace(dom.documentElement, filename)
+        sort_node_attributes(dom.documentElement)
 
-        # Sort Relationships for deterministic diffing
-        if filename.endswith(".rels"):
-            rels_node = None
-            if dom.documentElement is not None and dom.documentElement.tagName == "Relationships":
-                rels_node = dom.documentElement
+    # Sort Relationships for deterministic diffing
+    if filename.endswith(".rels"):
+        rels_node = None
+        if dom.documentElement is not None and dom.documentElement.tagName == "Relationships":
+            rels_node = dom.documentElement
 
-            if rels_node:
-                children = []
-                for child in rels_node.childNodes:
-                    if child.nodeType == child.ELEMENT_NODE and child.tagName == "Relationship":
-                        children.append(child)
+        if rels_node:
+            children = []
+            for child in rels_node.childNodes:
+                if child.nodeType == child.ELEMENT_NODE and child.tagName == "Relationship":
+                    children.append(child)
 
-                for child in children:
-                    rels_node.removeChild(child)
+            for child in children:
+                rels_node.removeChild(child)
 
-                # Sort by Target first, then Type
-                children.sort(key=lambda x: (x.getAttribute("Target"), x.getAttribute("Type")))
+            # Sort by Target first, then Type
+            children.sort(key=lambda x: (x.getAttribute("Target"), x.getAttribute("Type")))
 
-                for child in children:
-                    rels_node.appendChild(child)
+            for child in children:
+                rels_node.appendChild(child)
 
-        return dom.toprettyxml(indent="  ")
-    except Exception:
-        return xml_bytes.decode("utf-8", errors="ignore")
+    return dom.toprettyxml(indent="  ")
 
 
 def get_abstracted_xml_snapshot(docx_path: str) -> str:

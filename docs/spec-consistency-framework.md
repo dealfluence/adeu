@@ -70,3 +70,5 @@ The `vitest` runner will:
 Direct byte-for-byte DOCX or XML comparisons will fail because `lxml` (Python) and `@xmldom/xmldom` (Node) serialize XML differently (e.g., `<w:b/>` vs `<w:b></w:b>`, attribute ordering, namespace prefixes).
 
 We bypass this using Python's existing `abstract_docx_xml` logic from `xml_debug.py`. It normalizes relationships, strips volatile RSIDs/Timestamps/session IDs, and alphabetically sorts attributes, allowing a mathematically secure diff of the underlying structure.
+
+Snapshot comparison parses source XML strictly before normalization; malformed XML or an invalid `w16du` binding fails with the OPC part name. For canonical `w16du` name-only usage, declarations are normalized to the part root when used and omitted when unused. Declaration placement remains unchanged when values or text mention the prefix, so normalization does not guess at QName-valued content. Other namespace bindings and semantic XML content remain visible. This policy changes diagnostic snapshots only, not either engine's DOCX serialization.
