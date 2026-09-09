@@ -965,6 +965,15 @@ describe("Test Adeu n8n Node", () => {
   });
 
   describe("Operation: Hydrate Tool Output", () => {
+    it("uses a generic profile in the output path placeholder", () => {
+      const property = node.description.properties.find(
+        (property) => property.name === "outputPathTemplate",
+      );
+      expect(property?.placeholder).toBe(
+        "e.g. C:\\Users\\you\\.n8n-files\\{baseName}_{timestamp}.docx",
+      );
+    });
+
     beforeEach(() => {
       (
         mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>

@@ -5,35 +5,36 @@ from pathlib import Path
 
 SETTINGS_PATH = Path("~/.gemini/antigravity-cli/settings.json").expanduser()
 BACKUP_PATH = Path("~/.gemini/antigravity-cli/settings.json.bak").expanduser()
+REPO_ROOT = Path(__file__).resolve().parent.parent.as_posix()
 
 # Define autonomous test creator permissions
 TEST_CREATOR_PERMISSIONS = {
     "allow": [
-        "read_file(/Users/mkorpela/workspace/adeu/*)",
+        f"read_file({REPO_ROOT}/*)",
         "command(uv run pytest)",
         "command(npm run test)",
-        "write_file(/Users/mkorpela/workspace/adeu/python/tests/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/tests/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/*.test.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/test-utils.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/n8n-nodes-adeu/test/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/mcp-server/tests/*)",
+        f"write_file({REPO_ROOT}/python/tests/*)",
+        f"write_file({REPO_ROOT}/tests/*)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/*.test.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/test-utils.ts)",
+        f"write_file({REPO_ROOT}/node/packages/n8n-nodes-adeu/test/*)",
+        f"write_file({REPO_ROOT}/node/packages/mcp-server/tests/*)",
     ],
     "deny": [
-        "write_file(/Users/mkorpela/workspace/adeu/python/src/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/comments.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/diff.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/domain.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/engine.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/index.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/ingest.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/mapper.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/markup.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/models.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/outline.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/core/src/pagination.ts)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/mcp-server/src/*)",
-        "write_file(/Users/mkorpela/workspace/adeu/node/packages/n8n-nodes-adeu/nodes/*)",
+        f"write_file({REPO_ROOT}/python/src/*)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/comments.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/diff.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/domain.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/engine.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/index.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/ingest.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/mapper.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/markup.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/models.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/outline.ts)",
+        f"write_file({REPO_ROOT}/node/packages/core/src/pagination.ts)",
+        f"write_file({REPO_ROOT}/node/packages/mcp-server/src/*)",
+        f"write_file({REPO_ROOT}/node/packages/n8n-nodes-adeu/nodes/*)",
     ],
     "ask": [],
 }

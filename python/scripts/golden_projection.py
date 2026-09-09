@@ -19,9 +19,13 @@ is asserted on every capture, so a run that breaks it fails loudly even
 before the byte-compare.
 
 Usage:
-  python scripts/golden_projection.py verify [manifest]   # vs COMMITTED hashes
+  python scripts/golden_projection.py verify [--manifest PATH]
   python scripts/golden_projection.py capture <outdir>
   python scripts/golden_projection.py compare <baseline_dir> <new_dir>
+
+Default inputs are portable synthetic fixtures. Private runs require an explicit
+--document PATH, and private verification also requires --manifest PATH. Private
+captures contain document text: keep them local and out of version control.
 
 `verify` is the durable gate: it compares against the committed
 tests/golden_manifest.txt (hashes only — no multi-MB golden text in git) and
@@ -36,11 +40,14 @@ projection change is intended, and say so in the commit:
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
+import re
 import sys
 import time
 from pathlib import Path
+from zipfile import BadZipFile
 
 from docx import Document
 
@@ -50,12 +57,9 @@ from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.mapper import DocumentMapper
 from adeu.utils.docx import strip_bom_from_docx_bytes
 
-# (name, path) — VVBIG/BIGDOC live on the user's Desktop, not in the repo.
-DOCS = [
-    ("cells", None),  # synthetic, built below
-    ("BIGDOC", Path(r"C:\Users\Uzair\Desktop\BIGDOC.docx")),
-    ("VVBIG", Path(r"C:\Users\Uzair\Desktop\VVBIG.docx")),
-]
+# Default inputs are synthetic and identical on every checkout.
+DOCS = [("cells", None), ("revisions", None)]
+VIEW_NAMES = ("reader_raw", "reader_clean", "reader_appendix", "mapper_raw", "mapper_clean", "outline", "pagination")
 
 
 def build_cells_fixture() -> bytes:
@@ -97,10 +101,37 @@ def build_cells_fixture() -> bytes:
     return buf.getvalue()
 
 
+def build_revisions_fixture() -> bytes:
+    """Independent insertion/deletion with fixed metadata and differing views."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    doc.add_paragraph("Tracked change fixture", style="Heading 1")
+    for tag, revision_id, value in (
+        ("del", "1", "removed wording"),
+        ("ins", "2", "added wording"),
+    ):
+        paragraph = doc.add_paragraph()
+        revision = OxmlElement(f"w:{tag}")
+        revision.set(qn("w:id"), revision_id)
+        revision.set(qn("w:author"), "Regression Fixture")
+        revision.set(qn("w:date"), "2026-01-01T00:00:00Z")
+        run = OxmlElement("w:r")
+        text = OxmlElement("w:delText" if tag == "del" else "w:t")
+        text.text = value
+        run.append(text)
+        revision.append(run)
+        paragraph._p.append(revision)
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
 def load_bytes(name, path):
-    if path is None:
-        return build_cells_fixture()
-    return path.read_bytes()
+    if path is not None:
+        return path.read_bytes()
+    return {"cells": build_cells_fixture, "revisions": build_revisions_fixture}[name]()
 
 
 def render_outline(doc):
@@ -182,71 +213,100 @@ def compute_views(name: str, sanitized: bytes, verbose: bool = False) -> dict[st
     return views
 
 
-def iter_documents(verbose: bool = False):
-    """Yields (name, sanitized_bytes) for every document available here."""
-    for name, path in DOCS:
-        if path is not None and not path.exists():
-            if verbose:
-                print(f"SKIP {name}: {path} not found")
-            continue
-        yield name, strip_bom_from_docx_bytes(load_bytes(name, path))
+def iter_documents(document: Path | None = None):
+    """Yield named raw input bytes once, without implicit file discovery."""
+    for name, path in [("private", document)] if document is not None else DOCS:
+        yield name, load_bytes(name, path)
 
 
-def capture(outdir: Path):
+def capture(outdir: Path, document: Path | None = None) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for name, sanitized in iter_documents(verbose=True):
-        print(f"\n=== {name} ({len(sanitized) / 1e6:.2f} MB) ===")
-        views = compute_views(name, sanitized, verbose=True)
+    outputs = {}
+    for name, raw in iter_documents(document):
+        print(f"\n=== {name} ({len(raw) / 1e6:.2f} MB) ===")
+        views = compute_views(name, strip_bom_from_docx_bytes(raw), verbose=True)
+        if set(views) != set(VIEW_NAMES):
+            raise ValueError("expected all seven projection views")
         print("  twin contract    OK (raw + clean byte-identical)")
+        if document is not None:
+            outputs["INPUT_SHA256.txt"] = hashlib.sha256(raw).hexdigest() + "\n"
         for view, text in views.items():
-            (outdir / f"{name}.{view}.txt").write_text(text, encoding="utf-8", newline="")
+            outputs[f"{name}.{view}.txt"] = text
             sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
             manifest.append(f"{sha}  {len(text):>10}  {name}.{view}.txt")
             print(f"    {view:16s} {len(text):>10} chars  {sha[:16]}")
 
-    (outdir / "MANIFEST.txt").write_text("\n".join(manifest) + "\n", encoding="utf-8", newline="")
-    print(f"\ncaptured {len(manifest)} views -> {outdir}")
+    if not manifest:
+        raise ValueError("no projection views captured")
+    outputs["MANIFEST.txt"] = "\n".join(manifest) + "\n"
+    if document is not None:
+        for filename in outputs:
+            destination = outdir / filename
+            if destination.exists() and destination.samefile(document):
+                raise ValueError("capture outputs must not overwrite the input document")
+    for filename, text in outputs.items():
+        (outdir / filename).write_text(text, encoding="utf-8", newline="")
+    print(f"\ncaptured {len(manifest)} views")
 
 
 def load_manifest(manifest_path: Path) -> dict[str, str]:
     expected = {}
-    for ln in manifest_path.read_text(encoding="utf-8").splitlines():
+    allowed_names = {name for name, _ in DOCS} | {"private"}
+    allowed_keys = {f"{name}.{view}.txt" for name in allowed_names for view in VIEW_NAMES}
+    for number, ln in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), 1):
         if not ln.strip() or ln.lstrip().startswith("#"):
             continue
-        sha, _size, fname = ln.split()
-        expected[fname] = sha
+        fields = ln.split()
+        if len(fields) != 3:
+            raise ValueError(f"invalid manifest row {number}")
+        sha, size, fname = fields
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", sha) or not re.fullmatch(r"[0-9]+", size) or fname not in allowed_keys:
+            raise ValueError(f"invalid manifest row {number}")
+        if fname in expected:
+            raise ValueError(f"duplicate manifest row {number}")
+        expected[fname] = sha.lower()
+    names = {key.split(".", 1)[0] for key in expected}
+    if not expected or set(expected) != {f"{name}.{view}.txt" for name in names for view in VIEW_NAMES}:
+        raise ValueError("manifest must contain all seven views of each document")
+    if "private" in names and names != {"private"}:
+        raise ValueError("private manifest cannot contain portable fixtures")
     return expected
 
 
-def verify(manifest_path: Path) -> int:
-    """Recompute every view and compare hashes to a COMMITTED manifest.
+def _read_input_sha(manifest_path: Path) -> str:
+    digest = (manifest_path.parent / "INPUT_SHA256.txt").read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValueError("invalid private input fingerprint")
+    return digest.lower()
 
-    Unlike `compare`, this needs no stored golden text — only hashes — so the
-    baseline is committable (tests/golden_manifest.txt) and the
-    byte-identical claim stays checkable long after capture dirs are deleted.
-    Documents absent from this machine are reported, not failed.
-    """
+
+def verify(manifest_path: Path, document: Path | None = None) -> int:
+    """Verify all portable views, or an explicit private input and its baseline."""
     expected = load_manifest(manifest_path)
+    names = {"private"} if document is not None else {name for name, _ in DOCS}
+    if set(expected) != {f"{name}.{view}.txt" for name in names for view in VIEW_NAMES}:
+        raise ValueError("manifest must cover exactly the selected documents")
+    input_sha = _read_input_sha(manifest_path) if document is not None else None
     checked = 0
     failures = []
-    seen = set()
 
-    for name, sanitized in iter_documents(verbose=True):
-        seen.add(name)
-        views = compute_views(name, sanitized)
+    for name, raw in iter_documents(document):
+        if input_sha is not None and hashlib.sha256(raw).hexdigest() != input_sha:
+            print("FAIL: private input differs from captured baseline")
+            return 1
+        views = compute_views(name, strip_bom_from_docx_bytes(raw))
+        if set(views) != set(VIEW_NAMES):
+            raise ValueError("expected all seven projection views")
         for view, text in views.items():
             key = f"{name}.{view}.txt"
-            if key not in expected:
-                failures.append(f"{key}: not present in manifest (new view?)")
-                continue
             got = hashlib.sha256(text.encode("utf-8")).hexdigest()
             checked += 1
             if got != expected[key]:
                 failures.append(f"{key}: expected {expected[key][:16]} got {got[:16]} ({len(text)} chars)")
 
-    for name in sorted({k.split(".")[0] for k in expected} - seen):
-        print(f"NOTE: {name} unavailable here; its manifest rows were not checked")
+    if checked != len(expected):
+        failures.append("not all manifest views were checked")
     for f in failures:
         print(f"FAIL {f}")
     print(
@@ -257,10 +317,15 @@ def verify(manifest_path: Path) -> int:
 
 
 def compare(base: Path, new: Path):
-    b = (base / "MANIFEST.txt").read_text(encoding="utf-8").splitlines()
-    n = (new / "MANIFEST.txt").read_text(encoding="utf-8").splitlines()
-    bm = {ln.split("  ")[-1]: ln.split("  ")[0] for ln in b if ln.strip()}
-    nm = {ln.split("  ")[-1]: ln.split("  ")[0] for ln in n if ln.strip()}
+    bm = load_manifest(base / "MANIFEST.txt")
+    nm = load_manifest(new / "MANIFEST.txt")
+    keys = bm.keys() | nm.keys()
+    if any(key.startswith("private.") for key in keys):
+        if not all(key.startswith("private.") for key in keys):
+            raise ValueError("private comparison requires two private baselines")
+        if _read_input_sha(base / "MANIFEST.txt") != _read_input_sha(new / "MANIFEST.txt"):
+            print("FAIL: private input differs between captures")
+            return 1
 
     only_b = sorted(set(bm) - set(nm))
     only_n = sorted(set(nm) - set(bm))
@@ -290,11 +355,35 @@ def compare(base: Path, new: Path):
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "tests" / "golden_manifest.txt"
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    check = commands.add_parser("verify", help="verify portable or explicit private projection hashes")
+    check.add_argument("--manifest", type=Path)
+    check.add_argument("--document", type=Path)
+    snapshot = commands.add_parser("capture", help="capture projection text; keep private outputs local")
+    snapshot.add_argument("outdir", type=Path)
+    snapshot.add_argument("--document", type=Path)
+    diff = commands.add_parser("compare", help="compare local captures, including text excerpts")
+    diff.add_argument("base", type=Path)
+    diff.add_argument("new", type=Path)
+    args = parser.parse_args(argv)
+    if args.command == "verify" and args.document is not None and args.manifest is None:
+        parser.error("private verification requires --manifest")
+    try:
+        if args.command == "verify":
+            return verify(args.manifest or DEFAULT_MANIFEST, args.document)
+        if args.command == "capture":
+            capture(args.outdir, args.document)
+            return 0
+        return compare(args.base, args.new)
+    except (OSError, UnicodeError, BadZipFile) as exc:
+        print(f"ERROR: cannot read/write benchmark inputs or outputs ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "verify":
-        path = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MANIFEST
-        sys.exit(verify(path))
-    if sys.argv[1] == "capture":
-        capture(Path(sys.argv[2]))
-    else:
-        sys.exit(compare(Path(sys.argv[2]), Path(sys.argv[3])))
+    sys.exit(main())

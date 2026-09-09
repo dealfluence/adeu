@@ -32,7 +32,6 @@ def inspect(path):
 
 
 if __name__ == "__main__":
-    # path = r"C:\Users\mikko\workspace\docx-md-docx\test.docx"
-    # Using the path provided in previous prompt contexts or command line
-    target = sys.argv[1] if len(sys.argv) > 1 else "test.docx"
-    inspect(target)
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: inspect_test_docx.py DOCUMENT.docx")
+    inspect(sys.argv[1])

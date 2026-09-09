@@ -49,7 +49,6 @@ def debug_relationships(docx_path):
 
 
 if __name__ == "__main__":
-    target = r"C:\Users\mikko\workspace\docx-md-docx\test.docx"
-    if len(sys.argv) > 1:
-        target = sys.argv[1]
-    debug_relationships(target)
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: debug_rels.py DOCUMENT.docx")
+    debug_relationships(sys.argv[1])

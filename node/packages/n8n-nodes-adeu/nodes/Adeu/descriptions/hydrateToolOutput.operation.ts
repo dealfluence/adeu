@@ -121,7 +121,7 @@ export const hydrateToolOutputDescription: INodeProperties[] = [
     type: "string",
     default: "",
     placeholder:
-      "e.g. C:\\Users\\Uzair\\.n8n-files\\{baseName}_{timestamp}.docx",
+      "e.g. C:\\Users\\you\\.n8n-files\\{baseName}_{timestamp}.docx",
     description:
       "Optional template to compute the final write path on disk, returned on the output JSON as 'outputPath'. " +
       "If set, you can configure downstream Write nodes to simply read '{{ $json.outputPath }}' with zero escaping risks. " +

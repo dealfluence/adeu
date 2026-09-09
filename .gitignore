@@ -13,6 +13,9 @@ testing.docx
 /node/*.docx
 !**/tests/fixtures/*.docx
 
+# Explicit private benchmark captures contain document text and local baselines.
+/.private-benchmarks/
+
 # C extensions
 *.so
 

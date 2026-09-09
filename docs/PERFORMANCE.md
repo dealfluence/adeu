@@ -60,6 +60,38 @@ and it ports directly:
    new unit tests that pin the changed algorithm against a verbatim copy of
    the *old* algorithm.
 
+**Portable gate versus private benchmarks.** Default tests use two generated
+fixtures (`cells` and `revisions`) and 14 committed projection hashes. They do
+not discover documents from a home directory or Desktop. Historical control
+and stress measurements below are not prerequisites for running the public
+suite; reproducing those measurements requires an explicitly selected input.
+
+From `python/`, the default check is:
+
+```sh
+uv run python scripts/golden_projection.py verify
+```
+
+For local private work, supply the input and keep captures outside version
+control. This PowerShell example expands a path supplied by the operator; the
+script does not read `PRIVATE_DOCX` implicitly:
+
+```powershell
+uv run python scripts/golden_projection.py capture ../.private-benchmarks/before --document "$env:PRIVATE_DOCX"
+uv run python scripts/golden_projection.py verify --document "$env:PRIVATE_DOCX" --manifest ../.private-benchmarks/before/MANIFEST.txt
+```
+
+Private capture records the SHA-256 of the exact raw input bytes in
+`INPUT_SHA256.txt`, alongside the seven-view manifest. Verification reports a
+changed input separately from changed projection hashes. Missing inputs,
+fingerprints, and incomplete manifests fail; nothing is silently skipped or
+automatically re-baselined. Inputs are read-only. To inspect a before/after
+text diff, explicitly capture a second directory and use `compare BASE NEW`.
+
+**Captures contain document text, and `compare` prints excerpts.** Keep them
+local: `.private-benchmarks/` is ignored, but ignore rules are not a security
+boundary. Do not commit private inputs/captures or upload them as CI artifacts.
+
 ---
 
 ## 3. Root cause: the empty-cell anchor fallback was quadratic
@@ -706,27 +738,30 @@ begins "Batch rejected." Clients cannot use one check for both.
 
 ### 8.4 Golden harness (kept this time)
 
-`python/scripts/golden_projection.py` — `verify [manifest]` / `capture <dir>` /
-`compare <base> <new>`. Captures 7 views × 3 documents (cells synthetic
-fixture, BIGDOC, VVBIG): `reader_raw`, `reader_clean`, `reader_appendix`,
+`python/scripts/golden_projection.py` — `verify [--manifest PATH]` /
+`capture <dir> [--document PATH]` / `compare <base> <new>`. Captures seven views:
+`reader_raw`, `reader_clean`, `reader_appendix`,
 `mapper_raw`, `mapper_clean`, `outline`, `pagination`. It asserts the §7.3.3
 twin contract on every computation, mirrors the production outline path exactly
 (`return_paragraph_offsets=True`, as `doc_cache._fill_view` does), and checks
-that requesting offsets does not change the projected text. All 21 views
-stayed byte-identical across both §8.2 changes.
+that requesting offsets does not change the projected text. During the original
+§8.2 work, all 21 views of the synthetic, control, and stress inputs stayed
+byte-identical. Those historical private inputs are no longer discovered by
+the default gate.
 
 **The baseline is now COMMITTED and automatically enforced** — previously the
 evidence lived only in a commit message, so "byte-identical" could not be
 re-checked later:
 
-- `tests/golden_manifest.txt` — sha256 + length per view. Hashes only, so no
+- `tests/golden_manifest.txt` — sha256 + length for 14 portable views. Hashes only, so no
   multi-MB golden text enters git. Regenerating it is a deliberate, reviewable
   act (`capture` then copy the MANIFEST) and must be called out in the commit.
-- `tests/test_projection_goldens.py` — runs the gate. The `cells` fixture is
-  built in-process so it gates EVERY machine including a fresh clone; BIGDOC
-  runs when present (~2.5 s); VVBIG needs `ADEU_GOLDEN_SLOW=1` (~60 s, kept
-  out of the default ~30 s suite). The gate is verified to actually fail: a
-  doctored hash produces a mismatch and exit 1.
+- `tests/test_projection_goldens.py` — runs both generated fixtures on every
+  machine: `cells` covers anchors/tables/styles, and `revisions` covers fixed
+  tracked insertions/deletions with different raw and clean text. It also tests
+  private CLI boundaries, input fingerprints, and malformed manifests. A
+  doctored hash still produces a mismatch and exit 1. Private stress runs are
+  explicit CLI operations, not default pytest cases or hidden skip conditions.
 - `tests/test_run_fusion_equivalence.py` pins the fused function against
   VERBATIM copies of both pre-fusion originals over 26 run shapes × both
   `is_heading` values (§3.6's "pin against the old algorithm").
