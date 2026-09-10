@@ -1,0 +1,536 @@
+=== FILE: _rels/.rels ===
+<?xml version="1.0" ?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdRID" Target="docProps/app.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties"/>
+  <Relationship Id="rIdRID" Target="docProps/core.xml" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"/>
+  <Relationship Id="rIdRID" Target="word/document.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/>
+</Relationships>
+=== END FILE: _rels/.rels ===
+
+=== FILE: word/_rels/document.xml.rels ===
+<?xml version="1.0" ?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdRID" Target="comments.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"/>
+  <Relationship Id="rIdRID" Target="footer1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"/>
+  <Relationship Id="rIdRID" Target="footnotes.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"/>
+  <Relationship Id="rIdRID" Target="header1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"/>
+  <Relationship Id="rIdRID" Target="https://example.org/spec" TargetMode="External" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"/>
+  <Relationship Id="rIdRID" Target="media/chart.png" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/>
+  <Relationship Id="rIdRID" Target="numbering.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"/>
+  <Relationship Id="rIdRID" Target="settings.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"/>
+  <Relationship Id="rIdRID" Target="styles.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"/>
+</Relationships>
+=== END FILE: word/_rels/document.xml.rels ===
+
+=== FILE: word/comments.xml ===
+<?xml version="1.0" ?>
+<w:comments>
+  <w:comment w:author="M. Reviewer" w:date="DATE" w:id="ID">
+    <w:p>
+      <w:r>
+        <w:t>Confirm this figure against the source table before circulation.</w:t>
+      </w:r>
+    </w:p>
+  </w:comment>
+  <w:comment w:author="A. Counsel" w:date="DATE" w:id="ID">
+    <w:p>
+      <w:r>
+        <w:t>Defined term must match the definitions schedule.</w:t>
+      </w:r>
+    </w:p>
+  </w:comment>
+</w:comments>
+=== END FILE: word/comments.xml ===
+
+=== FILE: word/document.xml ===
+<?xml version="1.0" ?>
+<w:document xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+  <w:body>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="Heading1"/>
+      </w:pPr>
+      <w:r>
+        <w:t>Master Services Agreement</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ClauseBody"/>
+      </w:pPr>
+      <w:r>
+        <w:t xml:space="preserve">This agreement governs the provision of services described in Schedule A. The </w:t>
+      </w:r>
+      <w:commentRangeStart w:id="ID"/>
+      <w:r>
+        <w:rPr>
+          <w:rStyle w:val="DefinedTerm"/>
+        </w:rPr>
+        <w:t>Effective Date</w:t>
+      </w:r>
+      <w:commentRangeEnd w:id="ID"/>
+      <w:r>
+        <w:commentReference w:id="ID"/>
+      </w:r>
+      <w:r>
+        <w:t xml:space="preserve"> is the date of last signature.</w:t>
+      </w:r>
+      <w:r>
+        <w:rPr>
+          <w:rStyle w:val="FootnoteReference"/>
+        </w:rPr>
+        <w:footnoteReference w:id="ID"/>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="Heading2"/>
+      </w:pPr>
+      <w:r>
+        <w:t>1. Scope of Services</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ListParagraph"/>
+        <w:numPr>
+          <w:ilvl w:val="0"/>
+          <w:numId w:val="1"/>
+        </w:numPr>
+      </w:pPr>
+      <w:r>
+        <w:t>The Supplier shall deliver the services with reasonable skill and care.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ListParagraph"/>
+        <w:numPr>
+          <w:ilvl w:val="1"/>
+          <w:numId w:val="1"/>
+        </w:numPr>
+      </w:pPr>
+      <w:r>
+        <w:t xml:space="preserve">Service levels are set out in </w:t>
+      </w:r>
+      <w:hyperlink r:id="rId8">
+        <w:r>
+          <w:rPr>
+            <w:rStyle w:val="Hyperlink"/>
+          </w:rPr>
+          <w:t>the published specification</w:t>
+        </w:r>
+      </w:hyperlink>
+      <w:r>
+        <w:t>.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ListParagraph"/>
+        <w:numPr>
+          <w:ilvl w:val="0"/>
+          <w:numId w:val="1"/>
+        </w:numPr>
+      </w:pPr>
+      <w:ins w:author="A. Counsel" w:date="DATE" w:id="ID">
+        <w:r>
+          <w:t>The Supplier shall maintain professional indemnity insurance.</w:t>
+        </w:r>
+      </w:ins>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ClauseBody"/>
+      </w:pPr>
+      <w:r>
+        <w:t xml:space="preserve">The parties agree the fee is </w:t>
+      </w:r>
+      <w:del w:author="A. Counsel" w:date="DATE" w:id="ID">
+        <w:r>
+          <w:delText xml:space="preserve">EUR 40,000 </w:delText>
+        </w:r>
+      </w:del>
+      <w:ins w:author="A. Counsel" w:date="DATE" w:id="ID">
+        <w:r>
+          <w:t xml:space="preserve">EUR 44,500 </w:t>
+        </w:r>
+      </w:ins>
+      <w:r>
+        <w:t>per annum.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="Heading2"/>
+      </w:pPr>
+      <w:r>
+        <w:t>2. Commercial Terms</w:t>
+      </w:r>
+    </w:p>
+    <w:sdt>
+      <w:sdtPr>
+        <w:alias w:val="Contract Reference"/>
+        <w:tag w:val="contract_ref"/>
+        <w:id w:val="770011"/>
+        <w:text/>
+      </w:sdtPr>
+      <w:sdtContent>
+        <w:p>
+          <w:pPr>
+            <w:pStyle w:val="ClauseBody"/>
+          </w:pPr>
+          <w:r>
+            <w:t>Contract reference: MSA-2026-0417</w:t>
+          </w:r>
+        </w:p>
+      </w:sdtContent>
+    </w:sdt>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblStyle w:val="TableGrid"/>
+        <w:tblW w:type="auto" w:w="0"/>
+      </w:tblPr>
+      <w:tblGrid>
+        <w:gridCol w:w="3000"/>
+        <w:gridCol w:w="3000"/>
+        <w:gridCol w:w="3000"/>
+      </w:tblGrid>
+      <w:tr>
+        <w:trPr>
+          <w:tblHeader/>
+        </w:trPr>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:rPr>
+                <w:b/>
+              </w:rPr>
+              <w:t>Milestone</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:rPr>
+                <w:b/>
+              </w:rPr>
+              <w:t>Date</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:rPr>
+                <w:b/>
+              </w:rPr>
+              <w:t>Fee</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:t>Discovery</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:t>2026-09-15</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:commentRangeStart w:id="ID"/>
+            <w:r>
+              <w:t>EUR 14,000</w:t>
+            </w:r>
+            <w:commentRangeEnd w:id="ID"/>
+            <w:r>
+              <w:commentReference w:id="ID"/>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:t>Delivery</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:t>2026-12-01</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:r>
+              <w:t>EUR 32,500</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:trPr>
+          <w:ins w:author="Agent" w:date="DATE" w:id="ID"/>
+        </w:trPr>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:pPr>
+              <w:rPr>
+                <w:ins w:author="Agent" w:date="DATE" w:id="ID"/>
+              </w:rPr>
+            </w:pPr>
+            <w:ins w:author="Agent" w:date="DATE" w:id="ID">
+              <w:r>
+                <w:t>Handover</w:t>
+              </w:r>
+            </w:ins>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:pPr>
+              <w:rPr>
+                <w:ins w:author="Agent" w:date="DATE" w:id="ID"/>
+              </w:rPr>
+            </w:pPr>
+            <w:ins w:author="Agent" w:date="DATE" w:id="ID">
+              <w:r>
+                <w:t>2027-02-15</w:t>
+              </w:r>
+            </w:ins>
+          </w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr>
+            <w:tcW w:type="dxa" w:w="3000"/>
+          </w:tcPr>
+          <w:p>
+            <w:pPr>
+              <w:rPr>
+                <w:ins w:author="Agent" w:date="DATE" w:id="ID"/>
+              </w:rPr>
+            </w:pPr>
+            <w:ins w:author="Agent" w:date="DATE" w:id="ID">
+              <w:r>
+                <w:t>EUR 8,000</w:t>
+              </w:r>
+            </w:ins>
+          </w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ClauseBody"/>
+      </w:pPr>
+      <w:r>
+        <w:t xml:space="preserve">Historic spend is shown below.</w:t>
+      </w:r>
+      <w:r>
+        <w:rPr>
+          <w:rStyle w:val="FootnoteReference"/>
+        </w:rPr>
+        <w:footnoteReference w:id="ID"/>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline distB="0" distL="0" distR="0" distT="0">
+            <wp:extent cx="3810000" cy="2286000"/>
+            <wp:docPr descr="Historic spend by quarter" id="1" name="Picture 1"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                <pic:pic>
+                  <pic:nvPicPr>
+                    <pic:cNvPr id="1" name="chart.png"/>
+                    <pic:cNvPicPr/>
+                  </pic:nvPicPr>
+                  <pic:blipFill>
+                    <a:blip r:embed="rId7"/>
+                    <a:stretch>
+                      <a:fillRect/>
+                    </a:stretch>
+                  </pic:blipFill>
+                  <pic:spPr>
+                    <a:xfrm>
+                      <a:off x="0" y="0"/>
+                      <a:ext cx="3810000" cy="2286000"/>
+                    </a:xfrm>
+                    <a:prstGeom prst="rect">
+                      <a:avLst/>
+                    </a:prstGeom>
+                  </pic:spPr>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ListParagraph"/>
+        <w:numPr>
+          <w:ilvl w:val="0"/>
+          <w:numId w:val="2"/>
+        </w:numPr>
+      </w:pPr>
+      <w:r>
+        <w:t>Invoices are payable within 30 days.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:pStyle w:val="ListParagraph"/>
+        <w:numPr>
+          <w:ilvl w:val="0"/>
+          <w:numId w:val="2"/>
+        </w:numPr>
+      </w:pPr>
+      <w:r>
+        <w:t>Late payment attracts statutory interest.</w:t>
+      </w:r>
+    </w:p>
+    <w:sectPr>
+      <w:headerReference r:id="rId5" w:type="default"/>
+      <w:footerReference r:id="rId6" w:type="default"/>
+      <w:pgSz w:h="16838" w:w="11906"/>
+      <w:pgMar w:bottom="1440" w:footer="708" w:header="708" w:left="1440" w:right="1440" w:top="1440"/>
+    </w:sectPr>
+  </w:body>
+</w:document>
+=== END FILE: word/document.xml ===
+
+=== FILE: word/footer1.xml ===
+<?xml version="1.0" ?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:pPr>
+      <w:jc w:val="center"/>
+    </w:pPr>
+    <w:r>
+      <w:t>Confidential</w:t>
+    </w:r>
+  </w:p>
+</w:ftr>
+=== END FILE: word/footer1.xml ===
+
+=== FILE: word/footnotes.xml ===
+<?xml version="1.0" ?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="ID" w:type="separator">
+    <w:p>
+      <w:pPr>
+        <w:spacing w:after="0"/>
+      </w:pPr>
+      <w:r>
+        <w:separator/>
+      </w:r>
+    </w:p>
+  </w:footnote>
+  <w:footnote w:id="ID" w:type="continuationSeparator">
+    <w:p>
+      <w:pPr>
+        <w:spacing w:after="0"/>
+      </w:pPr>
+      <w:r>
+        <w:continuationSeparator/>
+      </w:r>
+    </w:p>
+  </w:footnote>
+  <w:footnote w:id="ID">
+    <w:p>
+      <w:pPr>
+        <w:spacing w:after="0"/>
+      </w:pPr>
+      <w:r>
+        <w:rPr>
+          <w:rStyle w:val="FootnoteReference"/>
+        </w:rPr>
+        <w:footnoteRef/>
+      </w:r>
+      <w:r>
+        <w:t xml:space="preserve"> ECMA-376 Part 1, 5th edition, section 17.3.1.</w:t>
+      </w:r>
+    </w:p>
+  </w:footnote>
+  <w:footnote w:id="ID">
+    <w:p>
+      <w:pPr>
+        <w:spacing w:after="0"/>
+      </w:pPr>
+      <w:r>
+        <w:rPr>
+          <w:rStyle w:val="FootnoteReference"/>
+        </w:rPr>
+        <w:footnoteRef/>
+      </w:r>
+      <w:r>
+        <w:t xml:space="preserve"> Measured across the reference corpus, Q2 2026.</w:t>
+      </w:r>
+    </w:p>
+  </w:footnote>
+</w:footnotes>
+=== END FILE: word/footnotes.xml ===
+
+=== FILE: word/header1.xml ===
+<?xml version="1.0" ?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:pPr>
+      <w:jc w:val="right"/>
+    </w:pPr>
+    <w:r>
+      <w:t>Reference Agreement - Draft 7</w:t>
+    </w:r>
+  </w:p>
+</w:hdr>
+=== END FILE: word/header1.xml ===
