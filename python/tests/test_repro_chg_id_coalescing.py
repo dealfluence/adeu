@@ -7,8 +7,8 @@ Two related fixes are protected here:
   PROBLEM B (ID coalescing, primary): A single ModifyText whose target spans
   multiple <w:r> elements (e.g. because a bold word forces OOXML to split the
   text across runs) used to mint a fresh w:id per <w:del> element, surfacing as
-  N [Chg:N] entries in the projected bubble. After the fix, all <w:del>
-  elements produced by one logical edit share a single w:id; same for <w:ins>.
+  N [Chg:N] entries in the projected bubble. Adjacent deleted runs now share
+  one <w:del> wrapper and ID, rather than emitting duplicate XML IDs.
 
   PROBLEM A (bubble annotation): The projected metadata bubble now annotates
   Chg entries with their kind ([Chg:N delete] / [Chg:N insert] / [Chg:N format])
@@ -84,7 +84,7 @@ def _collect_revision_ids(doc) -> tuple[list[str], list[str]]:
 def test_multi_run_target_shares_one_del_id():
     """
     A single ModifyText whose target spans two <w:r> elements (because of a
-    bold word) must produce multiple <w:del> elements that share a single w:id.
+    bold word) must produce one <w:del> containing both styled runs.
     """
     stream = _build_doc_with_bold_span()
     engine = RedlineEngine(stream, author="Reviewer AI")
@@ -100,13 +100,8 @@ def test_multi_run_target_shares_one_del_id():
     out_doc = Document(engine.save_to_stream())
     del_ids, ins_ids = _collect_revision_ids(out_doc)
 
-    # Two <w:del> elements (one per real run touched), but they must share one id.
-    assert len(del_ids) == 2, f"Expected 2 <w:del> elements, got {len(del_ids)}: {del_ids}"
-    assert del_ids[0] == del_ids[1], (
-        f"Multi-run delete must share one w:id (Problem B). Got {del_ids}. "
-        "If this fails, check that track_delete_run is being called with "
-        "reuse_id=del_id from _apply_single_edit_indexed's MODIFICATION branch."
-    )
+    assert len(del_ids) == 1, f"Expected one deletion wrapper, got {del_ids}"
+    assert len(out_doc.element.xpath("//w:del/w:r")) == 2
 
     # One <w:ins> with its own distinct id.
     assert len(ins_ids) == 1, f"Expected 1 <w:ins>, got {len(ins_ids)}: {ins_ids}"
@@ -175,9 +170,8 @@ def test_bubble_annotates_delete_and_insert():
 
 def test_accept_resolves_all_shared_id_elements_together():
     """
-    Accepting a coalesced delete (one w:id, two <w:del> elements) must remove
-    BOTH elements and finalize the deletion across the whole logical edit.
-    Guards against a future refactor that resolves only one element per call.
+    Accepting a coalesced delete must remove both runs and finalize the
+    deletion across the whole logical edit.
     """
     stream = _build_doc_with_bold_span()
     engine = RedlineEngine(stream, author="Reviewer AI")
@@ -187,7 +181,7 @@ def test_accept_resolves_all_shared_id_elements_together():
     # Find the coalesced delete id directly from the XML.
     redlined_doc = Document(redlined_stream)
     del_ids, ins_ids = _collect_revision_ids(redlined_doc)
-    assert del_ids[0] == del_ids[1], "Precondition: deletes must share an id"
+    assert len(del_ids) == 1, "Precondition: adjacent deleted runs share one wrapper"
     coalesced_del_id = del_ids[0]
     coalesced_ins_id = ins_ids[0]
 
