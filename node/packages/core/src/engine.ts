@@ -8125,7 +8125,12 @@ export class RedlineEngine {
     let first_del: Element | null = null;
     let last_del: Element | null = null;
     for (const run of target_runs) {
-      const del_tag = this._create_track_change_tag("w:del", "", del_id);
+      // One deletion may contain several styled runs. Do not repeat its ID
+      // on sibling wrappers or move intervening anchors into the deletion.
+      const can_append: boolean = last_del !== null && run._element.previousSibling === last_del;
+      const del_tag: Element = can_append
+        ? last_del!
+        : this._create_track_change_tag("w:del", "", first_del === null ? del_id : null);
       const new_run = run._element.cloneNode(true) as Element;
 
       const tNodes = Array.from(new_run.getElementsByTagName("w:t"));
@@ -8138,7 +8143,11 @@ export class RedlineEngine {
       });
 
       del_tag.appendChild(new_run);
-      run._element.parentNode?.replaceChild(del_tag, run._element);
+      if (can_append) {
+        run._element.parentNode?.removeChild(run._element);
+      } else {
+        run._element.parentNode?.replaceChild(del_tag, run._element);
+      }
       if (first_del === null) first_del = del_tag;
       last_del = del_tag;
     }

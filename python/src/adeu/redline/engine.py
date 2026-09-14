@@ -2057,8 +2057,15 @@ class RedlineEngine:
 
         grandparent.remove(parent_ins)
 
-    def track_delete_run(self, run: Run, reuse_id: Optional[str] = None):
-        del_tag = self._create_track_change_tag("w:del", reuse_id=reuse_id)
+    def track_delete_run(
+        self, run: Run, reuse_id: Optional[str] = None, previous_deletion: Optional[etree._Element] = None
+    ):
+        # Keep adjacent styled runs in one deletion without swallowing anchors.
+        # A separate wrapper needs a fresh ID even within the same logical edit.
+        if previous_deletion is not None and run._r.getprevious() is previous_deletion:
+            del_tag = previous_deletion
+        else:
+            del_tag = self._create_track_change_tag("w:del", reuse_id=reuse_id if previous_deletion is None else None)
 
         # Clone the run to preserve special content (w:drawing, w:commentReference)
         new_run = deepcopy(run._r)
@@ -2083,7 +2090,10 @@ class RedlineEngine:
         # The replacement-insertion side (in _apply_single_edit_indexed) splits
         # the enclosing <w:ins> so the new <w:ins> is a sibling, never <w:ins>
         # nested in <w:ins>.
-        parent.replace(run._r, del_tag)
+        if del_tag is previous_deletion:
+            parent.remove(run._r)
+        else:
+            parent.replace(run._r, del_tag)
         return del_tag
 
     @staticmethod
@@ -5634,15 +5644,9 @@ class RedlineEngine:
         if op == EditOperationType.PARAGRAPH_REPLACE:
             return self._apply_paragraph_replace(edit)
 
-        # Allocate logical-edit IDs up front: one id for the delete side and
-        # one for the insert side per logical operation, reused across every
-        # <w:ins>/<w:del> element this edit produces. A single ModifyText can
-        # span multiple XML runs (e.g. a target containing a bold word, which
-        # OOXML stores as a separate <w:r> element) or multiple paragraphs;
-        # minting a fresh w:id per element would surface N [Chg:N] entries in
-        # the projected bubble for what Word renders as a single review entry.
-        # The mapper's _build_merged_meta_block deduplicates repeated IDs via
-        # seen_sigs, collapsing the bubble without any projection-side change.
+        # Reserve the first deletion and insertion IDs up front. Adjacent
+        # deleted runs share one wrapper, not repeated w:del IDs. Separate
+        # wrappers across structural boundaries receive fresh deletion IDs.
         del_id: Optional[str] = edit._reserved_del_id
         ins_id: Optional[str] = edit._reserved_ins_id
         if op in (EditOperationType.DELETION, EditOperationType.MODIFICATION) and del_id is None:
@@ -5725,7 +5729,7 @@ class RedlineEngine:
             last_del_element = None
             del_elems = []
             for run in target_runs:
-                del_elem = self.track_delete_run(run, reuse_id=del_id)
+                del_elem = self.track_delete_run(run, reuse_id=del_id, previous_deletion=last_del_element)
                 if del_elem is not None:
                     del_elems.append(del_elem)
                 if first_del_element is None:
@@ -5763,7 +5767,7 @@ class RedlineEngine:
             last_del_element = None
             del_elems = []
             for run in target_runs:
-                del_elem = self.track_delete_run(run, reuse_id=del_id)
+                del_elem = self.track_delete_run(run, reuse_id=del_id, previous_deletion=last_del_element)
                 if del_elem is not None:
                     del_elems.append(del_elem)
                 if first_del_element is None:
@@ -5784,9 +5788,8 @@ class RedlineEngine:
                         if current_style and getattr(current_style, "name", "") == style_name:
                             text_to_insert = clean_text
 
-                    del_r = last_del_element.find(qn("w:r"))
-                    if del_r is None:
-                        del_r = target_runs[-1]._element
+                    deleted_runs = last_del_element.findall(qn("w:r"))
+                    del_r = deleted_runs[-1] if deleted_runs else target_runs[-1]._element
 
                     ins_elem, last_p = self.track_insert(
                         text_to_insert,
@@ -5983,7 +5986,7 @@ class RedlineEngine:
                     del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
                     rPr.append(del_mark)
 
-        self._record_used_revision_ids(edit, del_id, ins_id)
+        self._record_used_revision_ids(edit, del_id, ins_id, *(node.get(qn("w:id")) for node in del_elems))
         return True
 
     def _paragraph_has_visible_content(self, p_elem) -> bool:
