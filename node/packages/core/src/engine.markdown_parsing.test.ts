@@ -35,6 +35,17 @@ describe("Inline Markdown Parsing & Underscore Runs (Node.js Parity)", () => {
     parseAndCheck(engine, "_foo_bar_", [["foo_bar", { italic: true }]]);
   });
 
+  it("maintains Unicode word character and whitespace parity with Python", async () => {
+    const doc = await createTestDocument();
+    const engine = new RedlineEngine(doc);
+
+    parseAndCheck(engine, "caf\u00e9_au_", [["caf\u00e9_au_", {}]]);
+    parseAndCheck(engine, "_foo_\u00e9", [["_foo_\u00e9", {}]]);
+    parseAndCheck(engine, "\u65e5\u672c_\u8a9e_", [["\u65e5\u672c_\u8a9e_", {}]]);
+    parseAndCheck(engine, "_\ufeffx_", [["\ufeffx", { italic: true }]]);
+    parseAndCheck(engine, "_a\u0085_", [["_a\u0085_", {}]]);
+  });
+
   it("preserves empty delimiters as literal text", async () => {
     const doc = await createTestDocument();
     const engine = new RedlineEngine(doc);

@@ -101,6 +101,20 @@ def test_intra_word_underscores():
     _parse_and_check(engine, "_foo_bar_", [("foo_bar", {"italic": True})])
 
 
+def test_unicode_word_chars_and_whitespace_parity():
+    doc = Document()
+    stream = BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    _parse_and_check(engine, "caf\u00e9_au_", [("caf\u00e9_au_", {})])
+    _parse_and_check(engine, "_foo_\u00e9", [("_foo_\u00e9", {})])
+    _parse_and_check(engine, "\u65e5\u672c_\u8a9e_", [("\u65e5\u672c_\u8a9e_", {})])
+    _parse_and_check(engine, "_\ufeffx_", [("\ufeffx", {"italic": True})])
+    _parse_and_check(engine, "_a\u0085_", [("_a\u0085_", {})])
+
+
 def test_empty_delimiters_preserved():
     doc = Document()
     stream = BytesIO()

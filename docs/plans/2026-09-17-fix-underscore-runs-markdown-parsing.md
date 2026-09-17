@@ -226,6 +226,10 @@ Status: DONE
 
 ### Task 3: Node Engine Inline Markdown Parser Refactor & Unit Tests
 Status: DONE
+Failed-cycles: 1
+Attempt ledger:
+- attempt 1: regex replacement with ASCII \w and \s checks -> FAIL: Unicode word characters and whitespace parity discrepancy between JS /\w//\s/ and Python str.isalnum()/str.isspace()
+- attempt 2: Unicode-aware word character regex /[\p{L}\p{N}_]/u and Python-matching _is_space helper (handling U+0085, \x1c-\x1f, and excluding U+FEFF) across all 4 delimiter whitespace check sites -> PASS
 
 - **Goal:** Refactor `RedlineEngine._parse_inline_markdown` in `node/packages/core/src/engine.ts` to achieve 100% parity with Python, correctly preserving underscore runs, handling intra-word underscores, and supporting backslash escapes. Create `node/packages/core/src/engine.markdown_parsing.test.ts` with comprehensive unit and integration tests.
 - **Difficulty:** EASY

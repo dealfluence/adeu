@@ -3038,7 +3038,14 @@ export class RedlineEngine {
   }
 
   private _is_word_char(c: string): boolean {
-    return /\w/.test(c);
+    return /[\p{L}\p{N}_]/u.test(c);
+  }
+
+  private _is_space(c: string): boolean {
+    if (c === "\ufeff") return false;
+    return (
+      /^\s$/u.test(c) || c === "\u0085" || (c >= "\u001c" && c <= "\u001f")
+    );
   }
 
   private _find_next_emphasis(
@@ -3053,14 +3060,14 @@ export class RedlineEngine {
         text.substring(i, i + 2) === "**" &&
         !this._is_escaped(text, i)
       ) {
-        if (i + 2 < n && text[i + 2] !== "*" && !/\s/.test(text[i + 2])) {
+        if (i + 2 < n && text[i + 2] !== "*" && !this._is_space(text[i + 2])) {
           let j = i + 2;
           while (j + 1 < n) {
             if (
               text.substring(j, j + 2) === "**" &&
               !this._is_escaped(text, j)
             ) {
-              if (!/\s/.test(text[j - 1])) {
+              if (!this._is_space(text[j - 1])) {
                 const inner = text.substring(i + 2, j);
                 if (inner && !/^[*]+$/.test(inner)) {
                   return [i, j + 2, "bold", inner];
@@ -3079,7 +3086,7 @@ export class RedlineEngine {
         const isPrevUnderscore = i > 0 && text[i - 1] === "_";
         const isNextUnderscore = i + 1 < n && text[i + 1] === "_";
         const isPrevWord = i > 0 && this._is_word_char(text[i - 1]);
-        const isNextSpace = i + 1 === n || /\s/.test(text[i + 1]);
+        const isNextSpace = i + 1 === n || this._is_space(text[i + 1]);
 
         if (
           !isPrevUnderscore &&
@@ -3090,7 +3097,7 @@ export class RedlineEngine {
           let j = i + 1;
           while (j < n) {
             if (text[j] === "_" && !this._is_escaped(text, j)) {
-              const isClosePrevSpace = /\s/.test(text[j - 1]);
+              const isClosePrevSpace = this._is_space(text[j - 1]);
               const isClosePrevUnderscore = text[j - 1] === "_";
               const isCloseNextUnderscore = j + 1 < n && text[j + 1] === "_";
               const isCloseNextWord =
