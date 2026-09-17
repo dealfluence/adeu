@@ -1207,11 +1207,85 @@ class RedlineEngine:
                 return True
         return False
 
+    @staticmethod
+    def _is_escaped(text: str, pos: int) -> bool:
+        """True if the character at pos is preceded by an odd number of backslashes."""
+        count = 0
+        p = pos - 1
+        while p >= 0 and text[p] == "\\":
+            count += 1
+            p -= 1
+        return count % 2 == 1
+
+    @staticmethod
+    def _unescape_markdown(text: str) -> str:
+        """Replaces escaped markdown characters with literal form (e.g. \\_ -> _, \\* -> *, \\\\ -> \\)."""
+        return re.sub(r"\\([\\*_])", r"\1", text)
+
+    @staticmethod
+    def _is_word_char(c: str) -> bool:
+        return c.isalnum() or c == "_"
+
+    def _find_next_emphasis(self, text: str) -> Optional[Tuple[int, int, str, str]]:
+        """
+        Finds the earliest valid emphasis delimiter pair in text.
+        Returns (start_idx, end_idx, tag_type, inner_content) or None.
+        tag_type is 'bold' or 'italic'.
+        """
+        n = len(text)
+        i = 0
+        while i < n:
+            # Check for bold opening: **
+            if i + 1 < n and text[i : i + 2] == "**" and not self._is_escaped(text, i):
+                if i + 2 < n and text[i + 2] != "*" and not text[i + 2].isspace():
+                    j = i + 2
+                    while j + 1 < n:
+                        if text[j : j + 2] == "**" and not self._is_escaped(text, j):
+                            if not text[j - 1].isspace():
+                                inner = text[i + 2 : j]
+                                if inner and not all(c == "*" for c in inner):
+                                    return (i, j + 2, "bold", inner)
+                            j += 2
+                        else:
+                            j += 1
+
+            # Check for italic opening: _
+            if text[i] == "_" and not self._is_escaped(text, i):
+                is_prev_underscore = i > 0 and text[i - 1] == "_"
+                is_next_underscore = i + 1 < n and text[i + 1] == "_"
+                is_prev_word = i > 0 and self._is_word_char(text[i - 1])
+                is_next_space = i + 1 == n or text[i + 1].isspace()
+
+                if (not is_prev_underscore) and (not is_next_underscore) and (not is_prev_word) and (not is_next_space):
+                    j = i + 1
+                    while j < n:
+                        if text[j] == "_" and not self._is_escaped(text, j):
+                            is_close_prev_space = text[j - 1].isspace()
+                            is_close_prev_underscore = text[j - 1] == "_"
+                            is_close_next_underscore = j + 1 < n and text[j + 1] == "_"
+                            is_close_next_word = j + 1 < n and self._is_word_char(text[j + 1])
+
+                            if (
+                                (not is_close_prev_space)
+                                and (not is_close_prev_underscore)
+                                and (not is_close_next_underscore)
+                                and (not is_close_next_word)
+                            ):
+                                inner = text[i + 1 : j]
+                                if inner and not all(c == "_" for c in inner):
+                                    return (i, j + 1, "italic", inner)
+                        j += 1
+
+            i += 1
+
+        return None
+
     def _parse_inline_markdown(
         self, text: str, base_style: Optional[Dict[str, Any]] = None
     ) -> List[Tuple[str, Dict[str, Any]]]:
         """
-        Recursively parses bold (**) and italic (_) markdown.
+        Recursively parses bold (**) and italic (_) markdown, preserving underscore runs
+        and literal escaped characters.
         """
         if base_style is None:
             base_style = {}
@@ -1219,21 +1293,12 @@ class RedlineEngine:
         if not text:
             return []
 
-        token_pattern = re.compile(r"(\*\*.*?\*\*)|(_.*?_)")
-
-        match = token_pattern.search(text)
+        match = self._find_next_emphasis(text)
 
         if not match:
-            return [(text, base_style)]
+            return [(self._unescape_markdown(text), base_style)]
 
-        start, end = match.span()
-
-        if match.group(1):
-            tag_type = "bold"
-            inner_raw = match.group(1)
-        else:
-            tag_type = "italic"
-            inner_raw = match.group(2)
+        start, end, tag_type, inner_content = match
 
         pre_text = text[:start]
         post_text = text[end:]
@@ -1241,14 +1306,12 @@ class RedlineEngine:
         results = []
 
         if pre_text:
-            results.append((pre_text, base_style))
+            results.append((self._unescape_markdown(pre_text), base_style))
 
         new_style = base_style.copy()
         if tag_type == "bold":
-            inner_content = inner_raw[2:-2]
             new_style["bold"] = True
         else:
-            inner_content = inner_raw[1:-1]
             new_style["italic"] = True
 
         results.extend(self._parse_inline_markdown(inner_content, new_style))
