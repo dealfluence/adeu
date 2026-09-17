@@ -3023,35 +3023,128 @@ export class RedlineEngine {
     return false;
   }
 
+  private _is_escaped(text: string, pos: number): boolean {
+    let count = 0;
+    let p = pos - 1;
+    while (p >= 0 && text[p] === "\\") {
+      count++;
+      p--;
+    }
+    return count % 2 === 1;
+  }
+
+  private _unescape_markdown(text: string): string {
+    return text.replace(/\\([\\*_])/g, "$1");
+  }
+
+  private _is_word_char(c: string): boolean {
+    return /\w/.test(c);
+  }
+
+  private _find_next_emphasis(
+    text: string,
+  ): [number, number, "bold" | "italic", string] | null {
+    const n = text.length;
+    let i = 0;
+    while (i < n) {
+      // Check for bold opening: **
+      if (
+        i + 1 < n &&
+        text.substring(i, i + 2) === "**" &&
+        !this._is_escaped(text, i)
+      ) {
+        if (i + 2 < n && text[i + 2] !== "*" && !/\s/.test(text[i + 2])) {
+          let j = i + 2;
+          while (j + 1 < n) {
+            if (
+              text.substring(j, j + 2) === "**" &&
+              !this._is_escaped(text, j)
+            ) {
+              if (!/\s/.test(text[j - 1])) {
+                const inner = text.substring(i + 2, j);
+                if (inner && !/^[*]+$/.test(inner)) {
+                  return [i, j + 2, "bold", inner];
+                }
+              }
+              j += 2;
+            } else {
+              j++;
+            }
+          }
+        }
+      }
+
+      // Check for italic opening: _
+      if (text[i] === "_" && !this._is_escaped(text, i)) {
+        const isPrevUnderscore = i > 0 && text[i - 1] === "_";
+        const isNextUnderscore = i + 1 < n && text[i + 1] === "_";
+        const isPrevWord = i > 0 && this._is_word_char(text[i - 1]);
+        const isNextSpace = i + 1 === n || /\s/.test(text[i + 1]);
+
+        if (
+          !isPrevUnderscore &&
+          !isNextUnderscore &&
+          !isPrevWord &&
+          !isNextSpace
+        ) {
+          let j = i + 1;
+          while (j < n) {
+            if (text[j] === "_" && !this._is_escaped(text, j)) {
+              const isClosePrevSpace = /\s/.test(text[j - 1]);
+              const isClosePrevUnderscore = text[j - 1] === "_";
+              const isCloseNextUnderscore = j + 1 < n && text[j + 1] === "_";
+              const isCloseNextWord =
+                j + 1 < n && this._is_word_char(text[j + 1]);
+
+              if (
+                !isClosePrevSpace &&
+                !isClosePrevUnderscore &&
+                !isCloseNextUnderscore &&
+                !isCloseNextWord
+              ) {
+                const inner = text.substring(i + 1, j);
+                if (inner && !/^[_]+$/.test(inner)) {
+                  return [i, j + 1, "italic", inner];
+                }
+              }
+            }
+            j++;
+          }
+        }
+      }
+
+      i++;
+    }
+
+    return null;
+  }
+
   private _parse_inline_markdown(
     text: string,
     baseStyle: any = {},
   ): [string, any][] {
     if (!text) return [];
 
-    const tokenPattern = /(\*\*.*?\*\*)|(_.*?_)/;
-    const match = text.match(tokenPattern);
+    const match = this._find_next_emphasis(text);
+    if (!match) {
+      return [[this._unescape_markdown(text), baseStyle]];
+    }
 
-    if (!match) return [[text, baseStyle]];
-
-    const start = match.index!;
-    const raw = match[0];
-    const end = start + raw.length;
-
-    const isBold = raw.startsWith("**");
-    const innerContent = isBold
-      ? raw.substring(2, raw.length - 2)
-      : raw.substring(1, raw.length - 1);
-
+    const [start, end, tagType, innerContent] = match;
     const preText = text.substring(0, start);
     const postText = text.substring(end);
 
     const results: [string, any][] = [];
-    if (preText) results.push([preText, baseStyle]);
+    if (preText) {
+      results.push([this._unescape_markdown(preText), baseStyle]);
+    }
 
     const newStyle = { ...baseStyle };
-    if (isBold) newStyle.bold = true;
-    else newStyle.italic = true;
+    if (tagType === "bold") {
+      newStyle.bold = true;
+    } else {
+      newStyle.italic = true;
+    }
 
     results.push(...this._parse_inline_markdown(innerContent, newStyle));
     results.push(...this._parse_inline_markdown(postText, baseStyle));

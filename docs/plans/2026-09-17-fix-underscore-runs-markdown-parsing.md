@@ -225,6 +225,7 @@ Status: DONE
 - **Done when:** `uv run pytest tests/test_nested_markdown.py` passes all unit and integration tests.
 
 ### Task 3: Node Engine Inline Markdown Parser Refactor & Unit Tests
+Status: DONE
 
 - **Goal:** Refactor `RedlineEngine._parse_inline_markdown` in `node/packages/core/src/engine.ts` to achieve 100% parity with Python, correctly preserving underscore runs, handling intra-word underscores, and supporting backslash escapes. Create `node/packages/core/src/engine.markdown_parsing.test.ts` with comprehensive unit and integration tests.
 - **Difficulty:** EASY
