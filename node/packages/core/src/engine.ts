@@ -3048,6 +3048,46 @@ export class RedlineEngine {
     );
   }
 
+  /**
+   * Returns the character ending immediately before index `pos`, as a whole
+   * code point ("" when `pos` is at the start of the string).
+   *
+   * Python indexes `str` by code point while JavaScript indexes by UTF-16 code
+   * unit, so `text[pos - 1]` hands a lone surrogate to the character-class
+   * predicates whenever the neighbour is non-BMP: `_is_word_char` then reports
+   * false for astral letters and digits and emphasis fires where Python
+   * suppresses it. Stepping back over a surrogate pair keeps both engines
+   * inspecting the same character.
+   */
+  private _prev_char(text: string, pos: number): string {
+    if (pos <= 0) return "";
+    const low = text.charCodeAt(pos - 1);
+    if (low >= 0xdc00 && low <= 0xdfff && pos - 2 >= 0) {
+      const high = text.charCodeAt(pos - 2);
+      if (high >= 0xd800 && high <= 0xdbff) {
+        return text.slice(pos - 2, pos);
+      }
+    }
+    return text[pos - 1];
+  }
+
+  /**
+   * Returns the character starting at index `pos`, as a whole code point
+   * ("" when `pos` is past the end of the string). Code-point counterpart to
+   * `_prev_char`; see there for why raw indexing is not enough.
+   */
+  private _next_char(text: string, pos: number): string {
+    if (pos >= text.length) return "";
+    const high = text.charCodeAt(pos);
+    if (high >= 0xd800 && high <= 0xdbff && pos + 1 < text.length) {
+      const low = text.charCodeAt(pos + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        return text.slice(pos, pos + 2);
+      }
+    }
+    return text[pos];
+  }
+
   private _find_next_emphasis(
     text: string,
   ): [number, number, "bold" | "italic", string] | null {
@@ -3060,14 +3100,18 @@ export class RedlineEngine {
         text.substring(i, i + 2) === "**" &&
         !this._is_escaped(text, i)
       ) {
-        if (i + 2 < n && text[i + 2] !== "*" && !this._is_space(text[i + 2])) {
+        if (
+          i + 2 < n &&
+          text[i + 2] !== "*" &&
+          !this._is_space(this._next_char(text, i + 2))
+        ) {
           let j = i + 2;
           while (j + 1 < n) {
             if (
               text.substring(j, j + 2) === "**" &&
               !this._is_escaped(text, j)
             ) {
-              if (!this._is_space(text[j - 1])) {
+              if (!this._is_space(this._prev_char(text, j))) {
                 const inner = text.substring(i + 2, j);
                 if (inner && !/^[*]+$/.test(inner)) {
                   return [i, j + 2, "bold", inner];
@@ -3085,8 +3129,10 @@ export class RedlineEngine {
       if (text[i] === "_" && !this._is_escaped(text, i)) {
         const isPrevUnderscore = i > 0 && text[i - 1] === "_";
         const isNextUnderscore = i + 1 < n && text[i + 1] === "_";
-        const isPrevWord = i > 0 && this._is_word_char(text[i - 1]);
-        const isNextSpace = i + 1 === n || this._is_space(text[i + 1]);
+        const isPrevWord =
+          i > 0 && this._is_word_char(this._prev_char(text, i));
+        const isNextSpace =
+          i + 1 === n || this._is_space(this._next_char(text, i + 1));
 
         if (
           !isPrevUnderscore &&
@@ -3097,11 +3143,11 @@ export class RedlineEngine {
           let j = i + 1;
           while (j < n) {
             if (text[j] === "_" && !this._is_escaped(text, j)) {
-              const isClosePrevSpace = this._is_space(text[j - 1]);
+              const isClosePrevSpace = this._is_space(this._prev_char(text, j));
               const isClosePrevUnderscore = text[j - 1] === "_";
               const isCloseNextUnderscore = j + 1 < n && text[j + 1] === "_";
               const isCloseNextWord =
-                j + 1 < n && this._is_word_char(text[j + 1]);
+                j + 1 < n && this._is_word_char(this._next_char(text, j + 1));
 
               if (
                 !isClosePrevSpace &&

@@ -225,11 +225,12 @@ Status: DONE
 - **Done when:** `uv run pytest tests/test_nested_markdown.py` passes all unit and integration tests.
 
 ### Task 3: Node Engine Inline Markdown Parser Refactor & Unit Tests
-Status: DONE
-Failed-cycles: 1
+Status: IN_PROGRESS (attempt 3 - escalated to @opus-coder)
+Failed-cycles: 2
 Attempt ledger:
 - attempt 1: regex replacement with ASCII \w and \s checks -> FAIL: Unicode word characters and whitespace parity discrepancy between JS /\w//\s/ and Python str.isalnum()/str.isspace()
-- attempt 2: Unicode-aware word character regex /[\p{L}\p{N}_]/u and Python-matching _is_space helper (handling U+0085, \x1c-\x1f, and excluding U+FEFF) across all 4 delimiter whitespace check sites -> PASS
+- attempt 2: Unicode-aware word character regex /[\p{L}\p{N}_]/u and Python-matching _is_space helper -> FAIL on final verification: JS UTF-16 code units vs Python code points for astral plane characters (surrogate pairs like \u{20000}_foo_ and _foo_\u{1D7CE}) where lone surrogate is checked instead of full code point
+- attempt 3: Make neighbour lookarounds code-point aware in TypeScript (handling surrogate pairs before and after delimiter), test astral plane parity across both engines
 
 - **Goal:** Refactor `RedlineEngine._parse_inline_markdown` in `node/packages/core/src/engine.ts` to achieve 100% parity with Python, correctly preserving underscore runs, handling intra-word underscores, and supporting backslash escapes. Create `node/packages/core/src/engine.markdown_parsing.test.ts` with comprehensive unit and integration tests.
 - **Difficulty:** EASY

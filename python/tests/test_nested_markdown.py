@@ -115,6 +115,31 @@ def test_unicode_word_chars_and_whitespace_parity():
     _parse_and_check(engine, "_a\u0085_", [("_a\u0085_", {})])
 
 
+def test_astral_plane_word_chars_parity():
+    """Non-BMP neighbours are judged by code point, not by UTF-16 code unit.
+
+    Python indexes str by code point, so these cases only exist to pin the
+    contract the TypeScript engine has to reproduce with surrogate pairs.
+    """
+    doc = Document()
+    stream = BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    # Astral word characters adjacent to a delimiter suppress emphasis.
+    _parse_and_check(engine, "\U00020000_foo_", [("\U00020000_foo_", {})])
+    _parse_and_check(engine, "_foo_\U0001d7ce", [("_foo_\U0001d7ce", {})])
+    _parse_and_check(engine, "\U0001d400_foo_", [("\U0001d400_foo_", {})])
+
+    # Astral non-word characters (emoji) do not suppress emphasis.
+    _parse_and_check(engine, "\U0001f600_foo_", [("\U0001f600", {}), ("foo", {"italic": True})])
+    _parse_and_check(engine, "_foo_\U0001f600", [("foo", {"italic": True}), ("\U0001f600", {})])
+
+    # An astral character as the whole emphasised span still parses.
+    _parse_and_check(engine, "_\U00020000_", [("\U00020000", {"italic": True})])
+
+
 def test_empty_delimiters_preserved():
     doc = Document()
     stream = BytesIO()

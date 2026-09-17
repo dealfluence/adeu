@@ -46,6 +46,29 @@ describe("Inline Markdown Parsing & Underscore Runs (Node.js Parity)", () => {
     parseAndCheck(engine, "_a\u0085_", [["_a\u0085_", {}]]);
   });
 
+  it("judges astral-plane neighbours by code point, not UTF-16 code unit", async () => {
+    const doc = await createTestDocument();
+    const engine = new RedlineEngine(doc);
+
+    // Astral word characters adjacent to a delimiter suppress emphasis.
+    parseAndCheck(engine, "\u{20000}_foo_", [["\u{20000}_foo_", {}]]);
+    parseAndCheck(engine, "_foo_\u{1D7CE}", [["_foo_\u{1D7CE}", {}]]);
+    parseAndCheck(engine, "\u{1D400}_foo_", [["\u{1D400}_foo_", {}]]);
+
+    // Astral non-word characters (emoji) do not suppress emphasis.
+    parseAndCheck(engine, "\u{1F600}_foo_", [
+      ["\u{1F600}", {}],
+      ["foo", { italic: true }],
+    ]);
+    parseAndCheck(engine, "_foo_\u{1F600}", [
+      ["foo", { italic: true }],
+      ["\u{1F600}", {}],
+    ]);
+
+    // An astral character as the whole emphasised span still parses.
+    parseAndCheck(engine, "_\u{20000}_", [["\u{20000}", { italic: true }]]);
+  });
+
   it("preserves empty delimiters as literal text", async () => {
     const doc = await createTestDocument();
     const engine = new RedlineEngine(doc);
