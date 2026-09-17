@@ -184,6 +184,7 @@ Status: DONE
 - **Done when:** `uv run pytest tests/test_nested_markdown.py` passes all test cases with 0 failures.
 
 ### Task 2: Python End-to-End Tracked Insertion Verification (`<w:ins>`)
+Status: DONE
 
 - **Goal:** Verify that inserting fill-in blanks like `__________` into a DOCX document using `RedlineEngine.process_batch` generates real `<w:ins>` tags with literal runs and survives into the saved document.
 - **Difficulty:** EASY

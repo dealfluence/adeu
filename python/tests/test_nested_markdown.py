@@ -157,3 +157,70 @@ def test_fill_in_blank_with_surrounding_text():
             (" and _escaped_ and foo_bar_baz", {}),
         ],
     )
+
+
+def test_tracked_insert_underscore_run_survives():
+    doc = Document()
+    doc.add_paragraph("Name: [blank]")
+    stream = BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    from adeu.models import ModifyText
+
+    stats = engine.process_batch(
+        [ModifyText(type="modify", target_text="Name: [blank]", new_text="Name: __________", comment=None)]
+    )
+    assert stats["edits_applied"] == 1
+
+    # Verify XML structure has w:ins containing run with __________
+    saved_stream = engine.save_to_stream()
+    out_doc = Document(saved_stream)
+    p = out_doc.paragraphs[0]
+    xml_str = p._element.xml
+    assert "w:ins" in xml_str
+    assert "__________" in xml_str
+
+    # Verify clean text extraction includes __________
+    from adeu.ingest import extract_text_from_stream
+
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+    assert "Name: __________" in clean_text
+
+
+def test_tracked_insert_escaped_characters_survive():
+    doc = Document()
+    doc.add_paragraph("Original: placeholder")
+    stream = BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+
+    from adeu.models import ModifyText
+
+    stats = engine.process_batch(
+        [
+            ModifyText(
+                type="modify",
+                target_text="Original: placeholder",
+                new_text=r"Original: foo\_bar and \*not bold\*",
+                comment=None,
+            )
+        ]
+    )
+    assert stats["edits_applied"] == 1
+
+    # Verify XML structure has w:ins containing run with unescaped text
+    saved_stream = engine.save_to_stream()
+    out_doc = Document(saved_stream)
+    p = out_doc.paragraphs[0]
+    xml_str = p._element.xml
+    assert "w:ins" in xml_str
+    assert "foo_bar" in xml_str
+    assert "*not bold*" in xml_str
+
+    from adeu.ingest import extract_text_from_stream
+
+    clean_text = extract_text_from_stream(engine.save_to_stream(), clean_view=True)
+    assert "Original: foo_bar and *not bold*" in clean_text
