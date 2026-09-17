@@ -385,6 +385,7 @@ Attempt ledger:
 - **Done when:** `npm run test -- engine.markdown_parsing.test.ts` passes with 0 failures.
 
 ### Task 4: Full Suite Parity, Build & Lint Verification (Both Python & Node)
+Status: DONE
 
 - **Goal:** Verify that the full Python and Node test suites pass with zero regressions, and that all linting and typechecking pass cleanly.
 - **Difficulty:** EASY
