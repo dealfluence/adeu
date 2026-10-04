@@ -45,7 +45,7 @@ requires-dist = [
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
-    { name = "ooxml-integrity", specifier = "==0.4.5" },
+    { name = "ooxml-integrity", specifier = "==0.4.8" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },

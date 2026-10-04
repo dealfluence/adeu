@@ -55,7 +55,7 @@ requires-dist = [
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
-    { name = "ooxml-integrity", specifier = "==0.4.5" },
+    { name = "ooxml-integrity", specifier = "==0.4.8" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
@@ -1208,15 +1208,15 @@ wheels = [
 
 [[package]]
 name = "ooxml-integrity"
-version = "0.4.5"
+version = "0.4.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fonttools" },
     { name = "lxml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/e4/5746f41abed06c15e825bdb050dfbe198c732eb8a998d28811cc6a2e45ab/ooxml_integrity-0.4.5.tar.gz", hash = "sha256:ca13b0dd39df672c847a2e57c3bf30ba9b74d65898a6021585ddf779a72bf397", size = 8953891, upload-time = "2026-09-28T19:13:08.52Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/96/df0a33bfa39d52258298dc8a8c0d10b427c4c42e6e95498ff50f58bee3c2/ooxml_integrity-0.4.8.tar.gz", hash = "sha256:0756820fbde9eaac9a59938d08239593ac026f0d2ec49938736b7ac5e92aae7a", size = 17654776, upload-time = "2026-10-03T06:16:38.035Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/bf/05a8bcd5d29a260942fab41fef9b729dbd0fb65cfc3ad49ef5fbfc845a7a/ooxml_integrity-0.4.5-py3-none-any.whl", hash = "sha256:47674ca3fed5060f811eb3c0d485b48a8c8db0cfc71964de37f74c7591fed3a8", size = 87514, upload-time = "2026-09-28T19:13:07.1Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/7e/a4969e3f09283817be73fff05656d6d113f2b33b54a1601e34437596e082/ooxml_integrity-0.4.8-py3-none-any.whl", hash = "sha256:4fea2a4eda3154ce1b75849dd3558d5f25b74d766c7691f3b3eda93979affaa9", size = 98971, upload-time = "2026-10-03T06:16:36.253Z" },
 ]
 
 [[package]]
