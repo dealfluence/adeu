@@ -2273,6 +2273,42 @@ export class RedlineEngine {
           const delMark = rPr ? findChild(rPr, "w:del") : null;
           if (rPr && delMark) {
             rPr.removeChild(delMark);
+
+            // If content was merged into this paragraph from a following
+            // paragraph across the deleted paragraph break, restore the break
+            // by splitting the merged content back into a new paragraph (Issue #158).
+            const allChildren = Array.from(p.childNodes) as Element[];
+            const delNodes = allChildren.filter(
+              (c) => c.nodeType === 1 && c.tagName === "w:del",
+            );
+            if (delNodes.length > 0) {
+              const lastDel = delNodes[delNodes.length - 1];
+              const lastDelIdx = allChildren.indexOf(lastDel);
+              const trailingChildren = allChildren.slice(lastDelIdx + 1);
+              const hasContent = trailingChildren.some(
+                (c) =>
+                  c.nodeType === 1 &&
+                  (c.tagName === "w:r" ||
+                    c.tagName === "w:sdt" ||
+                    c.getElementsByTagName("w:t").length > 0),
+              );
+              if (hasContent && p.parentNode) {
+                const doc = p.ownerDocument!;
+                const newP = doc.createElement("w:p");
+                const newPPr = pPr.cloneNode(true) as Element;
+                const newRPr = findChild(newPPr, "w:rPr");
+                if (newRPr) {
+                  const dm = findChild(newRPr, "w:del");
+                  if (dm) newRPr.removeChild(dm);
+                }
+                newP.appendChild(newPPr);
+                for (const c of trailingChildren) {
+                  p.removeChild(c);
+                  newP.appendChild(c);
+                }
+                p.parentNode.insertBefore(newP, p.nextSibling);
+              }
+            }
           }
         }
       }
@@ -6894,14 +6930,29 @@ export class RedlineEngine {
       // (bottom-up, after the node loop).
       const rejected_mark_hosts: Element[] = [];
 
-      for (const node of group_nodes) {
+      // Process pilcrow deletions before content deletions so that paragraph splits
+      // can locate the boundary while child <w:del> elements are still intact.
+      const sorted_nodes = [...group_nodes].sort((a, b) => {
+        const a_is_del_pm =
+          a.tagName === "w:del" &&
+          (a.parentNode as Element)?.tagName === "w:rPr" &&
+          ((a.parentNode as Element)?.parentNode as Element)?.tagName === "w:pPr";
+        const b_is_del_pm =
+          b.tagName === "w:del" &&
+          (b.parentNode as Element)?.tagName === "w:rPr" &&
+          ((b.parentNode as Element)?.parentNode as Element)?.tagName === "w:pPr";
+        if (a_is_del_pm && !b_is_del_pm) return -1;
+        if (!a_is_del_pm && b_is_del_pm) return 1;
+        return 0;
+      });
+
+      for (const node of sorted_nodes) {
         const is_ins = node.tagName === "w:ins";
         const parent_tag = node.parentNode
           ? (node.parentNode as Element).tagName
           : "";
         const is_trPr = parent_tag === "w:trPr";
         const is_paragraph_mark =
-          is_ins &&
           parent_tag === "w:rPr" &&
           !!node.parentNode?.parentNode &&
           (node.parentNode.parentNode as Element).tagName === "w:pPr";
@@ -6953,7 +7004,46 @@ export class RedlineEngine {
             // deleted text is being RESTORED, so a comment anchored on it
             // stays valid (Python-engine parity, QA round 3 finding 1.1).
             if (is_trPr) node.parentNode?.removeChild(node);
-            else {
+            else if (is_paragraph_mark) {
+              const rPr = node.parentNode as Element;
+              const pPr = rPr ? (rPr.parentNode as Element) : null;
+              const hostP = pPr ? (pPr.parentNode as Element) : null;
+              if (hostP && hostP.tagName === "w:p") {
+                const allChildren = Array.from(hostP.childNodes) as Element[];
+                const delNodes = allChildren.filter(
+                  (c) => c.nodeType === 1 && c.tagName === "w:del",
+                );
+                if (delNodes.length > 0) {
+                  const lastDel = delNodes[delNodes.length - 1];
+                  const lastDelIdx = allChildren.indexOf(lastDel);
+                  const trailingChildren = allChildren.slice(lastDelIdx + 1);
+                  const hasContent = trailingChildren.some(
+                    (c) =>
+                      c.nodeType === 1 &&
+                      (c.tagName === "w:r" ||
+                        c.tagName === "w:sdt" ||
+                        c.getElementsByTagName("w:t").length > 0),
+                  );
+                  if (hasContent && hostP.parentNode) {
+                    const doc = hostP.ownerDocument!;
+                    const newP = doc.createElement("w:p");
+                    const newPPr = pPr!.cloneNode(true) as Element;
+                    const newRPr = findChild(newPPr, "w:rPr");
+                    if (newRPr) {
+                      const dm = findChild(newRPr, "w:del");
+                      if (dm) newRPr.removeChild(dm);
+                    }
+                    newP.appendChild(newPPr);
+                    for (const c of trailingChildren) {
+                      hostP.removeChild(c);
+                      newP.appendChild(c);
+                    }
+                    hostP.parentNode.insertBefore(newP, hostP.nextSibling);
+                  }
+                }
+              }
+              node.parentNode?.removeChild(node);
+            } else {
               const delTexts = Array.from(
                 node.getElementsByTagName("w:delText"),
               );
@@ -8397,14 +8487,6 @@ export class RedlineEngine {
           }
 
           if (p2_element && p2_element.tagName === "w:p") {
-            // Decide the merged container's properties BEFORE p2's children
-            // move in: when p1 keeps no visible content (a FULL paragraph
-            // deletion), the only surviving text is p2's — the merged
-            // paragraph must carry p2's properties (style, numbering).
-            // Keeping p1's restyled the following paragraph: deleting a
-            // heading turned the next body paragraph into a heading,
-            // deleting a plain paragraph before a list item stripped the
-            // item's numbering (QA 2026-07-19 ADEU-QA-002 B).
             const p1_fully_deleted =
               !this._paragraph_has_visible_content(p1_element);
 
@@ -8445,7 +8527,7 @@ export class RedlineEngine {
               pPr!.appendChild(rPr);
             }
             if (!findChild(rPr!, "w:del")) {
-              const del_mark = this._create_track_change_tag("w:del");
+              const del_mark = this._create_track_change_tag("w:del", "", del_id);
               rPr!.appendChild(del_mark);
             }
 
@@ -8531,7 +8613,7 @@ export class RedlineEngine {
           pPr!.appendChild(rPr);
         }
         if (!findChild(rPr!, "w:del")) {
-          const del_mark = this._create_track_change_tag("w:del");
+          const del_mark = this._create_track_change_tag("w:del", "", del_id);
           rPr!.appendChild(del_mark);
         }
       }

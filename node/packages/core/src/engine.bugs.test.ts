@@ -667,4 +667,60 @@ describe("Resolved Bugs Core Engine Verification", () => {
     accepted.accept_all_revisions();
     expect(docForAccept.element.getElementsByTagName("w:tab").length).toBe(1);
   });
+
+  it("Issue #158: Deleting a paragraph with its separator restores the paragraph break on reject", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "First paragraph.");
+    addParagraph(doc, "Second paragraph.");
+    addParagraph(doc, "Third paragraph.");
+
+    const engine = new RedlineEngine(doc, "Tester");
+    const stats = engine.process_batch([
+      { type: "modify", target_text: "Second paragraph.\n\n", new_text: "" },
+    ]);
+    expect(stats.status).toBe("ok");
+    expect(stats.edits[0].status).toBe("applied");
+
+    const buf = await doc.save();
+
+    // Accept all revisions: leaves only First and Third
+    const docAccept = await DocumentObject.load(buf);
+    const engAccept = new RedlineEngine(docAccept, "Tester");
+    engAccept.accept_all_revisions();
+    const pElementsAccept = docAccept.element.getElementsByTagName("w:p");
+    const textsAccept = Array.from(pElementsAccept).map((p) => p.textContent);
+    expect(textsAccept).toEqual(["First paragraph.", "Third paragraph."]);
+
+    // Reject all revisions: restores all three separate paragraphs
+    const docReject = await DocumentObject.load(buf);
+    const engReject = new RedlineEngine(docReject, "Tester");
+    engReject.reject_all_revisions();
+    const pElementsReject = docReject.element.getElementsByTagName("w:p");
+    const textsReject = Array.from(pElementsReject).map((p) => p.textContent);
+    expect(textsReject).toEqual([
+      "First paragraph.",
+      "Second paragraph.",
+      "Third paragraph.",
+    ]);
+
+    // Individual reject via apply_review_actions restores all three separate paragraphs
+    const docReview = await DocumentObject.load(buf);
+    const engReview = new RedlineEngine(docReview, "Tester");
+    const delNodes = docReview.element.getElementsByTagName("w:del");
+    const ids = Array.from(delNodes)
+      .map((d) => d.getAttribute("w:id"))
+      .filter(Boolean) as string[];
+    for (const id of ids) {
+      engReview.apply_review_actions([
+        { type: "reject", target_id: `Chg:${id}` },
+      ]);
+    }
+    const pElementsReview = docReview.element.getElementsByTagName("w:p");
+    const textsReview = Array.from(pElementsReview).map((p) => p.textContent);
+    expect(textsReview).toEqual([
+      "First paragraph.",
+      "Second paragraph.",
+      "Third paragraph.",
+    ]);
+  });
 });

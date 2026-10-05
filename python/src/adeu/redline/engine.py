@@ -5981,15 +5981,6 @@ class RedlineEngine:
                         p2_element = p2_element.getnext()
 
                     if p2_element is not None and p2_element.tag == qn("w:p"):
-                        # Decide the merged container's properties BEFORE p2's
-                        # children move in: when p1 keeps no visible content
-                        # (a FULL paragraph deletion), the only surviving text
-                        # is p2's — the merged paragraph must carry p2's
-                        # properties (style, numbering). Keeping p1's restyled
-                        # the following paragraph: deleting a heading turned
-                        # the next body paragraph into a heading, deleting a
-                        # plain paragraph before a list item stripped the
-                        # item's numbering (QA 2026-07-19 ADEU-QA-002 B).
                         p1_fully_deleted = not self._paragraph_has_visible_content(p1_element)
 
                         # 1. Track pilcrow deletion in p1
@@ -6016,7 +6007,7 @@ class RedlineEngine:
                             pPr.append(rPr)
 
                         if rPr.find(qn("w:del")) is None:
-                            del_mark = self._create_track_change_tag("w:del")
+                            del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
                             rPr.append(del_mark)
 
                         # 2. Coalesce children from p2 to p1
@@ -6762,6 +6753,8 @@ class RedlineEngine:
 
         if applied:
             self._mutated_since_load = True
+            for el in self.doc.element.findall(".//*[@_adeu_unwrapped_end]"):
+                el.attrib.pop("_adeu_unwrapped_end", None)
         return applied, skipped, already_resolved
 
     def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
@@ -7001,7 +6994,11 @@ class RedlineEngine:
 
             parent.remove(ins)
 
-        for d in all_del:
+        sorted_del = sorted(
+            all_del,
+            key=lambda d: 0 if d.getparent() is not None and d.getparent().tag == qn("w:rPr") else 1,
+        )
+        for d in sorted_del:
             self._clean_wrapping_comments(d, preserve_comments=True)
             parent = d.getparent()
             if parent is None:
@@ -7011,8 +7008,44 @@ class RedlineEngine:
                 parent.remove(d)
                 continue
 
+            grandparent = parent.getparent()
+            if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
+                p_el = grandparent.getparent()
+                if p_el is not None and p_el.tag == qn("w:p"):
+                    all_children = list(p_el)
+                    del_nodes = [c for c in all_children if c.tag == qn("w:del")]
+                    if del_nodes:
+                        last_del_idx = all_children.index(del_nodes[-1])
+                    else:
+                        unwrapped = [c for c in all_children if c.get("_adeu_unwrapped_end") == "true"]
+                        if unwrapped:
+                            last_del_idx = all_children.index(unwrapped[-1])
+                            unwrapped[-1].attrib.pop("_adeu_unwrapped_end", None)
+                        else:
+                            last_del_idx = -1
+                    if last_del_idx >= 0:
+                        trailing_children = all_children[last_del_idx + 1 :]
+                        if any(c.tag in (qn("w:r"), qn("w:sdt")) or any(c.iter(qn("w:t"))) for c in trailing_children):
+                            new_p = create_element("w:p")
+                            new_pPr = deepcopy(grandparent)
+                            new_rPr = new_pPr.find(qn("w:rPr"))
+                            if new_rPr is not None:
+                                dm = new_rPr.find(qn("w:del"))
+                                if dm is not None:
+                                    new_rPr.remove(dm)
+                            new_p.append(new_pPr)
+                            for c in trailing_children:
+                                p_el.remove(c)
+                                new_p.append(c)
+                            p_el.addnext(new_p)
+                parent.remove(d)
+                continue
+
             index = parent.index(d)
-            for child in list(d):
+            children = list(d)
+            if children:
+                children[-1].set("_adeu_unwrapped_end", "true")
+            for child in children:
                 for dt in child.findall(f".//{qn('w:delText')}"):
                     dt.tag = qn("w:t")
                     if dt.text is not None and dt.text.strip() != dt.text:
@@ -7383,6 +7416,31 @@ class RedlineEngine:
                         del_mark = rPr.find(qn("w:del"))
                         if del_mark is not None:
                             rPr.remove(del_mark)
+
+                            # If content was merged into this paragraph from a following
+                            # paragraph across the deleted paragraph break, restore the break
+                            # by splitting the merged content back into a new paragraph (Issue #158).
+                            all_children = list(p)
+                            del_nodes = [c for c in all_children if c.tag == qn("w:del")]
+                            if del_nodes:
+                                last_del_idx = all_children.index(del_nodes[-1])
+                                trailing_children = all_children[last_del_idx + 1 :]
+                                if any(
+                                    c.tag in (qn("w:r"), qn("w:sdt")) or any(c.iter(qn("w:t")))
+                                    for c in trailing_children
+                                ):
+                                    new_p = create_element("w:p")
+                                    new_pPr = deepcopy(pPr)
+                                    new_rPr = new_pPr.find(qn("w:rPr"))
+                                    if new_rPr is not None:
+                                        dm = new_rPr.find(qn("w:del"))
+                                        if dm is not None:
+                                            new_rPr.remove(dm)
+                                    new_p.append(new_pPr)
+                                    for c in trailing_children:
+                                        p.remove(c)
+                                        new_p.append(c)
+                                    p.addnext(new_p)
 
             # 3. Reject deletions: restore the original text.
             for d in root_element.findall(f".//{qn('w:del')}"):
