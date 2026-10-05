@@ -701,6 +701,7 @@ export class RedlineEngine {
       ignore_control_locks?: boolean;
       ignore_document_protection?: boolean;
       allow_untracked_writes?: boolean;
+      timestamp?: string | Date;
     },
   ) {
     this.doc = doc;
@@ -720,7 +721,13 @@ export class RedlineEngine {
     // gates, the projection banner and the fields ledger must all report the
     // same state.
     this.protection = readDocumentProtection(doc);
-    this.timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    if (opts?.timestamp instanceof Date) {
+      this.timestamp = opts.timestamp.toISOString().replace(/\.\d{3}Z$/, "Z");
+    } else if (typeof opts?.timestamp === "string") {
+      this.timestamp = opts.timestamp;
+    } else {
+      this.timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    }
 
     const w16du_ns =
       "http://schemas.microsoft.com/office/word/2023/wordml/word16du";
@@ -2500,7 +2507,12 @@ export class RedlineEngine {
     if (!parent_element || !start_element || !end_element) return null;
     if (this._skip_comment_outside_main_story(parent_element, text)) return null;
 
-    const comment_id = this.comments_manager.addComment(this.author, text);
+    const comment_id = this.comments_manager.addComment(
+      this.author,
+      text,
+      null,
+      this.timestamp,
+    );
     const xmlDoc = parent_element.ownerDocument!;
 
     const range_start = xmlDoc.createElement("w:commentRangeStart");
@@ -2558,7 +2570,12 @@ export class RedlineEngine {
     )
       return;
 
-    const comment_id = this.comments_manager.addComment(this.author, text);
+    const comment_id = this.comments_manager.addComment(
+      this.author,
+      text,
+      null,
+      this.timestamp,
+    );
     const xmlDocStart = start_p.ownerDocument!;
     const xmlDocEnd = end_p.ownerDocument!;
 
@@ -6668,7 +6685,12 @@ export class RedlineEngine {
         }
         let new_id: string;
         try {
-          new_id = this.comments_manager.addComment(this.author, action.text, cid);
+          new_id = this.comments_manager.addComment(
+            this.author,
+            action.text,
+            cid,
+            this.timestamp,
+          );
         } catch (e) {
           if (e instanceof CommentThreadingError) {
             // A reply that cannot be threaded must NOT be written as a new

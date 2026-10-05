@@ -800,7 +800,13 @@ class CommentsManager:
             ext_el.set(qn("w16cex:dateUtc"), date_utc)
             self.extensible_part.element.append(ext_el)
 
-    def add_comment(self, author: str, text: str, parent_id: Optional[str] = None) -> str:
+    def add_comment(
+        self,
+        author: str,
+        text: str,
+        parent_id: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> str:
         logger.info("Adding comment", author=author, parent_id=parent_id)
 
         # Before anything else, and for top-level comments too: the paraIds this
@@ -837,7 +843,10 @@ class CommentsManager:
 
         comment_id = str(self.next_id)
         self.next_id += 1
-        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if timestamp is not None:
+            now = timestamp
+        else:
+            now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         comment = OxmlElement("w:comment")
         comment.set(qn("w:id"), comment_id)

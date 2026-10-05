@@ -11,6 +11,7 @@ import { parseXml, serializeXml } from "./docx/dom.js";
 import { create_unified_diff } from "./diff.js";
 import { extract_outline } from "./outline.js";
 import { paginate } from "./pagination.js";
+import { CommentsManager, extract_comments_data } from "./comments.js";
 
 describe("Resolved Bugs Core Engine Verification", () => {
   it("BUG-3 & BUG-4: Links parts to package and yields headers for extraction", async () => {
@@ -722,5 +723,125 @@ describe("Resolved Bugs Core Engine Verification", () => {
       "Second paragraph.",
       "Third paragraph.",
     ]);
+  });
+
+  it("Issue #159: Revisions and comments share engine timestamp from opts.timestamp", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "The quick brown fox.");
+
+    const fixedTime = "2026-04-15T09:30:00Z";
+    const engine = new RedlineEngine(doc, "Tester", { timestamp: fixedTime });
+    expect(engine.timestamp).toBe(fixedTime);
+
+    const stats = engine.process_batch([
+      {
+        type: "modify",
+        target_text: "quick",
+        new_text: "slow",
+        comment: "Foxes are not always quick.",
+      },
+    ]);
+    expect(stats.status).toBe("ok");
+
+    // Body revisions carry fixedTime
+    const docXml = doc.element.toString();
+    const delDates = Array.from(docXml.matchAll(/<w:del\b[^>]*\bw:date="([^"]+)"/g)).map((m) => m[1]);
+    const insDates = Array.from(docXml.matchAll(/<w:ins\b[^>]*\bw:date="([^"]+)"/g)).map((m) => m[1]);
+    expect(delDates.length + insDates.length).toBeGreaterThan(0);
+    for (const d of [...delDates, ...insDates]) {
+      expect(d).toBe(fixedTime);
+    }
+
+    // Comment w:date carries fixedTime
+    const data = extract_comments_data(doc.pkg);
+    const commentDates = Object.values(data).map((c: any) => c.date);
+    expect(commentDates.length).toBeGreaterThan(0);
+    for (const d of commentDates) {
+      expect(d).toBe(fixedTime);
+    }
+  });
+
+  it("Issue #159: RedlineEngine constructor handles Date, string, and default timestamp", async () => {
+    const doc = await createTestDocument();
+
+    // 1. Date instance
+    const d = new Date("2026-06-01T12:00:00.123Z");
+    const engDate = new RedlineEngine(doc, "Tester", { timestamp: d });
+    expect(engDate.timestamp).toBe("2026-06-01T12:00:00Z");
+
+    // 2. String
+    const engStr = new RedlineEngine(doc, "Tester", { timestamp: "2026-01-01T00:00:00Z" });
+    expect(engStr.timestamp).toBe("2026-01-01T00:00:00Z");
+
+    // 3. Default
+    const engDefault = new RedlineEngine(doc, "Tester");
+    expect(engDefault.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  it("Issue #159: Reassigning engine.timestamp before process_batch updates comment timestamp", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "The quick brown fox.");
+
+    const engine = new RedlineEngine(doc, "Tester");
+    const reassignedTime = "2026-12-25T18:00:00Z";
+    engine.timestamp = reassignedTime;
+
+    const stats = engine.process_batch([
+      {
+        type: "modify",
+        target_text: "quick",
+        new_text: "slow",
+        comment: "Foxes are slow.",
+      },
+    ]);
+    expect(stats.status).toBe("ok");
+
+    const data = extract_comments_data(doc.pkg);
+    const commentDates = Object.values(data).map((c: any) => c.date);
+    expect(commentDates).toEqual([reassignedTime]);
+
+    const docXml = doc.element.toString();
+    const delDates = Array.from(docXml.matchAll(/<w:del\b[^>]*\bw:date="([^"]+)"/g)).map((m) => m[1]);
+    const insDates = Array.from(docXml.matchAll(/<w:ins\b[^>]*\bw:date="([^"]+)"/g)).map((m) => m[1]);
+    for (const d of [...delDates, ...insDates]) {
+      expect(d).toBe(reassignedTime);
+    }
+  });
+
+  it("Issue #159: ReplyComment review action uses engine.timestamp", async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, "The quick brown fox.");
+
+    const engine = new RedlineEngine(doc, "Tester", { timestamp: "2026-01-01T10:00:00Z" });
+    engine.process_batch([
+      {
+        type: "modify",
+        target_text: "quick",
+        new_text: "fast",
+        comment: "Original note",
+      },
+    ]);
+
+    const replyTime = "2026-01-02T15:00:00Z";
+    engine.timestamp = replyTime;
+    const [applied] = engine.apply_review_actions([
+      { type: "reply", target_id: "Com:1", text: "Reply note" },
+    ]);
+    expect(applied).toBe(1);
+
+    const data = extract_comments_data(doc.pkg);
+    expect(data["1"].date).toBe("2026-01-01T10:00:00Z");
+    expect(data["2"].date).toBe(replyTime);
+  });
+
+  it("Issue #159: CommentsManager.addComment respects optional timestamp", async () => {
+    const doc = await createTestDocument();
+    const cm = new CommentsManager(doc);
+    const cid1 = cm.addComment("Tester", "Explicit timestamp", null, "2026-07-07T07:07:07Z");
+    const cid2 = cm.addComment("Tester", "Default timestamp");
+
+    const data = extract_comments_data(doc.pkg);
+    expect(data[cid1].date).toBe("2026-07-07T07:07:07Z");
+    expect(data[cid2].date).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
 });

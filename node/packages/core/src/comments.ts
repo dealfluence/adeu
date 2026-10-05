@@ -672,7 +672,12 @@ export class CommentsManager {
     return rootParaId ?? adoptedParaId;
   }
 
-  public addComment(author: string, text: string, parentId: string | null = null): string {
+  public addComment(
+    author: string,
+    text: string,
+    parentId: string | null = null,
+    timestamp?: string | null,
+  ): string {
     // Before anything else, and for top-level comments too: the paraIds this
     // document arrived with are about to share a part with the ones we are
     // about to mint, and Word renumbers the whole part if any of them is out of
@@ -709,7 +714,10 @@ export class CommentsManager {
 
     const commentId = this.nextId.toString();
     this.nextId++;
-    const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const now =
+      timestamp !== undefined && timestamp !== null
+        ? timestamp
+        : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
     const doc = this.commentsPart._element.ownerDocument!;
     const comment = doc.createElement('w:comment');

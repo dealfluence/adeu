@@ -497,6 +497,7 @@ class RedlineEngine:
         ignore_control_locks: bool = False,
         ignore_document_protection: bool = False,
         allow_untracked_writes: bool = False,
+        timestamp: Optional[Union[str, datetime.datetime]] = None,
     ):
         self.terse_errors = terse_errors
         # CC-4 write-gate overrides. Engine kwargs rather than process_batch
@@ -555,9 +556,20 @@ class RedlineEngine:
             part._adeu_element = parse_xml(part.blob)  # type: ignore[attr-defined]
 
         self.author = author
-        self.timestamp = (
-            datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+        if isinstance(timestamp, datetime.datetime):
+            if timestamp.tzinfo is None:
+                dt = timestamp.replace(tzinfo=datetime.timezone.utc)
+            else:
+                dt = timestamp.astimezone(datetime.timezone.utc)
+            self.timestamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif isinstance(timestamp, str):
+            self.timestamp = timestamp
+        elif timestamp is None:
+            self.timestamp = (
+                datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+        else:
+            raise TypeError(f"timestamp must be a str, datetime.datetime, or None, got {type(timestamp).__name__}")
         self.current_id = self._scan_existing_ids()
         self.mapper = DocumentMapper(self.doc)
         # Offsets into mapper.full_text; rebuilt whenever the mapper is.
@@ -2247,7 +2259,7 @@ class RedlineEngine:
             logger.warning("Comment anchor elements are not children of the parent; skipping", text=text[:60])
             return
 
-        comment_id = self.comments_manager.add_comment(self.author, text)
+        comment_id = self.comments_manager.add_comment(self.author, text, timestamp=self.timestamp)
         range_start = create_element("w:commentRangeStart")
         create_attribute(range_start, "w:id", comment_id)
         range_end = create_element("w:commentRangeEnd")
@@ -2282,7 +2294,7 @@ class RedlineEngine:
         start_el = self._paragraph_child_ancestor(start_el, start_p)
         end_el = self._paragraph_child_ancestor(end_el, end_p)
 
-        comment_id = self.comments_manager.add_comment(self.author, text)
+        comment_id = self.comments_manager.add_comment(self.author, text, timestamp=self.timestamp)
 
         range_start = create_element("w:commentRangeStart")
         create_attribute(range_start, "w:id", comment_id)
@@ -7113,7 +7125,9 @@ class RedlineEngine:
             return False
 
         try:
-            new_comment_id = self.comments_manager.add_comment(self.author, text, parent_id=target_id)
+            new_comment_id = self.comments_manager.add_comment(
+                self.author, text, parent_id=target_id, timestamp=self.timestamp
+            )
         except CommentThreadingError as exc:
             # A reply that cannot be threaded must NOT be written as a new
             # top-level comment. The old path wrote it anyway and reported
