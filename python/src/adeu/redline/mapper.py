@@ -25,6 +25,14 @@ from adeu.utils.content_controls import (
     wrapping_sdt,
 )
 from adeu.utils.docx import (
+    QN_W_BR,
+    QN_W_CR,
+    QN_W_DELTEXT,
+    QN_W_NOBREAKHYPHEN,
+    QN_W_PTAB,
+    QN_W_RPR,
+    QN_W_T,
+    QN_W_TAB,
     DocxEvent,
     ProjectedRun,
     compute_change_pair_map,
@@ -1752,15 +1760,77 @@ class DocumentMapper:
         left_text = text[:split_index]
         right_text = text[split_index:]
 
-        run.text = left_text
+        # Create new_r_element as a copy of run._element, keeping attributes and w:rPr
         new_r_element = deepcopy(run._element)
+        rPr_new = new_r_element.find(QN_W_RPR)
+        for child in list(new_r_element):
+            if child is not rPr_new:
+                new_r_element.remove(child)
+
+        def _child_len(c: Any) -> int:
+            tag = c.tag
+            if tag == QN_W_T or tag == QN_W_DELTEXT:
+                return len(c.text or "")
+            elif tag in (QN_W_TAB, QN_W_PTAB, QN_W_NOBREAKHYPHEN, QN_W_BR, QN_W_CR):
+                return 1
+            return 0
+
+        current_offset = 0
+        for child in list(run._element):
+            if child.tag == QN_W_RPR:
+                continue
+            c_len = _child_len(child)
+            if c_len == 0:
+                if current_offset < split_index:
+                    pass
+                else:
+                    run._element.remove(child)
+                    new_r_element.append(child)
+            else:
+                if current_offset + c_len <= split_index:
+                    current_offset += c_len
+                elif current_offset >= split_index:
+                    run._element.remove(child)
+                    new_r_element.append(child)
+                    current_offset += c_len
+                else:
+                    offset_in_child = split_index - current_offset
+                    raw = child.text or ""
+                    left_str = raw[:offset_in_child]
+                    right_str = raw[offset_in_child:]
+
+                    child.text = left_str
+                    if left_str.startswith(" ") or left_str.endswith(" ") or "\n" in left_str:
+                        child.set(qn("xml:space"), "preserve")
+                    else:
+                        child.attrib.pop(qn("xml:space"), None)
+
+                    right_child = deepcopy(child)
+                    right_child.text = right_str
+                    if right_str.startswith(" ") or right_str.endswith(" ") or "\n" in right_str:
+                        right_child.set(qn("xml:space"), "preserve")
+                    else:
+                        right_child.attrib.pop(qn("xml:space"), None)
+
+                    new_r_element.append(right_child)
+                    current_offset += c_len
+
         run._element.addnext(new_r_element)
         if isinstance(run, ProjectedRun):
-            new_run: Any = ProjectedRun(new_r_element, right_text, run.proj_bold, run.proj_italic)
-            new_run.text = right_text
+            run.proj_text = left_text
+            new_run: Any = ProjectedRun(
+                new_r_element,
+                right_text,
+                run.proj_bold,
+                run.proj_italic,
+                getattr(run, "sdt_stack", ()),
+            )
         else:
+            if hasattr(run, "proj_text"):
+                run.proj_text = left_text
             new_run = Run(new_r_element, run._parent)
-            new_run.text = right_text
+            if hasattr(new_run, "proj_text"):
+                new_run.proj_text = right_text
         return run, new_run
 
     def get_context_at_range(self, start_idx: int, end_idx: int) -> Optional[TextSpan]:

@@ -34,6 +34,11 @@ import {
   iter_document_parts_with_kind,
   iter_paragraph_content,
   paragraph_mark_is_deleted,
+  QN_W_BR,
+  QN_W_CR,
+  QN_W_DELTEXT,
+  QN_W_T,
+  QN_W_TAB,
 } from "./utils/docx.js";
 
 export interface TextSpan {
@@ -1857,10 +1862,78 @@ export class DocumentMapper {
     const left_text = text.substring(0, split_index);
     const right_text = text.substring(split_index);
 
-    this._set_run_text_elements(run._element, left_text);
-
     const new_r_element = run._element.cloneNode(true) as Element;
-    this._set_run_text_elements(new_r_element, right_text);
+    // Remove all children from new_r_element except w:rPr
+    const new_children = Array.from(new_r_element.childNodes) as Element[];
+    for (const child of new_children) {
+      if (child.nodeType === 1 && child.tagName === "w:rPr") {
+        continue;
+      }
+      new_r_element.removeChild(child);
+    }
+
+    const _child_len = (c: Element): number => {
+      const tag = c.tagName;
+      if (tag === QN_W_T || tag === QN_W_DELTEXT) {
+        return (c.textContent || "").length;
+      } else if (
+        tag === QN_W_TAB ||
+        tag === "w:ptab" ||
+        tag === "w:noBreakHyphen" ||
+        tag === QN_W_BR ||
+        tag === QN_W_CR
+      ) {
+        return 1;
+      }
+      return 0;
+    };
+
+    let current_offset = 0;
+    const orig_children = Array.from(run._element.childNodes) as Element[];
+    for (const child of orig_children) {
+      if (child.nodeType === 1 && child.tagName === "w:rPr") {
+        continue;
+      }
+      const c_len = child.nodeType === 1 ? _child_len(child) : 0;
+      if (c_len === 0) {
+        if (current_offset < split_index) {
+          // stays in run._element
+        } else {
+          run._element.removeChild(child);
+          new_r_element.appendChild(child);
+        }
+      } else {
+        if (current_offset + c_len <= split_index) {
+          current_offset += c_len;
+        } else if (current_offset >= split_index) {
+          run._element.removeChild(child);
+          new_r_element.appendChild(child);
+          current_offset += c_len;
+        } else {
+          const offset_in_child = split_index - current_offset;
+          const raw = child.textContent || "";
+          const left_str = raw.substring(0, offset_in_child);
+          const right_str = raw.substring(offset_in_child);
+
+          child.textContent = left_str;
+          if (left_str.startsWith(" ") || left_str.endsWith(" ") || left_str.includes("\n")) {
+            child.setAttribute("xml:space", "preserve");
+          } else {
+            child.removeAttribute("xml:space");
+          }
+
+          const right_child = child.cloneNode(true) as Element;
+          right_child.textContent = right_str;
+          if (right_str.startsWith(" ") || right_str.endsWith(" ") || right_str.includes("\n")) {
+            right_child.setAttribute("xml:space", "preserve");
+          } else {
+            right_child.removeAttribute("xml:space");
+          }
+          new_r_element.appendChild(right_child);
+          current_offset += c_len;
+        }
+      }
+    }
 
     if (run._element.parentNode) {
       run._element.parentNode.insertBefore(
@@ -1870,33 +1943,8 @@ export class DocumentMapper {
     }
 
     const new_run = new Run(new_r_element, run._parent);
+    new_run.sdtStack = run.sdtStack;
     return [run, new_run];
-  }
-
-  private _set_run_text_elements(r_element: Element, new_text: string) {
-    const to_remove: Element[] = [];
-    for (let i = 0; i < r_element.childNodes.length; i++) {
-      const child = r_element.childNodes[i] as Element;
-      if (
-        child.nodeType === 1 &&
-        ["w:t", "w:delText", "w:br", "w:cr", "w:tab"].includes(child.tagName)
-      ) {
-        to_remove.push(child);
-      }
-    }
-    for (const child of to_remove) {
-      r_element.removeChild(child);
-    }
-
-    const doc = r_element.ownerDocument;
-    if (doc) {
-      const new_t = doc.createElement("w:t");
-      new_t.textContent = new_text;
-      if (new_text.trim() !== new_text) {
-        new_t.setAttribute("xml:space", "preserve");
-      }
-      r_element.appendChild(new_t);
-    }
   }
 
   public get_context_at_range(

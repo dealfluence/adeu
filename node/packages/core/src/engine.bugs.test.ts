@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { DocumentObject } from "./docx/bridge.js";
 import {
   createTestDocument,
   addParagraph,
@@ -623,5 +624,47 @@ describe("Resolved Bugs Core Engine Verification", () => {
     const stats = other.accept_all_revisions() as any;
 
     expect(stats.removed_comments).toBe(1);
+  });
+
+  it("Issue #157: A tab in a run that an edit splits is preserved, not replaced by space", async () => {
+    const doc = await createTestDocument();
+    const xmlDoc = doc.element.ownerDocument!;
+    const p = xmlDoc.createElement("w:p");
+    const r = xmlDoc.createElement("w:r");
+
+    const t1 = xmlDoc.createElement("w:t");
+    t1.textContent = "1.1";
+    r.appendChild(t1);
+
+    const tab = xmlDoc.createElement("w:tab");
+    r.appendChild(tab);
+
+    const t2 = xmlDoc.createElement("w:t");
+    t2.textContent = "The Supplier shall deliver the Goods.";
+    t2.setAttribute("xml:space", "preserve");
+    r.appendChild(t2);
+
+    p.appendChild(r);
+    doc.element.appendChild(p);
+
+    const tabsBefore = doc.element.getElementsByTagName("w:tab").length;
+    expect(tabsBefore).toBe(1);
+
+    const engine = new RedlineEngine(doc, "Tester");
+    engine.process_batch([{ type: "modify", target_text: "deliver", new_text: "supply" }]);
+
+    const tabsAfter = doc.element.getElementsByTagName("w:tab").length;
+    expect(tabsAfter).toBe(1);
+
+    const buf = await doc.save();
+    const docForReject = await DocumentObject.load(buf);
+    const rejected = new RedlineEngine(docForReject, "Tester");
+    rejected.reject_all_revisions();
+    expect(docForReject.element.getElementsByTagName("w:tab").length).toBe(1);
+
+    const docForAccept = await DocumentObject.load(buf);
+    const accepted = new RedlineEngine(docForAccept, "Tester");
+    accepted.accept_all_revisions();
+    expect(docForAccept.element.getElementsByTagName("w:tab").length).toBe(1);
   });
 });
