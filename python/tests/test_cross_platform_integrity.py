@@ -9,8 +9,9 @@ that reports lost comment anchors, footnote references, tracked changes and
 other constructs. Only error-level findings fail.
 
 Accept/reject scenarios remove revisions on purpose. EXPECTED_REVISION_CHANGES
-lists the revision-count changes each one requests, so any other loss still
-fails, and a new accept/reject scenario declares its own.
+lists the revision-count changes each one requests, declared to ooxml-integrity
+as expectations: a requested change that does not happen fails (EXP001), any
+other loss still fails, and a new accept/reject scenario declares its own.
 """
 
 import io
@@ -18,7 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
-from ooxml_integrity import Severity, check, compare
+from ooxml_integrity import Expectation, Severity, check, compare, expect
 
 from adeu.models import (
     AcceptChange,
@@ -63,11 +64,12 @@ def _written_scenarios():
     return cases
 
 
-def _revision_change(finding):
-    """(tag, before, after) of an FID001 insertion/deletion finding, otherwise None."""
-    if finding.code == "FID001" and finding.extra.get("tag") in ("ins", "del"):
-        return (finding.extra["tag"], finding.extra["before"], finding.extra["after"])
-    return None
+def _expectations(name):
+    """The scenario's requested revision-count changes as ooxml-integrity expectations."""
+    return [
+        Expectation("FID001", {"tag": tag, "before": before, "after": after}, reason=f"{name} accepts or rejects")
+        for tag, before, after in sorted(EXPECTED_REVISION_CHANGES.get(name, set()))
+    ]
 
 
 @pytest.mark.parametrize("test_dir", _written_scenarios())
@@ -80,11 +82,6 @@ def test_scenario_output_integrity(test_dir: Path, tmp_path: Path):
     output = tmp_path / "output.docx"
     output.write_bytes(engine.save_to_stream().getvalue())
 
-    findings = check(output) + compare(source, output)
-    expected = EXPECTED_REVISION_CHANGES.get(test_dir.name, set())
-    requested = {change for change in map(_revision_change, findings) if change}
-    assert requested == expected, (
-        f"[{test_dir.name}] revision-count changes {sorted(requested)} != expected {sorted(expected)}"
-    )
-    errors = [f for f in findings if f.severity is Severity.ERROR and _revision_change(f) not in expected]
+    kept, _ = expect(check(output) + compare(source, output), _expectations(test_dir.name))
+    errors = [f for f in kept if f.severity is Severity.ERROR]
     assert not errors, f"[{test_dir.name}] ooxml-integrity errors:\n" + "\n".join(str(f) for f in errors)
