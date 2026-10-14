@@ -1389,8 +1389,15 @@ export function build_search_response(
   // nothing to drop — and the radius ladder cannot rescue that case either,
   // because a balanced window is at least as wide as the CriticMarkup spans it
   // must keep whole, however small the radius (QA round 5, finding 1).
+  //
+  // The `File Path:` line's scaffolding is fixed chrome, but the path it
+  // echoes is caller-supplied and unbounded: counting it let a long path
+  // (OneDrive, temp dirs) crowd out snippet context and whole matches.
+  const prefix_chrome = content_prefix
+    ? content_prefix.length - resolve(file_path).length
+    : 0;
   const fits = (markdown: string, rendered_count: number): boolean =>
-    content_prefix.length + markdown.length <=
+    prefix_chrome + markdown.length <=
     search_budget_tokens(max_matches, rendered_count) * CHARS_PER_TOKEN;
 
   let ui_markdown: string;

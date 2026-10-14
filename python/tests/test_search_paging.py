@@ -670,3 +670,30 @@ def test_cli_search_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str], mo
     captured = capsys.readouterr()
     stdout = captured.out
     assert stdout.count("### Match ") == 3
+
+
+def test_long_file_path_does_not_shrink_the_match_budget():
+    # The `> **File Path:**` line echoes the caller's path verbatim. The budget
+    # is sized for match content plus fixed chrome, so a long path (OneDrive,
+    # temp dirs) must not push out snippet context or whole matches: the same
+    # document must render identically at a short and a long path.
+    text = _make_haystack(50)
+    long_path = "/" + "/".join(["a-rather-long-directory-name"] * 6) + "/doc.docx"
+
+    def render(file_path: str) -> str:
+        res = build_search_response(
+            text,
+            search_query="Supplier",
+            search_regex=False,
+            search_case_sensitive=True,
+            page=None,
+            file_path=file_path,
+            max_matches=3,
+        )
+        return str(res.structured_content["markdown"])
+
+    short_md = render("doc.docx")
+    long_md = render(long_path)
+    assert short_md.count("### Match ") == 3
+    assert "trimmed" not in short_md
+    assert long_md == short_md
