@@ -31,7 +31,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: ./node
-        run: npm install
+        run: npm ci
 
       - name: Build Packages
         working-directory: ./node
@@ -98,7 +98,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: ./node
-        run: npm install
+        run: npm ci
 
       - name: Build Packages
         working-directory: ./node
@@ -191,7 +191,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: ./node
-        run: npm install
+        run: npm ci
 
       - name: Build Packages
         working-directory: ./node
