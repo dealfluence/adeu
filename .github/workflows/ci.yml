@@ -193,3 +193,20 @@ jobs:
         run: |
           npm run build
           npm test --workspace @adeu/core -- corpus_validation
+
+  # The one required status check on main. The ruleset requires `ci-ok` instead
+  # of listing matrix check names such as `build (3.14)`: drop or rename a matrix
+  # entry and a listed check never reports, blocking every PR. `if: always()` is
+  # load-bearing: without it a failed dependency makes this job *skipped*, and
+  # GitHub counts a skipped required check as passing. corpus-validation is
+  # manual-only and deliberately not a dependency.
+  ci-ok:
+    if: always()
+    needs: [build, node-test, langchain-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gating job to succeed
+        if: needs.build.result != 'success' || needs.node-test.result != 'success' || needs.langchain-test.result != 'success'
+        run: |
+          echo "build=${{ needs.build.result }} node-test=${{ needs.node-test.result }} langchain-test=${{ needs.langchain-test.result }}"
+          exit 1
