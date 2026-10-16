@@ -18,6 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: "CANARY (never merge): fail one matrix leg"
+        if: matrix.python-version == '3.13'
+        run: exit 1
+
       - name: Install xmllint (libxml2-utils)
         run: |
           sudo apt-get update
