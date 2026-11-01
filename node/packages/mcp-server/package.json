@@ -34,7 +34,7 @@
   "type": "module",
   "dependencies": {
     "@adeu/core": "^3.0.7",
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@modelcontextprotocol/ext-apps": "^1.7.4",
     "zod": "4.6.7"
   }
