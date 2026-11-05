@@ -243,22 +243,33 @@ export class CommentsManager {
     // most importantly w14, which qualifies the w14:paraId / w14:textId
     // attributes we write on each comment paragraph. Without the declaration
     // the serialised XML is invalid ("Namespace prefix w14 ... is not defined").
-    // Declare any missing namespace prefixes on the existing root element.
+    // Declare any missing namespace prefixes on the existing root element,
+    // keeping every declaration it already has (existing comments may use
+    // them, e.g. r:id on a hyperlink). A prefix bound to a different URI is
+    // rebound, or the attributes we write under it would mean something else.
+    // The extension prefixes must also be listed in mc:Ignorable or Word drops
+    // the attributes; merge with the existing list rather than replacing it
+    // (TechGC fork LLO-1694; Python twin: CommentsManager._ensure_namespaces).
     const root = this._commentsPart?._element;
     if (!root) return;
 
     const required: [string, string][] = [
-      ['xmlns:w', NS.w],
-      ['xmlns:w14', NS.w14],
-      ['xmlns:w15', NS.w15],
-      ['xmlns:w16cid', NS.w16cid],
-      ['xmlns:w16cex', NS.w16cex],
-      ['xmlns:mc', NS.mc],
+      ['w', NS.w],
+      ['w14', NS.w14],
+      ['w15', NS.w15],
+      ['w16cid', NS.w16cid],
+      ['w16cex', NS.w16cex],
+      ['mc', NS.mc],
     ];
-    for (const [attr, uri] of required) {
-      if (!root.getAttribute(attr)) {
-        root.setAttribute(attr, uri);
+    for (const [prefix, uri] of required) {
+      if (root.getAttribute(`xmlns:${prefix}`) !== uri) {
+        root.setAttribute(`xmlns:${prefix}`, uri);
       }
+    }
+    const ignorable = (root.getAttribute('mc:Ignorable') || '').split(/\s+/).filter(Boolean);
+    const merged = [...new Set([...ignorable, 'w14', 'w15', 'w16cid', 'w16cex'])].join(' ');
+    if (merged !== ignorable.join(' ')) {
+      root.setAttribute('mc:Ignorable', merged);
     }
   }
 
