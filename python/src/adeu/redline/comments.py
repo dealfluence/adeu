@@ -371,7 +371,7 @@ class CommentsManager:
         # existing comments may use any of them (r:id on a hyperlink in a
         # counterparty's comment), and mc:Ignorable may name any of them. The
         # old string rebuild of the start tag dropped them, so re-parsing
-        # failed with "Namespace prefix r ... is not defined" (TechGC LLO-1694).
+        # failed with "Namespace prefix r ... is not defined".
         wanted = {**COMMENT_EXTENSION_NAMESPACES, "mc": MC_NS}
         rebound = {prefix: uri for prefix, uri in wanted.items() if element.nsmap.get(prefix) != uri}
         merged_ignorable = " ".join(dict.fromkeys([*ignorable, *COMMENT_EXTENSION_NAMESPACES]))

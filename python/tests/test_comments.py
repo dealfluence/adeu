@@ -81,7 +81,7 @@ def test_multiple_comments_ids():
 
 
 # --- An existing comments.xml root keeps its namespace declarations ----------
-# (TechGC fork 309fc4c / LLO-1694). Counterparty documents arrive with comments
+# Counterparty documents arrive with comments
 # whose root declares more than the namespaces Adeu needs; Word puts
 # hyperlinks (r:id) in comment bodies.
 

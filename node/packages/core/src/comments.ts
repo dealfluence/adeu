@@ -249,7 +249,7 @@ export class CommentsManager {
     // rebound, or the attributes we write under it would mean something else.
     // The extension prefixes must also be listed in mc:Ignorable or Word drops
     // the attributes; merge with the existing list rather than replacing it
-    // (TechGC fork LLO-1694; Python twin: CommentsManager._ensure_namespaces).
+    // (Python twin: CommentsManager._ensure_namespaces).
     const root = this._commentsPart?._element;
     if (!root) return;
 

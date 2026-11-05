@@ -1,6 +1,6 @@
 /**
  * Edits that KEEP a cross-reference or hyperlink must edit only the text
- * around it (found while reviewing the TechGC fork, 2026-11-05).
+ * around it (2026-11-05).
  *
  * A cross-reference projects as `[~2.1~](#_Ref123)`; the `_` in the bookmark
  * name routed the edit down the whole-span markdown path, which deleted the REF

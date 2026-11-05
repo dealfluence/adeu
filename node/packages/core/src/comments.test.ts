@@ -33,7 +33,7 @@ describe('CommentsManager & DOM Serialization', () => {
 });
 
 // An existing comments.xml root keeps its declarations and gains the extension
-// namespaces + mc:Ignorable entries Word needs (TechGC fork 309fc4c / LLO-1694).
+// namespaces + mc:Ignorable entries Word needs.
 // Python twin: python/tests/test_comments.py.
 describe('existing comments root namespaces', () => {
   const W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';

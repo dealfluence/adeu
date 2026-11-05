@@ -1,7 +1,7 @@
 """
 Edits that KEEP a cross-reference or hyperlink must edit only the text around it.
 
-Repro (found while reviewing the TechGC fork, 2026-11-05): a cross-reference
+Repro (2026-11-05): a cross-reference
 projects as `[~2.1~](#_Ref123)`, and the `_` in the bookmark name routed the
 edit down the whole-span markdown path. The engine then deleted the REF field's
 result and inserted the projection markup as literal text, so the accepted
