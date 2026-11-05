@@ -311,6 +311,14 @@ function sequential_context_hint(applied_so_far: number): string {
 // (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
+// Projection markers that stand for document STRUCTURE rather than text:
+// cross-references `[~2.1~](#_Ref1)`, images `![alt](docx-image:N)` and
+// hyperlinks `[label](url)`. Written into a run they become literal text, so an
+// edit that keeps them must never send them through a text replacement (see
+// RedlineEngine._split_around_kept_markers). Python twin: _STRUCTURAL_MARKER_RE.
+const STRUCTURAL_MARKER_RE =
+  /\[~[^~\]]+~\]\(#[^)]+\)|!\[[^\]]*\]\(docx-image:[^)]*\)|\[(?!~)[^\]]+\]\([^)]+\)/g;
+
 // CC-1e: content-control anchors, open or close, with or without flag words.
 /**
  * Drop paragraph marks that BOTH sides of a replacement end with (CC-14).
@@ -7500,253 +7508,347 @@ export class RedlineEngine {
         continue;
       }
 
-      if (
-        actual_doc_text === current_effective_new_text ||
-        edit.target_text === current_effective_new_text
-      ) {
-        all_sub_edits.push({
-          type: "modify",
-          target_text: actual_doc_text,
-          new_text: actual_doc_text,
-          comment: edit.comment,
-          _match_start_index: start_idx,
-          _internal_op: "COMMENT_ONLY",
-          _active_mapper_ref: active_mapper,
-        });
-        continue;
-      }
-
-      let overlaps_virtual_pipe = false;
-      if (active_mapper) {
-        overlaps_virtual_pipe = active_mapper.spans.some(
-          (s: any) =>
-            s.text === " | " &&
-            (s.run === null || s.run === undefined) &&
-            s.start < start_idx + match_len &&
-            s.end > start_idx,
-        );
-      }
-
-      if (overlaps_virtual_pipe) {
-        const actual_cells = actual_doc_text.split("|");
-        const new_cells = current_effective_new_text.split("|");
-
-        if (actual_cells.length !== new_cells.length) {
-          throw new BatchValidationError([
-            `Target text spans ${actual_cells.length} table cells, but replacement provides ${new_cells.length}. To modify text without altering table structure (rows or columns), ensure the replacement contains the exact same number of '|' separators (e.g., replace with 'CellC | ' to empty the second cell).`
-          ]);
-        }
-
-        if (actual_cells.length > 1) {
-          const sub_edits: any[] = [];
-
-          // actual_doc_text IS the document slice at
-          // [start_idx, start_idx + len): per-cell offsets are exact
-          // arithmetic over that slice — never a search of mapper.full_text,
-          // which cannot distinguish repeated cell text and lands in the
-          // wrong cell when the matched range starts inside a " | "
-          // separator.
-          let cell_start_in_target = 0;
-
-          // Determine which cell receives the comment
-          let target_comment_idx = 0;
-          for (let idx = 0; idx < actual_cells.length; idx++) {
-            if (actual_cells[idx].trim() !== new_cells[idx].trim()) {
-              target_comment_idx = idx;
-              break;
-            }
-          }
-
-          for (let cell_idx = 0; cell_idx < actual_cells.length; cell_idx++) {
-            const a_cell = actual_cells[cell_idx];
-            const n_cell = new_cells[cell_idx];
-            const a_clean = a_cell.trim();
-            const n_clean = n_cell.trim();
-            const actual_start =
-              start_idx +
-              cell_start_in_target +
-              (a_clean ? a_cell.indexOf(a_clean) : 0);
-
-            const should_attach_comment = (edit.comment !== null && edit.comment !== undefined) && (cell_idx === target_comment_idx);
-
-            if (a_clean !== n_clean || should_attach_comment) {
-              const cell_sub_edits = this._word_diff_sub_edits(
-                a_clean,
-                n_clean,
-                actual_start,
-                should_attach_comment ? edit.comment : null,
-                true,
-                active_mapper,
-              );
-              for (const se of cell_sub_edits) {
-                se._original_target_text = edit.target_text;
-                se._split_group_id = start_idx;
-                sub_edits.push(se);
-              }
-            }
-
-            cell_start_in_target += a_cell.length + 1; // +1 for the '|'
-          }
-
-          for (const sub of sub_edits) {
-            all_sub_edits.push(sub);
-          }
-          continue;
-        }
-        // Exactly one "cell": the target merely brushes a separator (its
-        // match range starts or ends inside " | ") without crossing into
-        // another cell's text. That is an ordinary in-cell edit — fall
-        // through to the standard resolution.
-      }
-
-      let has_markdown = false;
-      if (edit.target_text && (edit.target_text.includes("**") || edit.target_text.includes("_"))) {
-        has_markdown = true;
-      }
-      if (current_effective_new_text && (current_effective_new_text.includes("**") || current_effective_new_text.includes("_"))) {
-        has_markdown = true;
-      }
-
-      let effective_op = "";
-      let final_target = "";
-      let final_new = "";
-      let effective_start_idx = start_idx;
-
-      if (current_effective_new_text.startsWith(actual_doc_text)) {
-        effective_op = "INSERTION";
-        final_new = current_effective_new_text.substring(actual_doc_text.length);
-        effective_start_idx = start_idx + match_len;
-      } else {
-        const [prefix_len, suffix_len] = trim_common_context(
-          actual_doc_text,
-          current_effective_new_text,
-        );
-        const t_end = actual_doc_text.length - suffix_len;
-        const n_end = current_effective_new_text.length - suffix_len;
-
-        final_target = actual_doc_text.substring(prefix_len, t_end);
-        final_new = current_effective_new_text.substring(prefix_len, n_end);
-        effective_start_idx = start_idx + prefix_len;
-      }
-
-      if (has_markdown) {
-        if (!final_target && final_new) {
-          effective_op = "INSERTION";
-        } else if (final_target && !final_new) {
-          effective_op = "DELETION";
-        } else if (final_target && final_new) {
-          effective_op = "MODIFICATION";
-        } else {
-          all_sub_edits.push({
-            type: "modify",
-            target_text: final_target,
-            new_text: final_new,
-            comment: edit.comment,
-            _match_start_index: effective_start_idx,
-            _internal_op: "COMMENT_ONLY",
-            _active_mapper_ref: active_mapper,
-          });
-          continue;
-        }
-
-        all_sub_edits.push({
-          type: "modify",
-          target_text: final_target,
-          new_text: final_new,
-          comment: edit.comment,
-          _resolved_start_idx: effective_start_idx,
-          _match_start_index: effective_start_idx,
-          _internal_op: effective_op,
-          _active_mapper_ref: active_mapper,
-        });
-        continue;
-      }
-
-      // Balanced multi-paragraph modification: the matched span crosses one or
-      // more paragraph breaks and the replacement preserves the same number of
-      // breaks. Apply it as one independent sub-edit per paragraph segment so
-      // the structural \n\n breaks are left intact. Each sub-edit shares a
-      // _split_group_id (the occurrence's start index) so the batch report
-      // counts it as a single applied edit. Unbalanced cases (a genuine
-      // paragraph merge or split) fall through to the single-span path and are
-      // rejected by validate_edits.
-      const target_segs = actual_doc_text.split("\n\n");
-      const new_segs = current_effective_new_text.split("\n\n");
-      if (
-        actual_doc_text.includes("\n\n") &&
-        target_segs.length === new_segs.length
-      ) {
-        const split_sub_edits: any[] = [];
-        let seg_offset = start_idx;
-        let comment_assigned = false;
-        for (let k = 0; k < target_segs.length; k++) {
-          const t_seg = target_segs[k];
-          const n_seg = new_segs[k];
-          if (t_seg !== n_seg) {
-            const seg_comment =
-              edit.comment && !comment_assigned ? edit.comment : null;
-            const seg_sub_edits = this._word_diff_sub_edits(
-              t_seg,
-              n_seg,
-              seg_offset,
-              seg_comment,
-              false,
-              active_mapper,
-            );
-            if (seg_sub_edits.some((se) => se.comment !== null && se.comment !== undefined)) {
-              comment_assigned = true;
-            }
-            for (const se of seg_sub_edits) {
-              se._split_group_id = start_idx;
-              split_sub_edits.push(se);
-            }
-          }
-          // Advance past this segment plus its "\n\n" separator span.
-          seg_offset += t_seg.length + 2;
-        }
-        if (split_sub_edits.length > 0) {
-          for (const sub of split_sub_edits) all_sub_edits.push(sub);
-          continue;
-        }
-      }
-
-      // After trimming shared context, an edit whose target remainder is
-      // EMPTY is a pure insertion with exactly one hunk. Resolve it
-      // directly at the effective offset instead of word-diffing the full
-      // strings: dmp's alignment can cross-match punctuation between the
-      // shared context and the inserted text (pairing the period of "two."
-      // with "marker.") and split the insertion apart.
-      if (!final_target && final_new) {
-        all_sub_edits.push({
-          type: "modify",
-          target_text: "",
-          new_text: final_new,
-          comment: edit.comment,
-          _resolved_start_idx: effective_start_idx,
-          _match_start_index: effective_start_idx,
-          _internal_op: "INSERTION",
-          _active_mapper_ref: active_mapper,
-        });
-        continue;
-      }
-
-      const sub_edits = this._word_diff_sub_edits(
+      for (const sub of this._resolve_single_match(
+        edit,
+        start_idx,
+        match_len,
+        active_mapper,
         actual_doc_text,
         current_effective_new_text,
-        start_idx,
-        edit.comment,
-        false,
-        active_mapper,
-      );
-      for (const se of sub_edits) {
-        se._split_group_id = start_idx;
-        all_sub_edits.push(se);
+      )) {
+        all_sub_edits.push(sub);
       }
     }
 
     if (all_sub_edits.length === 0) return null;
     if (match_mode === "all" || all_sub_edits.length > 1) return all_sub_edits;
     return all_sub_edits[0];
+  }
+
+  /**
+   * Resolves an edit that keeps every structural marker it spans (same
+   * cross-references, hyperlinks and images, in the same order) as one
+   * sub-edit per CHANGED gap between the markers, so the markers' XML (REF
+   * fields, w:hyperlink, drawings) is never touched. Without this, a kept
+   * `[~2.1~](#_Ref1)` reached the whole-span markdown path (the `_` reads as
+   * markup), the field result was track-deleted and the projection markup was
+   * inserted as literal run text. A comment goes on the first changed gap, the
+   * precedent the table-cell and paragraph splits set. Returns null when the
+   * edit does not keep its markers. Python twin: same name.
+   */
+  private _split_around_kept_markers(
+    edit: any,
+    start_idx: number,
+    active_mapper: any,
+    actual_doc_text: string,
+    effective_new_text: string,
+  ): any[] | null {
+    if (actual_doc_text === effective_new_text || !actual_doc_text.includes("](")) {
+      return null;
+    }
+    const t_markers = [...actual_doc_text.matchAll(STRUCTURAL_MARKER_RE)];
+    const n_markers = [...effective_new_text.matchAll(STRUCTURAL_MARKER_RE)];
+    if (
+      t_markers.length === 0 ||
+      t_markers.length !== n_markers.length ||
+      t_markers.some((m, k) => m[0] !== n_markers[k][0])
+    ) {
+      return null;
+    }
+
+    const sub_edits: any[] = [];
+    let comment = edit.comment;
+    let t_pos = 0;
+    let n_pos = 0;
+    for (let k = 0; k <= t_markers.length; k++) {
+      const t_m = t_markers[k];
+      const n_m = n_markers[k];
+      const t_gap = actual_doc_text.substring(t_pos, t_m ? t_m.index : actual_doc_text.length);
+      const n_gap = effective_new_text.substring(n_pos, n_m ? n_m.index : effective_new_text.length);
+      if (t_gap !== n_gap) {
+        const gap_edit = { type: "modify", target_text: t_gap, new_text: n_gap, comment };
+        comment = null;
+        sub_edits.push(
+          ...this._resolve_single_match(gap_edit, start_idx + t_pos, t_gap.length, active_mapper, t_gap, n_gap),
+        );
+      }
+      if (t_m && n_m) {
+        t_pos = t_m.index + t_m[0].length;
+        n_pos = n_m.index + n_m[0].length;
+      }
+    }
+
+    for (const sub_edit of sub_edits) sub_edit._split_group_id = start_idx;
+    return sub_edits.length > 0 ? sub_edits : null;
+  }
+
+  /**
+   * Resolves ONE occurrence of a heuristic edit into apply-ready sub-edits.
+   * Python twin: RedlineEngine._resolve_single_match. Kept separate so the
+   * structural-marker split (_split_around_kept_markers) can resolve each
+   * changed gap through the same rules.
+   */
+  private _resolve_single_match(
+    edit: any,
+    start_idx: number,
+    match_len: number,
+    active_mapper: any,
+    actual_doc_text: string,
+    current_effective_new_text: string,
+  ): any[] {
+    const kept_marker_edits = this._split_around_kept_markers(
+      edit,
+      start_idx,
+      active_mapper,
+      actual_doc_text,
+      current_effective_new_text,
+    );
+    if (kept_marker_edits !== null) return kept_marker_edits;
+
+    const out: any[] = [];
+    if (
+      actual_doc_text === current_effective_new_text ||
+      edit.target_text === current_effective_new_text
+    ) {
+      out.push({
+        type: "modify",
+        target_text: actual_doc_text,
+        new_text: actual_doc_text,
+        comment: edit.comment,
+        _match_start_index: start_idx,
+        _internal_op: "COMMENT_ONLY",
+        _active_mapper_ref: active_mapper,
+      });
+      return out;
+    }
+
+    let overlaps_virtual_pipe = false;
+    if (active_mapper) {
+      overlaps_virtual_pipe = active_mapper.spans.some(
+        (s: any) =>
+          s.text === " | " &&
+          (s.run === null || s.run === undefined) &&
+          s.start < start_idx + match_len &&
+          s.end > start_idx,
+      );
+    }
+
+    if (overlaps_virtual_pipe) {
+      const actual_cells = actual_doc_text.split("|");
+      const new_cells = current_effective_new_text.split("|");
+
+      if (actual_cells.length !== new_cells.length) {
+        throw new BatchValidationError([
+          `Target text spans ${actual_cells.length} table cells, but replacement provides ${new_cells.length}. To modify text without altering table structure (rows or columns), ensure the replacement contains the exact same number of '|' separators (e.g., replace with 'CellC | ' to empty the second cell).`
+        ]);
+      }
+
+      if (actual_cells.length > 1) {
+        const sub_edits: any[] = [];
+
+        // actual_doc_text IS the document slice at
+        // [start_idx, start_idx + len): per-cell offsets are exact
+        // arithmetic over that slice — never a search of mapper.full_text,
+        // which cannot distinguish repeated cell text and lands in the
+        // wrong cell when the matched range starts inside a " | "
+        // separator.
+        let cell_start_in_target = 0;
+
+        // Determine which cell receives the comment
+        let target_comment_idx = 0;
+        for (let idx = 0; idx < actual_cells.length; idx++) {
+          if (actual_cells[idx].trim() !== new_cells[idx].trim()) {
+            target_comment_idx = idx;
+            break;
+          }
+        }
+
+        for (let cell_idx = 0; cell_idx < actual_cells.length; cell_idx++) {
+          const a_cell = actual_cells[cell_idx];
+          const n_cell = new_cells[cell_idx];
+          const a_clean = a_cell.trim();
+          const n_clean = n_cell.trim();
+          const actual_start =
+            start_idx +
+            cell_start_in_target +
+            (a_clean ? a_cell.indexOf(a_clean) : 0);
+
+          const should_attach_comment = (edit.comment !== null && edit.comment !== undefined) && (cell_idx === target_comment_idx);
+
+          if (a_clean !== n_clean || should_attach_comment) {
+            const cell_sub_edits = this._word_diff_sub_edits(
+              a_clean,
+              n_clean,
+              actual_start,
+              should_attach_comment ? edit.comment : null,
+              true,
+              active_mapper,
+            );
+            for (const se of cell_sub_edits) {
+              se._original_target_text = edit.target_text;
+              se._split_group_id = start_idx;
+              sub_edits.push(se);
+            }
+          }
+
+          cell_start_in_target += a_cell.length + 1; // +1 for the '|'
+        }
+
+        for (const sub of sub_edits) {
+          out.push(sub);
+        }
+        return out;
+      }
+      // Exactly one "cell": the target merely brushes a separator (its
+      // match range starts or ends inside " | ") without crossing into
+      // another cell's text. That is an ordinary in-cell edit — fall
+      // through to the standard resolution.
+    }
+
+    let has_markdown = false;
+    if (edit.target_text && (edit.target_text.includes("**") || edit.target_text.includes("_"))) {
+      has_markdown = true;
+    }
+    if (current_effective_new_text && (current_effective_new_text.includes("**") || current_effective_new_text.includes("_"))) {
+      has_markdown = true;
+    }
+
+    let effective_op = "";
+    let final_target = "";
+    let final_new = "";
+    let effective_start_idx = start_idx;
+
+    if (current_effective_new_text.startsWith(actual_doc_text)) {
+      effective_op = "INSERTION";
+      final_new = current_effective_new_text.substring(actual_doc_text.length);
+      effective_start_idx = start_idx + match_len;
+    } else {
+      const [prefix_len, suffix_len] = trim_common_context(
+        actual_doc_text,
+        current_effective_new_text,
+      );
+      const t_end = actual_doc_text.length - suffix_len;
+      const n_end = current_effective_new_text.length - suffix_len;
+
+      final_target = actual_doc_text.substring(prefix_len, t_end);
+      final_new = current_effective_new_text.substring(prefix_len, n_end);
+      effective_start_idx = start_idx + prefix_len;
+    }
+
+    if (has_markdown) {
+      if (!final_target && final_new) {
+        effective_op = "INSERTION";
+      } else if (final_target && !final_new) {
+        effective_op = "DELETION";
+      } else if (final_target && final_new) {
+        effective_op = "MODIFICATION";
+      } else {
+        out.push({
+          type: "modify",
+          target_text: final_target,
+          new_text: final_new,
+          comment: edit.comment,
+          _match_start_index: effective_start_idx,
+          _internal_op: "COMMENT_ONLY",
+          _active_mapper_ref: active_mapper,
+        });
+        return out;
+      }
+
+      out.push({
+        type: "modify",
+        target_text: final_target,
+        new_text: final_new,
+        comment: edit.comment,
+        _resolved_start_idx: effective_start_idx,
+        _match_start_index: effective_start_idx,
+        _internal_op: effective_op,
+        _active_mapper_ref: active_mapper,
+      });
+      return out;
+    }
+
+    // Balanced multi-paragraph modification: the matched span crosses one or
+    // more paragraph breaks and the replacement preserves the same number of
+    // breaks. Apply it as one independent sub-edit per paragraph segment so
+    // the structural \n\n breaks are left intact. Each sub-edit shares a
+    // _split_group_id (the occurrence's start index) so the batch report
+    // counts it as a single applied edit. Unbalanced cases (a genuine
+    // paragraph merge or split) fall through to the single-span path and are
+    // rejected by validate_edits.
+    const target_segs = actual_doc_text.split("\n\n");
+    const new_segs = current_effective_new_text.split("\n\n");
+    if (
+      actual_doc_text.includes("\n\n") &&
+      target_segs.length === new_segs.length
+    ) {
+      const split_sub_edits: any[] = [];
+      let seg_offset = start_idx;
+      let comment_assigned = false;
+      for (let k = 0; k < target_segs.length; k++) {
+        const t_seg = target_segs[k];
+        const n_seg = new_segs[k];
+        if (t_seg !== n_seg) {
+          const seg_comment =
+            edit.comment && !comment_assigned ? edit.comment : null;
+          const seg_sub_edits = this._word_diff_sub_edits(
+            t_seg,
+            n_seg,
+            seg_offset,
+            seg_comment,
+            false,
+            active_mapper,
+          );
+          if (seg_sub_edits.some((se) => se.comment !== null && se.comment !== undefined)) {
+            comment_assigned = true;
+          }
+          for (const se of seg_sub_edits) {
+            se._split_group_id = start_idx;
+            split_sub_edits.push(se);
+          }
+        }
+        // Advance past this segment plus its "\n\n" separator span.
+        seg_offset += t_seg.length + 2;
+      }
+      if (split_sub_edits.length > 0) {
+        for (const sub of split_sub_edits) out.push(sub);
+        return out;
+      }
+    }
+
+    // After trimming shared context, an edit whose target remainder is
+    // EMPTY is a pure insertion with exactly one hunk. Resolve it
+    // directly at the effective offset instead of word-diffing the full
+    // strings: dmp's alignment can cross-match punctuation between the
+    // shared context and the inserted text (pairing the period of "two."
+    // with "marker.") and split the insertion apart.
+    if (!final_target && final_new) {
+      out.push({
+        type: "modify",
+        target_text: "",
+        new_text: final_new,
+        comment: edit.comment,
+        _resolved_start_idx: effective_start_idx,
+        _match_start_index: effective_start_idx,
+        _internal_op: "INSERTION",
+        _active_mapper_ref: active_mapper,
+      });
+      return out;
+    }
+
+    const sub_edits = this._word_diff_sub_edits(
+      actual_doc_text,
+      current_effective_new_text,
+      start_idx,
+      edit.comment,
+      false,
+      active_mapper,
+    );
+    for (const se of sub_edits) {
+      se._split_group_id = start_idx;
+      out.push(se);
+    }
+    return out;
   }
 
   /**

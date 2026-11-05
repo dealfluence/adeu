@@ -46,7 +46,7 @@ Parity", except where one engine is already correct.
   bound to another URI is rebound; already-correct root left untouched).
 - Done when: both suites green; probe `test_309fc4c_*` passes.
 
-### T2 — Structural markers survive markup-path edits (incidental §6.1) — TODO
+### T2 — Structural markers survive markup-path edits (incidental §6.1) — DONE
 - Goal: an edit that keeps a cross-reference or hyperlink unchanged edits only
   the text around it; the field / link and its result stay intact, no literal
   `[~…~](#…)` / `[…](…)` text is written.

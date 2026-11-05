@@ -150,6 +150,13 @@ _CC_ANCHOR_RE = re.compile(r"\{#/?cc:\d+[^}]*\}")
 # placeholder bubble.
 _CC_EMPTY_PAIR_RE = re.compile(r"^\{#cc:(\d+)[^}]*\}(?:\{>>placeholder:[^<]*<<\})?\{#/cc:\1\}$")
 
+# Projection markers that stand for document STRUCTURE rather than text:
+# cross-references `[~2.1~](#_Ref1)`, images `![alt](docx-image:N)` and
+# hyperlinks `[label](url)`. Written into a run they become literal text, so an
+# edit that keeps them must never send them through a text replacement (see
+# RedlineEngine._split_around_kept_markers). Node twin: STRUCTURAL_MARKER_RE.
+_STRUCTURAL_MARKER_RE = re.compile(r"\[~[^~\]]+~\]\(#[^)]+\)|!\[[^\]]*\]\(docx-image:[^)]*\)|\[(?!~)[^\]]+\]\([^)]+\)")
+
 # Children of a properties container that the corresponding tracked-change
 # record cannot store, and which must therefore survive rejecting it.
 #
@@ -5147,6 +5154,69 @@ class RedlineEngine:
 
         return sub_edits
 
+    def _split_around_kept_markers(
+        self,
+        edit: ModifyText,
+        start_idx: int,
+        active_mapper: Any,
+        actual_doc_text: str,
+        effective_new_text: str,
+        index_offset: int,
+    ) -> Optional[List[ModifyText]]:
+        """
+        Resolves an edit that keeps every structural marker it spans (same
+        cross-references, hyperlinks and images, in the same order) as one
+        sub-edit per CHANGED gap between the markers, so the markers' XML
+        (REF fields, w:hyperlink, drawings) is never touched.
+
+        Without this, an edit like `Section [~2.1~](#_Ref1), nothing else` ->
+        `Section [~2.1~](#_Ref1), no other` reached the whole-span markdown path
+        (the bookmark name's `_` reads as markup): the REF field's result was
+        track-deleted and the projection markup inserted as literal run text.
+        A bold hyperlink (`[**x**](url)`) failed the same way.
+
+        Each gap resolves through `_resolve_single_match`, so it gets the usual
+        word-diff / markdown / paragraph handling. A comment goes on the first
+        changed gap, the precedent the table-cell and paragraph splits set.
+        Returns None when the edit does not keep its markers (the existing
+        link-retarget and validation paths own those shapes).
+        """
+        if actual_doc_text == effective_new_text or "](" not in actual_doc_text:
+            return None
+        t_markers = list(_STRUCTURAL_MARKER_RE.finditer(actual_doc_text))
+        n_markers = list(_STRUCTURAL_MARKER_RE.finditer(effective_new_text))
+        if not t_markers or [m.group(0) for m in t_markers] != [m.group(0) for m in n_markers]:
+            return None
+
+        sub_edits: List[ModifyText] = []
+        comment = edit.comment
+        t_pos = n_pos = 0
+        for t_m, n_m in zip([*t_markers, None], [*n_markers, None], strict=True):
+            t_gap = actual_doc_text[t_pos : t_m.start() if t_m else len(actual_doc_text)]
+            n_gap = effective_new_text[n_pos : n_m.start() if n_m else len(effective_new_text)]
+            if t_gap != n_gap:
+                gap_edit = ModifyText(type="modify", target_text=t_gap, new_text=n_gap, comment=comment)
+                comment = None
+                resolved = self._resolve_single_match(
+                    gap_edit,
+                    start_idx + t_pos,
+                    len(t_gap),
+                    active_mapper,
+                    t_gap,
+                    n_gap,
+                    index_offset=index_offset,
+                )
+                if isinstance(resolved, list):
+                    sub_edits.extend(resolved)
+                elif resolved is not None:
+                    sub_edits.append(resolved)
+            if t_m is not None and n_m is not None:
+                t_pos, n_pos = t_m.end(), n_m.end()
+
+        for sub_edit in sub_edits:
+            sub_edit._split_group_id = start_idx
+        return sub_edits or None
+
     def _resolve_single_match(
         self,
         edit,
@@ -5157,6 +5227,12 @@ class RedlineEngine:
         effective_new_text,
         index_offset: int = 0,
     ):
+        kept_marker_edits = self._split_around_kept_markers(
+            edit, start_idx, active_mapper, actual_doc_text, effective_new_text, index_offset
+        )
+        if kept_marker_edits is not None:
+            return kept_marker_edits
+
         if "](" in actual_doc_text:
             t_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", actual_doc_text))
             n_links = list(re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", effective_new_text))
