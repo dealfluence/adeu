@@ -100,10 +100,15 @@ AGENTS.md "Dual-Engine Parity", except where one engine is already correct.
   twin; tests in both engines.
 - Done when: both suites green.
 
-### T7 — Several comments per edit, each with its own author — TODO
+### T7 — Several comments per edit, each with its own author — DONE
 - Goal: `comment` accepts a string or a list of `{text, author?}`; each entry
   becomes its own comment on the same anchor; Node rejects a malformed
   `comment` with a validation error instead of a TypeError.
+- Node MCP publishes `comment` as a plain string (clients strip property
+  unions to `{}`, see `repro.qa_2026_07_23.client-compat.test.ts`); the list
+  form is runtime tolerance parked under a marker key past the schema. Live
+  Word joins a list into one comment under the session author (COM takes one
+  string per range).
 - Files: `python/src/adeu/models.py`, engine comment attach paths, markup
   preview, MCP tool schemas (Python + Node), `node/packages/core` types +
   engine, n8n/langchain only if they re-declare the schema, `GEMINI.md`.

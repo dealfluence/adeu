@@ -36,7 +36,7 @@ Applies a list of edits to a DOCX. Edits apply **sequentially** — each one eva
 - `allow_untracked_writes=true`: permit writes in fill-in-forms protected documents (where Word suppresses change tracking)
 
 **Change types:**
-- `modify`: search-and-replace. `target_text` must uniquely identify the passage. `new_text` supports Markdown headings, bold, italic, and `\n\n` for paragraph breaks. Empty `new_text` deletes the passage.
+- `modify`: search-and-replace. `target_text` must uniquely identify the passage. `new_text` supports Markdown headings, bold, italic, and `\n\n` for paragraph breaks. Empty `new_text` deletes the passage. `comment` attaches a margin comment: a string, or a list `[{"text": ..., "author": ...}]` to put several comments on the same change, each under its own author (`author` is optional and defaults to the session author).
 - `set_field`: fill a form field (content control) by `field` ("CC:<N>", tag, or alias) and `value`. Automatically dual-writes bound data stores.
 - `accept` / `reject`: finalize or revert a tracked change by `target_id` (e.g. `Chg:12`). Revision ids are numbered per package part; if the same id exists in several parts (e.g. body and a header) the bare id is refused, and the optional `part` field (e.g. `word/header1.xml`) picks the one you mean.
 - `reply`: reply to a comment by `target_id` (e.g. `Com:5`)

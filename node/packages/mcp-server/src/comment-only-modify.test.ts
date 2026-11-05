@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DocumentObject, extract_comments_data } from "@adeu/core";
 import { createTestDocument } from "../../core/src/test-utils.js";
-import { coerceChangeItemInPlace, CHANGE_ITEM_SCHEMA } from "./index.js";
+import { coerceChangeItemInPlace, restoreCommentListInPlace, CHANGE_ITEM_SCHEMA } from "./index.js";
 import { startTestServer, TestServer } from "./test-rpc.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -48,6 +48,26 @@ describe("comment-only modify boundary normalization", () => {
     const item2: any = { type: "modify", target_text: "X", comment: "   " };
     coerceChangeItemInPlace(item2);
     expect(item2.new_text).toBeUndefined();
+  });
+
+  it("treats a comment list with a non-empty entry like a string comment, and carries it past the string-typed schema", () => {
+    const list = [{ text: "Internal", author: "A" }, { text: "Vendor" }];
+    const item: any = { type: "modify", target_text: "Term", comment: list };
+    coerceChangeItemInPlace(item);
+    expect(item.new_text).toBe("Term");
+
+    const parsed: any = CHANGE_ITEM_SCHEMA.parse(item);
+    restoreCommentListInPlace(parsed);
+    expect(parsed.comment).toEqual(list);
+
+    const blank: any = { type: "modify", target_text: "Term", comment: [{ text: "  " }] };
+    coerceChangeItemInPlace(blank);
+    expect(blank.new_text).toBeUndefined();
+  });
+
+  it("publishes comment as a plain string (clients strip unions to {})", () => {
+    const shape: any = (CHANGE_ITEM_SCHEMA as any).shape;
+    expect(shape.comment.unwrap().constructor.name).toBe("ZodString");
   });
 
   it("does NOT infer type or populate new_text when type is absent with target_text + comment", () => {
@@ -196,6 +216,42 @@ describe("comment-only modify through process_document_batch (live MCP server)",
       ).toBe(true);
       const para = doc.element.getElementsByTagName("w:p")[1];
       expect(paragraphText(para)).toBe("Normal paragraph text.");
+    },
+    60000,
+  );
+
+  it(
+    "a comment list reaches the engine through the server: one comment per entry, each under its own author",
+    async () => {
+      const outPath = server.tempOut("comment_list");
+      const res = await server.callTool("process_document_batch", {
+        reasoning: "two notes on one change",
+        original_docx_path: headingDocPath,
+        author_name: "Reviewer AI",
+        changes: [
+          {
+            type: "modify",
+            target_text: "Normal paragraph text.",
+            new_text: "Revised paragraph text.",
+            comment: [
+              { text: "Internal: why we changed it", author: "Reviewer AI (Internal)" },
+              { text: "Vendor: please confirm" },
+            ],
+          },
+        ],
+        output_path: outPath,
+      });
+
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0].text).toContain("Edits: 1 applied");
+      const doc = await DocumentObject.load(readFileSync(outPath));
+      const comments = Object.values(extract_comments_data(doc.pkg)).map((c: any) => [c.text, c.author]);
+      expect(comments).toEqual(
+        expect.arrayContaining([
+          [expect.stringContaining("Internal: why we changed it"), "Reviewer AI (Internal)"],
+          [expect.stringContaining("Vendor: please confirm"), "Reviewer AI"],
+        ]),
+      );
     },
     60000,
   );

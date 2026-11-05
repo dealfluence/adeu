@@ -800,6 +800,11 @@ if sys.platform == "win32":
                         continue
 
                     if isinstance(change, ModifyText):
+                        # Word COM takes one comment string per range: a list
+                        # of comments is joined into one, under the session
+                        # author (per-entry authors are a disk-engine feature).
+                        if isinstance(change.comment, list):
+                            change = change.model_copy(update={"comment": change.comment_text})
                         is_regex = getattr(change, "regex", False)
                         match_mode = getattr(change, "match_mode", "strict")
 
@@ -1006,7 +1011,7 @@ if sys.platform == "win32":
                                                         app,
                                                         replace_rng,
                                                         final_new_text,
-                                                        (change.comment if should_comment else None),
+                                                        (change.comment_text if should_comment else None),
                                                     )
                                                     cells_updated += 1
 
@@ -1062,7 +1067,7 @@ if sys.platform == "win32":
                                         app,
                                         replace_rng,
                                         final_new_text,
-                                        change.comment,
+                                        change.comment_text,
                                     )
                                     any_success = True
                                 else:
@@ -1104,7 +1109,7 @@ if sys.platform == "win32":
                                             app,
                                             replace_rng,
                                             final_new_text,
-                                            change.comment,
+                                            change.comment_text,
                                         )
                                         any_success = True
                                     else:

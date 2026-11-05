@@ -1,5 +1,5 @@
 import { trim_common_context } from "./diff.js";
-import { ModifyText } from "./models.js";
+import { ModifyText, comment_text } from "./models.js";
 import { RegexTimeoutError, userFindAllMatches } from "./utils/safe-regex.js";
 
 /** One entry per input edit in apply_edits_to_markdown's edit_reports. */
@@ -551,7 +551,7 @@ export function apply_edits_to_markdown(
     const markup = _build_critic_markup(
       isolated_target,
       isolated_new,
-      edit.comment,
+      comment_text(edit.comment),
       // 1-based, matching apply's "Edit N" reports and batch validation
       // errors (QA 2026-07-17 F10; mirrors Python).
       orig_idx + 1,

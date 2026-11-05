@@ -120,14 +120,33 @@ export function coerceChangeItemInPlace(item: any): void {
   ) {
     const target = item.target_text;
     const comment = item.comment;
-    if (
-      typeof target === "string" &&
-      target &&
-      typeof comment === "string" &&
-      comment.trim()
-    ) {
+    const has_comment =
+      (typeof comment === "string" && comment.trim()) ||
+      (Array.isArray(comment) &&
+        comment.some(
+          (c: any) => c && typeof c.text === "string" && c.text.trim(),
+        ));
+    if (typeof target === "string" && target && has_comment) {
       item.new_text = target;
     }
+  }
+
+  // A list of comments ([{text, author?}]) rides past the string-typed
+  // published `comment` under a marker key; the handler restores it and the
+  // engine validates each entry (restoreCommentListInPlace).
+  if (Array.isArray(item.comment)) {
+    item[COMMENT_LIST_KEY] = item.comment;
+    delete item.comment;
+  }
+}
+
+const COMMENT_LIST_KEY = "__adeu_comment_list";
+
+/** Undoes the comment-list parking done by coerceChangeItemInPlace. */
+export function restoreCommentListInPlace(item: any): void {
+  if (item !== null && typeof item === "object" && COMMENT_LIST_KEY in item) {
+    item.comment = item[COMMENT_LIST_KEY];
+    delete item[COMMENT_LIST_KEY];
   }
 }
 // At most this many sibling filenames are suggested in a file-not-found
@@ -864,11 +883,15 @@ export const CHANGE_ITEM_SCHEMA = z
         "accept / reject: the package part holding the change, e.g. 'word/header1.xml'. Revision ids are numbered per part, so the same Chg:N can name unrelated changes in different parts; a bare ambiguous id is refused with an error listing the parts, and this field picks one. Omit whenever the id is unique (the usual case).",
       ),
     text: z.string().optional().describe("reply: the reply body."),
+    // Published as a string only: real MCP clients strip property-level
+    // anyOf/oneOf to {} (QA 2026-07-23). The list form is runtime tolerance:
+    // coerceChangeItemInPlace parks it under COMMENT_LIST_KEY past this
+    // schema, the handler restores it, and the engine validates the entries.
     comment: z
       .string()
       .optional()
       .describe(
-        "modify: attach a margin comment to the edited text. accept / reject: record the rationale as a margin comment anchored where the change was resolved (reported as Com:N).",
+        "modify: attach a margin comment to the edited text — a string, or a list of comments [{text, author?}] on the same change, each under its own author (the engine author when omitted). accept / reject: record the rationale (a string) as a margin comment anchored where the change was resolved (reported as Com:N).",
       ),
     match_mode: z
       .enum(["strict", "first", "all"])
@@ -1072,6 +1095,7 @@ server.registerTool(
         // same way Python does before its union validation.
         if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
           coerceChangeItemInPlace(obj);
+          restoreCommentListInPlace(obj);
         }
         return obj;
       });
@@ -1779,7 +1803,11 @@ export function formatBatchResult(stats: any, outPath: string): string {
       const occ = report.occurrences_modified ?? 0;
       res += `**Mode:** \`${report.match_mode || "strict"}\` (${occ} occurrence${occ !== 1 ? "s" : ""} modified)\n`;
 
-      if (report.comment) {
+      if (Array.isArray(report.comment)) {
+        for (const c of report.comment) {
+          res += `**Comment${c.author ? ` (${c.author})` : ""}:** "${c.text}"\n`;
+        }
+      } else if (report.comment) {
         res += `**Comment:** "${report.comment}"\n`;
       }
 

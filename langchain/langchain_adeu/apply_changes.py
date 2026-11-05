@@ -409,7 +409,11 @@ def _build_success_content(
             )
             lines.append(f"  Target: '{report.get('target_text', '')}'")
             lines.append(f"  New text: '{report.get('new_text', '')}'")
-            if report.get("comment"):
+            if isinstance(report.get("comment"), list):
+                for c in report["comment"]:
+                    by = f" ({c['author']})" if c.get("author") else ""
+                    lines.append(f'  Comment{by}: "{c["text"]}"')
+            elif report.get("comment"):
                 lines.append(f'  Comment: "{report["comment"]}"')
             if report.get("warning"):
                 lines.append(f"  Warning: {report['warning']}")

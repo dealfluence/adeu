@@ -113,6 +113,68 @@ class _EditState(BaseModel):
     _unwrap_sdt_after: Optional[Any] = PrivateAttr(default=None)
 
 
+class EditComment(BaseModel):
+    """One comment on an edit, optionally under its own author."""
+
+    text: str = Field(..., description="Comment text.")
+    author: Optional[str] = Field(default=None, description="Comment author; defaults to the engine author.")
+
+
+EditCommentValue = Union[str, list[EditComment]]
+
+_COMMENT_DESCRIPTION = (
+    "Text to appear in a comment bubble (Review Pane) linked to this edit, or a list of comments "
+    "[{text, author?}] to attach to the same change, each under its own author (the engine author "
+    "when omitted)."
+)
+
+# Published inline rather than as a $defs reference: the flat MCP schema must
+# stay a single object with no $defs (hosts that cannot follow references),
+# and the canonical union's $defs list is the DocumentChange variants only.
+_COMMENT_JSON_SCHEMA: dict = {
+    "anyOf": [
+        {"type": "string"},
+        {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Comment text."},
+                    "author": {
+                        "type": "string",
+                        "description": "Comment author; defaults to the engine author.",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+        {"type": "null"},
+    ],
+    "default": None,
+}
+
+
+def comment_entries(comment: Optional[EditCommentValue]) -> list[EditComment]:
+    """A comment value as its list of non-empty entries (a string is one entry)."""
+    if isinstance(comment, str):
+        return [EditComment(text=comment)] if comment else []
+    return [entry for entry in comment or [] if entry.text]
+
+
+def comment_text(comment: Optional[EditCommentValue]) -> Optional[str]:
+    """A comment value as plain text: list entries joined by blank lines."""
+    if comment is None or isinstance(comment, str):
+        return comment
+    return "\n\n".join(entry.text for entry in comment_entries(comment)) or None
+
+
+def comment_for_report(comment: Optional[EditCommentValue]) -> Any:
+    """A comment value as JSON: a string stays a string, a list becomes dicts."""
+    if comment is None or isinstance(comment, str):
+        return comment
+    return [entry.model_dump(exclude_none=True) for entry in comment]
+
+
 class ModifyText(_EditState):
     """
     Represents a single atomic edit suggested by the LLM.
@@ -143,10 +205,15 @@ class ModifyText(_EditState):
         ),
     )
 
-    comment: Optional[str] = Field(
+    comment: Annotated[Optional[EditCommentValue], WithJsonSchema(_COMMENT_JSON_SCHEMA)] = Field(
         None,
-        description="Text to appear in a comment bubble (Review Pane) linked to this edit.",
+        description=_COMMENT_DESCRIPTION,
     )
+
+    @property
+    def comment_text(self) -> Optional[str]:
+        """The comment as plain text, list entries joined by blank lines."""
+        return comment_text(self.comment)
 
     match_mode: Literal["strict", "first", "all"] = Field(
         default="strict",
@@ -338,9 +405,13 @@ class FlatDocumentChange(BaseModel):
             "JavaScript-style $1 is NOT expanded here — it stays literal text."
         ),
     )
-    comment: Optional[str] = Field(
+    comment: Annotated[Optional[EditCommentValue], WithJsonSchema(_COMMENT_JSON_SCHEMA)] = Field(
         None,
-        description="Text to appear in a comment bubble (Review Pane) linked to this edit or optional rationale.",
+        description=(
+            "modify: text to appear in a comment bubble (Review Pane) linked to this edit, or a list of "
+            "comments [{text, author?}] on the same change, each under its own author (the engine author "
+            "when omitted). accept / reject / set_field: optional rationale (a string)."
+        ),
     )
     match_mode: Optional[Literal["strict", "first", "all"]] = Field(
         None,
@@ -507,7 +578,11 @@ def _normalize_comment_only_modify_in_place(item: dict) -> None:
         return
     target = item.get("target_text")
     comment = item.get("comment")
-    if isinstance(target, str) and target and isinstance(comment, str) and comment.strip():
+    has_comment = (isinstance(comment, str) and comment.strip()) or (
+        isinstance(comment, list)
+        and any(isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].strip() for c in comment)
+    )
+    if isinstance(target, str) and target and has_comment:
         item["new_text"] = target
 
 

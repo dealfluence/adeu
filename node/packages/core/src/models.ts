@@ -1,8 +1,53 @@
+/** One comment on an edit, optionally under its own author. */
+export interface EditComment {
+  text: string;
+  /** Defaults to the engine author. */
+  author?: string | null;
+}
+
+/** A comment on an edit: one string, or several comments on the same change. */
+export type EditCommentValue = string | EditComment[];
+
+/** A comment value as its list of non-empty entries (a string is one entry). */
+export function comment_entries(comment: EditCommentValue | null | undefined): EditComment[] {
+  if (typeof comment === 'string') return comment ? [{ text: comment }] : [];
+  return (comment || []).filter((entry) => entry && entry.text);
+}
+
+/** A comment value as plain text: list entries joined by blank lines. */
+export function comment_text(comment: EditCommentValue | null | undefined): string | null {
+  if (comment === null || comment === undefined || typeof comment === 'string') return comment ?? null;
+  return comment_entries(comment).map((entry) => entry.text).join('\n\n') || null;
+}
+
+/**
+ * Why `comment` is not a valid comment value, or null when it is: a string,
+ * or a list of `{text: string, author?: string}`. Callers outside the MCP
+ * schema (SDK, n8n) reach the engine unvalidated, and a malformed comment
+ * used to crash deep inside it with a TypeError.
+ */
+export function describe_invalid_comment(comment: unknown): string | null {
+  if (comment === null || comment === undefined || typeof comment === 'string') return null;
+  if (!Array.isArray(comment)) {
+    return '`comment` must be a string or a list of {text, author?} objects.';
+  }
+  for (const [i, entry] of comment.entries()) {
+    if (!entry || typeof entry !== 'object' || typeof (entry as any).text !== 'string') {
+      return `\`comment[${i}]\` must be an object with a string \`text\` (and an optional string \`author\`).`;
+    }
+    const author = (entry as any).author;
+    if (author !== undefined && author !== null && typeof author !== 'string') {
+      return `\`comment[${i}].author\` must be a string.`;
+    }
+  }
+  return null;
+}
+
 export interface ModifyText {
   type: 'modify';
   target_text: string;
   new_text: string;
-  comment?: string | null;
+  comment?: EditCommentValue | null;
   match_mode?: 'strict' | 'first' | 'all';
   regex?: boolean;
   _match_start_index?: number | null;

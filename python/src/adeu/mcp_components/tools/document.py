@@ -868,7 +868,11 @@ async def _process_document_batch_disk(
                 # (QA 2026-07-23 F7). The engine supplies the per-edit
                 # `comment` field; .get() keeps this safe to render even
                 # against engine builds that predate the field.
-                if report.get("comment"):
+                if isinstance(report.get("comment"), list):
+                    for c in report["comment"]:
+                        by = f" ({c['author']})" if c.get("author") else ""
+                        res += f'**Comment{by}:** "{c["text"]}"\n'
+                elif report.get("comment"):
                     res += f'**Comment:** "{report["comment"]}"\n'
 
                 if report.get("warning"):

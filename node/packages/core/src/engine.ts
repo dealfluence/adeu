@@ -15,6 +15,11 @@ import {
   RejectChange,
   ReplyComment,
   DocumentChange,
+  EditComment,
+  EditCommentValue,
+  comment_entries,
+  comment_text,
+  describe_invalid_comment,
 } from "./models.js";
 import { trim_common_context, generate_edits_from_text } from "./diff.js";
 import { findChild, findAllDescendants, serializeXml, parseXml } from "./docx/dom.js";
@@ -468,7 +473,17 @@ export function validate_edit_strings(
       ["target_text", t_text],
       ["new_text", n_text],
     ];
-    if (edit.comment) checked_fields.push(["comment", edit.comment]);
+    const comment_problem = describe_invalid_comment(edit.comment);
+    if (comment_problem) {
+      errors.push(`- Edit ${i + 1 + index_offset} Failed: ${comment_problem}`);
+    } else if (Array.isArray(edit.comment)) {
+      edit.comment.forEach((entry: EditComment, entry_idx: number) => {
+        checked_fields.push([`comment[${entry_idx}].text`, entry.text || ""]);
+        if (entry.author) checked_fields.push([`comment[${entry_idx}].author`, entry.author]);
+      });
+    } else if (edit.comment) {
+      checked_fields.push(["comment", edit.comment]);
+    }
     (edit.cells || []).forEach((cell: string, cell_idx: number) => {
       checked_fields.push([`cells[${cell_idx}]`, cell || ""]);
     });
@@ -2511,14 +2526,32 @@ export class RedlineEngine {
     parent_element: Element,
     start_element: Element,
     end_element: Element,
+    comment: EditCommentValue | null | undefined,
+  ): string | null {
+    // A list of entries writes one comment per entry on the same range
+    // (nested), each under its own author or the engine author. Returns the
+    // first comment's id. Python twin: same name.
+    let first_id: string | null = null;
+    for (const entry of comment_entries(comment)) {
+      const id = this._attach_one_comment(parent_element, start_element, end_element, entry.text, entry.author);
+      first_id = first_id ?? id;
+    }
+    return first_id;
+  }
+
+  private _attach_one_comment(
+    parent_element: Element,
+    start_element: Element,
+    end_element: Element,
     text: string,
+    author?: string | null,
   ): string | null {
     if (!text) return null;
     if (!parent_element || !start_element || !end_element) return null;
     if (this._skip_comment_outside_main_story(parent_element, text)) return null;
 
     const comment_id = this.comments_manager.addComment(
-      this.author,
+      author || this.author,
       text,
       null,
       this.timestamp,
@@ -2570,7 +2603,20 @@ export class RedlineEngine {
     start_el: Element,
     end_p: Element,
     end_el: Element,
+    comment: EditCommentValue | null | undefined,
+  ) {
+    for (const entry of comment_entries(comment)) {
+      this._attach_one_comment_spanning(start_p, start_el, end_p, end_el, entry.text, entry.author);
+    }
+  }
+
+  private _attach_one_comment_spanning(
+    start_p: Element,
+    start_el: Element,
+    end_p: Element,
+    end_el: Element,
     text: string,
+    author?: string | null,
   ) {
     if (!text) return;
     if (!start_p || !end_p) return;
@@ -2581,7 +2627,7 @@ export class RedlineEngine {
       return;
 
     const comment_id = this.comments_manager.addComment(
-      this.author,
+      author || this.author,
       text,
       null,
       this.timestamp,

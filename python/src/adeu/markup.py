@@ -644,7 +644,7 @@ def apply_edits_to_markdown(
         markup = _build_critic_markup(
             target_text=isolated_target,
             new_text=isolated_new,
-            comment=edit.comment,
+            comment=edit.comment_text,
             # 1-based, matching apply's "Edit N" reports and batch
             # validation errors (QA 2026-07-17 F10).
             edit_index=orig_idx + 1,

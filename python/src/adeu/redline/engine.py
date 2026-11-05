@@ -19,12 +19,15 @@ from adeu.models import (
     AcceptChange,
     DeleteTableRow,
     DocumentChange,
+    EditCommentValue,
     EditOperationType,
     InsertTableRow,
     ModifyText,
     RejectChange,
     ReplyComment,
     SetField,
+    comment_entries,
+    comment_for_report,
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
@@ -315,9 +318,14 @@ def validate_edit_strings(
         # written into a DOCX (lxml refuses), so reject them here with a clean
         # per-edit error instead of a raw lxml traceback at apply time.
         checked_fields = [("target_text", t_text), ("new_text", n_text)]
-        comment_text = getattr(edit, "comment", None)
-        if comment_text:
-            checked_fields.append(("comment", comment_text))
+        comment_value = getattr(edit, "comment", None)
+        if isinstance(comment_value, list):
+            for entry_idx, entry in enumerate(comment_value):
+                checked_fields.append((f"comment[{entry_idx}].text", entry.text or ""))
+                if entry.author:
+                    checked_fields.append((f"comment[{entry_idx}].author", entry.author))
+        elif comment_value:
+            checked_fields.append(("comment", comment_value))
         for cell_idx, cell in enumerate(getattr(edit, "cells", []) or []):
             checked_fields.append((f"cells[{cell_idx}]", cell or ""))
         for field_name, field_value in checked_fields:
@@ -1389,7 +1397,7 @@ class RedlineEngine:
         text: str,
         anchor_run: Optional[Run] = None,
         anchor_paragraph: Optional[Paragraph] = None,
-        comment: Optional[str] = None,
+        comment: Optional[EditCommentValue] = None,
         suppress_inherited: bool = False,
         insert_before: bool = False,
         reuse_id: Optional[str] = None,
@@ -2243,7 +2251,18 @@ class RedlineEngine:
         logger.warning("Comment anchor outside main story; comment dropped", story=story, text=text[:60])
         return True
 
-    def _attach_comment(self, parent_element, start_element, end_element, text: str):
+    def _attach_comment(self, parent_element, start_element, end_element, comment: Optional[EditCommentValue]):
+        """
+        Anchors `comment` from start_element through end_element. A list of
+        entries writes one comment per entry on the same range (nested), each
+        under its own author or the engine author. Node twin: same name.
+        """
+        for entry in comment_entries(comment):
+            self._attach_one_comment(parent_element, start_element, end_element, entry.text, entry.author)
+
+    def _attach_one_comment(
+        self, parent_element, start_element, end_element, text: str, author: Optional[str] = None
+    ) -> None:
         if not text:
             return
         # The anchor context can be gone by the time we get here (e.g. the
@@ -2268,7 +2287,7 @@ class RedlineEngine:
             logger.warning("Comment anchor elements are not children of the parent; skipping", text=text[:60])
             return
 
-        comment_id = self.comments_manager.add_comment(self.author, text, timestamp=self.timestamp)
+        comment_id = self.comments_manager.add_comment(author or self.author, text, timestamp=self.timestamp)
         range_start = create_element("w:commentRangeStart")
         create_attribute(range_start, "w:id", comment_id)
         range_end = create_element("w:commentRangeEnd")
@@ -2290,7 +2309,14 @@ class RedlineEngine:
         parent_element.insert(end_index + 1, range_end)
         parent_element.insert(end_index + 2, ref_run)
 
-    def _attach_comment_spanning(self, start_p, start_el, end_p, end_el, text: str):
+    def _attach_comment_spanning(self, start_p, start_el, end_p, end_el, comment: Optional[EditCommentValue]):
+        """_attach_comment across two paragraphs; one comment per list entry."""
+        for entry in comment_entries(comment):
+            self._attach_one_comment_spanning(start_p, start_el, end_p, end_el, entry.text, entry.author)
+
+    def _attach_one_comment_spanning(
+        self, start_p, start_el, end_p, end_el, text: str, author: Optional[str] = None
+    ) -> None:
         if not text:
             return
         if start_p is None or end_p is None:
@@ -2303,7 +2329,7 @@ class RedlineEngine:
         start_el = self._paragraph_child_ancestor(start_el, start_p)
         end_el = self._paragraph_child_ancestor(end_el, end_p)
 
-        comment_id = self.comments_manager.add_comment(self.author, text, timestamp=self.timestamp)
+        comment_id = self.comments_manager.add_comment(author or self.author, text, timestamp=self.timestamp)
 
         range_start = create_element("w:commentRangeStart")
         create_attribute(range_start, "w:id", comment_id)
@@ -3285,7 +3311,7 @@ class RedlineEngine:
             # Every per-edit report carries the edit's comment — the report
             # is where an agent verifies the comment it wrote
             # (F7, QA 2026-07-23).
-            "comment": getattr(edit, "comment", None),
+            "comment": comment_for_report(getattr(edit, "comment", None)),
             "warning": warning,
             "error": edit_error_msg,
             "critic_markup": critic_markup,
@@ -3622,7 +3648,7 @@ class RedlineEngine:
                         "type": getattr(e, "type", "modify"),
                         "target_text": truncate_middle(getattr(e, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(e), REPORT_ECHO_CAP),
-                        "comment": getattr(e, "comment", None),
+                        "comment": comment_for_report(getattr(e, "comment", None)),
                         "warning": None,
                         "error": err_msg,
                         "critic_markup": None,
@@ -3675,7 +3701,7 @@ class RedlineEngine:
                         "type": getattr(edit, "type", "modify"),
                         "target_text": truncate_middle(getattr(edit, "target_text", ""), REPORT_ECHO_CAP),
                         "new_text": truncate_middle(self._report_new_text(edit), REPORT_ECHO_CAP),
-                        "comment": getattr(edit, "comment", None),
+                        "comment": comment_for_report(getattr(edit, "comment", None)),
                         "warning": warning,
                         "error": "\n".join(single_errors),
                         "critic_markup": None,
@@ -5085,7 +5111,7 @@ class RedlineEngine:
         target_str: str,
         new_str: str,
         base_offset: int,
-        comment: str,
+        comment: EditCommentValue,
         is_table: bool,
         active_mapper,
     ) -> List[ModifyText]:
@@ -5145,7 +5171,7 @@ class RedlineEngine:
         target_str: str,
         new_str: str,
         base_offset: int,
-        parent_comment: Optional[str] = None,
+        parent_comment: Optional[EditCommentValue] = None,
         is_table: bool = False,
         active_mapper=None,
     ) -> List[ModifyText]:
