@@ -8,6 +8,7 @@
 // clamped window readable, and the budget pass that drops trailing HITS rather
 // than ship an oversized response.
 
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   balanceSnippetWindow,
@@ -294,9 +295,10 @@ describe("A2: snippet clamping", () => {
     expect(shown_n).toBeGreaterThan(0);
     expect(shown_n).toBeLessThan(20);
     expect(md).toContain(`match_offset=${shown_n}`);
-    expect(approxTokens(textOf(res))).toBeLessThanOrEqual(
-      search_budget_tokens(20, shown_n),
-    );
+    // The echoed path is caller-supplied, not budgeted chrome (see test 15).
+    expect(
+      approxTokens(textOf(res).replace(resolve("doc.docx"), "")),
+    ).toBeLessThanOrEqual(search_budget_tokens(20, shown_n));
     assertMarkupTerminatedInOrder(md);
   });
 
@@ -483,5 +485,30 @@ describe("A2: headers, budgets and page validation", () => {
       "Invalid page value: '2-4'. In search mode, `page` must be omitted " +
         "(search all pages), `'all'`, or a positive integer document page number.",
     );
+  });
+
+  it("15. a long file path does not shrink the match budget", () => {
+    // The `> **File Path:**` line echoes the caller's path verbatim. The
+    // budget is sized for match content plus fixed chrome, so a long path
+    // (OneDrive, temp dirs) must not push out snippet context or whole
+    // matches: the same document renders identically at either path.
+    const longPath =
+      "/" + Array(6).fill("a-rather-long-directory-name").join("/") + "/doc.docx";
+    const render = (file_path: string): string =>
+      mdOf(
+        build_search_response(
+          longParagraphs(50),
+          "Supplier",
+          false,
+          true,
+          undefined,
+          file_path,
+          undefined,
+          { max_matches: 3 },
+        ),
+      );
+    const shortMd = render("/doc.docx");
+    expect(countEntries(shortMd)).toBe(3);
+    expect(render(longPath)).toBe(shortMd);
   });
 });

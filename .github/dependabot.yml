@@ -1,22 +1,59 @@
 version: 2
 updates:
-  # Maintain Python dependencies in /python
-  - package-ecosystem: "pip"
+  # Maintain Python dependencies in /python. The `uv` ecosystem updates
+  # uv.lock together with pyproject.toml; `pip` only edited pyproject.toml,
+  # which left the lock stale (CI now fails on a stale lock: `uv sync --locked`).
+  - package-ecosystem: "uv"
     directory: "/python"
     schedule:
       interval: "weekly"
+    ignore:
+      # FastMCP 4 is a planned migration, not a range bump: the move back to
+      # FastMCP 3 was deliberate (c443b15, see #131).
+      - dependency-name: "fastmcp"
+        update-types: ["version-update:semver-major"]
+    groups:
+      python-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
-  # Maintain Python dependencies in /langchain
-  - package-ecosystem: "pip"
+  # Maintain Python dependencies in /langchain (resolves adeu from ../python
+  # through an editable path source).
+  - package-ecosystem: "uv"
     directory: "/langchain"
     schedule:
       interval: "weekly"
+    groups:
+      langchain-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      langchain-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   # Maintain Node.js dependencies in /node
   - package-ecosystem: "npm"
     directory: "/node"
     schedule:
       interval: "weekly"
+    ignore:
+      # ext-apps 2.x requires the MCP TypeScript SDK v2 split packages; it
+      # arrives with a deliberate SDK v2 migration (see #152).
+      - dependency-name: "@modelcontextprotocol/ext-apps"
+        update-types: ["version-update:semver-major"]
+    groups:
+      node-minor-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      node-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   # Maintain GitHub Actions in CI/CD workflows
   - package-ecosystem: "github-actions"

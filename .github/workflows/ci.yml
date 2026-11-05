@@ -34,7 +34,9 @@ jobs:
 
       - name: Install Dependencies
         working-directory: ./python
-        run: uv sync --all-extras --dev
+        # --locked: fail on a stale uv.lock instead of silently re-resolving, so
+        # CI tests the committed lock (the one python/Dockerfile installs).
+        run: uv sync --locked --all-extras --dev
 
       - name: Lint (Ruff)
         working-directory: ./python
@@ -72,7 +74,7 @@ jobs:
         run: uv python install 3.12
       - name: Install Python Dependencies
         working-directory: ./python
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v7
@@ -113,6 +115,9 @@ jobs:
 
       - name: Install Dependencies
         working-directory: ./langchain
+        # Deliberately not --locked: this lock embeds python/'s dependency pins
+        # through the editable `adeu` path source, so every python/ dependency
+        # bump leaves it stale until langchain/ is relocked as well.
         run: uv sync --group dev --group test
 
       - name: Lint & Format Check (Ruff)
@@ -160,7 +165,7 @@ jobs:
         run: uv python install 3.12
       - name: Install Python Dependencies
         working-directory: ./python
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Use Node.js
         uses: actions/setup-node@v7
@@ -188,3 +193,20 @@ jobs:
         run: |
           npm run build
           npm test --workspace @adeu/core -- corpus_validation
+
+  # The one required status check on main. The ruleset requires `ci-ok` instead
+  # of listing matrix check names such as `build (3.14)`: drop or rename a matrix
+  # entry and a listed check never reports, blocking every PR. `if: always()` is
+  # load-bearing: without it a failed dependency makes this job *skipped*, and
+  # GitHub counts a skipped required check as passing. corpus-validation is
+  # manual-only and deliberately not a dependency.
+  ci-ok:
+    if: always()
+    needs: [build, node-test, langchain-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gating job to succeed
+        if: needs.build.result != 'success' || needs.node-test.result != 'success' || needs.langchain-test.result != 'success'
+        run: |
+          echo "build=${{ needs.build.result }} node-test=${{ needs.node-test.result }} langchain-test=${{ needs.langchain-test.result }}"
+          exit 1

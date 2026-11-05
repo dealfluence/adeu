@@ -68,55 +68,63 @@ clean_path = "MSA_final.docx"
 
 # 2. Read the document to extract text with active tracked changes & comments
 # clean_view=False ensures the LLM sees inline CriticMarkup (e.g. {++inserted++})
-read_result = read_tool.invoke({
-    "reasoning": "Reading the draft to review tracked changes and comments.",
-    "file_path": input_path,
-    "clean_view": False,
-    "mode": "full",
-    "page": 1
-})
+read_result = read_tool.invoke(
+    {
+        "reasoning": "Reading the draft to review tracked changes and comments.",
+        "file_path": input_path,
+        "clean_view": False,
+        "mode": "full",
+        "page": 1,
+    }
+)
 print("--- Document Contents ---\n", read_result)
 
 # 3. Apply a batch of edits (tracked modifications + a comment reply)
-apply_result = apply_tool.invoke({
-    "reasoning": "Applying jurisdiction edits and replying to a comment.",
-    "file_path": input_path,
-    "author_name": "AI Reviewer",
-    "output_path": redline_path,
-    "changes": [
-        {
-            "type": "modify",
-            "target_text": "Governing Law shall be the State of New York.",
-            "new_text": "Governing Law shall be the State of Delaware.",
-            "comment": "Updating jurisdiction to corporate standard."
-        },
-        {
-            "type": "reply",
-            "target_id": "Com:1",
-            "text": "Agreed. Applied jurisdiction change."
-        }
-    ]
-})
+apply_result = apply_tool.invoke(
+    {
+        "reasoning": "Applying jurisdiction edits and replying to a comment.",
+        "file_path": input_path,
+        "author_name": "AI Reviewer",
+        "output_path": redline_path,
+        "changes": [
+            {
+                "type": "modify",
+                "target_text": "Governing Law shall be the State of New York.",
+                "new_text": "Governing Law shall be the State of Delaware.",
+                "comment": "Updating jurisdiction to corporate standard.",
+            },
+            {
+                "type": "reply",
+                "target_id": "Com:1",
+                "text": "Agreed. Applied jurisdiction change.",
+            },
+        ],
+    }
+)
 print("\n--- Changes Applied ---\n", apply_result)
 
 # 4. Generate a word-level diff to verify edits
-diff_result = diff_tool.invoke({
-    "reasoning": "Verifying the applied edits with a word-level diff.",
-    "original_path": input_path,
-    "modified_path": redline_path,
-    "compare_clean": True
-})
+diff_result = diff_tool.invoke(
+    {
+        "reasoning": "Verifying the applied edits with a word-level diff.",
+        "original_path": input_path,
+        "modified_path": redline_path,
+        "compare_clean": True,
+    }
+)
 print("\n--- Word-Level Diff ---\n", diff_result)
 
 # 5. Sanitize document properties and remove author history for final delivery
 # keep_markup=True preserves unresolved track changes while stripping metadata
-sanitize_result = sanitize_tool.invoke({
-    "reasoning": "Stripping metadata before delivering the redline.",
-    "file_path": redline_path,
-    "output_path": clean_path,
-    "keep_markup": True,
-    "author": "Anonymous Advisor"
-})
+sanitize_result = sanitize_tool.invoke(
+    {
+        "reasoning": "Stripping metadata before delivering the redline.",
+        "file_path": redline_path,
+        "output_path": clean_path,
+        "keep_markup": True,
+        "author": "Anonymous Advisor",
+    }
+)
 print("\n--- Sanitization Report ---\n", sanitize_result)
 ```
 

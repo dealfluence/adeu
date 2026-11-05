@@ -1105,9 +1105,15 @@ def build_search_response(
     # scaffolding alone outweigh `max_matches * 60`, so a purely content-sized
     # budget was unreachable and every radius "failed" down to a context-free
     # `...**hit**...` (QA round 4, finding 1).
+    #
+    # The `File Path:` line's scaffolding is fixed chrome, but the path it
+    # echoes is caller-supplied and unbounded: counting it let a long path
+    # (OneDrive, temp dirs) crowd out snippet context and whole matches.
+    prefix_chrome = len(content_prefix) - len(file_path) if content_prefix else 0
+
     def fits(markdown: str, rendered_count: int) -> bool:
         budget_chars = search_budget_tokens(max_matches, rendered_count) * CHARS_PER_TOKEN
-        return len(content_prefix) + len(markdown) <= budget_chars
+        return prefix_chrome + len(markdown) <= budget_chars
 
     if full_paragraph:
         ui_markdown = compose(selected_matches, None, "")

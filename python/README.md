@@ -146,9 +146,9 @@ changes = [
         target_text="State of New York",
         new_text="State of Delaware",
         comment="Standardized jurisdiction.",
-        match_mode="all"
+        match_mode="all",
     ),
-    AcceptChange(target_id="Chg:12")
+    AcceptChange(target_id="Chg:12"),
 ]
 
 # 3. Initialize the engine and apply
@@ -187,7 +187,7 @@ result = sanitize_docx(
     input_path="draft.docx",
     output_path="final.docx",
     keep_markup=True,
-    author="Legal Team"
+    author="Legal Team",
 )
 
 print(result.report_text)
