@@ -72,14 +72,15 @@ AGENTS.md "Dual-Engine Parity", except where one engine is already correct.
 - Verify: plain-anchor tests in the repro files; field/link intact.
 - Done when: both suites green.
 
-### T4 — Punctuation-only changes do not restate the word — TODO
+### T4 — Punctuation-only changes do not restate the word — DONE
 - Goal: `Cause.` → `Cause;` deletes only `.`; money, decimals, URLs, domains
   and `text.`→`document.` still trim as before.
 - Files: `python/src/adeu/diff.py` + `node/packages/core/src/diff.ts`
   (`trim_common_context`), tests `python/tests/test_context_trimming.py`, Node
   diff tests.
-- Change: a word↔terminal-punctuation (`.,;:!?`) boundary is a clean prefix
-  cut unless the punctuation sits between two word characters.
+- Change: a word↔terminal-punctuation (`.,;!?`) boundary is a clean prefix
+  cut unless the punctuation sits between two word characters. `:` is left
+  out: it would split `https://` URLs.
 - Verify: unit + guard cases; commented end-to-end case.
 - Done when: both suites green (incl. cross-platform goldens).
 

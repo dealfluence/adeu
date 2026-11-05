@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { trim_common_context, generate_edits_from_text, create_word_patch_diff, generate_edits_via_paragraph_alignment } from './diff.js';
+import { RedlineEngine } from './engine.js';
+import { addParagraph, createTestDocument } from './test-utils.js';
 
 describe('Diff Logic & Context Trimming', () => {
   it('handles basic prefix and suffix', () => {
@@ -77,5 +79,53 @@ describe('Diff Logic & Context Trimming', () => {
     const modified = "This is a single paragraph of the draft.\n";
     const edits = generate_edits_via_paragraph_alignment(original, modified);
     expect(edits.length).toBe(0);
+  });
+});
+
+// Punctuation-only changes trim to the punctuation. The prefix backtrack used
+// to accept only whitespace as a word boundary, so "Cause." -> "Cause;" struck
+// the whole word. Python twin: tests/test_context_trimming.py.
+describe('punctuation-only changes', () => {
+  const remainder = (t: string, n: string) => {
+    const [p, s] = trim_common_context(t, n);
+    return [t.substring(p, t.length - s), n.substring(p, n.length - s)];
+  };
+
+  it('trims a trailing punctuation swap to the punctuation', () => {
+    expect(remainder('Cause.', 'Cause;')).toEqual(['.', ';']);
+    expect(remainder('shall.', 'shall,')).toEqual(['.', ',']);
+  });
+
+  it('keeps the word when a clause follows the changed punctuation', () => {
+    const [deleted, inserted] = remainder('Cause.', 'Cause; provided that Involuntary Termination shall not include');
+    expect(deleted).toBe('.');
+    expect(inserted.startsWith(';')).toBe(true);
+  });
+
+  it('does not treat punctuation inside a token as a boundary', () => {
+    expect(remainder('color', 'colour')).toEqual(['color', 'colour']);
+    expect(remainder('$10,000.00', '$15,000.00')).toEqual(['$10,000.00', '$15,000.00']);
+    expect(remainder('https://old-site.com/x', 'https://new-site.com/x')).toEqual([
+      'https://old-site.com/x',
+      'https://new-site.com/x',
+    ]);
+    expect(remainder('example.com', 'example.org')).toEqual(['example.com', 'example.org']);
+    expect(remainder('text.', 'document.')).toEqual(['text.', 'document.']);
+  });
+
+  it('does not restate the word in a commented edit', async () => {
+    const doc = await createTestDocument();
+    addParagraph(doc, 'Involuntary Termination shall mean a termination by the Company without Cause.');
+    const engine = new RedlineEngine(doc, 'QA');
+    engine.process_batch([
+      {
+        type: 'modify',
+        target_text: 'without Cause.',
+        new_text: 'without Cause; provided that Involuntary Termination shall not include a termination',
+        comment: 'Carve-out.',
+      } as any,
+    ]);
+    const deleted = Array.from(doc.element.getElementsByTagName('w:delText')).map((d) => d.textContent);
+    expect(deleted).toEqual(['.']);
   });
 });

@@ -1,4 +1,5 @@
 import io
+import re
 
 from docx import Document
 
@@ -153,3 +154,67 @@ def test_trim_logic_full_suffix_overlap_crash_repro():
     # Suffix: 9 ("Agreement")
     assert p == 0
     assert s == 9
+
+
+# --- Punctuation-only changes trim to the punctuation ------------------------
+# The prefix backtrack used to accept only whitespace as a word boundary, so
+# "Cause." -> "Cause;" backtracked to 0 and struck the whole word.
+
+
+def _remainder(target: str, new_val: str) -> tuple[str, str]:
+    p, s = trim_common_context(target, new_val)
+    return target[p : len(target) - s], new_val[p : len(new_val) - s]
+
+
+def test_trailing_punctuation_swap_trims_to_the_punctuation():
+    assert _remainder("Cause.", "Cause;") == (".", ";")
+    assert _remainder("shall.", "shall,") == (".", ",")
+
+
+def test_punctuation_change_plus_added_clause_keeps_the_word():
+    deleted, inserted = _remainder("Cause.", "Cause; provided that Involuntary Termination shall not include")
+    assert deleted == "."
+    assert inserted.startswith(";")
+
+
+def test_punctuation_inside_a_token_is_not_a_boundary():
+    assert _remainder("color", "colour") == ("color", "colour")
+    assert _remainder("$10,000.00", "$15,000.00") == ("$10,000.00", "$15,000.00")
+    assert _remainder("https://old-site.com/x", "https://new-site.com/x") == (
+        "https://old-site.com/x",
+        "https://new-site.com/x",
+    )
+    assert _remainder("example.com", "example.org") == ("example.com", "example.org")
+    assert _remainder("text.", "document.") == ("text.", "document.")
+
+
+def _deleted_texts(paragraph: str, target: str, new: str, comment=None) -> list:
+    doc = Document()
+    doc.add_paragraph(paragraph)
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    engine = RedlineEngine(stream)
+    engine.apply_edits([ModifyText(target_text=target, new_text=new, comment=comment)])
+    xml = Document(engine.save_to_stream()).element.xml
+    return re.findall(r"<w:delText[^>]*>(.*?)</w:delText>", xml)
+
+
+def test_commented_punctuation_change_does_not_restate_the_word():
+    deleted = _deleted_texts(
+        "Involuntary Termination shall mean a termination by the Company without Cause.",
+        "without Cause.",
+        "without Cause; provided that Involuntary Termination shall not include a termination",
+        comment="Carve-out.",
+    )
+    assert deleted == ["."]
+
+
+def test_single_token_punctuation_change_does_not_restate_the_word():
+    deleted = _deleted_texts("The notice period is thirty days.", "days.", "days;")
+    assert deleted == ["."]
+
+
+def test_mid_word_change_still_strikes_the_whole_word():
+    deleted = _deleted_texts("The colorful banner.", "colorful", "colourful")
+    assert deleted == ["colorful"]

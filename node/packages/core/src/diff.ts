@@ -37,6 +37,31 @@ function _count_standalone_underscores(s: string): number {
   return count;
 }
 
+// Terminal sentence punctuation that may end a common prefix right after a
+// word. ":" is excluded: "https:" would then split a URL.
+const BOUNDARY_PUNCT = new Set([".", ",", ";", "!", "?"]);
+const isWordChar = (c: string) => /[\p{L}\p{N}_]/u.test(c);
+
+/**
+ * Whether ending the common prefix at index `i` splits a token mid-word.
+ * Clean cuts: whitespace, or a word character meeting terminal punctuation
+ * (`.,;!?`) that is not wedged between two word characters — so `Cause.` ->
+ * `Cause;` redlines only the punctuation. Punctuation inside a token
+ * (`10,000.00`, `example.com`, `https://x`) is not a boundary. Python twin:
+ * _splits_prefix_token in diff.py.
+ */
+function splitsPrefixToken(target: string, new_val: string, i: number): boolean {
+  for (const s of [target, new_val]) {
+    const a = s[i - 1];
+    const b = s[i];
+    if (/\s/.test(a) || /\s/.test(b)) continue;
+    if (isWordChar(a) && BOUNDARY_PUNCT.has(b) && (i + 1 >= s.length || !isWordChar(s[i + 1]))) continue;
+    if (isWordChar(b) && BOUNDARY_PUNCT.has(a) && (i < 2 || !isWordChar(s[i - 2]))) continue;
+    return true;
+  }
+  return false;
+}
+
 export function trim_common_context(
   target: string,
   new_val: string,
@@ -52,18 +77,11 @@ export function trim_common_context(
     prefix_len++;
   }
 
-  // Backtrack to nearest whitespace if we split a word
+  // Backtrack to the nearest token boundary if we split a word (whitespace,
+  // or a word <-> terminal punctuation transition).
   if (prefix_len < target.length && prefix_len < new_val.length) {
-    while (prefix_len > 0) {
-      const target_split =
-        !isSpace(target[prefix_len - 1]) && !isSpace(target[prefix_len]);
-      const new_split =
-        !isSpace(new_val[prefix_len - 1]) && !isSpace(new_val[prefix_len]);
-      if (target_split || new_split) {
-        prefix_len--;
-      } else {
-        break;
-      }
+    while (prefix_len > 0 && splitsPrefixToken(target, new_val, prefix_len)) {
+      prefix_len--;
     }
   }
 
