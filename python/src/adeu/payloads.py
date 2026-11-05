@@ -280,6 +280,11 @@ def _minimal_edit(edit: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuilds one edit report with the caller's echoes dropped."""
     status = edit.get("status")
     minimal: Dict[str, Any] = {}
+    # A failed edit names its position in the caller's change list so the
+    # agent knows which change to fix. Applied edits leave it out: their
+    # 40-token budget is better spent on the redline preview.
+    if status == "failed" and "index" in edit:
+        minimal["index"] = edit["index"]
     if status is not None:
         minimal["status"] = status
     if "type" in edit:

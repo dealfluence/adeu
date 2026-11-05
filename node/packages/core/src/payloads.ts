@@ -359,6 +359,10 @@ function _fit_to_budget(edit: Record<string, unknown>): void {
 function _minimal_edit(edit: Record<string, unknown>): Record<string, unknown> {
   const status = edit.status;
   const minimal: Record<string, unknown> = {};
+  // A failed edit names its position in the caller's change list so the agent
+  // knows which change to fix. Applied edits leave it out: their 40-token
+  // budget is better spent on the redline preview. Python twin: _minimal_edit.
+  if (status === "failed" && "index" in edit) minimal.index = edit.index;
   if (status !== undefined && status !== null) minimal.status = status;
   if ("type" in edit) minimal.type = edit.type;
 

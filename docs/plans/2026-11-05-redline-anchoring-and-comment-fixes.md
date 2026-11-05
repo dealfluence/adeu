@@ -91,9 +91,11 @@ AGENTS.md "Dual-Engine Parity", except where one engine is already correct.
 - Verify: appended paragraphs with both `\n` and `\n\n` separators.
 - Done when: Python suite green.
 
-### T6 — Per-edit reports carry the caller's index — TODO
+### T6 — Per-edit reports carry the caller's index — DONE
 - Goal: each `edits[]` report has `index` = position in the caller's change
-  list (mixed action/edit batches).
+  list (mixed action/edit batches). Minimal reports keep it on failed edits
+  only: the applied-edit 40-token budget covers the whole serialized edit and
+  the index would shave the redline preview.
 - Files: `engine.py` `_build_edit_report` + failed-report literals, `engine.ts`
   twin; tests in both engines.
 - Done when: both suites green.

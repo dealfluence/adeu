@@ -3705,6 +3705,13 @@ class RedlineEngine:
                     failed=failed_list,
                 )
 
+            # Name each report's position in the caller's change list (same
+            # 0-based numbering as `failed`): actions are filtered out of
+            # `edits`, so in a mixed batch report order alone does not say
+            # which change a report describes.
+            for (orig_idx, _), input_report in zip(cloned_edits, reports_by_input, strict=True):
+                if input_report is not None:
+                    input_report["index"] = orig_idx
             edits_reports = [r for r in reports_by_input if r is not None]
 
         # Cross-edit advisory: individually legal deletions can still add up to

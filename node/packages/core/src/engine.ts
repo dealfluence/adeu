@@ -5358,7 +5358,7 @@ export class RedlineEngine {
         ).length;
         skipped_edits = edits.length - applied_edits;
 
-        for (const edit of edits) {
+        for (const [pos, edit] of edits.entries()) {
           const success = (edit as any)._applied_status || false;
           const error_msg = (edit as any)._error_msg || null;
           let critic_markup = null;
@@ -5378,6 +5378,11 @@ export class RedlineEngine {
               this._check_punctuation_warning((edit as any).target_text || "");
           }
           edits_reports.push({
+            // Position in the caller's change list (same 0-based numbering as
+            // `failed`): actions are filtered out of `edits`, so in a mixed
+            // batch report order alone does not say which change a report
+            // describes. Python twin: process_batch.
+            index: edits_with_idx[pos].i,
             status: success ? "applied" : "failed",
             type: (edit as any).type || "modify",
             target_text: truncate_middle((edit as any).target_text || "", REPORT_ECHO_CAP),
