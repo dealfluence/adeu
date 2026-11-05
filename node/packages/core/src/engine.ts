@@ -1,6 +1,7 @@
 import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, Run, DocxEvent } from "./docx/primitives.js";
-import { DocumentMapper, TextSpan } from "./mapper.js";
+import { diff_match_patch } from "diff-match-patch";
+import { ANCHOR_MARKER_RE, DocumentMapper, TextSpan } from "./mapper.js";
 import {
   CommentsManager,
   CommentThreadingError,
@@ -32,6 +33,7 @@ import {
   PREVIEW_TEXT_CAP,
   REPORT_ECHO_CAP,
   clamp_text,
+  normalize_smart_quotes,
   restore_matched_typography,
   truncate_middle,
 } from "./utils/text.js";
@@ -4310,13 +4312,24 @@ export class RedlineEngine {
       if (matches.length === 1) {
         const [m_start, m_len] = matches[0];
         const matched = activeText.substring(m_start, m_start + m_len);
-        const [pfx, sfx] = trim_common_context(matched, edit.new_text || "");
+        const with_markers = RedlineEngine._reinject_anchor_markers(
+          target_mapper,
+          m_start,
+          m_len,
+          edit.target_text,
+          edit.new_text || "",
+        );
+        if (with_markers === null) {
+          errors.push(
+            `- Edit ${i + 1 + index_offset} Failed: target_text runs across a hyperlink or cross-reference whose visible text the replacement changes or removes. Keep that text unchanged and edit only around it, or copy the marker exactly as read_docx shows it ([text](url) for a hyperlink) into both target_text and new_text.`,
+          );
+          continue;
+        }
+        const effective_new = with_markers;
+        const [pfx, sfx] = trim_common_context(matched, effective_new);
         const t_end = matched.length - sfx;
         const final_target = matched.substring(pfx, t_end);
-        const final_new = (edit.new_text || "").substring(
-          pfx,
-          (edit.new_text || "").length - sfx,
-        );
+        const final_new = effective_new.substring(pfx, effective_new.length - sfx);
 
         // QA 2026-07-18 C1: the projection flattens headers, body, footers
         // and notes into one string, but a text edit whose matched span
@@ -4441,8 +4454,7 @@ export class RedlineEngine {
           // expressed as a per-paragraph text replacement. See
           // _pre_resolve_heuristic_edit.
           const balanced =
-            matched.split("\n\n").length ===
-            (edit.new_text || "").split("\n\n").length;
+            matched.split("\n\n").length === effective_new.split("\n\n").length;
           if (!balanced) {
             if (final_new.includes("\n\n")) {
               const parts = matched.split("\n\n");
@@ -7304,6 +7316,78 @@ export class RedlineEngine {
     return false;
   }
 
+  /**
+   * Puts back the hyperlink / cross-reference / bookmark markers a plain
+   * anchor matched across (DocumentMapper._get_plain_projection): each
+   * marker's visible text is located in the replacement by aligning it with
+   * the matched plain text, and the marker is written back in its place, so
+   * the marker-preserving split leaves the link / field XML untouched.
+   * Returns new_text unchanged when the anchor did not cross a marker, and
+   * null when the replacement changes or drops a marker's visible text.
+   * Python twin: same name.
+   */
+  private static _reinject_anchor_markers(
+    mapper: DocumentMapper,
+    start: number,
+    length: number,
+    caller_target: string,
+    new_text: string,
+  ): string | null {
+    const has_marker = (s: string) => new RegExp(ANCHOR_MARKER_RE.source).test(s);
+    if (!new_text || has_marker(caller_target || "")) return new_text;
+    if (!has_marker(mapper.full_text.substring(start, start + length))) return new_text;
+    const [plain, markers] = mapper.anchor_markers_in_range(start, length);
+    if (markers.length === 0) return new_text;
+
+    // A match widened over a whole marker carries plain text the caller's
+    // target did not: frame the replacement with the same text.
+    const norm_plain = normalize_smart_quotes(plain);
+    const norm_target = normalize_smart_quotes(
+      mapper._strip_markdown_formatting(caller_target),
+    );
+    const k = norm_target ? norm_plain.indexOf(norm_target) : -1;
+    if (k >= 0) {
+      new_text = plain.substring(0, k) + new_text + plain.substring(k + norm_target.length);
+    }
+
+    const dmp = new diff_match_patch();
+    const diffs = dmp.diff_main(norm_plain, normalize_smart_quotes(new_text));
+    const new_pos: (number | null)[] = new Array(plain.length).fill(null);
+    let p = 0;
+    let n = 0;
+    for (const [op, chunk] of diffs) {
+      if (op === 0) {
+        for (let j = 0; j < chunk.length; j++) new_pos[p + j] = n + j;
+      }
+      if (op !== 1) p += chunk.length;
+      if (op !== -1) n += chunk.length;
+    }
+
+    const placements: [number, number, string][] = [];
+    for (const [marker, a, b] of markers) {
+      if (a === b) {
+        // bookmark: no visible text, keep its position
+        let pos: number;
+        if (a < plain.length && new_pos[a] !== null) pos = new_pos[a]!;
+        else if (a > 0 && new_pos[a - 1] !== null) pos = new_pos[a - 1]! + 1;
+        else pos = dmp.diff_xIndex(diffs, a);
+        placements.push([pos, pos, marker]);
+        continue;
+      }
+      const mapped = new_pos.slice(a, b);
+      if (mapped.some((x) => x === null) || mapped[mapped.length - 1]! - mapped[0]! !== b - a - 1) {
+        return null;
+      }
+      placements.push([mapped[0]!, mapped[mapped.length - 1]! + 1, marker]);
+    }
+
+    placements.sort((x, y) => y[0] - x[0] || y[1] - x[1]);
+    for (const [s, e, marker] of placements) {
+      new_text = new_text.substring(0, s) + marker + new_text.substring(e);
+    }
+    return new_text;
+  }
+
   private _pre_resolve_heuristic_edit(edit: any): any {
     if (!edit.target_text) return null;
 
@@ -7461,6 +7545,17 @@ export class RedlineEngine {
         edit.target_text,
         current_effective_new_text,
       );
+      const with_markers = RedlineEngine._reinject_anchor_markers(
+        active_mapper,
+        start_idx,
+        match_len,
+        edit.target_text,
+        current_effective_new_text,
+      );
+      // validate_edits reports this; direct apply_edits callers bypass it,
+      // so skip the occurrence rather than corrupt it.
+      if (with_markers === null) continue;
+      current_effective_new_text = with_markers;
 
       // Stash the first occurrence's full match for the report preview, so it
       // can show the complete logical change rather than only the first

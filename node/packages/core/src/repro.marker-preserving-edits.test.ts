@@ -131,6 +131,75 @@ describe("edits that keep a structural marker", () => {
     expect(paragraphTexts(xml, false)[0]).toBe("Email the team at legal@adeu.com before Friday.");
   });
 
+  it("resolve a plain anchor across a bold hyperlink and keep the link", async () => {
+    const { result, xml } = await apply(
+      LINK_BODY,
+      "Email the team at legal@adeu.com before Friday.",
+      "Please email the team at legal@adeu.com by Friday.",
+    );
+    expect(result.edits_applied).toBe(1);
+    expect(deletedText(xml)).not.toContain("legal@adeu.com");
+    expect(texts(xml, /<w:hyperlink\b[^>]*>([\s\S]*?)<\/w:hyperlink>/g)).toContain("legal@adeu.com");
+    expect(paragraphTexts(xml, true)[0]).toBe("Please email the team at legal@adeu.com by Friday.");
+    expect(paragraphTexts(xml, false)[0]).toBe("Email the team at legal@adeu.com before Friday.");
+  });
+
+  it("resolve a plain anchor across a cross-reference and keep the field", async () => {
+    const { result, xml } = await apply(
+      XREF_BODY,
+      "expressly granted in Section 2.1, nothing else is licensed",
+      "expressly granted in Section 2.1, no other licence is granted",
+    );
+    expect(result.edits_applied).toBe(1);
+    expect(deletedText(xml)).not.toContain("2.1");
+    expect(insertedText(xml)).not.toContain("[~");
+    expect(xml).toContain("REF _Ref123");
+    expect(paragraphTexts(xml, true)[1]).toBe(
+      "Except as expressly granted in Section 2.1, no other licence is granted hereunder.",
+    );
+    expect(paragraphTexts(xml, false)[1]).toBe(XREF_SENTENCE);
+  });
+
+  it("reject a plain anchor whose replacement drops the link text", async () => {
+    const doc = await DocumentObject.load(buildDocx(LINK_BODY));
+    const engine = new RedlineEngine(doc, "QA");
+    const result: any = engine.process_batch(
+      [
+        {
+          type: "modify",
+          target_text: "Email the team at legal@adeu.com before Friday.",
+          new_text: "Email the team before Friday.",
+        } as any,
+      ],
+      undefined,
+      true,
+    );
+    expect(result.edits_applied).toBe(0);
+    expect(result.failed[0].reason).toContain("hyperlink");
+  });
+
+  it("widen a plain anchor that ends inside the link text", async () => {
+    const { result, xml } = await apply(LINK_BODY, "team at legal@adeu", "group at legal@adeu");
+    expect(result.edits_applied).toBe(1);
+    expect(texts(xml, /<w:hyperlink\b[^>]*>([\s\S]*?)<\/w:hyperlink>/g)).toContain("legal@adeu.com");
+    expect(deletedText(xml)).toBe("team");
+    expect(paragraphTexts(xml, true)[0]).toBe("Email the group at legal@adeu.com before Friday.");
+  });
+
+  it("resolve a plain anchor across a mid-sentence bookmark and keep it", async () => {
+    const body =
+      '<w:p><w:r><w:t xml:space="preserve">The Licensee shall pay </w:t></w:r>' +
+      '<w:bookmarkStart w:id="7" w:name="FeeClause"/>' +
+      '<w:r><w:t xml:space="preserve">the annual fee</w:t></w:r><w:bookmarkEnd w:id="7"/>' +
+      "<w:r><w:t> in advance.</w:t></w:r></w:p>";
+    const { result, xml } = await apply(body, "shall pay the annual fee in advance", "shall pay the annual fee in arrears");
+    expect(result.edits_applied).toBe(1);
+    expect(xml).toContain('w:name="FeeClause"');
+    expect(insertedText(xml)).not.toContain("{#");
+    expect(deletedText(xml)).toBe("advance");
+    expect(paragraphTexts(xml, true)[0]).toBe("The Licensee shall pay the annual fee in arrears.");
+  });
+
   it("attach a commented edit's comment once", async () => {
     const { result, xml } = await apply(
       XREF_BODY,

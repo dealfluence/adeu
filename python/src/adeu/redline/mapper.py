@@ -1,4 +1,5 @@
 # FILE: src/adeu/redline/mapper.py
+import bisect
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -246,6 +247,27 @@ def renumber_snapshot_ids(doc) -> tuple[dict[str, str], dict[str, str]]:
 # typed in the document live inside real (run-backed) spans and are never
 # confused with these.
 _STYLE_MARKER_TEXTS = frozenset({"**", "__", "*", "_"})
+
+# Projection markers that wrap (or stand between) visible text a caller reads
+# as plain prose: cross-references `[~2.1~](#_Ref1)`, hyperlinks
+# `[label](url)` and bookmark anchors `{#name}`. Content-control (`{#cc:N}`)
+# and cell (`{#cell:..}`) anchors are excluded: they mark walls the gates must
+# see. Images are excluded: their alt text is not document text.
+ANCHOR_MARKER_RE = re.compile(
+    r"\[~[^~\]]+~\]\(#[^)]+\)|(?<!!)\[(?!~)[^\]]+\]\((?!docx-image:)[^)]+\)|\{#(?!/?cc:|cell:)[^}]+\}"
+)
+
+
+def _is_anchor_marker_syntax(span: "TextSpan") -> bool:
+    """True for the virtual spans carrying ANCHOR_MARKER_RE syntax (not text)."""
+    if span.run is not None or span.paragraph is None:
+        return False
+    text = span.text
+    if text == "[~" or text.startswith("~](#"):
+        return True
+    if span.hyperlink_id is not None and (text == "[" or text.startswith("](")):
+        return True
+    return text.startswith("{#") and not text.startswith(("{#cc:", "{#/cc:", "{#cell:"))
 
 
 class DocumentMapper:
@@ -1392,6 +1414,13 @@ class DocumentMapper:
         fuzzy regex can find the plain target "Alpha". Matching against this
         projection and mapping the span back to full_text closes that gap.
 
+        The syntax of hyperlinks, cross-references and bookmark anchors is
+        dropped too (their visible text stays), so an anchor copied from the
+        document as prose — "email legal@adeu.com today", "Section 2.1, nothing"
+        — resolves across `[**legal@adeu.com**](mailto:…)` or
+        `[~2.1~](#_Ref1)`. The engine re-injects the markers into the caller's
+        replacement (RedlineEngine._reinject_anchor_markers).
+
         Built lazily and invalidated by _build_map(): most batches never need it.
         """
         if self._plain_projection is None:
@@ -1399,6 +1428,8 @@ class DocumentMapper:
             offsets: List[int] = []
             for s in self.spans:
                 if s.run is None and s.paragraph is not None and s.text in _STYLE_MARKER_TEXTS:
+                    continue
+                if _is_anchor_marker_syntax(s):
                     continue
                 chunks.append(s.text)
                 offsets.extend(range(s.start, s.end))
@@ -1411,7 +1442,9 @@ class DocumentMapper:
         each hit back to a (start, length) span in full_text. Interior style
         markers end up inside the returned span (so "Alpha" over "**Al**pha"
         resolves to the "Al**pha" range); markers just outside the matched
-        characters are excluded.
+        characters are excluded. A hit that cuts into an ANCHOR_MARKER_RE
+        marker widens to the whole marker, so a link or cross-reference is
+        never split in half.
         """
         plain_text, offsets = self._get_plain_projection()
         if len(plain_text) == len(self.full_text):
@@ -1423,10 +1456,39 @@ class DocumentMapper:
         results: List[Tuple[int, int]] = []
         for m in re.finditer(re.escape(norm_target), norm_plain, flags=flags):
             p_start, p_end = m.span()
-            raw_start = offsets[p_start]
-            raw_end = offsets[p_end - 1] + 1
+            raw_start, raw_end = self._widen_to_anchor_markers(offsets[p_start], offsets[p_end - 1] + 1)
             results.append((raw_start, raw_end - raw_start))
         return results
+
+    def _widen_to_anchor_markers(self, start: int, end: int) -> Tuple[int, int]:
+        """Extends [start, end) over any ANCHOR_MARKER_RE marker it cuts into."""
+        window_start = self.full_text.rfind("\n", 0, start) + 1
+        window_end = self.full_text.find("\n", end)
+        if window_end == -1:
+            window_end = len(self.full_text)
+        for m in ANCHOR_MARKER_RE.finditer(self.full_text, window_start, window_end):
+            if m.start() < end and m.end() > start:
+                start, end = min(start, m.start()), max(end, m.end())
+        return start, end
+
+    def anchor_markers_in_range(self, start: int, length: int) -> Tuple[str, List[Tuple[str, int, int]]]:
+        """
+        Plain (marker-free) text of full_text[start:start+length], plus each
+        ANCHOR_MARKER_RE marker in that range as (marker_text, a, b): the
+        plain-text range [a, b) holding its visible text (a == b for a
+        bookmark, which has none).
+        """
+        plain_text, offsets = self._get_plain_projection()
+        end = start + length
+        i0 = bisect.bisect_left(offsets, start)
+        i1 = bisect.bisect_left(offsets, end)
+        local = offsets[i0:i1]
+        markers: List[Tuple[str, int, int]] = []
+        for m in ANCHOR_MARKER_RE.finditer(self.full_text, start, end):
+            a = bisect.bisect_left(local, m.start())
+            b = bisect.bisect_left(local, m.end())
+            markers.append((m.group(0), a, b))
+        return plain_text[i0:i1], markers
 
     def _range_in_deletion(self, start: int, length: int) -> bool:
         """

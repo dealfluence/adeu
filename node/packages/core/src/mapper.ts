@@ -166,6 +166,42 @@ export function renumber_snapshot_ids(
 // confused with these.
 const STYLE_MARKER_TEXTS = new Set(["**", "__", "*", "_"]);
 
+/**
+ * Projection markers that wrap (or stand between) visible text a caller reads
+ * as plain prose: cross-references `[~2.1~](#_Ref1)`, hyperlinks
+ * `[label](url)` and bookmark anchors `{#name}`. Content-control and cell
+ * anchors are excluded (walls the gates must see), as are images (alt text is
+ * not document text). Python twin: mapper.ANCHOR_MARKER_RE.
+ */
+export const ANCHOR_MARKER_RE =
+  /\[~[^~\]]+~\]\(#[^)]+\)|(?<!!)\[(?!~)[^\]]+\]\((?!docx-image:)[^)]+\)|\{#(?!\/?cc:|cell:)[^}]+\}/g;
+
+/** True for the virtual spans carrying ANCHOR_MARKER_RE syntax (not text). */
+function isAnchorMarkerSyntax(span: TextSpan): boolean {
+  if (span.run !== null || span.paragraph === null) return false;
+  const text = span.text;
+  if (text === "[~" || text.startsWith("~](#")) return true;
+  if (span.hyperlink_id && (text === "[" || text.startsWith("]("))) return true;
+  return (
+    text.startsWith("{#") &&
+    !text.startsWith("{#cc:") &&
+    !text.startsWith("{#/cc:") &&
+    !text.startsWith("{#cell:")
+  );
+}
+
+/** First index in sorted `arr` whose value is >= `x`. */
+function bisectLeft(arr: number[], x: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 export class DocumentMapper {
   public doc: DocumentObject;
   public clean_view: boolean;
@@ -761,7 +797,7 @@ export class DocumentMapper {
     return current;
   }
 
-  private _strip_markdown_formatting(text: string): string {
+  public _strip_markdown_formatting(text: string): string {
     let result = text;
     result = result.replace(/^#+\s*/gm, "");
     result = result.replace(/\*\*(\w[\w\s]*\w|\w{2,})\*\*/g, "$1");
@@ -1451,6 +1487,12 @@ export class DocumentMapper {
    * fuzzy regex can find the plain target "Alpha". Matching against this
    * projection and mapping the span back to full_text closes that gap (QA H2).
    *
+   * The syntax of hyperlinks, cross-references and bookmark anchors is dropped
+   * too (their visible text stays), so an anchor copied from the document as
+   * prose resolves across `[**x**](mailto:x)` or `[~2.1~](#_Ref1)`. The engine
+   * re-injects the markers into the caller's replacement
+   * (RedlineEngine._reinject_anchor_markers).
+   *
    * Built lazily and invalidated by _build_map(): most batches never need it.
    */
   private _get_plain_projection(): [string, number[]] {
@@ -1465,6 +1507,7 @@ export class DocumentMapper {
         ) {
           continue;
         }
+        if (isAnchorMarkerSyntax(s)) continue;
         chunks.push(s.text);
         for (let k = s.start; k < s.end; k++) offsets.push(k);
       }
@@ -1498,12 +1541,60 @@ export class DocumentMapper {
       const p_start = norm_plain.indexOf(norm_target, from);
       if (p_start === -1) break;
       const p_end = p_start + norm_target.length;
-      const raw_start = offsets[p_start];
-      const raw_end = offsets[p_end - 1] + 1;
+      const [raw_start, raw_end] = this._widen_to_anchor_markers(
+        offsets[p_start],
+        offsets[p_end - 1] + 1,
+      );
       results.push([raw_start, raw_end - raw_start]);
       from = p_end;
     }
     return results;
+  }
+
+  /** Extends [start, end) over any ANCHOR_MARKER_RE marker it cuts into, so
+   * a link or cross-reference is never split in half. */
+  private _widen_to_anchor_markers(start: number, end: number): [number, number] {
+    const window_start = this.full_text.lastIndexOf("\n", start - 1) + 1;
+    let window_end = this.full_text.indexOf("\n", end);
+    if (window_end === -1) window_end = this.full_text.length;
+    const window = this.full_text.substring(window_start, window_end);
+    for (const m of window.matchAll(ANCHOR_MARKER_RE)) {
+      const m_start = window_start + m.index!;
+      const m_end = m_start + m[0].length;
+      if (m_start < end && m_end > start) {
+        start = Math.min(start, m_start);
+        end = Math.max(end, m_end);
+      }
+    }
+    return [start, end];
+  }
+
+  /**
+   * Plain (marker-free) text of full_text[start, start+length), plus each
+   * ANCHOR_MARKER_RE marker in that range as [marker_text, a, b]: the
+   * plain-text range [a, b) holding its visible text (a === b for a
+   * bookmark). Python twin: anchor_markers_in_range.
+   */
+  public anchor_markers_in_range(
+    start: number,
+    length: number,
+  ): [string, [string, number, number][]] {
+    const [plain_text, offsets] = this._get_plain_projection();
+    const end = start + length;
+    const i0 = bisectLeft(offsets, start);
+    const i1 = bisectLeft(offsets, end);
+    const local = offsets.slice(i0, i1);
+    const markers: [string, number, number][] = [];
+    const slice = this.full_text.substring(start, end);
+    for (const m of slice.matchAll(ANCHOR_MARKER_RE)) {
+      const m_start = start + m.index!;
+      markers.push([
+        m[0],
+        bisectLeft(local, m_start),
+        bisectLeft(local, m_start + m[0].length),
+      ]);
+    }
+    return [plain_text.substring(i0, i1), markers];
   }
 
   /**

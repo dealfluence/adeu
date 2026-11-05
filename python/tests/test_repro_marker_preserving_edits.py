@@ -174,6 +174,100 @@ def test_a_commented_edit_around_a_kept_cross_reference_attaches_its_comment_onc
     )
 
 
+def test_plain_anchor_across_a_bold_hyperlink_resolves_and_keeps_the_link():
+    # Callers anchor on visible text; the projection reads "[**legal@adeu.com**](mailto:legal@adeu.com)".
+    result, root = _apply(
+        _doc_with_bold_hyperlink(),
+        "Email the team at legal@adeu.com before Friday.",
+        "Please email the team at legal@adeu.com by Friday.",
+    )
+
+    assert result["edits_applied"] == 1
+    assert "legal@adeu.com" not in _deleted_text(root)
+    assert "".join(root.xpath("//w:hyperlink//w:t/text()", namespaces=NS)) == "legal@adeu.com"
+    assert _paragraph_texts(root, accept=True)[0] == "Please email the team at legal@adeu.com by Friday."
+    assert _paragraph_texts(root, accept=False)[0] == "Email the team at legal@adeu.com before Friday."
+
+
+def test_plain_anchor_across_a_cross_reference_resolves_and_keeps_the_field():
+    # The projection reads "[~2.1~](#_Ref123)".
+    result, root = _apply(
+        _doc_with_cross_reference(),
+        "expressly granted in Section 2.1, nothing else is licensed",
+        "expressly granted in Section 2.1, no other licence is granted",
+    )
+
+    assert result["edits_applied"] == 1
+    assert "2.1" not in _deleted_text(root), "the REF field result was deleted"
+    assert "[~" not in _inserted_text(root)
+    assert root.xpath("//w:instrText[contains(., 'REF _Ref123')]", namespaces=NS)
+    assert _paragraph_texts(root, accept=True)[1] == (
+        "Except as expressly granted in Section 2.1, no other licence is granted hereunder."
+    )
+    assert _paragraph_texts(root, accept=False)[1] == XREF_SENTENCE
+
+
+def test_plain_anchor_whose_replacement_drops_the_link_text_is_rejected_not_corrupted():
+    engine = RedlineEngine(_doc_with_bold_hyperlink(), author="QA")
+    result = engine.process_batch(
+        [
+            ModifyText(
+                target_text="Email the team at legal@adeu.com before Friday.",
+                new_text="Email the team before Friday.",
+            )
+        ],
+        partial=True,
+    )
+
+    assert result["edits_applied"] == 0
+    assert "hyperlink" in result["failed"][0]["reason"]
+
+
+def test_plain_anchor_ending_inside_the_link_text_keeps_the_link():
+    result, root = _apply(_doc_with_bold_hyperlink(), "team at legal@adeu", "group at legal@adeu")
+
+    assert result["edits_applied"] == 1
+    assert "".join(root.xpath("//w:hyperlink//w:t/text()", namespaces=NS)) == "legal@adeu.com"
+    assert _deleted_text(root) == "team"
+    assert _paragraph_texts(root, accept=True)[0] == "Email the group at legal@adeu.com before Friday."
+
+
+def test_plain_anchor_across_a_mid_sentence_bookmark_keeps_the_bookmark():
+    body = (
+        f'<w:p xmlns:w="{W}"><w:r><w:t xml:space="preserve">The Licensee shall pay </w:t></w:r>'
+        '<w:bookmarkStart w:id="7" w:name="FeeClause"/>'
+        '<w:r><w:t xml:space="preserve">the annual fee</w:t></w:r><w:bookmarkEnd w:id="7"/>'
+        "<w:r><w:t> in advance.</w:t></w:r></w:p>"
+    )
+    doc = Document()
+    doc.element.body.insert(0, parse_xml(body))
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+
+    result, root = _apply(stream, "shall pay the annual fee in advance", "shall pay the annual fee in arrears")
+
+    assert result["edits_applied"] == 1
+    assert root.xpath("//w:bookmarkStart[@w:name='FeeClause']", namespaces=NS)
+    assert "{#" not in _inserted_text(root)
+    assert _deleted_text(root) == "advance"
+    assert _paragraph_texts(root, accept=True)[0] == "The Licensee shall pay the annual fee in arrears."
+
+
+def test_plain_anchor_mapper_match_covers_whole_markers():
+    from adeu.redline.mapper import DocumentMapper
+
+    mapper = DocumentMapper(Document(_doc_with_cross_reference()))
+    start, length = mapper.find_match_index("granted in Section 2.1, nothing")
+    assert start != -1
+    assert mapper.full_text[start : start + length] == "granted in Section [~2.1~](#_Ref123), nothing"
+
+    mapper = DocumentMapper(Document(_doc_with_bold_hyperlink()))
+    start, length = mapper.find_match_index("at legal@adeu")
+    assert start != -1
+    assert mapper.full_text[start : start + length] == "at [**legal@adeu.com**](mailto:legal@adeu.com)"
+
+
 def test_no_literal_projection_markup_reaches_any_run():
     _, root = _apply(
         _doc_with_bold_hyperlink(),

@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import lxml.etree as etree
 import structlog
+from diff_match_patch import diff_match_patch
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsmap, qn
 from docx.text.paragraph import Paragraph
@@ -44,7 +45,7 @@ from adeu.redline.gates import (
     overrides_note,
     segmentation_note,
 )
-from adeu.redline.mapper import DocumentMapper, TextSpan
+from adeu.redline.mapper import ANCHOR_MARKER_RE, DocumentMapper, TextSpan
 from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
 from adeu.utils.opc import load_document as Document
 from adeu.utils.protection import read_document_protection
@@ -54,6 +55,7 @@ from adeu.utils.text import (
     REPORT_ECHO_CAP,
     clamp_text,
     has_smart_quotes,
+    normalize_smart_quotes,
     restore_document_typography,
     truncate_middle,
 )
@@ -2820,6 +2822,18 @@ class RedlineEngine:
                 start, length = valid_matches[0]
                 actual_doc_text = active_text[start : start + length]
                 effective_new_text = edit.new_text or ""
+                with_markers = self._reinject_anchor_markers(
+                    target_mapper, start, length, edit.target_text, effective_new_text
+                )
+                if with_markers is None:
+                    errors.append(
+                        f"- Edit {i + 1} Failed: target_text runs across a hyperlink or cross-reference "
+                        "whose visible text the replacement changes or removes. Keep that text unchanged "
+                        "and edit only around it, or copy the marker exactly as read_docx shows it "
+                        "([text](url) for a hyperlink) into both target_text and new_text."
+                    )
+                    continue
+                effective_new_text = with_markers
                 prefix_len, suffix_len = trim_common_context(actual_doc_text, effective_new_text)
                 t_end = len(actual_doc_text) - suffix_len
                 final_target = actual_doc_text[prefix_len:t_end]
@@ -4831,6 +4845,73 @@ class RedlineEngine:
             return new_text
         return restore_document_typography(actual_doc_text, new_text)
 
+    @staticmethod
+    def _reinject_anchor_markers(
+        mapper: DocumentMapper, start: int, length: int, caller_target: str, new_text: str
+    ) -> Optional[str]:
+        """
+        Puts back the hyperlink / cross-reference / bookmark markers a plain
+        anchor matched across (DocumentMapper._get_plain_projection).
+
+        The caller wrote "email legal@adeu.com today" -> "email legal@adeu.com
+        now"; the document reads "email [**legal@adeu.com**](mailto:…) today".
+        Each marker's visible text is located in the replacement by aligning
+        it with the matched plain text, and the marker is written back in its
+        place, so the marker-preserving split leaves the link / field XML
+        untouched. Returns `new_text` unchanged when the anchor did not cross
+        a marker, and None when the replacement changes or drops a marker's
+        visible text (editing link or field text through a plain anchor is not
+        supported). Node twin: same name.
+        """
+        if not new_text or ANCHOR_MARKER_RE.search(caller_target or ""):
+            return new_text
+        if not ANCHOR_MARKER_RE.search(mapper.full_text, start, start + length):
+            return new_text
+        plain, markers = mapper.anchor_markers_in_range(start, length)
+        if not markers:
+            return new_text
+
+        # A match widened over a whole marker carries plain text the caller's
+        # target did not: frame the replacement with the same text.
+        norm_plain = normalize_smart_quotes(plain)
+        norm_target = normalize_smart_quotes(mapper._strip_markdown_formatting(caller_target))
+        k = norm_plain.find(norm_target) if norm_target else -1
+        if k >= 0:
+            new_text = plain[:k] + new_text + plain[k + len(norm_target) :]
+
+        dmp = diff_match_patch()
+        diffs = dmp.diff_main(norm_plain, normalize_smart_quotes(new_text))
+        new_pos: List[Optional[int]] = [None] * len(plain)
+        p = n = 0
+        for op, chunk in diffs:
+            if op == 0:
+                for j in range(len(chunk)):
+                    new_pos[p + j] = n + j
+            if op != 1:
+                p += len(chunk)
+            if op != -1:
+                n += len(chunk)
+
+        placements: List[Tuple[int, int, str]] = []
+        for marker, a, b in markers:
+            if a == b:  # bookmark: no visible text, keep its position
+                if a < len(plain) and new_pos[a] is not None:
+                    pos = new_pos[a]
+                elif a > 0 and new_pos[a - 1] is not None:
+                    pos = new_pos[a - 1] + 1  # type: ignore[operator]
+                else:
+                    pos = dmp.diff_xIndex(diffs, a)
+                placements.append((pos, pos, marker))  # type: ignore[arg-type]
+                continue
+            mapped = new_pos[a:b]
+            if any(x is None for x in mapped) or mapped[-1] - mapped[0] != b - a - 1:  # type: ignore[operator]
+                return None
+            placements.append((mapped[0], mapped[-1] + 1, marker))  # type: ignore[arg-type,operator]
+
+        for s, e, marker in sorted(placements, reverse=True):
+            new_text = new_text[:s] + marker + new_text[e:]
+        return new_text
+
     def _pre_resolve_heuristic_edit(
         self, edit: ModifyText, index_offset: int = 0
     ) -> Union[ModifyText, List[ModifyText], None]:
@@ -4944,6 +5025,15 @@ class RedlineEngine:
             current_effective_new_text = self._restore_matched_typography(
                 actual_doc_text, edit.target_text, current_effective_new_text
             )
+            with_markers = self._reinject_anchor_markers(
+                active_mapper, start_idx, match_len, edit.target_text, current_effective_new_text
+            )
+            if with_markers is None:
+                # validate_edits reports this; direct apply_edits callers
+                # bypass it, so skip the occurrence rather than corrupt it.
+                logger.warning("Replacement changes text inside a hyperlink/cross-reference; skipping occurrence")
+                continue
+            current_effective_new_text = with_markers
 
             # Stash the first occurrence's full match for the report preview,
             # so it can show the complete logical change rather than only the

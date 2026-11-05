@@ -57,7 +57,7 @@ AGENTS.md "Dual-Engine Parity", except where one engine is already correct.
   deleted, accept-all text correct. Same for a bold hyperlink.
 - Done when: both suites green.
 
-### T3 — Plain anchors resolve across hyperlinks, cross-refs, bookmarks — TODO
+### T3 — Plain anchors resolve across hyperlinks, cross-refs, bookmarks — DONE
 - Goal: `"Email the team at legal@adeu.com before Friday."` and
   `"…granted in Section 2.1, nothing else…"` resolve, and the link / field is
   preserved in the redline.
