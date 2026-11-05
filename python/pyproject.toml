@@ -52,7 +52,7 @@ dev = [
     "hypothesis",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ooxml-integrity==0.8.1",
+    "ooxml-integrity==0.8.4",
 ]
 
 [tool.hatch.build.targets.wheel]
