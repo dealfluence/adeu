@@ -80,6 +80,44 @@ def test_multiple_comments_ids():
     assert len(set(ids)) == 2
 
 
+def _commented_text(doc_xml: str) -> str:
+    """Visible text between the first comment's range start and end."""
+    match = re.search(r'<w:commentRangeStart[^>]*w:id="(\d+)"', doc_xml)
+    assert match, "no comment anchor in the body"
+    inside = doc_xml.split(match.group(0), 1)[1].split(f'<w:commentRangeEnd w:id="{match.group(1)}"', 1)[0]
+    return "".join(re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", inside))
+
+
+def test_comment_on_paragraphs_added_after_the_target_spans_all_of_them():
+    # Node already anchors this from the first added paragraph to the last;
+    # Python covered only the last one.
+    sentence = "This Agreement is governed by the laws of New York."
+    for separator in ("\n", "\n\n"):
+        doc = Document()
+        doc.add_paragraph(sentence)
+        stream = io.BytesIO()
+        doc.save(stream)
+        stream.seek(0)
+        engine = RedlineEngine(stream, author="Jane Doe")
+        engine.process_batch(
+            [
+                ModifyText(
+                    target_text=sentence,
+                    new_text=(
+                        f"{sentence}{separator}Confidentiality: Firm keeps Client information confidential."
+                        f"{separator}Non-Solicitation: Firm will not recruit Client employees."
+                    ),
+                    comment="Adds the missing protections.",
+                )
+            ]
+        )
+
+        commented = _commented_text(Document(engine.save_to_stream()).element.xml)
+
+        assert commented.startswith("Confidentiality:"), (separator, commented)
+        assert commented.endswith("Client employees."), (separator, commented)
+
+
 # --- An existing comments.xml root keeps its namespace declarations ----------
 # Counterparty documents arrive with comments
 # whose root declares more than the namespaces Adeu needs; Word puts

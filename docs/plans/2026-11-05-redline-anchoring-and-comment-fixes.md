@@ -84,7 +84,7 @@ AGENTS.md "Dual-Engine Parity", except where one engine is already correct.
 - Verify: unit + guard cases; commented end-to-end case.
 - Done when: both suites green (incl. cross-platform goldens).
 
-### T5 — Comment spans every paragraph added after the target — TODO
+### T5 — Comment spans every paragraph added after the target — DONE
 - Goal (Python only; Node already correct): the comment range runs from the
   first added paragraph to the last.
 - Files: `engine.py` `_apply_insertion_op`; test `python/tests/test_comments.py`.

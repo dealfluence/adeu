@@ -5848,9 +5848,25 @@ class RedlineEngine:
                     else:
                         self._attach_comment(actual_parent, ins_elem, ins_elem, edit.comment)
             elif last_p is not None and edit.comment:
-                ins_list = [node for node in last_p.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
-                if ins_list:
-                    self._attach_comment(last_p, ins_list[0], ins_list[-1], edit.comment)
+                # Nothing inline: the text opened with a paragraph break, so it
+                # is only new paragraphs, inserted right after the host
+                # paragraph. Span the comment from the first one to the last;
+                # anchoring on last_p alone left every earlier added paragraph
+                # outside the comment (Node twin already spans them).
+                host_p = parent if parent.tag == qn("w:p") else next(parent.iterancestors(qn("w:p")), None)
+                first_p = host_p.getnext() if host_p is not None else None
+                if first_p is None or first_p.tag != qn("w:p"):
+                    first_p = last_p
+
+                def content_ins(p_el):
+                    return [node for node in p_el.findall(f".//{qn('w:ins')}") if not self._is_inside_pPr(node)]
+
+                first_ins, last_ins = content_ins(first_p), content_ins(last_p)
+                if first_ins and last_ins:
+                    if first_p is last_p:
+                        self._attach_comment(last_p, first_ins[0], last_ins[-1], edit.comment)
+                    else:
+                        self._attach_comment_spanning(first_p, first_ins[0], last_p, last_ins[-1], edit.comment)
         self._record_used_revision_ids(edit, ins_id)
         return True
 
