@@ -16,7 +16,7 @@ Third-party aggregators (ncnodes, Agentage, PulseMCP and similar) and one of my 
 1. **Usage is real and still accelerating.** PyPI `adeu` did 32,892 non-mirror downloads in the 30 days ending 2026-11-04. Daily volume went from about 100/day in April to about 1,900/day on Nov 3–4. The PyPI download bump that followed the 3.0.7 release (2026-10-05) never faded: daily downloads have stayed above 500 every day since.
 2. **The Python package and the MCP server carry the adoption.** `@adeu/core` (10.7k/30d) and `@adeu/mcp-server` (2.9k/30d) are solid. `langchain-adeu` (~0.9–3k/30d) and `n8n-nodes-adeu` (342/30d) are marginal.
 3. **Hidden production consumers.** Download-by-version data shows several unknown pipelines pinned to old versions. `@adeu/core@3.0.2` takes about 1,077 downloads a week while our own packages account for 4 of them. `adeu==3.0.4` took 14.5k downloads in 90 days. These are CI/deploy loops in someone's private repo. They are the biggest single usage signal, and we can't name them.
-4. **Named users we can confirm in public code** (section 4): LaunchStack (897★), PII-Shield (153★), claude-for-legal-finland (115★), and claude-contract-negotiator. There are also active private-use forks by TechGC / The Suite (pushed yesterday) and Vela Wood. NVIDIA SkillSpector (24.4k★) carries our registry entry as a test fixture.
+4. **Named users we can confirm in public code** (section 4): LaunchStack (897★), PII-Shield (153★), claude-for-legal-finland (115★), and claude-contract-negotiator. There is also an active private-use fork by Vela Wood. NVIDIA SkillSpector (24.4k★) carries our registry entry as a test fixture.
 5. **Independent benchmark.** Vespper (YC F24, a direct competitor) ran Adeu 3.0.7 on 180 Harvey LAB legal tasks. Adeu had the highest completion rate of any DOCX MCP tested (94%). However, a plain python-docx baseline beat every MCP on score and cost (section 6).
 6. **Things that need fixing now** (section 8):
    - The official MCP Registry still advertises 1.7.1 (npm) and 1.5.2 (PyPI), and scanners and clients are pinning those.
@@ -130,7 +130,6 @@ The desktop extension is a minor channel: about 4 downloads per release. Claude 
 | Who | Evidence | What |
 |---|---|---|
 | **Artur Serov**, Head of EMEA Legal & Compliance (Wesco), LegalQuants contributor | His LinkedIn post of 2026-08-15, reshared by Adeu and LegalQuants (verified via search) | An open-source LQ.AI fork on LangGraph Deep Agents for in-house counsel. In his words, Adeu supplies "redlining tools (Adeu's real tracked changes in Word)". A legalquants.com profile also lists his "Oscar GC" Electron app using "a contract-redline service". |
-| **TechGC / The Suite** (`TechGC/adeu` fork) | Branches verified: `llo-798-fix-multi-author-apply`, `llo-1251-edit-results`, `llo-1552-multi-comment`, `llo-1580-…`, `llo-1694-keep-comments-root-namespaces`, `fix/…-thesuite.3/.4`, `refactor-llo-837-for-upstream`, `tes-457-optional-mcp-deps`; last push **2026-11-04** | A commercial legal-ops product running a patched Adeu in production. The ticket prefixes (LLO, TES) are their internal Jira keys. The subagent reports an internal tag `1.5.2-thesuite.2` (not checked). **Highest-value lead: they're carrying patches they intend to upstream.** |
 | **Vela Wood** (`vela-wood/adeu` fork) | Fork verified; pushed **2026-10-19** | Fork with recent commits. The subagent identifies Vela Wood as a venture/corporate law firm (not verified). |
 | **Ahti Climate** (FuelEU Maritime compliance) | adeu.ai/case-studies/ahti-climate (verified) | Customer of the commercial Adeu product running "Adeu in Claude Desktop", for same-day redlines of inbound contracts. It's the hosted product, not strictly the OSS packages. |
 | **Fondia** (CEO Timo Lappi) | Testimonial on adeu.ai | Reported: the testimonial is for "Adeu Ambient", not the OSS packages. |
@@ -150,7 +149,7 @@ These are people building on the library, from the GitHub issues API. "Third-par
 | `Dmitry-Kov` | #137, #139, PRs #138, #140, #156, #161 | Author of `ooxml-integrity`. Contributed fixtures, and Adeu now dev-depends on his validator (Dependabot PR #185). |
 | `6uimorais` | #141, PR #142 | Fixed duplicate `w:del` IDs in both engines |
 | `vishalhabib99` | PR #163 | Search match-budget fix |
-| `ruhroh` | PR #98 | Made `fastmcp` an optional extra (55 MB vs 144 MB install), which shows someone embedding the CLI and SDK without MCP. Closed without a merge flag. The TechGC branch `tes-457-optional-mcp-deps` addresses the same need. |
+| `ruhroh` | PR #98 | Made `fastmcp` an optional extra (55 MB vs 144 MB install), which shows someone embedding the CLI and SDK without MCP. Closed without a merge flag. |
 | `zriyansh` | #20 | Pairing Adeu with Vaquill legal-research MCPs; asked for jurisdiction-aware validation hooks |
 | `itsbrex`, `mangodxd` | PRs #44, #9 | Documentation and housekeeping |
 | `stillmarcus24` (Still OS Digital Holdings) | #176 | Arbitrary-file-write report against `@adeu/mcp-server` 3.0.7. Filed publicly because the repo has no security contact. Closed as completed. |
@@ -167,7 +166,6 @@ These are people building on the library, from the GitHub issues API. "Third-par
 ### 4.5 Forks (28 in total, GitHub API)
 
 - **Forks with real activity:**
-  - TechGC (pushed 11-04)
   - vela-wood (10-19)
   - MorkMindy74 (10-04)
   - Dmitry-Kov (10-04)
@@ -266,11 +264,10 @@ These are people building on the library, from the GitHub issues API. "Third-par
 1. **Republish to the MCP Registry on every release.** `ai.adeu/adeu` is frozen at npm 1.7.1 / PyPI 1.5.2. Two scanners (NVIDIA SkillSpector, mcp-trust) and every registry-fed directory and client show or install 1.7.1, which is the 87 downloads a week on `@adeu/mcp-server@1.7.1`. Automate `server.json` publishing in the release workflow.
 2. **Remove the Smithery badge and install section from the README** (`README.md:8`, `README.md:91-94`). Smithery stopped hosted installs on 2026-10-31. Issue #182 was closed, but the README still advertises it.
 3. **Add `SECURITY.md` and enable GitHub private vulnerability reporting.** #176 (arbitrary file write in `@adeu/mcp-server` 3.0.7) was filed in public because there was no private channel. Next time it could be a 0-day posted with a proof of concept.
-4. **Talk to TechGC / The Suite.** They run a patched fork in production with branches named for upstreaming (`refactor-llo-837-for-upstream`). Upstreaming their patches removes a divergent fork and gives a named production reference.
-5. **Follow up with houfu (redlines, 3.7M downloads).** He has publicly proposed a joint "redlines diff → adeu writer" story. That would cover our weakest area (diff and move detection) and give access to a much larger user base.
-6. **Answer the token-cost critique.** Vespper's benchmark is the only independent number in the market, and it frames DOCX MCPs as about 2× the cost of python-docx. A response, for example a compact read mode, or our own Harvey LAB run with a compaction-aware harness, would be worth more than any listing.
-7. **Decide whether n8n and LangChain are worth their maintenance cost.** Together they are under 5% of downloads.
-8. **Get onto the high-traffic lists we're missing:** punkpeye/awesome-mcp-servers (the subagent says a previous PR was closed unmerged), mcp.so, the Docker MCP catalog, and the Cline marketplace.
+4. **Follow up with houfu (redlines, 3.7M downloads).** He has publicly proposed a joint "redlines diff → adeu writer" story. That would cover our weakest area (diff and move detection) and give access to a much larger user base.
+5. **Answer the token-cost critique.** Vespper's benchmark is the only independent number in the market, and it frames DOCX MCPs as about 2× the cost of python-docx. A response, for example a compact read mode, or our own Harvey LAB run with a compaction-aware harness, would be worth more than any listing.
+6. **Decide whether n8n and LangChain are worth their maintenance cost.** Together they are under 5% of downloads.
+7. **Get onto the high-traffic lists we're missing:** punkpeye/awesome-mcp-servers (the subagent says a previous PR was closed unmerged), mcp.so, the Docker MCP catalog, and the Cline marketplace.
 
 ---
 
@@ -321,7 +318,6 @@ Numbers from aggregators and from one subagent that the primary sources contradi
   - akunikkola/claude-for-legal-finland `juristi/.mcp.json`
   - sarturko-maker/Claude-Plugin-MCP `pyproject.toml`
   - Deodat-Lawson/LaunchStack `services/`
-  - TechGC/adeu branches
   - NVIDIA/SkillSpector repo and `tests/fixtures/mcp_registry/mcp_registry.json`
   - dheerajjha/mcp-migrate
   - LegalQuants/adeu-demo

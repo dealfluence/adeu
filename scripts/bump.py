@@ -210,7 +210,7 @@ def main():
     print(f"       git push origin {tag}")
     print(
         "  5. CI builds the draft release + assets. Add notes, then click 'Publish'"
-        " to ship to npm / PyPI / Smithery."
+        " to ship to npm / PyPI."
     )
     print(
         "\n  ⚠️  Do NOT sync nodeVersion/codexVersion in nodes/Adeu/Adeu.node.json"

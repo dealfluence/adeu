@@ -28,7 +28,6 @@ Pushing a `v*` tag triggers the `.github/workflows/release.yml` GitHub Action. T
 3. **Publishes to NPM** (`@adeu/core` and `@adeu/mcp-server`).
    * *Crucial Context:* The `package.json` for `@adeu/mcp-server` contains a hidden cryptographic field: `"mcpName": "ai.adeu/adeu"`. This proves to the MCP registry that the owner of the NPM package and the owner of the namespace are the same entity.
 4. **Builds the MCPB Bundle** (`Adeu.mcpb`) for Claude Desktop.
-5. **Publishes to Smithery:** It uses `scripts/patch_smithery_mcpb.py` to inject live schemas into the bundle and uses the hidden `SMITHERY_API_KEY` repository secret to publish directly to `https://smithery.ai/servers/adeu/adeu`.
 
 ## 3. Official MCP Registry (Manual Local Step)
 

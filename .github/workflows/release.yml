@@ -81,43 +81,6 @@ jobs:
             ./linux.adeu.zip \
             ./win32.adeu.zip
 
-  smithery-publish:
-    # Smithery ships on the SAME trigger as npm/PyPI (release published), not at
-    # the draft/tag stage — otherwise tagging a release you never publish would
-    # still push to Smithery, skewing it ahead of the other registries.
-    if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
-    name: Publish to Smithery
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24.x"
-
-      - name: Install Dependencies
-        working-directory: ./node
-        run: npm ci
-
-      - name: Build Packages
-        working-directory: ./node
-        run: npm run build
-
-      - name: Pack MCPB Bundle
-        working-directory: ./desktop-extension
-        run: zip -r Adeu.mcpb manifest.json icon.png package.json *.js assets/ templates/
-
-      - name: Build Smithery Bundle
-        run: python scripts/patch_smithery_mcpb.py
-
-      - name: Publish to Smithery
-        env:
-          SMITHERY_API_KEY: ${{ secrets.SMITHERY_TOKEN }}
-        # Using --yes to suppress any interactive CLI prompts
-        run: |
-          npx --yes smithery@latest mcp publish adeu-smithery.mcpb -n adeu/adeu
-
   pypi-publish:
     if: github.repository == 'dealfluence/adeu' && github.event_name == 'release'
     name: Upload release to PyPI
