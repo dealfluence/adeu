@@ -29,6 +29,7 @@ Three behaviors distinguish this tool from the others:
 from __future__ import annotations
 
 import asyncio
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
@@ -248,6 +249,12 @@ class AdeuApplyChanges(BaseTool):
         return await asyncio.to_thread(self._run, reasoning, file_path, author_name, changes, output_path, partial)
 
 
+_DERIVATIVE_STEM_RE = re.compile(
+    r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$",
+    re.IGNORECASE,
+)
+
+
 def _resolve_output_path(source: Path, requested: str | None) -> Path:
     """Decide where the processed file should be written.
 
@@ -257,7 +264,7 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     to `<stem>_processed.docx` next to the source.
     """
     if requested is None:
-        if source.stem.endswith("_processed") or source.stem.endswith("_redlined"):
+        if _DERIVATIVE_STEM_RE.search(source.stem):
             return source
         return source.with_name(f"{source.stem}_processed{source.suffix}")
 
@@ -266,7 +273,7 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not (source.stem.endswith("_processed") or source.stem.endswith("_redlined")):
+    if target == source and not _DERIVATIVE_STEM_RE.search(source.stem):
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "

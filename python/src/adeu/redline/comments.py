@@ -864,7 +864,7 @@ class CommentsManager:
         pStyle = OxmlElement("w:pStyle")
         pStyle.set(qn("w:val"), "CommentText")
         pPr.append(pStyle)
-        p.append(pPr)
+        p.insert(0, pPr)
 
         r_ref = OxmlElement("w:r")
         rPr_ref = OxmlElement("w:rPr")

@@ -362,6 +362,8 @@ def shrink_batch_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
     """
     res = dict(stats)
     res.pop("engine", None)
+    res.pop("actions", None)
+    res.pop("document_state", None)
 
     edit_errors: Set[str] = set()
     if "edits" in stats:

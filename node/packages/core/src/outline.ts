@@ -6,7 +6,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { Paragraph, Table, DocxEvent } from "./docx/primitives.js";
 import { build_paragraph_text, extract_table } from "./ingest.js";
 import { extract_comments_data } from "./comments.js";
-import { findChild } from "./docx/dom.js";
+import { findChild, findAllDescendants } from "./docx/dom.js";
 import {
   _get_style_cache,
   get_paragraph_prefix,
@@ -16,6 +16,13 @@ import {
 } from "./utils/docx.js";
 
 const _HEADING_PREFIX_RE = /^(#{1,6}) /;
+const _STRUCTURAL_BOLD_L1_RE =
+  /^(?:ARTICLE|PART|SCHEDULE|EXHIBIT|ANNEX|APPENDIX)\s+[0-9IVXLCDMab]+\b/i;
+const _STRUCTURAL_BOLD_L3_RE =
+  /^(?:\d+\.\d+\.\d+(?:\.\d+)*\.?\s+\S|(?:Section|Paragraph|Clause|Item)\s+\d+(?:\.\d+)*\([a-z0-9]+\))/i;
+const _STRUCTURAL_BOLD_L2_KEYWORD_RE =
+  /^(?:Section|Paragraph|Clause|Item)\s+\d+(?:\.\d+)*\b/i;
+const _STRUCTURAL_BOLD_L2_NUMBERED_RE = /^\d+(?:\.\d+)?\.\s+[A-Z]/;
 const _HEURISTIC_MIN_WORDS = 3;
 
 export interface OutlineNode {
@@ -389,8 +396,55 @@ function _project_part(part: any, comments_map: any): string {
   return blocks.join("\n\n");
 }
 
+function _structural_bold_heading_level(paragraph: Paragraph): number | null {
+  let curr: Element | null = paragraph._element;
+  while (curr) {
+    if (curr.tagName === "w:tc") return null;
+    curr = curr.parentNode as Element | null;
+  }
+
+  const text = paragraph.text.trim();
+  if (!text || text.length >= 120 || text.endsWith(".")) {
+    return null;
+  }
+
+  const runs = findAllDescendants(paragraph._element, "w:r");
+  let has_visible_run = false;
+  for (const r of runs) {
+    const tList = findAllDescendants(r, "w:t");
+    const rText = tList.map((t) => t.textContent || "").join("");
+    if (!rText.trim()) continue;
+    has_visible_run = true;
+    const rPr = findChild(r, "w:rPr");
+    let is_run_bold = false;
+    if (rPr) {
+      const b = findChild(rPr, "w:b");
+      if (b) {
+        const val = b.getAttribute("w:val");
+        if (val !== "0" && val !== "false" && val !== "off") {
+          is_run_bold = true;
+        }
+      }
+    }
+    if (!is_run_bold) return null;
+  }
+
+  if (!has_visible_run) return null;
+
+  if (_STRUCTURAL_BOLD_L1_RE.test(text)) return 1;
+  if (_STRUCTURAL_BOLD_L3_RE.test(text)) return 3;
+  if (
+    _STRUCTURAL_BOLD_L2_KEYWORD_RE.test(text) ||
+    _STRUCTURAL_BOLD_L2_NUMBERED_RE.test(text)
+  ) {
+    return 2;
+  }
+  return null;
+}
+
 function _is_heading(paragraph: Paragraph): boolean {
-  return _HEADING_PREFIX_RE.test(get_paragraph_prefix(paragraph));
+  if (_HEADING_PREFIX_RE.test(get_paragraph_prefix(paragraph))) return true;
+  return _structural_bold_heading_level(paragraph) !== null;
 }
 
 function _heading_passes_quality_filter(
@@ -406,7 +460,11 @@ function _heading_passes_quality_filter(
   const style = _determine_heading_style(paragraph);
   if (style !== "(heuristic)") return true;
   const word_count = (text.match(/\w+/g) || []).length;
-  return word_count >= _HEURISTIC_MIN_WORDS;
+  const min_words =
+    _structural_bold_heading_level(paragraph) !== null
+      ? 2
+      : _HEURISTIC_MIN_WORDS;
+  return word_count >= min_words;
 }
 
 /** True when the heading text (anchors stripped) contains a word character. */
@@ -418,7 +476,10 @@ function _heading_text_has_words(text: string): boolean {
 
 function _heading_level(paragraph: Paragraph): number {
   const match = _HEADING_PREFIX_RE.exec(get_paragraph_prefix(paragraph));
-  return match ? Math.min(match[1].length, 6) : 1;
+  if (match) return Math.min(match[1].length, 6);
+  const struct_lvl = _structural_bold_heading_level(paragraph);
+  if (struct_lvl !== null) return struct_lvl;
+  return 1;
 }
 
 // An outline entry is a MAP entry, not body content: cap it so a
@@ -791,7 +852,11 @@ function _heading_passes_quality_filter_fast(
   const style = _determine_heading_style(paragraph);
   if (style !== "(heuristic)") return true;
   const words = text.match(/\w+/g) || [];
-  return words.length >= _HEURISTIC_MIN_WORDS;
+  const min_words =
+    _structural_bold_heading_level(paragraph) !== null
+      ? 2
+      : _HEURISTIC_MIN_WORDS;
+  return words.length >= min_words;
 }
 
 function _heading_text_fast(

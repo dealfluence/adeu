@@ -464,6 +464,19 @@ def build_page_range_response(
                 ui_parts.append(
                     f'> **Range capped at {PAGE_RANGE_MAX_PAGES} pages.** Continue with `page="{next_start}-{end}"`.'
                 )
+        elif last == end and last < total_pages and (end - start + 1) >= PAGE_RANGE_MAX_PAGES:
+            next_start = last + 1
+            next_end = min(last + PAGE_RANGE_MAX_PAGES, total_pages)
+            if is_cli:
+                ui_parts.append(
+                    f"> **Continues on page {next_start} of {total_pages}.** "
+                    f"Pass `--page {next_start}-{next_end}` to read the next pages."
+                )
+            else:
+                ui_parts.append(
+                    f"> **Continues on page {next_start} of {total_pages}.** "
+                    f'Pass `page="{next_start}-{next_end}"` to read the next pages.'
+                )
         elif end > total_pages:
             ui_parts.append(f"> **[range stopped at page {total_pages}: the document has {total_pages} page(s)]**")
 
@@ -712,17 +725,42 @@ def build_search_response(
     page_offsets = pag_res.body_page_offsets
     total_doc_pages = pag_res.total_pages
 
-    # ---- Resolve `page` into either None (= all) or a 1-indexed int. ----
-    page_filter: int | None
+    # ---- Resolve `page` into either None (= all), a 1-indexed int, or a (start, end) tuple. ----
+    page_filter: int | None = None
+    page_range_filter: tuple[int, int] | None = None
     if page is None:
         page_filter = None
+    elif isinstance(page, (tuple, list)) and len(page) == 2:
+        try:
+            start_p = int(page[0])
+            end_p = int(page[1])
+        except (TypeError, ValueError):
+            raise BuilderError(
+                f"Invalid page value: {page!r}. In search mode, `page` must be "
+                f"omitted (search all pages), `'all'`, or a positive integer "
+                f"document page number."
+            ) from None
+        if start_p < 1 or end_p < start_p:
+            raise BuilderError(
+                f"Invalid page value: {page!r}. In search mode, `page` must be "
+                f"omitted, `'all'`, or a positive integer document page number."
+            )
+        if start_p > total_doc_pages:
+            raise BuilderError(
+                f"Document page {start_p} is out of range — the document has "
+                f"{total_doc_pages} page(s). In search mode, `page` filters matches "
+                f"by document page; omit `page` (or pass `page='all'`) to search "
+                f"across the whole document."
+            )
+        page_range_filter = (start_p, min(end_p, total_doc_pages))
     elif isinstance(page, str):
-        if page.lower() == "all":
+        s_clean = page.strip().strip("'\"")
+        if s_clean.lower() == "all":
             page_filter = None
         else:
             # Allow numeric strings ("3"); reject anything else.
             try:
-                page_filter = int(page)
+                page_filter = int(s_clean)
             except (TypeError, ValueError):
                 raise BuilderError(
                     f"Invalid page value: {page!r}. In search mode, `page` must be "
@@ -804,22 +842,28 @@ def build_search_response(
     pages_with_hits = sorted(page_distribution.keys())
 
     # ---- Apply filter. ----
-    if page_filter is None:
+    if page_filter is None and page_range_filter is None:
         filtered = matches_with_pages
     else:
-        filtered = [(m, p) for (m, p) in matches_with_pages if p == page_filter]
+        if page_range_filter is not None:
+            r_start, r_end = page_range_filter
+            filtered = [(m, p) for (m, p) in matches_with_pages if r_start <= p <= r_end]
+            page_label = f"pages {r_start}-{r_end}"
+        else:
+            filtered = [(m, p) for (m, p) in matches_with_pages if p == page_filter]
+            page_label = f"page {page_filter}"
 
         # `page=N` valid but has no hits, query exists elsewhere.
         if not filtered:
             other_pages_str = ", ".join(str(p) for p in pages_with_hits)
             if no_chrome:
                 ui_markdown = (
-                    f"No matches on document page {page_filter} for query `{search_query}`. "
+                    f"No matches on document {page_label} for query `{search_query}`. "
                     f"Query appears on page(s) {other_pages_str}."
                 )
             else:
                 ui_markdown = (
-                    f"> **Search Results** — No matches on document page {page_filter} "
+                    f"> **Search Results** — No matches on document {page_label} "
                     f"for query `{search_query}` in `{Path(file_path).name}`.\n\n"
                     f"The query DOES appear elsewhere ({total_matches} match"
                     f"{'es' if total_matches != 1 else ''} on page"
@@ -838,6 +882,11 @@ def build_search_response(
 
     # ---- Render. ----
     total_filtered = len(filtered)
+    active_page_label = (
+        f"pages {page_range_filter[0]}-{page_range_filter[1]}"
+        if page_range_filter is not None
+        else (f"page {page_filter}" if page_filter is not None else "")
+    )
 
     def window_note_response(note: str) -> BuilderResult:
         """
@@ -849,7 +898,7 @@ def build_search_response(
         """
         ui_parts: list[str] = []
         if not no_chrome:
-            if page_filter is None:
+            if not active_page_label:
                 ui_parts.append(
                     f"> **Search Results** — Found {total_matches} match"
                     f"{'es' if total_matches != 1 else ''} for query `{search_query}` "
@@ -858,7 +907,7 @@ def build_search_response(
             else:
                 ui_parts.append(
                     f"> **Search Results** — Found {total_filtered} match"
-                    f"{'es' if total_filtered != 1 else ''} on document page {page_filter} "
+                    f"{'es' if total_filtered != 1 else ''} on document {active_page_label} "
                     f"for query `{search_query}` in `{Path(file_path).name}` "
                     f"({total_matches} total in document)."
                 )
@@ -909,7 +958,7 @@ def build_search_response(
         next_offset = match_offset + num_rendered
         has_more = next_offset < total_filtered
 
-        if page_filter is None:
+        if not active_page_label:
             if total_filtered > num_rendered or match_offset > 0:
                 head.append(
                     f"> **Search Results** — Found {total_matches} match"
@@ -931,18 +980,21 @@ def build_search_response(
             if total_filtered > num_rendered or match_offset > 0:
                 head.append(
                     f"> **Search Results** — Found {shown} match"
-                    f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                    f"{'es' if shown != 1 else ''} on document {active_page_label} "
                     f"for query `{search_query}` in `{Path(file_path).name}` "
                     f"({total_matches} total in document, {num_rendered} shown)."
                 )
             else:
                 head.append(
                     f"> **Search Results** — Found {shown} match"
-                    f"{'es' if shown != 1 else ''} on document page {page_filter} "
+                    f"{'es' if shown != 1 else ''} on document {active_page_label} "
                     f"for query `{search_query}` in `{Path(file_path).name}` "
                     f"({total_matches} total in document)."
                 )
-            other_pages = [p for p in pages_with_hits if p != page_filter]
+            if page_range_filter is not None:
+                other_pages = [p for p in pages_with_hits if not (page_range_filter[0] <= p <= page_range_filter[1])]
+            else:
+                other_pages = [p for p in pages_with_hits if p != page_filter]
             if other_pages:
                 other_pages_str = ", ".join(str(p) for p in other_pages)
                 head.append(

@@ -4,6 +4,7 @@ JSON-Lines daemon (`adeu serve`) keeping a single process alive with a warm
 """
 
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -352,7 +353,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             stats["output_path"] = None
         else:
             if output_path is None:
-                if path.stem.endswith("_redlined") or path.stem.endswith("_processed"):
+                if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", path.stem, re.IGNORECASE):
                     output_path = path
                 else:
                     output_path = path.with_name(f"{path.stem}_redlined.docx")

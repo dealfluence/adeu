@@ -105,6 +105,55 @@ export function hasCatastrophicBacktrackingRisk(pattern: string): boolean {
 }
 
 /**
+ * Extracts PCRE-style inline flags `(?i)`, `(?m)`, `(?s)` (and combinations like `(?is)`)
+ * from a user-supplied regex pattern and merges them into `baseFlags`.
+ */
+export function extractInlineRegexFlags(
+  pattern: string,
+  baseFlags: string = "",
+): { pattern: string; flags: string } {
+  const flagSet = new Set<string>(baseFlags.split(""));
+  const cleaned = pattern.replace(/(?<!\\)\(\?([ims]+)\)/g, (_m, f: string) => {
+    for (const ch of f) {
+      flagSet.add(ch);
+    }
+    return "";
+  });
+  return {
+    pattern: cleaned,
+    flags: Array.from(flagSet).join(""),
+  };
+}
+
+/**
+ * Compiles a regular expression after extracting PCRE-style inline flags `(?i)`, `(?m)`, `(?s)`.
+ */
+export function compileRegexWithInlineFlags(
+  pattern: string,
+  baseFlags: string = "",
+): RegExp {
+  const { pattern: cleaned, flags } = extractInlineRegexFlags(pattern, baseFlags);
+  try {
+    return new RegExp(cleaned, flags);
+  } catch (err) {
+    if (/(?<!\\)\(\?([ims]+):/.test(cleaned)) {
+      const flagSet = new Set<string>(flags.split(""));
+      const cleaned2 = cleaned.replace(
+        /(?<!\\)\(\?([ims]+):/g,
+        (_m, f: string) => {
+          for (const ch of f) {
+            flagSet.add(ch);
+          }
+          return "(?:";
+        },
+      );
+      return new RegExp(cleaned2, Array.from(flagSet).join(""));
+    }
+    throw err;
+  }
+}
+
+/**
  * All non-overlapping matches of a user pattern, under the wall-clock budget.
  * Invalid patterns throw SyntaxError exactly like `new RegExp(...)` would.
  * The budget covers the ENTIRE scan, not just the first match.
@@ -114,12 +163,16 @@ export function userFindAllMatches(
   text: string,
   flags: string = "",
 ): Array<{ start: number; end: number }> {
-  if (hasCatastrophicBacktrackingRisk(pattern)) {
+  const { pattern: cleanedPattern, flags: mergedFlags } = extractInlineRegexFlags(
+    pattern,
+    flags,
+  );
+  if (hasCatastrophicBacktrackingRisk(cleanedPattern)) {
     throw new RegexTimeoutError(pattern);
   }
 
-  const normalized = flags.includes("g") ? flags : flags + "g";
-  const re = new RegExp(pattern, normalized);
+  const normalized = mergedFlags.includes("g") ? mergedFlags : mergedFlags + "g";
+  const re = compileRegexWithInlineFlags(cleanedPattern, normalized);
 
   const startTime = Date.now();
   const out: Array<{ start: number; end: number }> = [];
@@ -142,11 +195,18 @@ export function userSearch(
   text: string,
   flags: string = "",
 ): { start: number; end: number } | null {
-  if (hasCatastrophicBacktrackingRisk(pattern)) {
+  const { pattern: cleanedPattern, flags: mergedFlags } = extractInlineRegexFlags(
+    pattern,
+    flags,
+  );
+  if (hasCatastrophicBacktrackingRisk(cleanedPattern)) {
     throw new RegexTimeoutError(pattern);
   }
 
-  const re = new RegExp(pattern, flags.replace("g", ""));
+  const re = compileRegexWithInlineFlags(
+    cleanedPattern,
+    mergedFlags.replace("g", ""),
+  );
   const startTime = Date.now();
   const m = re.exec(text);
 

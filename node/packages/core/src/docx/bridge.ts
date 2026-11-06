@@ -262,9 +262,49 @@ export class DocumentObject {
     return id;
   }
 
+  private static readonly KNOWN_MC_IGNORABLE_URIS: Record<string, string> = {
+    w14: "http://schemas.microsoft.com/office/word/2010/wordml",
+    wp14: "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+    w15: "http://schemas.microsoft.com/office/word/2012/wordml",
+    wp15: "http://schemas.microsoft.com/office/word/2012/wordprocessingDrawing",
+    w16cid: "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+    w16cex: "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+    w16sdtdh: "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+    w16du: "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
+  };
+
   public async save(): Promise<Buffer> {
     for (const part of this.pkg.parts) {
       let xmlStr = serializeXml(part._element.ownerDocument || part._element);
+      let rootModified = false;
+
+      // Ensure every prefix listed in mc:Ignorable is bound on the root element.
+      const mcIgn = part._element.getAttribute("mc:Ignorable");
+      if (mcIgn) {
+        const tokens = mcIgn.trim().split(/\s+/).filter(Boolean);
+        const validTokens: string[] = [];
+        for (const tok of tokens) {
+          const attrName = `xmlns:${tok}`;
+          if (part._element.hasAttribute(attrName) || xmlStr.includes(`${attrName}=`)) {
+            validTokens.push(tok);
+          } else if (DocumentObject.KNOWN_MC_IGNORABLE_URIS[tok]) {
+            part._element.setAttribute(attrName, DocumentObject.KNOWN_MC_IGNORABLE_URIS[tok]);
+            validTokens.push(tok);
+            rootModified = true;
+          } else {
+            rootModified = true;
+          }
+        }
+        if (validTokens.length !== tokens.length) {
+          if (validTokens.length > 0) {
+            part._element.setAttribute("mc:Ignorable", validTokens.join(" "));
+          } else {
+            part._element.removeAttribute("mc:Ignorable");
+          }
+          rootModified = true;
+        }
+      }
+
       // Lazily declare the w16du namespace on any part that picked up a
       // tracked change (w16du:dateUtc) without a root declaration — a
       // tracked edit in a header/footer/footnotes part would otherwise
@@ -276,6 +316,9 @@ export class DocumentObject {
           "xmlns:w16du",
           "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
         );
+        rootModified = true;
+      }
+      if (rootModified) {
         xmlStr = serializeXml(part._element.ownerDocument || part._element);
       }
       if (!xmlStr.startsWith("<?xml")) {

@@ -28,6 +28,6 @@ export type { FieldEntry, DocumentProtection } from './fields.js';
 export { extract_comments_data } from './comments.js';
 export { extractTextFromBuffer, _extractTextFromDoc, ExtractStructure, TableGeometry, RowGeometry } from './ingest.js';
 export { finalize_document, FinalizeOptions, FinalizeResult } from './sanitize/core.js';
-export { RegexTimeoutError, userFindAllMatches, userSearch, USER_PATTERN_TIMEOUT_MS } from './utils/safe-regex.js';
+export { RegexTimeoutError, userFindAllMatches, userSearch, USER_PATTERN_TIMEOUT_MS, compileRegexWithInlineFlags, extractInlineRegexFlags } from './utils/safe-regex.js';
 export { clamp_text, truncate_middle, REPORT_ECHO_CAP, PREVIEW_TEXT_CAP } from './utils/text.js';
 export { failure_envelope, has_fused_json_marker, response_budget_limit, whole_doc_guard_message, shrink_batch_stats, BATCH_RECOVERY_PROTOCOL, BATCH_ERROR_CODES, FUSED_JSON_HINT, MINIMAL_EDIT_TOKEN_BUDGET, FAILED_TARGET_STUB_CAP, GUARD_EMITTED_MAX_CHARS, FailureEnvelope } from './payloads.js';

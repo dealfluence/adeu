@@ -18,6 +18,7 @@ import {
   failure_envelope,
   create_word_patch_diff,
   collect_media_difference_warnings,
+  generate_structured_edits,
   finalize_document,
   parse_page_arg,
   PageArgKind,
@@ -636,12 +637,26 @@ registerAppTool(
 
       if (search_query !== undefined && search_query !== null) {
         // In search mode, undefined `page` means "search all document pages".
+        let searchPage: any = page;
+        if (typeof page === "string") {
+          const sClean = page.trim().replace(/^['"]+|['"]+$/g, "").trim();
+          if (sClean.includes("-")) {
+            try {
+              const [pKind, pVal] = parse_page_arg(sClean);
+              if (pKind === "range") {
+                searchPage = pVal;
+              }
+            } catch {
+              /* let build_search_response report invalid page */
+            }
+          }
+        }
         const res = build_search_response(
           text,
           search_query,
           search_regex,
           search_case_sensitive,
-          page,
+          searchPage,
           file_path,
           bundle,
           { max_matches, match_offset, full_paragraph },
@@ -1026,6 +1041,12 @@ server.registerTool(
             "such write is flagged in the report. Separate from ignore_document_protection because it " +
             "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
         ),
+      markup_mode: z
+        .enum(["track_changes", "manual"])
+        .default("track_changes")
+        .describe(
+          "Markup mode: 'track_changes' (default, native Word w:ins/w:del) or 'manual' (inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments).",
+        ),
     },
   },
   async ({
@@ -1038,6 +1059,7 @@ server.registerTool(
     ignore_control_locks,
     ignore_document_protection,
     allow_untracked_writes,
+    markup_mode,
   }) => {
     try {
       void reasoning;
@@ -1163,7 +1185,7 @@ server.registerTool(
         // already a processed artifact, write back to it instead of compounding
         // the suffix into contract_processed_processed.docx, which fragments the
         // agent's document state across files.
-        if (base.endsWith("_processed") || base.endsWith("_redlined")) {
+        if (/(?:_|-|\.)(processed|redlined|redline|markup|marked)$/i.test(base)) {
           outPath = resolve(dir, `${base}${ext}`);
         } else {
           outPath = resolve(dir, `${base}_processed${ext}`);
@@ -1183,6 +1205,7 @@ server.registerTool(
         ignore_control_locks,
         ignore_document_protection,
         allow_untracked_writes,
+        markup_mode,
       });
 
       let stats;
@@ -1458,9 +1481,28 @@ server.registerTool(
         .describe(
           "If True, compares 'Accepted' state. If False, compares raw text.",
         ),
+      output_path: z
+        .string()
+        .optional()
+        .describe(
+          "Optional path to save a redlined DOCX showing all changes from original_path to modified_path as native Word tracked changes.",
+        ),
+      author_name: z
+        .string()
+        .optional()
+        .describe(
+          "Author name for tracked changes when output_path is provided (default: 'Comparison').",
+        ),
     },
   },
-  async ({ reasoning, original_path, modified_path, compare_clean }) => {
+  async ({
+    reasoning,
+    original_path,
+    modified_path,
+    compare_clean,
+    output_path,
+    author_name,
+  }) => {
     try {
       void reasoning;
       const origBuf = readFileBytesOrThrow(original_path);
@@ -1471,6 +1513,37 @@ server.registerTool(
       // changes no apply can consume (QA 2026-07-18 H1).
       const origDoc = await loadDocxOrThrow(origBuf, original_path);
       const modDoc = await loadDocxOrThrow(modBuf, modified_path);
+
+      let saved_header = "";
+      if (output_path) {
+        const { text: t1, structure: s1 } = _extractTextFromDoc(
+          origDoc,
+          compare_clean,
+          false,
+          false,
+          true,
+        ) as any;
+        const { text: t2, structure: s2 } = _extractTextFromDoc(
+          modDoc,
+          compare_clean,
+          false,
+          false,
+          true,
+        ) as any;
+        const { edits: structEdits } = generate_structured_edits(t1, s1, t2, s2);
+        const effAuthor = (author_name || "").trim() || "Comparison";
+        const engDoc = await loadDocxOrThrow(origBuf, original_path);
+        const eng = new RedlineEngine(engDoc, effAuthor);
+        const [applied, skipped] = eng.apply_edits(structEdits as any);
+        const outBytes = await engDoc.save();
+        const outDir = dirname(output_path);
+        if (outDir && outDir !== "." && !existsSync(outDir)) {
+          fs.mkdirSync(outDir, { recursive: true });
+        }
+        fs.writeFileSync(output_path, outBytes);
+        saved_header = `Redline saved to: ${output_path} (${applied} tracked change(s) applied, ${skipped} skipped, Author: ${effAuthor}).\n\n`;
+      }
+
       const origText = _extractTextFromDoc(origDoc, compare_clean, false) as string;
       const modText = _extractTextFromDoc(modDoc, compare_clean, false) as string;
 
@@ -1505,7 +1578,7 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: warning_text + diff,
+            text: saved_header + warning_text + diff,
           },
         ],
       };
@@ -1774,6 +1847,19 @@ export function formatBatchResult(stats: any, outPath: string): string {
     : "";
   res += `Actions: ${stats.actions_applied} applied, ${stats.actions_skipped} skipped${already_text}.\n`;
   res += `Edits: ${stats.edits_applied} applied${occ_text}, ${stats.edits_skipped} skipped.\n`;
+  if (stats.document_state) {
+    res += `Document State: ${stats.document_state.tracked_changes ?? 0} tracked change(s), ${stats.document_state.comments ?? 0} comment(s) remaining.\n`;
+  }
+
+  if (stats.actions && stats.actions.length > 0) {
+    res += "\nApplied Actions:\n";
+    for (const actRep of stats.actions) {
+      const rIds = (actRep.resolved_ids || [])
+        .map((rid: string) => `\`${rid}\``)
+        .join(", ");
+      res += `- **${actRep.type}** on ${rIds} ✅ [${actRep.status || "applied"}]\n`;
+    }
+  }
 
   if (stats.edits && stats.edits.length > 0) {
     res += "\nDetailed Edit Reports:\n";
@@ -1802,6 +1888,14 @@ export function formatBatchResult(stats: any, outPath: string): string {
 
       const occ = report.occurrences_modified ?? 0;
       res += `**Mode:** \`${report.match_mode || "strict"}\` (${occ} occurrence${occ !== 1 ? "s" : ""} modified)\n`;
+
+      const allMintedIds = [
+        ...(report.change_ids || []),
+        ...(report.comment_ids || []),
+      ];
+      if (allMintedIds.length > 0) {
+        res += `**IDs:** ${allMintedIds.map((id: string) => `\`${id}\``).join(", ")}\n`;
+      }
 
       if (Array.isArray(report.comment)) {
         for (const c of report.comment) {

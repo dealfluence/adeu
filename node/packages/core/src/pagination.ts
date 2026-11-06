@@ -26,7 +26,7 @@ export function parse_page_arg(
     return ["single", page];
   }
   if (typeof page === "string") {
-    const s = page.trim();
+    const s = page.trim().replace(/^['"]+|['"]+$/g, "").trim();
     if (!s) bad(page);
     if (s.toLowerCase() === "all") return ["all", null];
     const m = _PAGE_RANGE_RE.exec(s);

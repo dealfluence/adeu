@@ -346,7 +346,8 @@ def _heading_passes_quality_filter_fast(
         return True
 
     word_count = len(re.findall(r"\w+", text))
-    return word_count >= _HEURISTIC_MIN_WORDS
+    min_words = 2 if _structural_bold_heading_level(paragraph) is not None else _HEURISTIC_MIN_WORDS
+    return word_count >= min_words
 
 
 def _heading_text_fast(
@@ -775,6 +776,19 @@ def _project_part(part, comments_map: dict) -> str:
 
 
 _HEADING_PREFIX_RE = re.compile(r"^(#{1,6}) ")
+_STRUCTURAL_BOLD_L1_RE = re.compile(
+    r"^(?:ARTICLE|PART|SCHEDULE|EXHIBIT|ANNEX|APPENDIX)\s+[0-9IVXLCDMab]+\b",
+    re.IGNORECASE,
+)
+_STRUCTURAL_BOLD_L3_RE = re.compile(
+    r"^(?:\d+\.\d+\.\d+(?:\.\d+)*\.?\s+\S|(?:Section|Paragraph|Clause|Item)\s+\d+(?:\.\d+)*\([a-z0-9]+\))",
+    re.IGNORECASE,
+)
+_STRUCTURAL_BOLD_L2_KEYWORD_RE = re.compile(
+    r"^(?:Section|Paragraph|Clause|Item)\s+\d+(?:\.\d+)*\b",
+    re.IGNORECASE,
+)
+_STRUCTURAL_BOLD_L2_NUMBERED_RE = re.compile(r"^\d+(?:\.\d+)?\.\s+[A-Z]")
 
 # Minimum word count for a heading promoted by the all-caps-bold heuristic.
 # Real section titles ("CODE OF CONDUCT", "STANDARD PROCUREMENT DOCUMENT") have
@@ -783,13 +797,64 @@ _HEADING_PREFIX_RE = re.compile(r"^(#{1,6}) ")
 _HEURISTIC_MIN_WORDS = 3
 
 
+def _structural_bold_heading_level(paragraph: Paragraph) -> Optional[int]:
+    """
+    Detects standalone bold section headers in Normal-styled paragraphs
+    (e.g. 'Article I — Definitions', 'Paragraph 1 — Services', 'Section 2.01 — Orders',
+    '3. Term and Termination') without altering Virtual Text projection.
+    """
+    from adeu.utils.docx import QN_W_B, QN_W_R, QN_W_RPR, QN_W_T, QN_W_TC, QN_W_VAL
+
+    p_el = paragraph._element
+    ancestor = p_el.getparent()
+    while ancestor is not None:
+        if ancestor.tag == QN_W_TC:
+            return None
+        ancestor = ancestor.getparent()
+
+    text = paragraph.text.strip()
+    if not text or len(text) >= 120 or text.endswith("."):
+        return None
+
+    # Every visible run with non-whitespace text must be bold.
+    runs = p_el.findall(f".//{QN_W_R}")
+    has_visible_run = False
+    for r in runs:
+        t_elems = r.findall(f".//{QN_W_T}")
+        r_text = "".join(t.text or "" for t in t_elems)
+        if not r_text.strip():
+            continue
+        has_visible_run = True
+        rPr = r.find(QN_W_RPR)
+        is_run_bold = False
+        if rPr is not None:
+            b = rPr.find(QN_W_B)
+            if b is not None and b.get(QN_W_VAL) not in ("0", "false", "off"):
+                is_run_bold = True
+        if not is_run_bold:
+            return None
+
+    if not has_visible_run:
+        return None
+
+    if _STRUCTURAL_BOLD_L1_RE.match(text):
+        return 1
+    if _STRUCTURAL_BOLD_L3_RE.match(text):
+        return 3
+    if _STRUCTURAL_BOLD_L2_KEYWORD_RE.match(text) or _STRUCTURAL_BOLD_L2_NUMBERED_RE.match(text):
+        return 2
+    return None
+
+
 def _is_heading(paragraph: Paragraph) -> bool:
     """
-    A paragraph is a heading iff get_paragraph_prefix returns "# " through "###### ".
-    List items ("* ") and plain paragraphs ("") are excluded by the regex anchor.
+    A paragraph is a heading iff get_paragraph_prefix returns "# " through "###### "
+    or it is a standalone structural bold section header.
     """
     prefix = get_paragraph_prefix(paragraph)
-    return bool(_HEADING_PREFIX_RE.match(prefix))
+    if _HEADING_PREFIX_RE.match(prefix):
+        return True
+    return _structural_bold_heading_level(paragraph) is not None
 
 
 def _heading_passes_quality_filter(paragraph: Paragraph, comments_map: dict) -> bool:
@@ -819,7 +884,8 @@ def _heading_passes_quality_filter(paragraph: Paragraph, comments_map: dict) -> 
         return True
 
     word_count = len(re.findall(r"\w+", text))
-    return word_count >= _HEURISTIC_MIN_WORDS
+    min_words = 2 if _structural_bold_heading_level(paragraph) is not None else _HEURISTIC_MIN_WORDS
+    return word_count >= min_words
 
 
 def _heading_level(paragraph: Paragraph) -> int:
@@ -827,6 +893,9 @@ def _heading_level(paragraph: Paragraph) -> int:
     prefix = get_paragraph_prefix(paragraph)
     m = _HEADING_PREFIX_RE.match(prefix)
     if not m:
+        struct_lvl = _structural_bold_heading_level(paragraph)
+        if struct_lvl is not None:
+            return struct_lvl
         # Defensive: caller is supposed to guard with _is_heading first.
         return 1
     level = len(m.group(1))

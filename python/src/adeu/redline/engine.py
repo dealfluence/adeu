@@ -515,8 +515,11 @@ class RedlineEngine:
         ignore_document_protection: bool = False,
         allow_untracked_writes: bool = False,
         timestamp: Optional[Union[str, datetime.datetime]] = None,
+        markup_mode: str = "track_changes",
     ):
         self.terse_errors = terse_errors
+        self.markup_mode = markup_mode if markup_mode in ("track_changes", "manual") else "track_changes"
+        self._in_process_batch = False
         # CC-4 write-gate overrides. Engine kwargs rather than process_batch
         # arguments because the gates run in three places — validate_edits,
         # the resolver and the apply-path backstop — and only the first takes
@@ -1390,7 +1393,138 @@ class RedlineEngine:
         outlineLvl_el = pPr_clone.find(qn("w:outlineLvl"))
         if outlineLvl_el is not None:
             pPr_clone.remove(outlineLvl_el)
+        rPr_el = pPr_clone.find(qn("w:rPr"))
+        if rPr_el is not None:
+            for mark_tag in (qn("w:ins"), qn("w:del")):
+                for mark_el in rPr_el.findall(mark_tag):
+                    rPr_el.remove(mark_el)
+            if len(rPr_el) == 0 and len(rPr_el.attrib) == 0:
+                pPr_clone.remove(rPr_el)
         return pPr_clone
+
+    @staticmethod
+    def _is_pipe_table_row(line: str) -> bool:
+        s = line.strip()
+        return s.startswith("|") and s.endswith("|") and s.count("|") >= 2
+
+    @classmethod
+    def _group_markdown_table_blocks(cls, lines: List[str]) -> List[str]:
+        grouped: List[str] = []
+        idx = 0
+        while idx < len(lines):
+            if cls._is_pipe_table_row(lines[idx]):
+                run_rows: List[str] = [lines[idx].strip()]
+                j = idx + 1
+                while j < len(lines) and (cls._is_pipe_table_row(lines[j]) or lines[j] == ""):
+                    if cls._is_pipe_table_row(lines[j]):
+                        run_rows.append(lines[j].strip())
+                    j += 1
+                if len(run_rows) >= 2:
+                    grouped.append("\n".join(run_rows))
+                    idx = j
+                    continue
+            grouped.append(lines[idx])
+            idx += 1
+        return grouped
+
+    @classmethod
+    def _is_markdown_pipe_table_block(cls, block: str) -> bool:
+        if "\n" not in block:
+            return False
+        rows = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        return len(rows) >= 2 and all(cls._is_pipe_table_row(r) for r in rows)
+
+    def _build_markdown_table_element(
+        self,
+        block: str,
+        reuse_id: Optional[str],
+        anchor_run: Optional[Run],
+        suppress_inherited: bool,
+    ):
+        raw_rows = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        parsed_rows: List[List[str]] = [[c.strip() for c in r[1:-1].split("|")] for r in raw_rows]
+        has_header = False
+        if len(parsed_rows) >= 2 and all(re.match(r"^:?-{2,}:?$", c) for c in parsed_rows[1] if c != ""):
+            has_header = True
+            parsed_rows = [parsed_rows[0]] + parsed_rows[2:]
+        num_cols = max((len(r) for r in parsed_rows), default=1)
+
+        tbl = create_element("w:tbl")
+        tblPr = create_element("w:tblPr")
+        tblW = create_element("w:tblW")
+        create_attribute(tblW, "w:w", "5000")
+        create_attribute(tblW, "w:type", "pct")
+        tblPr.append(tblW)
+        tblBorders = create_element("w:tblBorders")
+        for b_name in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            b_el = create_element(f"w:{b_name}")
+            create_attribute(b_el, "w:val", "single")
+            create_attribute(b_el, "w:sz", "4")
+            create_attribute(b_el, "w:space", "0")
+            create_attribute(b_el, "w:color", "BFBFBF")
+            tblBorders.append(b_el)
+        tblPr.append(tblBorders)
+        tbl.append(tblPr)
+
+        tblGrid = create_element("w:tblGrid")
+        for _ in range(num_cols):
+            tblGrid.append(create_element("w:gridCol"))
+        tbl.append(tblGrid)
+
+        col_pct = str(max(1, 5000 // max(1, num_cols)))
+        first_ins = None
+        for r_idx, row_cells in enumerate(parsed_rows):
+            tr = create_element("w:tr")
+            trPr = create_element("w:trPr")
+            is_header_row = has_header and r_idx == 0
+            if is_header_row:
+                trPr.append(create_element("w:tblHeader"))
+            tr_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
+            trPr.append(tr_ins)
+            tr.append(trPr)
+
+            padded = list(row_cells) + [""] * max(0, num_cols - len(row_cells))
+            for cell_text in padded[:num_cols]:
+                tc = create_element("w:tc")
+                tcPr = create_element("w:tcPr")
+                tcW = create_element("w:tcW")
+                create_attribute(tcW, "w:w", col_pct)
+                create_attribute(tcW, "w:type", "pct")
+                tcPr.append(tcW)
+                if is_header_row:
+                    shd = create_element("w:shd")
+                    create_attribute(shd, "w:val", "clear")
+                    create_attribute(shd, "w:color", "auto")
+                    create_attribute(shd, "w:fill", "F2F2F2")
+                    tcPr.append(shd)
+                tc.append(tcPr)
+
+                p = create_element("w:p")
+                cell_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
+                if first_ins is None:
+                    first_ins = cell_ins
+                for seg_text, seg_props in self._parse_inline_markdown(cell_text):
+                    if not seg_text:
+                        continue
+                    eff_props = dict(seg_props)
+                    if is_header_row:
+                        eff_props["bold"] = True
+                    new_run = create_element("w:r")
+                    if anchor_run and anchor_run._element.rPr is not None:
+                        rPr_clone = deepcopy(anchor_run._element.rPr)
+                        if len(rPr_clone) > 0 or len(rPr_clone.attrib) > 0:
+                            new_run.append(rPr_clone)
+                    self._apply_run_props(new_run, eff_props, suppress_inherited=suppress_inherited)
+                    t = create_element("w:t")
+                    self._set_text_content(t, seg_text)
+                    new_run.append(t)
+                    cell_ins.append(new_run)
+                if len(cell_ins) > 0:
+                    p.append(cell_ins)
+                tc.append(p)
+                tr.append(tc)
+            tbl.append(tr)
+        return tbl, first_ins
 
     def track_insert(
         self,
@@ -1418,7 +1552,7 @@ class RedlineEngine:
         paragraph-splitting insertions keys on it (falling back to
         anchor_run when the two coincide).
         """
-        lines = re.split(r"[\r\n]+", text)
+        lines = self._group_markdown_table_blocks(re.split(r"[\r\n]+", text))
         if not lines:
             return None, None
 
@@ -1450,8 +1584,9 @@ class RedlineEngine:
         # reported status "applied". Note the em-dash spelling was never
         # affected, so the corruption tracked the punctuation an author chose.
         has_line_break = re.search(r"[\r\n]", text) is not None
+        first_is_table = self._is_markdown_pipe_table_block(lines[0])
 
-        if first_style and has_line_break:
+        if (first_style or first_is_table) and has_line_break:
             if current_p is None:
                 return None, None
 
@@ -1467,6 +1602,18 @@ class RedlineEngine:
             created_nodes = []
 
             for i, line_text in enumerate(lines):
+                if self._is_markdown_pipe_table_block(line_text):
+                    tbl_el, first_ins_el = self._build_markdown_table_element(
+                        line_text, reuse_id, anchor_run, suppress_inherited
+                    )
+                    if insert_before:
+                        body.insert(p_index + i, tbl_el)
+                    else:
+                        body.insert(p_index + 1 + i, tbl_el)
+                    if first_ins_el is not None:
+                        created_nodes.append((tbl_el, first_ins_el))
+                    continue
+
                 c_text, s_name = self._parse_markdown_style(line_text)
                 if not c_text and not s_name:
                     continue
@@ -1488,7 +1635,7 @@ class RedlineEngine:
                     rPr = create_element("w:rPr")
                     pPr.append(rPr)
                 ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
-                rPr.append(ins_mark)
+                rPr.insert(0, ins_mark)
 
                 new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
 
@@ -1497,7 +1644,9 @@ class RedlineEngine:
                 for seg_text, seg_props in segments:
                     new_run = create_element("w:r")
                     if anchor_run and anchor_run._element.rPr is not None:
-                        new_run.append(deepcopy(anchor_run._element.rPr))
+                        rPr_clone = deepcopy(anchor_run._element.rPr)
+                        if len(rPr_clone) > 0 or len(rPr_clone.attrib) > 0:
+                            new_run.append(rPr_clone)
 
                     self._apply_run_props(new_run, seg_props, suppress_inherited=suppress_inherited)
 
@@ -1559,7 +1708,7 @@ class RedlineEngine:
                     if rPr is None:
                         rPr = create_element("w:rPr")
                         pPr.append(rPr)
-                    rPr.append(self._create_track_change_tag("w:ins", reuse_id=reuse_id))
+                    rPr.insert(0, self._create_track_change_tag("w:ins", reuse_id=reuse_id))
 
                     new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
                     for seg_text, seg_props in self._parse_inline_markdown(line_text):
@@ -1668,7 +1817,31 @@ class RedlineEngine:
             if current_p.pPr is not None and current_p.pPr.find(qn("w:numPr")) is not None:
                 has_num_pr = True
 
+            has_relocated_suffix = bool(suffix_nodes)
+            orig_pilcrow_marks = []
+            if has_relocated_suffix:
+                cur_pPr = current_p.find(qn("w:pPr"))
+                if cur_pPr is None:
+                    cur_pPr = create_element("w:pPr")
+                    current_p.insert(0, cur_pPr)
+                cur_rPr = cur_pPr.find(qn("w:rPr"))
+                if cur_rPr is not None:
+                    for m_tag in (qn("w:ins"), qn("w:del")):
+                        for m_el in cur_rPr.findall(m_tag):
+                            cur_rPr.remove(m_el)
+                            orig_pilcrow_marks.append(m_el)
+                else:
+                    cur_rPr = create_element("w:rPr")
+                    cur_pPr.append(cur_rPr)
+                cur_ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
+                cur_rPr.insert(0, cur_ins_mark)
+
             for i, line_text in enumerate(remaining_lines):
+                if self._is_markdown_pipe_table_block(line_text):
+                    tbl_el, _ = self._build_markdown_table_element(line_text, reuse_id, anchor_run, suppress_inherited)
+                    parent_body.insert(p_index + 1 + i, tbl_el)
+                    continue
+
                 list_level = None
                 if has_num_pr:
                     match = re.match(r"^([ \t]*)(?:\*|-|\d+\.)\s+", line_text)
@@ -1697,17 +1870,30 @@ class RedlineEngine:
                                 numPr.append(ilvl_el)
                     new_p.append(pPr_clone)
 
-                # Track the paragraph break itself as an insertion
-                pPr = new_p.find(qn("w:pPr"))
-                if pPr is None:
-                    pPr = create_element("w:pPr")
-                    new_p.insert(0, pPr)
-                rPr = pPr.find(qn("w:rPr"))
-                if rPr is None:
-                    rPr = create_element("w:rPr")
-                    pPr.append(rPr)
-                ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
-                rPr.append(ins_mark)
+                is_last_line = i == len(remaining_lines) - 1
+                if not (has_relocated_suffix and is_last_line):
+                    # Track the paragraph break itself as an insertion
+                    pPr = new_p.find(qn("w:pPr"))
+                    if pPr is None:
+                        pPr = create_element("w:pPr")
+                        new_p.insert(0, pPr)
+                    rPr = pPr.find(qn("w:rPr"))
+                    if rPr is None:
+                        rPr = create_element("w:rPr")
+                        pPr.append(rPr)
+                    ins_mark = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
+                    rPr.insert(0, ins_mark)
+                elif orig_pilcrow_marks:
+                    pPr = new_p.find(qn("w:pPr"))
+                    if pPr is None:
+                        pPr = create_element("w:pPr")
+                        new_p.insert(0, pPr)
+                    rPr = pPr.find(qn("w:rPr"))
+                    if rPr is None:
+                        rPr = create_element("w:rPr")
+                        pPr.append(rPr)
+                    for idx_m, m_el in enumerate(orig_pilcrow_marks):
+                        rPr.insert(idx_m, m_el)
 
                 new_ins = self._create_track_change_tag("w:ins", reuse_id=reuse_id)
 
@@ -1791,7 +1977,11 @@ class RedlineEngine:
         # Avoid stacking duplicate markers.
         if rPr.find(qn("w:del")) is None:
             del_break = self._create_track_change_tag("w:del", reuse_id=del_id)
-            rPr.append(del_break)
+            ins_existing = rPr.find(qn("w:ins"))
+            if ins_existing is not None:
+                rPr.insert(rPr.index(ins_existing) + 1, del_break)
+            else:
+                rPr.insert(0, del_break)
 
         # 3. Build the new paragraph and insert it after the original.
         new_text = edit.new_text or ""
@@ -1831,7 +2021,7 @@ class RedlineEngine:
         if new_rPr is None:
             new_rPr = create_element("w:rPr")
             new_pPr.append(new_rPr)
-        new_rPr.append(self._create_track_change_tag("w:ins", reuse_id=ins_id))
+        new_rPr.insert(0, self._create_track_change_tag("w:ins", reuse_id=ins_id))
 
         # Inline content goes inside a single <w:ins>.
         new_ins = self._create_track_change_tag("w:ins", reuse_id=ins_id)
@@ -1905,6 +2095,23 @@ class RedlineEngine:
                 # Remove Complex Script italic (Bug #12)
                 for iCs in rPr.findall(qn("w:iCs")):
                     rPr.remove(iCs)
+
+        if props.get("strike"):
+            run_obj.font.strike = True
+
+        if props.get("underline"):
+            run_obj.underline = True
+
+        if props.get("color"):
+            from docx.shared import RGBColor
+
+            hex_val = str(props["color"]).lstrip("#")
+            if len(hex_val) == 6:
+                run_obj.font.color.rgb = RGBColor.from_string(hex_val.upper())
+
+        rPr_final = run_element.find(qn("w:rPr"))
+        if rPr_final is not None and len(rPr_final) == 0 and len(rPr_final.attrib) == 0:
+            run_element.remove(rPr_final)
 
     def _set_paragraph_style(self, p_element, style_name: str):
         existing_pPr = p_element.find(qn("w:pPr"))
@@ -2096,7 +2303,8 @@ class RedlineEngine:
                 for tag in ["w:vanish", "w:strike", "w:dstrike", "w:i", "w:iCs"]:
                     for el in rPr_clone.findall(qn(tag)):
                         rPr_clone.remove(el)
-                run.append(rPr_clone)
+                if len(rPr_clone) > 0 or len(rPr_clone.attrib) > 0:
+                    run.append(rPr_clone)
             self._apply_run_props(run, seg_props, suppress_inherited=suppress_inherited)
 
             t = create_element("w:t")
@@ -3301,7 +3509,19 @@ class RedlineEngine:
             critic_markup, clean_text = self._build_edit_context_previews(edit)
         else:
             warning = warning or self._check_punctuation_warning(getattr(edit, "target_text", ""))
-        return {
+        raw_cids = list(
+            dict.fromkeys(
+                str(x) for x in (getattr(edit, "_used_revision_ids", None) or []) if x is not None and str(x) != ""
+            )
+        )
+        change_ids = [x if x.startswith("Chg:") else f"Chg:{x}" for x in raw_cids]
+        raw_com_ids = list(
+            dict.fromkeys(
+                str(x) for x in (getattr(edit, "_minted_comment_ids", None) or []) if x is not None and str(x) != ""
+            )
+        )
+        comment_ids = [x if x.startswith("Com:") else f"Com:{x}" for x in raw_com_ids]
+        rep = {
             "status": "applied" if success else "failed",
             "type": getattr(edit, "type", "modify"),
             # Echoes of caller-supplied values are bounded so an oversized edit
@@ -3322,6 +3542,11 @@ class RedlineEngine:
             "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
+        if change_ids:
+            rep["change_ids"] = change_ids
+        if comment_ids:
+            rep["comment_ids"] = comment_ids
+        return rep
 
     def process_batch(
         self,
@@ -3332,7 +3557,14 @@ class RedlineEngine:
         """
         Processes a unified batch of actions and edits safely.
         """
-        return self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
+        self._in_process_batch = True
+        try:
+            res = self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
+            if self.markup_mode == "manual":
+                self._convert_revisions_to_manual_markup()
+            return res
+        finally:
+            self._in_process_batch = False
 
     def _field_label_at(self, offset: int) -> str:
         """``CC:<N> "<alias>" (tag: <tag>)`` for the control containing ``offset``.
@@ -3755,7 +3987,7 @@ class RedlineEngine:
         failed_objs = [{"index": idx, "reason": reason, "error": reason} for idx, reason in failed_list]
         status_str = "partial" if (partial and failed_list) else "ok"
 
-        return {
+        res = {
             "status": status_str,
             "failed": failed_objs,
             "actions_applied": applied_actions,
@@ -3782,6 +4014,130 @@ class RedlineEngine:
             "engine": "python",
             "version": __version__,
         }
+        if getattr(self, "_last_action_reports", None):
+            res["actions"] = list(self._last_action_reports)
+        res["document_state"] = self._get_document_state_summary()
+        return res
+
+    def _get_document_state_summary(self) -> dict:
+        unique_ids: set = set()
+        for root in self._revision_roots():
+            for tag in ("w:ins", "w:del", "w:pPrChange", "w:rPrChange", "w:sectPrChange"):
+                for el in root.findall(f".//{qn(tag)}"):
+                    rid = el.get(qn("w:id"))
+                    if rid:
+                        unique_ids.add(rid)
+        return {
+            "tracked_changes": len(unique_ids),
+            "comments": len(self._existing_comment_ids()),
+        }
+
+    def _convert_revisions_to_manual_markup(self) -> None:
+        """
+        Converts tracked changes (<w:del>, <w:ins>) into manual inline formatting:
+          - Deletions become regular <w:r><w:t> runs with <w:strike/> in their
+            original font color (not underlined).
+          - Insertions become regular <w:r><w:t> runs with bold, single underline,
+            and red (#C00000) color.
+          - Native Word comment anchors (<w:commentRangeStart>/<w:commentRangeEnd>)
+            remain in place around the struck-through and inserted runs.
+        """
+        for root in self._revision_roots():
+            # 1. Strip property change elements
+            for pr_tag in (
+                "w:rPrChange",
+                "w:pPrChange",
+                "w:tblPrChange",
+                "w:trPrChange",
+                "w:tcPrChange",
+                "w:sectPrChange",
+            ):
+                for el in root.findall(f".//{qn(pr_tag)}"):
+                    p = el.getparent()
+                    if p is not None:
+                        p.remove(el)
+
+            # 2. Convert <w:del> elements
+            for del_el in list(root.findall(f".//{qn('w:del')}")):
+                parent = del_el.getparent()
+                if parent is None:
+                    continue
+                if parent.tag == qn("w:rPr"):
+                    parent.remove(del_el)
+                    gp = parent.getparent()
+                    if gp is not None and len(parent) == 0 and len(parent.attrib) == 0:
+                        gp.remove(parent)
+                    continue
+                if parent.tag == qn("w:trPr"):
+                    tr = parent.getparent()
+                    parent.remove(del_el)
+                    if tr is not None:
+                        for r in tr.findall(f".//{qn('w:r')}"):
+                            self._apply_run_props(r, {"strike": True})
+                    continue
+
+                # Check if immediately followed by <w:ins> without boundary whitespace
+                nxt = del_el.getnext()
+                need_sep_space = False
+                if nxt is not None and nxt.tag == qn("w:ins"):
+                    del_txt = "".join(dt.text or "" for dt in del_el.findall(f".//{qn('w:delText')}"))
+                    ins_txt = "".join(t.text or "" for t in nxt.findall(f".//{qn('w:t')}"))
+                    if (
+                        del_txt
+                        and ins_txt
+                        and not del_txt[-1].isspace()
+                        and not ins_txt[0].isspace()
+                        and ins_txt[0] not in ",.;:!?)];"
+                    ):
+                        need_sep_space = True
+
+                for r in del_el.findall(f".//{qn('w:r')}"):
+                    for dt in list(r.findall(qn("w:delText"))):
+                        t_el = create_element("w:t")
+                        self._set_text_content(t_el, dt.text or "")
+                        idx_dt = r.index(dt)
+                        r.remove(dt)
+                        r.insert(idx_dt, t_el)
+                    rPr = r.find(qn("w:rPr"))
+                    if rPr is not None:
+                        for u_el in rPr.findall(qn("w:u")):
+                            rPr.remove(u_el)
+                    self._apply_run_props(r, {"strike": True})
+
+                del_idx = parent.index(del_el)
+                children = list(del_el)
+                for offset, child in enumerate(children):
+                    del_el.remove(child)
+                    parent.insert(del_idx + offset, child)
+                if need_sep_space:
+                    sep_r = create_element("w:r")
+                    sep_t = create_element("w:t")
+                    self._set_text_content(sep_t, " ")
+                    sep_r.append(sep_t)
+                    parent.insert(del_idx + len(children), sep_r)
+                parent.remove(del_el)
+
+            # 3. Convert <w:ins> elements
+            for ins_el in list(root.findall(f".//{qn('w:ins')}")):
+                parent = ins_el.getparent()
+                if parent is None:
+                    continue
+                if parent.tag in (qn("w:rPr"), qn("w:trPr")):
+                    parent.remove(ins_el)
+                    gp = parent.getparent()
+                    if parent.tag == qn("w:rPr") and gp is not None and len(parent) == 0 and len(parent.attrib) == 0:
+                        gp.remove(parent)
+                    continue
+
+                for r in ins_el.findall(f".//{qn('w:r')}"):
+                    self._apply_run_props(r, {"bold": True, "underline": True, "color": "C00000"})
+
+                ins_idx = parent.index(ins_el)
+                children = list(ins_el)
+                for offset, child in enumerate(children):
+                    ins_el.remove(child)
+                    parent.insert(ins_idx + offset, child)
+                parent.remove(ins_el)
 
     @staticmethod
     def _record_used_revision_ids(edit: Any, *ids: Optional[str]) -> None:
@@ -4451,6 +4807,7 @@ class RedlineEngine:
                     parent._error_msg = msg
                 continue
 
+            comment_next_before = self.comments_manager.next_id
             success = False
             if isinstance(edit, InsertTableRow):
                 success = self._apply_insert_row(edit)
@@ -4476,6 +4833,13 @@ class RedlineEngine:
                 unwrap_sdt(_SdtInfo(element=edit._unwrap_sdt_after, cls="text"))
 
             if success:
+                owner = getattr(edit, "_parent_edit_ref", None) or edit
+                minted_cids = list(getattr(owner, "_minted_comment_ids", None) or [])
+                for cid_num in range(comment_next_before, self.comments_manager.next_id):
+                    cid_str = str(cid_num)
+                    if cid_str not in minted_cids:
+                        minted_cids.append(cid_str)
+                owner._minted_comment_ids = minted_cids
                 # A balanced multi-paragraph split fans one logical edit into
                 # several paragraph sub-edits sharing a _split_group_id; count it
                 # once. Edits with no group id (the common case) always count.
@@ -4549,6 +4913,8 @@ class RedlineEngine:
                 applied += 1
             else:
                 skipped += 1
+        if self.markup_mode == "manual" and not self._in_process_batch:
+            self._convert_revisions_to_manual_markup()
         return applied, skipped
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
@@ -4879,6 +5245,60 @@ class RedlineEngine:
         return restore_document_typography(actual_doc_text, new_text)
 
     @staticmethod
+    def _restore_matched_whitespace(actual_doc_text: str, caller_target: str, new_text: str) -> str:
+        """
+        When fuzzy whitespace matching matched a caller's newline (`\\n` or `\\n\\n`)
+        against a horizontal space in `actual_doc_text`, and the caller repeated
+        that same newline inside the unchanged common prefix or suffix of
+        `caller_target` and `new_text`, normalize that unchanged newline to the
+        document's horizontal space so `trim_common_context` does not turn it
+        into an unintended paragraph split.
+        """
+        if not new_text or not actual_doc_text or not caller_target:
+            return new_text
+        if "\n" not in caller_target and "\r" not in caller_target:
+            return new_text
+        if "\n" not in new_text and "\r" not in new_text:
+            return new_text
+
+        min_len = min(len(caller_target), len(new_text))
+        p_len = 0
+        while p_len < min_len and caller_target[p_len] == new_text[p_len]:
+            p_len += 1
+        s_len = 0
+        while (
+            s_len < (min_len - p_len)
+            and caller_target[len(caller_target) - 1 - s_len] == new_text[len(new_text) - 1 - s_len]
+        ):
+            s_len += 1
+
+        if p_len == 0 and s_len == 0:
+            return new_text
+
+        doc_plain = re.sub(r"(\*\*|__|_)", "", actual_doc_text)
+        prefix = new_text[:p_len]
+        middle = new_text[p_len : len(new_text) - s_len if s_len > 0 else len(new_text)]
+        suffix = new_text[len(new_text) - s_len :] if s_len > 0 else ""
+
+        if "\n" in prefix or "\r" in prefix:
+            for m in list(re.finditer(r"(\S+)([ \t]*[\r\n]+[ \t\r\n]*)", prefix)):
+                left_tok, nl_ws = m.group(1), m.group(2)
+                if (left_tok + nl_ws) not in doc_plain:
+                    m_doc = re.search(re.escape(left_tok) + r"([ \t]+)", doc_plain)
+                    if m_doc:
+                        prefix = prefix.replace(left_tok + nl_ws, left_tok + m_doc.group(1), 1)
+
+        if "\n" in suffix or "\r" in suffix:
+            for m in list(re.finditer(r"([ \t]*[\r\n]+[ \t\r\n]*)(\S+)", suffix)):
+                nl_ws, right_tok = m.group(1), m.group(2)
+                if (nl_ws + right_tok) not in doc_plain:
+                    m_doc = re.search(r"([ \t]+)" + re.escape(right_tok), doc_plain)
+                    if m_doc:
+                        suffix = suffix.replace(nl_ws + right_tok, m_doc.group(1) + right_tok, 1)
+
+        return prefix + middle + suffix
+
+    @staticmethod
     def _reinject_anchor_markers(
         mapper: DocumentMapper, start: int, length: int, caller_target: str, new_text: str
     ) -> Optional[str]:
@@ -5056,6 +5476,9 @@ class RedlineEngine:
             # being typography-forgiving — a caller who quotes the document's
             # own characters and asks for different ones still gets the change.
             current_effective_new_text = self._restore_matched_typography(
+                actual_doc_text, edit.target_text, current_effective_new_text
+            )
+            current_effective_new_text = self._restore_matched_whitespace(
                 actual_doc_text, edit.target_text, current_effective_new_text
             )
             with_markers = self._reinject_anchor_markers(
@@ -5812,6 +6235,26 @@ class RedlineEngine:
         if self._introduces_table_row_text(active_mapper, start_idx, 1, "", final_new_text):
             return False
 
+        def _resolve_insert_index() -> int:
+            if edit._insert_host_el is not None:
+                return len(parent)
+            if anchor_run is not None:
+                a_el = anchor_run._element
+                a_parent = a_el.getparent()
+                if a_parent is not None and a_parent.tag == qn("w:del"):
+                    a_el = a_parent
+                if a_el.getparent() is parent:
+                    return parent.index(a_el)
+            if anchor_paragraph is not None:
+                idx_p = 0
+                for i_c, child in enumerate(parent):
+                    if child.tag == qn("w:pPr"):
+                        idx_p = i_c + 1
+                    else:
+                        break
+                return idx_p
+            return index
+
         if start_idx == 0:
             ins_elem, last_p = self.track_insert(
                 final_new_text,
@@ -5823,11 +6266,12 @@ class RedlineEngine:
                 reuse_id=ins_id,
             )
             if ins_elem is not None:
+                cur_index = _resolve_insert_index()
                 if parent.tag == qn("w:ins"):
-                    self._insert_and_split_ins(parent, index, ins_elem)
+                    self._insert_and_split_ins(parent, cur_index, ins_elem)
                     actual_parent = parent.getparent()
                 else:
-                    parent.insert(index, ins_elem)
+                    parent.insert(cur_index, ins_elem)
                     actual_parent = parent
 
                 if edit.comment:
@@ -5846,6 +6290,11 @@ class RedlineEngine:
             if anchor_run:
                 next_run = self._get_next_run(anchor_run)
                 style_run = self._determine_style_source(anchor_run, next_run, final_new_text)
+                if next_run is not None and any(
+                    s.end == start_idx and s.run is None and ("*" in s.text or "_" in s.text)
+                    for s in active_mapper.spans
+                ):
+                    style_run = next_run
             else:
                 style_run = None
 
@@ -5860,11 +6309,12 @@ class RedlineEngine:
                 positional_anchor_run=anchor_run,
             )
             if ins_elem is not None:
+                cur_index = _resolve_insert_index()
                 if parent.tag == qn("w:ins"):
-                    self._insert_and_split_ins(parent, index + 1, ins_elem)
+                    self._insert_and_split_ins(parent, cur_index + 1, ins_elem)
                     actual_parent = parent.getparent()
                 else:
-                    insert_idx = index + 1 if anchor_run else index
+                    insert_idx = cur_index + 1 if anchor_run else cur_index
                     parent.insert(insert_idx, ins_elem)
                     actual_parent = parent
 
@@ -6088,7 +6538,16 @@ class RedlineEngine:
                         suppress_inherited=suppress_emphasis,
                         reuse_id=ins_id,
                     )
-                    if last_p is not None:
+                    if ins_elem is not None:
+                        if parent.tag == qn("w:ins"):
+                            # Revising another author's pending insertion: the
+                            # <w:del> stays nested in their <w:ins>; splice our
+                            # new <w:ins> in right after it by splitting their
+                            # <w:ins> so we never produce <w:ins> within <w:ins>.
+                            self._insert_and_split_ins(parent, parent.index(last_del_element) + 1, ins_elem)
+                        else:
+                            parent.insert(parent.index(last_del_element) + 1, ins_elem)
+                    if last_p is not None and ins_elem is None:
                         # The replacement re-created the content as NEW tracked
                         # paragraphs (heading-block insertion). If the deletion
                         # consumed everything visible in the source paragraph,
@@ -6108,16 +6567,12 @@ class RedlineEngine:
                                 src_rPr = create_element("w:rPr")
                                 src_pPr.append(src_rPr)
                             if src_rPr.find(qn("w:del")) is None:
-                                src_rPr.append(self._create_track_change_tag("w:del", reuse_id=del_id))
-                    if ins_elem is not None:
-                        if parent.tag == qn("w:ins"):
-                            # Revising another author's pending insertion: the
-                            # <w:del> stays nested in their <w:ins>; splice our
-                            # new <w:ins> in right after it by splitting their
-                            # <w:ins> so we never produce <w:ins> within <w:ins>.
-                            self._insert_and_split_ins(parent, parent.index(last_del_element) + 1, ins_elem)
-                        else:
-                            parent.insert(parent.index(last_del_element) + 1, ins_elem)
+                                ins_existing = src_rPr.find(qn("w:ins"))
+                                del_tag = self._create_track_change_tag("w:del", reuse_id=del_id)
+                                if ins_existing is not None:
+                                    src_rPr.insert(src_rPr.index(ins_existing) + 1, del_tag)
+                                else:
+                                    src_rPr.insert(0, del_tag)
 
                     if edit.comment and first_del_element is not None:
                         # first_del_element / ins_elem may now sit inside a
@@ -6209,6 +6664,37 @@ class RedlineEngine:
 
                     if p2_element is not None and p2_element.tag == qn("w:p"):
                         p1_fully_deleted = not self._paragraph_has_visible_content(p1_element)
+                        p2_fully_deleted = not self._paragraph_has_visible_content(p2_element)
+                        is_pure_deletion = op == EditOperationType.DELETION or not edit.new_text
+
+                        if is_pure_deletion and p1_fully_deleted:
+                            # Standard OOXML whole-paragraph deletion: mark p1's
+                            # paragraph break as deleted and keep p1 and p2 as
+                            # separate <w:p> containers so rejecting revisions
+                            # restores p1 without concatenating paragraphs or
+                            # restyling p2.
+                            pPr = p1_element.find(qn("w:pPr"))
+                            if pPr is None:
+                                pPr = create_element("w:pPr")
+                                p1_element.insert(0, pPr)
+                            rPr = pPr.find(qn("w:rPr"))
+                            if rPr is None:
+                                rPr = create_element("w:rPr")
+                                pPr.append(rPr)
+                            if rPr.find(qn("w:del")) is None:
+                                ins_existing = rPr.find(qn("w:ins"))
+                                del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
+                                if ins_existing is not None:
+                                    rPr.insert(rPr.index(ins_existing) + 1, del_mark)
+                                else:
+                                    rPr.insert(0, del_mark)
+                            continue
+
+                        if is_pure_deletion and not p1_fully_deleted and p2_fully_deleted:
+                            # Trailing whole-paragraph deletion (e.g. "\n\nLast para" -> ""):
+                            # p2 is the deleted paragraph; affected_ps marks p2's pilcrow
+                            # as deleted, while p1 keeps its own paragraph break intact.
+                            continue
 
                         # 1. Track pilcrow deletion in p1
                         pPr = p1_element.find(qn("w:pPr"))
@@ -6234,8 +6720,12 @@ class RedlineEngine:
                             pPr.append(rPr)
 
                         if rPr.find(qn("w:del")) is None:
+                            ins_existing = rPr.find(qn("w:ins"))
                             del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
-                            rPr.append(del_mark)
+                            if ins_existing is not None:
+                                rPr.insert(rPr.index(ins_existing) + 1, del_mark)
+                            else:
+                                rPr.insert(0, del_mark)
 
                         # 2. Coalesce children from p2 to p1
                         for child in list(p2_element):
@@ -6265,7 +6755,11 @@ class RedlineEngine:
                     # shares del_id: accepting/rejecting the edit by its id
                     # then also resolves the paragraph mark (F1, QA 2026-07-23).
                     del_mark = self._create_track_change_tag("w:del", reuse_id=del_id)
-                    rPr.append(del_mark)
+                    ins_existing = rPr.find(qn("w:ins"))
+                    if ins_existing is not None:
+                        rPr.insert(rPr.index(ins_existing) + 1, del_mark)
+                    else:
+                        rPr.insert(0, del_mark)
 
         self._record_used_revision_ids(edit, del_id, ins_id, *(node.get(qn("w:id")) for node in del_elems))
         return True
@@ -6371,13 +6865,55 @@ class RedlineEngine:
         etree.cleanup_namespaces(new_root, top_nsmap={"w16du": w16du_ns}, keep_ns_prefixes=["w16du"])
         part._element = new_root
 
+    _KNOWN_MC_IGNORABLE_URIS = {
+        "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+        "wp14": "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
+        "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+        "wp15": "http://schemas.microsoft.com/office/word/2012/wordprocessingDrawing",
+        "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+        "w16cex": "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+        "w16sdtdh": "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+        "w16du": "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
+    }
+
+    def _repair_mc_ignorable_prefixes(self, part) -> None:
+        import lxml.etree as etree
+
+        root = getattr(part, "_adeu_element", None)
+        if root is None:
+            root = getattr(part, "_element", None)
+        if root is None:
+            return
+        mc_attr = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable"
+        mc_ign = root.get(mc_attr)
+        if not mc_ign:
+            return
+        tokens = mc_ign.split()
+        missing = {}
+        valid_tokens = []
+        for tok in tokens:
+            if tok in root.nsmap:
+                valid_tokens.append(tok)
+            elif tok in self._KNOWN_MC_IGNORABLE_URIS:
+                missing[tok] = self._KNOWN_MC_IGNORABLE_URIS[tok]
+                valid_tokens.append(tok)
+        if valid_tokens != tokens:
+            if valid_tokens:
+                root.set(mc_attr, " ".join(valid_tokens))
+            else:
+                del root.attrib[mc_attr]
+        if missing:
+            etree.cleanup_namespaces(root, top_nsmap=missing, keep_ns_prefixes=list(missing.keys()))
+
     def save_to_stream(self) -> BytesIO:
         import lxml.etree as etree
 
         # Lazily declare w16du on any non-main part that picked up a tracked
-        # change (and therefore a w16du:dateUtc attribute) during editing.
+        # change (and therefore a w16du:dateUtc attribute) during editing, and
+        # ensure every prefix listed in mc:Ignorable is bound on the part root.
         for part in self.doc.part.package.parts:
             self._inject_w16du_if_needed(part)
+            self._repair_mc_ignorable_prefixes(part)
 
         for part in self.doc.part.package.parts:
             if hasattr(part, "_adeu_element"):
@@ -6822,6 +7358,7 @@ class RedlineEngine:
         skipped = 0
         already_resolved = 0
         resolved_history: dict = {}  # revision id -> action type that resolved it
+        self._last_action_reports: List[dict] = []
 
         # Sort actions internally: non-destructive metadata operations (ReplyComment) first,
         # followed by destructive structural operations (AcceptChange, RejectChange).
@@ -6949,6 +7486,33 @@ class RedlineEngine:
                         # lookup that succeeded was scoped to it (issue #114).
                         resolved_history[rid] = (act.type, acting_part)
                 applied += 1
+                if isinstance(act, ReplyComment):
+                    com_label = raw_id if raw_id.startswith("Com:") else f"Com:{target_id}"
+                    self._last_action_reports.append(
+                        {
+                            "index": batch_idx,
+                            "type": "reply",
+                            "target_id": com_label,
+                            "resolved_ids": [com_label],
+                            "status": "applied",
+                        }
+                    )
+                else:
+                    res_labels = sorted(
+                        [f"Chg:{r}" for r in resolved_now if r],
+                        key=lambda s: int(s[4:]) if s[4:].isdigit() else 0,
+                    )
+                    if not res_labels:
+                        res_labels = [raw_id if raw_id.startswith("Chg:") else f"Chg:{target_id}"]
+                    self._last_action_reports.append(
+                        {
+                            "index": batch_idx,
+                            "type": act.type,
+                            "target_id": raw_id,
+                            "resolved_ids": res_labels,
+                            "status": "applied",
+                        }
+                    )
                 if comments_before:
                     removed = comments_before - set(self._existing_comment_ids())
                     if removed:
@@ -7078,6 +7642,115 @@ class RedlineEngine:
                         if node.get(qn("w:id")) == c_id and node.getparent() is not None:
                             node.getparent().remove(node)
 
+    def _resolve_rejected_mark_hosts(self, rejected_mark_hosts: list) -> None:
+        if not rejected_mark_hosts:
+            return
+        unique_hosts = []
+        seen_ids = set()
+        for h in rejected_mark_hosts:
+            if id(h) not in seen_ids:
+                seen_ids.add(id(h))
+                unique_hosts.append(h)
+
+        content_tags = {
+            qn("w:r"),
+            qn("w:del"),
+            qn("w:ins"),
+            qn("w:sdt"),
+            qn("w:hyperlink"),
+            qn("w:fldSimple"),
+            qn("w:smartTag"),
+            qn("w:oMath"),
+            qn("w:oMathPara"),
+        }
+
+        def _has_content(p_el) -> bool:
+            for child in p_el:
+                if child.tag == qn("w:pPr"):
+                    continue
+                if child.tag in content_tags:
+                    return True
+                for desc in child.iter():
+                    if desc.tag in content_tags:
+                        return True
+            return False
+
+        # Pass 1: remove empty host paragraphs whose inserted break was rejected.
+        surviving_hosts = []
+        for host in unique_hosts:
+            parent = host.getparent()
+            if parent is None:
+                continue
+            if not _has_content(host):
+                if not self._is_last_paragraph_in_cell(host):
+                    # Preserve any stray range markers by moving them into an adjacent paragraph.
+                    non_ppr = [c for c in host if c.tag != qn("w:pPr")]
+                    if non_ppr:
+                        nxt = host.getnext()
+                        while nxt is not None and nxt.tag != qn("w:p"):
+                            nxt = nxt.getnext()
+                        prev = host.getprevious()
+                        while prev is not None and prev.tag != qn("w:p"):
+                            prev = prev.getprevious()
+                        if nxt is not None:
+                            nxt_pPr = nxt.find(qn("w:pPr"))
+                            ins_pos = 1 if nxt_pPr is not None and nxt[0] is nxt_pPr else 0
+                            for idx_c, c in enumerate(non_ppr):
+                                host.remove(c)
+                                nxt.insert(ins_pos + idx_c, c)
+                        elif prev is not None:
+                            for c in non_ppr:
+                                host.remove(c)
+                                prev.append(c)
+                    parent.remove(host)
+            else:
+                surviving_hosts.append(host)
+
+        # Pass 2: for non-empty hosts (e.g. a split paragraph whose prefix/del
+        # stayed in host and whose suffix moved to the next paragraph), merge
+        # the next paragraph back into host.
+        for host in reversed(surviving_hosts):
+            parent = host.getparent()
+            if parent is None:
+                continue
+            nxt = host.getnext()
+            while nxt is not None and nxt.tag != qn("w:p"):
+                nxt = nxt.getnext()
+            if nxt is not None:
+                nxt_pPr = nxt.find(qn("w:pPr"))
+                nxt_rPr = nxt_pPr.find(qn("w:rPr")) if nxt_pPr is not None else None
+                if nxt_rPr is not None:
+                    marks = [m for m in nxt_rPr if m.tag in (qn("w:ins"), qn("w:del"))]
+                    if marks:
+                        host_pPr = host.find(qn("w:pPr"))
+                        if host_pPr is None:
+                            host_pPr = create_element("w:pPr")
+                            host.insert(0, host_pPr)
+                        host_rPr = host_pPr.find(qn("w:rPr"))
+                        if host_rPr is None:
+                            host_rPr = create_element("w:rPr")
+                            host_pPr.append(host_rPr)
+                        for idx_m, m in enumerate(marks):
+                            nxt_rPr.remove(m)
+                            host_rPr.insert(idx_m, m)
+                for child in list(nxt):
+                    if child.tag == qn("w:pPr"):
+                        continue
+                    nxt.remove(child)
+                    host.append(child)
+                parent.remove(nxt)
+            else:
+                prev = host.getprevious()
+                while prev is not None and prev.tag != qn("w:p"):
+                    prev = prev.getprevious()
+                if prev is not None and not self._is_last_paragraph_in_cell(host):
+                    for child in list(host):
+                        if child.tag == qn("w:pPr"):
+                            continue
+                        host.remove(child)
+                        prev.append(child)
+                    parent.remove(host)
+
     def _accept_change(self, target_id: str, part: Optional[str] = None) -> set:
         # `part` scopes every lookup to one OPC part (issue #114): ids are
         # numbered per part, so the same number elsewhere is an unrelated
@@ -7100,6 +7773,16 @@ class RedlineEngine:
                     all_ins.add(paired)
                 elif paired.tag == qn("w:del"):
                     all_del.add(paired)
+
+        # Expand group by shared w:id across the part (same author), matching Node (QA 2026-07-23 F1).
+        group_ids = {n.get(qn("w:id")) for n in (all_ins | all_del) if n.get(qn("w:id"))}
+        group_authors = {n.get(qn("w:author")) for n in (all_ins | all_del)}
+        for n in self._story_findall("w:ins", part):
+            if n.get(qn("w:id")) in group_ids and n.get(qn("w:author")) in group_authors:
+                all_ins.add(n)
+        for n in self._story_findall("w:del", part):
+            if n.get(qn("w:id")) in group_ids and n.get(qn("w:author")) in group_authors:
+                all_del.add(n)
 
         # Chained edits nest revisions (a transient <w:del> inside a pending
         # <w:ins>); they resolve together with their host (QA round 3, 2.1).
@@ -7179,6 +7862,16 @@ class RedlineEngine:
                 elif paired.tag == qn("w:del"):
                     all_del.add(paired)
 
+        # Expand group by shared w:id across the part (same author), matching Node (QA 2026-07-23 F1).
+        group_ids = {n.get(qn("w:id")) for n in (all_ins | all_del) if n.get(qn("w:id"))}
+        group_authors = {n.get(qn("w:author")) for n in (all_ins | all_del)}
+        for n in self._story_findall("w:ins", part):
+            if n.get(qn("w:id")) in group_ids and n.get(qn("w:author")) in group_authors:
+                all_ins.add(n)
+        for n in self._story_findall("w:del", part):
+            if n.get(qn("w:id")) in group_ids and n.get(qn("w:author")) in group_authors:
+                all_del.add(n)
+
         # Chained edits nest revisions (a transient <w:del> inside a pending
         # <w:ins>); they resolve together with their host (QA round 3, 2.1).
         self._expand_group_with_nested(all_ins, all_del)
@@ -7187,6 +7880,7 @@ class RedlineEngine:
         for node in all_ins | all_del:
             resolved_ids.add(node.get(qn("w:id")))
 
+        rejected_mark_hosts = []
         for ins in all_ins:
             self._clean_wrapping_comments(ins, preserve_comments=False)
             self._delete_comments_in_element(ins)
@@ -7201,25 +7895,19 @@ class RedlineEngine:
                     row.getparent().remove(row)
                 continue
 
-            # Tracked PARAGRAPH-BREAK insertion lives inside <w:pPr>/<w:rPr>.
-            # Rejecting the paragraph break means the paragraph itself shouldn't
-            # exist — the inserted break created the paragraph boundary.
-            # Remove the entire <w:p> rather than just the <w:ins> marker
-            # (which would leave behind an empty orphan paragraph).
             grandparent = parent.getparent()
             if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
-                p_el = grandparent.getparent()
-                if p_el is not None and p_el.tag == qn("w:p") and not self._is_last_paragraph_in_cell(p_el):
-                    body = p_el.getparent()
-                    if body is not None:
-                        body.remove(p_el)
-                    continue
-                # Fallthrough if the structure is unexpected — just remove the
-                # marker so we don't leave it behind.
                 parent.remove(ins)
+                if len(parent) == 0 and len(parent.attrib) == 0:
+                    grandparent.remove(parent)
+                p_el = grandparent.getparent()
+                if p_el is not None and p_el.tag == qn("w:p"):
+                    rejected_mark_hosts.append(p_el)
                 continue
 
             parent.remove(ins)
+
+        self._resolve_rejected_mark_hosts(rejected_mark_hosts)
 
         sorted_del = sorted(
             all_del,
@@ -7623,6 +8311,7 @@ class RedlineEngine:
             #    findall walks in document order, so an outer <w:ins> is handled
             #    before any nested one; removing the outer detaches the inner,
             #    whose later (no-op) processing is guarded by the parent check.
+            rejected_mark_hosts = []
             for ins in root_element.findall(f".//{qn('w:ins')}"):
                 parent = ins.getparent()
                 if parent is None:
@@ -7633,8 +8322,19 @@ class RedlineEngine:
                     row = parent.getparent()
                     if row is not None and row.getparent() is not None:
                         row.getparent().remove(row)
-                else:
+                    continue
+                grandparent = parent.getparent()
+                if parent.tag == qn("w:rPr") and grandparent is not None and grandparent.tag == qn("w:pPr"):
                     parent.remove(ins)
+                    if len(parent) == 0 and len(parent.attrib) == 0:
+                        grandparent.remove(parent)
+                    p_el = grandparent.getparent()
+                    if p_el is not None and p_el.tag == qn("w:p"):
+                        rejected_mark_hosts.append(p_el)
+                    continue
+                parent.remove(ins)
+
+            self._resolve_rejected_mark_hosts(rejected_mark_hosts)
 
             # 2. Reject paragraph-mark deletions: keep the paragraph break.
             for p in root_element.findall(f".//{qn('w:p')}"):

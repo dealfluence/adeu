@@ -6,6 +6,7 @@ import {
   OutlineNode,
   RegexTimeoutError,
   userFindAllMatches,
+  compileRegexWithInlineFlags,
   PAGE_RANGE_MAX_PAGES,
   response_budget_limit,
   whole_doc_guard_message,
@@ -703,6 +704,16 @@ export function build_page_range_response(
       ui_parts.push(
         `> **Range capped at ${PAGE_RANGE_MAX_PAGES} pages.** Continue with \`page="${last + 1}-${end}"\`.`,
       );
+    } else if (
+      last === end &&
+      last < total_pages &&
+      end - start + 1 >= PAGE_RANGE_MAX_PAGES
+    ) {
+      const next_start = last + 1;
+      const next_end = Math.min(last + PAGE_RANGE_MAX_PAGES, total_pages);
+      ui_parts.push(
+        `> **Continues on page ${next_start} of ${total_pages}.** Pass \`page="${next_start}-${next_end}"\` to read the next pages.`,
+      );
     } else if (end > total_pages) {
       ui_parts.push(
         `> **[range stopped at page ${total_pages}: the document has ${total_pages} page(s)]**`,
@@ -961,7 +972,7 @@ export function build_search_response(
   let isUserRegex = false;
   if (search_regex) {
     try {
-      new RegExp(search_query, flags);
+      compileRegexWithInlineFlags(search_query, flags);
       isUserRegex = true;
     } catch (e: any) {
       regexDowngradedNote =
@@ -999,7 +1010,7 @@ export function build_search_response(
     return p;
   };
 
-  // ---- Resolve `page` into either null (= all) or a 1-indexed int. ----
+  // ---- Resolve `page` into either null (= all), a 1-indexed int, or [start, end]. ----
   // Python reprs the offending value (`'2-4'` for a string, `0` for an int);
   // the two spellings tell an agent whether its argument arrived as a string.
   const shownPage = typeof page === "string" ? `'${page}'` : String(page);
@@ -1009,13 +1020,30 @@ export function build_search_response(
         `${omitted_hint}, \`'all'\`, or a positive integer document page number.`,
     );
   let page_filter: number | null = null;
+  let page_range_filter: [number, number] | null = null;
   if (page !== undefined && page !== null) {
-    if (typeof page === "string") {
-      if (page.toLowerCase() !== "all") {
+    if (Array.isArray(page) && page.length === 2) {
+      const startP = Number(page[0]);
+      const endP = Number(page[1]);
+      if (!Number.isInteger(startP) || !Number.isInteger(endP) || startP < 1 || endP < startP) {
+        throw badPage("omitted");
+      }
+      if (startP > total_doc_pages) {
+        throw new Error(
+          `Document page ${startP} is out of range — the document has ` +
+            `${total_doc_pages} page(s). In search mode, \`page\` filters matches ` +
+            `by document page; omit \`page\` (or pass \`page='all'\`) to search ` +
+            `across the whole document.`,
+        );
+      }
+      page_range_filter = [startP, Math.min(endP, total_doc_pages)];
+    } else if (typeof page === "string") {
+      const s_clean = page.trim().replace(/^['"]+|['"]+$/g, "").trim();
+      if (s_clean.toLowerCase() !== "all") {
         // Allow numeric strings ("3"); reject anything else — including a
         // range like "2-4", which `parseInt` would silently read as 2.
-        if (!/^[+-]?\d+$/.test(page.trim())) throw badPage("omitted (search all pages)");
-        page_filter = parseInt(page.trim(), 10);
+        if (!/^[+-]?\d+$/.test(s_clean)) throw badPage("omitted (search all pages)");
+        page_filter = parseInt(s_clean, 10);
         if (page_filter < 1) throw badPage("omitted");
       }
     } else if (typeof page === "number" && Number.isInteger(page)) {
@@ -1090,18 +1118,28 @@ export function build_search_response(
   );
 
   // ---- Apply filter. ----
-  const filtered =
-    page_filter === null
+  const active_page_label = page_range_filter
+    ? `pages ${page_range_filter[0]}-${page_range_filter[1]}`
+    : page_filter !== null
+      ? `page ${page_filter}`
+      : "";
+  const filtered = page_range_filter
+    ? all_hits.filter(
+        (hit) =>
+          hit.page >= page_range_filter![0] &&
+          hit.page <= page_range_filter![1],
+      )
+    : page_filter === null
       ? all_hits
       : all_hits.filter((hit) => hit.page === page_filter);
 
   // `page=N` valid but has no hits, query exists elsewhere.
-  if (page_filter !== null && filtered.length === 0) {
+  if (active_page_label && filtered.length === 0) {
     const other_pages_str = pages_with_hits.join(", ");
     const ui_markdown = no_chrome
-      ? `No matches on document page ${page_filter} for query \`${search_query}\`. ` +
+      ? `No matches on document ${active_page_label} for query \`${search_query}\`. ` +
         `Query appears on page(s) ${other_pages_str}.`
-      : `> **Search Results** — No matches on document page ${page_filter} ` +
+      : `> **Search Results** — No matches on document ${active_page_label} ` +
         `for query \`${search_query}\` in \`${basename(file_path)}\`.\n\n` +
         `The query DOES appear elsewhere (${total_matches} match` +
         `${total_matches !== 1 ? "es" : ""} on page` +
@@ -1124,12 +1162,12 @@ export function build_search_response(
     const ui_parts: string[] = [];
     if (!no_chrome) {
       ui_parts.push(
-        page_filter === null
+        !active_page_label
           ? `> **Search Results** — Found ${total_matches} match` +
               `${total_matches !== 1 ? "es" : ""} for query \`${search_query}\` ` +
               `in \`${basename(file_path)}\`.`
           : `> **Search Results** — Found ${total_filtered} match` +
-              `${total_filtered !== 1 ? "es" : ""} on document page ${page_filter} ` +
+              `${total_filtered !== 1 ? "es" : ""} on document ${active_page_label} ` +
               `for query \`${search_query}\` in \`${basename(file_path)}\` ` +
               `(${total_matches} total in document).`,
       );
@@ -1172,7 +1210,7 @@ export function build_search_response(
     const next_offset = match_offset + num_rendered;
     const has_more = next_offset < total_filtered;
 
-    if (page_filter === null) {
+    if (!active_page_label) {
       const found =
         `> **Search Results** — Found ${total_matches} match` +
         `${total_matches !== 1 ? "es" : ""} for query \`${search_query}\` ` +
@@ -1194,7 +1232,7 @@ export function build_search_response(
     } else {
       const found =
         `> **Search Results** — Found ${total_filtered} match` +
-        `${total_filtered !== 1 ? "es" : ""} on document page ${page_filter} ` +
+        `${total_filtered !== 1 ? "es" : ""} on document ${active_page_label} ` +
         `for query \`${search_query}\` in \`${basename(file_path)}\` ` +
         `(${total_matches} total in document`;
       head.push(
@@ -1202,7 +1240,11 @@ export function build_search_response(
           ? `${found}, ${num_rendered} shown).`
           : `${found}).`,
       );
-      const other_pages = pages_with_hits.filter((p) => p !== page_filter);
+      const other_pages = page_range_filter
+        ? pages_with_hits.filter(
+            (p) => p < page_range_filter![0] || p > page_range_filter![1],
+          )
+        : pages_with_hits.filter((p) => p !== page_filter);
       if (other_pages.length) {
         head.push(
           `> Additional matches exist on page` +

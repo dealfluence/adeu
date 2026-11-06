@@ -472,6 +472,19 @@ function _sequence_opcodes(a: string[], b: string[]): Opcode[] {
   return ops;
 }
 
+function _word_similarity_ratio(s1: string, s2: string): number {
+  const a = s1.trim().split(/\s+/).filter(Boolean);
+  const b = s2.trim().split(/\s+/).filter(Boolean);
+  if (a.length === 0 && b.length === 0) return 1.0;
+  if (a.length === 0 || b.length === 0) return 0.0;
+  const ops = _sequence_opcodes(a, b);
+  let matches = 0;
+  for (const [tag, i1, i2] of ops) {
+    if (tag === "equal") matches += i2 - i1;
+  }
+  return (2.0 * matches) / (a.length + b.length);
+}
+
 /**
  * True when a "\n\n"-separated block reads as projected table rows: every
  * line carries the " | " cell separator. Table rows are separated by single
@@ -657,18 +670,7 @@ export function generate_edits_via_paragraph_alignment(
         _match_start_index: offset,
       });
     } else if (tag === "replace") {
-      // Table blobs in equal-count replace blocks pair up positionally and
-      // diff as ROW-LEVEL edits; word-level hunks over a table blob start or
-      // end inside " | " separators and land in the wrong cell. Prose pairs
-      // (and any block whose counts differ) keep the word-level chunk diff.
-      if (
-        i2 - i1 === j2 - j1 &&
-        Array.from({ length: i2 - i1 }).some(
-          (_, k) =>
-            _is_table_blob(orig_paragraphs[i1 + k]) ||
-            _is_table_blob(mod_paragraphs[j1 + k]),
-        )
-      ) {
+      if (i2 - i1 === j2 - j1) {
         for (let k = 0; k < i2 - i1; k++) {
           const orig_p = orig_paragraphs[i1 + k];
           const mod_p = mod_paragraphs[j1 + k];
@@ -682,21 +684,210 @@ export function generate_edits_via_paragraph_alignment(
             edits.push(...row_edits);
             continue;
           }
-          const pair_edits = generate_edits_from_text(orig_p, mod_p);
-          for (const ce of pair_edits) {
-            ce._match_start_index = (ce._match_start_index || 0) + pair_offset;
-            edits.push(ce);
+          if (_word_similarity_ratio(orig_p, mod_p) < 0.35) {
+            edits.push({
+              type: "modify",
+              target_text: orig_p,
+              new_text: mod_p,
+              comment: "Diff: Replacement",
+              _match_start_index: pair_offset,
+            });
+          } else {
+            const pair_edits = generate_edits_from_text(orig_p, mod_p);
+            for (const ce of pair_edits) {
+              ce._match_start_index = (ce._match_start_index || 0) + pair_offset;
+              edits.push(ce);
+            }
           }
         }
         continue;
       }
 
-      const orig_chunk = orig_paragraphs.slice(i1, i2).join("\n\n");
-      const mod_chunk = mod_paragraphs.slice(j1, j2).join("\n\n");
-      const chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk);
-      for (const ce of chunk_edits) {
-        ce._match_start_index = (ce._match_start_index || 0) + offset;
-        edits.push(ce);
+      const orig_ps = orig_paragraphs.slice(i1, i2);
+      const mod_ps = mod_paragraphs.slice(j1, j2);
+      if (orig_ps.some(_is_table_blob) || mod_ps.some(_is_table_blob)) {
+        const orig_chunk = orig_ps.join("\n\n");
+        const mod_chunk = mod_ps.join("\n\n");
+        const chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk);
+        for (const ce of chunk_edits) {
+          ce._match_start_index = (ce._match_start_index || 0) + offset;
+          edits.push(ce);
+        }
+        continue;
+      }
+      const m_len = orig_ps.length;
+      const n_len = mod_ps.length;
+      const dp: number[][] = Array.from({ length: m_len + 1 }, () =>
+        new Array(n_len + 1).fill(0),
+      );
+      const back: Array<Array<["pair" | "delete" | "insert", number, number] | null>> =
+        Array.from({ length: m_len + 1 }, () => new Array(n_len + 1).fill(null));
+      const sim: number[][] = Array.from({ length: m_len }, (_, oi) =>
+        Array.from({ length: n_len }, (__, mj) =>
+          _word_similarity_ratio(orig_ps[oi], mod_ps[mj]),
+        ),
+      );
+
+      for (let oi = m_len - 1; oi >= 0; oi--) {
+        for (let mj = n_len - 1; mj >= 0; mj--) {
+          let best = dp[oi + 1][mj];
+          let bop: ["pair" | "delete" | "insert", number, number] = ["delete", oi, mj];
+          if (dp[oi][mj + 1] > best) {
+            best = dp[oi][mj + 1];
+            bop = ["insert", oi, mj];
+          }
+          if (sim[oi][mj] >= 0.35 && sim[oi][mj] + dp[oi + 1][mj + 1] >= best) {
+            best = sim[oi][mj] + dp[oi + 1][mj + 1];
+            bop = ["pair", oi, mj];
+          }
+          dp[oi][mj] = best;
+          back[oi][mj] = bop;
+        }
+      }
+
+      const raw_ops: Array<["pair" | "delete" | "insert", number, number]> = [];
+      let oi_cur = 0;
+      let mj_cur = 0;
+      while (oi_cur < m_len || mj_cur < n_len) {
+        if (oi_cur === m_len) {
+          raw_ops.push(["insert", oi_cur, mj_cur]);
+          mj_cur++;
+        } else if (mj_cur === n_len) {
+          raw_ops.push(["delete", oi_cur, mj_cur]);
+          oi_cur++;
+        } else {
+          const step = back[oi_cur][mj_cur]!;
+          raw_ops.push(step);
+          if (step[0] === "pair") {
+            oi_cur++;
+            mj_cur++;
+          } else if (step[0] === "delete") {
+            oi_cur++;
+          } else {
+            mj_cur++;
+          }
+        }
+      }
+
+      const collapsed: Array<["pair" | "delete" | "pending_insert", number, number[]]> = [];
+      let idx_op = 0;
+      while (idx_op < raw_ops.length) {
+        if (raw_ops[idx_op][0] === "pair") {
+          collapsed.push(["pair", raw_ops[idx_op][1], [raw_ops[idx_op][2]]]);
+          idx_op++;
+        } else {
+          const dels: number[] = [];
+          const inss: number[] = [];
+          while (
+            idx_op < raw_ops.length &&
+            (raw_ops[idx_op][0] === "delete" || raw_ops[idx_op][0] === "insert")
+          ) {
+            if (raw_ops[idx_op][0] === "delete") dels.push(raw_ops[idx_op][1]);
+            else inss.push(raw_ops[idx_op][2]);
+            idx_op++;
+          }
+          const k_pair = Math.min(dels.length, inss.length);
+          for (let p_idx = 0; p_idx < k_pair; p_idx++) {
+            collapsed.push(["pair", dels[p_idx], [inss[p_idx]]]);
+          }
+          for (let p_idx = k_pair; p_idx < dels.length; p_idx++) {
+            collapsed.push(["delete", dels[p_idx], []]);
+          }
+          if (inss.length > k_pair) {
+            const rem_ins = inss.slice(k_pair);
+            if (collapsed.length > 0 && collapsed[collapsed.length - 1][0] === "pair") {
+              collapsed[collapsed.length - 1][2].push(...rem_ins);
+            } else {
+              collapsed.push(["pending_insert", -1, rem_ins]);
+            }
+          }
+        }
+      }
+
+      const final_subops: Array<["pair" | "delete" | "pending_insert", number, number[]]> = [];
+      let pending_ins: number[] = [];
+      for (const item of collapsed) {
+        if (item[0] === "pending_insert") {
+          pending_ins.push(...item[2]);
+        } else if (item[0] === "pair" && pending_ins.length > 0) {
+          final_subops.push(["pair", item[1], [...pending_ins, ...item[2]]]);
+          pending_ins = [];
+        } else {
+          final_subops.push(item);
+        }
+      }
+      if (pending_ins.length > 0 && final_subops.length > 0) {
+        for (let rev_i = final_subops.length - 1; rev_i >= 0; rev_i--) {
+          if (final_subops[rev_i][0] === "pair") {
+            final_subops[rev_i][2].push(...pending_ins);
+            pending_ins = [];
+            break;
+          }
+        }
+      }
+
+      let last_paired_oi = -1;
+      for (const item of final_subops) {
+        if (item[0] === "pair" && item[1] > last_paired_oi) {
+          last_paired_oi = item[1];
+        }
+      }
+      const has_surviving_after_block = i2 < orig_paragraphs.length;
+
+      for (const [sub_kind, oi_rel, mj_list] of final_subops) {
+        const orig_abs = i1 + oi_rel;
+        const p_offset = orig_offsets[orig_abs];
+        const orig_p = orig_paragraphs[orig_abs];
+        if (sub_kind === "delete") {
+          if (has_surviving_after_block || oi_rel < last_paired_oi) {
+            edits.push({
+              type: "modify",
+              target_text: orig_p + "\n\n",
+              new_text: "",
+              comment: "Diff: Text deleted",
+              _match_start_index: p_offset,
+            });
+          } else {
+            const del_txt = orig_abs > 0 ? "\n\n" + orig_p : orig_p;
+            const del_off = orig_abs > 0 ? p_offset - 2 : p_offset;
+            edits.push({
+              type: "modify",
+              target_text: del_txt,
+              new_text: "",
+              comment: "Diff: Text deleted",
+              _match_start_index: del_off,
+            });
+          }
+        } else if (sub_kind === "pair") {
+          const mod_p = mj_list.map((mj) => mod_ps[mj]).join("\n\n");
+          if (orig_p === mod_p) continue;
+          if (
+            mj_list.length === 1 &&
+            _is_table_blob(orig_p) &&
+            _is_table_blob(mod_p)
+          ) {
+            const row_edits = _table_blob_row_edits(orig_p, mod_p);
+            if (row_edits !== null) {
+              edits.push(...row_edits);
+              continue;
+            }
+          }
+          if (_word_similarity_ratio(orig_p, mod_p) < 0.35) {
+            edits.push({
+              type: "modify",
+              target_text: orig_p,
+              new_text: mod_p,
+              comment: "Diff: Replacement",
+              _match_start_index: p_offset,
+            });
+          } else {
+            const sub_edits = generate_edits_from_text(orig_p, mod_p);
+            for (const ce of sub_edits) {
+              ce._match_start_index = (ce._match_start_index || 0) + p_offset;
+              edits.push(ce);
+            }
+          }
+        }
       }
     }
   }
@@ -1192,6 +1383,15 @@ export function generate_structured_edits(
   const final_edits = edits.filter(
     (e) => e.type !== "modify" || kept_modifies.has(e as ModifyText),
   );
+  for (const e of final_edits) {
+    if (
+      e.type === "modify" &&
+      typeof e.comment === "string" &&
+      e.comment.startsWith("Diff:")
+    ) {
+      delete e.comment;
+    }
+  }
 
   return { edits: final_edits, warnings };
 }

@@ -42,7 +42,18 @@ function _get_paragraph_text(p: Paragraph): string {
   let text = "";
   const runs = findAllDescendants(p._element, "w:r");
   for (const r of runs) {
-    text += get_run_text(new Run(r, p));
+    let insideDel = false;
+    let cur = r.parentNode as Element | null;
+    while (cur && cur.nodeType === 1) {
+      if (cur.tagName === "w:del") {
+        insideDel = true;
+        break;
+      }
+      cur = cur.parentNode as Element | null;
+    }
+    if (!insideDel) {
+      text += get_run_text(new Run(r, p));
+    }
   }
   return text;
 }
@@ -80,7 +91,12 @@ export function extract_terms_from_paragraph(text: string): string[] {
   const leading = _LEADING_TERM_RE.exec(text) as RegExpExecArray & {
     indices?: Array<[number, number]>;
   };
-  if (leading && leading.indices && leading.indices[1]) {
+  if (
+    leading &&
+    leading.indices &&
+    leading.indices[1] &&
+    text.slice(leading[0].length).trim()
+  ) {
     found.push([leading.indices[1][0], leading[1].trim()]);
   }
   for (const m of text.matchAll(_SENTENCE_TERM_RE)) {

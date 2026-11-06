@@ -28,14 +28,18 @@ Output is Markdown with CriticMarkup for tracked changes and comments. The same 
 
 ```bash
 uvx adeu diff v1.docx v2.docx
+# Write a redlined .docx directly in one step:
+uvx adeu diff v1.docx v2.docx -o redlined.docx --author "Deal Team"
 ```
 
-Returns Adeu's `@@ Word Patch @@` sub-word diff. Not a unified diff.
+Returns Adeu's `@@ Word Patch @@` sub-word diff, or writes a redlined `.docx` when `-o <file>.docx` is passed.
 
 ### `adeu apply` — apply edits as tracked changes
 
 ```bash
 uvx adeu apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
+# Manual / inline formatting markup (strikethrough + bold red underline instead of Track Changes):
+uvx adeu apply contract.docx edits.json --author "Review Bot" --manual -o contract_manual.docx
 # Machine-readable stats on stdout (recommended — parse it to verify your batch):
 uvx adeu apply contract.docx edits.json --json
 ```

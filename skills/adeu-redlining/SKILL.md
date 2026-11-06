@@ -29,7 +29,7 @@ If the user wants a fresh Word document built from nothing, defer to the `docx` 
 
 Adeu runs in two modes. Pick the first that applies and stop:
 
-1. **MCP tools available.** If you see Adeu MCP tools in the session (`read_docx`, `process_document_batch`, `accept_all_changes`, `diff_docx_files`, `finalize_document`), use them. This is the preferred path on every platform. Load `references/mcp-tools.md` before planning any non-trivial batch.
+1. **MCP tools available.** If you see Adeu MCP tools in the session (`read_docx`, `process_document_batch`, `accept_all_changes`, `diff_docx_files`, `finalize_document`), use them directly. This file contains everything needed for standard MCP operations; only load `references/mcp-tools.md` when you need edge-case parameter details.
 2. **Bash available, no MCP tools.** Shell out to the Python CLI: `uvx adeu <subcommand>`. This is the only CLI Adeu ships — there is no Node CLI. Load `references/cli-fallback.md` for the command surface and the JSON shape `adeu apply` expects.
 3. **Neither available.** Tell the user. Suggested install lines, in this order:
    - Claude Code plugin (covers everything): `/plugin marketplace add dealfluence/adeu` then `/plugin install adeu-redlining@adeu-skills`
@@ -41,57 +41,57 @@ Do not present these as options to the user mid-task. Pick the available path an
 
 ## Core workflow
 
-Every redlining task follows the same shape. Follow it in order:
+Every redlining task follows the same tight loop:
 
-1. **Read first.** Always read the document before editing. Use `read_docx` (MCP) or `uvx adeu extract` (CLI). For long contracts, start with `mode="outline"` to see the heading structure, then read specific pages.
-2. **Plan the edits.** Each edit is either a search-and-replace (most common), an accept/reject of an existing tracked change by ID, a reply to a comment by ID, or a structural table edit. Write the plan down explicitly before applying.
-3. **Apply as one batch.** Send all edits in a single `process_document_batch` call (MCP) or one `adeu apply` invocation (CLI). Edits apply _sequentially_: each edit evaluates against the document state produced by the edits before it, so dependent edits may be chained — a later edit must target the text as it reads _after_ the earlier edits.
-4. **Verify.** If the user asked for a specific outcome, re-read the modified file with `clean_view=true` (MCP) or `--clean` (CLI) and confirm.
+1. **Read targeted slices first.** Choose the fastest `read_docx` mode for the task instead of `page="all"`:
+   - **Triage / review existing redlines & comments:** call `read_docx(file_path=..., mode="changes")` to get the compact ledger of every `Chg:N` and `Com:N` with author, page, and snippet in one call.
+   - **Locate specific clauses or terms:** call `read_docx(file_path=..., search_query="...", search_case_sensitive=false)` (or `search_regex=true` with alternation like `"indemnif|liabilit|terminat"`).
+   - **Navigate structure or read sections:** call `read_docx(file_path=..., mode="outline")`, then read bounded page windows (`page=1` or `page="1-8"`, continuing with `page="9-16"` when the footer indicates more pages).
+   - **Compare two `.docx` files into a redline:** call `diff_docx_files(original_path=..., modified_path=..., output_path=..., author_name=...)` to generate the tracked-changes `.docx` in one step.
+2. **Apply all changes in one batch.** Send every edit and review action in a single `process_document_batch` call (or one `adeu apply` invocation).
+   - **Sub-clause surgical edits:** keep `target_text` to the shortest unique phrase (5–20 words around the changed words) rather than replacing entire multi-sentence paragraphs.
+   - **Sequential evaluation:** each edit in `changes` evaluates against the document state produced by preceding edits in the same batch.
+   - **Output path:** pass `output_path` explicitly when requested. When `output_path` is omitted, files ending in `_processed`, `_redlined`, `.redline`, `-redline`, `_markup`, or `.marked` update in place; other files save to `<stem>_processed.docx`.
+   - **Manual / inline formatting mode:** when the user requests inline strikethrough deletions and bold red underlined insertions instead of Word Track Changes, pass `markup_mode="manual"` on `process_document_batch` (or `--manual` on `adeu apply`).
+3. **Finish from the batch receipt.** `process_document_batch` returns per-edit `*Preview (CriticMarkup):*`, minted `**IDs:**` (`Chg:N`, `Com:N`), `Applied Actions`, and `Document State` (remaining tracked changes and comments). Treat a clean batch receipt as final verification — skip any extra post-batch `read_docx` call unless you need to inspect surrounding prose not shown in the receipt.
 
-Batches are transactional: if any edit fails validation, the whole batch is rejected, nothing is written, and the error reports per-edit failures you can correct and resubmit.
+Batches are transactional by default (`partial=false`): if any edit fails validation, nothing is written and the error reports exact per-edit diagnostics and nearest-match candidates so you can fix and resubmit immediately. Pass `partial=true` when you want valid edits applied and invalid ones reported as skipped.
 
 ## Critical gotchas
 
-These are environment-specific facts that will trip you up if you assume Word/`.docx` behaves like plain text. Read this section every time.
+- **IDs are session-bound.** Change IDs (`Chg:12`) and comment IDs (`Com:5`) come from `read_docx` (e.g. `mode="changes"`) or from the `**IDs:**` line of the immediately preceding `process_document_batch` receipt. Never guess IDs.
+- **Batches apply sequentially.** If edit 1 renames `X → Y`, a later edit in the same batch touching that span must target `Y`, not the original `X`.
+- **`target_text` must be unique by default.** `match_mode: "strict"` (default) requires a single match. Add 3–8 words of surrounding context to disambiguate, or set `match_mode: "first"` or `"all"`. Set `regex: true` for regex matching; capture groups expand via `$1`, `$2` (or `\1`, `\2`) in `new_text`.
+- **Plain replacement text in `new_text`.** Never write `{++`, `{--`, `{>>`, or `{==` into `new_text`. Use the `comment` field on the edit to attach a margin comment.
+- **`new_text` Markdown dialect.** Supports headings (`#` through `######`), `**bold**`, `_italic_` (underscores only), `\n\n` for paragraph splits, and Markdown pipe tables (`| Col 1 | Col 2 |\n|---|---|\n| A | B |`) to insert native Word tables. Empty string `""` deletes `target_text`.
+- **Read-only appendix.** Anything inside `<!-- READONLY_BOUNDARY_START -->` (defined terms, cross-reference targets, diagnostic summaries) is read-only projection metadata. Cross-references (`[~text~](#_Ref...)`) and bookmarks (`{#_BookmarkName}`) in the body are computed/structural — edit prose around them or include them unchanged in both `target_text` and `new_text`.
+- **`clean_view` toggles the projected state.** `clean_view=false` (default) projects raw text with pending tracked changes as CriticMarkup; `clean_view=true` projects the accepted state. Note that `process_document_batch` matches `target_text` against the clean/accepted state so you can edit cleanly across existing changes.
+- **Page indexing.** `page="1-8"` reads up to 8 pages at a time; check the `Continues on page X of Y` footer to see if more pages follow. `page` also accepts a page or range (`page=4` or `page="4-5"`) alongside `search_query`.
 
-- **IDs are session-bound.** Change IDs (`Chg:12`) and comment IDs (`Com:5`) shift every time the document state changes. Before any `accept`, `reject`, or `reply` action, call `read_docx` _immediately_ before the batch. Never reuse IDs from earlier in the conversation. Never reuse IDs across a save/reload boundary.
+## Edit types — complete schema reference
 
-- **Batches apply sequentially and reject transactionally.** You can rename `X → Y` and then in the same batch modify `Y` — but the second edit must target `Y` (the text as it reads after the rename), not the original `X` wording. Stale targets fail validation, and any validation failure rejects the whole batch (nothing is applied) with per-edit errors explaining what to fix.
+Pass `changes` as a list of objects to `process_document_batch(original_docx_path, author_name, changes, output_path?, partial?, markup_mode?)`:
 
-- **`target_text` must be unique by default.** `match_mode: "strict"` (the default) requires a single match. Either add surrounding context to disambiguate, or explicitly set `match_mode: "first"` or `"all"`. Set `regex: true` to use a regular expression; capture groups are available as `$1`, `$2` in `new_text`.
+| `type`        | Purpose                                   | Fields                                                                                                                                      |
+| ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `modify`      | Search-and-replace as a tracked change    | `target_text` (req), `new_text` (req, `""` deletes), `comment?`, `match_mode?` (`"strict"` \| `"first"` \| `"all"`), `regex?` (bool)        |
+| `accept`      | Finalize an existing tracked change by ID | `target_id` (req, e.g. `"Chg:12"`), `comment?`, `part?` (`"body"` \| `"header"` \| `"footer"` \| `"footnotes"` \| `"endnotes"`)             |
+| `reject`      | Revert an existing tracked change by ID   | `target_id` (req, e.g. `"Chg:12"`), `comment?`, `part?`                                                                                     |
+| `reply`       | Reply to an existing comment thread       | `target_id` (req, e.g. `"Com:5"`), `text` (req)                                                                                             |
+| `set_field`   | Fill or toggle a content control (`CC:N`) | `field` (req, e.g. `"CC:3"` or tag/alias), `value` (req), `match_mode?`, `comment?`                                                         |
+| `insert_row`  | Insert a table row above/below an anchor  | `target_text` (req, cell text in anchor row), `position` (`"above"` \| `"below"`), `cells` (`string[]` left-to-right), `comment?`           |
+| `delete_row`  | Delete a table row containing anchor text | `target_text` (req, cell text in row to delete), `comment?`                                                                                 |
 
-- **Do not write CriticMarkup tags manually.** Never put `{++`, `{--`, `{>>`, or `{==` into `new_text`. Use the `comment` field on the edit to attach a margin comment. Adeu generates the tracked-change XML from your plain replacement text.
+Other MCP tools:
+- `read_docx(file_path, mode="full"|"outline"|"changes"|"appendix"|"fields", page?, search_query?, search_regex?, search_case_sensitive?, clean_view?, full_paragraph?)`
+- `diff_docx_files(original_path, modified_path, compare_clean=true, output_path?, author_name?)` — returns text diff, or writes a redlined `.docx` directly when `output_path` is provided.
+- `accept_all_changes(docx_path, output_path?, remove_comments=true)` — accepts all tracked changes (`remove_comments=false` keeps comments).
+- `finalize_document(file_path, output_path?, sanitize_mode="full"|"keep-markup", accept_all?, protection_mode?, author?)`
 
-- **`new_text` supports Markdown.** Headings (`#` through `######`), `**bold**`, `_italic_` (not `*italic*` — strictly underscores), and `\n\n` to split into paragraphs. Empty string deletes.
+## Reference loading (on demand only)
 
-- **Read the appendix before editing structural references.** `read_docx` projects a semantic appendix at the bottom of the document containing defined terms, cross-references (`[~text~](#_Ref)`), internal anchors (`{#_BookmarkName}`), and footnotes (`[^fn-id]`). Anything inside the `<!-- READONLY_BOUNDARY_START -->` marker is read-only — attempting to modify it via search-and-replace will be rejected. Use `mode="appendix"` to see it explicitly.
+Do **not** load these during normal MCP tasks; consult them only when their specific trigger applies:
 
-- **`clean_view` toggles the document state you see.** `clean_view=false` (default) shows the _raw_ document with all pending tracked changes inline as CriticMarkup. `clean_view=true` shows what the document would look like if every pending change were accepted. Choose deliberately — comparing the wrong view to user intent is the most common source of confusion.
-
-- **Page indexing.** `page=N` paginates the body. `page='all'` or omitting `page` with a `search_query` searches the whole document. Don't assume page numbers from the user's PDF viewer match Adeu's pagination — they often don't.
-
-- **Live Word (Windows COM) is Python-only.** If the user is editing the active document in Word, only the Python `adeu` server supports it. The Node server does not. Table row inserts/deletes are also not supported in Live Word mode — fall back to disk editing.
-
-- **Multi-author redlines.** If the document has tracked changes from multiple authors, edits that overlap another author's pending insertion are rejected to prevent silent destruction of their work. Tell the user; don't try to force it.
-
-## Edit types — quick reference
-
-Use `references/mcp-tools.md` for the full schema. The five operations:
-
-| Type                        | Purpose                                | Required fields                                                                |
-| --------------------------- | -------------------------------------- | ------------------------------------------------------------------------------ |
-| `modify`                    | Search-and-replace as a tracked change | `target_text`, `new_text`                                                      |
-| `accept`                    | Finalize an existing tracked change    | `target_id` (e.g. `Chg:12`)                                                    |
-| `reject`                    | Revert an existing tracked change      | `target_id`                                                                    |
-| `reply`                     | Reply to an existing comment           | `target_id` (e.g. `Com:5`), `text`                                             |
-| `insert_row` / `delete_row` | Add or remove a table row              | `target_text` (a cell value to anchor on), plus `position`/`cells` for inserts |
-
-`comment` is optional on `modify`/`accept`/`reject` to attach a margin comment.
-
-## Reference loading
-
-Load these only when relevant — they're not part of the base context:
-
-- **`references/mcp-tools.md`** — full MCP tool schemas, parameter details, `process_document_batch` discriminated union. Load before planning any non-trivial edit batch on the MCP path.
-- **`references/cli-fallback.md`** — `uvx adeu` subcommands and the `edits.json` shape. Load on the CLI path.
-- **`references/criticmarkup.md`** — CriticMarkup syntax and Adeu's semantic projections (footnotes, cross-refs, anchors, defined-terms appendix). Load when interpreting raw `read_docx` output or when the user asks about a marker like `[^fn-3]` or `{#_BookmarkName}`.
+- **`references/mcp-tools.md`** — consult only for content-control lock overrides (`ignore_control_locks`, `ignore_document_protection`, `allow_untracked_writes`) or `finalize_document` encryption details.
+- **`references/cli-fallback.md`** — load only when MCP tools are absent and you must use `uvx adeu` via Bash.
+- **`references/criticmarkup.md`** — load only when interpreting unusual projection markers (`[^fn-3]`, `{#_BookmarkName}`, `[~text~](#_Ref...)`).

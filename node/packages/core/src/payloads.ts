@@ -469,6 +469,8 @@ export function shrink_batch_stats(
 ): Record<string, any> {
   const res = { ...stats };
   delete res.engine;
+  delete res.actions;
+  delete res.document_state;
 
   const edit_errors = new Set<string>();
   if ("edits" in stats) {

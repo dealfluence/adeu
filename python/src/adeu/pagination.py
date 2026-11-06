@@ -54,7 +54,7 @@ def parse_page_arg(
         return ("single", page)
 
     if isinstance(page, str):
-        s_page = page.strip()
+        s_page = page.strip().strip("'\"")
         if not s_page:
             raise ValueError(
                 f"Invalid page parameter: '{page}'. Provide a positive integer, page range (e.g. '2-6'), or 'all'."

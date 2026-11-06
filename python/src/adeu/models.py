@@ -103,6 +103,7 @@ class _EditState(BaseModel):
     # these ids, so previews show what the document really looks like
     # (F6, QA 2026-07-23).
     _used_revision_ids: list = PrivateAttr(default_factory=list)
+    _minted_comment_ids: list = PrivateAttr(default_factory=list)
     # The element that MUST host this edit's insertion, when position cannot
     # express it. Set only for a fill into an emptied content control, whose
     # `w:sdtContent` holds no run to anchor against (CC-5, spec-set-field §4).

@@ -421,13 +421,23 @@ async def _read_docx_disk(
                 # served from the cached base projection regardless of mode.
                 text, pagination = await asyncio.to_thread(doc_cache.get_pagination, entry, clean_view, relay.callback)
                 await ctx.info("Successfully extracted text from DOCX", extra={"text_length": len(text)})
+                search_page: Any = page
+                if isinstance(page, str):
+                    s_clean = page.strip().strip("'\"")
+                    if "-" in s_clean:
+                        try:
+                            p_kind, p_val = parse_page_arg(s_clean)
+                            if p_kind == "range":
+                                search_page = p_val
+                        except ValueError:
+                            pass
                 return _as_tool_result(
                     build_search_response(
                         text,
                         search_query,
                         search_regex,
                         search_case_sensitive,
-                        page,
+                        search_page,
                         file_path,
                         pagination_result=pagination,
                         max_matches=max_matches,
@@ -622,6 +632,7 @@ async def _process_document_batch_disk(
     ignore_control_locks: bool = False,
     ignore_document_protection: bool = False,
     allow_untracked_writes: bool = False,
+    markup_mode: str = "track_changes",
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -685,6 +696,7 @@ async def _process_document_batch_disk(
             ignore_control_locks=ignore_control_locks,
             ignore_document_protection=ignore_document_protection,
             allow_untracked_writes=allow_untracked_writes,
+            markup_mode=markup_mode,
         )
 
         valid_indices = getattr(rejected_notes, "valid_indices", None)
@@ -718,7 +730,7 @@ async def _process_document_batch_disk(
         final_output = output_path
         if not final_output:
             p = Path(original_docx_path)
-            if p.stem.endswith("_processed") or p.stem.endswith("_redlined"):
+            if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", p.stem, re.IGNORECASE):
                 final_output = str(p)
             else:
                 final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
@@ -843,6 +855,18 @@ async def _process_document_batch_disk(
             f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.\n"
             f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.\n"
         )
+        if stats.get("document_state"):
+            ds = stats["document_state"]
+            res += (
+                f"Document State: {ds.get('tracked_changes', 0)} tracked change(s), "
+                f"{ds.get('comments', 0)} comment(s) remaining.\n"
+            )
+
+        if stats.get("actions"):
+            res += "\nApplied Actions:\n"
+            for act_rep in stats["actions"]:
+                r_ids = ", ".join(f"`{rid}`" for rid in act_rep.get("resolved_ids", []))
+                res += f"- **{act_rep.get('type')}** on {r_ids} ✅ [{act_rep.get('status', 'applied')}]\n"
 
         if stats.get("edits"):
             res += "\nDetailed Edit Reports:\n"
@@ -862,6 +886,9 @@ async def _process_document_batch_disk(
                 occ = report.get("occurrences_modified", 0)
                 occ_text = f"{occ} occurrence{'s' if occ != 1 else ''} modified"
                 res += f"**Mode:** `{report.get('match_mode', 'strict')}` ({occ_text})\n"
+                all_minted_ids = [*(report.get("change_ids") or []), *(report.get("comment_ids") or [])]
+                if all_minted_ids:
+                    res += f"**IDs:** {', '.join(f'`{mid}`' for mid in all_minted_ids)}\n"
 
                 # An edit's comment must be visible in the rendered report —
                 # it is where an agent verifies the comment it wrote
@@ -901,19 +928,30 @@ async def _process_document_batch_disk(
 
 @tool(
     description=(
-        "Compares two DOCX files and generates a text-based Unified Diff. "
-        "Use this to see exactly what changed between two versions of a document. "
+        "Compares two DOCX files and generates a text-based Unified Diff, or optionally writes a "
+        "redlined DOCX with native Word tracked changes when output_path is provided. "
         "By default (compare_clean=True), it compares the 'Accepted' finalized states of both documents. "
         "Set compare_clean=False if you need to compare the raw underlying text including Tracked Change CriticMarkup."
     ),
     tags={"docx"},
-    annotations={"readOnlyHint": True},
+    annotations={"readOnlyHint": False},
 )
 async def diff_docx_files(
     original_path: Annotated[str, "Path to the base document."],
     modified_path: Annotated[str, "Path to the new document."],
     ctx: Context,
     compare_clean: Annotated[bool, "If True, compares 'Accepted' state. If False, compares raw text."] = True,
+    output_path: Annotated[
+        Optional[str],
+        (
+            "Optional path to save a redlined DOCX showing all changes from "
+            "original_path to modified_path as native Word tracked changes."
+        ),
+    ] = None,
+    author_name: Annotated[
+        Optional[str],
+        "Author name for tracked changes when output_path is provided (default: 'Comparison').",
+    ] = None,
     reasoning: Annotated[
         Optional[str],
         "Why do I need to diff these two documents? State this reason before any other parameter.",
@@ -927,6 +965,7 @@ async def diff_docx_files(
             "original_path": original_path,
             "modified_path": modified_path,
             "compare_clean": compare_clean,
+            "output_path": output_path,
         },
     )
 
@@ -946,6 +985,34 @@ async def diff_docx_files(
             stream_mod, filename=Path(modified_path).name, clean_view=compare_clean, include_appendix=False
         )
 
+        saved_header = ""
+        if output_path:
+            from docx import Document as DocxDocument
+
+            from adeu.diff import generate_structured_edits
+            from adeu.ingest import _extract_text_from_doc
+
+            doc_orig_obj = DocxDocument(BytesIO(stream_orig.getvalue()))
+            doc_mod_obj = DocxDocument(BytesIO(stream_mod.getvalue()))
+            t_orig, s_orig = _extract_text_from_doc(
+                doc_orig_obj, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+            t_mod, s_mod = _extract_text_from_doc(
+                doc_mod_obj, clean_view=compare_clean, include_appendix=False, return_structure=True
+            )
+            struct_edits, _ = generate_structured_edits(t_orig, s_orig, t_mod, s_mod)  # type: ignore[arg-type]
+            eff_author = (author_name or "").strip() or "Comparison"
+            eng = RedlineEngine(BytesIO(stream_orig.getvalue()), author=eff_author)
+            applied, skipped = eng.apply_edits(struct_edits)  # type: ignore[arg-type]
+            out_file = Path(output_path)
+            if out_file.parent:
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_bytes(eng.save_to_stream().getvalue())
+            saved_header = (
+                f"Redline saved to: {output_path} "
+                f"({applied} tracked change(s) applied, {skipped} skipped, Author: {eff_author}).\n\n"
+            )
+
         await ctx.debug("Generating text differences")
         # atomic_criticmarkup: diff-display only — hunks must never cut into a
         # {--/{++/{>>/{== block (QA 2026-07-23 F15). No-op on clean text.
@@ -953,10 +1020,10 @@ async def diff_docx_files(
 
         if not edits:
             await ctx.warning("No text differences found between the documents.")
-            return add_timing_if_debug(start_time, "No text differences found between the documents.")
+            return add_timing_if_debug(start_time, saved_header + "No text differences found between the documents.")
 
         await ctx.info(f"Diff complete. Found {len(edits)} differences.")
-        res = _create_diff_output(original_path, modified_path, text_orig, edits)
+        res = saved_header + _create_diff_output(original_path, modified_path, text_orig, edits)
         return add_timing_if_debug(start_time, res)
 
     except Exception as e:
@@ -1573,6 +1640,13 @@ if sys.platform == "win32":
         ignore_control_locks: IgnoreControlLocksParam = False,
         ignore_document_protection: IgnoreDocumentProtectionParam = False,
         allow_untracked_writes: AllowUntrackedWritesParam = False,
+        markup_mode: Annotated[
+            Literal["track_changes", "manual"],
+            (
+                "Markup mode: 'track_changes' (default, native Word w:ins/w:del) or 'manual' "
+                "(inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments)."
+            ),
+        ] = "track_changes",
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1644,6 +1718,7 @@ if sys.platform == "win32":
                     ignore_control_locks=ignore_control_locks,
                     ignore_document_protection=ignore_document_protection,
                     allow_untracked_writes=allow_untracked_writes,
+                    markup_mode=markup_mode,
                 )
         else:
             # Not open in Word (or Word not running): the file on disk is
@@ -1659,6 +1734,7 @@ if sys.platform == "win32":
                 ignore_control_locks=ignore_control_locks,
                 ignore_document_protection=ignore_document_protection,
                 allow_untracked_writes=allow_untracked_writes,
+                markup_mode=markup_mode,
             )
         return add_timing_if_debug(start_time, res)
 
@@ -1914,6 +1990,13 @@ else:
         ignore_control_locks: IgnoreControlLocksParam = False,
         ignore_document_protection: IgnoreDocumentProtectionParam = False,
         allow_untracked_writes: AllowUntrackedWritesParam = False,
+        markup_mode: Annotated[
+            Literal["track_changes", "manual"],
+            (
+                "Markup mode: 'track_changes' (default, native Word w:ins/w:del) or 'manual' "
+                "(inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments)."
+            ),
+        ] = "track_changes",
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1948,5 +2031,6 @@ else:
             ignore_control_locks=ignore_control_locks,
             ignore_document_protection=ignore_document_protection,
             allow_untracked_writes=allow_untracked_writes,
+            markup_mode=markup_mode,
         )
         return add_timing_if_debug(start_time, res)

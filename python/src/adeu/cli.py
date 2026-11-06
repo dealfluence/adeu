@@ -267,7 +267,6 @@ def _require_input_file(path: Path, exit_code: int = 1) -> None:
 
 
 def _handle_docx_error_and_exit(filename: str, exc: Exception) -> None:
-
     err_str = str(exc)
     reason = "got bad zip signature"
     if "not a valid DOCX file" in err_str:
@@ -1139,6 +1138,7 @@ def _open_redline_engine_or_exit(
     author: "str | None" = None,
     terse_errors: bool = False,
     gate_overrides: "dict | None" = None,
+    markup_mode: str = "track_changes",
 ) -> RedlineEngine:
     """Opens a RedlineEngine on `path` through the single shared error path."""
     _require_input_file(path)
@@ -1149,8 +1149,8 @@ def _open_redline_engine_or_exit(
         with open(path, "rb") as f:
             stream = BytesIO(f.read())
         if author is not None:
-            return RedlineEngine(stream, author=author, terse_errors=terse_errors, **gates)
-        return RedlineEngine(stream, terse_errors=terse_errors, **gates)
+            return RedlineEngine(stream, author=author, terse_errors=terse_errors, markup_mode=markup_mode, **gates)
+        return RedlineEngine(stream, terse_errors=terse_errors, markup_mode=markup_mode, **gates)
     except SystemExit:
         raise
     except Exception as e:
@@ -1174,7 +1174,16 @@ def handle_diff(args):
             protected.append((args.original, "original DOCX"))
         if getattr(args, "modified", None):
             protected.append((args.modified, "modified file"))
-        _guard_text_output_path(args.output, protected, payload="diff output")
+        if args.output.suffix.lower() == ".docx" and not args.json and getattr(args, "author", None):
+            for path, role in protected:
+                if path is not None and _paths_alias_same_file(args.output, path):
+                    _cli_error(
+                        "invalid_input",
+                        f"Output path '{args.output}' is the same file as the {role}. Writing diff output "
+                        "over it would destroy it. Choose a different output path.",
+                    )
+        else:
+            _guard_text_output_path(args.output, protected, payload="diff output")
 
     from adeu.diff import DiffEdit, make_edits_self_contained
 
@@ -1245,6 +1254,15 @@ def handle_diff(args):
             print(f"Diff JSON saved to {args.output}", file=sys.stderr)
         else:
             print(json_output)
+    elif getattr(args, "output", None) and args.output.suffix.lower() == ".docx":
+        eff_author = (getattr(args, "author", None) or "").strip() or _default_author()
+        eng = RedlineEngine(BytesIO(args.original.read_bytes()), author=eff_author)
+        applied, skipped = eng.apply_edits(edits)  # type: ignore[arg-type]
+        _write_output_or_exit(args.output, eng.save_to_stream().getvalue())
+        print(
+            f"Redline saved to {args.output} ({applied} applied, {skipped} skipped, Author: {eff_author})",
+            file=sys.stderr,
+        )
     elif not edits:
         # An explicit statement, on stdout: bare "Found 0 changes:" left the
         # reader to infer the documents are identical (QA 2026-07-23 F14).
@@ -1427,6 +1445,7 @@ def handle_apply(args):
             "ignore_document_protection": getattr(args, "ignore_document_protection", False),
             "allow_untracked_writes": getattr(args, "allow_untracked_writes", False),
         },
+        markup_mode="manual" if getattr(args, "manual", False) else "track_changes",
     )
     try:
         stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
@@ -1461,7 +1480,7 @@ def handle_apply(args):
     if not batch_failed:
         output_path = args.output
         if not output_path:
-            if args.original.stem.endswith("_redlined") or args.original.stem.endswith("_processed"):
+            if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", args.original.stem, re.IGNORECASE):
                 output_path = args.original
             else:
                 output_path = args.original.with_name(f"{args.original.stem}_redlined.docx")
@@ -2214,10 +2233,22 @@ def _main_impl():
     )
     p_init.set_defaults(func=handle_init)
 
+    default_author = _default_author()
+
     p_diff = subparsers.add_parser("diff", help="Compare two files (DOCX vs DOCX/Text)")
     p_diff.add_argument("original", type=Path, help="Original DOCX")
     p_diff.add_argument("modified", type=Path, help="Modified DOCX or Text file")
-    p_diff.add_argument("-o", "--output", type=Path, help="Output file path (default: stdout)")
+    p_diff.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output file path (if ending in .docx without --json, writes a redlined DOCX; default: stdout)",
+    )
+    p_diff.add_argument(
+        "--author",
+        default=None,
+        help=f"Author name when saving a redlined .docx via -o (default: '{default_author}')",
+    )
     p_diff.add_argument("--json", action="store_true", help="Output raw JSON edits")
     p_diff.add_argument(
         "--compare-clean",
@@ -2229,8 +2260,6 @@ def _main_impl():
         ),
     )
     p_diff.set_defaults(func=handle_diff)
-
-    default_author = _default_author()
 
     p_apply = subparsers.add_parser(
         "apply",
@@ -2254,6 +2283,14 @@ def _main_impl():
         "--live",
         action="store_true",
         help=f"{live_help_prefix}Apply edits to live active Word document",
+    )
+    p_apply.add_argument(
+        "--manual",
+        action="store_true",
+        help=(
+            "Apply changes as manual inline formatting (strikethrough deletions and "
+            "bold underlined red #C00000 insertions) instead of Word Track Changes"
+        ),
     )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")
     p_apply.add_argument(

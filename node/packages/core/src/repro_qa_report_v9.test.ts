@@ -153,10 +153,10 @@ describe("ADEU-QA-002 B: full-paragraph deletion keeps the following style", () 
 
     expect(cleanText(doc).trim()).toBe(text_m.trim());
 
-    // The merged container must carry the FOLLOWING paragraph's properties:
-    // no Heading2 pStyle may survive on a paragraph whose visible text is
+    // No Heading2 pStyle may survive on a paragraph whose visible text is
     // the body paragraph's.
     for (const p of findAllDescendants(doc.element, "w:p")) {
+      if (findAllDescendants(p, "w:t").length === 0) continue;
       const pPr = findChild(p, "w:pPr");
       const pStyle = pPr ? findChild(pPr, "w:pStyle") : null;
       if (pStyle && pStyle.getAttribute("w:val") === "Heading2") {

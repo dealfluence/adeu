@@ -3,13 +3,19 @@ from typing import Any, Dict, List, Tuple
 
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 from rapidfuzz.distance import Levenshtein
 
 from adeu.utils.docx import get_run_text, iter_block_items
 
 
 def _get_paragraph_text(p: Paragraph) -> str:
-    return "".join(get_run_text(r) for r in p.runs)
+    w_del = qn("w:del")
+    return "".join(
+        get_run_text(Run(r, p))
+        for r in p._element.findall(f".//{qn('w:r')}")
+        if not any(anc.tag == w_del for anc in r.iterancestors())
+    )
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -31,7 +37,7 @@ def extract_terms_from_paragraph(text: str) -> List[str]:
     """
     found: List[Tuple[int, str]] = []
     leading = _LEADING_TERM_RE.match(text)
-    if leading:
+    if leading and text[leading.end() :].strip():
         found.append((leading.start(1), leading.group(1).strip()))
     for m in _SENTENCE_TERM_RE.finditer(text):
         found.append((m.start(1), m.group(1).strip()))

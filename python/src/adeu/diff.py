@@ -644,15 +644,33 @@ def make_edits_self_contained(
         cleaned = re.sub(r"^\d+\.", "", cleaned)
         return len(cleaned) > 0
 
-    def _is_valid_candidate(candidate: str, new_full: str, sim_text: str) -> bool:
+    def _has_balanced_markdown(s: str) -> bool:
+        if s.count("**") % 2 != 0:
+            return False
+        if s.count("__") % 2 != 0:
+            return False
+        if _count_standalone_underscores(s) % 2 != 0:
+            return False
+        return True
+
+    def _is_valid_candidate(
+        candidate: str,
+        new_full: str,
+        sim_text: str,
+        require_orig_unique: bool = True,
+    ) -> bool:
         if not candidate:
             return False
         if not _has_real_content(candidate):
+            return False
+        if not _has_balanced_markdown(candidate) or not _has_balanced_markdown(new_full):
             return False
         if "\n\n" in candidate and candidate.count("\n\n") != new_full.count("\n\n"):
             non_empty = [p.strip() for p in candidate.split("\n\n") if p.strip()]
             if len(non_empty) >= 2:
                 return False
+        if require_orig_unique and original_text.count(candidate) != 1:
+            return False
         return sim_text.count(candidate) == 1
 
     def _widen_in(h: _Hunk, h_pos: int, sim_text: str) -> "Tuple[int, int, Optional[_Hunk]]":
@@ -690,7 +708,7 @@ def make_edits_self_contained(
             prefix = original_text[start : h.idx]
             suffix = original_text[h.end : end]
             new_full = f"{prefix}{h.new}{suffix}"
-            if _is_valid_candidate(candidate, new_full, sim_text):
+            if _is_valid_candidate(candidate, new_full, sim_text, require_orig_unique=True):
                 return start, end, None
             if start == min_start and end == max_end:
                 break
@@ -705,7 +723,7 @@ def make_edits_self_contained(
         prefix = original_text[start : h.idx]
         suffix = original_text[h.end : end]
         new_full = f"{prefix}{h.new}{suffix}"
-        if _is_valid_candidate(candidate, new_full, sim_text):
+        if _is_valid_candidate(candidate, new_full, sim_text, require_orig_unique=False):
             return start, end, None
 
         # Ambiguous. Prefer coalescing with the closer clamping neighbor.
@@ -1212,6 +1230,13 @@ def generate_structured_edits(
         if not (isinstance(e, ModifyText) and e._match_start_index is not None and not e._is_table_edit)
     ]
     edits = non_text_edits + list(surviving)
+    for edit_item in edits:
+        if (
+            isinstance(edit_item, ModifyText)
+            and isinstance(edit_item.comment, str)
+            and edit_item.comment.startswith("Diff:")
+        ):
+            edit_item.comment = None
     return edits, warnings
 
 
@@ -1438,32 +1463,156 @@ def generate_edits_via_paragraph_alignment(original_text: str, modified_text: st
                             edits.append(ce)
                 continue
 
-            orig_chunk = "\n\n".join(orig_paragraphs[i1:i2])
-            mod_chunk = "\n\n".join(mod_paragraphs[j1:j2])
-
-            # If the replace block represents a massive truncation, rewrite or insert,
-            # do not decompose into fragile, fine-grained character/word diffs.
-            # Just generate a single clean replacement edit.
-            use_wholesale = False
-            if len(orig_chunk) > 120 or len(mod_chunk) > 120:
-                m = difflib.SequenceMatcher(None, orig_chunk, mod_chunk)
-                if m.real_quick_ratio() < 0.35 and m.ratio() < 0.3:
-                    use_wholesale = True
-
-            if use_wholesale:
-                edit = ModifyText(
-                    type="modify",
-                    target_text=orig_chunk,
-                    new_text=mod_chunk,
-                    comment="Diff: Rewrite",
-                )
-                edit._match_start_index = offset
-                edits.append(edit)
-            else:
+            orig_ps = orig_paragraphs[i1:i2]
+            mod_ps = mod_paragraphs[j1:j2]
+            if any(_is_table_blob(p) for p in orig_ps) or any(_is_table_blob(p) for p in mod_ps):
+                orig_chunk = "\n\n".join(orig_ps)
+                mod_chunk = "\n\n".join(mod_ps)
                 chunk_edits = generate_edits_from_text(orig_chunk, mod_chunk)
                 for ce in chunk_edits:
                     ce._match_start_index = (ce._match_start_index or 0) + offset
                     edits.append(ce)
+                continue
+            m_len, n_len = len(orig_ps), len(mod_ps)
+            dp = [[0.0] * (n_len + 1) for _ in range(m_len + 1)]
+            back: list[list[tuple[str, int, int] | None]] = [[None] * (n_len + 1) for _ in range(m_len + 1)]
+            sim = [
+                [difflib.SequenceMatcher(None, orig_ps[oi].split(), mod_ps[mj].split()).ratio() for mj in range(n_len)]
+                for oi in range(m_len)
+            ]
+            for oi in range(m_len - 1, -1, -1):
+                for mj in range(n_len - 1, -1, -1):
+                    best = dp[oi + 1][mj]
+                    bop = ("delete", oi, mj)
+                    if dp[oi][mj + 1] > best:
+                        best = dp[oi][mj + 1]
+                        bop = ("insert", oi, mj)
+                    if sim[oi][mj] >= 0.35 and (sim[oi][mj] + dp[oi + 1][mj + 1]) >= best:
+                        best = sim[oi][mj] + dp[oi + 1][mj + 1]
+                        bop = ("pair", oi, mj)
+                    dp[oi][mj] = best
+                    back[oi][mj] = bop
+
+            raw_ops: list[tuple[str, int, int]] = []
+            oi_cur, mj_cur = 0, 0
+            while oi_cur < m_len or mj_cur < n_len:
+                if oi_cur == m_len:
+                    raw_ops.append(("insert", oi_cur, mj_cur))
+                    mj_cur += 1
+                elif mj_cur == n_len:
+                    raw_ops.append(("delete", oi_cur, mj_cur))
+                    oi_cur += 1
+                else:
+                    step = back[oi_cur][mj_cur]
+                    assert step is not None
+                    raw_ops.append(step)
+                    if step[0] == "pair":
+                        oi_cur += 1
+                        mj_cur += 1
+                    elif step[0] == "delete":
+                        oi_cur += 1
+                    else:
+                        mj_cur += 1
+
+            collapsed: list[tuple[str, int, list[int]]] = []
+            idx_op = 0
+            while idx_op < len(raw_ops):
+                if raw_ops[idx_op][0] == "pair":
+                    collapsed.append(("pair", raw_ops[idx_op][1], [raw_ops[idx_op][2]]))
+                    idx_op += 1
+                else:
+                    dels: list[int] = []
+                    inss: list[int] = []
+                    while idx_op < len(raw_ops) and raw_ops[idx_op][0] in ("delete", "insert"):
+                        if raw_ops[idx_op][0] == "delete":
+                            dels.append(raw_ops[idx_op][1])
+                        else:
+                            inss.append(raw_ops[idx_op][2])
+                        idx_op += 1
+                    k_pair = min(len(dels), len(inss))
+                    for p_idx in range(k_pair):
+                        collapsed.append(("pair", dels[p_idx], [inss[p_idx]]))
+                    for p_idx in range(k_pair, len(dels)):
+                        collapsed.append(("delete", dels[p_idx], []))
+                    if len(inss) > k_pair:
+                        rem_ins = inss[k_pair:]
+                        if collapsed and collapsed[-1][0] == "pair":
+                            collapsed[-1][2].extend(rem_ins)
+                        else:
+                            collapsed.append(("pending_insert", -1, rem_ins))
+
+            final_subops: list[tuple[str, int, list[int]]] = []
+            pending_ins: list[int] = []
+            for item in collapsed:
+                if item[0] == "pending_insert":
+                    pending_ins.extend(item[2])
+                elif item[0] == "pair" and pending_ins:
+                    final_subops.append(("pair", item[1], pending_ins + item[2]))
+                    pending_ins = []
+                else:
+                    final_subops.append(item)
+
+            if pending_ins and final_subops:
+                # Attach any trailing pending_ins to the last pair if one exists
+                for rev_i in range(len(final_subops) - 1, -1, -1):
+                    if final_subops[rev_i][0] == "pair":
+                        final_subops[rev_i][2].extend(pending_ins)
+                        pending_ins = []
+                        break
+
+            last_paired_oi = max((item[1] for item in final_subops if item[0] == "pair"), default=-1)
+            has_surviving_after_block = i2 < len(orig_paragraphs)
+
+            for sub_kind, oi_rel, mj_list in final_subops:
+                orig_abs = i1 + oi_rel
+                p_offset = orig_offsets[orig_abs]
+                orig_p = orig_paragraphs[orig_abs]
+                if sub_kind == "delete":
+                    if has_surviving_after_block or oi_rel < last_paired_oi:
+                        piece = orig_p + "\n\n"
+                        e = ModifyText(
+                            type="modify",
+                            target_text=piece,
+                            new_text="",
+                            comment="Diff: Text deleted",
+                        )
+                        e._match_start_index = p_offset
+                        edits.append(e)
+                    else:
+                        del_txt = ("\n\n" + orig_p) if orig_abs > 0 else orig_p
+                        del_off = (p_offset - 2) if orig_abs > 0 else p_offset
+                        e = ModifyText(
+                            type="modify",
+                            target_text=del_txt,
+                            new_text="",
+                            comment="Diff: Text deleted",
+                        )
+                        e._match_start_index = del_off
+                        edits.append(e)
+                elif sub_kind == "pair":
+                    mod_p = "\n\n".join(mod_ps[mj] for mj in mj_list)
+                    if orig_p == mod_p:
+                        continue
+                    if len(mj_list) == 1 and _is_table_blob(orig_p) and _is_table_blob(mod_p):
+                        row_edits = _table_blob_row_edits(orig_p, mod_p)
+                        if row_edits is not None:
+                            edits.extend(row_edits)
+                            continue
+                    sm_sub = difflib.SequenceMatcher(None, orig_p.split(), mod_p.split())
+                    if sm_sub.ratio() < 0.35:
+                        e = ModifyText(
+                            type="modify",
+                            target_text=orig_p,
+                            new_text=mod_p,
+                            comment="Diff: Replacement",
+                        )
+                        e._match_start_index = p_offset
+                        edits.append(e)
+                    else:
+                        sub_edits = generate_edits_from_text(orig_p, mod_p)
+                        for ce in sub_edits:
+                            ce._match_start_index = (ce._match_start_index or 0) + p_offset
+                            edits.append(ce)
 
     # Word-level diffs over unequal replace chunks can still emit hunks that
     # straddle a paragraph break with body text on both sides; split them

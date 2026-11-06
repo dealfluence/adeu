@@ -42,7 +42,11 @@ import {
   restore_matched_typography,
   truncate_middle,
 } from "./utils/text.js";
-import { RegexTimeoutError } from "./utils/safe-regex.js";
+import {
+  RegexTimeoutError,
+  compileRegexWithInlineFlags,
+  extractInlineRegexFlags,
+} from "./utils/safe-regex.js";
 import { CORE_VERSION } from "./version.js";
 import type { SdtInfo } from "./utils/content-controls.js";
 import type { DocumentProtection } from "./utils/protection.js";
@@ -714,6 +718,8 @@ export class RedlineEngine {
    */
   public rollback_verified: boolean = true;
   public id_discovery_hint: string | null;
+  public markup_mode: "track_changes" | "manual" = "track_changes";
+  private _in_process_batch: boolean = false;
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
   private _revisionIndex: RevisionIndex | null = null;
@@ -727,11 +733,14 @@ export class RedlineEngine {
       ignore_document_protection?: boolean;
       allow_untracked_writes?: boolean;
       timestamp?: string | Date;
+      markup_mode?: "track_changes" | "manual";
     },
   ) {
     this.doc = doc;
     this.author = author;
     this.id_discovery_hint = opts?.id_discovery_hint ?? null;
+    this.markup_mode =
+      opts?.markup_mode === "manual" ? "manual" : "track_changes";
     // CC-4 write-gate overrides. Constructor options rather than
     // process_batch arguments because the gates run in three places —
     // validate_edits, the resolver and the apply-path backstop — and only the
@@ -2281,6 +2290,7 @@ export class RedlineEngine {
       //    Document order means an outer <w:ins> is handled before a nested
       //    one; removing the outer detaches the inner (guarded below).
       const insNodes = findAllDescendants(root_element, "w:ins");
+      const rejected_mark_hosts: Element[] = [];
       for (const ins of insNodes) {
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
@@ -2291,10 +2301,31 @@ export class RedlineEngine {
           if (row && row.parentNode) {
             row.parentNode.removeChild(row);
           }
-        } else {
-          parent.removeChild(ins);
+          continue;
         }
+        const grandparent = parent.parentNode as Element | null;
+        if (
+          parent.tagName === "w:rPr" &&
+          grandparent &&
+          grandparent.tagName === "w:pPr"
+        ) {
+          parent.removeChild(ins);
+          const hasElChildren = Array.from(parent.childNodes).some(
+            (n) => n.nodeType === 1,
+          );
+          if (!hasElChildren && (!parent.attributes || parent.attributes.length === 0)) {
+            grandparent.removeChild(parent);
+          }
+          const pEl = grandparent.parentNode as Element | null;
+          if (pEl && pEl.tagName === "w:p") {
+            rejected_mark_hosts.push(pEl);
+          }
+          continue;
+        }
+        parent.removeChild(ins);
       }
+
+      this._resolve_rejected_mark_hosts(rejected_mark_hosts);
 
       // 2. Reject paragraph-mark deletions: keep the paragraph break.
       const pNodes = findAllDescendants(root_element, "w:p");
@@ -2368,6 +2399,141 @@ export class RedlineEngine {
           parent.insertBefore(d.firstChild, d);
         }
         parent.removeChild(d);
+      }
+    }
+  }
+
+  private _resolve_rejected_mark_hosts(rejected_mark_hosts: Element[]): void {
+    if (rejected_mark_hosts.length === 0) return;
+    const unique_hosts: Element[] = [];
+    const seen = new Set<Element>();
+    for (const h of rejected_mark_hosts) {
+      if (!seen.has(h)) {
+        seen.add(h);
+        unique_hosts.push(h);
+      }
+    }
+
+    const contentTags = new Set([
+      "w:r",
+      "w:del",
+      "w:ins",
+      "w:sdt",
+      "w:hyperlink",
+      "w:fldSimple",
+      "w:smartTag",
+      "w:oMath",
+      "w:oMathPara",
+    ]);
+
+    const hasContent = (pEl: Element): boolean => {
+      for (const child of Array.from(pEl.childNodes)) {
+        if (child.nodeType !== 1) continue;
+        const el = child as Element;
+        if (el.tagName === "w:pPr") continue;
+        if (contentTags.has(el.tagName)) return true;
+        for (const tag of contentTags) {
+          if (el.getElementsByTagName(tag).length > 0) return true;
+        }
+      }
+      return false;
+    };
+
+    const surviving_hosts: Element[] = [];
+    for (const host of unique_hosts) {
+      const parent = host.parentNode as Element | null;
+      if (!parent) continue;
+      if (!hasContent(host)) {
+        if (!this._is_last_paragraph_in_cell(host)) {
+          const nonPPr = Array.from(host.childNodes).filter(
+            (c) => c.nodeType === 1 && (c as Element).tagName !== "w:pPr",
+          ) as Element[];
+          if (nonPPr.length > 0) {
+            let nxt = getNextElement(host);
+            while (nxt && nxt.tagName !== "w:p") nxt = getNextElement(nxt);
+            let prev = getPreviousElement(host);
+            while (prev && prev.tagName !== "w:p") prev = getPreviousElement(prev);
+            if (nxt) {
+              const nxtPPr = findChild(nxt, "w:pPr");
+              const refChild = nxtPPr ? nxtPPr.nextSibling : nxt.firstChild;
+              for (const c of nonPPr) {
+                host.removeChild(c);
+                nxt.insertBefore(c, refChild);
+              }
+            } else if (prev) {
+              for (const c of nonPPr) {
+                host.removeChild(c);
+                prev.appendChild(c);
+              }
+            }
+          }
+          parent.removeChild(host);
+        }
+      } else {
+        surviving_hosts.push(host);
+      }
+    }
+
+    for (const host of surviving_hosts.reverse()) {
+      const parent = host.parentNode as Element | null;
+      if (!parent) continue;
+      let nxt = getNextElement(host);
+      while (nxt && nxt.tagName !== "w:p") nxt = getNextElement(nxt);
+      if (nxt) {
+        const nxtPPr = findChild(nxt, "w:pPr");
+        const nxtRPr = nxtPPr ? findChild(nxtPPr, "w:rPr") : null;
+        if (nxtRPr) {
+          const marks = Array.from(nxtRPr.childNodes).filter(
+            (c) =>
+              c.nodeType === 1 &&
+              ((c as Element).tagName === "w:ins" ||
+                (c as Element).tagName === "w:del"),
+          ) as Element[];
+          if (marks.length > 0) {
+            const doc = host.ownerDocument!;
+            let hostPPr = findChild(host, "w:pPr");
+            if (!hostPPr) {
+              hostPPr = doc.createElement("w:pPr");
+              host.insertBefore(hostPPr, host.firstChild);
+            }
+            let hostRPr = findChild(hostPPr, "w:rPr");
+            if (!hostRPr) {
+              hostRPr = doc.createElement("w:rPr");
+              hostPPr.appendChild(hostRPr);
+            }
+            for (let m = marks.length - 1; m >= 0; m--) {
+              nxtRPr.removeChild(marks[m]);
+              hostRPr.insertBefore(marks[m], hostRPr.firstChild);
+            }
+          }
+        }
+        for (const child of Array.from(nxt.childNodes)) {
+          if (
+            child.nodeType === 1 &&
+            (child as Element).tagName === "w:pPr"
+          ) {
+            continue;
+          }
+          nxt.removeChild(child);
+          host.appendChild(child);
+        }
+        parent.removeChild(nxt);
+      } else {
+        let prev = getPreviousElement(host);
+        while (prev && prev.tagName !== "w:p") prev = getPreviousElement(prev);
+        if (prev && !this._is_last_paragraph_in_cell(host)) {
+          for (const child of Array.from(host.childNodes)) {
+            if (
+              child.nodeType === 1 &&
+              (child as Element).tagName === "w:pPr"
+            ) {
+              continue;
+            }
+            host.removeChild(child);
+            prev.appendChild(child);
+          }
+          parent.removeChild(host);
+        }
       }
     }
   }
@@ -2749,7 +2915,184 @@ export class RedlineEngine {
     if (outlineLvl_el) {
       pPr_clone.removeChild(outlineLvl_el);
     }
+    const rPr_el = findChild(pPr_clone, "w:rPr");
+    if (rPr_el) {
+      for (const child of Array.from(rPr_el.childNodes)) {
+        if (
+          child.nodeType === 1 &&
+          ((child as Element).tagName === "w:ins" ||
+            (child as Element).tagName === "w:del")
+        ) {
+          rPr_el.removeChild(child);
+        }
+      }
+      const hasRprChildren = Array.from(rPr_el.childNodes).some(
+        (n) => n.nodeType === 1,
+      );
+      if (!hasRprChildren && (!rPr_el.attributes || rPr_el.attributes.length === 0)) {
+        pPr_clone.removeChild(rPr_el);
+      }
+    }
     return pPr_clone;
+  }
+
+  private static _is_pipe_table_row(line: string): boolean {
+    const s = line.trim();
+    return s.startsWith("|") && s.endsWith("|") && (s.match(/\|/g) || []).length >= 2;
+  }
+
+  private static _group_markdown_table_blocks(lines: string[]): string[] {
+    const grouped: string[] = [];
+    let idx = 0;
+    while (idx < lines.length) {
+      if (RedlineEngine._is_pipe_table_row(lines[idx])) {
+        const runRows: string[] = [lines[idx].trim()];
+        let j = idx + 1;
+        while (
+          j < lines.length &&
+          (RedlineEngine._is_pipe_table_row(lines[j]) || lines[j] === "")
+        ) {
+          if (RedlineEngine._is_pipe_table_row(lines[j])) {
+            runRows.push(lines[j].trim());
+          }
+          j++;
+        }
+        if (runRows.length >= 2) {
+          grouped.push(runRows.join("\n"));
+          idx = j;
+          continue;
+        }
+      }
+      grouped.push(lines[idx]);
+      idx++;
+    }
+    return grouped;
+  }
+
+  private static _is_markdown_pipe_table_block(block: string): boolean {
+    if (!block.includes("\n")) return false;
+    const rows = block
+      .split(/\r?\n/)
+      .map((ln) => ln.trim())
+      .filter(Boolean);
+    return (
+      rows.length >= 2 &&
+      rows.every((r) => RedlineEngine._is_pipe_table_row(r))
+    );
+  }
+
+  private _build_markdown_table_element(
+    block: string,
+    reuse_id: string,
+    anchor_run: Run | null,
+    xmlDoc: Document,
+    suppress_emphasis: boolean,
+  ): { tbl: Element; last_ins: Element | null } {
+    const rawRows = block
+      .split(/\r?\n/)
+      .map((ln) => ln.trim())
+      .filter(Boolean);
+    let parsedRows: string[][] = rawRows.map((r) =>
+      r
+        .slice(1, -1)
+        .split("|")
+        .map((c) => c.trim()),
+    );
+    let hasHeader = false;
+    if (
+      parsedRows.length >= 2 &&
+      parsedRows[1].every((c) => c === "" || /^:?-{2,}:?$/.test(c))
+    ) {
+      hasHeader = true;
+      parsedRows = [parsedRows[0], ...parsedRows.slice(2)];
+    }
+    const numCols = Math.max(1, ...parsedRows.map((r) => r.length));
+
+    const tbl = xmlDoc.createElement("w:tbl");
+    const tblPr = xmlDoc.createElement("w:tblPr");
+    const tblW = xmlDoc.createElement("w:tblW");
+    tblW.setAttribute("w:w", "5000");
+    tblW.setAttribute("w:type", "pct");
+    tblPr.appendChild(tblW);
+
+    const tblBorders = xmlDoc.createElement("w:tblBorders");
+    for (const bName of [
+      "top",
+      "left",
+      "bottom",
+      "right",
+      "insideH",
+      "insideV",
+    ]) {
+      const bEl = xmlDoc.createElement(`w:${bName}`);
+      bEl.setAttribute("w:val", "single");
+      bEl.setAttribute("w:sz", "4");
+      bEl.setAttribute("w:space", "0");
+      bEl.setAttribute("w:color", "BFBFBF");
+      tblBorders.appendChild(bEl);
+    }
+    tblPr.appendChild(tblBorders);
+    tbl.appendChild(tblPr);
+
+    const tblGrid = xmlDoc.createElement("w:tblGrid");
+    for (let c = 0; c < numCols; c++) {
+      tblGrid.appendChild(xmlDoc.createElement("w:gridCol"));
+    }
+    tbl.appendChild(tblGrid);
+
+    const colPct = String(Math.max(1, Math.floor(5000 / Math.max(1, numCols))));
+    let last_ins: Element | null = null;
+    for (let rIdx = 0; rIdx < parsedRows.length; rIdx++) {
+      const rowCells = parsedRows[rIdx];
+      const tr = xmlDoc.createElement("w:tr");
+      const trPr = xmlDoc.createElement("w:trPr");
+      const isHeaderRow = hasHeader && rIdx === 0;
+      if (isHeaderRow) {
+        trPr.appendChild(xmlDoc.createElement("w:tblHeader"));
+      }
+      trPr.appendChild(this._create_track_change_tag("w:ins", "", reuse_id));
+      tr.appendChild(trPr);
+
+      for (let cIdx = 0; cIdx < numCols; cIdx++) {
+        const cellText = rowCells[cIdx] ?? "";
+        const tc = xmlDoc.createElement("w:tc");
+        const tcPr = xmlDoc.createElement("w:tcPr");
+        const tcW = xmlDoc.createElement("w:tcW");
+        tcW.setAttribute("w:w", colPct);
+        tcW.setAttribute("w:type", "pct");
+        tcPr.appendChild(tcW);
+        if (isHeaderRow) {
+          const shd = xmlDoc.createElement("w:shd");
+          shd.setAttribute("w:val", "clear");
+          shd.setAttribute("w:color", "auto");
+          shd.setAttribute("w:fill", "F2F2F2");
+          tcPr.appendChild(shd);
+        }
+        tc.appendChild(tcPr);
+
+        const p = xmlDoc.createElement("w:p");
+        const cellLine =
+          isHeaderRow && cellText && !cellText.startsWith("**")
+            ? `**${cellText}**`
+            : cellText;
+        const cellIns = this._build_tracked_ins_for_line(
+          cellLine,
+          anchor_run,
+          reuse_id,
+          xmlDoc,
+          suppress_emphasis,
+        );
+        if (cellIns) {
+          p.appendChild(cellIns);
+          last_ins = cellIns;
+        }
+        tc.appendChild(p);
+        tr.appendChild(tc);
+      }
+      tbl.appendChild(tr);
+    }
+
+    return { tbl, last_ins };
   }
 
   private _track_insert_multiline(
@@ -2788,7 +3131,9 @@ export class RedlineEngine {
     }
 
     const xmlDoc = this.doc.part._element.ownerDocument!;
-    const lines = text.split(/[\r\n]+/);
+    const lines = RedlineEngine._group_markdown_table_blocks(
+      text.split(/[\r\n]+/),
+    );
 
     // Resolve the containing <w:p> (current_p) for the anchor.
     let current_p: Element | null = null;
@@ -2893,8 +3238,11 @@ export class RedlineEngine {
     // status "applied". Note the em-dash spelling was never affected, so the
     // corruption tracked the punctuation an author chose.
     const have_line_break = /[\r\n]/.test(text);
+    const first_is_table = RedlineEngine._is_markdown_pipe_table_block(lines[0]);
     const block_mode =
-      first_style !== null && have_paragraph_context && have_line_break;
+      (first_style !== null || first_is_table) &&
+      have_paragraph_context &&
+      have_line_break;
 
     let first_node: Element | null = null;
     let inline_ins: Element | null = null;
@@ -2955,8 +3303,50 @@ export class RedlineEngine {
     let last_ins: Element | null = null;
     let after: Element = current_p;
 
+    const has_relocated_suffix = !block_mode && suffix_nodes.length > 0;
+    const orig_pilcrow_marks: Element[] = [];
+    if (has_relocated_suffix) {
+      let cur_pPr = findChild(current_p, "w:pPr");
+      if (!cur_pPr) {
+        cur_pPr = xmlDoc.createElement("w:pPr");
+        current_p.insertBefore(cur_pPr, current_p.firstChild);
+      }
+      let cur_rPr = findChild(cur_pPr, "w:rPr");
+      if (cur_rPr) {
+        for (const child of Array.from(cur_rPr.childNodes)) {
+          if (
+            child.nodeType === 1 &&
+            ((child as Element).tagName === "w:ins" ||
+              (child as Element).tagName === "w:del")
+          ) {
+            cur_rPr.removeChild(child);
+            orig_pilcrow_marks.push(child as Element);
+          }
+        }
+      } else {
+        cur_rPr = xmlDoc.createElement("w:rPr");
+        cur_pPr.appendChild(cur_rPr);
+      }
+      const cur_ins_mark = this._create_track_change_tag("w:ins", "", reuse_id);
+      cur_rPr.insertBefore(cur_ins_mark, cur_rPr.firstChild);
+    }
+
     for (let i = 0; i < remaining_lines.length; i++) {
       const raw_line = remaining_lines[i];
+      if (RedlineEngine._is_markdown_pipe_table_block(raw_line)) {
+        const { tbl, last_ins: tbl_ins } = this._build_markdown_table_element(
+          raw_line,
+          reuse_id,
+          anchor_run,
+          xmlDoc,
+          suppress_emphasis,
+        );
+        insertAfterEl(tbl, after);
+        after = tbl;
+        if (tbl_ins) last_ins = tbl_ins;
+        if (!first_node) first_node = tbl;
+        continue;
+      }
       const [clean_text, style_name] = this._parse_markdown_style(raw_line);
 
       const new_p = xmlDoc.createElement("w:p");
@@ -2971,22 +3361,39 @@ export class RedlineEngine {
           new_p.appendChild(
             this._clone_pPr_scrubbing_headings(existing_pPr, current_p),
           );
-            }
+        }
       }
 
-      // Track the paragraph break itself as an insertion.
-      let pPr = findChild(new_p, "w:pPr");
-      if (!pPr) {
-        pPr = xmlDoc.createElement("w:pPr");
-        new_p.insertBefore(pPr, new_p.firstChild);
+      const is_last_line = i === remaining_lines.length - 1;
+      if (!(has_relocated_suffix && is_last_line)) {
+        // Track the paragraph break itself as an insertion.
+        let pPr = findChild(new_p, "w:pPr");
+        if (!pPr) {
+          pPr = xmlDoc.createElement("w:pPr");
+          new_p.insertBefore(pPr, new_p.firstChild);
+        }
+        let rPr = findChild(pPr, "w:rPr");
+        if (!rPr) {
+          rPr = xmlDoc.createElement("w:rPr");
+          pPr.appendChild(rPr);
+        }
+        const ins_mark = this._create_track_change_tag("w:ins", "", reuse_id);
+        rPr.insertBefore(ins_mark, rPr.firstChild);
+      } else if (orig_pilcrow_marks.length > 0) {
+        let pPr = findChild(new_p, "w:pPr");
+        if (!pPr) {
+          pPr = xmlDoc.createElement("w:pPr");
+          new_p.insertBefore(pPr, new_p.firstChild);
+        }
+        let rPr = findChild(pPr, "w:rPr");
+        if (!rPr) {
+          rPr = xmlDoc.createElement("w:rPr");
+          pPr.appendChild(rPr);
+        }
+        for (let m = orig_pilcrow_marks.length - 1; m >= 0; m--) {
+          rPr.insertBefore(orig_pilcrow_marks[m], rPr.firstChild);
+        }
       }
-      let rPr = findChild(pPr, "w:rPr");
-      if (!rPr) {
-        rPr = xmlDoc.createElement("w:rPr");
-        pPr.appendChild(rPr);
-      }
-      const ins_mark = this._create_track_change_tag("w:ins", "", reuse_id);
-      rPr.appendChild(ins_mark);
 
       // Build the content <w:ins>.
       const content_ins = this._build_tracked_ins_for_line(
@@ -3067,7 +3474,12 @@ export class RedlineEngine {
             const found = findChild(clone, tag);
             if (found) clone.removeChild(found);
           }
-          r.appendChild(clone);
+          const hasCloneChildren = Array.from(clone.childNodes).some(
+            (n) => n.nodeType === 1,
+          );
+          if (hasCloneChildren || (clone.attributes && clone.attributes.length > 0)) {
+            r.appendChild(clone);
+          }
         }
       }
       this._apply_run_props(r, segProps, false);
@@ -3314,6 +3726,72 @@ export class RedlineEngine {
     return results;
   }
 
+  private static readonly CT_RPR_ORDER: readonly string[] = [
+    "w:ins",
+    "w:del",
+    "w:moveFrom",
+    "w:moveTo",
+    "w:rStyle",
+    "w:rFonts",
+    "w:b",
+    "w:bCs",
+    "w:i",
+    "w:iCs",
+    "w:caps",
+    "w:smallCaps",
+    "w:strike",
+    "w:dstrike",
+    "w:outline",
+    "w:shadow",
+    "w:emboss",
+    "w:imprint",
+    "w:noProof",
+    "w:snapToGrid",
+    "w:vanish",
+    "w:webHidden",
+    "w:color",
+    "w:spacing",
+    "w:w",
+    "w:kern",
+    "w:position",
+    "w:sz",
+    "w:szCs",
+    "w:highlight",
+    "w:u",
+    "w:effect",
+    "w:bdr",
+    "w:shd",
+    "w:fitText",
+    "w:vertAlign",
+    "w:rtl",
+    "w:cs",
+    "w:em",
+    "w:lang",
+    "w:eastAsianLayout",
+    "w:specVanish",
+    "w:oMath",
+    "w:rPrChange",
+  ];
+
+  private _insert_rpr_child(rPr: Element, child: Element): void {
+    const targetRank = RedlineEngine.CT_RPR_ORDER.indexOf(child.tagName);
+    if (targetRank === -1) {
+      rPr.appendChild(child);
+      return;
+    }
+    for (const existing of Array.from(rPr.childNodes)) {
+      if (existing.nodeType !== 1) continue;
+      const existingRank = RedlineEngine.CT_RPR_ORDER.indexOf(
+        (existing as Element).tagName,
+      );
+      if (existingRank > targetRank || existingRank === -1) {
+        rPr.insertBefore(child, existing);
+        return;
+      }
+    }
+    rPr.appendChild(child);
+  }
+
   private _apply_run_props(
     runElement: Element,
     props: any,
@@ -3325,10 +3803,16 @@ export class RedlineEngine {
     }
 
     let rPr = findChild(runElement, "w:rPr");
-    if (!rPr && (props.bold || props.italic || suppressInherited)) {
+    const hasAnyProp =
+      props.bold ||
+      props.italic ||
+      props.underline ||
+      props.strike ||
+      props.color;
+    if (!rPr && (hasAnyProp || suppressInherited)) {
       const doc = runElement.ownerDocument!;
       rPr = doc.createElement("w:rPr");
-      runElement.appendChild(rPr);
+      runElement.insertBefore(rPr, runElement.firstChild);
     }
 
     if (rPr) {
@@ -3337,24 +3821,64 @@ export class RedlineEngine {
         let b = findChild(rPr, "w:b");
         if (!b) {
           b = doc.createElement("w:b");
-          rPr.appendChild(b);
+          this._insert_rpr_child(rPr, b);
         }
         b.setAttribute("w:val", "1");
       } else if (suppressInherited) {
-        const b = findChild(rPr, "w:b");
-        if (b) rPr.removeChild(b);
+        for (const tag of ["w:b", "w:bCs"]) {
+          const el = findChild(rPr, tag);
+          if (el) rPr.removeChild(el);
+        }
       }
 
       if (props.italic) {
         let i = findChild(rPr, "w:i");
         if (!i) {
           i = doc.createElement("w:i");
-          rPr.appendChild(i);
+          this._insert_rpr_child(rPr, i);
         }
         i.setAttribute("w:val", "1");
       } else if (suppressInherited) {
-        const i = findChild(rPr, "w:i");
-        if (i) rPr.removeChild(i);
+        for (const tag of ["w:i", "w:iCs"]) {
+          const el = findChild(rPr, tag);
+          if (el) rPr.removeChild(el);
+        }
+      }
+
+      if (props.strike) {
+        let strike = findChild(rPr, "w:strike");
+        if (!strike) {
+          strike = doc.createElement("w:strike");
+          this._insert_rpr_child(rPr, strike);
+        }
+      }
+
+      if (props.underline) {
+        let u = findChild(rPr, "w:u");
+        if (!u) {
+          u = doc.createElement("w:u");
+          this._insert_rpr_child(rPr, u);
+        }
+        u.setAttribute(
+          "w:val",
+          typeof props.underline === "string" ? props.underline : "single",
+        );
+      }
+
+      if (props.color) {
+        let color = findChild(rPr, "w:color");
+        if (!color) {
+          color = doc.createElement("w:color");
+          this._insert_rpr_child(rPr, color);
+        }
+        color.setAttribute("w:val", String(props.color).replace(/^#/, ""));
+      }
+
+      const hasElChildren = Array.from(rPr.childNodes).some(
+        (n) => n.nodeType === 1,
+      );
+      if (!hasElChildren && (!rPr.attributes || rPr.attributes.length === 0)) {
+        runElement.removeChild(rPr);
       }
     }
   }
@@ -4226,7 +4750,7 @@ export class RedlineEngine {
         // as "target text not found", sending the user hunting for a typo in
         // the document instead of in the pattern (QA 2026-07-19 F-13).
         try {
-          new RegExp(edit.target_text);
+          compileRegexWithInlineFlags(edit.target_text);
         } catch (regex_err: any) {
           errors.push(
             `- Edit ${i + 1 + index_offset} Failed: target_text is not a valid regular expression ` +
@@ -4995,7 +5519,24 @@ export class RedlineEngine {
    * python/src/adeu/redline/engine.py process_batch (:2551-2556).
    */
   public process_batch(
-    changes: DocumentChange[],
+    changes: any[],
+    original_indices?: number[],
+    partial: boolean = false,
+  ): any {
+    this._in_process_batch = true;
+    try {
+      const res = this._process_batch_inner(changes, original_indices, partial);
+      if (this.markup_mode === "manual") {
+        this._convert_revisions_to_manual_markup();
+      }
+      return res;
+    } finally {
+      this._in_process_batch = false;
+    }
+  }
+
+  private _process_batch_inner(
+    changes: any[],
     original_indices?: number[],
     partial: boolean = false,
   ): any {
@@ -5423,6 +5964,26 @@ export class RedlineEngine {
               warning ||
               this._check_punctuation_warning((edit as any).target_text || "");
           }
+          const raw_cids: string[] = Array.from(
+            new Set(
+              ((edit as any)._minted_change_ids || [])
+                .map((x: any) => String(x))
+                .filter(Boolean),
+            ),
+          );
+          const change_ids = raw_cids.map((x) =>
+            x.startsWith("Chg:") ? x : `Chg:${x}`,
+          );
+          const raw_com_ids: string[] = Array.from(
+            new Set(
+              ((edit as any)._minted_comment_ids || [])
+                .map((x: any) => String(x))
+                .filter(Boolean),
+            ),
+          );
+          const comment_ids = raw_com_ids.map((x) =>
+            x.startsWith("Com:") ? x : `Com:${x}`,
+          );
           edits_reports.push({
             // Position in the caller's change list (same 0-based numbering as
             // `failed`): actions are filtered out of `edits`, so in a mixed
@@ -5446,6 +6007,8 @@ export class RedlineEngine {
             field: (edit as any)._field || "",
             occurrences_modified: (edit as any)._occurrences_modified || 0,
             match_mode: (edit as any).match_mode || "strict",
+            ...(change_ids.length > 0 ? { change_ids } : {}),
+            ...(comment_ids.length > 0 ? { comment_ids } : {}),
           });
         }
       }
@@ -5497,8 +6060,28 @@ export class RedlineEngine {
       ),
       skipped_details: this.skipped_details,
       edits: edits_reports,
+      ...((this as any)._last_action_reports?.length
+        ? { actions: (this as any)._last_action_reports }
+        : {}),
+      document_state: this._get_document_state_summary(),
       engine: "node",
       version: CORE_VERSION,
+    };
+  }
+
+  private _get_document_state_summary(): {
+    tracked_changes: number;
+    comments: number;
+  } {
+    const unique_ids = new Set<string>();
+    for (const tag of [...REVISION_NODE_TAGS, ...PPC_TAGS]) {
+      for (const entry of this._revisionsByTagIn(tag, null)) {
+        if (entry.id) unique_ids.add(entry.id);
+      }
+    }
+    return {
+      tracked_changes: unique_ids.size,
+      comments: this._existing_comment_ids().length,
     };
   }
 
@@ -5520,7 +6103,11 @@ export class RedlineEngine {
     let group_count = 0;
     try {
       // Count capture groups by probing an always-matching alternation.
-      const probe = new RegExp(`(?:${edit.target_text})|`).exec("");
+      const { pattern: cleanSrc, flags: cleanFlags } = extractInlineRegexFlags(
+        edit.target_text,
+        "",
+      );
+      const probe = new RegExp(`(?:${cleanSrc})|`, cleanFlags).exec("");
       group_count = probe ? probe.length - 1 : 0;
     } catch {
       return;
@@ -5936,7 +6523,145 @@ export class RedlineEngine {
         skipped_logical++;
       }
     }
+    if (this.markup_mode === "manual" && !this._in_process_batch) {
+      this._convert_revisions_to_manual_markup();
+    }
     return [applied_logical, skipped_logical];
+  }
+
+  private _convert_revisions_to_manual_markup(): void {
+    const roots = this._revision_roots();
+    const prTags = [
+      "w:rPrChange",
+      "w:pPrChange",
+      "w:tblPrChange",
+      "w:trPrChange",
+      "w:tcPrChange",
+      "w:sectPrChange",
+    ];
+    for (const root of roots) {
+      for (const prTag of prTags) {
+        for (const el of findAllDescendants(root, prTag)) {
+          if (el.parentNode) el.parentNode.removeChild(el);
+        }
+      }
+
+      for (const delEl of findAllDescendants(root, "w:del")) {
+        const parent = delEl.parentNode as Element | null;
+        if (!parent) continue;
+        if (parent.tagName === "w:rPr") {
+          parent.removeChild(delEl);
+          const gp = parent.parentNode as Element | null;
+          const hasChildren = Array.from(parent.childNodes).some(
+            (n) => n.nodeType === 1,
+          );
+          if (
+            gp &&
+            !hasChildren &&
+            (!parent.attributes || parent.attributes.length === 0)
+          ) {
+            gp.removeChild(parent);
+          }
+          continue;
+        }
+        if (parent.tagName === "w:trPr") {
+          const tr = parent.parentNode as Element | null;
+          parent.removeChild(delEl);
+          if (tr) {
+            for (const r of findAllDescendants(tr, "w:r")) {
+              this._apply_run_props(r, { strike: true });
+            }
+          }
+          continue;
+        }
+
+        const nxt = getNextElement(delEl);
+        let needSepSpace = false;
+        if (nxt && nxt.tagName === "w:ins") {
+          const delTxt = findAllDescendants(delEl, "w:delText")
+            .map((dt) => dt.textContent || "")
+            .join("");
+          const insTxt = findAllDescendants(nxt, "w:t")
+            .map((t) => t.textContent || "")
+            .join("");
+          if (
+            delTxt.length > 0 &&
+            insTxt.length > 0 &&
+            !/\s$/.test(delTxt) &&
+            !/^\s/.test(insTxt) &&
+            !",.;:!?)];".includes(insTxt[0])
+          ) {
+            needSepSpace = true;
+          }
+        }
+
+        const xmlDoc = delEl.ownerDocument!;
+        for (const r of findAllDescendants(delEl, "w:r")) {
+          for (const dt of findAllDescendants(r, "w:delText")) {
+            const tEl = xmlDoc.createElement("w:t");
+            this._set_text_content(tEl, dt.textContent || "");
+            if (dt.parentNode) {
+              dt.parentNode.insertBefore(tEl, dt);
+              dt.parentNode.removeChild(dt);
+            }
+          }
+          const rPr = findChild(r, "w:rPr");
+          if (rPr) {
+            const uEl = findChild(rPr, "w:u");
+            if (uEl) rPr.removeChild(uEl);
+          }
+          this._apply_run_props(r, { strike: true });
+        }
+
+        for (const child of Array.from(delEl.childNodes)) {
+          delEl.removeChild(child);
+          parent.insertBefore(child, delEl);
+        }
+        if (needSepSpace) {
+          const sepR = xmlDoc.createElement("w:r");
+          const sepT = xmlDoc.createElement("w:t");
+          this._set_text_content(sepT, " ");
+          sepR.appendChild(sepT);
+          parent.insertBefore(sepR, delEl);
+        }
+        parent.removeChild(delEl);
+      }
+
+      for (const insEl of findAllDescendants(root, "w:ins")) {
+        const parent = insEl.parentNode as Element | null;
+        if (!parent) continue;
+        if (parent.tagName === "w:rPr" || parent.tagName === "w:trPr") {
+          parent.removeChild(insEl);
+          const gp = parent.parentNode as Element | null;
+          const hasChildren = Array.from(parent.childNodes).some(
+            (n) => n.nodeType === 1,
+          );
+          if (
+            parent.tagName === "w:rPr" &&
+            gp &&
+            !hasChildren &&
+            (!parent.attributes || parent.attributes.length === 0)
+          ) {
+            gp.removeChild(parent);
+          }
+          continue;
+        }
+
+        for (const r of findAllDescendants(insEl, "w:r")) {
+          this._apply_run_props(r, {
+            bold: true,
+            underline: "single",
+            color: "C00000",
+          });
+        }
+
+        for (const child of Array.from(insEl.childNodes)) {
+          insEl.removeChild(child);
+          parent.insertBefore(child, insEl);
+        }
+        parent.removeChild(insEl);
+      }
+    }
   }
 
   /**
@@ -6719,6 +7444,7 @@ export class RedlineEngine {
     let applied = 0;
     let skipped = 0;
     let already_resolved = 0;
+    (this as any)._last_action_reports = [];
     // id -> how and WHERE it was resolved: ids are per-part (issue #114), so
     // a follow-up naming an explicit different part is a fresh lookup, not a
     // duplicate of this entry.
@@ -6779,6 +7505,16 @@ export class RedlineEngine {
         }
         this._anchor_reply_comment(cid, new_id);
         applied++;
+        const comLabel = action.target_id.startsWith("Com:")
+          ? action.target_id
+          : `Com:${cid}`;
+        (this as any)._last_action_reports.push({
+          index: gidx(pos),
+          type: "reply",
+          target_id: comLabel,
+          resolved_ids: [comLabel],
+          status: "applied",
+        });
         continue;
       }
 
@@ -7155,24 +7891,7 @@ export class RedlineEngine {
         }
       }
 
-      // Merge rejected-mark paragraphs bottom-up so sibling pointers stay
-      // valid while several consecutive inserted paragraphs unwind.
-      for (const host of rejected_mark_hosts.reverse()) {
-        if (!host.parentNode) continue;
-        let prev = getPreviousElement(host);
-        while (prev && prev.tagName !== "w:p") prev = getPreviousElement(prev);
-        if (!prev) continue; // document-leading paragraph: keep the container
-        for (const child of Array.from(host.childNodes)) {
-          if (
-            child.nodeType === 1 &&
-            (child as Element).tagName === "w:pPr"
-          ) {
-            continue;
-          }
-          prev.appendChild(child);
-        }
-        host.parentNode.removeChild(host);
-      }
+      this._resolve_rejected_mark_hosts(rejected_mark_hosts);
 
       for (const ppc of group_ppc) {
         if (type === "accept") {
@@ -7191,6 +7910,24 @@ export class RedlineEngine {
         resolved_history.set(rid, { type, part: acting_part! });
       }
       applied++;
+      const resLabels = Array.from(resolved_now)
+        .filter(Boolean)
+        .sort((a, b) => Number(a) - Number(b))
+        .map((r) => `Chg:${r}`);
+      (this as any)._last_action_reports.push({
+        index: gidx(pos),
+        type,
+        target_id: action.target_id,
+        resolved_ids:
+          resLabels.length > 0
+            ? resLabels
+            : [
+                action.target_id.startsWith("Chg:")
+                  ? action.target_id
+                  : `Chg:${target_id}`,
+              ],
+        status: "applied",
+      });
 
       if (comments_before.size > 0) {
         const after = new Set(this._existing_comment_ids());
@@ -7377,6 +8114,80 @@ export class RedlineEngine {
    * null when the replacement changes or drops a marker's visible text.
    * Python twin: same name.
    */
+  private static _restore_matched_whitespace(
+    actual_doc_text: string,
+    caller_target: string,
+    new_text: string,
+  ): string {
+    if (!new_text || !actual_doc_text || !caller_target) return new_text;
+    if (!/[\r\n]/.test(caller_target) || !/[\r\n]/.test(new_text)) {
+      return new_text;
+    }
+
+    const minLen = Math.min(caller_target.length, new_text.length);
+    let pLen = 0;
+    while (pLen < minLen && caller_target[pLen] === new_text[pLen]) {
+      pLen++;
+    }
+    let sLen = 0;
+    while (
+      sLen < minLen - pLen &&
+      caller_target[caller_target.length - 1 - sLen] ===
+        new_text[new_text.length - 1 - sLen]
+    ) {
+      sLen++;
+    }
+    if (pLen === 0 && sLen === 0) return new_text;
+
+    const escapeRegExp = (s: string) =>
+      s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const docPlain = actual_doc_text.replace(/(\*\*|__|_)/g, "");
+    let prefix = new_text.slice(0, pLen);
+    const middle = new_text.slice(
+      pLen,
+      sLen > 0 ? new_text.length - sLen : new_text.length,
+    );
+    let suffix = sLen > 0 ? new_text.slice(new_text.length - sLen) : "";
+
+    if (/[\r\n]/.test(prefix)) {
+      const matches = Array.from(
+        prefix.matchAll(/(\S+)([ \t]*[\r\n]+[ \t\r\n]*)/g),
+      );
+      for (const m of matches) {
+        const leftTok = m[1];
+        const nlWs = m[2];
+        if (!docPlain.includes(leftTok + nlWs)) {
+          const mDoc = docPlain.match(
+            new RegExp(escapeRegExp(leftTok) + "([ \\t]+)"),
+          );
+          if (mDoc) {
+            prefix = prefix.replace(leftTok + nlWs, leftTok + mDoc[1]);
+          }
+        }
+      }
+    }
+
+    if (/[\r\n]/.test(suffix)) {
+      const matches = Array.from(
+        suffix.matchAll(/([ \t]*[\r\n]+[ \t\r\n]*)(\S+)/g),
+      );
+      for (const m of matches) {
+        const nlWs = m[1];
+        const rightTok = m[2];
+        if (!docPlain.includes(nlWs + rightTok)) {
+          const mDoc = docPlain.match(
+            new RegExp("([ \\t]+)" + escapeRegExp(rightTok)),
+          );
+          if (mDoc) {
+            suffix = suffix.replace(nlWs + rightTok, mDoc[1] + rightTok);
+          }
+        }
+      }
+    }
+
+    return prefix + middle + suffix;
+  }
+
   private static _reinject_anchor_markers(
     mapper: DocumentMapper,
     start: number,
@@ -7573,7 +8384,7 @@ export class RedlineEngine {
       if (is_regex && current_effective_new_text) {
         try {
           current_effective_new_text = actual_doc_text.replace(
-            new RegExp(edit.target_text),
+            compileRegexWithInlineFlags(edit.target_text),
             current_effective_new_text,
           );
         } catch (e) {}
@@ -7592,6 +8403,11 @@ export class RedlineEngine {
       // being typography-forgiving — a caller who quotes the document's own
       // characters and asks for different ones still gets the change.
       current_effective_new_text = restore_matched_typography(
+        actual_doc_text,
+        edit.target_text,
+        current_effective_new_text,
+      );
+      current_effective_new_text = RedlineEngine._restore_matched_whitespace(
         actual_doc_text,
         edit.target_text,
         current_effective_new_text,
@@ -8380,7 +9196,10 @@ export class RedlineEngine {
             rPr = xmlDoc.createElement("w:rPr");
             pPr.appendChild(rPr);
           }
-          rPr.appendChild(this._create_track_change_tag("w:ins", "", ins_id!));
+          rPr.insertBefore(
+            this._create_track_change_tag("w:ins", "", ins_id!),
+            rPr.firstChild,
+          );
           const content_ins = this._build_tracked_ins_for_line(
             clean_text,
             anchor_run,
@@ -8416,13 +9235,27 @@ export class RedlineEngine {
         }
       }
 
+      let effective_suppress_emphasis = suppress_emphasis;
+      if (
+        start_idx > 0 &&
+        anchor_run &&
+        active_mapper.spans.some(
+          (s: TextSpan) =>
+            s.end === start_idx &&
+            s.run === null &&
+            (s.text.includes("*") || s.text.includes("_")),
+        )
+      ) {
+        effective_suppress_emphasis = true;
+      }
+
       const result = this._track_insert_multiline(
         final_new_text,
         anchor_run,
         anchor_para,
         ins_id!,
         null,
-        suppress_emphasis,
+        effective_suppress_emphasis,
         // Insertions that attach BEFORE the anchor: the suffix relocation must
         // know, because everything it precedes belongs in the LAST inserted
         // paragraph. Two shapes reach here:
@@ -8759,6 +9592,39 @@ export class RedlineEngine {
           if (p2_element && p2_element.tagName === "w:p") {
             const p1_fully_deleted =
               !this._paragraph_has_visible_content(p1_element);
+            const p2_fully_deleted =
+              !this._paragraph_has_visible_content(p2_element);
+            const is_pure_deletion = op === "DELETION" || !edit.new_text;
+
+            if (is_pure_deletion && p1_fully_deleted) {
+              let pPr = findChild(p1_element, "w:pPr");
+              if (!pPr) {
+                pPr = p1_element.ownerDocument!.createElement("w:pPr") as Element;
+                p1_element.insertBefore(
+                  pPr,
+                  p1_element.firstChild as Node | null,
+                );
+              }
+              let rPr = findChild(pPr!, "w:rPr");
+              if (!rPr) {
+                rPr = p1_element.ownerDocument!.createElement("w:rPr") as Element;
+                pPr!.appendChild(rPr);
+              }
+              if (!findChild(rPr!, "w:del")) {
+                const del_mark = this._create_track_change_tag("w:del", "", del_id);
+                const ins_existing = findChild(rPr!, "w:ins");
+                if (ins_existing) {
+                  rPr!.insertBefore(del_mark, ins_existing.nextSibling);
+                } else {
+                  rPr!.insertBefore(del_mark, rPr!.firstChild);
+                }
+              }
+              continue;
+            }
+
+            if (is_pure_deletion && !p1_fully_deleted && p2_fully_deleted) {
+              continue;
+            }
 
             let pPr = findChild(p1_element, "w:pPr");
             if (p1_fully_deleted) {
@@ -8798,7 +9664,12 @@ export class RedlineEngine {
             }
             if (!findChild(rPr!, "w:del")) {
               const del_mark = this._create_track_change_tag("w:del", "", del_id);
-              rPr!.appendChild(del_mark);
+              const ins_existing = findChild(rPr!, "w:ins");
+              if (ins_existing) {
+                rPr!.insertBefore(del_mark, ins_existing.nextSibling);
+              } else {
+                rPr!.insertBefore(del_mark, rPr!.firstChild);
+              }
             }
 
             const children = Array.from(p2_element.childNodes);
@@ -8884,7 +9755,12 @@ export class RedlineEngine {
         }
         if (!findChild(rPr!, "w:del")) {
           const del_mark = this._create_track_change_tag("w:del", "", del_id);
-          rPr!.appendChild(del_mark);
+          const ins_existing = findChild(rPr!, "w:ins");
+          if (ins_existing) {
+            rPr!.insertBefore(del_mark, ins_existing.nextSibling);
+          } else {
+            rPr!.insertBefore(del_mark, rPr!.firstChild);
+          }
         }
       }
     }

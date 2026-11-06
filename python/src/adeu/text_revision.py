@@ -248,7 +248,7 @@ def apply_text_revision_core(
     if output_path:
         target_output = Path(output_path)
     else:
-        if p_input.stem.endswith("_redlined") or p_input.stem.endswith("_processed"):
+        if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", p_input.stem, re.IGNORECASE):
             target_output = p_input
         else:
             target_output = p_input.with_name(f"{p_input.stem}_redlined.docx")
