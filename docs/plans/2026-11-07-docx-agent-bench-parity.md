@@ -652,4 +652,35 @@ hygiene.
 - **Benchmark conflict of interest** (README "Conflict of interest"). The reader and graders are stetdoc's. Task 12
   addresses the one artifact found; others may exist.
 
+## Final verification (2026-11-07, at 3f2bedb)
+
+Repo commands, each run on the final tree:
+
+- Python (`python/`): `uv run pytest` 2103 passed, 3 failed, 131 skipped. The 3 are the `xmllint`-dependent tests
+  (`test_cross_platform_consistency[02_issue23…]`, two in `test_repro_issue23.py`), the same 3 as before any change:
+  `xmllint` is not installed here. `ruff check`, `ruff format --check`, `mypy src` clean.
+- Node (`node/`): `npm run build` ok; `npm run test` core 1142 passed / 32 skipped, mcp-server 342 passed, n8n 51
+  passed; `npm run lint` clean.
+- LangChain (`langchain/`): `uv run --all-groups pytest` 215 passed; ruff, mypy clean.
+- `node scripts/check_release_consistency.mjs`: passed.
+
+Local harness (`.worktrees/bench-data/`, not in the repo):
+
+| path | 3.0.7 / start of session | now |
+|---|---|---|
+| stetdoc compare (calibration) | 8/8 | 8/8 |
+| Node MCP one-step compare | 8/8, 12 new ooxml errors | 8/8, 7 (all duplicate ids, Task 7) |
+| Python CLI one-step `adeu diff -o` | 6/8 | 8/8, 7 new ooxml errors |
+| Python CLI two-step (diff --json → apply) | 8/8 | 8/8 (unchanged path) |
+| final-2 replays, 104 runs | 782/836 graders | 782/836 graders, +1 full-marks run |
+| final-2 replays, `read_docx` errors | 92 | 33 (all "file not found" on Gemini paths, an artifact) |
+| indenture summary edit | written into word/header1.xml | refused with anchor; retargeted: lands in body, `ooxml-valid: yes` |
+
+Replay caveat: one compare run (e-fmuPsr) drops from 7/8 to 6/8 because its recorded follow-up batch re-sends a
+clause that failed under 3.0.7 and now applies on the first try (Task 3), so it lands twice. Without the stale
+re-send the same run scores 7/8 with `nothing-else-changed` passing. A live agent would not re-send it.
+
+Open: Task 7 (unique revision ids, own plan), Task 6 item 2 (`~~`/`++` projection), Task 9 follow-ups
+(`insert_table`, `create_docx`), Task 12 (user's call). A live benchmark rerun is the only measure of agent behaviour.
+
 PLAN COMPLETE
