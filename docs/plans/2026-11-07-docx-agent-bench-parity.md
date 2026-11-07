@@ -480,7 +480,13 @@ hygiene.
 
 ### Task 7 (P1): Unique revision ids in both engines
 
-- **Status:** `[ ] Pending`
+- **Status:** `[ ] Deferred to its own plan (user, 2026-11-07)`. Evidence gathered first: all 25 adeu files in
+  final-2 carrying `Sem_UniqueAttributeValue` opened CLEAN in Word (`word-verdicts.tsv`), so the cost is the SDK and
+  stetdoc validity lines only. At the current build every remaining duplicate in the replays comes from F1's shared
+  ids: multi-paragraph insertions (content `w:ins` plus mark `w:ins` in `rPr`) and whole-paragraph deletions (mark
+  plus content `w:del`). One-step compare on compare-v1-v2 reports `ooxml-valid: no` (9 duplicate-id errors) and
+  `valid: no`. The fix is an F1 redesign of accept/reject grouping in both engines; it lands alone, as the Risks
+  section already required.
 - **Goal:** No two revision elements in a part share a `w:id`. This brings ooxml-validate `Sem_UniqueAttributeValue`
   and stetdoc `revision_id_duplicate` to zero on Adeu-written redlines.
 - **Files:**
