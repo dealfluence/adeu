@@ -449,7 +449,14 @@ hygiene.
 
 ### Task 6 (P1): Truthful manual-markup receipts, and a projection that shows manual markup
 
-- **Status:** `[ ] Pending`
+- **Status:** item 1 `[x] Done (2026-11-07, 4a9359e)`: in manual mode both engines drop `change_ids` from per-edit
+  reports (comment ids stay) and recompute `document_state` after the conversion (test: 0 tracked changes,
+  1 comment). Item 2 `[ ] Deferred (user, 2026-11-07)`. Cost found: style markers come from a fused,
+  performance-pinned run walk (`get_run_text_and_markers` / `run_text_and_flags` / inlined `process_run_element`,
+  pinned by `test_run_fusion_equivalence.py` and VVBIG timings) that threads bold/italic booleans through an event
+  stream, mirrored in Node. New markers also need the diff engine's marker balancing (`diff.py`, `markup.py`) in both
+  engines. Until it ships, `read_docx` after a manual batch shows struck and inserted text run together; the receipt's
+  CriticMarkup preview is the accurate record.
 - **Goal:** After a `markup_mode="manual"` batch, the receipt and `read_docx` tell the agent what is struck and what
   is inserted. No fictitious `Chg:N` ids or tracked-change counts.
 - **Files:**
