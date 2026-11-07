@@ -162,6 +162,11 @@ _CC_EMPTY_PAIR_RE = re.compile(r"^\{#cc:(\d+)[^}]*\}(?:\{>>placeholder:[^<]*<<\}
 # RedlineEngine._split_around_kept_markers). Node twin: STRUCTURAL_MARKER_RE.
 _STRUCTURAL_MARKER_RE = re.compile(r"\[~[^~\]]+~\]\(#[^)]+\)|!\[[^\]]*\]\(docx-image:[^)]*\)|\[(?!~)[^\]]+\]\([^)]+\)")
 
+# Document-level block structure in new_text: a Markdown heading line or a pipe
+# table row. Refused in page headers/footers (_header_block_error). Node twin.
+_HEADING_LINE_RE = re.compile(r"(?m)^#{1,6} ")
+_TABLE_ROW_RE = re.compile(r"(?m)^[ \t]*\|.*\|[ \t]*$")
+
 # Children of a properties container that the corresponding tracked-change
 # record cannot store, and which must therefore survive rejecting it.
 #
@@ -3101,6 +3106,12 @@ class RedlineEngine:
                         "within a single part (split it into one edit per part if both sides "
                         "must change)."
                     )
+                elif len(raw_span_parts) == 1:
+                    header_error = self._header_block_error(
+                        i + 1, target_mapper, raw_span_parts[0], final_target, final_new
+                    )
+                    if header_error:
+                        errors.append(header_error)
 
                 # QA 2026-07-18 M5: image markers are read-only projections.
                 # Only the CHANGED span matters — markers sitting untouched in
@@ -3539,6 +3550,9 @@ class RedlineEngine:
             "pages": getattr(edit, "_pages", []),
             "heading_path": getattr(edit, "_heading_path", ""),
             "field": getattr(edit, "_field", ""),
+            # "header (word/header1.xml)" when the edit landed outside the main
+            # story, "" in the body: a header edit repeats on every page.
+            "part": getattr(edit, "_part", ""),
             "occurrences_modified": getattr(edit, "_occurrences_modified", 0),
             "match_mode": getattr(edit, "match_mode", "strict"),
         }
@@ -4870,6 +4884,7 @@ class RedlineEngine:
                     parent._pages = pages
                     parent._heading_path = path
                     parent._field = self._field_label_at(start)
+                    parent._part = (edit._active_mapper_ref or self.mapper).part_label_at(start)
                 else:
                     if first_in_group:
                         edit._occurrences_modified = getattr(edit, "_occurrences_modified", 0) + 1
@@ -4880,6 +4895,7 @@ class RedlineEngine:
                     edit._pages = pages
                     edit._heading_path = path
                     edit._field = self._field_label_at(start)
+                    edit._part = (edit._active_mapper_ref or self.mapper).part_label_at(start)
             else:
                 skipped += 1
 
@@ -5422,6 +5438,46 @@ class RedlineEngine:
         if match_mode == "all" or len(all_sub_edits) > 1:
             return all_sub_edits
         return all_sub_edits[0]
+
+    @staticmethod
+    def _header_block_error(
+        edit_number: int, mapper: Any, part_index: int, final_target: str, final_new: str
+    ) -> Optional[str]:
+        """
+        Refuses an edit that ADDS a heading or a Markdown table to a page header
+        or footer. Agents anchor "add a summary at the top of the document" on
+        the first text they read, which is often the header: final-2's indenture
+        runs wrote a heading and a deviations table into word/header1.xml, so it
+        repeated on every page. Wording changes and plain extra lines in a header
+        stay allowed (letterheads legitimately have several). Node twin.
+        """
+        kind = mapper.part_kind_of(part_index)
+        if kind not in ("header", "footer"):
+            return None
+
+        def adds(pattern: "re.Pattern[str]") -> bool:
+            return bool(pattern.search(final_new)) and not pattern.search(final_target)
+
+        if not (adds(_HEADING_LINE_RE) or adds(_TABLE_ROW_RE)):
+            return None
+        name = mapper.part_names[part_index] if part_index < len(mapper.part_names) else ""
+        where = f"page {kind}" + (f" ({name})" if name else "")
+        edge, end_word = ("first", "start") if kind == "header" else ("last", "end")
+        anchor = mapper.body_edge_line(last=kind == "footer")
+        hint = f": '{anchor}'" if anchor else ""
+        count = mapper.full_text.count(anchor) if anchor else 0
+        if count > 1:
+            # Following the hint must not walk into the ambiguity guard.
+            hint += (
+                f' (it appears {count} times: pass match_mode="first")'
+                if kind == "header"
+                else f" (it appears {count} times: include the paragraph before it so the target is unique)"
+            )
+        return (
+            f"- Edit {edit_number} Failed: target_text is in the {where}, which repeats on every page; "
+            f"headings and tables cannot be added there. To add content at the {end_word} of the document, "
+            f"target the {edge} body paragraph instead{hint}. Wording changes inside the {kind} are still allowed."
+        )
 
     @staticmethod
     def _report_target(edit: Any) -> str:

@@ -1307,6 +1307,8 @@ def _print_detailed_edit_reports(stats: Dict[str, Any]) -> None:
             print(f"Edit {i + 1} {status_indicator}:", file=sys.stderr)
             if "target_text" in report:
                 print(f"  Target: '{report['target_text']}'", file=sys.stderr)
+            if report.get("part"):
+                print(f"  Part: {report['part']}", file=sys.stderr)
             edit_type = report.get("type", "modify")
             if edit_type == "delete_row":
                 print("  Deleted row", file=sys.stderr)

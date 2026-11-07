@@ -390,7 +390,13 @@ hygiene.
 
 ### Task 4 (P0): Guard block structure in headers and footers; disclose the part an edit lands in
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Narrowed from the plan: only an added Markdown heading line or pipe-table row
+  is refused. Plain extra paragraphs in a header stay allowed (letterheads have several), so no override flag is
+  needed. The refusal names the part and the first/last body line, plus `match_mode="first"` when that line recurs
+  (found on the real indenture: its first body line `## **INDENTURE**` appears twice). Receipts carry `part` and
+  render `**Part:**` (both MCP servers, CLI). Tests: `test_header_block_guard.py`, `header_block_guard.test.ts`
+  (Node red before the fix: 5/5). Local harness: the final-2 summary edit is refused with that hint; retargeted as
+  instructed, all 3 edits apply, the summary table lands in `word/document.xml`, header untouched, `ooxml-valid: yes`.
 - **Goal:** An agent placing an executive summary "at the top of the document" cannot silently write headings,
   tables or extra paragraphs into a page header or footer.
 - **Files:**

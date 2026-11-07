@@ -330,6 +330,13 @@ const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 const STRUCTURAL_MARKER_RE =
   /\[~[^~\]]+~\]\(#[^)]+\)|!\[[^\]]*\]\(docx-image:[^)]*\)|\[(?!~)[^\]]+\]\([^)]+\)/g;
 
+// Document-level block structure in new_text: a Markdown heading line or a
+// pipe table row. Refused in page headers/footers (_header_block_error).
+// Non-global so .test() keeps no lastIndex state. Python twins:
+// _HEADING_LINE_RE / _TABLE_ROW_RE.
+const HEADING_LINE_RE = /^#{1,6} /m;
+const TABLE_ROW_RE = /^[ \t]*\|.*\|[ \t]*$/m;
+
 // CC-1e: content-control anchors, open or close, with or without flag words.
 /**
  * Drop paragraph marks that BOTH sides of a replacement end with (CC-14).
@@ -876,6 +883,45 @@ export class RedlineEngine {
       sub_edit._is_table_edit = true;
     }
     return [sub_edit];
+  }
+
+  /**
+   * Refuses an edit that ADDS a heading or a Markdown table to a page header
+   * or footer. Agents anchor "add a summary at the top of the document" on the
+   * first text they read, which is often the header: final-2's indenture runs
+   * wrote a heading and a deviations table into word/header1.xml, so it
+   * repeated on every page. Wording changes and plain extra lines in a header
+   * stay allowed (letterheads legitimately have several). Python twin.
+   */
+  private _header_block_error(
+    edit_number: number,
+    mapper: DocumentMapper,
+    part_index: number,
+    final_target: string,
+    final_new: string,
+  ): string | null {
+    const kind = mapper.part_kind_of(part_index);
+    if (kind !== "header" && kind !== "footer") return null;
+    const adds = (re: RegExp) => re.test(final_new) && !re.test(final_target);
+    if (!adds(HEADING_LINE_RE) && !adds(TABLE_ROW_RE)) return null;
+    const name = mapper.part_names[part_index] || "";
+    const where = `page ${kind}` + (name ? ` (${name})` : "");
+    const [edge, end_word] = kind === "header" ? ["first", "start"] : ["last", "end"];
+    const anchor = mapper.body_edge_line(kind === "footer");
+    let hint = anchor ? `: '${anchor}'` : "";
+    const count = anchor ? mapper.full_text.split(anchor).length - 1 : 0;
+    if (count > 1) {
+      // Following the hint must not walk into the ambiguity guard.
+      hint +=
+        kind === "header"
+          ? ` (it appears ${count} times: pass match_mode="first")`
+          : ` (it appears ${count} times: include the paragraph before it so the target is unique)`;
+    }
+    return (
+      `- Edit ${edit_number} Failed: target_text is in the ${where}, which repeats on every page; ` +
+      `headings and tables cannot be added there. To add content at the ${end_word} of the document, ` +
+      `target the ${edge} body paragraph instead${hint}. Wording changes inside the ${kind} are still allowed.`
+    );
   }
 
   /**
@@ -4967,6 +5013,15 @@ export class RedlineEngine {
               "within a single part (split it into one edit per part if both sides " +
               "must change).",
           );
+        } else if (raw_span_parts.length === 1) {
+          const header_error = this._header_block_error(
+            i + 1 + index_offset,
+            target_mapper,
+            raw_span_parts[0],
+            final_target,
+            final_new,
+          );
+          if (header_error) errors.push(header_error);
         }
 
         // QA 2026-07-18 M5: image markers are read-only projections. Only
@@ -6037,6 +6092,9 @@ export class RedlineEngine {
             pages: (edit as any)._pages || [],
             heading_path: (edit as any)._heading_path || "",
             field: (edit as any)._field || "",
+            // "header (word/header1.xml)" when the edit landed outside the
+            // main story, "" in the body: a header edit repeats on every page.
+            part: (edit as any)._part || "",
             occurrences_modified: (edit as any)._occurrences_modified || 0,
             match_mode: (edit as any).match_mode || "strict",
             ...(change_ids.length > 0 ? { change_ids } : {}),
@@ -6501,6 +6559,7 @@ export class RedlineEngine {
           parent._pages = pages;
           parent._heading_path = path;
           parent._field = this._field_label_at(start);
+          parent._part = (edit._active_mapper_ref || this.mapper).part_label_at(start);
         } else {
           if (first_in_group) {
             edit._occurrences_modified = (edit._occurrences_modified || 0) + 1;
@@ -6515,6 +6574,7 @@ export class RedlineEngine {
           edit._pages = pages;
           edit._heading_path = path;
           edit._field = this._field_label_at(start);
+          edit._part = (edit._active_mapper_ref || this.mapper).part_label_at(start);
         }
       } else {
         skipped++;

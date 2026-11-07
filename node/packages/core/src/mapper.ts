@@ -214,6 +214,9 @@ export class DocumentMapper {
   // the matching index in .part_index. Together these let the engine refuse
   // or re-anchor edits at OPC part boundaries (QA 2026-07-18 C1).
   public part_ranges: [number, number, string][] = [];
+  // Package part name per part_ranges entry ("word/header1.xml"), for
+  // messages and receipts that must say WHERE an edit lands.
+  public part_names: string[] = [];
   private _current_part_index = 0;
   // Block-level controls enclosing the block currently being walked,
   // outermost first. Inline controls are NOT tracked here: they arrive
@@ -277,6 +280,7 @@ export class DocumentMapper {
     let emitted_any_part = false;
     for (const [part, part_kind] of iter_document_parts_with_kind(this.doc)) {
       this._current_part_index = part_idx;
+      this.part_names.push(String(part?.partname ?? part?.part?.partname ?? "").replace(/^\//, ""));
       const spans_mark = this.spans.length;
       const chunks_mark = this._text_chunks.length;
       const offset_mark = current_offset;
@@ -395,6 +399,33 @@ export class DocumentMapper {
       if (start <= index && index <= end) return kind;
     }
     return null;
+  }
+
+  /** `header (word/header1.xml)` for an offset outside the main story; "" in the body or nowhere. */
+  public part_label_at(index: number): string {
+    for (const [i, start, end, kind] of this._nonempty_part_ranges()) {
+      if (start <= index && index <= end) {
+        if (kind === "body") return "";
+        const name = this.part_names[i] || "";
+        return name ? `${kind} (${name})` : kind;
+      }
+    }
+    return "";
+  }
+
+  /** The first (or last) non-empty projected line of the body: a target an agent can copy verbatim. */
+  public body_edge_line(last = false): string {
+    for (const [start, end, kind] of this.part_ranges) {
+      if (kind === "body" && end > start) {
+        const lines = this.full_text
+          .substring(start, end)
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l);
+        if (lines.length) return (last ? lines[lines.length - 1] : lines[0]).substring(0, 80);
+      }
+    }
+    return "";
   }
 
   /**

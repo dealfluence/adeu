@@ -81,6 +81,9 @@ class _EditState(BaseModel):
     # CC:<N> "<alias>" (tag: <tag>) when the resolved range lies inside a
     # content control (spec-fields-ledger §6).
     _field: Optional[str] = PrivateAttr(default=None)
+    # "header (word/header1.xml)" when the resolved range lies outside the
+    # main story; "" in the body.
+    _part: str = PrivateAttr(default="")
     _occurrences_modified: int = PrivateAttr(default=0)
     _is_table_edit: bool = PrivateAttr(default=False)
     _has_markdown: bool = PrivateAttr(default=False)

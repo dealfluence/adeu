@@ -293,6 +293,9 @@ class DocumentMapper:
         # carry the matching index in .part_index. Together these let the
         # engine refuse or re-anchor edits at OPC part boundaries (QA C1).
         self.part_ranges: List[Tuple[int, int, str]] = []
+        # Package part name per part_ranges entry ("word/header1.xml"), for
+        # messages and receipts that must say WHERE an edit lands.
+        self.part_names: List[str] = []
         self._current_part_index = 0
         # Block-level controls enclosing the block currently being walked,
         # outermost first. Inline controls are NOT tracked here: they arrive
@@ -326,6 +329,7 @@ class DocumentMapper:
         emitted_any_part = False
         for part_idx, (part, part_kind) in enumerate(iter_document_parts_with_kind(self.doc)):
             self._current_part_index = part_idx
+            self.part_names.append(str(getattr(getattr(part, "part", None), "partname", "") or "").lstrip("/"))
             spans_mark = len(self.spans)
             chunks_mark = len(self._text_chunks)
             offset_mark = current_offset
@@ -426,6 +430,25 @@ class DocumentMapper:
             if start <= index <= end:
                 return kind
         return None
+
+    def part_label_at(self, index: int) -> str:
+        """`header (word/header1.xml)` for an offset outside the main story; "" in the body or nowhere."""
+        for i, start, end, kind in self._nonempty_part_ranges():
+            if start <= index <= end:
+                if kind == "body":
+                    return ""
+                name = self.part_names[i] if i < len(self.part_names) else ""
+                return f"{kind} ({name})" if name else kind
+        return ""
+
+    def body_edge_line(self, last: bool = False) -> str:
+        """The first (or last) non-empty projected line of the body: a target an agent can copy verbatim."""
+        for start, end, kind in self.part_ranges:
+            if kind == "body" and end > start:
+                lines = [ln.strip() for ln in self.full_text[start:end].split("\n") if ln.strip()]
+                if lines:
+                    return (lines[-1] if last else lines[0])[:80]
+        return ""
 
     def part_boundary_at(self, index: int) -> Optional[Tuple[int, int]]:
         """

@@ -1911,6 +1911,11 @@ export function formatBatchResult(stats: any, outPath: string): string {
         res += `**Path:** \`${report.heading_path}\`\n`;
       }
 
+      if (report.part) {
+        // Outside the main story: a header/footer edit repeats on every page.
+        res += `**Part:** ${report.part}\n`;
+      }
+
       if (report.field) {
         // Audit-trail symmetry with Path: an edit inside a content control is
         // subject to that control's locks and binding, which decides whether a
