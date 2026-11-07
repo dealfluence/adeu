@@ -361,7 +361,13 @@ hygiene.
 
 ### Task 3 (P0): Node parity for insertions at style-marker boundaries; actionable apply errors
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07, f052395)`. Correction to the premise: Python did NOT succeed. It reported the
+  edit applied and silently dropped the inserted clause (the virtual-only no-op branch); Node failed the batch. Both
+  engines produce the same `"**" → ", as supplemented …"` hunk. Fix in both: a marker-only-target hunk with real
+  replacement text becomes an insertion at the hunk start; Python's virtual no-op branch now covers deletions only;
+  apply failures name the caller's target (`_report_target`, first 40 chars as before; no reason code added). Tests:
+  `test_marker_boundary_insert.py`, `marker_boundary_insert.test.ts` (Node red before the fix: 3/3 failed). The
+  benchmark-fixture repro (`tidemark-draft-confirmation.docx`) now applies 1/0 on Node.
 - **Goal:** Appending or inserting text next to a bold/italic run, as the plain-text target in the defect-4
   example does, applies in Node exactly as in Python. When an apply-stage failure does happen, it names the caller's
   edit and the reason.
