@@ -28,15 +28,15 @@ Read a `.docx` and return text with inline CriticMarkup.
 
 ## `process_document_batch`
 
-Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates against the document state produced by the edits before it, so you may chain dependent edits within one batch (a later edit targets the text as it reads after the earlier edits). If any edit fails validation, the whole batch is rejected transactionally.
+Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates against the document state produced by the edits before it, so you may chain dependent edits within one batch (a later edit targets the text as it reads after the earlier edits). By default valid edits apply even when others fail, and the response leads with `PARTIAL: applied K of N`; `partial=false` makes the batch all-or-nothing.
 
 **Parameters:**
 - `original_docx_path` (str, required).
 - `author_name` (str, required) — appears in Track Changes (e.g. `"AI Reviewer"`).
 - `changes` (array, required) — see the discriminated union below.
 - `output_path` (str, optional) — defaults to in-place when the stem already ends in `_processed`, `_redlined`, `.redline`, `-redline`, `_markup`, or `.marked`; otherwise `<original>_processed.docx`.
-- `partial` (bool, default `false`) — when `true`, applies valid changes and reports invalid ones as skipped instead of rejecting the whole batch.
-- `markup_mode` (`"track_changes"` | `"manual"`, default `"track_changes"`) — `"manual"` renders deletions as inline strikethrough and insertions as bold underlined red (`#C00000`) text instead of `<w:ins>`/`<w:del>` revisions.
+- `partial` (bool, default `true`) — applies valid changes and reports invalid ones as skipped; pass `false` to reject the whole batch when any change fails.
+- `markup_mode` (`"track_changes"` | `"manual"`, default `"track_changes"`) — `"manual"` renders deletions as inline strikethrough and insertions as bold underlined red (`#C00000`) text, with each edit's comment as a native Word comment, instead of `<w:ins>`/`<w:del>` revisions.
 - `ignore_control_locks` (bool, default `false`) — permit writes to content-locked controls (`sdtContentLocked`).
 - `ignore_document_protection` (bool, default `false`) — permit writes to read-only or comments-protected documents.
 - `allow_untracked_writes` (bool, default `false`) — permit untracked fills in forms-protected documents where Word suppresses revision tracking.
@@ -83,7 +83,9 @@ Each entry must include a `type` field. The other fields depend on `type`.
 
 ### Report shape
 
-`process_document_batch` returns a complete receipt: `Document State` (remaining tracked changes and comments), `Applied Actions` (with resolved `Chg:N` / `Com:N` IDs), and per-edit reports (`status`, `pages`, `heading_path`, `occurrences_modified`, minted `**IDs:**`, and `*Preview (CriticMarkup):*` or `error` / `warning`). Treat this receipt as verification without a redundant `read_docx` call.
+`process_document_batch` returns a complete receipt: `Document State` (remaining tracked changes and comments), `Applied Actions` (with resolved `Chg:N` / `Com:N` IDs), and per-edit reports (`status`, `pages`, `heading_path`, `part` when the edit landed outside the body, e.g. `header (word/header1.xml)`, `occurrences_modified`, minted `**IDs:**`, and `*Preview (CriticMarkup):*` or `error` / `warning`). Treat this receipt as verification without a redundant `read_docx` call.
+
+A `modify` that adds a heading or a pipe table inside a page header or footer is refused: those parts repeat on every page. The error names the first (header) or last (footer) body paragraph to target instead.
 
 ## `accept_all_changes`
 
@@ -97,12 +99,12 @@ The response reports how many comments were deleted and names each one with its 
 
 ## `diff_docx_files`
 
-Compare two `.docx` files. Returns Adeu's custom `@@ Word Patch @@` sub-word diff format, or writes a redlined `.docx` directly when `output_path` is provided.
+Compare two `.docx` files. Returns Adeu's custom `@@ Word Patch @@` sub-word diff format; with `output_path` it also writes a redlined `.docx`. This is the way to produce a comparison redline: one call, every difference tracked.
 
 **Parameters:**
 - `original_path`, `modified_path` (both required).
 - `compare_clean` (bool, default `true`) — `true` compares accepted state; `false` compares raw text including pending changes.
-- `output_path` (str, optional) — when provided, writes a redlined `.docx` containing all differences as native Word tracked changes in one step.
+- `output_path` (str, optional) — writes a redlined `.docx` of `original_path` containing all differences as native Word tracked changes. All or nothing: if any computed change cannot be tracked, the call fails and writes nothing. Must differ from both inputs (refused otherwise).
 - `author_name` (str, default `"Comparison"`) — author name for tracked changes written when `output_path` is specified.
 
 ## `finalize_document`
@@ -126,5 +128,6 @@ Strip metadata, lock the document, and prepare for external distribution.
 - **Targeted single edit:** `read_docx` with `search_query` → identify exact match → `process_document_batch` with one `modify` in `strict` mode.
 - **Global rename:** `process_document_batch` with one `modify` using `match_mode="all"`.
 - **Resolve all pending comments:** `read_docx` (fresh) → batch of `reply` actions, one per `Com:N`.
-- **Two-stage rename + downstream edit:** Batch 1 = the rename. Re-read. Batch 2 = the downstream edit. Never combined.
+- **Rename + downstream edit:** one batch — the rename first, then a `modify` whose `target_text` is the renamed text (batches apply sequentially).
+- **Compare two versions:** `diff_docx_files` with `output_path`; no batch needed.
 - **Pre-distribution scrub:** `finalize_document` with `accept_all=true`, `sanitize_mode="full"`, `protection_mode="read_only"`.

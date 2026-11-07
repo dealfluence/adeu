@@ -498,7 +498,12 @@ hygiene.
 
 ### Task 8 (P0): Skill and reference corrections for the benchmark workflows
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Items 1-5 applied to `SKILL.md`, `mcp-tools.md`, `cli-fallback.md`. The CLI
+  fallback keeps `adeu diff -o` (Task 1 made it correct). Item 5 states both defaults: MCP salvages, CLI `apply` is
+  atomic (verified: a failing batch writes no file and exits 1). Also fixed: the CLI failure JSON key is `failed`,
+  not `errors` (verified output), and mcp-tools.md's "two-stage rename … never combined" pattern contradicted
+  sequential batches. Skill `version` is left to release tooling. No tests cover skill text; checked by reading the
+  diff.
 - **Goal:** The skill steers agents onto the paths verified to pass, and documents only features that exist.
 - **Files:** `skills/adeu-redlining/SKILL.md`, `references/mcp-tools.md`, `references/cli-fallback.md`.
 - **Change:**

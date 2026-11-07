@@ -28,11 +28,11 @@ Output is Markdown with CriticMarkup for tracked changes and comments. The same 
 
 ```bash
 uvx adeu diff v1.docx v2.docx
-# Write a redlined .docx directly in one step:
+# Write the comparison as a redlined .docx in one step (--author optional):
 uvx adeu diff v1.docx v2.docx -o redlined.docx --author "Deal Team"
 ```
 
-Returns Adeu's `@@ Word Patch @@` sub-word diff, or writes a redlined `.docx` when `-o <file>.docx` is passed.
+Returns Adeu's `@@ Word Patch @@` sub-word diff, or writes a redlined `.docx` of `v1.docx` when `-o <file>.docx` is passed. This is the way to produce a comparison redline. It is all or nothing (exit 1 and no file if any change cannot be tracked), and `-o` may not name either input.
 
 ### `adeu apply` — apply edits as tracked changes
 
@@ -44,7 +44,7 @@ uvx adeu apply contract.docx edits.json --author "Review Bot" --manual -o contra
 uvx adeu apply contract.docx edits.json --json
 ```
 
-With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`) and human logs are suppressed. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1. Exit code 1 also signals a partially applied batch — check `edits_skipped`.
+With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`) and human logs are suppressed. `adeu apply` is all-or-nothing by default: a batch that fails validation prints `{"error": "batch_validation_failed", "failed": [{"index", "reason"}, ...], "message": ...}`, writes nothing, and exits 1. Pass `--partial` to apply the valid edits anyway; exit code 1 then signals a partially applied batch — check `edits_skipped`. (The MCP tool has the opposite default.)
 
 The `edits.json` file is a JSON array. Each entry has a `type` discriminator matching `process_document_batch` (see `references/mcp-tools.md` for the full shape):
 
