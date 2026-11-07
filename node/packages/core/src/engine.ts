@@ -878,6 +878,25 @@ export class RedlineEngine {
     return [sub_edit];
   }
 
+  /**
+   * The target a failure message names: the CALLER's edit, never an internal
+   * sub-edit. A word-diff fragment such as `**` means nothing to the agent
+   * that wrote "in accordance with Section 6(e) …" (Python twin).
+   */
+  private _report_target(edit: any): string {
+    const parent = edit._parent_edit_ref;
+    let display_text: string;
+    if (parent && (parent.target_text || "").trim()) {
+      display_text = parent.target_text;
+    } else {
+      display_text = edit.target_text || "insertion";
+      if (!display_text.trim() && edit._original_target_text) {
+        display_text = edit._original_target_text;
+      }
+    }
+    return display_text.trim().substring(0, 40) || "insertion";
+  }
+
   private _word_diff_sub_edits(
     target_str: string,
     new_str: string,
@@ -933,6 +952,19 @@ export class RedlineEngine {
           (e.target_text || e.new_text)
         ),
     );
+    // A hunk whose TARGET is only style markers but whose replacement is real
+    // text is an insertion beside a styled run: dmp pairs the new words with
+    // the adjacent marker (`**` -> ", as supplemented ..." when a clause is
+    // appended after a bold run). Markers are zero-width virtual spans, so a
+    // modification over one has no runs to replace: this engine failed the
+    // batch and Python dropped the text while reporting success. Insert at
+    // the hunk's start instead; the inserted run's formatting then follows
+    // the ordinary insertion style-source rules. Python twin.
+    for (const e of raw_sub_edits) {
+      if (e.target_text && _marker_only(e.target_text) && e.new_text && !_marker_only(e.new_text)) {
+        e.target_text = "";
+      }
+    }
 
     if (!raw_sub_edits || raw_sub_edits.length === 0) {
       const fallback_edit: any = {
@@ -6378,8 +6410,7 @@ export class RedlineEngine {
       );
       if (overlaps) {
         skipped++;
-        const display_text = edit.target_text || "insertion";
-        const target_snippet = display_text.trim().substring(0, 40);
+        const target_snippet = this._report_target(edit);
         const msg = `- Skipped overlapping edit targeting: '${target_snippet}...'`;
         this.skipped_details.push(msg);
         edit._applied_status = false;
@@ -6487,8 +6518,7 @@ export class RedlineEngine {
         }
       } else {
         skipped++;
-        const display_text = edit.target_text || "insertion";
-        const target_snippet = display_text.trim().substring(0, 40);
+        const target_snippet = this._report_target(edit);
         const msg = `- Failed to apply edit targeting: '${target_snippet}...'`;
         this.skipped_details.push(msg);
         edit._applied_status = false;

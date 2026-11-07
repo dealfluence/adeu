@@ -4798,10 +4798,7 @@ class RedlineEngine:
                 logger.warning(f"Skipping overlapping edit at index {start}")
                 skipped += 1
 
-                display_text = edit.target_text or "insertion"
-                if not display_text.strip() and hasattr(edit, "_original_target_text"):
-                    display_text = edit._original_target_text or "insertion"
-                target_snippet = display_text.strip()[:40]
+                target_snippet = self._report_target(edit)
 
                 msg = f"- Skipped overlapping edit targeting: '{target_snippet}...'"
                 if getattr(edit, "_is_table_edit", False):
@@ -4886,12 +4883,7 @@ class RedlineEngine:
             else:
                 skipped += 1
 
-                display_text = edit.target_text or "insertion"
-                if not display_text.strip() and hasattr(edit, "_original_target_text"):
-                    display_text = edit._original_target_text or "insertion"
-                target_snippet = display_text.strip()[:40]
-                if not target_snippet:
-                    target_snippet = "insertion"
+                target_snippet = self._report_target(edit)
 
                 msg = f"- Failed to apply edit targeting: '{target_snippet}...'"
                 if getattr(edit, "_is_table_edit", False):
@@ -5431,6 +5423,22 @@ class RedlineEngine:
             return all_sub_edits
         return all_sub_edits[0]
 
+    @staticmethod
+    def _report_target(edit: Any) -> str:
+        """
+        The target a failure message names: the CALLER's edit, never an
+        internal sub-edit. A word-diff fragment such as `**` means nothing to
+        the agent that wrote "in accordance with Section 6(e) …" (Node twin).
+        """
+        parent = getattr(edit, "_parent_edit_ref", None)
+        if parent is not None and (getattr(parent, "target_text", None) or "").strip():
+            display_text = parent.target_text
+        else:
+            display_text = edit.target_text or "insertion"
+            if not display_text.strip() and hasattr(edit, "_original_target_text"):
+                display_text = edit._original_target_text or "insertion"
+        return display_text.strip()[:40] or "insertion"
+
     def _resolve_widened_pin(self, edit: ModifyText, index_offset: int) -> Union[ModifyText, List[ModifyText], None]:
         """
         Resolves a pinned edit that make_edits_self_contained widened with
@@ -5685,6 +5693,23 @@ class RedlineEngine:
                 and (e.target_text or e.new_text)
             )
         ]
+        # A hunk whose TARGET is only style markers but whose replacement is
+        # real text is an insertion beside a styled run: dmp pairs the new
+        # words with the adjacent marker (`**` -> ", as supplemented ..."
+        # when a clause is appended after a bold run). Markers are zero-width
+        # virtual spans, so a modification over one has no runs to replace:
+        # Node failed the batch and Python dropped the text while reporting
+        # success. Insert at the hunk's start instead; the inserted run's
+        # formatting then follows the ordinary insertion style-source rules.
+        # Node twin.
+        for hunk in raw_sub_edits:
+            if (
+                hunk.target_text
+                and _marker_only(hunk.target_text)
+                and hunk.new_text
+                and not _marker_only(hunk.new_text)
+            ):
+                hunk.target_text = ""
 
         if not raw_sub_edits:
             fallback_edit = ModifyText(
@@ -6494,8 +6519,15 @@ class RedlineEngine:
 
         if not target_runs and not virtual_spans:
             affected_spans = [s for s in active_mapper.spans if s.end > start_idx and s.start < start_idx + length]
-            if affected_spans and all(
-                s.run is None and s.text != "\n\n" and not getattr(s, "is_image_marker", False) for s in affected_spans
+            # Only REMOVING projection text is a safe no-op. A replacement
+            # reported applied here would drop its new text silently.
+            if (
+                not edit.new_text
+                and affected_spans
+                and all(
+                    s.run is None and s.text != "\n\n" and not getattr(s, "is_image_marker", False)
+                    for s in affected_spans
+                )
             ):
                 logger.debug(
                     f"Applied virtual no-op edit targeting purely virtual projection text: {repr(edit.target_text)}"
