@@ -931,10 +931,16 @@ async def _process_document_batch_disk(
 
 @tool(
     description=(
-        "Compares two DOCX files and generates a text-based Unified Diff, or optionally writes a "
-        "redlined DOCX with native Word tracked changes when output_path is provided. "
+        "Compares two DOCX files and generates a text-based Unified Diff. "
         "By default (compare_clean=True), it compares the 'Accepted' finalized states of both documents. "
-        "Set compare_clean=False if you need to compare the raw underlying text including Tracked Change CriticMarkup."
+        "Set compare_clean=False if you need to compare the raw underlying text including Tracked Change "
+        "CriticMarkup.\n\n"
+        # §7a: clients drop optional-parameter descriptions; in final-2 no
+        # agent ever found the one-step redline.
+        "Pass `output_path` (and optional `author_name`) to also write the comparison as a tracked-changes .docx "
+        "of original_path in one step — the recommended way to make a redline between two versions; never "
+        "hand-build compare batches. All or nothing: if any change cannot be tracked, nothing is written. "
+        "output_path may not be either input."
     ),
     tags={"docx"},
     annotations={"readOnlyHint": False},
@@ -1387,12 +1393,15 @@ READ_DOCX_TAIL = (
 
 PROCESS_BATCH_COMMON_DESC = (
     "Applies a batch of edits and review actions to a DOCX.\n\n"
-    "Batches apply SEQUENTIALLY: each change is validated and applied against "
-    "the document state produced by the changes before it, so you may chain "
-    "dependent edits within one batch (e.g. rename X to Y, then modify Y — "
-    "the second edit must target Y, the text as it reads after the rename). "
-    "Validation failures reject the whole batch transactionally: nothing is "
-    "applied until every change resolves.\n\n"
+    # BUDGET: clients truncate tool descriptions at ~2048 chars including the
+    # build tag (§7a); the win32 variant adds PROCESS_BATCH_WIN32_EXTRA.
+    "Batches apply SEQUENTIALLY: each change validates against the state from "
+    "prior changes (rename X to Y, then target Y). "
+    # Must match the `partial` default (True): this sentence used to promise
+    # transactional rejection while the tool salvaged.
+    "Valid changes apply when others fail (salvage default): the response LEADS "
+    "with `PARTIAL: applied K of N` listing unapplied changes. Pass partial=false "
+    "for all-or-nothing.\n\n"
 )
 # CC-4 override parameters (spec-gates.md §1). Defined once and reused by both
 # tool registrations so the win32 and non-win32 surfaces cannot drift in either
@@ -1426,15 +1435,13 @@ PROCESS_BATCH_WIN32_EXTRA = (
 )
 PROCESS_BATCH_OPERATIONS_DESC = (
     "Each item in `changes` must specify a `type`:\n"
-    "1. 'modify': Search-and-replace. `target_text` must uniquely match — include "
-    "surrounding context if the phrase is ambiguous. `new_text` supports Markdown: "
-    "'# Heading 1' through '###### Heading 6', '**bold**', '_italic_', and '\\n\\n' "
-    "to split into multiple paragraphs. Empty `new_text` deletes. Do NOT write "
-    "CriticMarkup tags ({++, {--, {>>) manually — use the `comment` parameter for comments.\n"
+    "1. 'modify': Search-and-replace. `target_text` must uniquely match — add "
+    "context if ambiguous. `new_text` supports Markdown: '#'–'######' headings, "
+    "'**bold**', '_italic_', '\\n\\n' paragraph split. Empty `new_text` deletes. "
+    "Never write CriticMarkup ({++, {--, {>>) manually — use `comment`.\n"
     "2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12'). "
-    "Revision ids are numbered per package part; if the same id exists in several parts "
-    "(e.g. body and a header) the bare id is refused, and the optional `part` field "
-    "(e.g. 'word/header1.xml') picks the one you mean.\n"
+    "Ids are per package part: when one exists in several parts the bare id is refused; "
+    "add `part` (e.g. 'word/header1.xml').\n"
     "3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n"
     "4. 'set_field': Fill a content control (form field) — `field` is its 'CC:<N>' id, "
     "tag or alias, `value` the text; list them with `read_docx` mode='fields'. Checkboxes "
@@ -1442,9 +1449,10 @@ PROCESS_BATCH_OPERATIONS_DESC = (
     "update their store too. A locked or protected control refuses and names the override "
     "that permits it.\n"
     "5. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
-    "ID VOLATILITY: 'Chg:N' and 'Com:N' shift between document states. "
-    "Always call `read_docx` immediately before any accept/reject/reply — "
-    "do not reuse IDs from earlier in the conversation.\n\n"
+    "ID VOLATILITY: 'Chg:N'/'Com:N' shift between document states — call "
+    "`read_docx` before any accept/reject/reply; never reuse earlier ids.\n\n"
+    "`markup_mode`='manual' writes strikethrough/underline with comments instead of "
+    "Track Changes.\n"
     "`author_name` is used for attribution on all tracked changes and comments, "
     "in both disk and Live Word modes."
 )

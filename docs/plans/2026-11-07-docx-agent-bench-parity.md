@@ -422,7 +422,13 @@ hygiene.
 
 ### Task 5 (P0): Tool descriptions carry the new parameters
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Both servers' `diff_docx_files` descriptions teach `output_path`/`author_name`
+  (all-or-nothing, never over an input); both batch descriptions teach `markup_mode`:'manual'. Found on the way:
+  Python's batch description promised transactional rejection while `partial` defaults to True, and its win32
+  variant was ~2180 chars (over budget; no test covered it). Now it states the salvage default and
+  `partial=false`, and measures 1919 chars on win32; Node's batch tool measures under 2048 in the client-compat
+  test. Tests: `test_tool_description_workflows.py`, new case in `repro.qa_2026_07_23.client-compat.test.ts` (both
+  red before the change).
 - **Goal:** In Claude Code, which drops optional-parameter descriptions (AI_CONTEXT.md §7a), the model learns the
   one-step compare and manual markup from the tool descriptions alone.
 - **Files:**

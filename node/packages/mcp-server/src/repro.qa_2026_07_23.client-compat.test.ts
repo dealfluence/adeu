@@ -105,6 +105,20 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
     ).toEqual([]);
   });
 
+  it("optional parameters that change the workflow are taught in the tool description (2026-11-07)", () => {
+    // Clients drop optional-parameter descriptions, so a model that only sees the tool description never learns
+    // the one-step compare or manual markup. In final-2 no Claude run ever passed output_path to diff_docx_files.
+    const diff = allTools.find((t) => t.name === "diff_docx_files")!;
+    expect(diff.description).toContain("output_path");
+    expect(diff.description).toContain("author_name");
+    const batch = allTools.find((t) => t.name === "process_document_batch")!;
+    expect(batch.description).toContain("markup_mode");
+    expect(batch.description).toContain("'manual'");
+    for (const t of [diff, batch]) {
+      expect(t.description.length).toBeLessThanOrEqual(CLIENT_DESCRIPTION_BUDGET);
+    }
+  });
+
   it("the fields ledger surface survives client stripping (A2.7)", () => {
     // The generic walkers below already cover every property, but CC-2 added a
     // mode and an offset to the most heavily used tool in the server, so the
