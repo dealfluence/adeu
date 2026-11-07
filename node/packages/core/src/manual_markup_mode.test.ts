@@ -61,4 +61,22 @@ describe("Manual / inline-formatting markup mode", () => {
     expect(findAllDescendants(root, "w:commentRangeStart").length).toBe(1);
     expect(findAllDescendants(root, "w:commentRangeEnd").length).toBe(1);
   });
+
+  it("returns a batch receipt that describes the saved document (no Chg ids, 0 tracked changes)", async () => {
+    // The receipt used to list minted `Chg:N` ids and count tracked changes that the manual conversion had already
+    // turned into plain formatted runs. Twin: python test_manual_batch_receipt_describes_the_saved_document.
+    const doc = await createTestDocument();
+    addParagraph(doc, "Redemption price shall be 105% of principal amount.");
+    const eng = new RedlineEngine(await DocumentObject.load(await doc.save()), "Counsel", {
+      markup_mode: "manual",
+    });
+    const stats: any = eng.process_batch([
+      { type: "modify", target_text: "105%", new_text: "102%", comment: "Lowered call premium." },
+    ]);
+    const report = stats.edits[0];
+    expect(report.status).toBe("applied");
+    expect(report.change_ids).toBeUndefined();
+    expect(report.comment_ids?.length).toBeGreaterThan(0);
+    expect(stats.document_state).toEqual({ tracked_changes: 0, comments: 1 });
+  });
 });

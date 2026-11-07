@@ -65,6 +65,26 @@ def test_manual_markup_mode_renders_strike_and_bold_underline_red_without_track_
     assert len(body.findall(f".//{qn('w:commentRangeEnd')}")) == 1
 
 
+def test_manual_batch_receipt_describes_the_saved_document():
+    # The receipt used to list minted `Chg:N` ids and count tracked changes that the manual conversion had already
+    # turned into plain formatted runs, so an agent verified against revisions that do not exist.
+    doc = Document()
+    doc.add_paragraph("Redemption price shall be 105% of principal amount.")
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    eng = RedlineEngine(io.BytesIO(buf.getvalue()), author="Counsel", markup_mode="manual")
+    stats = eng.process_batch(
+        [ModifyText(type="modify", target_text="105%", new_text="102%", comment="Lowered call premium.")]
+    )
+
+    report = stats["edits"][0]
+    assert report["status"] == "applied"
+    assert "change_ids" not in report
+    assert report.get("comment_ids"), report
+    assert stats["document_state"] == {"tracked_changes": 0, "comments": 1}
+
+
 def test_cli_apply_with_manual_flag(tmp_path: Path):
     doc_path = tmp_path / "indenture.docx"
     edits_path = tmp_path / "edits.json"

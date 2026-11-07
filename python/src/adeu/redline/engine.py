@@ -3576,6 +3576,12 @@ class RedlineEngine:
             res = self._process_batch_internal(changes, original_indices=original_indices, partial=partial)
             if self.markup_mode == "manual":
                 self._convert_revisions_to_manual_markup()
+                # The receipt was built from the tracked revisions the
+                # conversion just replaced with formatted runs: their Chg ids
+                # and counts no longer exist in the saved document (Node twin).
+                for rep in res.get("edits") or []:
+                    rep.pop("change_ids", None)
+                res["document_state"] = self._get_document_state_summary()
             return res
         finally:
             self._in_process_batch = False

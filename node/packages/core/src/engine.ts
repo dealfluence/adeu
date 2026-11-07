@@ -5615,6 +5615,11 @@ export class RedlineEngine {
       const res = this._process_batch_inner(changes, original_indices, partial);
       if (this.markup_mode === "manual") {
         this._convert_revisions_to_manual_markup();
+        // The receipt was built from the tracked revisions the conversion just
+        // replaced with formatted runs: their Chg ids and counts no longer
+        // exist in the saved document (Python twin).
+        for (const rep of res?.edits || []) delete rep.change_ids;
+        if (res) res.document_state = this._get_document_state_summary();
       }
       return res;
     } finally {
