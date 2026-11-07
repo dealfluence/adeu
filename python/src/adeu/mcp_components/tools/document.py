@@ -558,18 +558,15 @@ async def _read_docx_disk(
                     from adeu.payloads import response_budget_limit
 
                     if not force and len(text) > response_budget_limit():
-                        from adeu.mcp_components._response_builders import build_budget_guard_message
+                        # Over budget: serve the pages that fit (a successful
+                        # result), not a refusal — see build_bounded_full_response.
+                        from adeu.mcp_components._response_builders import build_bounded_full_response
 
                         _, _outline_pagination, nodes = await asyncio.to_thread(
                             doc_cache.get_outline, entry, clean_view, relay.callback
                         )
-                        raise ToolError(
-                            build_budget_guard_message(
-                                text,
-                                file_path,
-                                outline_nodes=nodes,
-                                pagination_result=pagination,
-                            )
+                        return _as_tool_result(
+                            build_bounded_full_response(text, file_path, pagination, outline_nodes=nodes)
                         )
                     return _as_tool_result(
                         build_full_document_response(text, file_path, fields_banner=_mcp_fields_banner(file_path))

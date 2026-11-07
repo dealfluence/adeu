@@ -280,16 +280,33 @@ def test_guard_does_not_fire_for_search_or_ranges(tmp_path: Path, monkeypatch, c
     main()
 
 
-def test_mcp_guard_fires(tmp_path: Path):
+def test_mcp_page_all_over_budget_returns_the_first_pages_instead_of_refusing(tmp_path: Path):
+    # Contract change (2026-11-07): the refusal was adeu's most common self-inflicted tool error in final-2 (58
+    # read_docx errors, every one this refusal). MCP read_docx now SUCCEEDS with the pages that fit, the L1 outline
+    # and how to continue. CLI and Live Word keep the refusal (tests above). Node twin: budget-guard.test.ts.
     doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
     ctx = MockContext()
 
-    with pytest.raises(ToolError) as exc_info:
-        asyncio.run(read_docx(reasoning="test", file_path=str(doc_path), page="all", ctx=ctx))
+    res = asyncio.run(read_docx(reasoning="test", file_path=str(doc_path), page="all", ctx=ctx))
+    text = res.content[0].text
 
-    err_msg = str(exc_info.value)
-    assert "Refused unbounded full document read" in err_msg
-    assert "Recipe to read bounded sections" in err_msg
+    assert "Refused unbounded" not in text
+    assert "> **Page 1 of " in text  # a paginated extract: apply_text_revision refuses it as partial
+    assert "exceeds the response budget" in text
+    assert "Paragraph chunk 0" in text
+    assert "Outline (L1 Headings):" in text and "First L1 Heading" in text
+    assert re.search(r'Continue with `page="\d+-\d+"`', text), text[-800:]
+    assert "force=true" in text
+    assert len(text) <= response_budget_limit()
+
+
+def test_mcp_bounded_page_all_is_refused_by_text_revision_as_a_partial_extract(tmp_path: Path):
+    from adeu.text_revision import _strip_page_chrome
+
+    doc_path = _create_doc(tmp_path / "big.docx", chars=80000)
+    res = asyncio.run(read_docx(reasoning="test", file_path=str(doc_path), page="all", ctx=MockContext()))
+    _body, page, total = _strip_page_chrome(res.content[0].text)
+    assert page == 1 and total and total > 1
 
 
 def test_guard_never_fires_when_paginating_normally(tmp_path: Path, monkeypatch, capsys):

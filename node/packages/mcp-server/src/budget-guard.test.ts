@@ -1,28 +1,21 @@
 // FILE: node/packages/mcp-server/src/budget-guard.test.ts
 //
-// A3: an unbounded whole-document read over the response budget is REFUSED,
-// and the refusal answers with the page count, the bounded-read recipe and the
-// L1 outline at <= 800 approx tokens.
+// A3 (contract changed 2026-11-07): an unbounded whole-document read over the
+// response budget is SERVED BOUNDED, not refused: the first pages that fit,
+// the L1 outline and how to continue, as a successful result. The refusal was
+// adeu's most common self-inflicted tool error in final-2 (58 read_docx
+// errors). Twin: python/tests/test_response_budget_guard.py.
 //
 // Pinned LIVE over stdio because the guard only exists on the real tool path,
 // and because it must fire on EXACTLY one path — mode='full', page='all', no
 // `search_query`, `force` unset. A false positive on any other path breaks the
 // text round-trip artifact (QA 2026-07-17 F1).
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { approxTokens, fixturePath } from "./conformance-utils.js";
+import { fixturePath } from "./conformance-utils.js";
 import { startTestServer, TestServer } from "./test-rpc.js";
 
 const REFUSAL = "Refused unbounded full document read";
-
-/** The six recipe lines whole_doc_guard_message() emits in full, never sliced. */
-const RECIPE = [
-  "Recipe to read bounded sections:",
-  "  - One page or a page range: --page 3 / --page 1-5 (MCP page=3 / page='1-5')",
-  '  - Find a passage: --search-query "text" (MCP search_query=\'text\')',
-  "  - Heading map: --mode outline (MCP mode='outline')",
-  "  - Tracked changes ledger: --mode changes (MCP mode='changes')",
-  "  - Read it all anyway: --force (MCP force=True)",
-];
+const BOUNDED = "exceeds the response budget";
 
 /** The conformance fixture: 89,564 projected chars over the default 76,000. */
 const OVERSIZED = fixturePath("long_5pages");
@@ -44,6 +37,13 @@ const SMALL_DOC = Array.from(
 );
 
 const textOf = (res: any): string => res.content[0].text;
+
+/** The `# Article …` lines of the outline section (the served pages carry headings too). */
+const outlineLines = (text: string): string[] =>
+  text
+    .split("Outline (L1 Headings):")[1]
+    .split("\n")
+    .filter((l) => l.startsWith("# Article "));
 
 const readAll = (server: TestServer, file_path: string, args = {}) =>
   server.callTool("read_docx", {
@@ -85,23 +85,24 @@ describe("read_docx response-budget guard (A3)", () => {
 
   afterAll(() => server?.stop());
 
-  it("1. refuses an oversized page='all' read with page count, recipe and L1 outline", async () => {
+  it("1. serves an oversized page='all' read as the first pages, L1 outline and continuation", async () => {
     const res = await readAll(server, OVERSIZED);
 
-    expect(res.isError).toBe(true);
+    expect(res.isError).toBeFalsy();
     const text = textOf(res);
-    expect(text).toContain(REFUSAL);
-    expect(text).toContain("(5 pages)");
-    expect(text).toContain("exceeds response budget limit (76,000 chars).");
-
-    const lines = text.split("\n");
-    for (const line of RECIPE) expect(lines).toContain(line);
+    expect(text).not.toContain(REFUSAL);
+    // Opens with the page banner, so a text revision recognises a partial extract.
+    expect(text).toMatch(/^> \*\*File Path:\*\*[^\n]*\n\n> \*\*Page 1 of 5\*\*/);
+    expect(text).toMatch(/exceeds the response budget\*\* \(89,564 chars, ~22,391 tokens; limit 76,000\): showing pages 1-\d of 5\./);
+    expect(text).toMatch(/Continue with `page="\d-5"`/);
+    expect(text).toContain("force=true");
 
     expect(text).toContain("Outline (L1 Headings):");
     // Byte-exact heading map, INCLUDING the page RANGE on the last article:
     // a heading owns pages up to the one before the next equal-or-higher
-    // heading, so Article 5 spans p4-p5 (outline.py:184-194).
-    expect(lines.filter((l) => l.startsWith("# Article "))).toEqual([
+    // heading, so Article 5 spans p4-p5 (outline.py:184-194). Read from the
+    // outline section only: the served pages carry the headings too.
+    expect(outlineLines(text)).toEqual([
       "# Article 1 — Definitions (p1)",
       "# Article 2 — Services (p1)",
       "# Article 3 — Fees and Invoicing (p2)",
@@ -110,9 +111,9 @@ describe("read_docx response-budget guard (A3)", () => {
     ]);
   });
 
-  it("2. keeps the refusal inside the 800 approx-token contract", async () => {
+  it("2. keeps the bounded response inside the response budget", async () => {
     const res = await readAll(server, OVERSIZED);
-    expect(approxTokens(textOf(res))).toBeLessThanOrEqual(800);
+    expect(textOf(res).length).toBeLessThanOrEqual(76000);
   });
 
   it("3. force=true bypasses the guard and returns the whole body", async () => {
@@ -151,18 +152,16 @@ describe("read_docx response-budget guard (A3)", () => {
     expect(text).not.toContain("synthetic page");
   });
 
-  it("8. refuses a clean_view read with the CLEAN heading map", async () => {
+  it("8. bounds a clean_view read with the CLEAN heading map", async () => {
     const res = await readAll(server, OVERSIZED, { clean_view: true });
 
-    expect(res.isError).toBe(true);
+    expect(res.isError).toBeFalsy();
     const text = textOf(res);
-    expect(text).toContain(REFUSAL);
+    expect(text).toContain(BOUNDED);
     // Python fills outline nodes per VIEW (doc_cache.py:155-188), so its
-    // clean-view refusal carries a heading map — Node's must too.
+    // clean-view response carries a heading map — Node's must too.
     expect(text).toContain("Outline (L1 Headings):");
-    expect(
-      text.split("\n").filter((l) => l.startsWith("# Article ")).length,
-    ).toBe(5);
+    expect(outlineLines(text).length).toBe(5);
   });
 });
 
@@ -177,20 +176,20 @@ describe("read_docx response-budget guard — ADEU_MAX_RESPONSE_CHARS", () => {
 
   afterAll(() => tuned?.stop());
 
-  it("6a. a 1,000-char budget trips the guard on a small document", async () => {
+  it("6a. a 1,000-char budget bounds the read on a small document", async () => {
     const res = await readAll(tuned, smallDocPath);
 
-    expect(res.isError).toBe(true);
+    expect(res.isError).toBeFalsy();
     const text = textOf(res);
-    expect(text).toContain(REFUSAL);
-    expect(text).toContain("exceeds response budget limit (1,000 chars).");
+    expect(text).toContain(BOUNDED);
+    expect(text).toContain("limit 1,000)");
   });
 
   it("7. a document with no L1 headings gets no outline section at all", async () => {
     const res = await readAll(tuned, smallDocPath);
 
     const text = textOf(res);
-    expect(text).toContain(REFUSAL);
+    expect(text).toContain(BOUNDED);
     expect(text).not.toContain("Outline (L1 Headings):");
     expect(text).not.toContain("(No headings detected)");
     expect(text).not.toContain("No headings");
@@ -227,16 +226,14 @@ describe("read_docx response-budget guard — structural appendix", () => {
     expect(text.trimEnd().endsWith("---")).toBe(false);
   });
 
-  it("9b. one char under the body length refuses, reporting Python's count", async () => {
+  it("9b. one char under the body length bounds the read, reporting Python's count", async () => {
     const res = await readAll(refused, APPENDIX_DOC);
 
-    // The size the refusal advertises is the size Python advertises: a 5-char
+    // The size the note advertises is the size Python advertises: a 5-char
     // Node-only appendix separator on the body made this fixture 556 chars
     // here and 551 there, so a 553-char budget disagreed across engines.
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toContain(
-      "total size (551 chars, ~137 tokens) exceeds response budget limit (550 chars).",
-    );
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toContain("(551 chars, ~137 tokens; limit 550)");
   });
 });
 

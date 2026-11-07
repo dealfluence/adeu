@@ -37,7 +37,7 @@ import {
   build_paginated_response,
   build_page_range_response,
   build_full_document_response,
-  build_budget_guard_message,
+  build_bounded_full_response,
   build_outline_response,
   build_appendix_response,
   build_search_response,
@@ -807,20 +807,9 @@ registerAppTool(
             const nodes = clean_view
               ? await docCache.ensureCleanOutline(entry, readBytes, loadDoc)
               : entry.outline_nodes;
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: build_budget_guard_message(
-                    bundle.body,
-                    file_path,
-                    nodes,
-                    bundle,
-                  ),
-                },
-              ],
-            } as any;
+            // Over budget: serve the pages that fit (a successful result), not
+            // a refusal — see build_bounded_full_response.
+            return build_bounded_full_response(bundle.body, file_path, nodes, bundle) as any;
           }
           const res = build_full_document_response(text, file_path, bundle, {
             fields_banner: await mcpFieldsBanner(file_path),

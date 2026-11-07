@@ -575,7 +575,14 @@ hygiene.
 
 ### Task 10 (P1): Bounded reads instead of refusals for `page="all"`
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. MCP `read_docx(page='all')` over budget now succeeds in both servers
+  (`build_bounded_full_response`): the first pages that fit, then a note (size, `page="N-M"` continuation,
+  `force=true`) and the L1 outline. The note goes after the pages so the response opens with `Page 1 of N`, which
+  `apply_text_revision` refuses as a partial extract (tested). CLI and Live Word keep the refusal (their tests stay
+  unchanged). Contract tests updated deliberately: Python `test_mcp_guard_fires` replaced by two tests (red before
+  the change); Node `budget-guard.test.ts` cases 1, 2, 6a, 7, 8, 9b rewritten to the bounded contract. Local full
+  replay, 104 runs: `read_docx` errors 92 → 33, with every budget refusal gone; the 33 left are "file not found" on
+  Gemini paths outside the workspace (a replay artifact).
 - **Goal:** Remove adeu's most common self-inflicted tool error: 58 `read_docx` errors in final-2's short runs, all
   "Refused unbounded full document read" (census: `.worktrees/bench-data/error_census.py short`).
 - **Files:**

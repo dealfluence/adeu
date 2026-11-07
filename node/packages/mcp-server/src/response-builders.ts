@@ -10,6 +10,7 @@ import {
   PAGE_RANGE_MAX_PAGES,
   response_budget_limit,
   whole_doc_guard_message,
+  GUARD_EMITTED_MAX_CHARS,
   heading_path_at,
 } from "@adeu/core";
 import { split_projection } from "./shared.js";
@@ -604,6 +605,74 @@ export function build_budget_guard_message(
     outline,
     pagination.total_pages,
   );
+}
+
+/**
+ * MCP `read_docx(page='all')` over the response budget, without `force`: the
+ * first pages that fit, the L1 heading map, and how to continue, as a
+ * SUCCESSFUL result. It replaced the refusal, which was adeu's most common
+ * self-inflicted tool error in final-2 (58 read_docx errors). Python twin:
+ * build_bounded_full_response.
+ *
+ * The note and outline go AFTER the pages, so the response still opens with
+ * the `Page 1 of N` banner: a text revision recognises a partial extract.
+ */
+export function build_bounded_full_response(
+  projected_text: string,
+  file_path: string,
+  nodes: OutlineNode[] | null,
+  bundle: ProjectionBundle,
+): ToolResult {
+  const limit = response_budget_limit();
+  const total_chars = projected_text.length;
+  const total_pages = bundle.pagination.total_pages;
+  const list = nodes ?? [];
+  const entries = list.some((n) => n.level === 1)
+    ? render_outline_tree(list, 1, false).split("\n").filter((l) => l.trim())
+    : [];
+
+  const tail = (shown: number, page_content: string): string => {
+    let cont = "";
+    if (shown < total_pages && !page_content.includes("Continues on page")) {
+      cont = `Continue with \`page="${shown + 1}-${Math.min(shown + PAGE_RANGE_MAX_PAGES, total_pages)}"\` · `;
+    }
+    const head = [
+      "---",
+      "",
+      `> **Document exceeds the response budget** (${total_chars.toLocaleString("en-US")} chars, ` +
+        `~${Math.floor(total_chars / 4).toLocaleString("en-US")} tokens; limit ${limit.toLocaleString("en-US")}): ` +
+        `showing pages 1-${shown} of ${total_pages}.`,
+      `> ${cont}find a passage with \`search_query\` · heading map with \`mode='outline'\` · ` +
+        "whole body with `force=true`.",
+    ];
+    const kept = [...entries];
+    for (;;) {
+      const lines = [...head];
+      if (kept.length) {
+        lines.push("", "Outline (L1 Headings):", ...kept);
+        if (kept.length < entries.length) {
+          lines.push(`  (${entries.length - kept.length} more headings: mode='outline')`);
+        }
+      }
+      const text = lines.join("\n");
+      if (!kept.length || text.length <= GUARD_EMITTED_MAX_CHARS) return text;
+      kept.pop();
+    }
+  };
+
+  let shown = Math.min(PAGE_RANGE_MAX_PAGES, total_pages);
+  let res: ToolResult;
+  let note: string;
+  for (;;) {
+    res = build_page_range_response(projected_text, 1, shown, file_path, bundle);
+    note = tail(shown, res.content[0].text);
+    if (shown === 1 || res.content[0].text.length + 2 + note.length <= limit) break;
+    shown--;
+  }
+  res.content[0].text = `${res.content[0].text}\n\n${note}`;
+  const sc = res.structuredContent;
+  if (sc && typeof sc.markdown === "string") sc.markdown = `${sc.markdown}\n\n${note}`;
+  return res;
 }
 
 export function build_paginated_response(

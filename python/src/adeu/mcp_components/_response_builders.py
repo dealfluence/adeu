@@ -628,6 +628,74 @@ def build_budget_guard_message(
     )
 
 
+def build_bounded_full_response(
+    projected_text: str,
+    file_path: str,
+    pagination_result: "PaginationResult",
+    outline_nodes: "list | None" = None,
+) -> BuilderResult:
+    """
+    MCP `read_docx(page='all')` over the response budget, without `force`:
+    the first pages that fit, the L1 heading map, and how to continue, as a
+    SUCCESSFUL result. It replaced the refusal, which was adeu's most common
+    self-inflicted tool error in final-2 (58 read_docx errors); the CLI and
+    Live Word keep build_budget_guard_message. Node twin.
+
+    The note and outline go AFTER the pages, so the response still opens with
+    the `Page 1 of N` banner: apply_text_revision recognises it as a partial
+    extract and refuses to treat it as the whole document.
+    """
+    from adeu.payloads import GUARD_EMITTED_MAX_CHARS, response_budget_limit
+
+    limit = response_budget_limit()
+    total_chars = len(projected_text)
+    total_pages = pagination_result.total_pages
+    nodes = outline_nodes or []
+    has_l1 = any(node.level == 1 for node in nodes)
+    entries = (
+        [ln for ln in render_outline_tree(nodes, max_level=1, file_path=file_path).splitlines() if ln.strip()]
+        if has_l1
+        else []
+    )
+
+    def tail(shown: int, page_content: str) -> str:
+        cont = ""
+        if shown < total_pages and "Continues on page" not in page_content:
+            nxt = shown + 1
+            cont = f'Continue with `page="{nxt}-{min(shown + PAGE_RANGE_MAX_PAGES, total_pages)}"` · '
+        head = [
+            "---",
+            "",
+            f"> **Document exceeds the response budget** ({total_chars:,} chars, ~{total_chars // 4:,} tokens; "
+            f"limit {limit:,}): showing pages 1-{shown} of {total_pages}.",
+            f"> {cont}find a passage with `search_query` · heading map with `mode='outline'` · "
+            "whole body with `force=true`.",
+        ]
+        kept = list(entries)
+        while True:
+            lines = list(head)
+            if kept:
+                lines += ["", "Outline (L1 Headings):", *kept]
+                if len(kept) < len(entries):
+                    lines.append(f"  ({len(entries) - len(kept)} more headings: mode='outline')")
+            text = "\n".join(lines)
+            if not kept or len(text) <= GUARD_EMITTED_MAX_CHARS:
+                return text
+            kept.pop()
+
+    shown = min(PAGE_RANGE_MAX_PAGES, total_pages)
+    while True:
+        res = build_page_range_response(projected_text, 1, shown, file_path, pagination_result=pagination_result)
+        note = tail(shown, res.content)
+        if shown == 1 or len(res.content) + 2 + len(note) <= limit:
+            break
+        shown -= 1
+    content = f"{res.content}\n\n{note}"
+    structured = dict(res.structured_content or {})
+    structured["markdown"] = f"{structured.get('markdown', '')}\n\n{note}"
+    return BuilderResult(content=content, structured_content=structured)
+
+
 @dataclass
 class _LedgerEntry:
     kind: str  # "chg" or "com"
