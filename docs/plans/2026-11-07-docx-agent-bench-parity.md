@@ -61,8 +61,8 @@ faithfully as its grading allows:
    the MCP server (3 Gemini comment-liability-cap runs and 5 stale-colleague-edit runs). Those 8 score the same on
    all builds, so they cannot hide a regression.
 
-The prototype harness lives in `.worktrees/bench-data/`, which is gitignored and not committed; Task 0 lands it in
-the repo. Its main entry points:
+The harness lives in `.worktrees/bench-data/`, which is gitignored and stays out of the repo (Task 0). Its main
+entry points:
 - `bench_harness.py`: scaffold, report and grade;
 - `run_case.py`: one case, one scripted agent;
 - `mcp_replay.mjs`: stdio MCP replay;
@@ -239,8 +239,9 @@ for `test_diff.py`; `test_batch_ergonomics_and_receipts.{py,test.ts}` for `test_
   Word (machine checks only triage). The score that matters is "fully correct".
 - Dual-engine parity (AGENTS.md) holds for every engine change below. The Node path matters most for the
   benchmark: Claude Code and Antigravity both run `@adeu/mcp-server`.
-- No live agent runs are part of verification. Each task's "Verify" uses the offline replay harness (Task 0) plus
-  unit tests in both engines. A live benchmark rerun is a separate, paid step for the user.
+- No live agent runs are part of verification. Each task's "Verify" uses unit tests in both engines (the
+  committed evidence) plus the local, uncommitted replay harness (Task 0). A live benchmark rerun is a separate, paid
+  step for the user.
 - Word is not available on the verification machine. "Word-valid" below means ooxml-validate reports 0 new errors
   and stetdoc reports no new class-A findings. final-2 shows these two checks are necessary but not sufficient:
   6 of 511 files clean under both still got a repair prompt.
@@ -250,39 +251,16 @@ for `test_diff.py`; `test_batch_ergonomics_and_receipts.{py,test.ts}` for `test_
 Priority: **P0** blocks benchmark parity; **P1** is a correctness/robustness gap the benchmark exposes; **P2** is
 hygiene.
 
-### Task 0 (P0): Land the offline benchmark harness
+### Task 0: Benchmark harness: dropped from the repo
 
-- **Status:** `[ ] Pending`
-- **Goal:** Anyone can re-measure Adeu against docx-agent-bench with one command before claiming an improvement.
-- **Files:** `scripts/bench/` (new), containing:
-  - `README.md`;
-  - `bench_harness.py`, `run_case.py`, `fetch_fixtures.py`, `extract_calls.py`, `replay_all.py`,
-    `mcp_replay.mjs`;
-  - `agents/`.
-
-  These are ported from `.worktrees/bench-data/`.
-- **Change:**
-  1. Make every path configurable by environment variable, with these names and defaults:
-     - `BENCH_DIR` → `.worktrees/docx-agent-bench`;
-     - `HARVEY_DIR` → `.worktrees/harvey-labs`;
-     - `STETDOC` → `stetdoc` on PATH;
-     - `OOXML_VALIDATE`;
-     - `BENCH_RAW` → the extracted final-2 archive.
-  2. Pin stetdoc to `0.9.0`.
-  3. README documents the setup steps verified here:
-     - `git clone docx-agent-bench`;
-     - sparse-clone harvey-labs at `465d1fcf` with `core.autocrlf=false` (otherwise the `.eml` SHA-256s fail);
-     - `pip install stetdoc==0.9.0`;
-     - the ooxml-validate win-x64 / osx release archive;
-     - the raw archive with its published SHA-256.
-  4. Add a `--server` option so a replay can target any built `dist/index.js`. Add an `--engine py` agent for the
-     Python CLI.
-  5. Keep it out of CI: it needs network fixtures and binaries. Provide `npm`/`uv` script aliases only.
-- **Verify:**
-  - `python scripts/bench/run_case.py calib compare-v1-v2 stetdoc-compare` → 8/8.
-  - `python scripts/bench/replay_all.py compare-v1-v2` against `@adeu/mcp-server@3.0.7` reproduces final-2's
-    failed-grader set for all 10 Claude runs.
-- **Done when:** the two commands above reproduce the numbers in this plan's Context section on a clean checkout.
+- **Status:** `[x] Dropped (user decision, 2026-11-07)`. The benchmark is not Adeu's code; the repo carries only Adeu
+  fixes. The harness stays local and gitignored in `.worktrees/bench-data/`, with environment-configurable paths
+  (`BENCH_DIR`, `HARVEY_DIR`, `STETDOC`, `OOXML_VALIDATE`, `BENCH_RAW`, `BENCH_RUNS`) and its setup notes in
+  `.worktrees/bench-data/README.md`. Every "harness" step below means that local copy; a fresh checkout cannot run
+  it, so the repo-side evidence for each task is its unit tests.
+- **Verified locally, 2026-11-07:** `run_case.py calib compare-v1-v2 stetdoc-compare` → 8/8;
+  `replay_all.py --server old=<3.0.7> --server head=<HEAD> compare-v1-v2` reproduces final-2's failed-grader set on
+  all 10 Claude runs.
 
 ### Task 1 (P0): Make Python one-step compare correct and safe; harden the Node one
 
@@ -578,9 +556,10 @@ hygiene.
   unchanged with it off.
 - **Done when:** one-step compare outputs validate with 0 new ooxml errors against v2.
 
-### Task 12 (P1, external, needs the user): Report the grader artifact upstream
+### Task 12 (external, needs the user): Report the grader artifact upstream
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Out of scope for this implementation (user, 2026-11-07: only Adeu changes)`. Not filed. The
+  evidence below stays here for the user's decision.
 - **Goal:** The benchmark stops penalizing correct tracked paragraph splits for every arm.
 - **Change:** File an issue on clauseo-ai/docx-agent-bench. Evidence:
   1. `report.sh:72` removes `{joins-next}` without joining blocks;
@@ -599,7 +578,8 @@ hygiene.
   Mitigation: land it alone, run the Hypothesis hunt profile, and keep every existing group test unmodified.
 - **Replays are not live agents.** HEAD agents will make different calls (for example, the one-step compare). The
   harness measures the engine on yesterday's decisions plus the scripted ideal path, not tomorrow's agent
-  behaviour. Only a paid live rerun (`scripts/run-all.sh`, `RUNS=5 LONG_RUNS=2`) settles the final number.
+  behaviour. Only a paid live rerun (the benchmark's `scripts/run-all.sh`, `RUNS=5 LONG_RUNS=2`) settles the final
+  number.
 - **Word remains the judge of validity.** 7 files in final-2 passed both machine checks and still got a repair prompt.
   Task 4 and Task 7 reduce risk; they cannot prove Word acceptance without Word.
 - **Benchmark conflict of interest** (README "Conflict of interest"). The reader and graders are stetdoc's. Task 12
