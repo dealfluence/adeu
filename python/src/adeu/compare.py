@@ -12,6 +12,9 @@ the three surfaces apply the same edits under the same two rules:
     already refuse.
   - Never over an input: the redline may not replace either document it was
     computed from.
+
+The output is a new document, so it also gets ECMA-376 property-container
+order (adeu.utils.schema_order); every other save path stays surgical.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from docx import Document
 from adeu.diff import DiffEdit, collect_media_difference_warnings, generate_structured_edits
 from adeu.ingest import _extract_text_from_doc
 from adeu.redline.engine import RedlineEngine
+from adeu.utils.schema_order import repair_schema_order
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -78,6 +82,11 @@ def apply_comparison_edits(original: bytes, edits: Sequence[DiffEdit], author: s
             "redline was saved: a partial redline would show those passages as unchanged.",
             engine.skipped_details,
         )
+    # The redline is a new document: normalise property-container order the
+    # original got wrong, so it does not validate as a new error against the
+    # revised version. Ordinary saves stay surgical.
+    for root in engine._revision_roots():
+        repair_schema_order(root)
     return engine.save_to_stream().getvalue(), applied
 
 

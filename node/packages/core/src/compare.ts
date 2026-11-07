@@ -12,6 +12,7 @@ import { DocumentObject } from "./docx/bridge.js";
 import { RedlineEngine } from "./engine.js";
 import { _extractTextFromDoc } from "./ingest.js";
 import { generate_structured_edits, collect_media_difference_warnings } from "./diff.js";
+import { repair_schema_order } from "./schema-order.js";
 
 export class ComparisonError extends Error {
   details: string[];
@@ -51,6 +52,12 @@ export async function build_redline_comparison(
         "redline was saved: a partial redline would show those passages as unchanged.",
       [...engine.skipped_details],
     );
+  }
+  // The redline is a new document: normalise property-container order the
+  // original got wrong, so it does not validate as a new error against the
+  // revised version. Ordinary saves stay surgical.
+  for (const root of (engine as any)._revision_roots() as Element[]) {
+    repair_schema_order(root);
   }
   return {
     data: await doc.save(),

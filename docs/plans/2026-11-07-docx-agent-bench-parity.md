@@ -590,7 +590,12 @@ hygiene.
 
 ### Task 11 (P2): Optional repair of pre-existing schema-order violations
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Built as a helper the one-step compare calls before save
+  (`utils/schema_order.py`, `schema-order.ts`) rather than an engine flag: no other caller needs it. Stable reorder of
+  known children only; unknown children keep their slots. Tests: `test_onestep_compare.py` (compare output reordered,
+  ordinary save untouched), `compare.test.ts` (red without the wiring). Local harness, compare-v1-v2 one-step, both
+  engines: 8/8, new ooxml errors 12 → 7 (all 7 are Task 7's duplicate ids), class-A findings 15 → 10. The Done-when
+  line (0 new errors) therefore waits on Task 7.
 - **Goal:** Adeu-written files do not count inherited out-of-order elements as new errors when they are validated
   against a different base. Example: compare-v1-v2's v1 has `w:tblBorders` out of order in every `w:tblPr`, while
   base-final v2 does not.

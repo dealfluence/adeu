@@ -133,6 +133,55 @@ def test_cli_one_step_compare_needs_no_author(pair, tmp_path: Path):
     assert _rejected(out.read_bytes()) == _clean(v1.read_bytes())
 
 
+def _bordered_table_doc(cell_text: str) -> bytes:
+    """A table whose w:tblPr lists tblBorders AFTER tblLook, as compare-v1-v2's v1 does (schema order violation)."""
+    from docx.oxml import parse_xml
+
+    d = Document()
+    d.add_paragraph("Schedule of rates")
+    t = d.add_table(rows=1, cols=1)
+    t.cell(0, 0).text = cell_text
+    tblPr = t._tbl.tblPr
+    tblPr.append(
+        parse_xml(
+            '<w:tblBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>'
+        )
+    )
+    b = io.BytesIO()
+    d.save(b)
+    return b.getvalue()
+
+
+def _tblpr_children(docx: bytes) -> list:
+    from lxml import etree
+
+    root = etree.fromstring(zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    return [c.tag.replace(w, "") for c in root.iter(f"{w}tblPr").__next__()]
+
+
+def test_one_step_compare_writes_property_containers_in_schema_order():
+    from adeu.compare import build_redline_comparison
+
+    v1, v2 = _bordered_table_doc("Rate: 5.00%"), _bordered_table_doc("Rate: 5.25%")
+    assert _tblpr_children(v1)[-1] == "tblBorders", "fixture no longer reproduces the inherited violation"
+
+    out = build_redline_comparison(v1, v2, author="Reviewer").data
+
+    kids = _tblpr_children(out)
+    assert kids.index("tblBorders") < kids.index("tblLook"), kids
+    assert _clean(out) == _clean(v2)
+
+
+def test_ordinary_saves_leave_existing_property_order_alone():
+    # Surgical mode (AI_CONTEXT.md §2): only the one-step compare output, a new document, is normalised.
+    v1 = _bordered_table_doc("Rate: 5.00%")
+    eng = RedlineEngine(io.BytesIO(v1), author="Reviewer")
+    eng.apply_edits([])
+    assert _tblpr_children(eng.save_to_stream().getvalue())[-1] == "tblBorders"
+
+
 @pytest.mark.parametrize("extra", [[], ["--author", "Deal Team"]])
 def test_cli_one_step_compare_refuses_to_overwrite_the_original(pair, extra):
     v1, v2 = pair
