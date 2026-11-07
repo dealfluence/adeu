@@ -424,4 +424,20 @@ An end-to-end audit of the Python (`adeu`) and Node.js (`@adeu/core`, `@adeu/mcp
 - **Risk: Python / Node drift across 10 engine and MCP tasks.**
   - *Mitigation:* Every task specifies the exact Python and Node files side by side and requires paired unit tests in both `python/tests/` and `node/packages/*/src/` before the task is marked complete.
 
+## Follow-up (2026-11-07)
+
+An audit of this plan against `5e9aaa0` found items claimed above that did not ship. Their disposition is recorded
+in `docs/plans/2026-11-07-docx-agent-bench-parity.md` (audit table and Task 9):
+
+- **Built there:** LangChain `markup_mode`; LangChain `adeu_diff_docx(output_path, author_name)`; empty
+  `<w:pPr>`/`<w:rPr>` pruning after accept/reject; the Node CT_ParaRPr test; `adeu diff -o` without `--author`.
+- **Still open (follow-up features):** the `insert_table` change type; `create_docx` / `adeu create`; inline `~~`/`++`
+  in `new_text` (deferred with the matching read-back projection, parity plan Task 6).
+- **Dropped:** `manual_del_props` / `manual_ins_props` constructor options (no caller needs them); the shared
+  `_insert_para_rpr_track_change` helper (ordering is inlined at each call site and correct); a Node
+  `make_edits_self_contained` (Node pins structured edits positionally, `diff.ts` "no make_edits_self_contained");
+  one-line paragraph previews in action receipts.
+- **Superseded:** the Risks entry keeping the `page="all"` refusal. MCP `read_docx` now serves the first pages
+  instead (parity plan Task 10); the CLI and Live Word keep the refusal.
+
 PLAN COMPLETE

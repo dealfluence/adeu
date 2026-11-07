@@ -2317,6 +2317,7 @@ export class RedlineEngine {
     this.removed_comment_notes = removed_ids.map(
       (cid) => `Com:${cid} (by ${comment_authors_before[cid] ?? "Unknown"})`,
     );
+    this._prune_empty_paragraph_properties();
 
     return {
       accepted_insertions,
@@ -2477,6 +2478,27 @@ export class RedlineEngine {
           parent.insertBefore(d.firstChild, d);
         }
         parent.removeChild(d);
+      }
+    }
+    this._prune_empty_paragraph_properties();
+  }
+
+  /**
+   * Removes paragraph-mark property containers that resolving a tracked
+   * paragraph mark left empty: `<w:pPr><w:rPr/></w:pPr>` becomes nothing.
+   * Only an inner `w:rPr` (whose only job was to carry the mark) and then an
+   * empty `w:pPr` go; a container with any child or attribute stays. Called
+   * at the end of every accept/reject path (Python twin).
+   */
+  private _prune_empty_paragraph_properties(): void {
+    const isEmpty = (el: Element) =>
+      !Array.from(el.childNodes).some((n) => n.nodeType === 1) && el.attributes.length === 0;
+    for (const root of this._revision_roots()) {
+      for (const ppr of findAllDescendants(root, "w:pPr")) {
+        const rpr = findChild(ppr, "w:rPr");
+        if (rpr && isEmpty(rpr)) ppr.removeChild(rpr);
+        const parent = ppr.parentNode as Element | null;
+        if (parent && parent.tagName === "w:p" && isEmpty(ppr)) parent.removeChild(ppr);
       }
     }
   }
@@ -3434,11 +3456,15 @@ export class RedlineEngine {
         this._set_paragraph_style(new_p, style_name);
       } else {
         // Inherit pPr from the anchor paragraph (preserves list numbering).
+        // A clone the scrub emptied (the source's only child was its
+        // paragraph-mark rPr) is not written: `<w:pPr/>` is an empty
+        // property container (stetdoc empty_properties).
         const existing_pPr = findChild(current_p, "w:pPr");
         if (existing_pPr) {
-          new_p.appendChild(
-            this._clone_pPr_scrubbing_headings(existing_pPr, current_p),
-          );
+          const cloned = this._clone_pPr_scrubbing_headings(existing_pPr, current_p);
+          if (cloned.attributes.length > 0 || Array.from(cloned.childNodes).some((n) => n.nodeType === 1)) {
+            new_p.appendChild(cloned);
+          }
         }
       }
 
@@ -8071,6 +8097,9 @@ export class RedlineEngine {
         }
       }
     }
+    // Once per batch, not per action: lookups must stay off one index
+    // (review_action_index.test.ts pins the scan budget).
+    if (applied > 0) this._prune_empty_paragraph_properties();
     return [applied, skipped, already_resolved];
   }
 

@@ -542,7 +542,16 @@ hygiene.
 
 ### Task 9 (P2): Finish or formally drop the previous plan's unimplemented items
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Built (item 2): LangChain `apply_changes(markup_mode=…)`; empty-container
+  pruning after every accept/reject path in both engines (`_prune_empty_paragraph_properties`), plus Node no longer
+  writes an empty `<w:pPr/>` on a paragraph split; the Node CT_ParaRPr assertion. Probing found the real shape:
+  resolving a tracked paragraph mark left `<w:pPr><w:rPr/></w:pPr>` in 5 of 8 edit/resolve combinations in both
+  engines. Tests: `test_ooxml_schema_compliance.py` (10, red 5/10 before), `ooxml_schema_compliance.test.ts`
+  (11, red 7/11 before), LangChain `test_manual_markup_mode_writes_formatting_not_revisions` (red before).
+  Not built, recorded as follow-ups rather than dropped: `insert_table` and `create_docx` / `adeu create`
+  (item 1: each is a new feature in both engines, both servers and the CLI; pipe tables in `new_text` already cover
+  table insertion). Dropped (item 3), recorded in the previous plan: `manual_del_props`/`manual_ins_props`, the
+  shared `_insert_para_rpr_track_change` helper, a Node `make_edits_self_contained`, receipt paragraph previews.
 - **Goal:** Every item the previous plan claimed but did not ship (audit table) is either built or recorded as
   dropped. Most urgent: long tasks need an executive-summary table and a cover-note `.docx`. Today agents drop to
   python-docx for both, which is exactly how indenture outputs inherited the bad `mc:Ignorable` root in final-2.

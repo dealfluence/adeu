@@ -123,6 +123,21 @@ class TestAdeuApplyChangesBehavior:
         raw = read_tool.invoke({"reasoning": "test", "file_path": str(output_path), "clean_view": False})
         assert _REPLACEMENT in raw, f"New text {_REPLACEMENT!r} not found in read-back of edited file."
 
+    def test_manual_markup_mode_writes_formatting_not_revisions(self, working_docx: Path, output_path: Path) -> None:
+        # Parity with the CLI (--manual) and both MCP servers (markup_mode="manual").
+        import zipfile
+
+        args = _make_args(
+            working_docx,
+            [{"type": "modify", "target_text": _UNIQUE_TARGET, "new_text": _REPLACEMENT, "comment": "Why."}],
+            output_path,
+        )
+        msg = AdeuApplyChanges().invoke({**args, "markup_mode": "manual"})
+        assert output_path.exists(), msg[:300]
+        body = zipfile.ZipFile(output_path).read("word/document.xml").decode("utf-8")
+        assert "<w:strike/>" in body
+        assert "<w:ins " not in body and "<w:del " not in body
+
     def test_input_file_is_not_modified(self, working_docx: Path, output_path: Path) -> None:
         original_bytes = working_docx.read_bytes()
         tool = AdeuApplyChanges()

@@ -79,6 +79,81 @@ describe("OOXML schema compliance (CT_RPr order, CT_ParaRPr order, empty rPr pru
     }
   });
 
+  it("keeps w:del before w:sz in a deleted paragraph's mark properties (CT_ParaRPr order)", async () => {
+    // Python twin: test_unbold_replacement_prunes_empty_rpr_and_para_rpr_maintains_canonical_order.
+    const doc = await createTestDocument();
+    addParagraph(doc, "Anchor paragraph.");
+    const p2 = addParagraph(doc, "Paragraph to delete.");
+    const xmlDoc = doc.part._element.ownerDocument!;
+    const pPr = xmlDoc.createElement("w:pPr");
+    const markRPr = xmlDoc.createElement("w:rPr");
+    const sz = xmlDoc.createElement("w:sz");
+    sz.setAttribute("w:val", "24");
+    markRPr.appendChild(sz);
+    pPr.appendChild(markRPr);
+    p2.insertBefore(pPr, p2.firstChild);
+    addParagraph(doc, "Surviving paragraph.");
+
+    const engDoc = await DocumentObject.load(await doc.save());
+    const eng = new RedlineEngine(engDoc, "Counsel");
+    const [applied, skipped] = eng.apply_edits([
+      { type: "modify", target_text: "Paragraph to delete.\n\n", new_text: "" },
+    ]);
+    expect([applied, skipped]).toEqual([1, 0]);
+
+    const target = findAllDescendants(engDoc.part._element, "w:p")[1];
+    const tags = Array.from(findChild(findChild(target, "w:pPr")!, "w:rPr")!.childNodes)
+      .filter((n) => n.nodeType === 1)
+      .map((n) => (n as Element).tagName);
+    expect(tags.indexOf("w:del")).toBeGreaterThanOrEqual(0);
+    expect(tags.indexOf("w:del")).toBeLessThan(tags.indexOf("w:sz"));
+  });
+
+  const FOUR = ["Alpha clause one.", "Bravo clause two.", "Charlie clause three.", "Delta clause four."];
+  const MARK_EDITS: Record<string, { target_text: string; new_text: string }> = {
+    "delete whole paragraph": { target_text: "Bravo clause two.\n\n", new_text: "" },
+    "split paragraph": { target_text: "Alpha clause one.", new_text: "Alpha clause\n\none." },
+    "insert paragraph": { target_text: "Charlie clause three.", new_text: "Charlie clause three.\n\nNew paragraph." },
+    "merge paragraphs": {
+      target_text: "Charlie clause three.\n\nDelta clause four.",
+      new_text: "Charlie clause three. Delta clause four.",
+    },
+  };
+  const EMPTY_CONTAINER = /<w:pPr\/>|<w:pPr><\/w:pPr>|<w:rPr\/>|<w:rPr><\/w:rPr>/g;
+
+  for (const resolve of ["accept", "reject"] as const) {
+    for (const [name, edit] of Object.entries(MARK_EDITS)) {
+      it(`leaves no empty property containers: ${name}, then ${resolve} (all and by id)`, async () => {
+        // Python twin: test_resolving_paragraph_mark_revisions_leaves_no_empty_property_containers.
+        const doc = await createTestDocument();
+        for (const t of FOUR) addParagraph(doc, t);
+        const d = await DocumentObject.load(await doc.save());
+        new RedlineEngine(d, "Counsel").process_batch([{ type: "modify", ...edit }]);
+        const edited = await d.save();
+        expect(d.part.blob.match(EMPTY_CONTAINER) ?? [], `${name} after edit`).toEqual([]);
+
+        const all = await DocumentObject.load(edited);
+        const e1 = new RedlineEngine(all);
+        if (resolve === "accept") e1.accept_all_revisions();
+        else e1.reject_all_revisions();
+        const allXml = (await DocumentObject.load(await all.save())).part.blob;
+        expect(allXml.match(EMPTY_CONTAINER) ?? [], `${name} / ${resolve} all`).toEqual([]);
+
+        const byId = await DocumentObject.load(edited);
+        const ids = Array.from(
+          new Set(
+            ["w:ins", "w:del"].flatMap((t) =>
+              findAllDescendants(byId.part._element, t).map((el) => el.getAttribute("w:id")!),
+            ),
+          ),
+        );
+        new RedlineEngine(byId).process_batch(ids.map((id) => ({ type: resolve, target_id: `Chg:${id}` })) as any);
+        const idXml = (await DocumentObject.load(await byId.save())).part.blob;
+        expect(idXml.match(EMPTY_CONTAINER) ?? [], `${name} / ${resolve} by id`).toEqual([]);
+      });
+    }
+  }
+
   it("repairs undeclared mc:Ignorable prefixes on save", async () => {
     const doc = await createTestDocument();
     addParagraph(doc, "Clause text.");

@@ -122,6 +122,14 @@ class AdeuApplyChangesInput(BaseModel):
             "semantics: any failure rejects the whole batch and nothing is written."
         ),
     )
+    markup_mode: Literal["track_changes", "manual"] = Field(
+        default="track_changes",
+        description=(
+            "'track_changes' (default) writes native Word Track Changes. 'manual' writes "
+            "deletions as strikethrough and insertions as underlined text, with each "
+            "edit's comment as a Word comment, and no tracked revisions."
+        ),
+    )
 
 
 _DESCRIPTION = (
@@ -148,6 +156,8 @@ _DESCRIPTION = (
     "states. Always call adeu_read_docx immediately before any "
     "accept/reject/reply action to get fresh IDs — do not reuse IDs from "
     "earlier in the conversation.\n\n"
+    "markup_mode='manual' writes strikethrough deletions and underlined "
+    "insertions with comments instead of Track Changes.\n\n"
     "Edits can still be skipped for non-validation reasons at apply time — "
     "check artifact['edits_applied'] vs artifact['edits_skipped'], and "
     "artifact['status'] ('ok' or 'partial')."
@@ -171,6 +181,7 @@ class AdeuApplyChanges(BaseTool):
         changes: list[dict[str, Any]],
         output_path: str | None = None,
         partial: bool = True,
+        markup_mode: Literal["track_changes", "manual"] = "track_changes",
     ) -> tuple[str, dict[str, Any]]:
         if not author_name.strip():
             raise ToolException(
@@ -208,7 +219,9 @@ class AdeuApplyChanges(BaseTool):
         sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
         stream = BytesIO(sanitized_bytes)
 
-        engine = RedlineEngine(stream, author=author_name, id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT)
+        engine = RedlineEngine(
+            stream, author=author_name, id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT, markup_mode=markup_mode
+        )
 
         try:
             stats = engine.process_batch(validated_changes, partial=partial)
@@ -245,8 +258,11 @@ class AdeuApplyChanges(BaseTool):
         changes: list[dict[str, Any]],
         output_path: str | None = None,
         partial: bool = True,
+        markup_mode: Literal["track_changes", "manual"] = "track_changes",
     ) -> tuple[str, dict[str, Any]]:
-        return await asyncio.to_thread(self._run, reasoning, file_path, author_name, changes, output_path, partial)
+        return await asyncio.to_thread(
+            self._run, reasoning, file_path, author_name, changes, output_path, partial, markup_mode
+        )
 
 
 _DERIVATIVE_STEM_RE = re.compile(

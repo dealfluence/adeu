@@ -7685,6 +7685,8 @@ class RedlineEngine:
             self._mutated_since_load = True
             for el in self.doc.element.findall(".//*[@_adeu_unwrapped_end]"):
                 el.attrib.pop("_adeu_unwrapped_end", None)
+            # Once per batch, not per action (Node pins the scan budget).
+            self._prune_empty_paragraph_properties()
         return applied, skipped, already_resolved
 
     def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
@@ -7889,6 +7891,24 @@ class RedlineEngine:
                         host.remove(child)
                         prev.append(child)
                     parent.remove(host)
+
+    def _prune_empty_paragraph_properties(self) -> None:
+        """
+        Removes paragraph-mark property containers that resolving a tracked
+        paragraph mark left empty: `<w:pPr><w:rPr/></w:pPr>` becomes nothing.
+        Only inner `w:rPr` (whose only job was to carry the mark) and then an
+        empty `w:pPr` go; a container with any child or attribute stays.
+        Called at the end of every accept/reject path (Node twin).
+        """
+        rpr_tag, ppr_tag = qn("w:rPr"), qn("w:pPr")
+        for root in self._revision_roots():
+            for ppr in list(root.iter(ppr_tag)):
+                rpr = ppr.find(rpr_tag)
+                if rpr is not None and len(rpr) == 0 and not rpr.attrib:
+                    ppr.remove(rpr)
+                parent = ppr.getparent()
+                if len(ppr) == 0 and not ppr.attrib and parent is not None and parent.tag == qn("w:p"):
+                    parent.remove(ppr)
 
     def _accept_change(self, target_id: str, part: Optional[str] = None) -> set:
         # `part` scopes every lookup to one OPC part (issue #114): ids are
@@ -8400,6 +8420,7 @@ class RedlineEngine:
             f"Com:{cid} (by {comment_authors_before.get(cid, 'Unknown')})"
             for cid in sorted(removed_ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
         ]
+        self._prune_empty_paragraph_properties()
 
         return {
             "accepted_insertions": accepted_insertions,
@@ -8526,3 +8547,5 @@ class RedlineEngine:
                     parent.insert(index, child)
                     index += 1
                 parent.remove(d)
+
+        self._prune_empty_paragraph_properties()
