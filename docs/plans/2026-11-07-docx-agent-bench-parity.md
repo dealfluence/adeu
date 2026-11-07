@@ -306,7 +306,10 @@ hygiene.
 
 ### Task 2 (P0, needs a product decision): Split-free paragraph restructuring
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Decided, no engine change (user, 2026-11-07)`. Keep the inserted-pilcrow split: it is correct,
+  Word-native OOXML and loses points only to a reader artifact in a benchmark that is not Adeu's. Agents are steered
+  away from mid-paragraph splits by Task 8 item 2 and toward the one-step compare by Task 8 item 1. The options below
+  are kept for the record.
 - **Goal:** An edit that inserts paragraph breaks inside an existing paragraph leaves the original paragraph intact
   in the "all revisions rejected" view, even for a reader that does not merge tracked paragraph marks. That reader
   is the benchmark's (`report.sh:72`), and others behave the same way.
