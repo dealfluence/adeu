@@ -1,5 +1,6 @@
 import io
 import sys
+import zipfile
 from pathlib import Path
 
 import docx
@@ -1082,13 +1083,20 @@ def test_diff_output_flag_text_and_guards(tmp_path, capsys):
     assert code == 1
     assert "same file" in stderr or "invalid_input" in stderr
 
-    # 5. Guard against .docx output path
+    # 5. A text payload (--json) may still never land in a .docx path...
     code, stdout, stderr = run_cli(
-        ["diff", str(orig_path), str(mod_path), "-o", str(tmp_path / "out.docx")],
+        ["diff", str(orig_path), str(mod_path), "--json", "-o", str(tmp_path / "out.docx")],
         capsys,
     )
     assert code == 1
     assert "refusing" in stderr.lower() or "invalid_input" in stderr
+
+    # 6. ...but a plain .docx output IS a Word document now: the one-step
+    # redline, with or without --author.
+    out_docx = tmp_path / "redline.docx"
+    code, stdout, stderr = run_cli(["diff", str(orig_path), str(mod_path), "-o", str(out_docx)], capsys)
+    assert code == 0, stderr
+    assert "<w:ins " in zipfile.ZipFile(out_docx).read("word/document.xml").decode("utf-8")
 
 
 def test_post_apply_verification_plain_text_without_heading_prefix(tmp_path, capsys):

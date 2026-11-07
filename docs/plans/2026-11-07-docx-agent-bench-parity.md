@@ -264,7 +264,14 @@ hygiene.
 
 ### Task 1 (P0): Make Python one-step compare correct and safe; harden the Node one
 
-- **Status:** `[ ] Pending`
+- **Status:** `[x] Done (2026-11-07)`. Root cause: `apply_edits`' pinned branch applied a context-widened edit raw;
+  only text-match resolution re-trims widened context. Fix: `make_edits_self_contained` flags `_widened`, and the
+  pinned branch resolves flagged edits through the shared per-occurrence pipeline (`_resolve_occurrence`). All
+  one-step writers go through `adeu/compare.py` / `@adeu/core` `compare.ts` (transactional, alias-guarded); the
+  Python MCP tool runs in `asyncio.to_thread` and raises `ToolError`; `adeu diff -o x.docx` works without
+  `--author`; LangChain `adeu_diff_docx` gains `output_path`/`author_name`. Node needs no widening fix (its diff
+  never widens). `test_cli_bug_repro.py::test_diff_output_flag_text_and_guards` step 5 pinned the superseded
+  "`-o x.docx` is refused" contract and was updated. Local harness: Python CLI one-step 6/8 → 8/8.
 - **Goal:** `adeu diff v1 v2 -o out.docx`, Python MCP `diff_docx_files(output_path=…)` and LangChain's diff tool
   produce the same redline as the passing two-step path. They never overwrite an input and never write a file with
   skipped edits.

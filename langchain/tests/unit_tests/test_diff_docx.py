@@ -121,6 +121,51 @@ class TestAdeuDiffDocxValidation:
         assert input_data.diff_format == "unified"
 
 
+class TestAdeuDiffDocxRedlineOutput:
+    """`output_path` writes the comparison as a tracked-changes redline (same contract as `adeu diff -o`)."""
+
+    @staticmethod
+    def _pair(tmp_path: Path) -> tuple[Path, Path]:
+        from docx import Document
+
+        v1, v2 = tmp_path / "v1.docx", tmp_path / "v2.docx"
+        for path, word in ((v1, "thirty (30)"), (v2, "sixty (60)")):
+            d = Document()
+            d.add_paragraph(f"Invoices are payable within {word} days.")
+            d.save(str(path))
+        return v1, v2
+
+    def test_writes_redline_matching_modified(self, tmp_path: Path) -> None:
+        from io import BytesIO
+
+        from adeu.ingest import extract_text_from_stream
+
+        v1, v2 = self._pair(tmp_path)
+        out = tmp_path / "redline.docx"
+        result = AdeuDiffDocx().invoke(
+            {
+                "reasoning": "test",
+                "original_path": str(v1),
+                "modified_path": str(v2),
+                "output_path": str(out),
+                "author_name": "Deal Team",
+            }
+        )
+        assert "Redline saved to" in result
+        assert extract_text_from_stream(BytesIO(out.read_bytes()), clean_view=True) == extract_text_from_stream(
+            BytesIO(v2.read_bytes()), clean_view=True
+        )
+
+    def test_refuses_to_overwrite_original(self, tmp_path: Path) -> None:
+        v1, v2 = self._pair(tmp_path)
+        before = v1.read_bytes()
+        with pytest.raises(ToolException, match="same file as the original"):
+            AdeuDiffDocx().invoke(
+                {"reasoning": "test", "original_path": str(v1), "modified_path": str(v2), "output_path": str(v1)}
+            )
+        assert v1.read_bytes() == before
+
+
 def test_dead_helper_is_gone() -> None:
     import langchain_adeu.diff_docx as mod
 

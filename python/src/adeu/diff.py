@@ -772,6 +772,7 @@ def make_edits_self_contained(
             f"{first.new}{gap}{second.new}",
         )
         merged.edit.comment = first.edit.comment or second.edit.comment
+        merged.edit._widened = True  # the stable gap is shared context
         dropped.add(id(second.edit))
         pos_first = hunks.index(first)
         hunks[pos_first] = merged
@@ -785,6 +786,7 @@ def make_edits_self_contained(
             h.edit.target_text = original_text[start:end]
             h.edit.new_text = f"{prefix}{h.new}{suffix}"
             h.edit._match_start_index = start
+            h.edit._widened = True
         else:
             h.edit.target_text = h.target
             h.edit.new_text = h.new

@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Literal
 
+from adeu.compare import ComparisonError, build_redline_comparison, refuse_input_alias
 from adeu.diff import (
     collect_media_difference_warnings,
     create_unified_diff,
@@ -31,7 +33,7 @@ from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.mcp_components.tools.document import _create_diff_output
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
 from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
@@ -71,6 +73,17 @@ class AdeuDiffDocxInput(BaseModel):
             "directly into adeu_apply_changes."
         ),
     )
+    output_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional path for a .docx redline: the comparison written as native Word tracked changes "
+            "of original_path. Must differ from both inputs."
+        ),
+    )
+    author_name: str | None = Field(
+        default=None,
+        description="Author of the tracked changes when output_path is given (default: 'Comparison').",
+    )
 
 
 _DESCRIPTION = (
@@ -81,7 +94,10 @@ _DESCRIPTION = (
     "Compares the 'Accepted' state by default (i.e. what the text would be "
     "if every tracked change were accepted), which is what reviewers usually "
     "want. Set compare_clean=False to compare the raw underlying text including "
-    "any CriticMarkup for tracked changes."
+    "any CriticMarkup for tracked changes.\n\n"
+    "Pass `output_path` (and optional `author_name`) to also write the comparison "
+    "as a tracked-changes .docx in one step: the recommended way to make a "
+    "redline between two versions."
 )
 
 _NO_DIFF_MESSAGE = "No text differences found between the documents."
@@ -108,9 +124,14 @@ class AdeuDiffDocx(BaseTool):
         modified_path: str,
         compare_clean: bool = True,
         diff_format: Literal["word_patch", "unified", "structured_changes"] = "word_patch",
+        output_path: str | None = None,
+        author_name: str | None = None,
     ) -> str:
         orig = validate_docx_path(original_path, label="original document")
         mod = validate_docx_path(modified_path, label="modified document")
+
+        if output_path is not None:
+            return self._write_redline(orig, mod, output_path, author_name, compare_clean)
 
         if orig == mod:
             return _NO_DIFF_MESSAGE
@@ -188,6 +209,29 @@ class AdeuDiffDocx(BaseTool):
         diff_output = _create_diff_output(str(orig), str(mod), text_orig, edits)
         return warning_prefix + diff_output
 
+    @staticmethod
+    def _write_redline(orig: Path, mod: Path, output_path: str, author_name: str | None, compare_clean: bool) -> str:
+        target = validate_docx_path(output_path, must_exist=False, label="output path")
+        try:
+            refuse_input_alias(target, orig, mod)
+            author = (author_name or "").strip() or "Comparison"
+            comparison = build_redline_comparison(
+                strip_bom_from_docx_bytes(orig.read_bytes()),
+                strip_bom_from_docx_bytes(mod.read_bytes()),
+                author=author,
+                compare_clean=compare_clean,
+            )
+        except ComparisonError as e:
+            raise ToolException("\n".join([str(e), *e.details])) from e
+        replaced = target.exists()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(comparison.data)
+        lines = [f"Redline saved to {target} ({comparison.applied} tracked change(s), Author: {author})."]
+        if replaced:
+            lines.append(f"Note: replaced existing file {target}.")
+        lines += [f"⚠️  {w}" for w in comparison.warnings]
+        return "\n".join(lines)
+
     async def _arun(
         self,
         reasoning: str,
@@ -195,6 +239,8 @@ class AdeuDiffDocx(BaseTool):
         modified_path: str,
         compare_clean: bool = True,
         diff_format: Literal["word_patch", "unified", "structured_changes"] = "word_patch",
+        output_path: str | None = None,
+        author_name: str | None = None,
     ) -> str:
         return await asyncio.to_thread(
             self._run,
@@ -203,6 +249,8 @@ class AdeuDiffDocx(BaseTool):
             modified_path,
             compare_clean,
             diff_format,
+            output_path,
+            author_name,
         )
 
 

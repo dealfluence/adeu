@@ -53,6 +53,11 @@ class _EditState(BaseModel):
     # Internal use only. PrivateAttr is invisible to the MCP API schema.
     _match_start_index: Optional[int] = PrivateAttr(default=None)
     _resolved_start_idx: Optional[int] = PrivateAttr(default=None)
+    # Set by make_edits_self_contained when it widened (or coalesced) this
+    # edit with shared document context while keeping its pin. The pinned
+    # apply path must then re-trim that context exactly as text-match
+    # resolution does, instead of replacing the whole widened span.
+    _widened: bool = PrivateAttr(default=False)
     # Non-fatal advisory surfaced as the edit report's "warning" field (e.g.
     # a JS-style $N backreference that Python's re engine left as literal
     # text — QA 2026-07-23 customer C2).

@@ -4635,6 +4635,23 @@ class RedlineEngine:
         # as the ordinary edit it becomes.
         resolved_edits: List[Tuple[Union[ModifyText, InsertTableRow, DeleteTableRow], Any]] = []
 
+        def _register_resolved(edit: ModifyText, resolved: Union[ModifyText, List[ModifyText]]) -> None:
+            if isinstance(resolved, list):
+                for r in resolved:
+                    r._resolved_start_idx = r._match_start_index
+                    r._parent_edit_ref = edit
+                    if edit._resolved_start_idx is None:
+                        edit._resolved_start_idx = r._resolved_start_idx
+                    if getattr(edit, "_resolved_proxy_edit", None) is None:
+                        edit._resolved_proxy_edit = r
+                    resolved_edits.append((r, r.new_text))
+            else:
+                resolved._resolved_start_idx = resolved._match_start_index
+                resolved._parent_edit_ref = edit
+                edit._resolved_start_idx = resolved._resolved_start_idx
+                edit._resolved_proxy_edit = resolved
+                resolved_edits.append((resolved, edit.new_text))
+
         # Pre-resolve phase: locate all edits against initial clean state
         for idx, edit in enumerate(edits):
             edit_idx = index_offset + idx
@@ -4674,6 +4691,13 @@ class RedlineEngine:
                     if not self.clean_mapper:
                         self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
                     edit._active_mapper_ref = self.clean_mapper
+                # Context-widened diff edits re-trim their shared context the
+                # way text-match resolution does (see _resolve_widened_pin).
+                if isinstance(edit, ModifyText):
+                    at_pin = self._resolve_widened_pin(edit, index_offset=edit_idx)
+                    if at_pin is not None:
+                        _register_resolved(edit, at_pin)
+                        continue
                 # A pure insertion landing exactly between an empty control's
                 # anchors is a field fill expressed as text (A4.10).
                 if (
@@ -4708,21 +4732,7 @@ class RedlineEngine:
                     edit._error_msg = msg
                     continue
                 if resolved:
-                    if isinstance(resolved, list):
-                        for r in resolved:
-                            r._resolved_start_idx = r._match_start_index
-                            r._parent_edit_ref = edit
-                            if edit._resolved_start_idx is None:
-                                edit._resolved_start_idx = r._resolved_start_idx
-                            if getattr(edit, "_resolved_proxy_edit", None) is None:
-                                edit._resolved_proxy_edit = r
-                            resolved_edits.append((r, r.new_text))
-                    else:
-                        resolved._resolved_start_idx = resolved._match_start_index
-                        resolved._parent_edit_ref = edit
-                        edit._resolved_start_idx = resolved._resolved_start_idx
-                        edit._resolved_proxy_edit = resolved
-                        resolved_edits.append((resolved, edit.new_text))
+                    _register_resolved(edit, resolved)
                 else:
                     skipped += 1
                     edit._applied_status = False
@@ -5409,118 +5419,10 @@ class RedlineEngine:
             live_matches = live_matches[:1]
 
         all_sub_edits = []
-
         for start_idx, match_len in live_matches:
-            actual_doc_text = active_mapper.full_text[start_idx : start_idx + match_len]
-            current_effective_new_text = edit.new_text or ""
-
-            if re.match(r"^\{#cell:[^}]+\}$", actual_doc_text.strip()):
-                ins_text = current_effective_new_text
-                ins_text = ins_text.replace(actual_doc_text.strip(), "")
-                # A NON-empty cell: the anchor sits after the existing cell
-                # text, so the insertion lands at the END of the cell — and a
-                # new_text that echoes the existing content ("By: /s/ Signer"
-                # for a cell already reading "By: ") must not duplicate it
-                # (QA round 3, finding 1.3).
-                anchor_span = next(
-                    (s for s in active_mapper.spans if s.start <= start_idx < s.end and s.paragraph is not None),
-                    None,
-                )
-                if anchor_span is not None and anchor_span.paragraph is not None and ins_text:
-                    anchor_p_el = anchor_span.paragraph._element
-                    existing_cell_text = "".join(
-                        s.text
-                        for s in active_mapper.spans
-                        if s.end <= start_idx
-                        and s.run is not None
-                        and s.paragraph is not None
-                        and s.paragraph._element is anchor_p_el
-                    )
-                    if existing_cell_text:
-                        for candidate in (existing_cell_text, existing_cell_text.rstrip()):
-                            if candidate and ins_text.startswith(candidate):
-                                ins_text = ins_text[len(candidate) :].lstrip()
-                                break
-                        # Appending after a label ("Nimi" + "Testi") must not
-                        # glue words together (TC 5.1).
-                        if ins_text and not existing_cell_text[-1].isspace() and not ins_text[0].isspace():
-                            ins_text = " " + ins_text
-                if ins_text:
-                    sub_mt = ModifyText(type="modify", target_text="", new_text=ins_text, comment=edit.comment)
-                    sub_mt._match_start_index = start_idx
-                    sub_mt._internal_op = "INSERTION"
-                    sub_mt._active_mapper_ref = active_mapper
-                    all_sub_edits.append(sub_mt)
-                elif edit.comment:
-                    sub_mt = ModifyText(type="modify", target_text="", new_text="", comment=edit.comment)
-                    sub_mt._match_start_index = start_idx
-                    sub_mt._internal_op = "COMMENT_ONLY"
-                    sub_mt._active_mapper_ref = active_mapper
-                    all_sub_edits.append(sub_mt)
-                continue
-
-            if is_regex and current_effective_new_text:
-                try:
-                    current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
-                except re.error:
-                    pass
-                else:
-                    self._flag_surviving_js_backreference(edit, current_effective_new_text)
-
-            # The matcher forgave a typographic mismatch to find this
-            # occurrence (an LLM writes "parties' Master", the document reads
-            # "parties’ Master"), so the writer must forgive the same one:
-            # otherwise the caller's straight quotes are written back verbatim
-            # and every untargeted curly character becomes a real tracked
-            # change on a provision nobody touched (B4). Keyed on the MATCH
-            # being typography-forgiving — a caller who quotes the document's
-            # own characters and asks for different ones still gets the change.
-            current_effective_new_text = self._restore_matched_typography(
-                actual_doc_text, edit.target_text, current_effective_new_text
+            all_sub_edits.extend(
+                self._resolve_occurrence(edit, start_idx, match_len, active_mapper, is_regex, index_offset)
             )
-            current_effective_new_text = self._restore_matched_whitespace(
-                actual_doc_text, edit.target_text, current_effective_new_text
-            )
-            with_markers = self._reinject_anchor_markers(
-                active_mapper, start_idx, match_len, edit.target_text, current_effective_new_text
-            )
-            if with_markers is None:
-                # validate_edits reports this; direct apply_edits callers
-                # bypass it, so skip the occurrence rather than corrupt it.
-                logger.warning("Replacement changes text inside a hyperlink/cross-reference; skipping occurrence")
-                continue
-            current_effective_new_text = with_markers
-
-            # Stash the first occurrence's full match for the report preview,
-            # so it can show the complete logical change rather than only the
-            # first word-diff sub-edit (e.g. "{--two--}{++five++} (2) years"
-            # for a "two (2) years" -> "five (5) years" edit).
-            if edit._preview_span is None:
-                edit._preview_span = (start_idx, match_len)
-                edit._preview_matched_text = actual_doc_text
-                edit._preview_new_text = current_effective_new_text
-                edit._preview_mapper_ref = active_mapper
-
-            para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
-            if para_replace is not None:
-                if is_regex:
-                    para_replace.new_text = current_effective_new_text
-                all_sub_edits.append(para_replace)
-                continue
-
-            res = self._resolve_single_match(
-                edit,
-                start_idx,
-                match_len,
-                active_mapper,
-                actual_doc_text,
-                current_effective_new_text,
-                index_offset=index_offset,
-            )
-            if isinstance(res, list):
-                all_sub_edits.extend(res)
-            elif res:
-                all_sub_edits.append(res)
 
         if not all_sub_edits:
             return None
@@ -5528,6 +5430,149 @@ class RedlineEngine:
         if match_mode == "all" or len(all_sub_edits) > 1:
             return all_sub_edits
         return all_sub_edits[0]
+
+    def _resolve_widened_pin(self, edit: ModifyText, index_offset: int) -> Union[ModifyText, List[ModifyText], None]:
+        """
+        Resolves a pinned edit that make_edits_self_contained widened with
+        shared context (`_widened`) through the same per-occurrence pipeline
+        as text-match resolution, at its pinned offset. Applied raw, the
+        widened span is deleted and re-inserted whole: a target that crosses a
+        bold run and a paragraph break came back with literal `**`, and
+        rejecting every revision merged two headings. Returns None (caller
+        keeps the raw pinned path) when the pin no longer addresses the
+        target text.
+        """
+        if not edit._widened or edit._internal_op is not None or not edit.target_text:
+            return None
+        mapper = edit._active_mapper_ref
+        start = edit._resolved_start_idx
+        if mapper is None or start is None:
+            return None
+        if mapper.full_text[start : start + len(edit.target_text)] != edit.target_text:
+            return None
+        subs = self._resolve_occurrence(edit, start, len(edit.target_text), mapper, False, index_offset)
+        if not subs:
+            return None
+        return subs if len(subs) > 1 else subs[0]
+
+    def _resolve_occurrence(
+        self,
+        edit: ModifyText,
+        start_idx: int,
+        match_len: int,
+        active_mapper,
+        is_regex: bool,
+        index_offset: int,
+    ) -> List[ModifyText]:
+        """Resolves one located occurrence of `edit` into apply-ready sub-edits."""
+        actual_doc_text = active_mapper.full_text[start_idx : start_idx + match_len]
+        current_effective_new_text = edit.new_text or ""
+
+        if re.match(r"^\{#cell:[^}]+\}$", actual_doc_text.strip()):
+            ins_text = current_effective_new_text
+            ins_text = ins_text.replace(actual_doc_text.strip(), "")
+            # A NON-empty cell: the anchor sits after the existing cell
+            # text, so the insertion lands at the END of the cell — and a
+            # new_text that echoes the existing content ("By: /s/ Signer"
+            # for a cell already reading "By: ") must not duplicate it
+            # (QA round 3, finding 1.3).
+            anchor_span = next(
+                (s for s in active_mapper.spans if s.start <= start_idx < s.end and s.paragraph is not None),
+                None,
+            )
+            if anchor_span is not None and anchor_span.paragraph is not None and ins_text:
+                anchor_p_el = anchor_span.paragraph._element
+                existing_cell_text = "".join(
+                    s.text
+                    for s in active_mapper.spans
+                    if s.end <= start_idx
+                    and s.run is not None
+                    and s.paragraph is not None
+                    and s.paragraph._element is anchor_p_el
+                )
+                if existing_cell_text:
+                    for candidate in (existing_cell_text, existing_cell_text.rstrip()):
+                        if candidate and ins_text.startswith(candidate):
+                            ins_text = ins_text[len(candidate) :].lstrip()
+                            break
+                    # Appending after a label ("Nimi" + "Testi") must not
+                    # glue words together (TC 5.1).
+                    if ins_text and not existing_cell_text[-1].isspace() and not ins_text[0].isspace():
+                        ins_text = " " + ins_text
+            if ins_text:
+                sub_mt = ModifyText(type="modify", target_text="", new_text=ins_text, comment=edit.comment)
+                sub_mt._match_start_index = start_idx
+                sub_mt._internal_op = "INSERTION"
+                sub_mt._active_mapper_ref = active_mapper
+                return [sub_mt]
+            if edit.comment:
+                sub_mt = ModifyText(type="modify", target_text="", new_text="", comment=edit.comment)
+                sub_mt._match_start_index = start_idx
+                sub_mt._internal_op = "COMMENT_ONLY"
+                sub_mt._active_mapper_ref = active_mapper
+                return [sub_mt]
+            return []
+
+        if is_regex and current_effective_new_text:
+            try:
+                current_effective_new_text = re.sub(edit.target_text, current_effective_new_text, actual_doc_text)
+            except re.error:
+                pass
+            else:
+                self._flag_surviving_js_backreference(edit, current_effective_new_text)
+
+        # The matcher forgave a typographic mismatch to find this
+        # occurrence (an LLM writes "parties' Master", the document reads
+        # "parties’ Master"), so the writer must forgive the same one:
+        # otherwise the caller's straight quotes are written back verbatim
+        # and every untargeted curly character becomes a real tracked
+        # change on a provision nobody touched (B4). Keyed on the MATCH
+        # being typography-forgiving — a caller who quotes the document's
+        # own characters and asks for different ones still gets the change.
+        current_effective_new_text = self._restore_matched_typography(
+            actual_doc_text, edit.target_text, current_effective_new_text
+        )
+        current_effective_new_text = self._restore_matched_whitespace(
+            actual_doc_text, edit.target_text, current_effective_new_text
+        )
+        with_markers = self._reinject_anchor_markers(
+            active_mapper, start_idx, match_len, edit.target_text, current_effective_new_text
+        )
+        if with_markers is None:
+            # validate_edits reports this; direct apply_edits callers
+            # bypass it, so skip the occurrence rather than corrupt it.
+            logger.warning("Replacement changes text inside a hyperlink/cross-reference; skipping occurrence")
+            return []
+        current_effective_new_text = with_markers
+
+        # Stash the first occurrence's full match for the report preview,
+        # so it can show the complete logical change rather than only the
+        # first word-diff sub-edit (e.g. "{--two--}{++five++} (2) years"
+        # for a "two (2) years" -> "five (5) years" edit).
+        if edit._preview_span is None:
+            edit._preview_span = (start_idx, match_len)
+            edit._preview_matched_text = actual_doc_text
+            edit._preview_new_text = current_effective_new_text
+            edit._preview_mapper_ref = active_mapper
+
+        para_replace = self._maybe_paragraph_replace(edit, start_idx, match_len, active_mapper)
+        if para_replace is not None:
+            if is_regex:
+                para_replace.new_text = current_effective_new_text
+            return [para_replace]
+
+        res = self._resolve_single_match(
+            edit,
+            start_idx,
+            match_len,
+            active_mapper,
+            actual_doc_text,
+            current_effective_new_text,
+            index_offset=index_offset,
+        )
+        if isinstance(res, list):
+            return res
+        return [res] if res else []
 
     def _single_commented_sub_edit(
         self,

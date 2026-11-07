@@ -969,66 +969,58 @@ async def diff_docx_files(
         },
     )
 
-    try:
-        await ctx.debug("Extracting text from original document")
+    def _diff_sync() -> str:
         stream_orig = read_file_bytes(original_path)
+        stream_mod = read_file_bytes(modified_path)
+
+        saved_header = ""
+        if output_path:
+            from adeu.compare import build_redline_comparison, refuse_input_alias
+
+            refuse_input_alias(output_path, original_path, modified_path)
+            eff_author = (author_name or "").strip() or "Comparison"
+            comparison = build_redline_comparison(
+                stream_orig.getvalue(), stream_mod.getvalue(), author=eff_author, compare_clean=compare_clean
+            )
+            out_file = Path(output_path)
+            if out_file.parent:
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+            overwrite_note = _overwrite_note(output_path, original_path)
+            out_file.write_bytes(comparison.data)
+            warnings = "".join(f"⚠️  {w}\n" for w in comparison.warnings)
+            saved_header = (
+                f"Redline saved to: {output_path} "
+                f"({comparison.applied} tracked change(s) applied, Author: {eff_author}).{overwrite_note}\n"
+                f"{warnings}\n"
+            )
+
         # include_appendix=False: the generated appendix ("used N times",
         # diagnostics) is not document content — diffing it produces phantom
         # changes no apply can consume (QA 2026-07-18 H1).
         text_orig = extract_text_from_stream(
             stream_orig, filename=Path(original_path).name, clean_view=compare_clean, include_appendix=False
         )
-
-        await ctx.debug("Extracting text from modified document")
-        stream_mod = read_file_bytes(modified_path)
         text_mod = extract_text_from_stream(
             stream_mod, filename=Path(modified_path).name, clean_view=compare_clean, include_appendix=False
         )
-
-        saved_header = ""
-        if output_path:
-            from docx import Document as DocxDocument
-
-            from adeu.diff import generate_structured_edits
-            from adeu.ingest import _extract_text_from_doc
-
-            doc_orig_obj = DocxDocument(BytesIO(stream_orig.getvalue()))
-            doc_mod_obj = DocxDocument(BytesIO(stream_mod.getvalue()))
-            t_orig, s_orig = _extract_text_from_doc(
-                doc_orig_obj, clean_view=compare_clean, include_appendix=False, return_structure=True
-            )
-            t_mod, s_mod = _extract_text_from_doc(
-                doc_mod_obj, clean_view=compare_clean, include_appendix=False, return_structure=True
-            )
-            struct_edits, _ = generate_structured_edits(t_orig, s_orig, t_mod, s_mod)  # type: ignore[arg-type]
-            eff_author = (author_name or "").strip() or "Comparison"
-            eng = RedlineEngine(BytesIO(stream_orig.getvalue()), author=eff_author)
-            applied, skipped = eng.apply_edits(struct_edits)  # type: ignore[arg-type]
-            out_file = Path(output_path)
-            if out_file.parent:
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-            out_file.write_bytes(eng.save_to_stream().getvalue())
-            saved_header = (
-                f"Redline saved to: {output_path} "
-                f"({applied} tracked change(s) applied, {skipped} skipped, Author: {eff_author}).\n\n"
-            )
-
-        await ctx.debug("Generating text differences")
         # atomic_criticmarkup: diff-display only — hunks must never cut into a
         # {--/{++/{>>/{== block (QA 2026-07-23 F15). No-op on clean text.
         edits = generate_edits_from_text(text_orig, text_mod, atomic_criticmarkup=True)
-
         if not edits:
-            await ctx.warning("No text differences found between the documents.")
-            return add_timing_if_debug(start_time, saved_header + "No text differences found between the documents.")
+            return saved_header + "No text differences found between the documents."
+        return saved_header + _create_diff_output(original_path, modified_path, text_orig, edits)
 
-        await ctx.info(f"Diff complete. Found {len(edits)} differences.")
-        res = saved_header + _create_diff_output(original_path, modified_path, text_orig, edits)
-        return add_timing_if_debug(start_time, res)
-
+    try:
+        # Extraction, diff, apply and save are CPU/disk bound: off the event
+        # loop (AI_CONTEXT.md §12).
+        res = await asyncio.to_thread(_diff_sync)
     except Exception as e:
+        from adeu.compare import ComparisonError
+
         await ctx.error("Failed to compute diff", extra={"error": str(e)})
-        return add_timing_if_debug(start_time, f"Error computing diff: {str(e)}")
+        details = e.details if isinstance(e, ComparisonError) else []
+        raise ToolError("\n".join([f"Error computing diff: {e}", *details])) from e
+    return add_timing_if_debug(start_time, res)
 
 
 def _clamp_display_to_criticmarkup_blocks(

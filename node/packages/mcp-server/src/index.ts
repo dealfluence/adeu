@@ -18,7 +18,8 @@ import {
   failure_envelope,
   create_word_patch_diff,
   collect_media_difference_warnings,
-  generate_structured_edits,
+  build_redline_comparison,
+  ComparisonError,
   finalize_document,
   parse_page_arg,
   PageArgKind,
@@ -236,6 +237,24 @@ function overwriteNote(
     return `\nNote: the source document at ${outPath} was overwritten in place.`;
   }
   return `\nNote: replaced existing file ${outPath}.`;
+}
+
+/**
+ * True when two paths name the same file: string aliases, symlinks and hard
+ * links (same device + inode), falling back to resolved-path equality when
+ * either side does not exist yet. Mirrors Python's `_same_file`.
+ */
+function isSameFile(a: string, b: string): boolean {
+  try {
+    if (existsSync(a) && existsSync(b)) {
+      const sa = fs.statSync(a, { bigint: true });
+      const sb = fs.statSync(b, { bigint: true });
+      if (sa.dev === sb.dev && sa.ino === sb.ino) return true;
+    }
+  } catch {
+    // Unreadable metadata: fall through to path comparison.
+  }
+  return resolve(a) === resolve(b);
 }
 
 /**
@@ -1516,32 +1535,45 @@ server.registerTool(
 
       let saved_header = "";
       if (output_path) {
-        const { text: t1, structure: s1 } = _extractTextFromDoc(
-          origDoc,
-          compare_clean,
-          false,
-          false,
-          true,
-        ) as any;
-        const { text: t2, structure: s2 } = _extractTextFromDoc(
-          modDoc,
-          compare_clean,
-          false,
-          false,
-          true,
-        ) as any;
-        const { edits: structEdits } = generate_structured_edits(t1, s1, t2, s2);
+        for (const [input, role] of [
+          [original_path, "original"],
+          [modified_path, "modified"],
+        ] as const) {
+          if (isSameFile(output_path, input)) {
+            throw new Error(
+              `output_path '${output_path}' is the same file as the ${role} document; writing the redline ` +
+                "there would destroy it. Choose a different output path.",
+            );
+          }
+        }
         const effAuthor = (author_name || "").trim() || "Comparison";
-        const engDoc = await loadDocxOrThrow(origBuf, original_path);
-        const eng = new RedlineEngine(engDoc, effAuthor);
-        const [applied, skipped] = eng.apply_edits(structEdits as any);
-        const outBytes = await engDoc.save();
+        let comparison;
+        try {
+          comparison = await build_redline_comparison(origBuf, modBuf, effAuthor, compare_clean);
+        } catch (e) {
+          if (e instanceof ComparisonError) {
+            throw new Error([e.message, ...e.details].join("\n"));
+          }
+          throw e;
+        }
         const outDir = dirname(output_path);
         if (outDir && outDir !== "." && !existsSync(outDir)) {
           fs.mkdirSync(outDir, { recursive: true });
         }
-        fs.writeFileSync(output_path, outBytes);
-        saved_header = `Redline saved to: ${output_path} (${applied} tracked change(s) applied, ${skipped} skipped, Author: ${effAuthor}).\n\n`;
+        const existedBefore = existsSync(output_path);
+        fs.writeFileSync(output_path, comparison.data);
+        // Media warnings are printed with the text diff below; list only the
+        // diff's own warnings here so none appears twice.
+        const media = new Set(
+          collect_media_difference_warnings(new Uint8Array(origBuf), new Uint8Array(modBuf)),
+        );
+        const warnings = comparison.warnings
+          .filter((w) => !media.has(w))
+          .map((w) => `⚠️  ${w}\n`)
+          .join("");
+        saved_header =
+          `Redline saved to: ${output_path} (${comparison.applied} tracked change(s) applied, Author: ${effAuthor}).` +
+          `${overwriteNote(output_path, original_path, existedBefore)}\n${warnings}\n`;
       }
 
       const origText = _extractTextFromDoc(origDoc, compare_clean, false) as string;

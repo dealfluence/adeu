@@ -1174,7 +1174,10 @@ def handle_diff(args):
             protected.append((args.original, "original DOCX"))
         if getattr(args, "modified", None):
             protected.append((args.modified, "modified file"))
-        if args.output.suffix.lower() == ".docx" and not args.json and getattr(args, "author", None):
+        # A .docx output (without --json) is the one-step redline, with or
+        # without --author: guard the inputs here instead of refusing the
+        # extension as a text payload.
+        if args.output.suffix.lower() == ".docx" and not args.json:
             for path, role in protected:
                 if path is not None and _paths_alias_same_file(args.output, path):
                     _cli_error(
@@ -1255,14 +1258,15 @@ def handle_diff(args):
         else:
             print(json_output)
     elif getattr(args, "output", None) and args.output.suffix.lower() == ".docx":
+        from adeu.compare import ComparisonError, apply_comparison_edits
+
         eff_author = (getattr(args, "author", None) or "").strip() or _default_author()
-        eng = RedlineEngine(BytesIO(args.original.read_bytes()), author=eff_author)
-        applied, skipped = eng.apply_edits(edits)  # type: ignore[arg-type]
-        _write_output_or_exit(args.output, eng.save_to_stream().getvalue())
-        print(
-            f"Redline saved to {args.output} ({applied} applied, {skipped} skipped, Author: {eff_author})",
-            file=sys.stderr,
-        )
+        try:
+            data, applied = apply_comparison_edits(args.original.read_bytes(), edits, eff_author)
+        except ComparisonError as e:
+            _cli_error("unsupported", str(e), errors=e.details)
+        _write_output_or_exit(args.output, data)
+        print(f"Redline saved to {args.output} ({applied} applied, Author: {eff_author})", file=sys.stderr)
     elif not edits:
         # An explicit statement, on stdout: bare "Found 0 changes:" left the
         # reader to infer the documents are identical (QA 2026-07-23 F14).
