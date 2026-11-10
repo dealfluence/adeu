@@ -225,6 +225,41 @@ describe("Test Adeu n8n Node", () => {
       expect(typeof item.json.markdown).toBe("string");
       expect(item.json.markdown).not.toContain("READONLY_BOUNDARY_START");
     });
+
+    it("should return a range of pages when page is a range string like '1-2'", async () => {
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        cleanView: false,
+        page: "1-2",
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("markdown");
+      expect(item.json).toHaveProperty("page", "1-2");
+      expect(item.json).toHaveProperty("total_pages");
+      expect(typeof item.json.markdown).toBe("string");
+      expect(item.json.markdown).toContain("golden");
+    });
+
+    it("should return the fields ledger when mode is 'fields'", async () => {
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "extractMarkdown",
+        binaryPropertyName: "data",
+        mode: "fields",
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("mode", "fields");
+      expect(item.json).toHaveProperty("markdown");
+      expect(item.json.markdown).toContain("# Fields:");
+    });
   });
   describe("Operation: Extract Outline", () => {
     beforeEach(() => {
@@ -503,6 +538,48 @@ describe("Test Adeu n8n Node", () => {
       const edits = stats.edits as Array<Record<string, unknown>>;
       expect(edits[0]).toHaveProperty("status", "applied");
       expect(edits[0]).toHaveProperty("match_mode", "all");
+    });
+
+    it("should normalize comment-only modify items and support markupMode='manual'", async () => {
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              {
+                type: "modify",
+                target_text: uniqueTarget,
+                comment: "Annotation only",
+              },
+              {
+                type: "modify",
+                target_text: "golden",
+                new_text: "platinum",
+                comment: "Manual replacement",
+              },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "applyEdits",
+        binaryPropertyName: "data",
+        outputBinaryPropertyName: "data",
+        author: "n8n AI",
+        editsSource: "fromInputJson",
+        editsJsonPath: "changes",
+        markupMode: "manual",
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+      const stats = item.json.stats as Record<string, any>;
+      expect(stats.edits_applied).toBe(2);
+      expect(stats.edits[1].change_ids).toBeUndefined();
+      expect(stats.edits[0].comment_ids.length).toBe(1);
     });
 
     it("should name the failing change index and the recovery protocol", async () => {
@@ -961,6 +1038,41 @@ describe("Test Adeu n8n Node", () => {
       expect(diff).toContain("No textual differences found between the documents");
       expect(diff).toContain("--- orig.docx");
       expect(diff).toContain("+++ mod.docx");
+    });
+
+    it("should produce a redlined .docx binary in one step when diffFormat is 'redlineDocx'", async () => {
+      const initialBuffer = readFileSync(INITIAL_FIXTURE);
+      let callCount = 0;
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<
+          typeof vi.fn
+        >
+      ).mockImplementation(async () => {
+        callCount += 1;
+        return callCount === 1 ? initialBuffer : goldenBuffer;
+      });
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "generateDiff",
+        originalDocumentSource: "fromInput",
+        originalBinaryPropertyName: "data",
+        modifiedDocumentSource: "fromInput",
+        modifiedBinaryPropertyName: "data2",
+        cleanView: true,
+        diffFormat: "redlineDocx",
+        author: "n8n AI",
+        outputBinaryPropertyName: "data",
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+
+      expect(item.json).toHaveProperty("diffFormat", "redlineDocx");
+      expect(item.json).toHaveProperty("fileName", "orig_redlined.docx");
+      expect(item.json).toHaveProperty("author", "n8n AI");
+      expect(item.json).toHaveProperty("edits_applied");
+      expect((item.json.edits_applied as number) >= 1).toBe(true);
+      expect(item.binary).toHaveProperty("data");
     });
   });
 

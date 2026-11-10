@@ -6,8 +6,14 @@ import type {
 } from "n8n-workflow";
 import { NodeOperationError } from "n8n-workflow";
 import {
+  collectFields,
+  DocumentObject,
   extractTextFromBuffer,
+  PAGE_RANGE_MAX_PAGES,
   paginate,
+  parse_page_arg,
+  readDocumentProtection,
+  renderLedger,
   split_structural_appendix,
 } from "@adeu/core";
 
@@ -30,6 +36,46 @@ export const extractMarkdownDescription: INodeProperties[] = [
     description:
       "Name of the binary property holding the .docx file (string, e.g. 'data'). In 'From Connected Input' mode this reads from the current item; in 'From Another Node' mode this specifies which property on the source node's output to read. Must be a valid .docx (not .doc, .pdf, or another format).",
     displayOptions,
+  },
+  {
+    displayName: "Mode",
+    name: "mode",
+    type: "options",
+    default: "full",
+    description:
+      "Projection mode. 'Full' (default) returns the document body in Markdown/CriticMarkup. 'Fields (Content Controls)' returns the form-fields ledger with CC:<N> IDs, tags, aliases, types, lock/binding state, and current values for use with set_field.",
+    options: [
+      {
+        name: "Full Document",
+        value: "full",
+        description: "Full or page-scoped Markdown/CriticMarkup projection",
+      },
+      {
+        name: "Fields (Content Controls)",
+        value: "fields",
+        description:
+          "Form-fields ledger listing every content control (CC:<N>, tag, alias, type, state, value)",
+      },
+    ],
+    displayOptions,
+  },
+  {
+    displayName: "Fields Offset",
+    name: "fieldsOffset",
+    type: "number",
+    default: 0,
+    typeOptions: {
+      minValue: 0,
+    },
+    description:
+      "0-based entry offset when paging through a long Fields ledger",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["extractMarkdown"],
+        mode: ["fields"],
+      },
+    },
   },
   {
     displayName: "Clean View",
@@ -80,13 +126,18 @@ export async function executeExtractMarkdown(
     "binaryPropertyName",
     itemIndex,
   ) as string;
-  const cleanView = this.getNodeParameter("cleanView", itemIndex) as boolean;
+  const mode = this.getNodeParameter(
+    "mode",
+    itemIndex,
+    "full",
+  ) as "full" | "fields";
+  const cleanView = this.getNodeParameter("cleanView", itemIndex, false) as boolean;
   const includeAppendix = this.getNodeParameter(
     "includeAppendix",
     itemIndex,
     true,
   ) as boolean;
-  const page = this.getNodeParameter("page", itemIndex, 0) as number;
+  const pageRaw = this.getNodeParameter("page", itemIndex, 0) as number | string;
 
   const documentSource = this.getNodeParameter(
     "documentSource",
@@ -117,14 +168,46 @@ export async function executeExtractMarkdown(
     itemIndex,
     source,
   );
+
+  if (mode === "fields") {
+    const fieldsOffset = this.getNodeParameter(
+      "fieldsOffset",
+      itemIndex,
+      0,
+    ) as number;
+    const doc = await DocumentObject.load(buffer);
+    const rawText = await extractTextFromBuffer(buffer, false, false);
+    const [body] = split_structural_appendix(rawText);
+    const pagination = paginate(body, "");
+    const entries = collectFields(doc, rawText, pagination.body_page_offsets);
+    const protection = readDocumentProtection(doc);
+    const markdown = renderLedger(fileName, entries, protection, fieldsOffset);
+    return [
+      {
+        json: {
+          fileName,
+          mode: "fields",
+          total_fields: entries.length,
+          markdown,
+        },
+        pairedItem: { item: itemIndex },
+      },
+    ];
+  }
+
   const fullMarkdown = await extractTextFromBuffer(
     buffer,
     cleanView,
     includeAppendix,
   );
 
-  // Page 0 / omitted => full document, no pagination metadata (preserves backward compatibility).
-  if (!page || page === 0) {
+  // Page 0 / omitted / "0" / "all" => full document, no pagination metadata (preserves backward compatibility).
+  if (
+    !pageRaw ||
+    pageRaw === 0 ||
+    (typeof pageRaw === "string" &&
+      (pageRaw.trim() === "0" || pageRaw.trim().toLowerCase() === "all"))
+  ) {
     return [
       {
         json: {
@@ -141,10 +224,53 @@ export async function executeExtractMarkdown(
   const [body, appendix] = split_structural_appendix(fullMarkdown);
   const pagination = paginate(body, appendix);
 
-  if (page > pagination.total_pages) {
+  if (typeof pageRaw === "string" && pageRaw.includes("-")) {
+    const [kind, val] = parse_page_arg(pageRaw.trim().replace(/^['"]|['"]$/g, ""));
+    if (kind === "range" && Array.isArray(val)) {
+      const [startPage, endPage] = val;
+      if (startPage > pagination.total_pages) {
+        throw new NodeOperationError(
+          this.getNode(),
+          `Requested page ${startPage} exceeds total_pages (${pagination.total_pages}). Call extractOutline to discover the page count first.`,
+          { itemIndex },
+        );
+      }
+      const lastPage = Math.min(
+        endPage,
+        startPage + PAGE_RANGE_MAX_PAGES - 1,
+        pagination.total_pages,
+      );
+      const selectedPages = pagination.pages.slice(startPage - 1, lastPage);
+      const combinedMarkdown = selectedPages
+        .map((p) => p.page_content)
+        .join("\n\n");
+      const totalChanges = selectedPages.reduce(
+        (acc, p) => acc + p.tracked_change_count,
+        0,
+      );
+      return [
+        {
+          json: {
+            fileName,
+            cleanView,
+            markdown: combinedMarkdown,
+            page: `${startPage}-${ endPage }`,
+            total_pages: pagination.total_pages,
+            has_next: lastPage < pagination.total_pages,
+            has_prev: startPage > 1,
+            tracked_change_count: totalChanges,
+          },
+          pairedItem: { item: itemIndex },
+        },
+      ];
+    }
+  }
+
+  const page = typeof pageRaw === "number" ? pageRaw : Number(pageRaw);
+  if (!Number.isInteger(page) || page < 1 || page > pagination.total_pages) {
     throw new NodeOperationError(
       this.getNode(),
-      `Requested page ${page} exceeds total_pages (${pagination.total_pages}). Call extractOutline to discover the page count first.`,
+      `Requested page ${pageRaw} exceeds total_pages (${pagination.total_pages}). Call extractOutline to discover the page count first.`,
       { itemIndex },
     );
   }

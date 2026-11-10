@@ -6,6 +6,7 @@ import type {
   INodeProperties,
 } from "n8n-workflow";
 import {
+  build_redline_comparison,
   DocumentObject,
   _extractTextFromDoc,
   type ExtractStructure,
@@ -18,7 +19,9 @@ import {
 
 import {
   type BinarySource,
+  buildOutputFileName,
   docOpDisplayOptions,
+  DOCX_MIME_TYPE,
   getDocxBufferFromSource,
 } from "../GenericFunctions";
 
@@ -129,7 +132,7 @@ export const generateDiffDescription: INodeProperties[] = [
     type: "options",
     default: "wordPatch",
     description:
-      "Format of the output diff. 'Word Patch' (default) produces an Adeu @@ Word Patch @@ text string showing sub-word modifications. 'Unified' produces a standard Git-style unified diff string. 'Structured Changes' produces a JSON array of DocumentChange objects suitable for feeding directly into Apply Edits.",
+      "Format of the output diff. 'Word Patch' (default) produces an Adeu @@ Word Patch @@ text string showing sub-word modifications. 'Unified' produces a standard Git-style unified diff string. 'Structured Changes' produces a JSON array of DocumentChange objects suitable for feeding directly into Apply Edits. 'Redlined DOCX' produces a tracked-changes .docx comparing Original and Modified in one transactional step.",
     options: [
       {
         name: "Word Patch",
@@ -147,11 +150,49 @@ export const generateDiffDescription: INodeProperties[] = [
         description:
           "JSON array of DocumentChange objects that transform original into modified",
       },
+      {
+        name: "Redlined DOCX (One-Step Comparison)",
+        value: "redlineDocx",
+        description:
+          "Transactional tracked-changes .docx comparing original and modified in one step",
+      },
     ],
     displayOptions: {
       show: {
         resource: ["document"],
         operation: ["generateDiff"],
+      },
+    },
+  },
+  {
+    displayName: "Author Name",
+    name: "author",
+    type: "string",
+    default: "Adeu Redline",
+    placeholder: "e.g. AI Legal Counsel",
+    description:
+      "Author name attributed to all tracked changes in the generated comparison .docx",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["generateDiff"],
+        diffFormat: ["redlineDocx"],
+      },
+    },
+  },
+  {
+    displayName: "Output Binary Property",
+    name: "outputBinaryPropertyName",
+    type: "string",
+    default: "data",
+    placeholder: "e.g. data",
+    description:
+      "Name of the binary property where the redlined comparison .docx will be written",
+    displayOptions: {
+      show: {
+        resource: ["document"],
+        operation: ["generateDiff"],
+        diffFormat: ["redlineDocx"],
       },
     },
   },
@@ -174,7 +215,7 @@ export async function executeGenerateDiff(
     "diffFormat",
     itemIndex,
     "wordPatch",
-  ) as "wordPatch" | "unified" | "structuredChanges";
+  ) as "wordPatch" | "unified" | "structuredChanges" | "redlineDocx";
 
   const originalDocumentSource = this.getNodeParameter(
     "originalDocumentSource",
@@ -222,6 +263,68 @@ export async function executeGenerateDiff(
     new Uint8Array(originalBuffer),
     new Uint8Array(modifiedBuffer),
   );
+
+  if (diffFormat === "redlineDocx") {
+    const author = this.getNodeParameter(
+      "author",
+      itemIndex,
+      "Adeu Redline",
+    ) as string;
+    const outputBinaryPropertyName = this.getNodeParameter(
+      "outputBinaryPropertyName",
+      itemIndex,
+      "data",
+    ) as string;
+
+    const cmp = await build_redline_comparison(
+      originalBuffer,
+      modifiedBuffer,
+      author,
+      cleanView,
+    );
+    const outName = buildOutputFileName(originalName, "redlined");
+    const incomingBinary = this.getInputData()[itemIndex].binary ?? {};
+    const binary = await this.helpers.prepareBinaryData(
+      cmp.data,
+      outName,
+      DOCX_MIME_TYPE,
+    );
+
+    const isToolExec =
+      typeof this.isToolExecution === "function" && this.isToolExecution();
+    let redlinedBinaryId: string | undefined;
+    if (isToolExec && binary.id) {
+      const staticData = this.getWorkflowStaticData("global");
+      staticData.adeu_last_redlined = {
+        id: binary.id,
+        fileName: outName,
+        mimeType: DOCX_MIME_TYPE,
+        timestamp: Date.now(),
+      };
+      redlinedBinaryId = binary.id;
+    }
+
+    return [
+      {
+        json: {
+          originalFileName: originalName,
+          modifiedFileName: modifiedName,
+          fileName: outName,
+          author,
+          cleanView,
+          diffFormat,
+          edits_applied: cmp.applied,
+          ...(cmp.warnings.length > 0 ? { warnings: cmp.warnings } : {}),
+          ...(redlinedBinaryId !== undefined ? { redlinedBinaryId } : {}),
+        },
+        binary: {
+          ...incomingBinary,
+          [outputBinaryPropertyName]: binary,
+        },
+        pairedItem: { item: itemIndex },
+      },
+    ];
+  }
 
   if (diffFormat === "structuredChanges") {
     const docOrig = await DocumentObject.load(originalBuffer);

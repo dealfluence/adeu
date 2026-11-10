@@ -299,10 +299,13 @@ const MATCH_MODE_SYNONYMS: Record<string, "strict" | "first" | "all"> = {
   first: "first",
   "first-occurrence": "first",
   "first-only": "first",
+  first_only: "first",
+  firstonly: "first",
   all: "all",
   global: "all",
   bulk: "all",
   alloccurrences: "all",
+  all_occurrences: "all",
   "all-occurrences": "all",
   every: "all",
 };
@@ -314,11 +317,37 @@ const MATCH_MODE_SYNONYMS: Record<string, "strict" | "first" | "all"> = {
 export function coerceChangeItemInPlace(item: any): void {
   if (item === null || typeof item !== "object" || Array.isArray(item)) return;
 
+  const hasComment =
+    (typeof item.comment === "string" && item.comment.trim() !== "") ||
+    (Array.isArray(item.comment) &&
+      item.comment.some(
+        (c: any) =>
+          c && typeof c.text === "string" && c.text.trim() !== "",
+      ));
+
   // Infer missing `type` when fields fit unambiguously
   if (!("type" in item) || item.type === undefined || item.type === null) {
     if ("cells" in item) item.type = "insert_row";
     else if ("text" in item && "target_id" in item) item.type = "reply";
-    else if ("target_text" in item && "new_text" in item) item.type = "modify";
+    else if ("field" in item && "value" in item) item.type = "set_field";
+    else if (
+      "target_text" in item &&
+      ("new_text" in item || hasComment)
+    ) {
+      item.type = "modify";
+    }
+  }
+
+  // Comment-only modify: omitting `new_text` (or passing null) when a comment
+  // is present means "annotate this span without changing its text" — never
+  // "delete the span". Mirrors @adeu/mcp-server (index.ts:119-134).
+  if (
+    item.type === "modify" &&
+    (item.new_text === undefined || item.new_text === null) &&
+    typeof item.target_text === "string" &&
+    hasComment
+  ) {
+    item.new_text = item.target_text;
   }
 
   // Normalize match_mode
@@ -442,7 +471,7 @@ export function mapAdeuErrorToNodeApiError(
     } else if (lower.includes("read-only") || lower.includes("readonly")) {
       messageContext = "An edit targeted a read-only structural element.";
       descriptionContext =
-        "Cross-references, footnotes, hyperlinks, and the Structural Appendix cannot be modified via text replacement:\n" +
+        "The Structural Appendix and locked cross-reference targets cannot be modified directly via text replacement (plain-text target_text resolves across hyperlinks, cross-references, and bookmarks automatically when kept intact):\n" +
         joined;
     } else if (lower.includes("comment range from another author")) {
       messageContext =

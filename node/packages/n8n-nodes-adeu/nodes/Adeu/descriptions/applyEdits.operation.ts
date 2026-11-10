@@ -168,6 +168,28 @@ export const applyEditsDescription: INodeProperties[] = [
       "Salvage mode is for AI Agent loops that will fix and resubmit the rejected changes; do not use it where a half-applied redline would be shipped as final.",
     displayOptions: applyEditsDisplayOptions,
   },
+  {
+    displayName: "Markup Mode",
+    name: "markupMode",
+    type: "options",
+    default: "track_changes",
+    description:
+      "How modifications are recorded in the output .docx. 'Track Changes' (default) writes native Word <w:ins> and <w:del> revision tags. 'Manual (Inline Formatting)' writes deletions as strikethrough runs and insertions as bold underlined red (#C00000) runs with native Word comments, emitting zero tracked revisions.",
+    options: [
+      {
+        name: "Track Changes",
+        value: "track_changes",
+        description: "Native Word <w:ins> and <w:del> tracked revisions",
+      },
+      {
+        name: "Manual (Inline Formatting)",
+        value: "manual",
+        description:
+          "Strikethrough deletions and underlined red insertions with comments (no <w:ins>/<w:del>)",
+      },
+    ],
+    displayOptions: applyEditsDisplayOptions,
+  },
   // CC-4 write-gate overrides (spec-gates.md §1). Three separate toggles
   // rather than one "force": they license different things, and a single
   // switch would make a user who wanted one silently accept all three.
@@ -244,6 +266,11 @@ export async function executeApplyEdits(
     itemIndex,
     false,
   ) as boolean;
+  const markupMode = this.getNodeParameter(
+    "markupMode",
+    itemIndex,
+    "track_changes",
+  ) as "track_changes" | "manual";
   const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
 
   // Resolve the changes array
@@ -307,6 +334,7 @@ export async function executeApplyEdits(
     ignore_control_locks: ignoreControlLocks,
     ignore_document_protection: ignoreDocumentProtection,
     allow_untracked_writes: allowUntrackedWrites,
+    markup_mode: markupMode,
   });
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],
