@@ -114,7 +114,12 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
     const batch = allTools.find((t) => t.name === "process_document_batch")!;
     expect(batch.description).toContain("markup_mode");
     expect(batch.description).toContain("'manual'");
-    for (const t of [diff, batch]) {
+    expect(batch.description).toContain("pipe tables");
+    expect(batch.description).toContain("[{text, author?}]");
+    const readDocx = allTools.find((t) => t.name === "read_docx")!;
+    expect(readDocx.description).not.toContain("oversized documents are refused");
+    expect(readDocx.description).toContain("serves the first pages");
+    for (const t of [diff, batch, readDocx]) {
       expect(t.description.length).toBeLessThanOrEqual(CLIENT_DESCRIPTION_BUDGET);
     }
   });
