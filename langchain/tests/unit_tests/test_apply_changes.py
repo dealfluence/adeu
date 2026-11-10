@@ -33,6 +33,7 @@ class TestAdeuApplyChangesSchema:
         desc = tool.description
         for change_type in (
             "modify",
+            "set_field",
             "accept",
             "reject",
             "reply",
@@ -40,6 +41,19 @@ class TestAdeuApplyChangesSchema:
             "delete_row",
         ):
             assert change_type in desc, f"description missing change type '{change_type}'"
+        assert "pipe tables" in desc
+        assert "[{text, author?}]" in desc
+
+    def test_gate_override_fields_default_to_false(self) -> None:
+        data = AdeuApplyChangesInput(
+            reasoning="t",
+            file_path="/a.docx",
+            author_name="AI",
+            changes=[{"type": "accept", "target_id": "Chg:1"}],
+        )
+        assert data.ignore_control_locks is False
+        assert data.ignore_document_protection is False
+        assert data.allow_untracked_writes is False
 
     def test_description_warns_about_batch_semantics(self) -> None:
         # Batches apply sequentially (chaining supported); if the contract is
@@ -219,6 +233,8 @@ class TestAdeuApplyChangesArtifactParity:
         success = _success_artifact(src, str(target), target, "AI", True, self._stats(), [])
         failure = _failure_artifact(src, str(target), "AI", ["boom"])
         assert set(success) == set(failure)
+        assert "actions" in success
+        assert "document_state" in success
 
     def test_requested_output_path_is_the_caller_string_on_both_branches(self, tmp_path: Path) -> None:
         # Same field, same meaning on both branches: what the caller asked

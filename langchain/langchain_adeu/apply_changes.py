@@ -2,9 +2,9 @@
 """Apply a batch of edits and review actions to a .docx file.
 
 Wraps `adeu.RedlineEngine.process_batch`. The agent supplies a flat list
-of `DocumentChange` objects (modify / accept / reject / reply / insert_row
-/ delete_row) and gets back a new .docx with the changes applied as
-native Word Track Changes plus comments.
+of `DocumentChange` objects (modify / set_field / accept / reject / reply /
+insert_row / delete_row) and gets back a new .docx with the changes applied
+as native Word Track Changes (or manual inline formatting) plus comments.
 
 Three behaviors distinguish this tool from the others:
 
@@ -67,20 +67,28 @@ class AdeuApplyChangesInput(BaseModel):
             "and is validated against the Adeu DocumentChange schema:\n\n"
             "MODIFY (search and replace text — most common):\n"
             "  {'type': 'modify', 'target_text': 'exact phrase to find', "
-            "'new_text': 'replacement text', 'comment': 'optional rationale', "
+            "'new_text': 'replacement text', 'comment': 'optional rationale or [{text, author?}]', "
             "'match_mode': 'strict'|'first'|'all', 'regex': false|true}\n"
             "  - target_text must match uniquely (when match_mode='strict'); if ambiguous, either "
             "include surrounding context, or set match_mode='first' (first occurrence) or "
-            "match_mode='all' (every occurrence).\n"
+            "match_mode='all' (every occurrence). Empty table cells emit `{#cell:<id>}` — "
+            "pass that token as target_text to fill one.\n"
             "  - new_text supports Markdown: '# Heading 1' through "
-            "'###### Heading 6', '**bold**', '_italic_', and '\\n\\n' to split "
-            "into multiple paragraphs.\n"
-            "  - empty new_text deletes the matched text.\n"
+            "'###### Heading 6', '**bold**', '_italic_', '\\n\\n' to split "
+            "into multiple paragraphs, and pipe tables (`| Col 1 | Col 2 |\\n|---|---|\\n| A | B |`) "
+            "to insert native Word tables.\n"
+            "  - empty new_text deletes the matched text; omitting new_text (with a comment) "
+            "annotates without changing text.\n"
             "  - do NOT write CriticMarkup tags ({++, {--, {>>) — use the "
-            "comment parameter for comments instead.\n\n"
+            "comment parameter (a string or a list of `{'text': '...', 'author': '...'}`) instead.\n\n"
+            "SET_FIELD (fill a content control / form field):\n"
+            "  {'type': 'set_field', 'field': 'CC:3', 'value': 'New Value', "
+            "'match_mode': 'strict'|'first'|'all', 'comment': 'optional rationale'}\n"
+            "  - field is the 'CC:<N>' id, tag, or alias from adeu_read_docx(mode='fields'). "
+            "Checkboxes take true/false, dates YYYY-MM-DD, dropdowns a listed option.\n\n"
             "ACCEPT or REJECT (finalize or revert a tracked change by ID):\n"
-            "  {'type': 'accept', 'target_id': 'Chg:12'}\n"
-            "  {'type': 'reject', 'target_id': 'Chg:12'}\n"
+            "  {'type': 'accept', 'target_id': 'Chg:12', 'part': 'optional OPC part'}\n"
+            "  {'type': 'reject', 'target_id': 'Chg:12', 'part': 'optional OPC part'}\n"
             "  - revision ids are numbered per package part; if the same id exists "
             "in several parts (e.g. body and a header) the bare id is refused, and "
             "the optional 'part' field (e.g. 'word/header1.xml') picks the one you "
@@ -108,9 +116,10 @@ class AdeuApplyChangesInput(BaseModel):
         description=(
             "Absolute path for the edited output. When omitted, defaults to "
             "'<stem>_processed.docx' in the same directory as the input "
-            "(or overwrites the input if its stem already ends in '_processed' "
-            "or '_redlined'). Must differ from input_path unless the input is "
-            "already a processed/redlined file."
+            "(or overwrites the input in place if its stem already ends in "
+            "'_processed', '_redlined', '.redline', '-redline', '_markup', or "
+            "'.marked'). Must differ from input_path unless the input is "
+            "already a derivative processed/redlined file."
         ),
     )
     partial: bool = Field(
@@ -130,14 +139,38 @@ class AdeuApplyChangesInput(BaseModel):
             "edit's comment as a Word comment, and no tracked revisions."
         ),
     )
+    ignore_control_locks: bool = Field(
+        default=False,
+        description=(
+            "Apply edits even inside content-locked or grouped content controls "
+            "(`w:lock` / `w:group`). Defaults to False."
+        ),
+    )
+    ignore_document_protection: bool = Field(
+        default=False,
+        description=(
+            "Apply changes even when the document carries enforced editing protection "
+            "(read-only, fill-in-forms, comments-only, tracked-changes-only). Defaults to False."
+        ),
+    )
+    allow_untracked_writes: bool = Field(
+        default=False,
+        description=(
+            "Permit writes that Word records WITHOUT tracked changes in fill-in-forms-"
+            "protected documents. Defaults to False."
+        ),
+    )
 
 
 _DESCRIPTION = (
     "Apply a batch of edits and review actions to a Microsoft Word (.docx) "
     "file. Edits are committed as native Word Track Changes attributed to "
     "the author_name you provide.\n\n"
-    "Supported change types: 'modify' (search-and-replace text with optional "
-    "comment), 'accept' or 'reject' (finalize/revert a tracked change by ID), "
+    "Supported change types: 'modify' (search-and-replace text with Markdown "
+    "headings, bold/italic, '\\n\\n' paragraph splits, pipe tables, `{#cell:<id>}` "
+    "empty-cell anchors, and optional comment as a string or `[{text, author?}]`), "
+    "'set_field' (fill a form field / content control by 'CC:<N>' id, tag, or alias), "
+    "'accept' or 'reject' (finalize/revert a tracked change by ID, with optional 'part'), "
     "'reply' (respond to a comment by ID), 'insert_row' or 'delete_row' "
     "(structural table edits).\n\n"
     "Changes in a batch apply SEQUENTIALLY: each change is evaluated against "
@@ -182,6 +215,9 @@ class AdeuApplyChanges(BaseTool):
         output_path: str | None = None,
         partial: bool = True,
         markup_mode: Literal["track_changes", "manual"] = "track_changes",
+        ignore_control_locks: bool = False,
+        ignore_document_protection: bool = False,
+        allow_untracked_writes: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         if not author_name.strip():
             raise ToolException(
@@ -198,7 +234,7 @@ class AdeuApplyChanges(BaseTool):
         if not changes:
             raise ToolException(
                 "changes list cannot be empty. Provide at least one change "
-                "(type: modify, accept, reject, reply, insert_row, or delete_row)."
+                "(type: modify, set_field, accept, reject, reply, insert_row, or delete_row)."
             )
 
         source = validate_docx_path(file_path, label="DOCX file")
@@ -214,13 +250,21 @@ class AdeuApplyChanges(BaseTool):
             )
 
         target = _resolve_output_path(source, output_path)
+        source_overwritten = target == source
+        existing_output_overwritten = not source_overwritten and target.exists()
 
         raw_bytes = source.read_bytes()
         sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
         stream = BytesIO(sanitized_bytes)
 
         engine = RedlineEngine(
-            stream, author=author_name, id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT, markup_mode=markup_mode
+            stream,
+            author=author_name,
+            id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT,
+            markup_mode=markup_mode,
+            ignore_control_locks=ignore_control_locks,
+            ignore_document_protection=ignore_document_protection,
+            allow_untracked_writes=allow_untracked_writes,
         )
 
         try:
@@ -245,7 +289,15 @@ class AdeuApplyChanges(BaseTool):
         with open(target, "wb") as f:
             f.write(result_stream.getvalue())
 
-        content_lines = _build_success_content(stats, target, engine_failed, len(validated_changes), partial)
+        content_lines = _build_success_content(
+            stats,
+            target,
+            engine_failed,
+            len(validated_changes),
+            partial,
+            source_overwritten=source_overwritten,
+            existing_output_overwritten=existing_output_overwritten,
+        )
 
         artifact = _success_artifact(source, output_path, target, author_name, partial, stats, engine_failed)
         return "\n".join(content_lines), artifact
@@ -259,9 +311,22 @@ class AdeuApplyChanges(BaseTool):
         output_path: str | None = None,
         partial: bool = True,
         markup_mode: Literal["track_changes", "manual"] = "track_changes",
+        ignore_control_locks: bool = False,
+        ignore_document_protection: bool = False,
+        allow_untracked_writes: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         return await asyncio.to_thread(
-            self._run, reasoning, file_path, author_name, changes, output_path, partial, markup_mode
+            self._run,
+            reasoning,
+            file_path,
+            author_name,
+            changes,
+            output_path,
+            partial,
+            markup_mode,
+            ignore_control_locks,
+            ignore_document_protection,
+            allow_untracked_writes,
         )
 
 
@@ -331,7 +396,9 @@ def _success_artifact(
         "occurrences_modified": stats.get("occurrences_modified", 0),
         "author_impersonation_warning": stats.get("author_impersonation_warning"),
         "skipped_details": stats.get("skipped_details", []),
+        "actions": stats.get("actions", []),
         "edits": stats.get("edits", []),
+        "document_state": stats.get("document_state"),
         "engine": stats.get("engine"),
         "engine_version": stats.get("version"),
     }
@@ -367,7 +434,9 @@ def _failure_artifact(
         "occurrences_modified": 0,
         "author_impersonation_warning": None,
         "skipped_details": [],
+        "actions": [],
         "edits": [],
+        "document_state": None,
         "engine": None,
         "engine_version": None,
     }
@@ -379,16 +448,20 @@ def _build_success_content(
     engine_failed: list[dict[str, Any]],
     total_changes: int,
     partial: bool,
+    *,
+    source_overwritten: bool = False,
+    existing_output_overwritten: bool = False,
 ) -> list[str]:
     """Assemble the human-readable content block for a successful batch.
 
     Mirrors the report the MCP server's `process_document_batch` renders
-    (`document.py:749-825`) so behavior is consistent across surfaces: the
+    (`document.py:834-922`) so behavior is consistent across surfaces: the
     salvage header first (a partial success is a SUCCESS response, and the
     failures must be readable above the path that was written), then the
-    counts, then per-edit reports carrying enough context (page, heading
-    path, match mode, comment, CriticMarkup preview) for an LLM to
-    self-review and decide what to resubmit.
+    counts and document state, then per-action and per-edit reports carrying
+    enough context (page, heading path, part, field, match mode, minted IDs,
+    comment, CriticMarkup preview) for an LLM to self-review and decide what
+    to resubmit.
     """
     applied_count = stats.get("edits_applied", 0) + stats.get("actions_applied", 0)
     lines: list[str] = []
@@ -403,8 +476,16 @@ def _build_success_content(
             lines.append(f"- Change #{item.get('index', 0) + 1} Failed: {item.get('reason', '')}")
         lines.append("")
 
-    lines.append(f"Batch complete. Saved to: {target}")
+    if source_overwritten:
+        overwrite_note = f" (Note: the source document at {target} was overwritten in place.)"
+    elif existing_output_overwritten:
+        overwrite_note = f" (Note: replaced existing file {target}.)"
+    else:
+        overwrite_note = ""
+    lines.append(f"Batch complete. Saved to: {target}{overwrite_note}")
 
+    if stats.get("overrides_note"):
+        lines.append(f"*{stats['overrides_note']}*")
     if stats.get("author_impersonation_warning"):
         lines.append(f"*Warning:* {stats['author_impersonation_warning']}")
 
@@ -414,6 +495,21 @@ def _build_success_content(
     occ_text = f" ({occurrences} occurrences)" if occurrences > stats["edits_applied"] else ""
     lines.append(f"Actions: {stats['actions_applied']} applied, {stats['actions_skipped']} skipped{already_text}.")
     lines.append(f"Edits: {stats['edits_applied']} applied{occ_text}, {stats['edits_skipped']} skipped.")
+
+    if stats.get("document_state"):
+        ds = stats["document_state"]
+        lines.append(
+            f"Document State: {ds.get('tracked_changes', 0)} tracked change(s), "
+            f"{ds.get('comments', 0)} comment(s) remaining."
+        )
+
+    action_reports = stats.get("actions") or []
+    if action_reports:
+        lines.append("")
+        lines.append("Applied Actions:")
+        for act_rep in action_reports:
+            r_ids = ", ".join(f"`{rid}`" for rid in act_rep.get("resolved_ids", []))
+            lines.append(f"- **{act_rep.get('type')}** on {r_ids} [{act_rep.get('status', 'applied')}]")
 
     edit_reports = stats.get("edits") or []
     if edit_reports:
@@ -426,10 +522,17 @@ def _build_success_content(
             lines.append(f"Edit {i} {indicator}{page_suffix}:")
             if report.get("heading_path"):
                 lines.append(f"  Path: `{report['heading_path']}`")
+            if report.get("part"):
+                lines.append(f"  Part: {report['part']}")
+            if report.get("field"):
+                lines.append(f"  field: {report['field']}")
             occ = report.get("occurrences_modified", 0)
             lines.append(
                 f"  Mode: `{report.get('match_mode', 'strict')}` ({occ} occurrence{'s' if occ != 1 else ''} modified)"
             )
+            all_minted_ids = [*(report.get("change_ids") or []), *(report.get("comment_ids") or [])]
+            if all_minted_ids:
+                lines.append(f"  IDs: {', '.join(f'`{mid}`' for mid in all_minted_ids)}")
             lines.append(f"  Target: '{report.get('target_text', '')}'")
             lines.append(f"  New text: '{report.get('new_text', '')}'")
             if isinstance(report.get("comment"), list):
@@ -444,7 +547,7 @@ def _build_success_content(
                 lines.append(f"  Error: {report['error']}")
             if report.get("critic_markup"):
                 lines.append(f"  Preview (CriticMarkup): {report['critic_markup']}")
-            if report.get("clean_text"):
+            elif report.get("clean_text"):
                 lines.append(f"  Clean text preview: {report['clean_text']}")
 
     if stats.get("skipped_details"):

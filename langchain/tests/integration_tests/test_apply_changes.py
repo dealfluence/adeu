@@ -325,5 +325,9 @@ class TestAdeuApplyChangesBehavior:
         assert first["comment"] == "Why this changed."
         assert "Mode: `strict`" in msg.content
         assert 'Comment: "Why this changed."' in msg.content
+        assert "Document State:" in msg.content
+        assert "IDs:" in msg.content
+        assert "document_state" in msg.artifact
+        assert "actions" in msg.artifact
         assert msg.artifact["occurrences_modified"] >= 1
         assert "actions_already_resolved" in msg.artifact
