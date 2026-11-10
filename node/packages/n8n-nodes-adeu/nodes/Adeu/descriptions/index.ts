@@ -26,7 +26,7 @@ export const documentDescription: INodeProperties[] = [
         value: "applyEdits",
         action: "Apply tracked changes to document",
         description:
-          "Apply a JSON array of DocumentChange objects (modify, accept, reject, reply, insert_row, delete_row) as native Word tracked changes and comments. modify edits support match_mode ('strict'|'first'|'all') and regex (boolean) for targeted multi-occurrence writes. The whole batch is pre-validated atomically: if any single edit is invalid, the entire batch is rejected with a per-edit error report and the document is left untouched. Set 'Allow Partial Application' to apply the changes that validate and report the rest in 'stats.failed' with 0-based indices; the output 'status' then reads 'partial'.",
+          "Apply a JSON array of DocumentChange objects (modify, set_field, accept, reject, reply, insert_row, delete_row) sequentially as native Word tracked changes (or manual inline formatting) and comments. modify edits support match_mode ('strict'|'first'|'all'), regex (boolean), Markdown headings/bold/italic/'\\n\\n' splits/pipe tables, `{#cell:<id>}` empty-cell anchors, and single or multi-author comments (`[{text, author?}]`). By default the batch is pre-validated atomically; set 'Allow Partial Application' to apply the changes that validate and report the rest in 'stats.failed' with 0-based indices.",
       },
       {
         name: "Apply Text Revision",
@@ -40,7 +40,7 @@ export const documentDescription: INodeProperties[] = [
         value: "extractMarkdown",
         action: "Extract markdown from document",
         description:
-          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix listing defined terms, cross-references, and potential typos. Each tracked change is tagged with a stable ID (Chg:N, Com:N) for use in Apply Edits. Supports an optional Page parameter to fetch only one page of a large document (paired with Extract Outline for navigation).",
+          "Project the .docx into LLM-friendly Markdown with CriticMarkup ({++ins++}, {--del--}, {>>comment<<}) plus a Semantic Appendix (or a Fields Content Controls ledger when Mode is 'fields'). Each tracked change is tagged with an ID (Chg:N, Com:N) for use in Apply Edits. Supports an optional Page number or 'N-M' page range to fetch a slice of a large document (paired with Extract Outline for navigation).",
       },
       {
         name: "Extract Outline",
@@ -61,7 +61,7 @@ export const documentDescription: INodeProperties[] = [
         value: "generateDiff",
         action: "Generate diff between documents",
         description:
-          "Produce a sub-word level @@ Word Patch @@ diff between two .docx files. Reads the document text via the same Markdown projection used by Extract Markdown, so the diff respects CriticMarkup and Clean View settings.",
+          "Produce a sub-word level @@ Word Patch @@ diff, unified diff, structured DocumentChange JSON array, or a one-step redlined comparison .docx (`diffFormat='redlineDocx'`) between two .docx files.",
       },
       {
         name: "Hydrate Tool Output",

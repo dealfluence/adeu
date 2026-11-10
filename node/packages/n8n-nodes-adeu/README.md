@@ -57,11 +57,11 @@ Restart your n8n instance after installation.
 - **Semantic Appendix**: Automatically extracts defined terms, cross-references, and potential typos to give LLMs deeper context.
 - **Structural Outline**: Lightweight headings-and-pages map of any document, with table/footnote flags per section.
 - **Pagination**: Drill into a single page of a large document instead of blasting the full body into LLM context.
-- **Native Redlining**: Apply `modify`, `accept`, `reject`, and `reply` actions directly to the OOXML tree.
+- **Native & Manual Redlining**: Apply `modify`, `set_field`, `accept`, `reject`, `reply`, `insert_row`, and `delete_row` actions directly to the OOXML tree as native Word Track Changes (`track_changes`) or inline strikethrough/underline formatting (`manual`).
 - **Whole-Text Revision**: Hand back the complete revised clean text and let the engine diff it against the document and write the tracked changes, behind a post-apply verification gate.
-- **Structured Diffs**: emit a diff as a ready-to-apply `DocumentChange` array, not just text.
+- **Structured & One-Step Redline Diffs**: Emit a diff as sub-word text, unified diff, a ready-to-apply `DocumentChange` array, or a one-step transactional redlined `.docx` (`redlineDocx`).
 - **Salvage Batches**: Optionally keep the changes that validate and get every failure reported with its 0-based index, instead of an all-or-nothing rejection.
-- **Targeted Multi-Occurrence Writes**: `match_mode` (`strict`/`first`/`all`) and `regex` support for surgical or sweeping replacements.
+- **Targeted Multi-Occurrence Writes & Form Fields**: `match_mode` (`strict`/`first`/`all`), `regex` (including inline flags like `(?i)`), Markdown pipe tables in `new_text`, `{#cell:<id>}` empty-cell anchors, multi-author comment lists `[{text, author?}]`, and Content Control inspection/filling (`mode='fields'` + `set_field`).
 - **Document Sanitization**: Strip metadata, auto-accept markup, and apply read-only locks before sending to counterparties.
 
 ---
@@ -71,14 +71,17 @@ Restart your n8n instance after installation.
 The node exposes one resource (**Document**) with seven operations:
 
 ### 1. Extract Markdown
-Projects a `.docx` file into LLM-friendly Markdown.
+Projects a `.docx` file into LLM-friendly Markdown (or a Content Controls ledger).
 - **Input**: `.docx` binary.
-- **Output**: JSON `{ markdown, fileName, cleanView }` (plus pagination metadata when a `page` is requested).
+- **Mode** (`full` default | `fields`):
+  - `Full Document` (`full`): Returns the document body in Markdown/CriticMarkup.
+  - `Fields (Content Controls)` (`fields`): Returns the form-fields ledger with `CC:<N>` IDs, tags, aliases, types, lock/binding state, and current values (`{ fileName, mode: 'fields', total_fields, markdown }`). Paginate via `Fields Offset`.
+- **Output (`full` mode)**: JSON `{ markdown, fileName, cleanView }` (plus pagination metadata when a `page` or page range is requested).
 - **Clean View toggle**:
   - `False` (Raw View): Shows all pending tracked changes via CriticMarkup. Best for resolving counterparty edits.
   - `True` (Clean View): Simulates an "Accept All" state, hiding markup. Best for generating net-new redlines on a clean baseline.
 - **Include Appendix** (boolean, default `true`): whether to append the Structural Appendix (defined terms, cross-reference anchors, potential typos). Turn it off to save context when you only need body text.
-- **🆕 Page parameter**: Optional 1-based page number. When `0` (default), the full document is returned. When `>= 1`, only that page's content is returned and the JSON includes `{ page, total_pages, has_next, has_prev, tracked_change_count }`. Pages are ~19,000-character chunks of the projected body; the Structural Appendix is appended to every page. Use **Extract Outline** first to discover how many pages exist.
+- **🆕 Page parameter**: Optional 1-based page number or `'N-M'` page range (up to 8 pages in one call when passed via expression/AI tool, e.g. `'2-5'`). When `0` (default), the full document is returned. When `>= 1` or `'N-M'`, only that page or range is returned and the JSON includes `{ page, total_pages, has_next, has_prev, tracked_change_count }`. Pages are ~19,000-character chunks of the projected body; the Structural Appendix is appended to every page. Use **Extract Outline** first to discover how many pages exist.
 
 ### 2. Extract Outline 🆕
 Returns a token-cheap structural map of the document — essentially a table of contents an LLM can use to navigate large files.
@@ -178,6 +181,7 @@ Produces a sub-word level `@@ Word Patch @@` diff, a unified diff, or structured
   - `Word Patch` (`wordPatch`) — Adeu `@@ Word Patch @@` sub-word text diff. Output JSON `{ originalFileName, modifiedFileName, cleanView, diffFormat, diff, warnings? }`.
   - `Unified Diff` (`unified`) — Git-style unified text diff, same output shape.
   - `Structured Changes (JSON)` (`structuredChanges`) — a JSON array of `DocumentChange` objects that transform original into modified, returned on `changes` (**not** `diff`) so it can be piped straight into **Apply Edits**. Output JSON `{ originalFileName, modifiedFileName, cleanView, diffFormat, changes, warnings? }`.
+  - `Redlined DOCX (One-Step Comparison)` (`redlineDocx`) — compares original and modified transactionally via `build_redline_comparison`, repairs OOXML schema child order, and outputs the redlined `.docx` binary on `Output Binary Property` (and stashes `redlinedBinaryId` when called as an AI Agent tool). Output JSON `{ originalFileName, modifiedFileName, fileName, author, cleanView, diffFormat, edits_applied, warnings?, redlinedBinaryId? }`.
 - **Identical documents**: both text formats return an explicit `No textual differences found between the documents.` body rather than an empty string.
 - **Media warning**: a text diff cannot see image bytes, so when embedded media differ the `warnings` array is populated and the warning text is prefixed onto `diff`.
 
@@ -214,9 +218,10 @@ To use the **Apply Edits** operation, your LLM must output a JSON array of objec
 
 | Type | Required Fields | Optional Fields | Description |
 | :--- | :--- | :--- | :--- |
-| `modify` | `target_text`, `new_text` | `comment`, `match_mode`, `regex` | Replaces baseline text. `match_mode`: `"strict"` (default, fails on ambiguity), `"first"` (silently picks first hit), `"all"` (replaces every occurrence). `regex`: when `true`, `target_text` is an ES2022 RegExp pattern. |
-| `accept` | `target_id` | `comment` | Accepts an existing tracked change (e.g., `Chg:123`). |
-| `reject` | `target_id` | `comment` | Rejects an existing tracked change. |
+| `modify` | `target_text`, `new_text` | `comment`, `match_mode`, `regex` | Replaces baseline text (`new_text` supports `#`–`######` headings, `**bold**`, `_italic_`, `\n\n` splits, and Markdown pipe tables; `{#cell:<id>}` targets empty table cells; `comment` accepts a string or `[{text, author?}]`). `match_mode`: `"strict"` (default), `"first"`, `"all"`. `regex`: when `true`, `target_text` is an ES2022 RegExp pattern (supports inline flags like `(?i)`). |
+| `set_field` | `field`, `value` | `match_mode`, `comment` | Fills a Content Control (form field) by `CC:<N>` ID, tag, or alias (discoverable via **Extract Markdown** with `Mode: Fields`). Checkboxes take `true`/`false`, dates `YYYY-MM-DD`, dropdowns a listed option. |
+| `accept` | `target_id` | `part`, `comment` | Accepts an existing tracked change (e.g., `Chg:123`; pass `part` e.g. `word/header1.xml` when the ID exists in multiple package parts). |
+| `reject` | `target_id` | `part`, `comment` | Rejects an existing tracked change (optional `part` as for `accept`). |
 | `reply` | `target_id`, `text` | — | Replies to an existing comment (e.g., `Com:456`). |
 | `insert_row` | `target_text`, `position`, `cells` | — | Inserts a new table row `above` or `below` the target cell text. |
 | `delete_row` | `target_text` | — | Deletes the table row containing the target text. |
@@ -403,7 +408,7 @@ AI Agents cannot pass binary `.docx` data through JSON arguments anyway — that
 
 **Changes (JSON):**
 ```
-={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Each object is one of: {"type":"modify","target_text":"<verbatim from source>","new_text":"<replacement>","comment":"<optional>","match_mode":"<optional 'strict' (default) | 'first' | 'all'>","regex":<optional boolean default false>} | {"type":"accept","target_id":"Chg:12","comment":"<optional>"} | {"type":"reject","target_id":"Chg:12","comment":"<optional>"} | {"type":"reply","target_id":"Com:45","text":"<reply>"} | {"type":"insert_row","target_text":"<cell text anchoring row>","position":"above" or "below","cells":["col1","col2"]} | {"type":"delete_row","target_text":"<cell text anchoring row>"}. MODIFY EXTENDED: set match_mode='all' to replace every occurrence of target_text in linear document order (returns occurrences_modified in the per-edit report); set match_mode='first' to silently anchor to the first hit; omit or use 'strict' (default) to fail on ambiguous matches so you can self-correct with more context. Set regex=true to interpret target_text as an ES2022 RegExp pattern; new_text may reference capture groups via $1, $2 etc. Combine match_mode='all' with regex=true for global pattern-based replacements. RULES: target_text must be copied VERBATIM from the source including punctuation/whitespace/case (unless regex=true) and must uniquely anchor one location under match_mode='strict'; never include CriticMarkup tags like {++ or {-- in new_text — the engine applies tracking automatically; use Chg:N and Com:N IDs exactly as surfaced by extract_markdown; the entire array must be a single JSON-encoded string. Atomic batch: if any single edit is invalid the whole array is rejected with an error telling you which edit failed — use that to self-correct on the next call. (If the node has 'Allow Partial Application' enabled, the valid edits are applied instead and the rejected ones come back in stats.failed with their 0-based index — fix those and resubmit them against the returned draft.)`, 'string') }}
+={{ $fromAI('Changes_JSON', `JSON-encoded string containing an array of DocumentChange objects. Changes evaluate SEQUENTIALLY: each item runs against the document state produced by preceding items in the same batch. Each object is one of: {"type":"modify","target_text":"<from source or {#cell:id}>","new_text":"<replacement>","comment":"<optional string or [{text, author?}]>","match_mode":"<optional 'strict' (default) | 'first' | 'all'>","regex":<optional boolean default false>} | {"type":"set_field","field":"<CC:N, tag, or alias>","value":"<text, true/false, or YYYY-MM-DD>","match_mode":"<optional 'strict'|'first'|'all'>","comment":"<optional>"} | {"type":"accept","target_id":"Chg:12","part":"<optional OPC part e.g. word/header1.xml>","comment":"<optional>"} | {"type":"reject","target_id":"Chg:12","part":"<optional OPC part>","comment":"<optional>"} | {"type":"reply","target_id":"Com:45","text":"<reply>"} | {"type":"insert_row","target_text":"<cell text anchoring row>","position":"above" or "below","cells":["col1","col2"]} | {"type":"delete_row","target_text":"<cell text anchoring row>"}. MODIFY EXTENDED: new_text supports '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' paragraph splits, and Markdown pipe tables (| H1 | H2 |\\n|---|---|\\n| A | B |); omit new_text with a comment to annotate without changing text; empty string deletes. Set match_mode='all' to replace every occurrence in linear document order; set match_mode='first' to anchor to the first hit; omit or use 'strict' (default) to fail on ambiguous matches. Set regex=true to interpret target_text as an ES2022 RegExp pattern (supports inline flags like (?i)); new_text may reference capture groups via $1, $2 etc. RULES: plain-text target_text resolves across hyperlinks, cross-references, and bookmarks automatically; never include CriticMarkup tags like {++ or {-- in new_text; use Chg:N and Com:N IDs from extract_markdown; the entire array must be a single JSON-encoded string. Unless 'Allow Partial Application' is enabled, any single invalid edit rejects the whole batch; with 'Allow Partial Application' enabled, valid edits apply and rejected ones come back in stats.failed with their 0-based index.`, 'string') }}
 ```
 
 **Return Markdown Output:**

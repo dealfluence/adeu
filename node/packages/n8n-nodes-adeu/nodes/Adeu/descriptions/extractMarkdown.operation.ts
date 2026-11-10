@@ -104,9 +104,9 @@ export const extractMarkdownDescription: INodeProperties[] = [
       minValue: 0,
     },
     description:
-      "Optional 1-based page number to return only one page of the projected document (integer, default 0). " +
+      "Optional 1-based page number or 'N-M' page range (up to 8 pages in one call when passed via expression/AI tool, e.g. '2-5') to return only a slice of the projected document (default 0). " +
       "When 0 (default), the full Markdown body plus the Structural Appendix is returned in the 'markdown' field and pagination metadata is omitted. " +
-      "When >= 1, only that page is returned in the 'markdown' field and the JSON output includes pagination metadata: page, total_pages, has_next, has_prev, tracked_change_count. " +
+      "When >= 1 (or 'N-M'), only that page or range is returned in the 'markdown' field and the JSON output includes pagination metadata: page, total_pages, has_next, has_prev, tracked_change_count. " +
       "Pages are ~19,000-character chunks of the projected body with the Structural Appendix appended to each page. Use the extractOutline operation first to discover how many pages exist and what each page contains. " +
       "If the requested page exceeds total_pages, an error is thrown.",
     displayOptions: {
