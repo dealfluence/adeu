@@ -84,6 +84,7 @@ def test_flat_schema_variant_is_a_single_object_without_const():
         "delete_row",
         "set_field",
     }
+    assert "part" in items["properties"], "FlatDocumentChange must expose `part` for accept/reject disambiguation"
     assert not _find_const(schema)
 
 

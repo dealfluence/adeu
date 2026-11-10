@@ -714,7 +714,7 @@ def build_search_response(
     search_query: str,
     search_regex: bool,
     search_case_sensitive: bool,
-    page: int | str | None,
+    page: int | str | tuple[int, int] | None,
     file_path: str,
     is_cli: bool = False,
     pagination_result: "PaginationResult | None" = None,

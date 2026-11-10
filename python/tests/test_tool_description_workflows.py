@@ -29,4 +29,16 @@ def test_batch_tool_teaches_manual_markup_and_states_the_real_partial_default():
     assert tool.parameters["properties"]["partial"]["default"] is True
     assert "transactionally" not in desc, "the description contradicts the salvage default"
     assert "partial=false" in desc
+    assert "match_mode" in desc
+    assert "{#cell:" in desc
+    assert "pipe tables" in desc
+    assert len(desc) < CLIENT_DESCRIPTION_BUDGET
+
+
+def test_read_docx_teaches_fields_changes_and_page_ranges():
+    tool = _tools()["read_docx"]
+    desc = tool.description or ""
+    assert "mode='fields'" in desc or "'fields'" in desc
+    assert "'changes'" in desc
+    assert "N-M" in desc
     assert len(desc) < CLIENT_DESCRIPTION_BUDGET

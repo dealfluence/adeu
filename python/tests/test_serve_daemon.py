@@ -459,3 +459,62 @@ def test_serve_outline_warm_read_does_not_reparse_the_docx(monkeypatch, capsys):
     # nodes itself. Rendering the outline consults the cached nodes only, so
     # neither the cold nor the warm read may open the DOCX again.
     assert parses == [str(fixture_path.resolve())]
+
+
+def test_serve_apply_manual_markup_mode(tmp_path, monkeypatch, capsys):
+    import zipfile
+
+    fixture_path = get_fixture_path("golden.docx")
+    out_docx = tmp_path / "manual.docx"
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(fixture_path),
+                "changes": [{"type": "modify", "target_text": "document", "new_text": "agreement", "comment": "Why."}],
+                "markup_mode": "manual",
+                "output": str(out_docx),
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+    res = json.loads(captured[0])
+    assert res.get("edits_applied") == 1
+    assert out_docx.exists()
+
+    body = zipfile.ZipFile(out_docx).read("word/document.xml").decode("utf-8")
+    assert "<w:strike/>" in body
+    assert "agreement" in body
+
+
+def test_serve_extract_search_with_page_range(monkeypatch, capsys):
+    fixture_path = get_fixture_path("golden.docx")
+    lines = [
+        json.dumps(
+            {
+                "command": "extract",
+                "file_path": str(fixture_path),
+                "search_query": "the",
+                "page": "1-2",
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 1
+    res = json.loads(captured[0])
+    assert res.get("status") != "error", res
+    assert "Search Results" in res.get("markdown", "")

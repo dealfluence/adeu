@@ -382,13 +382,25 @@ if sys.platform == "win32":
                     from adeu.mcp_components._response_builders import (
                         build_search_response,
                     )
+                    from adeu.pagination import parse_page_arg as _parse_search_page
+
+                    search_page: int | str | tuple[int, int] | None = page
+                    if isinstance(page, str):
+                        s_clean = page.strip().strip("'\"")
+                        if "-" in s_clean:
+                            try:
+                                p_kind, p_val = _parse_search_page(s_clean)
+                                if p_kind == "range":
+                                    search_page = p_val
+                            except ValueError:
+                                pass
 
                     res = build_search_response(
                         final_text,
                         search_query,
                         search_regex,
                         search_case_sensitive,
-                        page,
+                        search_page,
                         actual_path,
                         max_matches=max_matches,
                         match_offset=match_offset,

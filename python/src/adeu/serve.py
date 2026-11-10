@@ -139,12 +139,22 @@ def _handle_extract_command(req: Dict[str, Any]) -> None:
 
         if search_query:
             text, _ = doc_cache.get_pagination(entry, clean_view=clean_view)
+            search_page: Any = page_arg
+            if isinstance(page_arg, str):
+                s_clean = page_arg.strip().strip("'\"")
+                if "-" in s_clean:
+                    try:
+                        p_kind, p_val = parse_page_arg(s_clean)
+                        if p_kind == "range":
+                            search_page = p_val
+                    except ValueError:
+                        pass
             res = build_search_response(
                 text,
                 search_query,
                 bool(req.get("search_regex", False)),
                 not bool(req.get("search_case_insensitive", False)),
-                page_arg,
+                search_page,
                 str(path),
                 is_cli=True,
                 max_matches=int(req.get("max_matches", 20)),
@@ -297,6 +307,10 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
     author = req.get("author")
     partial = bool(req.get("partial", False))
     terse_errors = bool(req.get("terse_errors", False))
+    markup_mode = req.get("markup_mode", "track_changes")
+    if markup_mode not in ("track_changes", "manual"):
+        _emit_error("invalid_input", f"Invalid markup_mode: '{markup_mode}'. Expected 'track_changes' or 'manual'.")
+        return
     # CC-4 write-gate overrides (spec-gates.md §1), default off like every
     # other surface.
     gate_overrides = {
@@ -331,7 +345,11 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             return
 
         engine = _open_redline_engine_or_exit(
-            path, author=author, terse_errors=terse_errors, gate_overrides=gate_overrides
+            path,
+            author=author,
+            terse_errors=terse_errors,
+            gate_overrides=gate_overrides,
+            markup_mode=markup_mode,
         )
         stats = engine.process_batch(changes, partial=partial)
 

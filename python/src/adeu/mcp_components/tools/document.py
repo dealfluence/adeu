@@ -1381,11 +1381,14 @@ READ_DOCX_WIN32_EXTRA = (
 
 READ_DOCX_TAIL = (
     "Modes:\n"
-    "- 'full' (default): paginated body content. Use page=N to navigate.\n"
+    "- 'full' (default): paginated body content. `page`: 1-indexed int, 'N-M' range (up to 8 pages; "
+    "also filters `search_query`), or 'all' (serves first pages + L1 outline when over budget unless force=true).\n"
     "- 'outline': heading map only — start here for large docs to plan targeted reads. "
     "Defaults to L1-L2 headings; pass outline_max_level=3-6 to see deeper structure.\n"
     "- 'appendix': defined terms, anchors, and cross-reference targets. "
-    "Consult before editing legal/technical docs to avoid breaking references."
+    "Consult before editing legal/technical docs to avoid breaking references.\n"
+    "- 'changes': compact ledger of Tracked Changes (`Chg:N`) and Comments (`Com:N`).\n"
+    "- 'fields': ledger of form fields (content controls) with `CC:<N>` IDs (paginate via `fields_offset`)."
 )
 
 PROCESS_BATCH_COMMON_DESC = (
@@ -1431,20 +1434,21 @@ PROCESS_BATCH_WIN32_EXTRA = (
     "Leave original_docx_path empty to edit whatever document is currently active.\n\n"
 )
 PROCESS_BATCH_OPERATIONS_DESC = (
-    "Each item in `changes` must specify a `type`:\n"
+    "Changes by `type`:\n"
     "1. 'modify': Search-and-replace. `target_text` must uniquely match — add "
-    "context if ambiguous. `new_text` supports Markdown: '#'–'######' headings, "
-    "'**bold**', '_italic_', '\\n\\n' paragraph split. Empty `new_text` deletes. "
-    "Never write CriticMarkup ({++, {--, {>>) manually — use `comment`.\n"
-    "2. 'accept' / 'reject': Finalize or revert a tracked change by `target_id` (e.g. 'Chg:12'). "
-    "Ids are per package part: when one exists in several parts the bare id is refused; "
-    "add `part` (e.g. 'word/header1.xml').\n"
-    "3. 'reply': Reply to a comment by `target_id` (e.g. 'Com:5') with `text`.\n"
-    "4. 'set_field': Fill a content control (form field) — `field` is its 'CC:<N>' id, "
-    "tag or alias, `value` the text; list them with `read_docx` mode='fields'. Checkboxes "
-    "take true/false, dates YYYY-MM-DD, dropdowns a listed option. Data-bound controls "
-    "update their store too. A locked or protected control refuses and names the override "
-    "that permits it.\n"
+    "context, or set `match_mode` ('first'|'all') or `regex=true`. Empty table "
+    "cells emit `{#cell:<id>}` — pass that token as `target_text` to fill one. "
+    "`new_text` supports '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' "
+    "paragraph split, and pipe tables (`| H1 | H2 |\\n|---|---|\\n| A | B |`). "
+    "Empty `new_text` deletes. Never write CriticMarkup ({++, {--, {>>) — use "
+    '`comment` (string or `[{"text": ..., "author": ...}]`).\n'
+    "2. 'accept' / 'reject': Finalize or revert by `target_id` ('Chg:12'); add "
+    "`part` ('word/header1.xml') when the same id exists in several parts.\n"
+    "3. 'reply': Reply to `target_id` ('Com:5') with `text`.\n"
+    "4. 'set_field': Fill a content control — `field` is 'CC:<N>', tag or alias, "
+    "`value` the text (checkboxes true/false, dates YYYY-MM-DD, dropdowns a listed "
+    "option; list via `read_docx` mode='fields'). Data-bound controls update their "
+    "store; locked/protected controls refuse and name the override.\n"
     "5. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
     "ID VOLATILITY: 'Chg:N'/'Com:N' shift between document states — call "
     "`read_docx` before any accept/reject/reply; never reuse earlier ids.\n\n"

@@ -199,8 +199,10 @@ class ModifyText(_EditState):
     target_text: str = Field(
         ...,
         description=(
-            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
-            "You can include CriticMarkup {==...==} in the target to match text inside existing markup."
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context, "
+            "or set match_mode='first'/'all'. Empty table cells emit `{#cell:<id>}` — pass that token as "
+            "target_text to fill one. You can include CriticMarkup {==...==} in the target to match text inside "
+            "existing markup."
         ),
     )
 
@@ -208,7 +210,8 @@ class ModifyText(_EditState):
         ...,
         description=(
             "The desired text replacement. You may use Markdown formatting: "
-            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
+            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic, '\\n\\n' for paragraph breaks, "
+            "and pipe tables (`| Col 1 | Col 2 |\\n| --- | --- |\\n| A | B |`) to insert native Word tables. "
             "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
             "To add a comment, use the 'comment' parameter instead."
         ),
@@ -363,15 +366,18 @@ class FlatDocumentChange(BaseModel):
     target_text: Optional[str] = Field(
         None,
         description=(
-            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context. "
-            "You can include CriticMarkup {==...==} in the target to match text inside existing markup."
+            "Exact text to find. If the text appears multiple times (e.g. 'Fee'), include surrounding context, "
+            "or set match_mode='first'/'all'. Empty table cells emit `{#cell:<id>}` — pass that token as "
+            "target_text to fill one. You can include CriticMarkup {==...==} in the target to match text inside "
+            "existing markup."
         ),
     )
     new_text: Optional[str] = Field(
         None,
         description=(
             "The desired text replacement. You may use Markdown formatting: "
-            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic. "
+            "'# Title' for headers, '**bold**' for bold, '_italic_' for italic, '\\n\\n' for paragraph breaks, "
+            "and pipe tables (`| Col 1 | Col 2 |\\n| --- | --- |\\n| A | B |`) to insert native Word tables. "
             "Do NOT manually write CriticMarkup tags ({++...++}, {--...--}, {>>...<<}, {==...==}). "
             "To add a comment, use the 'comment' parameter instead."
         ),
@@ -393,6 +399,15 @@ class FlatDocumentChange(BaseModel):
     target_id: Optional[str] = Field(
         None,
         description="The full ID string from the document text (e.g. 'Chg:12', 'Com:5').",
+    )
+    part: Optional[str] = Field(
+        None,
+        description=(
+            "accept / reject only: OPC part holding the change, e.g. 'word/header1.xml'. "
+            "Revision ids are numbered per part, so the same Chg:N can name unrelated changes in "
+            "different parts; a bare ambiguous id is refused with an error listing the parts, and "
+            "this field picks one. Omit whenever the id is unique in the package."
+        ),
     )
     text: Optional[str] = Field(
         None,
