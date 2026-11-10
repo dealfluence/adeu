@@ -12,6 +12,8 @@ FILES_TO_BUMP = [
     "node/packages/mcp-server/package.json",
     "desktop-extension/manifest.json",
     "gemini-extension.json",
+    ".claude-plugin/marketplace.json",
+    "skills/adeu-redlining/SKILL.md",
     "python/server.json",
     "node/packages/n8n-nodes-adeu/package.json",
 ]
@@ -57,7 +59,40 @@ def update_json_version(filepath, version):
         return False
 
     data = json.loads(content)
-    old_version = data.get("version", "unknown")
+    old_match = re.search(r'"version"\s*:\s*"([^"]+)"', content)
+    old_version = data.get("version") or (
+        old_match.group(1) if old_match else "unknown"
+    )
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    print(f"✅ Updated {filepath} ({old_version} -> {version})")
+    return True
+
+
+def update_md_frontmatter_version(filepath, version):
+    path = Path(filepath)
+    if not path.exists():
+        print(f"⚠️  Skipping {filepath} (not found)")
+        return False
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    old_match = re.search(r'^(\s*version:\s*)"([^"]+)"', content, flags=re.MULTILINE)
+    old_version = old_match.group(2) if old_match else "unknown"
+
+    new_content = re.sub(
+        r'^(\s*version:\s*)"[^"]+"',
+        f'\\g<1>"{version}"',
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    if new_content == content:
+        return False
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(new_content)
@@ -162,6 +197,9 @@ def main():
     for filepath in FILES_TO_BUMP:
         if filepath.endswith(".toml"):
             if update_toml_version(filepath, target_version):
+                modified = True
+        elif filepath.endswith(".md"):
+            if update_md_frontmatter_version(filepath, target_version):
                 modified = True
         else:
             if update_json_version(filepath, target_version):

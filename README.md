@@ -101,9 +101,10 @@ You can guarantee the best behavioral results by adding this context to your age
 > **Role:** Document Specialist
 > **Tools:**
 >
-> - `read_docx(clean_view=True)`: Read the final "clean" version of the text to understand context. Use `search_query` and `page` filters to locate specific clauses without reading the whole document.
-> - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified list of changes. Use `type: "modify"` for specific search-and-replace text edits (supports `match_mode="all"` and `regex=True` for bulk updates), and `type: "accept"`, `"reject"`, or `"reply"` to manage existing Track Changes and Comments by ID.
-> - `finalize_document`: **Pre-Send Scrub.** Strip dangerous metadata, author names, and internal tracking IDs, lock the document (`protection_mode="read_only"`), and prepare it for distribution.
+> - `read_docx`: Start with `mode="changes"` to triage existing tracked changes (`Chg:N`) and comments (`Com:N`), `search_query` (with optional `page="4-5"` range) to locate specific clauses, `mode="fields"` to inspect form fields (`CC:<N>`), or `mode="outline"` followed by bounded page ranges (`page="1-8"`) to read sections without loading the whole file.
+> - `process_document_batch`: **Commit & Negotiate Mode.** Apply a unified, sequentially evaluated list of changes in one call: `type: "modify"` for search-and-replace text edits (supports Markdown headings/bold/italic/pipe tables, `{#cell:<id>}` empty-cell anchors, `match_mode="all"`, `regex=True`, and single or `[{"text": ..., "author": ...}]` comments), `type: "set_field"` for form fields, `type: "accept"`, `"reject"` (with optional `part`), or `"reply"` for existing markup, and `type: "insert_row"` / `"delete_row"` for table rows. Pass `markup_mode="manual"` when inline strikethrough/underline formatting is requested instead of Track Changes.
+> - `diff_docx_files`: Compare two `.docx` files; pass `output_path` and `author_name` to write the comparison as a tracked-changes `.docx` in one step.
+> - `finalize_document`: **Pre-Send Scrub.** Strip metadata, author names, and internal tracking IDs, lock the document (`protection_mode="read_only"`), and prepare it for distribution.
 
 ### Live MS Word Integration
 If you are running on Windows with Microsoft Word installed, Adeu can act as a real-time copilot, editing the active document right in front of you. This requires running the Python MCP server backend (see Developer Tools below).

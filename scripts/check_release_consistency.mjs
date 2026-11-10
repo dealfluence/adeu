@@ -48,6 +48,8 @@ const VERSIONED_MANIFESTS = [
   "node/packages/mcp-server/package.json",
   "desktop-extension/manifest.json",
   "gemini-extension.json",
+  ".claude-plugin/marketplace.json",
+  "skills/adeu-redlining/SKILL.md",
   "python/server.json",
   "node/packages/n8n-nodes-adeu/package.json",
 ];
@@ -55,10 +57,12 @@ const VERSIONED_MANIFESTS = [
 const N8N_DIR = "node/packages/n8n-nodes-adeu";
 
 function readVersionFromManifest(text, filepath) {
-  // .toml uses `version = "x"`; .json uses `"version": "x"`.
+  // .toml uses `version = "x"`; .md frontmatter uses `version: "x"`; .json uses `"version": "x"`.
   const re = filepath.endsWith(".toml")
     ? /^version\s*=\s*"([^"]+)"/m
-    : /"version"\s*:\s*"([^"]+)"/;
+    : filepath.endsWith(".md")
+      ? /^\s*version:\s*"([^"]+)"/m
+      : /"version"\s*:\s*"([^"]+)"/;
   const m = text.match(re);
   return m ? m[1] : null;
 }

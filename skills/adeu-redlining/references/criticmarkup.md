@@ -22,10 +22,13 @@ These are Adeu-specific projections of `.docx` structural elements into Markdown
 | Projection | Meaning | Editable? |
 |------------|---------|-----------|
 | `[^fn-<id>]` | Footnote or endnote reference. `<id>` is the stable OOXML id, not the display number. The body is appended at the bottom of the document. | Yes — edits flow through to `footnotes.xml`. |
-| `[text](url)` | Hyperlink. Editing the visible `text` produces a tracked change. Editing the `url` rewrites the relationship silently (no redline). | Yes. |
-| `[~display text~](#_Ref<id>)` | Cross-reference. The `[~...~]` wrapper marks the visible text as *computed* — Word recalculates it. | **No.** Modifying via `modify` is rejected. |
-| `{#_BookmarkName}` | Internal anchor (Word bookmark). Structural; cannot be edited via text replacement. | **No.** Rejected by the engine. |
-| `\| cell \| cell \|` | Table cells separated by virtual pipes. Each pipe is a hard `<w:tc>` boundary. | Cell *content* is editable. Adding/removing columns by adding/removing pipes is **rejected** — use `insert_row` / `delete_row` for row changes. Column changes are not supported. |
+| `[text](url)` | Hyperlink. Plain-text `target_text` resolves across `[text](url)` and preserves the hyperlink when kept unchanged; editing the visible `text` produces a tracked change; editing `url` rewrites the relationship silently. | Yes. |
+| `[~display text~](#_Ref<id>)` | Cross-reference. The `[~...~]` wrapper marks the visible text as *computed* — Word recalculates it. Plain-text `target_text` resolves across `[~display text~](#_Ref<id>)` when surrounding prose is edited and the cross-reference text is kept intact. | **No** (the cross-reference target itself cannot be rewritten via `modify`). |
+| `{#_BookmarkName}` | Internal anchor (Word bookmark). Plain-text `target_text` resolves across `{#_BookmarkName}` and preserves the bookmark. | **No** (the bookmark token itself is structural). |
+| `{#cc:<N>}...{#/cc:<N>}` | Content control (form field) with ordinal ID `CC:<N>` (and `[ ]` / `[x]` for checkbox controls). Inspect all controls via `read_docx(mode="fields")`. | Yes — fill via `type: "set_field"` (`field: "CC:<N>"`) or `modify` (subject to control lock gates). |
+| `{#cell:<paraId>}` | Empty table cell anchor. | Yes — pass `{#cell:<paraId>}` as `target_text` in `modify` to populate the empty cell. |
+| `![alt](docx-image:<N>)` | Embedded image marker. | Read-only marker. |
+| `\| cell \| cell \|` | Table cells separated by virtual pipes. Each pipe is a hard `<w:tc>` boundary. | Cell *content* is editable. Adding/removing columns by adding/removing pipes is **rejected** — use `insert_row` / `delete_row` for row changes, or insert a new table in `new_text` using Markdown pipe-table syntax. |
 
 ## The Markdown dialect
 

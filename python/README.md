@@ -43,10 +43,13 @@ uvx adeu extract --live
 ```
 
 ### Diffing
-Generate a word-level patch diff between two document versions.
+Generate a word-level patch diff or a one-step redlined `.docx` comparison between two document versions.
 ```bash
-# Compare two DOCX files
+# Compare two DOCX files (@@ Word Patch @@ output)
 uvx adeu diff original.docx modified.docx
+
+# Write the comparison directly as a tracked-changes .docx in one step
+uvx adeu diff original.docx modified.docx -o redlined.docx --author "AI Reviewer"
 
 # Output raw JSON edits for programmatic use
 uvx adeu diff original.docx modified.docx --json
@@ -57,6 +60,9 @@ Apply a JSON array of `DocumentChange` objects (or a modified markdown file) bac
 ```bash
 # Apply a JSON batch of edits to a file
 uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
+
+# Manual / inline formatting markup (strikethrough + bold red underline instead of Track Changes)
+uvx adeu apply original.docx edits.json --author "AI Reviewer" --manual -o manual.docx
 
 # Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
 uvx adeu apply original.docx edits.json --json
@@ -123,14 +129,14 @@ The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
   - `0` = success (in `--partial` mode, at least one edit applied; check `edits_skipped` in JSON stats to detect skipped edits)
   - `1` = failure (in atomic mode, if any edit fails; in `--partial` mode, if all edits fail)
 
-`adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "errors": [...]}` and exits 1.
+`adeu apply --json` prints the engine's raw stats object — `edits_applied`, `edits_skipped`, per-edit reports with CriticMarkup previews, plus `output_path` — and suppresses the human-readable logs. A batch that fails validation prints `{"error": "batch_validation_failed", "failed": [{"index", "reason"}, ...], "errors": [...]}` and exits 1.
 
 ## The Python SDK
 
 The SDK allows you to embed Adeu's Redline Engine directly into your own Python applications.
 
 ### Applying Tracked Changes
-The engine processes a flat list of `DocumentChange` objects (`ModifyText`, `AcceptChange`, `RejectChange`, `ReplyComment`, `InsertTableRow`, `DeleteTableRow`).
+The engine processes a flat list of `DocumentChange` objects (`ModifyText`, `SetField`, `AcceptChange`, `RejectChange`, `ReplyComment`, `InsertTableRow`, `DeleteTableRow`).
 
 ```python
 from io import BytesIO

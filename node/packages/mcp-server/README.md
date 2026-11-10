@@ -34,24 +34,12 @@ Once connected, your AI agent will have access to the following tools.
 
 ### Document tools
 
-- `read_docx`: Reads a DOCX file and returns LLM-friendly text with inline CriticMarkup (`{++inserted++}`, `{--deleted--}`) for Tracked Changes and Comments. Supports pagination, structural outlining, form fields discovery (`mode="fields"`), and semantic appendix extraction.
-- `process_document_batch`: Applies a batch of search-and-replace text modifications, form field edits (`set_field`), table edits, and comment replies to a document. Translates the LLM's edits into perfectly formatted native Word Track Changes.
+- `read_docx`: Reads a DOCX file and returns LLM-friendly text with inline CriticMarkup (`{++inserted++}`, `{--deleted--}`) for Tracked Changes and Comments. Supports pagination and page ranges (`page="1-8"`), structural outlining (`mode="outline"`), tracked-changes/comments ledger (`mode="changes"`), form fields discovery (`mode="fields"`), search (`search_query`, `search_regex`), and semantic appendix extraction (`mode="appendix"`).
+- `process_document_batch`: Applies a sequential batch of search-and-replace text modifications (`modify` with Markdown headings/bold/italic/pipe tables, `{#cell:<id>}` empty-cell anchors, `match_mode`, `regex`, and single or `[{text, author?}]` comments), form field edits (`set_field`), tracked-change resolutions (`accept`/`reject` with optional `part`), comment replies (`reply`), and table row edits (`insert_row`/`delete_row`). Supports native Word Track Changes (`markup_mode="track_changes"`) or inline strikethrough/underline formatting (`markup_mode="manual"`).
+- `apply_text_revision`: Rewrites a whole document from revised clean text by diffing against the document's clean view and applying the delta as native Word Track Changes behind a post-apply verification gate.
 - `accept_all_changes`: Accepts all tracked changes to produce a finalized clean document. `remove_comments` (default `true`) also deletes every comment; pass `remove_comments=false` to keep them. Deleted comments are reported by id and author.
-- `diff_docx_files`: Compares two DOCX files and returns a unified sub-word diff of their text content.
-- `finalize_document`: Prepares a document for signature by applying native OOXML read-only locking and deep metadata sanitization.
-
-### Email tools
-
-These require an authenticated Adeu Cloud session (see Cloud tools below).
-
-- `search_and_fetch_emails`: Searches the user's live email inbox via the Adeu Cloud backend and returns matching messages.
-- `create_email_draft`: Creates an email draft in the user's native draft box (Outlook Drafts or Gmail Drafts).
-- `list_available_mailboxes`: Lists all personal and shared/delegated mailboxes the authenticated user can access across every linked provider account, including each mailbox's address, display name, and auto-processing settings.
-
-### Cloud tools
-
-- `login_to_adeu_cloud`: Logs the user into Adeu Cloud, opening a browser window for SSO authentication.
-- `logout_of_adeu_cloud`: Logs out of the Adeu Cloud backend.
+- `diff_docx_files`: Compares two DOCX files and returns a sub-word `@@ Word Patch @@` diff; when `output_path` is provided, also writes the comparison as a tracked-changes `.docx` in one transactional step.
+- `finalize_document`: Prepares a document for signature or distribution by applying native OOXML read-only locking and deep metadata sanitization (`sanitize_mode="full"` or `"keep-markup"`).
 
 ## Documentation & Support
 For full architectural details, prompt recommendations, and the project constitution, please visit the [main Adeu repository](https://github.com/dealfluence/adeu) or our [website](https://adeu.ai).

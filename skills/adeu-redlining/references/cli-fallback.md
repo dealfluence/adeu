@@ -46,7 +46,7 @@ uvx adeu apply contract.docx edits.json --json
 
 With `--json`, stdout carries the engine stats (`edits_applied`, `edits_skipped`, per-edit `edits[]` reports with CriticMarkup previews, `output_path`) and human logs are suppressed. `adeu apply` is all-or-nothing by default: a batch that fails validation prints `{"error": "batch_validation_failed", "failed": [{"index", "reason"}, ...], "message": ...}`, writes nothing, and exits 1. Pass `--partial` to apply the valid edits anyway; exit code 1 then signals a partially applied batch — check `edits_skipped`. (The MCP tool has the opposite default.)
 
-The `edits.json` file is a JSON array. Each entry has a `type` discriminator matching `process_document_batch` (see `references/mcp-tools.md` for the full shape):
+The `edits.json` file is a JSON array. Each entry has a `type` discriminator matching `process_document_batch` (see `references/mcp-tools.md` for the full shape, including `set_field`, Markdown pipe tables in `new_text`, `{#cell:<id>}` empty-cell anchors, and `comment` as either a string or `[{"text": "...", "author": "..."}]`):
 
 ```json
 [

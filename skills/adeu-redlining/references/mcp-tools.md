@@ -1,6 +1,6 @@
 # Adeu MCP Tool Reference
 
-Load this when planning a non-trivial batch on the MCP path. The five Adeu MCP tools are listed below with their parameters and the patterns that actually work in practice.
+Load this when planning a non-trivial batch on the MCP path. The six Adeu MCP tools are listed below with their parameters and the patterns that actually work in practice.
 
 ## `read_docx`
 
@@ -10,16 +10,21 @@ Read a `.docx` and return text with inline CriticMarkup.
 - `file_path` (str, required) — absolute path.
 - `clean_view` (bool, default `false`) — `false` shows raw text with CriticMarkup for all pending changes; `true` shows the text as if every pending change were accepted.
 - `mode` (`"full"` | `"outline"` | `"changes"` | `"appendix"` | `"fields"`, default `"full"`):
-  - `full` — body content, paginated (or up to 8 pages per range window `page="1-8"`).
+  - `full` — body content, paginated (or up to 8 pages per range window `page="1-8"`). When `page="all"` exceeds the response budget, serves the first pages that fit plus an L1 outline and continuation hint unless `force=true`.
   - `outline` — heading map only (includes Heading styles, all-caps bold headings, and standalone numbered/structural bold headings). Start here for large docs to plan targeted reads. Defaults to L1–L2 headings; pass `outline_max_level=3..6` for deeper structure.
   - `changes` — compact ledger of every pending tracked change (`Chg:N`) and comment thread (`Com:N`) with author, page, and snippet. Start here when triaging, accepting, rejecting, or replying to existing markup.
   - `appendix` — defined terms, cross-reference targets, bookmarks, footnotes. Consult before editing legal/technical docs to avoid breaking references.
   - `fields` — ledger of form fields (content controls) with CC:<N> ID, tag, alias, class, state, option lists, and data bindings.
+- `changes_author` (str, optional) — filter `mode="changes"` to a specific author.
+- `changes_offset` (int, default 0) — 0-indexed pagination offset for `mode="changes"`.
 - `fields_offset` (int, default 0) — 0-indexed pagination offset for `mode="fields"`.
 - `page` (int, `"N-M"` range, or `"all"`) — without `search_query`: which body page or 8-page range to show (defaults to 1). With `search_query`: which page or page range to restrict matches to (defaults to all).
+- `force` (bool, default `false`) — for `mode="full"` with `page="all"`, return the whole document even when it exceeds the response budget.
 - `search_query` (str) — substring or regex. Filters results to matching paragraphs across the requested page scope.
 - `search_regex` (bool, default `false`) — interpret `search_query` as regex (supports inline flags `(?i)`, `(?m)`, `(?s)`).
 - `search_case_sensitive` (bool, default `true`).
+- `max_matches` (int, default `20`) — maximum search matches returned per call (`0` returns the counts header only).
+- `match_offset` (int, default `0`) — 0-indexed pagination offset for search matches.
 - `full_paragraph` (bool, default `false`) — in search mode, return the full matching paragraph rather than a snippet window.
 - `outline_max_level` (int, 1–6, default `2`) — only for `mode="outline"`.
 - `outline_verbose` (bool, default `false`) — include extra metadata in the outline.
@@ -53,7 +58,7 @@ Each entry must include a `type` field. The other fields depend on `type`.
   - `first` — first occurrence in linear document order.
   - `all` — every occurrence.
 - `regex` (bool, default `false`) — treat `target_text` as a regular expression. Capture groups available in `new_text` as `$1`, `$2`, …
-- `comment` (str, optional) — margin comment attached to the change.
+- `comment` (str or `[{"text": str, "author"?: str}]`, optional) — margin comment(s) attached to the change. Pass a list of `{text, author?}` objects to attach multiple comments to the same anchor, each optionally under its own author.
 
 **Never put CriticMarkup syntax (`{++`, `{--`, `{>>`, `{==`) into `new_text`.** Use `comment` for comments.
 
@@ -65,6 +70,7 @@ Each entry must include a `type` field. The other fields depend on `type`.
 
 #### `type: "accept"` / `type: "reject"` — resolve an existing tracked change
 - `target_id` (str, required) — e.g. `"Chg:12"`. Must come from a `read_docx` call made *immediately before* this batch.
+- `part` (str, optional) — e.g. `"word/header1.xml"` when the same revision ID exists in more than one package part.
 - `comment` (str, optional).
 
 #### `type: "reply"` — reply to an existing comment
@@ -86,6 +92,17 @@ Each entry must include a `type` field. The other fields depend on `type`.
 `process_document_batch` returns a complete receipt: `Document State` (remaining tracked changes and comments), `Applied Actions` (with resolved `Chg:N` / `Com:N` IDs), and per-edit reports (`status`, `pages`, `heading_path`, `part` when the edit landed outside the body, e.g. `header (word/header1.xml)`, `occurrences_modified`, minted `**IDs:**`, and `*Preview (CriticMarkup):*` or `error` / `warning`). Treat this receipt as verification without a redundant `read_docx` call.
 
 A `modify` that adds a heading or a pipe table inside a page header or footer is refused: those parts repeat on every page. The error names the first (header) or last (footer) body paragraph to target instead.
+
+## `apply_text_revision`
+
+Rewrite a whole document from revised clean text: Adeu diffs `revised_text` against the document's clean view and writes the delta as native Word tracked changes, behind a clean-text verification gate.
+
+**Parameters:**
+- `file_path` (str, required) — absolute path to the source `.docx`.
+- `revised_text` (str, required) — complete revised clean text of the document (no CriticMarkup; never a single page of a multi-page document).
+- `output_path` (str, optional) — defaults to `<stem>_revised.docx`.
+- `author` (str, optional) — author attribution for tracked changes.
+- `allow_major_deletions` (bool, default `false`) — permit revisions that delete more than 50% of the document's characters.
 
 ## `accept_all_changes`
 

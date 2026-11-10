@@ -6,7 +6,7 @@ compatibility: Requires either the Adeu MCP server (preferred — Node `@adeu/mc
 metadata:
   homepage: https://adeu.ai
   repository: https://github.com/dealfluence/adeu
-  version: "1.18.2"
+  version: "3.2.0"
 ---
 
 # Adeu — Tracked-Changes Redlining for .docx
@@ -62,11 +62,11 @@ The MCP tool salvages by default (`partial=true`): valid edits apply, and the re
 - **IDs are session-bound.** Change IDs (`Chg:12`) and comment IDs (`Com:5`) come from `read_docx` (e.g. `mode="changes"`) or from the `**IDs:**` line of the immediately preceding `process_document_batch` receipt. Never guess IDs.
 - **Batches apply sequentially.** If edit 1 renames `X → Y`, a later edit in the same batch touching that span must target `Y`, not the original `X`.
 - **`target_text` must be unique by default.** `match_mode: "strict"` (default) requires a single match. Add 3–8 words of surrounding context to disambiguate, or set `match_mode: "first"` or `"all"`. Set `regex: true` for regex matching; capture groups expand via `$1`, `$2` (or `\1`, `\2`) in `new_text`.
-- **Plain replacement text in `new_text`.** Never write `{++`, `{--`, `{>>`, or `{==` into `new_text`. Use the `comment` field on the edit to attach a margin comment.
-- **`new_text` Markdown dialect.** Supports headings (`#` through `######`), `**bold**`, `_italic_` (underscores only), `\n\n` for paragraph breaks, and Markdown pipe tables (`| Col 1 | Col 2 |\n|---|---|\n| A | B |`) to insert native Word tables. Empty string `""` deletes `target_text`.
+- **Plain replacement text in `new_text`.** Never write `{++`, `{--`, `{>>`, or `{==` into `new_text`. Use the `comment` field on the edit to attach a margin comment (a string, or a list `[{"text": "...", "author": "..."}]` to attach multiple comments with optional per-comment authors).
+- **`new_text` Markdown dialect.** Supports headings (`#` through `######`), `**bold**`, `_italic_` (underscores only), `\n\n` for paragraph breaks, and Markdown pipe tables (`| Col 1 | Col 2 |\n|---|---|\n| A | B |`) to insert native Word tables. Empty string `""` deletes `target_text`; omitting `new_text` with `comment` annotates without changing text. Empty table cells emit `{#cell:<id>}` — pass that token as `target_text` to fill one.
 - **Restructure whole paragraphs.** To split, merge, or reorder paragraphs, target the complete paragraph(s) and give the complete new paragraphs in `new_text`. A `\n\n` inserted into the middle of an existing paragraph becomes a tracked paragraph mark, which many reviewers and redline readers display as an untracked edit.
 - **The top of page 1 may be the page header.** Headers and footers repeat on every page, so headings and tables cannot be added there (the batch refuses and names the first body paragraph to use instead). Anchor document-top insertions such as an executive summary on the first body paragraph shown by `mode="outline"`, with `match_mode="first"` if that text recurs.
-- **Read-only appendix.** Anything inside `<!-- READONLY_BOUNDARY_START -->` (defined terms, cross-reference targets, diagnostic summaries) is read-only projection metadata. Cross-references (`[~text~](#_Ref...)`) and bookmarks (`{#_BookmarkName}`) in the body are computed/structural — edit prose around them or include them unchanged in both `target_text` and `new_text`.
+- **Read-only appendix & structural markers.** Anything inside `<!-- READONLY_BOUNDARY_START -->` (defined terms, cross-reference targets, diagnostic summaries) is read-only projection metadata. Plain-text `target_text` in the body resolves automatically across hyperlinks (`[text](url)`), cross-references (`[~text~](#_Ref...)`), and bookmarks (`{#_BookmarkName}`), preserving them when kept intact.
 - **`clean_view` toggles the projected state.** `clean_view=false` (default) projects raw text with pending tracked changes as CriticMarkup; `clean_view=true` projects the accepted state. Note that `process_document_batch` matches `target_text` against the clean/accepted state so you can edit cleanly across existing changes.
 - **Page indexing.** `page="1-8"` reads up to 8 pages at a time; check the `Continues on page X of Y` footer to see if more pages follow. `page` also accepts a page or range (`page=4` or `page="4-5"`) alongside `search_query`.
 
@@ -76,8 +76,8 @@ Pass `changes` as a list of objects to `process_document_batch(original_docx_pat
 
 | `type`        | Purpose                                   | Fields                                                                                                                                      |
 | ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `modify`      | Search-and-replace as a tracked change    | `target_text` (req), `new_text` (req, `""` deletes), `comment?`, `match_mode?` (`"strict"` \| `"first"` \| `"all"`), `regex?` (bool)        |
-| `accept`      | Finalize an existing tracked change by ID | `target_id` (req, e.g. `"Chg:12"`), `comment?`, `part?` (`"body"` \| `"header"` \| `"footer"` \| `"footnotes"` \| `"endnotes"`)             |
+| `modify`      | Search-and-replace as a tracked change    | `target_text` (req), `new_text` (req unless `comment` set; `""` deletes), `comment?` (str \| `[{text, author?}]`), `match_mode?` (`"strict"` \| `"first"` \| `"all"`), `regex?` (bool) |
+| `accept`      | Finalize an existing tracked change by ID | `target_id` (req, e.g. `"Chg:12"`), `comment?`, `part?` (`"body"` \| `"header"` \| `"footer"` \| `"footnotes"` \| `"endnotes"` or `"word/header1.xml"`) |
 | `reject`      | Revert an existing tracked change by ID   | `target_id` (req, e.g. `"Chg:12"`), `comment?`, `part?`                                                                                     |
 | `reply`       | Reply to an existing comment thread       | `target_id` (req, e.g. `"Com:5"`), `text` (req)                                                                                             |
 | `set_field`   | Fill or toggle a content control (`CC:N`) | `field` (req, e.g. `"CC:3"` or tag/alias), `value` (req), `match_mode?`, `comment?`                                                         |
@@ -85,8 +85,9 @@ Pass `changes` as a list of objects to `process_document_batch(original_docx_pat
 | `delete_row`  | Delete a table row containing anchor text | `target_text` (req, cell text in row to delete), `comment?`                                                                                 |
 
 Other MCP tools:
-- `read_docx(file_path, mode="full"|"outline"|"changes"|"appendix"|"fields", page?, search_query?, search_regex?, search_case_sensitive?, clean_view?, full_paragraph?)`
+- `read_docx(file_path, mode="full"|"outline"|"changes"|"appendix"|"fields", page?, force?, search_query?, search_regex?, search_case_sensitive?, max_matches?, match_offset?, full_paragraph?, changes_author?, changes_offset?, fields_offset?, clean_view?)`
 - `diff_docx_files(original_path, modified_path, compare_clean=true, output_path?, author_name?)` — returns the text diff; with `output_path` it also writes the redlined `.docx` (all or nothing, never over an input).
+- `apply_text_revision(file_path, revised_text, output_path?, author?, allow_major_deletions?)` — rewrites a whole document from revised clean text into native tracked changes behind a clean-text verification gate.
 - `accept_all_changes(docx_path, output_path?, remove_comments=true)` — accepts all tracked changes (`remove_comments=false` keeps comments).
 - `finalize_document(file_path, output_path?, sanitize_mode="full"|"keep-markup", accept_all?, protection_mode?, author?)`
 
