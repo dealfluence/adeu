@@ -21,10 +21,11 @@ import asyncio
 from io import BytesIO
 from typing import Any, Literal
 
+from adeu.fields import banner_for_path
 from adeu.ingest import _extract_text_from_doc
 from adeu.mcp_components._response_builders import (
     build_appendix_response,
-    build_budget_guard_message,
+    build_bounded_full_response,
     build_changes_response,
     build_fields_response,
     build_full_document_response,
@@ -33,7 +34,8 @@ from adeu.mcp_components._response_builders import (
     build_paginated_response,
     build_search_response,
 )
-from adeu.pagination import parse_page_arg
+from adeu.outline import extract_outline
+from adeu.pagination import paginate, parse_page_arg, split_structural_appendix
 from adeu.payloads import response_budget_limit
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
@@ -110,15 +112,26 @@ class AdeuReadDocxInput(BaseModel):
         # 'all') can never drift from adeu.pagination.parse_page_arg
         # (python/src/adeu/pagination.py:26). The value is passed through
         # unchanged; _run re-parses it for dispatch, exactly like document.py.
-        parse_page_arg(v)
+        if isinstance(v, str):
+            parse_page_arg(v.strip().strip("'\""))
+        else:
+            parse_page_arg(v)
         return v
 
     force: bool = Field(
         default=False,
         description=(
             "Only for page='all': return the whole document even when it exceeds the "
-            "response budget. Without this, an oversized unbounded read is refused with "
-            "a list of bounded alternatives (page ranges, search, outline)."
+            "response budget. Without this, an oversized page='all' read serves the "
+            "first pages that fit plus an L1 outline and continuation hint."
+        ),
+    )
+
+    no_chrome: bool = Field(
+        default=False,
+        description=(
+            "When True, strips navigation banners, page headers, and footers for "
+            "raw token-minimal output. Defaults to False."
         ),
     )
 
@@ -197,7 +210,8 @@ _DESCRIPTION = (
     "Set clean_view=True to see the finalized 'Accepted' text without markup. "
     "\n\n"
     "Modes:\n"
-    "- 'full' (default): paginated body content. Use page=N to navigate.\n"
+    "- 'full' (default): paginated body content. Use page=N, a range like page='2-6' "
+    "(up to 8 pages; also filters search_query), or page='all'.\n"
     "- 'outline': heading map only — start here for large docs to plan "
     "targeted reads. Defaults to L1-L2 headings; pass outline_max_level=3-6 "
     "to see deeper structure.\n"
@@ -205,10 +219,14 @@ _DESCRIPTION = (
     "Consult before editing legal/technical docs to avoid breaking references.\n"
     "- 'changes': a concise ledger of every tracked change and comment with its "
     "id, author, page, and text. Use this before any accept/reject/reply, and "
-    "instead of reading full pages just to find ids."
+    "instead of reading full pages just to find ids.\n"
+    "- 'fields': a ledger of every content control (form field) with its CC:<N> "
+    "id, tag/alias, type, lock/binding state, and current value (paginate via "
+    "fields_offset)."
     "\n\n"
-    "page='all' returns the whole document, and is refused with a recipe of bounded "
-    "alternatives when the document exceeds the response budget — pass force=True to override."
+    "page='all' returns the whole document; when it exceeds the response budget, "
+    "it serves the first pages that fit plus an L1 outline and continuation hint "
+    "— pass force=True to return the full document in one call."
 )
 
 
@@ -235,6 +253,7 @@ class AdeuReadDocx(BaseTool):
         mode: Literal["full", "outline", "appendix", "changes", "fields"] = "full",
         page: int | str | None = None,
         force: bool = False,
+        no_chrome: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -256,6 +275,9 @@ class AdeuReadDocx(BaseTool):
                     "from the raw tracked-change projection. Drop clean_view or pick another mode."
                 )
 
+        if isinstance(page, str):
+            page = page.strip().strip("'\"")
+
         # `page` means "document page" and defaults to 1 everywhere EXCEPT search
         # and mode='changes', where None means "every page" — the response builder
         # needs to tell "omitted" from an explicit 1 (document.py:1384-1389).
@@ -269,32 +291,52 @@ class AdeuReadDocx(BaseTool):
         needs_appendix = mode == "appendix"
         needs_offsets = mode == "outline"
 
-        extract_result = _extract_text_from_doc(
-            doc,
-            clean_view=clean_view,
-            include_appendix=needs_appendix,
-            return_paragraph_offsets=needs_offsets,
-        )
+        text: str
+        paragraph_offsets: dict[int, tuple[int, int, Any]] | None
         if needs_offsets:
-            text, paragraph_offsets = extract_result
+            res_tuple = _extract_text_from_doc(
+                doc,
+                clean_view=clean_view,
+                include_appendix=needs_appendix,
+                return_paragraph_offsets=True,
+            )
+            assert isinstance(res_tuple, tuple)
+            text = res_tuple[0]
+            paragraph_offsets = res_tuple[1]  # type: ignore[assignment]
         else:
-            text = extract_result
+            res_str = _extract_text_from_doc(
+                doc,
+                clean_view=clean_view,
+                include_appendix=needs_appendix,
+                return_paragraph_offsets=False,
+            )
+            assert isinstance(res_str, str)
+            text = res_str
             paragraph_offsets = None
 
         if search_query is not None:
+            search_page: int | str | tuple[int, int] | None = page
+            if isinstance(page, str) and "-" in page:
+                try:
+                    p_kind, p_val = parse_page_arg(page)
+                    if p_kind == "range":
+                        search_page = p_val
+                except ValueError:
+                    pass
             result = build_search_response(
                 text,
                 search_query,
                 search_regex,
                 search_case_sensitive,
-                page,
+                search_page,
                 str(path),
                 max_matches=max_matches,
                 match_offset=match_offset,
                 full_paragraph=full_paragraph,
+                no_chrome=no_chrome,
             )
         elif mode == "fields":
-            result = build_fields_response(doc, text, str(path), offset=fields_offset)
+            result = build_fields_response(doc, text, str(path), offset=fields_offset, no_chrome=no_chrome)
         elif mode == "changes":
             # One engine load serves both enrichments the ledger wants:
             # comments_data (author + reply threading) and the authoritative set
@@ -320,6 +362,7 @@ class AdeuReadDocx(BaseTool):
                 page=page,
                 offset=changes_offset,
                 existing_change_ids=existing_change_ids,
+                no_chrome=no_chrome,
             )
         elif mode == "outline":
             result = build_outline_response(
@@ -329,36 +372,69 @@ class AdeuReadDocx(BaseTool):
                 outline_max_level=outline_max_level,
                 outline_verbose=outline_verbose,
                 paragraph_offsets=paragraph_offsets,
+                no_chrome=no_chrome,
             )
         else:
             kind, page_val = parse_page_arg(page)
+            fields_banner = (
+                None
+                if no_chrome
+                else banner_for_path(
+                    str(path),
+                    hint=' \u00b7 adeu_read_docx mode="fields" for the field ledger',
+                    loader=lambda _p: doc,
+                )
+            )
             if mode == "appendix":
                 if kind == "range":
                     raise ToolException("Page range pagination is only supported in 'full' mode, not 'appendix' mode.")
                 if kind == "all":
                     raise ToolException(f"Invalid page parameter: '{page}'. Provide a positive integer.")
                 assert isinstance(page_val, int)
-                result = build_appendix_response(text, page_val, str(path))
+                result = build_appendix_response(text, page_val, str(path), no_chrome=no_chrome)
             elif kind == "all":
                 if not force and len(text) > response_budget_limit():
-                    raise ToolException(build_budget_guard_message(text, str(path), doc=doc))
-                result = build_full_document_response(text, str(path))
+                    body_text, _ = split_structural_appendix(text)
+                    pagination = paginate(body_text, "")
+                    outline_nodes = extract_outline(
+                        doc,
+                        body_text,
+                        pagination.body_pages,
+                        pagination.body_page_offsets,
+                    )
+                    result = build_bounded_full_response(
+                        text,
+                        str(path),
+                        pagination,
+                        outline_nodes=outline_nodes,
+                    )
+                else:
+                    result = build_full_document_response(
+                        text,
+                        str(path),
+                        no_chrome=no_chrome,
+                        fields_banner=fields_banner,
+                    )
             elif kind == "range":
                 assert isinstance(page_val, tuple)
-                start_p, end_p = page_val
-                result = build_page_range_response(text, start_p, end_p, str(path))
+                start_page, end_page = page_val
+                result = build_page_range_response(text, start_page, end_page, str(path), no_chrome=no_chrome)
             else:
                 assert isinstance(page_val, int)
-                result = build_paginated_response(text, page_val, str(path))
+                result = build_paginated_response(
+                    text,
+                    page_val,
+                    str(path),
+                    no_chrome=no_chrome,
+                    fields_banner=fields_banner,
+                )
 
         artifact = dict(result.structured_content) if result.structured_content else {}
-        ui_markdown = artifact.get("markdown")
-
-        if ui_markdown is None:
+        if isinstance(result.content, str):
+            content = result.content
+        else:
             blocks = result.content if isinstance(result.content, list) else [result.content]
-            ui_markdown = "".join(getattr(b, "text", str(b)) for b in blocks if b is not None)
-
-        content = f"> **File Path:** `{path}`\n\n{ui_markdown}"
+            content = "".join(getattr(b, "text", str(b)) for b in blocks if b is not None)
 
         return content, artifact
 
@@ -370,6 +446,7 @@ class AdeuReadDocx(BaseTool):
         mode: Literal["full", "outline", "appendix", "changes", "fields"] = "full",
         page: int | str | None = None,
         force: bool = False,
+        no_chrome: bool = False,
         outline_max_level: int = 2,
         outline_verbose: bool = False,
         search_query: str | None = None,
@@ -390,6 +467,7 @@ class AdeuReadDocx(BaseTool):
             mode,
             page,
             force,
+            no_chrome,
             outline_max_level,
             outline_verbose,
             search_query,

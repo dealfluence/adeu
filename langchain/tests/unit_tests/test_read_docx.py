@@ -29,6 +29,15 @@ class TestAdeuReadDocxSchema:
         tool = AdeuReadDocx()
         assert len(tool.description) > 100  # Sanity floor — must actually explain itself.
         assert "CriticMarkup" in tool.description  # The critical concept must be named.
+        assert "'fields'" in tool.description
+
+    def test_no_chrome_defaults_to_false(self) -> None:
+        data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx")
+        assert data.no_chrome is False
+
+    def test_quoted_page_range_is_accepted(self) -> None:
+        data = AdeuReadDocxInput(reasoning="test", file_path="/tmp/x.docx", page="'2-6'")
+        assert data.page == "'2-6'"
 
     def test_args_schema_is_pydantic_model(self) -> None:
         tool = AdeuReadDocx()

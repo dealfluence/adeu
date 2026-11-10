@@ -163,15 +163,37 @@ class TestAdeuReadDocxBehavior:
         result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "1-2"})
         assert "This is the" in result
 
-    def test_page_all_refuses_when_over_response_budget(
+    def test_search_with_page_range_filters_matches(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke(
+            {
+                "reasoning": "test",
+                "file_path": str(golden_docx_path),
+                "search_query": "the",
+                "page": "1-2",
+            }
+        )
+        assert "Search Results" in result
+
+    def test_no_chrome_strips_navigation_headers(self, golden_docx_path: Path) -> None:
+        tool = AdeuReadDocx()
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "no_chrome": True})
+        assert "File Path:" not in result
+        assert "This is the" in result
+
+    def test_page_all_over_budget_serves_bounded_first_pages(
         self, golden_docx_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # response_budget_limit() reads ADEU_MAX_RESPONSE_CHARS (payloads.py:398-409);
-        # golden.docx projects to ~353 chars, so a 10-char budget trips the guard.
+        # Parity with MCP read_docx (commit a8c71f8): over-budget page='all'
+        # without force=True serves the first pages that fit + continuation
+        # hint as a normal response instead of raising a refusal exception.
         monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
         tool = AdeuReadDocx()
-        with pytest.raises(ToolException, match="Refused unbounded full document read"):
-            tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "all"})
+        result = tool.invoke({"reasoning": "test", "file_path": str(golden_docx_path), "page": "all"})
+        assert "exceeds the response budget" in result
+        assert "showing pages 1-1 of 1" in result
+        assert "force=true" in result
+        assert "This is the" in result
 
     def test_force_overrides_the_response_budget(self, golden_docx_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ADEU_MAX_RESPONSE_CHARS", "10")
