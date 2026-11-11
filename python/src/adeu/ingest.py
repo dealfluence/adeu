@@ -25,6 +25,7 @@ from adeu.utils.content_controls import (
 )
 from adeu.utils.docx import (
     DocxEvent,
+    NumberingTracker,
     ProjectedRun,
     _get_style_cache,
     apply_formatting_to_segments,
@@ -95,6 +96,7 @@ def extract_text_from_stream(
     filename: str = "document.docx",
     clean_view: bool = False,
     include_appendix: bool = True,
+    resolve_numbering: bool = True,
 ) -> str:
     """
     Extracts text from a file stream using raw run concatenation.
@@ -106,6 +108,9 @@ def extract_text_from_stream(
         include_appendix: If False, omits the generated read-only structural
                     appendix — required whenever the text feeds a comparison
                     (QA 2026-07-18 H1).
+        resolve_numbering: If True (default), emits resolved OOXML clause/list
+                    numbers; if False, emits canonical '1. ' markers for
+                    DOCX-to-DOCX comparison.
 
     CRITICAL: This must match DocumentMapper._build_map logic exactly.
     """
@@ -114,7 +119,12 @@ def extract_text_from_stream(
 
         sanitized_bytes = strip_bom_from_docx_bytes(file_stream.read())
         doc = Document(io.BytesIO(sanitized_bytes))
-        return _extract_text_from_doc(doc, clean_view, include_appendix=include_appendix)
+        return _extract_text_from_doc(
+            doc,
+            clean_view,
+            include_appendix=include_appendix,
+            resolve_numbering=resolve_numbering,
+        )
     except Exception as e:
         logger.error(f"Text extraction failed: {e}", exc_info=True)
         raise ValueError(f"Could not extract text: {str(e)}") from e
@@ -126,6 +136,7 @@ def _extract_text_from_doc(
     include_appendix: bool = True,
     return_paragraph_offsets: bool = False,
     return_structure: bool = False,
+    resolve_numbering: bool = True,
 ):
     """
     Extracts text from an already-loaded python-docx Document.
@@ -177,6 +188,11 @@ def _extract_text_from_doc(
         # part_cursor accounts for the \n\n separator that will precede this part
         # in the final join, ensuring internal offsets align exactly.
         part_cursor = cursor + 2 if full_text else cursor
+        part_ref = getattr(part, "part", part)
+        part_style_cache, part_default_pstyle = _get_style_cache(part_ref)
+        numbering_tracker = NumberingTracker(
+            part_ref, style_cache=part_style_cache, resolve_numbering=resolve_numbering
+        )
         part_text = _extract_blocks(
             part,
             comments_map,
@@ -184,7 +200,12 @@ def _extract_text_from_doc(
             offset_map=offset_map,
             cursor=part_cursor,
             table_acc=structure.tables if structure is not None else None,
+            style_cache=part_style_cache,
+            default_pstyle=part_default_pstyle,
+            part=part_ref,
             sdt_infos=sdt_infos,
+            numbering_tracker=numbering_tracker,
+            resolve_numbering=resolve_numbering,
         )
         if part_text:
             if full_text:
@@ -223,6 +244,8 @@ def _extract_blocks(
     part: Any = None,
     sdt_infos: dict | None = None,
     in_cell: bool = False,
+    numbering_tracker: NumberingTracker | None = None,
+    resolve_numbering: bool = True,
 ) -> str:
     """
     Recursively extracts text from a container (Document, Cell, Header, etc.)
@@ -236,6 +259,8 @@ def _extract_blocks(
         part = getattr(container, "part", container)
     if style_cache is None:
         style_cache, default_pstyle = _get_style_cache(part)
+    if numbering_tracker is None:
+        numbering_tracker = NumberingTracker(part, style_cache=style_cache, resolve_numbering=resolve_numbering)
 
     blocks = []
     local_cursor = cursor
@@ -290,6 +315,8 @@ def _extract_blocks(
                 default_pstyle=default_pstyle,
                 part=part,
                 in_cell=in_cell,
+                numbering_tracker=numbering_tracker,
+                resolve_numbering=resolve_numbering,
             )
             if inner:
                 full = f"{open_tok}{inner}{close_tok}"
@@ -312,6 +339,9 @@ def _extract_blocks(
                 sdt_infos=sdt_infos,
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
+                part=part,
+                numbering_tracker=numbering_tracker,
+                resolve_numbering=resolve_numbering,
             )
             if fn_text:
                 blocks.append(fn_text)
@@ -324,7 +354,15 @@ def _extract_blocks(
                     local_cursor -= 2
         elif isinstance(item, Paragraph):
             p_elem = item._element
-            style_prefix = get_paragraph_prefix(p_elem, style_cache, default_pstyle, part=part)
+            num_snap = numbering_tracker.snapshot()
+            style_prefix = get_paragraph_prefix(
+                p_elem,
+                style_cache,
+                default_pstyle,
+                part=part,
+                numbering_tracker=numbering_tracker,
+                resolve_numbering=resolve_numbering,
+            )
             prefix = style_prefix
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{container.note_type}-{container.id}]: " + prefix
@@ -345,6 +383,7 @@ def _extract_blocks(
                 # paragraph away; when nothing visible survives inside it,
                 # the accepted view must not render an empty container
                 # (QA round 3, finding 2.4).
+                numbering_tracker.restore(num_snap)
                 if not is_first_block:
                     local_cursor -= 2
                 is_first_para = False
@@ -375,6 +414,8 @@ def _extract_blocks(
                 style_cache=style_cache,
                 default_pstyle=default_pstyle,
                 part=part,
+                numbering_tracker=numbering_tracker,
+                resolve_numbering=resolve_numbering,
             )
             if table_text:
                 blocks.append(table_text)
@@ -402,6 +443,8 @@ def extract_table(
     default_pstyle: str | None = None,
     part: Any = None,
     sdt_infos: dict | None = None,
+    numbering_tracker: NumberingTracker | None = None,
+    resolve_numbering: bool = True,
 ) -> str:
     """
     Args:
@@ -463,6 +506,8 @@ def extract_table(
                 default_pstyle=default_pstyle,
                 part=part,
                 in_cell=True,
+                numbering_tracker=numbering_tracker,
+                resolve_numbering=resolve_numbering,
             )
             if cell_info is not None:
                 # Cell-level control (sdtContent > w:tc): anchors render inline

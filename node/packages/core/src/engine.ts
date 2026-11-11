@@ -726,6 +726,7 @@ export class RedlineEngine {
   public rollback_verified: boolean = true;
   public id_discovery_hint: string | null;
   public markup_mode: "track_changes" | "manual" = "track_changes";
+  public resolve_numbering: boolean = true;
   private _in_process_batch: boolean = false;
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
@@ -741,6 +742,7 @@ export class RedlineEngine {
       allow_untracked_writes?: boolean;
       timestamp?: string | Date;
       markup_mode?: "track_changes" | "manual";
+      resolve_numbering?: boolean;
     },
   ) {
     this.doc = doc;
@@ -748,6 +750,7 @@ export class RedlineEngine {
     this.id_discovery_hint = opts?.id_discovery_hint ?? null;
     this.markup_mode =
       opts?.markup_mode === "manual" ? "manual" : "track_changes";
+    this.resolve_numbering = opts?.resolve_numbering ?? true;
     // CC-4 write-gate overrides. Constructor options rather than
     // process_batch arguments because the gates run in three places —
     // validate_edits, the resolver and the apply-path backstop — and only the
@@ -789,7 +792,7 @@ export class RedlineEngine {
     }
 
     this.current_id = this._scan_existing_ids();
-    this.mapper = new DocumentMapper(this.doc);
+    this.mapper = new DocumentMapper(this.doc, false, false, this.resolve_numbering);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
     this._field_entries_cache = null;
@@ -4118,6 +4121,7 @@ export class RedlineEngine {
         return null;
       }
       delete pkg._adeu_numbering_cache;
+      delete pkg._adeu_numbering_defs;
       return "1";
     }
 
@@ -4163,6 +4167,7 @@ export class RedlineEngine {
       num.appendChild(ref);
       root.appendChild(num);
       delete pkg._adeu_numbering_cache;
+      delete pkg._adeu_numbering_defs;
       return String(max_num_id + 1);
     }
 
@@ -4218,6 +4223,7 @@ export class RedlineEngine {
     num.appendChild(ref);
     root.appendChild(num);
     delete pkg._adeu_numbering_cache;
+    delete pkg._adeu_numbering_defs;
     return String(max_num_id + 1);
   }
 
@@ -4618,7 +4624,7 @@ export class RedlineEngine {
     let resolved_mapper = this.mapper;
     if (matches.length === 0) {
       if (!this.clean_mapper) {
-        this.clean_mapper = new DocumentMapper(this.doc, true);
+        this.clean_mapper = new DocumentMapper(this.doc, true, false, this.resolve_numbering);
       }
       matches = this.clean_mapper.drop_virtual_only_matches(
         this.clean_mapper.find_all_match_indices(edit.target_text),
@@ -4878,7 +4884,7 @@ export class RedlineEngine {
 
       if (matches.length === 0) {
         if (!this.clean_mapper)
-          this.clean_mapper = new DocumentMapper(this.doc, true);
+          this.clean_mapper = new DocumentMapper(this.doc, true, false, this.resolve_numbering);
         matches = this.clean_mapper.drop_virtual_only_matches(
           this.clean_mapper.find_all_match_indices(edit.target_text, is_regex),
         );
@@ -4911,7 +4917,7 @@ export class RedlineEngine {
 
       if (matches.length === 0) {
         if (!this.original_mapper) {
-          this.original_mapper = new DocumentMapper(this.doc, false, true);
+          this.original_mapper = new DocumentMapper(this.doc, false, true, this.resolve_numbering);
         }
         const orig_matches = this.original_mapper.drop_virtual_only_matches(
           this.original_mapper.find_all_match_indices(
@@ -4986,12 +4992,19 @@ export class RedlineEngine {
       if (matches.length === 1) {
         const [m_start, m_len] = matches[0];
         const matched = activeText.substring(m_start, m_start + m_len);
+        const aligned_new = RedlineEngine._restore_matched_list_prefix(
+          target_mapper,
+          m_start,
+          matched,
+          edit.target_text,
+          edit.new_text || "",
+        );
         const with_markers = RedlineEngine._reinject_anchor_markers(
           target_mapper,
           m_start,
           m_len,
           edit.target_text,
-          edit.new_text || "",
+          aligned_new,
         );
         if (with_markers === null) {
           errors.push(
@@ -5726,7 +5739,7 @@ export class RedlineEngine {
     if (!snapshot) return;
     restoreSnapshot(this.doc, snapshot);
     this.current_id = originalCurrentId;
-    this.mapper = new DocumentMapper(this.doc);
+    this.mapper = new DocumentMapper(this.doc, false, false, this.resolve_numbering);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
     this._field_entries_cache = null;
@@ -6007,7 +6020,7 @@ export class RedlineEngine {
                 !(edit as any)._any_sub_failure
               ) {
                 applied_so_far++;
-                this.mapper = new DocumentMapper(this.doc);
+                this.mapper = new DocumentMapper(this.doc, false, false, this.resolve_numbering);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
     this._field_entries_cache = null;
@@ -6036,7 +6049,7 @@ export class RedlineEngine {
                 // have mutated the tree before giving up, and the next edit
                 // validates against that state.
                 if ((edit as any)._applied_status) {
-                  this.mapper = new DocumentMapper(this.doc);
+                  this.mapper = new DocumentMapper(this.doc, false, false, this.resolve_numbering);
     // Offsets into mapper.full_text; rebuilt whenever the mapper is.
     this._cc_anchor_pairs = null;
     this._field_entries_cache = null;
@@ -6347,7 +6360,7 @@ export class RedlineEngine {
         // documents whose views differ (AP-05).
         if (!edit._active_mapper_ref) {
           if (!this.clean_mapper) {
-            this.clean_mapper = new DocumentMapper(this.doc, true);
+            this.clean_mapper = new DocumentMapper(this.doc, true, false, this.resolve_numbering);
           }
           edit._active_mapper_ref = this.clean_mapper;
         }
@@ -8312,6 +8325,42 @@ export class RedlineEngine {
     return prefix + middle + suffix;
   }
 
+  private static _restore_matched_list_prefix(
+    mapper: DocumentMapper,
+    start_idx: number,
+    actual_doc_text: string,
+    caller_target: string,
+    new_text: string,
+  ): string {
+    if (!new_text || !caller_target || actual_doc_text === caller_target) {
+      return new_text;
+    }
+    for (const s of mapper.spans) {
+      if (s.start > start_idx) break;
+      if (s.start === start_idx && s.run === null && s.canonical_prefix) {
+        if (
+          !actual_doc_text.startsWith(s.text) ||
+          caller_target.startsWith(s.text)
+        ) {
+          return new_text;
+        }
+        const doc_body = actual_doc_text.slice(s.text.length);
+        if (!doc_body || caller_target.length <= doc_body.length) {
+          return new_text;
+        }
+        const caller_prefix = caller_target.slice(
+          0,
+          caller_target.length - doc_body.length,
+        );
+        if (new_text.startsWith(caller_prefix)) {
+          return s.text + new_text.slice(caller_prefix.length);
+        }
+        return new_text;
+      }
+    }
+    return new_text;
+  }
+
   private static _reinject_anchor_markers(
     mapper: DocumentMapper,
     start: number,
@@ -8526,6 +8575,13 @@ export class RedlineEngine {
       // BUG_comment_threading_anchoring_and_typography.md). Keyed on the MATCH
       // being typography-forgiving — a caller who quotes the document's own
       // characters and asks for different ones still gets the change.
+      current_effective_new_text = RedlineEngine._restore_matched_list_prefix(
+        active_mapper,
+        start_idx,
+        actual_doc_text,
+        edit.target_text,
+        current_effective_new_text,
+      );
       current_effective_new_text = restore_matched_typography(
         actual_doc_text,
         edit.target_text,

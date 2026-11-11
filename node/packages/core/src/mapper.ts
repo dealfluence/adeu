@@ -24,7 +24,7 @@ import { RegexTimeoutError, userFindAllMatches, userSearch } from "./utils/safe-
 import {
   _get_style_cache,
   compute_change_pair_map,
-  get_paragraph_prefix,
+  get_paragraph_prefix_with_canonical,
   get_run_style_markers,
   get_run_text,
   is_heading_paragraph,
@@ -33,6 +33,7 @@ import {
   iter_block_items,
   iter_document_parts_with_kind,
   iter_paragraph_content,
+  NumberingTracker,
   paragraph_mark_is_deleted,
   QN_W_BR,
   QN_W_CR,
@@ -75,6 +76,7 @@ export interface TextSpan {
   // the text, enclosure decides which gates apply, and a sdtContentLocked
   // picture control is locked while projecting nothing.
   sdt_stack?: readonly SdtInfo[];
+  canonical_prefix?: string | null;
 }
 
 export function renumber_snapshot_ids(
@@ -206,6 +208,7 @@ export class DocumentMapper {
   public doc: DocumentObject;
   public clean_view: boolean;
   public original_view: boolean;
+  public resolve_numbering: boolean;
   public comments_map: Record<string, any>;
   public full_text: string = "";
   public spans: TextSpan[] = [];
@@ -238,10 +241,12 @@ export class DocumentMapper {
     doc: DocumentObject,
     clean_view: boolean = false,
     original_view: boolean = false,
+    resolve_numbering: boolean = true,
   ) {
     this.doc = doc;
     this.clean_view = clean_view;
     this.original_view = original_view;
+    this.resolve_numbering = resolve_numbering;
     this.comments_map = extract_comments_data(doc.pkg);
     this._build_map();
   }
@@ -290,7 +295,19 @@ export class DocumentMapper {
         current_offset += 2;
       }
       const part_start = current_offset;
-      current_offset = this._map_blocks(part, current_offset);
+      const partRef = (part as any).part || part;
+      const [partStyleCache] = _get_style_cache(partRef);
+      const numberingTracker = new NumberingTracker(
+        partRef,
+        partStyleCache,
+        this.resolve_numbering,
+      );
+      current_offset = this._map_blocks(
+        part,
+        current_offset,
+        false,
+        numberingTracker,
+      );
 
       if (current_offset === part_start) {
         this.spans.length = spans_mark;
@@ -448,11 +465,19 @@ export class DocumentMapper {
     return null;
   }
 
-  private _map_blocks(container: any, offset: number, inCell = false): number {
+  private _map_blocks(
+    container: any,
+    offset: number,
+    inCell = false,
+    numbering_tracker?: NumberingTracker,
+  ): number {
     let current = offset;
     const c_type = container.constructor.name;
     const part = container.part || container;
     const [style_cache, default_pstyle] = _get_style_cache(part);
+    const tracker =
+      numbering_tracker ??
+      new NumberingTracker(part, style_cache, this.resolve_numbering);
 
     // Block-join semantics mirror _extract_blocks exactly:
     // "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when it
@@ -526,6 +551,7 @@ export class DocumentMapper {
             },
             current,
             inCell,
+            tracker,
           );
         } finally {
           if (info) this._current_block_sdt_stack.pop();
@@ -553,7 +579,7 @@ export class DocumentMapper {
           current += 2;
         }
         const block_start = current;
-        current = this._map_blocks(item, current);
+        current = this._map_blocks(item, current, false, tracker);
         if (current === block_start) {
           // Empty footnote entry: the reader drops the block, so roll back
           // the separator and any zero-width spans.
@@ -564,6 +590,7 @@ export class DocumentMapper {
           emitted_any_block = true;
         }
       } else if (item instanceof Paragraph) {
+        const num_snap = tracker.snapshot();
         if (emitted_any_block) {
           // Attach the newline to the previous paragraph so merges work
           // correctly.
@@ -573,18 +600,29 @@ export class DocumentMapper {
           current += 2;
         }
 
-        const style_prefix = get_paragraph_prefix(
-          item,
-          style_cache,
-          default_pstyle,
-        );
-        let prefix = style_prefix;
+        const [style_prefix, canonical_prefix] =
+          get_paragraph_prefix_with_canonical(
+            item,
+            style_cache,
+            default_pstyle,
+            tracker,
+            this.resolve_numbering,
+          );
         if (is_first_para && c_type === "FootnoteItem") {
-          prefix = `[^${container.note_type}-${container.id}]: ` + prefix;
+          const fn_label = `[^${container.note_type}-${container.id}]: `;
+          this._add_virtual_text(fn_label, current, item);
+          current += fn_label.length;
         }
-        if (prefix) {
-          this._add_virtual_text(prefix, current, item);
-          current += prefix.length;
+        if (style_prefix) {
+          this._add_virtual_text(
+            style_prefix,
+            current,
+            item,
+            null,
+            false,
+            canonical_prefix,
+          );
+          current += style_prefix.length;
         }
 
         const content_start = current;
@@ -599,13 +637,7 @@ export class DocumentMapper {
           current === content_start &&
           paragraph_mark_is_deleted(item._element)
         ) {
-          // Twin of the reader's skip in _extract_blocks: accepting a tracked
-          // paragraph-mark deletion merges the paragraph away, so when nothing
-          // visible survives inside it the accepted view renders no container
-          // at all. The reader drops the whole `prefix + p_text` block, so the
-          // rollback must undo the prefix and the separator too — and the
-          // paragraph must NOT count as a block, or the next separator lands
-          // twice.
+          tracker.restore(num_snap);
           this.spans.length = spans_mark;
           this._text_chunks.length = chunks_mark;
           current = offset_mark;
@@ -623,7 +655,7 @@ export class DocumentMapper {
           current += 2;
         }
         const block_start = current;
-        current = this._map_table(item, current);
+        current = this._map_table(item, current, tracker);
         if (current === block_start) {
           // Empty table (e.g. every row skipped in this view): the reader
           // drops the block AND its separator.
@@ -660,7 +692,11 @@ export class DocumentMapper {
     return info && isAnchored(info) ? info : null;
   }
 
-  private _map_table(table: Table, offset: number): number {
+  private _map_table(
+    table: Table,
+    offset: number,
+    numbering_tracker?: NumberingTracker,
+  ): number {
     let current = offset;
     let rows_processed = 0;
 
@@ -729,7 +765,7 @@ export class DocumentMapper {
         );
         this._current_block_sdt_stack.push(...enclosing);
         try {
-          current = this._map_blocks(cell, current, true);
+          current = this._map_blocks(cell, current, true, numbering_tracker);
         } finally {
           for (let n = 0; n < enclosing.length; n++) {
             this._current_block_sdt_stack.pop();
@@ -1438,6 +1474,7 @@ export class DocumentMapper {
     context_paragraph: Paragraph | null,
     hyperlink_id: string | null = null,
     is_image_marker = false,
+    canonical_prefix: string | null = null,
   ) {
     const span: TextSpan = {
       start: offset,
@@ -1449,6 +1486,7 @@ export class DocumentMapper {
       part_index: this._current_part_index,
       is_image_marker: is_image_marker || undefined,
       sdt_stack: this._spanSdtStack(),
+      canonical_prefix: canonical_prefix || undefined,
     };
     this.spans.push(span);
     this._text_chunks.push(text);
@@ -1578,6 +1616,44 @@ export class DocumentMapper {
       );
       results.push([raw_start, raw_end - raw_start]);
       from = p_end;
+    }
+    return results;
+  }
+
+  private static readonly _CALLER_CLAUSE_PREFIX_RE =
+    /^([ \t]*(?:#+\s+)?(?:(?:§|Article|ARTICLE|Part|PART|Clause|CLAUSE|Section|SECTION|ust\.|pkt)\s+)?(?:\([a-zA-Z0-9]+\)|[0-9IVXLCDMa-zA-Z]+(?:\.[0-9a-zA-Z]+)*[.)]?)\s+)([\s\S]+)$/;
+
+  private _find_list_prefix_matches(target_text: string): [number, number][] {
+    if (!target_text) return [];
+    const norm_full = this._replace_smart_quotes(this.full_text);
+    const parsed_clause = DocumentMapper._CALLER_CLAUSE_PREFIX_RE.exec(target_text);
+    const target_is_heading = target_text.trimStart().startsWith("#");
+
+    const results: [number, number][] = [];
+    for (const s of this.spans) {
+      if (s.run !== null || !s.canonical_prefix) continue;
+      const span_is_heading = s.canonical_prefix.trimStart().startsWith("#");
+      if (target_is_heading !== span_is_heading) continue;
+
+      let caller_body: string | null = null;
+      if (target_text.startsWith(s.canonical_prefix)) {
+        caller_body = target_text.slice(s.canonical_prefix.length);
+      } else if (parsed_clause !== null) {
+        caller_body = parsed_clause[2]!;
+      }
+      if (!caller_body) continue;
+
+      const norm_body = this._replace_smart_quotes(caller_body);
+      const end_pos = s.end + norm_body.length;
+      if (
+        end_pos <= norm_full.length &&
+        norm_full.slice(s.end, end_pos) === norm_body
+      ) {
+        const total_len = s.end - s.start + caller_body.length;
+        if (!this.range_is_virtual_only(s.start, total_len)) {
+          results.push([s.start, total_len]);
+        }
+      }
     }
     return results;
   }
@@ -1724,6 +1800,9 @@ export class DocumentMapper {
       }
     } catch (e) {}
 
+    const prefix_first = this._find_list_prefix_matches(target_text);
+    if (prefix_first.length > 0) return prefix_first[0];
+
     return [-1, 0];
   }
 
@@ -1785,6 +1864,9 @@ export class DocumentMapper {
       const fuzzy = [...this.full_text.matchAll(pattern)];
       if (fuzzy.length > 0) return fuzzy.map((m) => [m.index!, m[0].length]);
     } catch (e) {}
+
+    const prefix_matches = this._find_list_prefix_matches(target_text);
+    if (prefix_matches.length > 0) return prefix_matches;
 
     return [];
   }

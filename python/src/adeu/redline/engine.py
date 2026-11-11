@@ -521,8 +521,10 @@ class RedlineEngine:
         allow_untracked_writes: bool = False,
         timestamp: Optional[Union[str, datetime.datetime]] = None,
         markup_mode: str = "track_changes",
+        resolve_numbering: bool = True,
     ):
         self.terse_errors = terse_errors
+        self.resolve_numbering = resolve_numbering
         self.markup_mode = markup_mode if markup_mode in ("track_changes", "manual") else "track_changes"
         self._in_process_batch = False
         # CC-4 write-gate overrides. Engine kwargs rather than process_batch
@@ -596,7 +598,7 @@ class RedlineEngine:
         else:
             raise TypeError(f"timestamp must be a str, datetime.datetime, or None, got {type(timestamp).__name__}")
         self.current_id = self._scan_existing_ids()
-        self.mapper = DocumentMapper(self.doc)
+        self.mapper = DocumentMapper(self.doc, resolve_numbering=self.resolve_numbering)
         # Offsets into mapper.full_text; rebuilt whenever the mapper is.
         self._cc_anchor_pairs: "list[tuple[int, int, int]] | None" = None
         # (projection text, ledger rows) - see _field_entries.
@@ -2218,6 +2220,8 @@ class RedlineEngine:
             self.doc.part.relate_to(new_part, RT.NUMBERING)
             if hasattr(package, "_adeu_numbering_cache"):
                 del package._adeu_numbering_cache
+            if hasattr(package, "_adeu_numbering_defs"):
+                del package._adeu_numbering_defs
             self._bullet_num_id = "1"
             return self._bullet_num_id
 
@@ -2279,6 +2283,8 @@ class RedlineEngine:
             numbering_part._element = root
         if hasattr(package, "_adeu_numbering_cache"):
             del package._adeu_numbering_cache
+        if hasattr(package, "_adeu_numbering_defs"):
+            del package._adeu_numbering_defs
         logger.info("Added bullet numbering definition", num_id=new_num_id)
         self._bullet_num_id = new_num_id
         return self._bullet_num_id
@@ -2758,7 +2764,7 @@ class RedlineEngine:
         resolved_mapper = self.mapper
         if not matches:
             if not self.clean_mapper:
-                self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+                self.clean_mapper = DocumentMapper(self.doc, clean_view=True, resolve_numbering=self.resolve_numbering)
             matches = self.clean_mapper.drop_virtual_only_matches(
                 self.clean_mapper.find_all_match_indices(edit.target_text)
             )
@@ -2993,7 +2999,9 @@ class RedlineEngine:
             # Fallback to Clean View if not found in Raw View (matches heuristic logic)
             if len(matches) == 0:
                 if not self.clean_mapper:
-                    self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+                    self.clean_mapper = DocumentMapper(
+                        self.doc, clean_view=True, resolve_numbering=self.resolve_numbering
+                    )
                 matches = self.clean_mapper.drop_virtual_only_matches(
                     self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
                 )
@@ -3007,7 +3015,9 @@ class RedlineEngine:
             # Check original view if still not found
             if len(matches) == 0:
                 if not self.original_mapper:
-                    self.original_mapper = DocumentMapper(self.doc, original_view=True)
+                    self.original_mapper = DocumentMapper(
+                        self.doc, original_view=True, resolve_numbering=self.resolve_numbering
+                    )
                 orig_matches = self.original_mapper.drop_virtual_only_matches(
                     self.original_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
                 )
@@ -3061,6 +3071,9 @@ class RedlineEngine:
                 start, length = valid_matches[0]
                 actual_doc_text = active_text[start : start + length]
                 effective_new_text = edit.new_text or ""
+                effective_new_text = self._restore_matched_list_prefix(
+                    target_mapper, start, actual_doc_text, edit.target_text, effective_new_text
+                )
                 with_markers = self._reinject_anchor_markers(
                     target_mapper, start, length, edit.target_text, effective_new_text
                 )
@@ -3390,7 +3403,7 @@ class RedlineEngine:
         the document state this one produced (chaining). Mirrors the Node
         engine, which re-creates its mapper after each applied edit.
         """
-        self.mapper = DocumentMapper(self.doc)
+        self.mapper = DocumentMapper(self.doc, resolve_numbering=self.resolve_numbering)
         # Offsets into mapper.full_text; rebuilt whenever the mapper is.
         self._cc_anchor_pairs = None
         self.clean_mapper = None
@@ -3410,6 +3423,7 @@ class RedlineEngine:
             author=self.author,
             id_discovery_hint=self.id_discovery_hint,
             terse_errors=self.terse_errors,
+            resolve_numbering=self.resolve_numbering,
         )
 
     def _batch_fingerprint(self) -> str:
@@ -4709,7 +4723,9 @@ class RedlineEngine:
                 # on documents whose views differ (AP-05).
                 if edit._active_mapper_ref is None:
                     if not self.clean_mapper:
-                        self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+                        self.clean_mapper = DocumentMapper(
+                            self.doc, clean_view=True, resolve_numbering=self.resolve_numbering
+                        )
                     edit._active_mapper_ref = self.clean_mapper
                 # Context-widened diff edits re-trim their shared context the
                 # way text-match resolution does (see _resolve_widened_pin).
@@ -5323,6 +5339,39 @@ class RedlineEngine:
         return prefix + middle + suffix
 
     @staticmethod
+    def _restore_matched_list_prefix(
+        mapper: DocumentMapper,
+        start_idx: int,
+        actual_doc_text: str,
+        caller_target: str,
+        new_text: str,
+    ) -> str:
+        """
+        When a match resolved across a virtual auto-numbered list/heading prefix
+        whose current rendered number differs from the caller's prefix (e.g. an
+        earlier batch edit inserted a list item shifting '3. ' -> '4. ', or
+        `diff --json` emitted canonical '1. '), rewrite the matching leading
+        prefix on `new_text` to the paragraph's current virtual prefix so the
+        word-diff never inserts literal numbering text into `<w:t>`.
+        """
+        if not new_text or not caller_target or actual_doc_text == caller_target:
+            return new_text
+        for s in mapper.spans:
+            if s.start > start_idx:
+                break
+            if s.start == start_idx and s.run is None and s.canonical_prefix is not None:
+                if not actual_doc_text.startswith(s.text) or caller_target.startswith(s.text):
+                    return new_text
+                doc_body = actual_doc_text[len(s.text) :]
+                if not doc_body or len(caller_target) <= len(doc_body):
+                    return new_text
+                caller_prefix = caller_target[: len(caller_target) - len(doc_body)]
+                if new_text.startswith(caller_prefix):
+                    return s.text + new_text[len(caller_prefix) :]
+                return new_text
+        return new_text
+
+    @staticmethod
     def _reinject_anchor_markers(
         mapper: DocumentMapper, start: int, length: int, caller_target: str, new_text: str
     ) -> Optional[str]:
@@ -5405,7 +5454,7 @@ class RedlineEngine:
 
         if not matches:
             if not self.clean_mapper:
-                self.clean_mapper = DocumentMapper(self.doc, clean_view=True)
+                self.clean_mapper = DocumentMapper(self.doc, clean_view=True, resolve_numbering=self.resolve_numbering)
             matches = self.clean_mapper.drop_virtual_only_matches(
                 self.clean_mapper.find_all_match_indices(edit.target_text, is_regex=is_regex)
             )
@@ -5599,6 +5648,9 @@ class RedlineEngine:
         # change on a provision nobody touched (B4). Keyed on the MATCH
         # being typography-forgiving — a caller who quotes the document's
         # own characters and asks for different ones still gets the change.
+        current_effective_new_text = self._restore_matched_list_prefix(
+            active_mapper, start_idx, actual_doc_text, edit.target_text, current_effective_new_text
+        )
         current_effective_new_text = self._restore_matched_typography(
             actual_doc_text, edit.target_text, current_effective_new_text
         )

@@ -13,6 +13,7 @@ import {
   iter_block_items,
   iter_document_parts,
   iter_paragraph_content,
+  NumberingTracker,
 } from "./utils/docx.js";
 
 const _HEADING_PREFIX_RE = /^(#{1,6}) /;
@@ -62,6 +63,7 @@ interface _BlockRecord {
   is_table: boolean;
   start_offset: number;
   projected_length: number;
+  prefix?: string;
 }
 
 export function extract_outline(
@@ -99,7 +101,7 @@ export function extract_outline(
     const paragraph = rec.item as Paragraph;
 
     const level = _heading_level(paragraph);
-    const text = _heading_text(paragraph, comments_map);
+    const text = _heading_text(paragraph, comments_map, rec.prefix ?? "");
     const style = _determine_heading_style(paragraph);
 
     const owned_end = _find_owned_end(
@@ -173,10 +175,18 @@ function _walk_doc_body(
   const records: _BlockRecord[] = [];
   let cursor = body_start_offset;
   let is_first_block = true;
+  const bodyPartRef = body_part.part || body_part;
+  const [bodyStyleCache, bodyDefaultPstyle] = _get_style_cache(bodyPartRef);
+  const bodyTracker = new NumberingTracker(bodyPartRef, bodyStyleCache);
 
   for (const item of iter_block_items(body_part)) {
     if (item instanceof Paragraph) {
-      const prefix = get_paragraph_prefix(item);
+      const prefix = get_paragraph_prefix(
+        item,
+        bodyStyleCache,
+        bodyDefaultPstyle,
+        bodyTracker,
+      );
       const p_text = build_paragraph_text(item, comments_map, false);
       const block_len = (prefix + p_text).length;
 
@@ -188,11 +198,22 @@ function _walk_doc_body(
         is_table: false,
         start_offset: cursor,
         projected_length: block_len,
+        prefix,
       });
       cursor += block_len;
       is_first_block = false;
     } else if (item instanceof Table) {
-      const table_text = extract_table(item, comments_map, false, 0);
+      const snap = bodyTracker.snapshot();
+      const table_text = extract_table(
+        item,
+        comments_map,
+        false,
+        0,
+        undefined,
+        null,
+        undefined,
+        bodyTracker,
+      );
       const block_len = table_text ? table_text.length : 0;
 
       if (!is_first_block) cursor += 2;
@@ -205,7 +226,16 @@ function _walk_doc_body(
         start_offset: table_start,
         projected_length: block_len,
       });
-      _record_table_inner_blocks_lite(item, table_start, records, comments_map);
+      const afterTable = bodyTracker.snapshot();
+      bodyTracker.restore(snap);
+      _record_table_inner_blocks_lite(
+        item,
+        table_start,
+        records,
+        comments_map,
+        bodyTracker,
+      );
+      bodyTracker.restore(afterTable);
       cursor += block_len;
       is_first_block = false;
     }
@@ -321,6 +351,7 @@ function _record_table_inner_blocks_lite(
   inherited_offset: number,
   records: _BlockRecord[],
   comments_map: any,
+  numbering_tracker?: NumberingTracker,
 ) {
   const seen_cells = new Set();
   for (const row of table.rows) {
@@ -330,6 +361,9 @@ function _record_table_inner_blocks_lite(
 
       for (const inner_item of iter_block_items(cell)) {
         if (inner_item instanceof Paragraph) {
+          let prefix = numbering_tracker
+            ? get_paragraph_prefix(inner_item, undefined, undefined, numbering_tracker)
+            : "";
           const true_offset = _is_heading(inner_item)
             ? _compute_inner_block_offset(
                 table,
@@ -338,12 +372,16 @@ function _record_table_inner_blocks_lite(
                 comments_map,
               )
             : inherited_offset;
+          if (!prefix && _is_heading(inner_item)) {
+            prefix = get_paragraph_prefix(inner_item);
+          }
           records.push({
             item: inner_item,
             is_paragraph: true,
             is_table: false,
             start_offset: true_offset,
             projected_length: 0,
+            prefix,
           });
         } else if (inner_item instanceof Table) {
           records.push({
@@ -358,6 +396,7 @@ function _record_table_inner_blocks_lite(
             inherited_offset,
             records,
             comments_map,
+            numbering_tracker,
           );
         }
       }
@@ -365,9 +404,16 @@ function _record_table_inner_blocks_lite(
   }
 }
 
-function _project_part(part: any, comments_map: any): string {
+function _project_part(
+  part: any,
+  comments_map: any,
+  numbering_tracker?: NumberingTracker,
+): string {
   const blocks: string[] = [];
   const c_type = part.constructor.name;
+  const partRef = part.part || part;
+  const [styleCache] = _get_style_cache(partRef);
+  const tracker = numbering_tracker ?? new NumberingTracker(partRef, styleCache);
 
   if (c_type === "NotesPart") {
     const header = part.note_type === "fn" ? "## Footnotes" : "## Endnotes";
@@ -377,17 +423,26 @@ function _project_part(part: any, comments_map: any): string {
   let is_first_para = true;
   for (const item of iter_block_items(part)) {
     if (item.constructor.name === "FootnoteItem") {
-      const fn_text = _project_part(item, comments_map);
+      const fn_text = _project_part(item, comments_map, tracker);
       if (fn_text) blocks.push(fn_text);
     } else if (item instanceof Paragraph) {
-      let prefix = get_paragraph_prefix(item);
+      let prefix = get_paragraph_prefix(item, styleCache, undefined, tracker);
       if (is_first_para && c_type === "FootnoteItem")
         prefix = `[^${part.note_type}-${part.id}]: ${prefix}`;
       const p_text = build_paragraph_text(item, comments_map, false);
       blocks.push(prefix + p_text);
       is_first_para = false;
     } else if (item instanceof Table) {
-      const table_text = extract_table(item, comments_map, false, 0);
+      const table_text = extract_table(
+        item,
+        comments_map,
+        false,
+        0,
+        undefined,
+        null,
+        undefined,
+        tracker,
+      );
       if (table_text) blocks.push(table_text);
       is_first_para = false;
     }
@@ -487,9 +542,14 @@ function _heading_level(paragraph: Paragraph): number {
 // outline (QA 2026-07-23 F13b; the Python mirror pins the same 200-char cap).
 const _OUTLINE_TEXT_MAX_CHARS = 200;
 
-function _heading_text(paragraph: Paragraph, comments_map: any): string {
+function _heading_text(
+  paragraph: Paragraph,
+  comments_map: any,
+  prefix = "",
+): string {
   const p_text = build_paragraph_text(paragraph, comments_map, false);
-  let cleaned = _strip_critic_markup(p_text);
+  const heading_num_label = prefix ? prefix.replace(/^#+\s+/, "") : "";
+  let cleaned = _strip_critic_markup(heading_num_label + p_text);
   // Internal line breaks (w:br inside a heading) must collapse BEFORE marker
   // stripping so "**A\nB**" strips cleanly and every rendered outline line
   // carries balanced ** markers (QA 2026-07-23 F13a).

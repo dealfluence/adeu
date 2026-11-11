@@ -22,9 +22,9 @@ review-heavy item 3 {#cell:323EA4BB} | Team 1 {#cell:28426CF5} | Approved {#cell
 
 1. Evidence step 1 for windows-review-heavy-01 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 2 for windows-review-heavy-01 must remain readable and internally consistent after an automated edit.
+2. Evidence step 2 for windows-review-heavy-01 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 3 for windows-review-heavy-01 must remain readable and internally consistent after an automated edit.
+3. Evidence step 3 for windows-review-heavy-01 must remain readable and internally consistent after an automated edit.
 
 {==Review point 2 for windows-review-heavy-01 needs an independent answer.==}{>>[Com:1] Evidence Reviewer 2 @ DATE: Synthetic reviewer note 2 for windows-review-heavy-01.<<}
 

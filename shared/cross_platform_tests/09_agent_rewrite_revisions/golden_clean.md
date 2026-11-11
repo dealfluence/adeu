@@ -8,9 +8,9 @@ This agreement governs the Supplier’s provision of the services described in S
 
 1. The Supplier shall deliver the services with reasonable skill and care.
 
-    1. Service levels are set out in [the published specification](https://example.org/spec).
+    1.a Service levels are set out in [the published specification](https://example.org/spec).
 
-1. The Supplier shall maintain professional indemnity insurance.
+2. The Supplier shall maintain professional indemnity insurance.
 
 The parties agree that the fee shall be EUR 44,500 per annum.
 

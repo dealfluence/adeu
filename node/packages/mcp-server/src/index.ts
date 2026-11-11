@@ -1569,8 +1569,8 @@ server.registerTool(
           `${overwriteNote(output_path, original_path, existedBefore)}\n${warnings}\n`;
       }
 
-      const origText = _extractTextFromDoc(origDoc, compare_clean, false) as string;
-      const modText = _extractTextFromDoc(modDoc, compare_clean, false) as string;
+      const origText = _extractTextFromDoc(origDoc, compare_clean, false, false, false, false) as string;
+      const modText = _extractTextFromDoc(modDoc, compare_clean, false, false, false, false) as string;
 
       let diff = create_word_patch_diff(
         origText,

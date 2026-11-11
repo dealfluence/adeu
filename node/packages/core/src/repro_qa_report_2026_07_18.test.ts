@@ -789,7 +789,7 @@ describe("M4: style-based lists project list markers", () => {
     expect(text).toContain("* Maintain ISO 27001 controls");
     expect(text).toContain("* Notify incidents without undue delay");
     expect(text).toContain("1. First escalation");
-    expect(text).toContain("1. Second escalation");
+    expect(text).toContain("2. Second escalation");
   });
 
   it("mapper and ingest stay in sync for style-based lists", async () => {

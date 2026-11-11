@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from adeu import __version__
 from adeu.outline import OutlineNode
 
+# Increment whenever Virtual Text projection rules change without a package version bump.
+_CACHE_SCHEMA_VERSION = 2
+
 
 def get_default_cache_dir() -> Path:
     if env_dir := os.environ.get("ADEU_CACHE_DIR"):
@@ -125,6 +128,7 @@ class DiskProjectionCache:
                 or key.get("mtime_ns") != mtime_ns
                 or key.get("size") != size
                 or key.get("version") != __version__
+                or key.get("schema") != _CACHE_SCHEMA_VERSION
             ):
                 self._misses += 1
                 return None
@@ -165,6 +169,7 @@ class DiskProjectionCache:
                 "mtime_ns": mtime_ns,
                 "size": size,
                 "version": __version__,
+                "schema": _CACHE_SCHEMA_VERSION,
             }
 
             data: Dict[str, Any] = {"key": key_dict, "views": {}}

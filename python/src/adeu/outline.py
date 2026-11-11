@@ -16,6 +16,8 @@ from adeu.utils.docx import (
     QN_W_FOOTNOTEREFERENCE,
     QN_W_P,
     DocxEvent,
+    NumberingTracker,
+    _get_style_cache,
     get_paragraph_prefix,
     iter_block_items,
     iter_document_parts,
@@ -50,6 +52,7 @@ class _BlockRecord:
     is_table: bool
     start_offset: int  # offset in projected body where this block starts
     projected_length: int  # length of the projected text for this block
+    prefix: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +148,7 @@ def extract_outline(
         paragraph = rec.item
 
         level = _heading_level(paragraph)
-        text = _heading_text(paragraph, comments_map)
+        text = _heading_text(paragraph, comments_map, prefix=rec.prefix)
         style = _determine_heading_style(paragraph)
 
         # Owned range: blocks strictly between this heading and the next equal-or-
@@ -476,10 +479,19 @@ def _walk_doc_body(doc: DocumentObject, comments_map: dict) -> List[_BlockRecord
     records: List[_BlockRecord] = []
     cursor = body_start_offset
     is_first_block = True
+    body_part_ref = getattr(body_part, "part", body_part)
+    body_style_cache, body_default_pstyle = _get_style_cache(body_part_ref)
+    body_tracker = NumberingTracker(body_part_ref, style_cache=body_style_cache)
 
     for item in iter_block_items(body_part):
         if isinstance(item, Paragraph):
-            prefix = get_paragraph_prefix(item)
+            prefix = get_paragraph_prefix(
+                item,
+                style_cache=body_style_cache,
+                default_pstyle=body_default_pstyle,
+                part=body_part_ref,
+                numbering_tracker=body_tracker,
+            )
             p_text = build_paragraph_text(item, comments_map, clean_view=False)
             block_len = len(prefix + p_text)
 
@@ -493,13 +505,15 @@ def _walk_doc_body(doc: DocumentObject, comments_map: dict) -> List[_BlockRecord
                     is_table=False,
                     start_offset=cursor,
                     projected_length=block_len,
+                    prefix=prefix,
                 )
             )
             cursor += block_len
             is_first_block = False
 
         elif isinstance(item, Table):
-            table_text = extract_table(item, comments_map, clean_view=False)
+            snap = body_tracker.snapshot()
+            table_text = extract_table(item, comments_map, clean_view=False, numbering_tracker=body_tracker)
             block_len = len(table_text) if table_text else 0
 
             if not is_first_block:
@@ -515,9 +529,12 @@ def _walk_doc_body(doc: DocumentObject, comments_map: dict) -> List[_BlockRecord
                     projected_length=block_len,
                 )
             )
-            # Record inner blocks for heading detection — but DO NOT call
-            # build_paragraph_text on them (we don't need their lengths).
-            _record_table_inner_blocks_lite(item, table_start, records, comments_map)
+            # Record inner blocks for heading detection — rewind a copy of
+            # body_tracker so inner heading prefixes match extract_table's pass.
+            after_table = body_tracker.snapshot()
+            body_tracker.restore(snap)
+            _record_table_inner_blocks_lite(item, table_start, records, comments_map, body_tracker)
+            body_tracker.restore(after_table)
             cursor += block_len
             is_first_block = False
 
@@ -678,17 +695,12 @@ def _record_table_inner_blocks_lite(
     inherited_offset: int,
     records: List[_BlockRecord],
     comments_map: dict,
+    numbering_tracker: Optional[NumberingTracker] = None,
 ) -> None:
     """
     PERF-optimized version of _record_table_inner_blocks: records inner
     paragraphs/tables for heading detection without paying the full projection
     cost for non-headings.
-
-    Headings inside tables get TRUE offsets computed via _compute_inner_block_offset
-    (so outline.page resolves correctly when a table spans page boundaries).
-    Non-heading inner blocks keep projected_length=0 and inherit the table's
-    start_offset — they are never used to resolve a page, only to scan for
-    nested headings/tables.
     """
     seen_cells: set = set()
     for row in iter_table_rows(table):
@@ -700,10 +712,14 @@ def _record_table_inner_blocks_lite(
 
             for inner_item in iter_block_items(cell):
                 if isinstance(inner_item, Paragraph):
-                    # Only pay the projection cost when the inner paragraph is
-                    # actually a heading — non-heading inner paragraphs do not
-                    # need a true offset (they're never assigned a page).
+                    prefix = (
+                        get_paragraph_prefix(inner_item, numbering_tracker=numbering_tracker)
+                        if numbering_tracker is not None
+                        else ""
+                    )
                     if _is_heading(inner_item):
+                        if not prefix:
+                            prefix = get_paragraph_prefix(inner_item)
                         true_offset = _compute_inner_block_offset(table, inner_item, inherited_offset, comments_map)
                     else:
                         true_offset = inherited_offset
@@ -715,6 +731,7 @@ def _record_table_inner_blocks_lite(
                             is_table=False,
                             start_offset=true_offset,
                             projected_length=0,
+                            prefix=prefix,
                         )
                     )
                 elif isinstance(inner_item, Table):
@@ -727,20 +744,22 @@ def _record_table_inner_blocks_lite(
                             projected_length=0,
                         )
                     )
-                    _record_table_inner_blocks_lite(inner_item, inherited_offset, records, comments_map)
+                    _record_table_inner_blocks_lite(
+                        inner_item, inherited_offset, records, comments_map, numbering_tracker
+                    )
 
 
-def _project_part(part, comments_map: dict) -> str:
+def _project_part(part, comments_map: dict, numbering_tracker: Optional[NumberingTracker] = None) -> str:
     """
     Renders a non-body document part (header/footer/notes) to measure its
-    projected length. Mirrors ingest._extract_blocks but inlined here so we
-    don't reach into ingest's private helpers.
-
-    Headers and footers iterate as Paragraphs/Tables. NotesPart is iterated
-    via FootnoteItem children.
+    projected length. Mirrors ingest._extract_blocks.
     """
     blocks: List[str] = []
     c_type = type(part).__name__
+    part_ref = getattr(part, "part", part)
+    if numbering_tracker is None:
+        style_cache, _ = _get_style_cache(part_ref)
+        numbering_tracker = NumberingTracker(part_ref, style_cache=style_cache)
 
     if c_type == "NotesPart":
         header = "## Footnotes" if part.note_type == "fn" else "## Endnotes"
@@ -751,18 +770,18 @@ def _project_part(part, comments_map: dict) -> str:
         i_type = type(item).__name__
 
         if i_type == "FootnoteItem":
-            fn_text = _project_part(item, comments_map)
+            fn_text = _project_part(item, comments_map, numbering_tracker=numbering_tracker)
             if fn_text:
                 blocks.append(fn_text)
         elif isinstance(item, Paragraph):
-            prefix = get_paragraph_prefix(item)
+            prefix = get_paragraph_prefix(item, part=part_ref, numbering_tracker=numbering_tracker)
             if is_first_para and c_type == "FootnoteItem":
                 prefix = f"[^{part.note_type}-{part.id}]: " + prefix
             p_text = build_paragraph_text(item, comments_map, clean_view=False)
             blocks.append(prefix + p_text)
             is_first_para = False
         elif isinstance(item, Table):
-            table_text = extract_table(item, comments_map, clean_view=False)
+            table_text = extract_table(item, comments_map, clean_view=False, numbering_tracker=numbering_tracker)
             if table_text:
                 blocks.append(table_text)
             is_first_para = False
@@ -907,12 +926,12 @@ def _heading_level(paragraph: Paragraph) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _heading_text(paragraph: Paragraph, comments_map: dict) -> str:
+def _heading_text(paragraph: Paragraph, comments_map: dict, prefix: str = "") -> str:
     """
     Returns the heading text as the user would see it:
       - same projection as build_paragraph_text (so tracked changes / formatting
         look the same as in the body)
-      - heading prefix removed
+      - heading '#' prefix removed (while preserving any resolved heading clause number)
       - CriticMarkup tags stripped (insertions kept as plain text, deletions
         and meta-blocks dropped)
       - internal newlines collapsed to a single space BEFORE marker stripping —
@@ -927,7 +946,8 @@ def _heading_text(paragraph: Paragraph, comments_map: dict) -> str:
         (QA 2026-07-23 F13b).
     """
     p_text = build_paragraph_text(paragraph, comments_map, clean_view=False)
-    cleaned = _strip_critic_markup(p_text)
+    heading_num_label = re.sub(r"^#+\s+", "", prefix) if prefix else ""
+    cleaned = _strip_critic_markup(heading_num_label + p_text)
     cleaned = re.sub(r"\s*\n\s*", " ", cleaned)
     cleaned = _strip_inline_formatting(cleaned)
     return _truncate_outline_text(cleaned.strip())

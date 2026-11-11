@@ -1004,10 +1004,18 @@ async def diff_docx_files(
         # diagnostics) is not document content — diffing it produces phantom
         # changes no apply can consume (QA 2026-07-18 H1).
         text_orig = extract_text_from_stream(
-            stream_orig, filename=Path(original_path).name, clean_view=compare_clean, include_appendix=False
+            stream_orig,
+            filename=Path(original_path).name,
+            clean_view=compare_clean,
+            include_appendix=False,
+            resolve_numbering=False,
         )
         text_mod = extract_text_from_stream(
-            stream_mod, filename=Path(modified_path).name, clean_view=compare_clean, include_appendix=False
+            stream_mod,
+            filename=Path(modified_path).name,
+            clean_view=compare_clean,
+            include_appendix=False,
+            resolve_numbering=False,
         )
         # atomic_criticmarkup: diff-display only — hunks must never cut into a
         # {--/{++/{>>/{== block (QA 2026-07-23 F15). No-op on clean text.

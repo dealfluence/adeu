@@ -8,11 +8,11 @@ This agreement governs the provision of services described in Schedule A. The {=
 
 1. The Supplier shall deliver the services with reasonable skill and care.
 
-    1. Service levels are set out in [the published specification](https://example.org/spec).
+    1.a Service levels are set out in [the published specification](https://example.org/spec).
 
-1. {++The Supplier shall maintain professional indemnity insurance.++}{>>[Chg:101 insert] A. Counsel<<}
+2. {++The Supplier shall maintain professional indemnity insurance.++}{>>[Chg:101 insert] A. Counsel<<}
 
-1. {++The Supplier shall maintain cyber liability insurance of not less than EUR 5,000,000.++}{>>[Chg:903 insert] Agent<<}
+3. {++The Supplier shall maintain cyber liability insurance of not less than EUR 5,000,000.++}{>>[Chg:903 insert] Agent<<}
 
 The parties agree the fee is {--EUR 40,000 EUR 44,500 --}{++EUR 47,250 ++}{>>[Chg:102 delete] A. Counsel (pairs with Chg:103)
 [Chg:103 insert] A. Counsel (pairs with Chg:102)

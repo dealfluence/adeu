@@ -8,11 +8,11 @@ This agreement governs the provision of services described in Schedule A. The Ef
 
 1. The Supplier shall deliver the services with reasonable skill and care.
 
-    1. Service levels are set out in [the published specification](https://example.org/spec).
+    1.a Service levels are set out in [the published specification](https://example.org/spec).
 
-1. The Supplier shall maintain professional indemnity insurance.
+2. The Supplier shall maintain professional indemnity insurance.
 
-1. The Supplier shall maintain cyber liability insurance of not less than EUR 5,000,000.
+3. The Supplier shall maintain cyber liability insurance of not less than EUR 5,000,000.
 
 The parties agree the fee is EUR 47,250 per annum.
 

@@ -10,9 +10,9 @@ This agreement governs the {--provision of services--}{++Supplier’s provision 
 
 1. The Supplier shall deliver the services with reasonable skill and care.
 
-    1. Service levels are set out in [the published specification](https://example.org/spec).
+    1.a Service levels are set out in [the published specification](https://example.org/spec).
 
-1. {++The Supplier shall maintain professional indemnity insurance.++}{>>[Chg:101 insert] A. Counsel<<}
+2. {++The Supplier shall maintain professional indemnity insurance.++}{>>[Chg:101 insert] A. Counsel<<}
 
 The parties agree {--the fee is --}{++that the fee shall be ++}{--EUR 40,000 --}{++EUR 44,500 ++}{>>[Chg:205 delete] Agent (pairs with Chg:206)
 [Chg:206 insert] Agent (pairs with Chg:205)

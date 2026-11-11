@@ -187,7 +187,7 @@ class TestF1PaginationRoundTrip:
         assert "Paragraph 0130" in original_clean  # sanity: doc really has the tail
 
         txt_path = tmp_path / "large.txt"
-        rc = _run_cli(["extract", str(docx_path), "--clean-view", "-o", str(txt_path)])
+        rc = _run_cli(["extract", str(docx_path), "--clean-view", "--page", "1", "-o", str(txt_path)])
         assert rc == 0
         page1_text = txt_path.read_text(encoding="utf-8")
         assert "Page 1 of" in page1_text  # sanity: extract really paginated
@@ -207,7 +207,7 @@ class TestF1PaginationRoundTrip:
         docx_path = tmp_path / "large.docx"
         docx_path.write_bytes(_make_large_doc().getvalue())
         txt_path = tmp_path / "large.txt"
-        assert _run_cli(["extract", str(docx_path), "--clean-view", "-o", str(txt_path)]) == 0
+        assert _run_cli(["extract", str(docx_path), "--clean-view", "--page", "1", "-o", str(txt_path)]) == 0
 
         rc = _run_cli(["diff", str(docx_path), str(txt_path)])
         err = capsys.readouterr().err

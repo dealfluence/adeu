@@ -319,10 +319,10 @@ def _sanitize_baseline(
     # The appendix is generated metadata, not document content — diffing it
     # writes phantom "used N times" edits into the output (QA H1/H3).
     working_text, working_struct = _extract_text_from_doc(
-        working_doc, clean_view=True, include_appendix=False, return_structure=True
+        working_doc, clean_view=True, include_appendix=False, return_structure=True, resolve_numbering=False
     )
     baseline_text, baseline_struct = _extract_text_from_doc(
-        baseline_doc_view, clean_view=True, include_appendix=False, return_structure=True
+        baseline_doc_view, clean_view=True, include_appendix=False, return_structure=True, resolve_numbering=False
     )
 
     # Divergence check: a real sequence similarity over paragraphs. The old
@@ -379,7 +379,7 @@ def _sanitize_baseline(
     # and transactionally, exactly like `adeu apply`.
     baseline_stream.seek(0)
     engine_author = author or "Author"
-    engine = RedlineEngine(baseline_stream, author=engine_author)
+    engine = RedlineEngine(baseline_stream, author=engine_author, resolve_numbering=False)
 
     if edits:
         try:

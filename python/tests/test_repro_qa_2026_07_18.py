@@ -970,7 +970,7 @@ class TestM4Lists:
         assert "* Maintain ISO 27001 controls" in text, text
         assert "* Notify incidents without undue delay" in text
         assert "1. First escalation" in text, "ordered lists must be distinguishable from bullets"
-        assert "1. Second escalation" in text
+        assert "2. Second escalation" in text
 
     def test_mapper_projection_stays_in_sync(self, tmp_path):
         """The Virtual Text contract: mapper and ingest must produce identical text."""

@@ -38,13 +38,20 @@ export async function build_redline_comparison(
 ): Promise<RedlineComparison> {
   // Appendix excluded: its generated text is not writable content (QA 2026-07-18 H1).
   const extract = async (buf: Buffer) =>
-    _extractTextFromDoc(await DocumentObject.load(buf), compare_clean, false, false, true) as any;
+    _extractTextFromDoc(
+      await DocumentObject.load(buf),
+      compare_clean,
+      false,
+      false,
+      true,
+      false,
+    ) as any;
   const { text: t1, structure: s1 } = await extract(original);
   const { text: t2, structure: s2 } = await extract(modified);
   const { edits, warnings } = generate_structured_edits(t1, s1, t2, s2);
 
   const doc = await DocumentObject.load(original);
-  const engine = new RedlineEngine(doc, author);
+  const engine = new RedlineEngine(doc, author, { resolve_numbering: false });
   const [applied, skipped] = engine.apply_edits(edits as any);
   if (skipped > 0) {
     throw new ComparisonError(

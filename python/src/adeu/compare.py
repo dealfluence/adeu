@@ -72,9 +72,11 @@ def refuse_input_alias(output_path: PathLike, original_path: PathLike, modified_
             )
 
 
-def apply_comparison_edits(original: bytes, edits: Sequence[DiffEdit], author: str) -> "tuple[bytes, int]":
+def apply_comparison_edits(
+    original: bytes, edits: Sequence[DiffEdit], author: str, resolve_numbering: bool = False
+) -> "tuple[bytes, int]":
     """Applies diff-generated edits to `original` as tracked changes; all of them or none."""
-    engine = RedlineEngine(BytesIO(original), author=author)
+    engine = RedlineEngine(BytesIO(original), author=author, resolve_numbering=resolve_numbering)
     applied, skipped = engine.apply_edits(list(edits))  # type: ignore[arg-type]
     if skipped:
         raise ComparisonError(
@@ -96,10 +98,18 @@ def build_redline_comparison(
     """Diffs two DOCX packages part by part and writes the result as a redline of `original`."""
     # Appendix excluded: its generated text is not writable content (QA 2026-07-18 H1).
     text_o, struct_o = _extract_text_from_doc(
-        Document(BytesIO(original)), clean_view=compare_clean, include_appendix=False, return_structure=True
+        Document(BytesIO(original)),
+        clean_view=compare_clean,
+        include_appendix=False,
+        return_structure=True,
+        resolve_numbering=False,
     )
     text_m, struct_m = _extract_text_from_doc(
-        Document(BytesIO(modified)), clean_view=compare_clean, include_appendix=False, return_structure=True
+        Document(BytesIO(modified)),
+        clean_view=compare_clean,
+        include_appendix=False,
+        return_structure=True,
+        resolve_numbering=False,
     )
     edits, warnings = generate_structured_edits(text_o, struct_o, text_m, struct_m)  # type: ignore[arg-type]
     warnings = list(warnings) + collect_media_difference_warnings(original, modified)

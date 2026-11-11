@@ -156,6 +156,45 @@ def _normalize_virtual_projection_text(text: str) -> str:
     return strip_cell_anchors(text)
 
 
+_VERIFY_CLAUSE_PREFIX_RE = re.compile(
+    r"^[ \t]*(?:(?:§|Article|ARTICLE|Part|PART|Clause|CLAUSE|Section|SECTION|ust\.|pkt)\s+)?"
+    r"(?:\([a-zA-Z0-9]+\)|[0-9IVXLCDMa-zA-Z]+(?:\.[0-9a-zA-Z]+)*[.)]?)\s+"
+)
+
+
+def _matches_allowing_auto_renumber(engine_doc: Any, actual_norm: str, expected_norm: str) -> bool:
+    """True when divergence is strictly due to Word auto-renumbering surviving <w:numPr> paragraphs."""
+    from adeu.redline.mapper import DocumentMapper
+
+    clean_mapper = DocumentMapper(engine_doc, clean_view=True)
+    # Build a canonicalized version of actual clean text where ONLY genuine OOXML
+    # auto-numbered prefix spans are replaced by a sentinel token `\x00NUM\x00 `.
+    sentinel = "\x00NUM\x00 "
+    pieces: list[str] = []
+    for s in clean_mapper.spans:
+        if s.run is None and s.canonical_prefix is not None:
+            pieces.append(sentinel)
+        else:
+            pieces.append(s.text)
+    marked_actual = _normalize_virtual_projection_text("".join(pieces).strip())
+    act_blocks = marked_actual.split("\n\n")
+    exp_blocks = expected_norm.split("\n\n")
+    if len(act_blocks) != len(exp_blocks):
+        return False
+    for mb, ep in zip(act_blocks, exp_blocks, strict=True):
+        if not mb.startswith(sentinel):
+            if mb != ep:
+                return False
+            continue
+        body = mb[len(sentinel) :]
+        if not ep.endswith(body):
+            return False
+        ep_prefix = ep[: len(ep) - len(body)]
+        if ep_prefix and not _VERIFY_CLAUSE_PREFIX_RE.fullmatch(ep_prefix):
+            return False
+    return True
+
+
 def verify_clean_text(
     engine_doc: Any,
     expected_text: str,
@@ -168,7 +207,7 @@ def verify_clean_text(
     actual_norm = _normalize_virtual_projection_text(actual)
     expected_norm = _normalize_virtual_projection_text(expected)
 
-    if actual_norm != expected_norm:
+    if actual_norm != expected_norm and not _matches_allowing_auto_renumber(engine_doc, actual_norm, expected_norm):
         div = next(
             (k for k, (a, b) in enumerate(zip(actual_norm, expected_norm, strict=False)) if a != b),
             min(len(actual_norm), len(expected_norm)),

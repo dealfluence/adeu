@@ -318,15 +318,129 @@ export function _get_style_cache(
  * (QA 2026-07-18 M4). Missing part / malformed XML yields an empty cache,
  * which projects every list with the bullet marker (the historical default).
  */
-export function _get_numbering_cache(
-  part: any,
-): Record<string, Record<number, string>> {
-  const pkg = _resolve_package(part);
-  if (!pkg) return {};
-  if (pkg._adeu_numbering_cache) return pkg._adeu_numbering_cache;
+export interface LevelDef {
+  ilvl: number;
+  start: number;
+  num_fmt: string;
+  lvl_text: string | null;
+  is_lgl: boolean;
+  lvl_restart: number | null;
+  p_style: string | null;
+}
 
-  // Null-prototype: keyed on w:numId (see _get_style_cache above).
-  const cache: Record<string, Record<number, string>> = Object.create(null);
+export interface LevelOverride {
+  start_override: number | null;
+  lvl: LevelDef | null;
+}
+
+export interface AbstractNumDef {
+  levels: Map<number, LevelDef>;
+  num_style_link: string | null;
+  style_link: string | null;
+}
+
+export interface NumDef {
+  abstract_num_id: string;
+  overrides: Map<number, LevelOverride>;
+}
+
+export interface NumberingDefs {
+  abstract_nums: Map<string, AbstractNumDef>;
+  nums: Map<string, NumDef>;
+}
+
+const _EMPTY_NUMBERING_DEFS: NumberingDefs = {
+  abstract_nums: new Map(),
+  nums: new Map(),
+};
+
+const _RE_LVL_PLACEHOLDER = /%([1-9])/g;
+const _ROMAN_PAIRS: ReadonlyArray<readonly [number, string]> = [
+  [1000, "M"],
+  [900, "CM"],
+  [500, "D"],
+  [400, "CD"],
+  [100, "C"],
+  [90, "XC"],
+  [50, "L"],
+  [40, "XL"],
+  [10, "X"],
+  [9, "IX"],
+  [5, "V"],
+  [4, "IV"],
+  [1, "I"],
+];
+
+function _directChildren(parent: Element, tagName: string): Element[] {
+  const out: Element[] = [];
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const ch = parent.childNodes[i];
+    if (ch && ch.nodeType === 1 && (ch as Element).tagName === tagName) {
+      out.push(ch as Element);
+    }
+  }
+  return out;
+}
+
+function _parse_level_element(lvl_el: Element): LevelDef | null {
+  const ilvl_val = lvl_el.getAttribute("w:ilvl");
+  if (ilvl_val === null || !/^-?\d+$/.test(ilvl_val)) return null;
+  const ilvl = parseInt(ilvl_val, 10);
+
+  let start = 1;
+  const start_el = findChild(lvl_el, "w:start");
+  if (start_el) {
+    const s_val = start_el.getAttribute("w:val");
+    if (s_val !== null && /^-?\d+$/.test(s_val)) start = parseInt(s_val, 10);
+  }
+
+  let num_fmt = "decimal";
+  const fmt_el = findChild(lvl_el, "w:numFmt");
+  if (fmt_el) {
+    const f_val = fmt_el.getAttribute("w:val");
+    if (f_val) num_fmt = f_val;
+  }
+
+  let lvl_text: string | null = null;
+  const txt_el = findChild(lvl_el, "w:lvlText");
+  if (txt_el) {
+    const t_val = txt_el.getAttribute("w:val");
+    if (t_val !== null) lvl_text = t_val;
+  }
+
+  let is_lgl = false;
+  const lgl_el = findChild(lvl_el, "w:isLgl");
+  if (lgl_el) {
+    const lgl_val = lgl_el.getAttribute("w:val");
+    is_lgl = lgl_val !== "0" && lgl_val !== "false" && lgl_val !== "off";
+  }
+
+  let lvl_restart: number | null = null;
+  const restart_el = findChild(lvl_el, "w:lvlRestart");
+  if (restart_el) {
+    const r_val = restart_el.getAttribute("w:val");
+    if (r_val !== null && /^-?\d+$/.test(r_val)) {
+      lvl_restart = parseInt(r_val, 10);
+    }
+  }
+
+  let p_style: string | null = null;
+  const pstyle_el = findChild(lvl_el, "w:pStyle");
+  if (pstyle_el) {
+    const ps_val = pstyle_el.getAttribute("w:val");
+    if (ps_val) p_style = ps_val;
+  }
+
+  return { ilvl, start, num_fmt, lvl_text, is_lgl, lvl_restart, p_style };
+}
+
+export function _get_numbering_defs(part: any): NumberingDefs {
+  const pkg = _resolve_package(part);
+  if (!pkg) return _EMPTY_NUMBERING_DEFS;
+  if (pkg._adeu_numbering_defs) return pkg._adeu_numbering_defs;
+
+  const abstract_nums = new Map<string, AbstractNumDef>();
+  const nums = new Map<string, NumDef>();
   let numbering_root: Element | null = null;
   try {
     const numberingPart = (pkg.parts || []).find((p: any) =>
@@ -338,34 +452,286 @@ export function _get_numbering_cache(
   }
 
   if (numbering_root) {
-    // Null-prototype: keyed on w:abstractNumId; the `!== undefined` guard below
-    // would otherwise accept an inherited member as a real level map.
-    const abstract_fmts: Record<string, Record<number, string>> =
-      Object.create(null);
-    for (const abstract of findAllDescendants(numbering_root, "w:abstractNum")) {
+    for (const abstract of _directChildren(numbering_root, "w:abstractNum")) {
       const a_id = abstract.getAttribute("w:abstractNumId");
       if (a_id === null) continue;
-      const lvl_map: Record<number, string> = {};
-      for (const lvl of findAllDescendants(abstract, "w:lvl")) {
-        const ilvl_val = lvl.getAttribute("w:ilvl");
-        const fmt_el = findChild(lvl, "w:numFmt");
-        if (ilvl_val !== null && /^-?\d+$/.test(ilvl_val) && fmt_el) {
-          const fmt = fmt_el.getAttribute("w:val");
-          if (fmt) lvl_map[parseInt(ilvl_val, 10)] = fmt;
-        }
+      const levels = new Map<number, LevelDef>();
+      for (const lvl_el of _directChildren(abstract, "w:lvl")) {
+        const parsed = _parse_level_element(lvl_el);
+        if (parsed !== null) levels.set(parsed.ilvl, parsed);
       }
-      abstract_fmts[a_id] = lvl_map;
+      const nsl_el = findChild(abstract, "w:numStyleLink");
+      const nsl = nsl_el ? nsl_el.getAttribute("w:val") : null;
+      const sl_el = findChild(abstract, "w:styleLink");
+      const sl = sl_el ? sl_el.getAttribute("w:val") : null;
+      abstract_nums.set(a_id, { levels, num_style_link: nsl, style_link: sl });
     }
 
-    for (const num of findAllDescendants(numbering_root, "w:num")) {
+    for (const num of _directChildren(numbering_root, "w:num")) {
       const n_id = num.getAttribute("w:numId");
       const a_ref = findChild(num, "w:abstractNumId");
       if (n_id === null || !a_ref) continue;
       const a_id = a_ref.getAttribute("w:val");
-      if (a_id !== null && abstract_fmts[a_id] !== undefined) {
-        cache[n_id] = abstract_fmts[a_id];
+      if (!a_id) continue;
+      const overrides = new Map<number, LevelOverride>();
+      for (const ov_el of _directChildren(num, "w:lvlOverride")) {
+        const ov_ilvl = ov_el.getAttribute("w:ilvl");
+        if (ov_ilvl === null || !/^-?\d+$/.test(ov_ilvl)) continue;
+        let so_val: number | null = null;
+        const so_el = findChild(ov_el, "w:startOverride");
+        if (so_el) {
+          const raw_so = so_el.getAttribute("w:val");
+          if (raw_so !== null && /^-?\d+$/.test(raw_so)) {
+            so_val = parseInt(raw_so, 10);
+          }
+        }
+        const inner_lvl_el = findChild(ov_el, "w:lvl");
+        const inner_lvl = inner_lvl_el ? _parse_level_element(inner_lvl_el) : null;
+        overrides.set(parseInt(ov_ilvl, 10), { start_override: so_val, lvl: inner_lvl });
+      }
+      nums.set(n_id, { abstract_num_id: a_id, overrides });
+    }
+  }
+
+  const defs: NumberingDefs = { abstract_nums, nums };
+  pkg._adeu_numbering_defs = defs;
+  return defs;
+}
+
+function _resolve_abstract_num(
+  defs: NumberingDefs,
+  abstract_num_id: string,
+  style_cache?: Record<string, any>,
+): AbstractNumDef | null {
+  const abs_def = defs.abstract_nums.get(abstract_num_id);
+  if (!abs_def) return null;
+  if (abs_def.num_style_link && abs_def.levels.size === 0) {
+    const target = abs_def.num_style_link;
+    for (const candidate of defs.abstract_nums.values()) {
+      if (candidate.style_link === target && candidate.levels.size > 0) {
+        return candidate;
       }
     }
+    if (style_cache) {
+      const linked_style = style_cache[target];
+      const linked_num_id = linked_style ? linked_style.num_id : null;
+      if (linked_num_id && defs.nums.has(linked_num_id)) {
+        const linked_abs = defs.nums.get(linked_num_id)!.abstract_num_id;
+        if (linked_abs !== abstract_num_id) {
+          return defs.abstract_nums.get(linked_abs) ?? abs_def;
+        }
+      }
+    }
+  }
+  return abs_def;
+}
+
+function _format_ooxml_num(value: number, num_fmt: string): string {
+  if (num_fmt === "none") return "";
+  if (num_fmt === "decimalZero") {
+    return value >= 0 && value < 10 ? String(value).padStart(2, "0") : String(value);
+  }
+  if (num_fmt === "lowerLetter" || num_fmt === "upperLetter") {
+    if (value < 1) return String(value);
+    const base = num_fmt === "lowerLetter" ? 97 : 65;
+    const ch = String.fromCharCode(base + ((value - 1) % 26));
+    return ch.repeat(Math.floor((value - 1) / 26) + 1);
+  }
+  if (num_fmt === "lowerRoman" || num_fmt === "upperRoman") {
+    if (value < 1 || value > 3999) return String(value);
+    let rem = value;
+    let out = "";
+    for (const [arabic, roman] of _ROMAN_PAIRS) {
+      while (rem >= arabic) {
+        out += roman;
+        rem -= arabic;
+      }
+    }
+    return num_fmt === "lowerRoman" ? out.toLowerCase() : out;
+  }
+  if (num_fmt === "ordinal") {
+    const abs_v = Math.abs(value);
+    const mod100 = abs_v % 100;
+    let suffix = "th";
+    if (mod100 < 11 || mod100 > 13) {
+      const mod10 = abs_v % 10;
+      if (mod10 === 1) suffix = "st";
+      else if (mod10 === 2) suffix = "nd";
+      else if (mod10 === 3) suffix = "rd";
+    }
+    return `${value}${suffix}`;
+  }
+  return String(value);
+}
+
+export class NumberingTracker {
+  private _defs: NumberingDefs;
+  private _style_cache?: Record<string, any>;
+  public resolve_numbering: boolean;
+  private _counters = new Map<string, Map<number, number>>();
+
+  constructor(part: any, style_cache?: Record<string, any>, resolve_numbering = true) {
+    this._defs = _get_numbering_defs(part);
+    this._style_cache = style_cache;
+    this.resolve_numbering = resolve_numbering;
+  }
+
+  public snapshot(): Map<string, Map<number, number>> {
+    const copy = new Map<string, Map<number, number>>();
+    for (const [k, v] of this._counters.entries()) {
+      copy.set(k, new Map(v));
+    }
+    return copy;
+  }
+
+  public restore(snap: Map<string, Map<number, number>>): void {
+    this._counters = new Map();
+    for (const [k, v] of snap.entries()) {
+      this._counters.set(k, new Map(v));
+    }
+  }
+
+  private _effective_level_def(
+    num_def: NumDef,
+    abs_def: AbstractNumDef,
+    level: number,
+  ): LevelDef | null {
+    const ov = num_def.overrides.get(level);
+    if (ov && ov.lvl) return ov.lvl;
+    if (abs_def.levels.has(level)) return abs_def.levels.get(level)!;
+    for (let lookup = level; lookup >= 0; lookup--) {
+      const ov_fb = num_def.overrides.get(lookup);
+      if (ov_fb && ov_fb.lvl) return ov_fb.lvl;
+      if (abs_def.levels.has(lookup)) return abs_def.levels.get(lookup)!;
+    }
+    return null;
+  }
+
+  private _initial_start(num_def: NumDef, abs_def: AbstractNumDef, level: number): number {
+    const ov = num_def.overrides.get(level);
+    if (ov && ov.start_override !== null) return ov.start_override;
+    const lvl_def = this._effective_level_def(num_def, abs_def, level);
+    return lvl_def ? lvl_def.start : 1;
+  }
+
+  public infer_ilvl(
+    num_id: string,
+    explicit_ilvl: number | null,
+    style_id?: string | null,
+  ): number {
+    if (explicit_ilvl !== null && explicit_ilvl !== undefined) return explicit_ilvl;
+    const num_def = this._defs.nums.get(num_id);
+    if (!num_def) return 0;
+    const abs_def = _resolve_abstract_num(this._defs, num_def.abstract_num_id, this._style_cache);
+    if (!abs_def || !style_id) return 0;
+    for (const [lvl_idx, ov] of num_def.overrides.entries()) {
+      if (ov.lvl && ov.lvl.p_style === style_id) return lvl_idx;
+    }
+    for (const [lvl_idx, lvl_def] of abs_def.levels.entries()) {
+      if (lvl_def.p_style === style_id) return lvl_idx;
+    }
+    return 0;
+  }
+
+  public next_marker(
+    num_id: string,
+    ilvl: number | null,
+    style_id?: string | null,
+    is_heading = false,
+  ): [string, number] {
+    const eff_ilvl = this.infer_ilvl(num_id, ilvl, style_id);
+    const num_def = this._defs.nums.get(num_id);
+    if (!num_def) return [is_heading ? "" : "* ", eff_ilvl];
+    const abs_def = _resolve_abstract_num(this._defs, num_def.abstract_num_id, this._style_cache);
+    if (!abs_def) return [is_heading ? "" : "* ", eff_ilvl];
+
+    const lvl_def = this._effective_level_def(num_def, abs_def, eff_ilvl);
+    if (!lvl_def) return [is_heading ? "" : "* ", eff_ilvl];
+
+    if (lvl_def.num_fmt === "bullet") return [is_heading ? "" : "* ", eff_ilvl];
+    if (!this.resolve_numbering) return [is_heading ? "" : "1. ", eff_ilvl];
+
+    let state = this._counters.get(num_id);
+    if (!state) {
+      state = new Map<number, number>();
+      this._counters.set(num_id, state);
+    }
+
+    for (let anc = 0; anc < eff_ilvl; anc++) {
+      if (!state.has(anc)) {
+        state.set(anc, this._initial_start(num_def, abs_def, anc));
+      }
+    }
+
+    if (!state.has(eff_ilvl)) {
+      state.set(eff_ilvl, this._initial_start(num_def, abs_def, eff_ilvl));
+    } else {
+      state.set(eff_ilvl, state.get(eff_ilvl)! + 1);
+    }
+
+    for (const deeper of Array.from(state.keys())) {
+      if (deeper <= eff_ilvl) continue;
+      const d_lvl = this._effective_level_def(num_def, abs_def, deeper);
+      const restart_rule = d_lvl ? d_lvl.lvl_restart : null;
+      if (restart_rule === null) {
+        state.delete(deeper);
+      } else if (restart_rule === 0) {
+        continue;
+      } else if (eff_ilvl <= restart_rule - 1) {
+        state.delete(deeper);
+      }
+    }
+
+    if (lvl_def.num_fmt === "none" && !lvl_def.lvl_text) {
+      return ["", eff_ilvl];
+    }
+
+    const template =
+      lvl_def.lvl_text !== null
+        ? lvl_def.lvl_text
+        : lvl_def.num_fmt === "none"
+          ? ""
+          : `%${eff_ilvl + 1}.`;
+
+    const rendered = template
+      .replace(_RE_LVL_PLACEHOLDER, (_m, g1: string) => {
+        const idx = parseInt(g1, 10) - 1;
+        const val = state!.has(idx) ? state!.get(idx)! : this._initial_start(num_def, abs_def, idx);
+        const idx_lvl = this._effective_level_def(num_def, abs_def, idx);
+        const raw_fmt = idx_lvl ? idx_lvl.num_fmt : "decimal";
+        const eff_fmt =
+          lvl_def.is_lgl && idx < eff_ilvl && raw_fmt !== "none" ? "decimal" : raw_fmt;
+        return _format_ooxml_num(val, eff_fmt);
+      })
+      .replace(/\t/g, " ")
+      .trim();
+
+    return [rendered ? `${rendered} ` : "", eff_ilvl];
+  }
+}
+
+export function _get_numbering_cache(
+  part: any,
+): Record<string, Record<number, string>> {
+  const pkg = _resolve_package(part);
+  if (!pkg) return {};
+  if (pkg._adeu_numbering_cache) return pkg._adeu_numbering_cache;
+
+  const defs = _get_numbering_defs(part);
+  const [style_cache] = _get_style_cache(part);
+  // Null-prototype: keyed on w:numId (see _get_style_cache above).
+  const cache: Record<string, Record<number, string>> = Object.create(null);
+  for (const [n_id, num_def] of defs.nums.entries()) {
+    const abs_def = _resolve_abstract_num(defs, num_def.abstract_num_id, style_cache);
+    if (!abs_def) continue;
+    const lvl_map: Record<number, string> = {};
+    for (const [lvl_idx, lvl] of abs_def.levels.entries()) {
+      lvl_map[lvl_idx] = lvl.num_fmt;
+    }
+    for (const [ov_idx, ov] of num_def.overrides.entries()) {
+      if (ov.lvl) lvl_map[ov_idx] = ov.lvl.num_fmt;
+    }
+    cache[n_id] = lvl_map;
   }
 
   pkg._adeu_numbering_cache = cache;
@@ -476,28 +842,20 @@ export function is_native_heading(
 
   return false;
 }
-export function get_paragraph_prefix(
+export function get_paragraph_prefix_with_canonical(
   paragraph: Paragraph,
   style_cache?: Record<string, any>,
   default_pstyle?: string | null,
-): string {
+  numbering_tracker?: NumberingTracker | null,
+  resolve_numbering = true,
+): [string, string | null] {
+  const part = paragraph._parent
+    ? paragraph._parent.part || paragraph._parent
+    : null;
   if (!style_cache) {
-    [style_cache, default_pstyle] = _get_style_cache(
-      paragraph._parent.part || paragraph._parent,
-    );
+    [style_cache, default_pstyle] = _get_style_cache(part);
   }
   const pPr = findChild(paragraph._element, QN_W_PPR);
-
-  if (pPr) {
-    const oLvl = findChild(pPr, QN_W_OUTLINELVL);
-    if (oLvl) {
-      const val = oLvl.getAttribute(QN_W_VAL);
-      if (val && /^\d+$/.test(val)) {
-        const lvl = parseInt(val, 10);
-        if (lvl >= 0 && lvl <= 8) return "#".repeat(lvl + 1) + " ";
-      }
-    }
-  }
 
   let style_id = default_pstyle;
   if (pPr) {
@@ -506,29 +864,17 @@ export function get_paragraph_prefix(
   }
 
   const style_info = style_id && style_cache ? style_cache[style_id] : null;
-  if (
-    style_info &&
-    style_info.outline_level !== null &&
-    style_info.outline_level >= 0 &&
-    style_info.outline_level <= 8
-  ) {
-    return "#".repeat(style_info.outline_level + 1) + " ";
-  }
-
   let style_name = style_info ? style_info.name : style_id; // FALLBACK TO ID
-  if (style_name && typeof style_name === "string" && style_name.toLowerCase().startsWith("heading")) {
+  if (
+    style_name &&
+    typeof style_name === "string" &&
+    style_name.toLowerCase().startsWith("heading")
+  ) {
     style_name = style_name.replace(/^heading/i, "Heading");
   }
-  if (style_name?.startsWith("Heading")) {
-    const match = style_name.replace("Heading", "").trim();
-    if (/^\d+$/.test(match)) return "#".repeat(parseInt(match, 10)) + " ";
-  }
 
-  if (style_name === "Title") return "# ";
-
-  // Check for List Formatting (direct paragraph numPr first, then the
-  // style chain — Word's built-in List Bullet/List Number styles keep their
-  // numPr in styles.xml, QA 2026-07-18 M4).
+  // Resolve active <w:numPr> (direct paragraph numPr first, honoring numId=0
+  // suppression, then style inheritance).
   let list_num_id: string | null = null;
   let list_ilvl: number | null = null;
   let numbering_disabled = false;
@@ -539,8 +885,6 @@ export function get_paragraph_prefix(
       if (numId) {
         const val = numId.getAttribute(QN_W_VAL);
         if (val === "0") {
-          // ECMA-376 §17.9.15: a direct numId of 0 REMOVES the numbering a
-          // style would otherwise apply.
           numbering_disabled = true;
         } else if (val) {
           list_num_id = val;
@@ -565,19 +909,75 @@ export function get_paragraph_prefix(
       }
     }
   }
+
+  let heading_level: number | null = null;
+  if (pPr) {
+    const oLvl = findChild(pPr, QN_W_OUTLINELVL);
+    if (oLvl) {
+      const val = oLvl.getAttribute(QN_W_VAL);
+      if (val && /^\d+$/.test(val)) {
+        const lvl = parseInt(val, 10);
+        if (lvl >= 0 && lvl <= 8) heading_level = lvl + 1;
+      }
+    }
+  }
+
+  if (
+    heading_level === null &&
+    style_info &&
+    style_info.outline_level !== null &&
+    style_info.outline_level >= 0 &&
+    style_info.outline_level <= 8
+  ) {
+    heading_level = style_info.outline_level + 1;
+  }
+
+  if (heading_level === null && style_name) {
+    if (style_name.startsWith("Heading")) {
+      const match = style_name.replace("Heading", "").trim();
+      if (/^\d+$/.test(match)) heading_level = parseInt(match, 10);
+    } else if (style_name === "Title") {
+      heading_level = 1;
+    }
+  }
+
+  if (heading_level !== null) {
+    const base_h = "#".repeat(heading_level) + " ";
+    if (list_num_id !== null && resolve_numbering) {
+      const tracker =
+        numbering_tracker ??
+        new NumberingTracker(part, style_cache, resolve_numbering);
+      const [marker] = tracker.next_marker(
+        list_num_id,
+        list_ilvl,
+        style_id,
+        true,
+      );
+      if (marker) return [base_h + marker, base_h];
+    }
+    return [base_h, null];
+  }
+
   if (list_num_id !== null) {
-    const level = list_ilvl !== null ? list_ilvl : 0;
-    const marker = get_list_marker(
-      paragraph._parent ? paragraph._parent.part || paragraph._parent : null,
+    const tracker =
+      numbering_tracker ??
+      new NumberingTracker(part, style_cache, resolve_numbering);
+    const [marker, level] = tracker.next_marker(
       list_num_id,
-      level,
+      list_ilvl,
+      style_id,
+      false,
     );
-    return "    ".repeat(level) + marker;
+    const indent = "    ".repeat(level);
+    if (marker === "* ") return [indent + "* ", null];
+    const canonical = indent + "1. ";
+    if (!marker) return [indent, canonical];
+    return [indent + marker, canonical];
   }
 
   if (style_name && style_name !== "Normal") {
     const custom_level = _detect_heading_level_from_name(style_name);
-    if (custom_level !== null) return "#".repeat(custom_level) + " ";
+    if (custom_level !== null) return ["#".repeat(custom_level) + " ", null];
   }
 
   if (!style_name || style_name === "Normal") {
@@ -591,7 +991,7 @@ export function get_paragraph_prefix(
       curr = curr.parentNode as Element | null;
     }
     if (is_inside_tc) {
-      return "";
+      return ["", null];
     }
 
     const text = paragraph.text.trim();
@@ -620,11 +1020,27 @@ export function get_paragraph_prefix(
           }
         }
       }
-      if (is_bold) return "## ";
+      if (is_bold) return ["## ", null];
     }
   }
 
-  return "";
+  return ["", null];
+}
+
+export function get_paragraph_prefix(
+  paragraph: Paragraph,
+  style_cache?: Record<string, any>,
+  default_pstyle?: string | null,
+  numbering_tracker?: NumberingTracker | null,
+  resolve_numbering = true,
+): string {
+  return get_paragraph_prefix_with_canonical(
+    paragraph,
+    style_cache,
+    default_pstyle,
+    numbering_tracker,
+    resolve_numbering,
+  )[0];
 }
 
 export function is_heading_paragraph(
@@ -632,10 +1048,15 @@ export function is_heading_paragraph(
   style_cache?: Record<string, any>,
   default_pstyle?: string | null,
 ): boolean {
-  const prefix = get_paragraph_prefix(paragraph, style_cache, default_pstyle);
+  const prefix = get_paragraph_prefix(
+    paragraph,
+    style_cache,
+    default_pstyle,
+    null,
+    false,
+  );
   if (!prefix) return false;
-  const stripped = prefix.trimEnd();
-  return stripped.length > 0 && stripped === "#".repeat(stripped.length);
+  return /^#+ /.test(prefix);
 }
 
 export function get_run_style_markers(

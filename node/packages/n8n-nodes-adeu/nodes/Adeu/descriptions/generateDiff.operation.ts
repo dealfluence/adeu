@@ -336,6 +336,7 @@ export async function executeGenerateDiff(
       false,
       false,
       true,
+      false,
     ) as {
       text: string;
       structure: ExtractStructure;
@@ -346,6 +347,7 @@ export async function executeGenerateDiff(
       false,
       false,
       true,
+      false,
     ) as {
       text: string;
       structure: ExtractStructure;
@@ -381,10 +383,12 @@ export async function executeGenerateDiff(
     originalBuffer,
     cleanView,
     false,
+    false,
   );
   const modifiedText = await extractTextFromBuffer(
     modifiedBuffer,
     cleanView,
+    false,
     false,
   );
 

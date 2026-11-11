@@ -22,9 +22,9 @@ review-heavy item 3 {#cell:37B9DDC6} | Team 2 {#cell:707DBA16} | Approved {#cell
 
 1. Evidence step 1 for review-heavy-02 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 2 for review-heavy-02 must remain readable and internally consistent after an automated edit.
+2. Evidence step 2 for review-heavy-02 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 3 for review-heavy-02 must remain readable and internally consistent after an automated edit.
+3. Evidence step 3 for review-heavy-02 must remain readable and internally consistent after an automated edit.
 
 {==Review point 2 for review-heavy-02 needs an independent answer.==}{>>[Com:1] Evidence Reviewer 2 @ DATE: Synthetic reviewer note 2 for review-heavy-02.<<}
 

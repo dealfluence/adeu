@@ -209,6 +209,48 @@ function _repr(text: string): string {
   return `${quote}${body}${quote}`;
 }
 
+import { DocumentMapper } from "./mapper.js";
+
+const _VERIFY_CLAUSE_PREFIX_RE =
+  /^[ \t]*(?:(?:§|Article|ARTICLE|Part|PART|Clause|CLAUSE|Section|SECTION|ust\.|pkt)\s+)?(?:\([a-zA-Z0-9]+\)|[0-9IVXLCDMa-zA-Z]+(?:\.[0-9a-zA-Z]+)*[.)]?)\s+$/;
+
+function _matches_allowing_auto_renumber(
+  doc: DocumentObject,
+  expected_norm: string,
+): boolean {
+  const clean_mapper = new DocumentMapper(doc, true);
+  const sentinel = "\x00NUM\x00 ";
+  const pieces: string[] = [];
+  for (const s of clean_mapper.spans) {
+    if (s.run === null && s.canonical_prefix) {
+      pieces.push(sentinel);
+    } else {
+      pieces.push(s.text);
+    }
+  }
+  const marked_actual = _normalize_virtual_projection_text(
+    pieces.join("").trim(),
+  );
+  const act_blocks = marked_actual.split("\n\n");
+  const exp_blocks = expected_norm.split("\n\n");
+  if (act_blocks.length !== exp_blocks.length) return false;
+  for (let i = 0; i < act_blocks.length; i++) {
+    const mb = act_blocks[i]!;
+    const ep = exp_blocks[i]!;
+    if (!mb.startsWith(sentinel)) {
+      if (mb !== ep) return false;
+      continue;
+    }
+    const body = mb.slice(sentinel.length);
+    if (!ep.endsWith(body)) return false;
+    const ep_prefix = ep.slice(0, ep.length - body.length);
+    if (ep_prefix && !_VERIFY_CLAUSE_PREFIX_RE.test(ep_prefix)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Verifies that the clean view of `doc` matches `expected_text`. */
 export function verify_clean_text(
   doc: DocumentObject,
@@ -218,7 +260,10 @@ export function verify_clean_text(
   const actual_norm = _normalize_virtual_projection_text(actual_clean.trim());
   const expected_norm = _normalize_virtual_projection_text(expected_text.trim());
 
-  if (actual_norm !== expected_norm) {
+  if (
+    actual_norm !== expected_norm &&
+    !_matches_allowing_auto_renumber(doc, expected_norm)
+  ) {
     // BY CODE POINT, like Python's `zip(actual_norm, expected_norm)` and
     // `norm[div : div + 40]` (verifier finding, Task 19 attempt 3): indexing
     // UTF-16 units instead halves a surrogate pair straddling the 40-character

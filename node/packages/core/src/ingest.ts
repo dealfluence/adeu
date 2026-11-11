@@ -4,6 +4,7 @@ import {
   _get_style_cache,
   compute_change_pair_map,
   get_paragraph_prefix,
+  NumberingTracker,
   paragraph_mark_is_deleted,
   is_heading_paragraph,
   is_native_heading,
@@ -63,12 +64,20 @@ export interface ExtractStructure {
 }
 
 export async function extractTextFromBuffer(
-  buffer: Buffer,
+  buffer: Buffer | Uint8Array,
   cleanView = false,
   includeAppendix = true,
+  resolveNumbering = true,
 ): Promise<string> {
-  const doc = await DocumentObject.load(buffer);
-  return _extractTextFromDoc(doc, cleanView, includeAppendix) as string;
+  const doc = await DocumentObject.load(Buffer.from(buffer));
+  return _extractTextFromDoc(
+    doc,
+    cleanView,
+    includeAppendix,
+    false,
+    false,
+    resolveNumbering,
+  ) as string;
 }
 
 export function _extractTextFromDoc(
@@ -77,6 +86,7 @@ export function _extractTextFromDoc(
   includeAppendix = true,
   return_paragraph_offsets = false,
   return_structure = false,
+  resolveNumbering = true,
 ):
   | string
   | { text: string; paragraph_offsets: Map<any, [number, number]> }
@@ -103,6 +113,13 @@ export function _extractTextFromDoc(
 
   for (const [part, part_kind] of iter_document_parts_with_kind(doc)) {
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
+    const partRef = (part as any).part || part;
+    const [partStyleCache] = _get_style_cache(partRef);
+    const numberingTracker = new NumberingTracker(
+      partRef,
+      partStyleCache,
+      resolveNumbering,
+    );
     const part_text = _extract_blocks(
       part,
       comments_map,
@@ -111,6 +128,9 @@ export function _extractTextFromDoc(
       return_paragraph_offsets ? paragraph_offsets : undefined,
       structure ? structure.tables : undefined,
       sdtInfos,
+      false,
+      numberingTracker,
+      resolveNumbering,
     );
     if (part_text) {
       if (full_text.length > 0) cursor += 2;
@@ -152,9 +172,14 @@ function _extract_blocks(
   table_acc?: TableGeometry[],
   sdtInfos?: Map<any, SdtInfo>,
   inCell = false,
+  numbering_tracker?: NumberingTracker,
+  resolve_numbering = true,
 ): string {
   const part = container.part || container;
   const [style_cache, default_pstyle] = _get_style_cache(part);
+  const tracker =
+    numbering_tracker ??
+    new NumberingTracker(part, style_cache, resolve_numbering);
 
   const blocks: string[] = [];
   let local_cursor = cursor;
@@ -205,6 +230,8 @@ function _extract_blocks(
         undefined,
         sdtInfos,
         inCell,
+        tracker,
+        resolve_numbering,
       );
       if (inner) {
         const full = anchored
@@ -228,6 +255,9 @@ function _extract_blocks(
         paragraph_offsets,
         undefined,
         sdtInfos,
+        false,
+        tracker,
+        resolve_numbering,
       );
       if (fn_text) {
         blocks.push(fn_text);
@@ -237,7 +267,14 @@ function _extract_blocks(
         local_cursor -= 2;
       }
     } else if (item instanceof Paragraph) {
-      let prefix = get_paragraph_prefix(item, style_cache, default_pstyle);
+      const num_snap = tracker.snapshot();
+      let prefix = get_paragraph_prefix(
+        item,
+        style_cache,
+        default_pstyle,
+        tracker,
+        resolve_numbering,
+      );
       if (is_first_para && container.constructor.name === "FootnoteItem") {
         prefix = `[^${container.note_type}-${container.id}]: ` + prefix;
       }
@@ -250,12 +287,7 @@ function _extract_blocks(
         sdtInfos,
       );
       if (cleanView && !p_text && paragraph_mark_is_deleted(item._element)) {
-        // Accepting a tracked paragraph-mark deletion merges the paragraph
-        // away; when nothing visible survives inside it, the accepted view
-        // must not render an empty container. Twin of python
-        // ingest._extract_blocks (QA round 3, finding 2.4) — without it the
-        // clean view grew a stray blank line per deleted-mark paragraph
-        // ("Alpha\n\n\n\nBeta" where python gives "Alpha\n\nBeta").
+        tracker.restore(num_snap);
         if (!is_first_block) local_cursor -= 2;
         is_first_para = false;
         continue;
@@ -280,6 +312,8 @@ function _extract_blocks(
         paragraph_offsets,
         geometry,
         sdtInfos,
+        tracker,
+        resolve_numbering,
       );
       if (table_text) {
         blocks.push(table_text);
@@ -319,6 +353,8 @@ export function extract_table(
   paragraph_offsets?: Map<any, [number, number]>,
   geometry?: TableGeometry | null,
   sdtInfos?: Map<any, SdtInfo>,
+  numbering_tracker?: NumberingTracker,
+  resolve_numbering = true,
 ): string {
   const rows_text: string[] = [];
   let rows_processed = 0;
@@ -358,6 +394,8 @@ export function extract_table(
         undefined,
         sdtInfos,
         true,
+        numbering_tracker,
+        resolve_numbering,
       );
       if (cellInfo) {
         // Cell-level control (sdtContent > w:tc): anchors render inline inside

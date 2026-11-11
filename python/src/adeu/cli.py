@@ -830,7 +830,13 @@ def handle_extract(args):
         # modes it must be a positive integer; anything else is a hard error,
         # never a silent fallback to page 1 (QA L1).
         page_num = 1
-        want_all_pages = False
+        # Writing to a file (`-o <path>`, where `-o -` was already normalized to
+        # None above) defaults to the full document when `--page` is omitted:
+        # synthetic pagination protects stdout/LLM context windows, whereas file
+        # extraction is expected to contain the whole document.
+        want_all_pages = bool(
+            args.page is None and args.output and args.mode == "full" and not getattr(args, "search_query", None)
+        )
         is_page_range = False
         range_start = 1
         range_end = 1
@@ -1064,7 +1070,29 @@ def handle_extract(args):
         # extracted text otherwise. stdout stays quiet either way — printing
         # the full payload again surprised pipeline users (QA 2026-07-18 L4).
         _write_output_or_exit(args.output, json_output if json_output is not None else output_text)
-        print(f"Extracted {'JSON' if json_output is not None else 'text'} to {args.output}", file=sys.stderr)
+        status_msg = f"Extracted {'JSON' if json_output is not None else 'text'} to {args.output}"
+        if not getattr(args, "search_query", None) and args.mode == "full" and not want_all_pages:
+            from adeu.pagination import PAGE_RANGE_MAX_PAGES, paginate, split_structural_appendix
+
+            total_pages = paginate(split_structural_appendix(text)[0], "").total_pages
+            if is_page_range:
+                shown_end = min(range_end, range_start + PAGE_RANGE_MAX_PAGES - 1, total_pages)
+                if range_start > 1 or shown_end < total_pages:
+                    status_msg = (
+                        f"Extracted pages {range_start}-{shown_end} of {total_pages} to {args.output} "
+                        "(partial extract; pass --page all for the full document)"
+                    )
+            elif total_pages > 1:
+                status_msg = (
+                    f"Extracted page {page_num} of {total_pages} to {args.output} "
+                    "(partial extract; pass --page all for the full document)"
+                )
+        elif args.mode == "appendix" and "Continues on appendix page " in output_text:
+            status_msg = (
+                f"Extracted appendix page {page_num} to {args.output} "
+                "(partial appendix extract; pass --page N for subsequent pages)"
+            )
+        print(status_msg, file=sys.stderr)
     elif json_output is not None:
         print(json_output)
     else:
@@ -1203,11 +1231,19 @@ def handle_diff(args):
         try:
             doc_orig = _load_docx_or_exit(args.original)
             text_orig, struct_orig = _extract_text_from_doc(
-                doc_orig, clean_view=compare_clean, include_appendix=False, return_structure=True
+                doc_orig,
+                clean_view=compare_clean,
+                include_appendix=False,
+                return_structure=True,
+                resolve_numbering=False,
             )
             doc_mod = _load_docx_or_exit(args.modified)
             text_mod, struct_mod = _extract_text_from_doc(
-                doc_mod, clean_view=compare_clean, include_appendix=False, return_structure=True
+                doc_mod,
+                clean_view=compare_clean,
+                include_appendix=False,
+                return_structure=True,
+                resolve_numbering=False,
             )
         except SystemExit:
             raise
@@ -2114,7 +2150,12 @@ def _main_impl():
         action="store_true",
         help=f"{live_help_prefix}Extract text from live active Word document",
     )
-    p_extract.add_argument("-o", "--output", type=Path, help="Output file ('-' or omitted: stdout)")
+    p_extract.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output file ('-' or omitted: stdout; defaults --page to 'all' in full mode when omitted)",
+    )
     p_extract.add_argument(
         "--force",
         action="store_true",
@@ -2159,11 +2200,10 @@ def _main_impl():
         type=str,
         default=None,
         help=(
-            "Page number (1-indexed) for 'full' and 'appendix' modes (defaults to 1), "
-            "or 'all' to emit the entire document in one output (mode 'full' and search). "
-            "Use '--page all' when producing a text file for `adeu apply`/`adeu diff` — "
-            "a single page of a multi-page document cannot round-trip. Note: pages are "
-            "synthetic, length-based content chunks sized for LLM consumption — they do "
+            "Page number (1-indexed) for 'full' and 'appendix' modes (defaults to 1 on stdout and 'all' "
+            "when writing to -o <file>), or 'all' to emit the entire document in one output (mode 'full' "
+            "and search). A single page of a multi-page document cannot round-trip into `adeu apply`/`adeu diff`. "
+            "Note: pages are synthetic, length-based content chunks sized for LLM consumption — they do "
             "NOT correspond to printed Word pages or explicit page breaks."
         ),
     )

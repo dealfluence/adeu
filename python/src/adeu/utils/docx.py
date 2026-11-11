@@ -178,11 +178,11 @@ def prefix_is_heading(prefix: str) -> bool:
     Kept as its own function so the rule lives in exactly ONE place: both
     Virtual Text twins must agree on what counts as a heading, and callers
     that already hold the prefix reuse this instead of re-deriving it.
+    Matches both unnumbered ('# ') and auto-numbered ('# § 1. ') headings.
     """
     if not prefix:
         return False
-    stripped = prefix.rstrip()
-    return bool(stripped) and stripped == "#" * len(stripped)
+    return bool(re.match(r"^#+ ", prefix))
 
 
 def is_heading_paragraph(
@@ -443,26 +443,128 @@ def _get_style_cache(part):
     return cache, default_pstyle
 
 
-def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
-    """
-    Parses word/numbering.xml once per package into
-    {numId: {ilvl: numFmt}} (e.g. {"5": {0: "decimal", 1: "lowerLetter"}}).
+class _LevelDef(NamedTuple):
+    ilvl: int
+    start: int
+    num_fmt: str
+    lvl_text: Optional[str]
+    is_lgl: bool
+    lvl_restart: Optional[int]
+    p_style: Optional[str]
 
-    Used to distinguish bullet lists from ordered lists in the projection
-    (QA 2026-07-18 M4). Missing part / malformed XML yields an empty cache,
-    which projects every list with the bullet marker (the historical default).
-    """
+
+class _LevelOverride(NamedTuple):
+    start_override: Optional[int]
+    lvl: Optional[_LevelDef]
+
+
+class _AbstractNumDef(NamedTuple):
+    levels: Dict[int, _LevelDef]
+    num_style_link: Optional[str]
+    style_link: Optional[str]
+
+
+class _NumDef(NamedTuple):
+    abstract_num_id: str
+    overrides: Dict[int, _LevelOverride]
+
+
+class _NumberingDefs(NamedTuple):
+    abstract_nums: Dict[str, _AbstractNumDef]
+    nums: Dict[str, _NumDef]
+
+
+_EMPTY_NUMBERING_DEFS = _NumberingDefs(abstract_nums={}, nums={})
+_RE_LVL_PLACEHOLDER = re.compile(r"%([1-9])")
+_ROMAN_PAIRS: Tuple[Tuple[int, str], ...] = (
+    (1000, "M"),
+    (900, "CM"),
+    (500, "D"),
+    (400, "CD"),
+    (100, "C"),
+    (90, "XC"),
+    (50, "L"),
+    (40, "XL"),
+    (10, "X"),
+    (9, "IX"),
+    (5, "V"),
+    (4, "IV"),
+    (1, "I"),
+)
+
+
+def _parse_level_element(lvl_el: Any) -> Optional[_LevelDef]:
+    ilvl_val = lvl_el.get(qn("w:ilvl"))
+    if ilvl_val is None or not ilvl_val.lstrip("-").isdigit():
+        return None
+    ilvl = int(ilvl_val)
+
+    start = 1
+    start_el = lvl_el.find(qn("w:start"))
+    if start_el is not None:
+        s_val = start_el.get(qn("w:val"))
+        if s_val is not None and s_val.lstrip("-").isdigit():
+            start = int(s_val)
+
+    num_fmt = "decimal"
+    fmt_el = lvl_el.find(qn("w:numFmt"))
+    if fmt_el is not None:
+        f_val = fmt_el.get(qn("w:val"))
+        if f_val:
+            num_fmt = f_val
+
+    lvl_text: Optional[str] = None
+    txt_el = lvl_el.find(qn("w:lvlText"))
+    if txt_el is not None:
+        t_val = txt_el.get(qn("w:val"))
+        if t_val is not None:
+            lvl_text = t_val
+
+    is_lgl = False
+    lgl_el = lvl_el.find(qn("w:isLgl"))
+    if lgl_el is not None:
+        lgl_val = lgl_el.get(qn("w:val"))
+        is_lgl = lgl_val not in ("0", "false", "off")
+
+    lvl_restart: Optional[int] = None
+    restart_el = lvl_el.find(qn("w:lvlRestart"))
+    if restart_el is not None:
+        r_val = restart_el.get(qn("w:val"))
+        if r_val is not None and r_val.lstrip("-").isdigit():
+            lvl_restart = int(r_val)
+
+    p_style: Optional[str] = None
+    pstyle_el = lvl_el.find(qn("w:pStyle"))
+    if pstyle_el is not None:
+        ps_val = pstyle_el.get(qn("w:val"))
+        if ps_val:
+            p_style = ps_val
+
+    return _LevelDef(
+        ilvl=ilvl,
+        start=start,
+        num_fmt=num_fmt,
+        lvl_text=lvl_text,
+        is_lgl=is_lgl,
+        lvl_restart=lvl_restart,
+        p_style=p_style,
+    )
+
+
+def _get_numbering_defs(part: Any) -> _NumberingDefs:
+    """Parses word/numbering.xml once per package into full OOXML level definitions."""
     if part is None:
-        return {}
+        return _EMPTY_NUMBERING_DEFS
     if hasattr(part, "part"):
         part = part.part
     if not hasattr(part, "package"):
-        return {}
+        return _EMPTY_NUMBERING_DEFS
     pkg = part.package
-    if hasattr(pkg, "_adeu_numbering_cache"):
-        return pkg._adeu_numbering_cache
+    if hasattr(pkg, "_adeu_numbering_defs"):
+        return pkg._adeu_numbering_defs
 
-    cache: Dict[str, Dict[int, str]] = {}
+    abstract_nums: Dict[str, _AbstractNumDef] = {}
+    nums: Dict[str, _NumDef] = {}
     numbering_root = None
     try:
         for p in pkg.parts:
@@ -478,20 +580,20 @@ def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
         numbering_root = None
 
     if numbering_root is not None:
-        abstract_fmts: Dict[str, Dict[int, str]] = {}
         for abstract in numbering_root.findall(qn("w:abstractNum")):
             a_id = abstract.get(qn("w:abstractNumId"))
             if a_id is None:
                 continue
-            lvl_map: Dict[int, str] = {}
-            for lvl in abstract.findall(qn("w:lvl")):
-                ilvl_val = lvl.get(qn("w:ilvl"))
-                fmt_el = lvl.find(qn("w:numFmt"))
-                if ilvl_val is not None and ilvl_val.lstrip("-").isdigit() and fmt_el is not None:
-                    fmt = fmt_el.get(qn("w:val"))
-                    if fmt:
-                        lvl_map[int(ilvl_val)] = fmt
-            abstract_fmts[a_id] = lvl_map
+            levels: Dict[int, _LevelDef] = {}
+            for lvl_el in abstract.findall(qn("w:lvl")):
+                parsed = _parse_level_element(lvl_el)
+                if parsed is not None:
+                    levels[parsed.ilvl] = parsed
+            nsl_el = abstract.find(qn("w:numStyleLink"))
+            nsl = nsl_el.get(qn("w:val")) if nsl_el is not None else None
+            sl_el = abstract.find(qn("w:styleLink"))
+            sl = sl_el.get(qn("w:val")) if sl_el is not None else None
+            abstract_nums[a_id] = _AbstractNumDef(levels=levels, num_style_link=nsl, style_link=sl)
 
         for num in numbering_root.findall(qn("w:num")):
             n_id = num.get(qn("w:numId"))
@@ -499,8 +601,231 @@ def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
             if n_id is None or a_ref is None:
                 continue
             a_id = a_ref.get(qn("w:val"))
-            if a_id in abstract_fmts:
-                cache[n_id] = abstract_fmts[a_id]
+            if not a_id:
+                continue
+            overrides: Dict[int, _LevelOverride] = {}
+            for ov_el in num.findall(qn("w:lvlOverride")):
+                ov_ilvl = ov_el.get(qn("w:ilvl"))
+                if ov_ilvl is None or not ov_ilvl.lstrip("-").isdigit():
+                    continue
+                so_val: Optional[int] = None
+                so_el = ov_el.find(qn("w:startOverride"))
+                if so_el is not None:
+                    raw_so = so_el.get(qn("w:val"))
+                    if raw_so is not None and raw_so.lstrip("-").isdigit():
+                        so_val = int(raw_so)
+                inner_lvl_el = ov_el.find(qn("w:lvl"))
+                inner_lvl = _parse_level_element(inner_lvl_el) if inner_lvl_el is not None else None
+                overrides[int(ov_ilvl)] = _LevelOverride(start_override=so_val, lvl=inner_lvl)
+            nums[n_id] = _NumDef(abstract_num_id=a_id, overrides=overrides)
+
+    defs = _NumberingDefs(abstract_nums=abstract_nums, nums=nums)
+    pkg._adeu_numbering_defs = defs
+    return defs
+
+
+def _resolve_abstract_num(
+    defs: _NumberingDefs, abstract_num_id: str, style_cache: Optional[dict] = None
+) -> Optional[_AbstractNumDef]:
+    abs_def = defs.abstract_nums.get(abstract_num_id)
+    if abs_def is None:
+        return None
+    if abs_def.num_style_link and not abs_def.levels:
+        target = abs_def.num_style_link
+        for candidate in defs.abstract_nums.values():
+            if candidate.style_link == target and candidate.levels:
+                return candidate
+        if style_cache:
+            linked_style = style_cache.get(target)
+            linked_num_id = linked_style.get("num_id") if linked_style else None
+            if linked_num_id and linked_num_id in defs.nums:
+                linked_abs = defs.nums[linked_num_id].abstract_num_id
+                if linked_abs != abstract_num_id:
+                    return defs.abstract_nums.get(linked_abs) or abs_def
+    return abs_def
+
+
+def _format_ooxml_num(value: int, num_fmt: str) -> str:
+    if num_fmt == "none":
+        return ""
+    if num_fmt == "decimalZero":
+        return f"{value:02d}" if 0 <= value < 10 else str(value)
+    if num_fmt in ("lowerLetter", "upperLetter"):
+        if value < 1:
+            return str(value)
+        base = ord("a") if num_fmt == "lowerLetter" else ord("A")
+        ch = chr(base + ((value - 1) % 26))
+        return ch * (((value - 1) // 26) + 1)
+    if num_fmt in ("lowerRoman", "upperRoman"):
+        if value < 1 or value > 3999:
+            return str(value)
+        rem = value
+        out: list[str] = []
+        for arabic, roman in _ROMAN_PAIRS:
+            while rem >= arabic:
+                out.append(roman)
+                rem -= arabic
+        res = "".join(out)
+        return res.lower() if num_fmt == "lowerRoman" else res
+    if num_fmt == "ordinal":
+        abs_v = abs(value)
+        if 11 <= (abs_v % 100) <= 13:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(abs_v % 10, "th")
+        return f"{value}{suffix}"
+    return str(value)
+
+
+class NumberingTracker:
+    """Per-story OOXML list counter resolving <w:numPr> paragraphs to display labels."""
+
+    def __init__(self, part: Any, style_cache: Optional[dict] = None, resolve_numbering: bool = True) -> None:
+        self._defs = _get_numbering_defs(part)
+        self._style_cache = style_cache
+        self.resolve_numbering = resolve_numbering
+        self._counters: Dict[str, Dict[int, int]] = {}
+
+    def snapshot(self) -> Dict[str, Dict[int, int]]:
+        return {k: dict(v) for k, v in self._counters.items()}
+
+    def restore(self, snap: Dict[str, Dict[int, int]]) -> None:
+        self._counters = {k: dict(v) for k, v in snap.items()}
+
+    def _effective_level_def(self, num_def: _NumDef, abs_def: _AbstractNumDef, level: int) -> Optional[_LevelDef]:
+        ov = num_def.overrides.get(level)
+        if ov is not None and ov.lvl is not None:
+            return ov.lvl
+        if level in abs_def.levels:
+            return abs_def.levels[level]
+        for lookup in range(level, -1, -1):
+            ov_fb = num_def.overrides.get(lookup)
+            if ov_fb is not None and ov_fb.lvl is not None:
+                return ov_fb.lvl
+            if lookup in abs_def.levels:
+                return abs_def.levels[lookup]
+        return None
+
+    def _initial_start(self, num_def: _NumDef, abs_def: _AbstractNumDef, level: int) -> int:
+        ov = num_def.overrides.get(level)
+        if ov is not None and ov.start_override is not None:
+            return ov.start_override
+        lvl_def = self._effective_level_def(num_def, abs_def, level)
+        return lvl_def.start if lvl_def is not None else 1
+
+    def infer_ilvl(self, num_id: str, explicit_ilvl: Optional[int], style_id: Optional[str] = None) -> int:
+        if explicit_ilvl is not None:
+            return explicit_ilvl
+        num_def = self._defs.nums.get(num_id)
+        if num_def is None:
+            return 0
+        abs_def = _resolve_abstract_num(self._defs, num_def.abstract_num_id, self._style_cache)
+        if abs_def is None or not style_id:
+            return 0
+        for lvl_idx, ov in num_def.overrides.items():
+            if ov.lvl is not None and ov.lvl.p_style == style_id:
+                return lvl_idx
+        for lvl_idx, lvl_def in abs_def.levels.items():
+            if lvl_def.p_style == style_id:
+                return lvl_idx
+        return 0
+
+    def next_marker(
+        self,
+        num_id: str,
+        ilvl: Optional[int],
+        style_id: Optional[str] = None,
+        is_heading: bool = False,
+    ) -> Tuple[str, int]:
+        """Returns (marker_with_trailing_space, effective_ilvl)."""
+        eff_ilvl = self.infer_ilvl(num_id, ilvl, style_id=style_id)
+        num_def = self._defs.nums.get(num_id)
+        if num_def is None:
+            return ("" if is_heading else "* "), eff_ilvl
+        abs_def = _resolve_abstract_num(self._defs, num_def.abstract_num_id, self._style_cache)
+        if abs_def is None:
+            return ("" if is_heading else "* "), eff_ilvl
+
+        lvl_def = self._effective_level_def(num_def, abs_def, eff_ilvl)
+        if lvl_def is None:
+            return ("" if is_heading else "* "), eff_ilvl
+
+        if lvl_def.num_fmt == "bullet":
+            return ("" if is_heading else "* "), eff_ilvl
+
+        if not self.resolve_numbering:
+            return ("" if is_heading else "1. "), eff_ilvl
+
+        state = self._counters.setdefault(num_id, {})
+        for anc in range(eff_ilvl):
+            if anc not in state:
+                state[anc] = self._initial_start(num_def, abs_def, anc)
+
+        if eff_ilvl not in state:
+            state[eff_ilvl] = self._initial_start(num_def, abs_def, eff_ilvl)
+        else:
+            state[eff_ilvl] += 1
+
+        for deeper in list(state.keys()):
+            if deeper <= eff_ilvl:
+                continue
+            d_lvl = self._effective_level_def(num_def, abs_def, deeper)
+            restart_rule = d_lvl.lvl_restart if d_lvl is not None else None
+            if restart_rule is None:
+                del state[deeper]
+            elif restart_rule == 0:
+                continue
+            elif eff_ilvl <= (restart_rule - 1):
+                del state[deeper]
+
+        if lvl_def.num_fmt == "none" and not lvl_def.lvl_text:
+            return "", eff_ilvl
+
+        template = (
+            lvl_def.lvl_text
+            if lvl_def.lvl_text is not None
+            else ("" if lvl_def.num_fmt == "none" else f"%{eff_ilvl + 1}.")
+        )
+
+        def _sub(match: re.Match[str]) -> str:
+            idx = int(match.group(1)) - 1
+            val = state.get(idx, self._initial_start(num_def, abs_def, idx))
+            idx_lvl = self._effective_level_def(num_def, abs_def, idx)
+            raw_fmt = idx_lvl.num_fmt if idx_lvl is not None else "decimal"
+            eff_fmt = "decimal" if (lvl_def.is_lgl and idx < eff_ilvl and raw_fmt != "none") else raw_fmt
+            return _format_ooxml_num(val, eff_fmt)
+
+        rendered = _RE_LVL_PLACEHOLDER.sub(_sub, template).replace("\t", " ").strip()
+        return (f"{rendered} " if rendered else ""), eff_ilvl
+
+
+def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
+    """
+    Parses word/numbering.xml once per package into
+    {numId: {ilvl: numFmt}} (e.g. {"5": {0: "decimal", 1: "lowerLetter"}}).
+    """
+    if part is None:
+        return {}
+    if hasattr(part, "part"):
+        part = part.part
+    if not hasattr(part, "package"):
+        return {}
+    pkg = part.package
+    if hasattr(pkg, "_adeu_numbering_cache"):
+        return pkg._adeu_numbering_cache
+
+    defs = _get_numbering_defs(part)
+    style_cache, _ = _get_style_cache(part)
+    cache: Dict[str, Dict[int, str]] = {}
+    for n_id, num_def in defs.nums.items():
+        abs_def = _resolve_abstract_num(defs, num_def.abstract_num_id, style_cache)
+        if abs_def is None:
+            continue
+        lvl_map = {lvl_idx: lvl.num_fmt for lvl_idx, lvl in abs_def.levels.items()}
+        for ov_idx, ov in num_def.overrides.items():
+            if ov.lvl is not None:
+                lvl_map[ov_idx] = ov.lvl.num_fmt
+        cache[n_id] = lvl_map
 
     pkg._adeu_numbering_cache = cache
     return cache
@@ -508,9 +833,8 @@ def _get_numbering_cache(part) -> Dict[str, Dict[int, str]]:
 
 def get_list_marker(paragraph_part, num_id: Optional[str], ilvl: int) -> str:
     """
-    Markdown marker for a list paragraph: '* ' for bullets, '1. ' for every
-    numbered format (Markdown renderers renumber sequentially). Unknown
-    numbering (no numbering.xml entry) keeps the historical '* '.
+    Canonical Markdown marker for a list paragraph: '* ' for bullets, '1. ' for
+    every numbered format. Unknown numbering keeps the historical '* '.
     """
     fmt = None
     if num_id is not None:
@@ -518,7 +842,6 @@ def get_list_marker(paragraph_part, num_id: Optional[str], ilvl: int) -> str:
         if lvl_map:
             fmt = lvl_map.get(ilvl)
             if fmt is None and lvl_map:
-                # Fall back to the nearest defined level at or below ilvl.
                 for lookup in range(ilvl, -1, -1):
                     if lookup in lvl_map:
                         fmt = lvl_map[lookup]
@@ -644,15 +967,21 @@ def _is_page_instr(instr: str) -> bool:
     return parts[0] in ("PAGE", "NUMPAGES")
 
 
-def get_paragraph_prefix(
+def get_paragraph_prefix_with_canonical(
     paragraph: Any,
     style_cache: Optional[dict] = None,
     default_pstyle: Optional[str] = None,
     part: Any = None,
-) -> str:
+    numbering_tracker: Optional[NumberingTracker] = None,
+    resolve_numbering: bool = True,
+) -> Tuple[str, Optional[str]]:
     """
-    Returns the Markdown prefix for a paragraph based on its style.
-    Uses the Fast XML Cache to avoid python-docx performance penalties.
+    Returns (prefix, canonical_prefix) for a paragraph.
+
+    `canonical_prefix` is non-None only when `prefix` carries a resolved OOXML
+    clause/heading number (e.g. prefix='3. ', canonical='1. '; or
+    prefix='# § 1. ', canonical='# '), allowing DocumentMapper to match both
+    resolved and canonical ('1. ') prefixes cleanly.
     """
     if part is None:
         part = _get_part_safely(paragraph)
@@ -662,17 +991,6 @@ def get_paragraph_prefix(
     p_el = paragraph._element if hasattr(paragraph, "_element") else paragraph
     pPr = p_el.find(QN_W_PPR)
 
-    # 1. Check Outline Level on the paragraph itself (Structural Truth)
-    if pPr is not None:
-        oLvl = pPr.find(QN_W_OUTLINELVL)
-        if oLvl is not None:
-            val = oLvl.get(QN_W_VAL)
-            if val and val.isdigit():
-                lvl = int(val)
-                if 0 <= lvl <= 8:
-                    return "#" * (lvl + 1) + " "
-
-    # 2. Get Style Name & properties from Cache
     style_id = default_pstyle
     if pPr is not None:
         pStyle = pPr.find(QN_W_PSTYLE)
@@ -680,30 +998,12 @@ def get_paragraph_prefix(
             style_id = pStyle.get(QN_W_VAL) or default_pstyle
 
     style_info = cache.get(style_id) if style_id else None
-
-    if style_info:
-        lvl = style_info.get("outline_level")
-        if lvl is not None and 0 <= lvl <= 8:
-            return "#" * (lvl + 1) + " "
-
     style_name = style_info["name"] if style_info else None
 
-    # Check Style Name explicitly
-    if style_name and style_name.startswith("Heading"):
-        try:
-            level = int(style_name.replace("Heading", "").strip())
-            return "#" * level + " "
-        except ValueError:
-            pass
-
-    if style_name == "Title":
-        return "# "
-
-    # 3. Check for List Formatting (direct paragraph numPr first, then the
-    # style chain — Word's built-in List Bullet/List Number styles keep their
-    # numPr in styles.xml, QA 2026-07-18 M4).
-    list_num_id = None
-    list_ilvl = None
+    # Resolve active <w:numPr> (direct paragraph numPr first, honoring numId=0
+    # suppression, then style inheritance).
+    list_num_id: Optional[str] = None
+    list_ilvl: Optional[int] = None
     numbering_disabled = False
     if pPr is not None:
         numPr = pPr.find(QN_W_NUMPR)
@@ -712,8 +1012,6 @@ def get_paragraph_prefix(
             if numId is not None:
                 val = numId.get(QN_W_VAL)
                 if val == "0":
-                    # ECMA-376 §17.9.15: a direct numId of 0 REMOVES the
-                    # numbering a style would otherwise apply.
                     numbering_disabled = True
                 elif val:
                     list_num_id = val
@@ -728,22 +1026,63 @@ def get_paragraph_prefix(
             list_num_id = style_num_id
             if list_ilvl is None:
                 list_ilvl = style_info.get("num_ilvl")
+
+    # 1 & 2. Determine native heading level (outlineLvl, style outline_level, Heading N, Title)
+    heading_level: Optional[int] = None
+    if pPr is not None:
+        oLvl = pPr.find(QN_W_OUTLINELVL)
+        if oLvl is not None:
+            val = oLvl.get(QN_W_VAL)
+            if val and val.isdigit():
+                lvl = int(val)
+                if 0 <= lvl <= 8:
+                    heading_level = lvl + 1
+
+    if heading_level is None and style_info:
+        lvl = style_info.get("outline_level")
+        if lvl is not None and 0 <= lvl <= 8:
+            heading_level = lvl + 1
+
+    if heading_level is None and style_name:
+        if style_name.startswith("Heading"):
+            try:
+                heading_level = int(style_name.replace("Heading", "").strip())
+            except ValueError:
+                pass
+        elif style_name == "Title":
+            heading_level = 1
+
+    if heading_level is not None:
+        base_h = "#" * heading_level + " "
+        if list_num_id is not None and resolve_numbering:
+            tracker = numbering_tracker or NumberingTracker(
+                part, style_cache=cache, resolve_numbering=resolve_numbering
+            )
+            marker, _eff_lvl = tracker.next_marker(list_num_id, list_ilvl, style_id=style_id, is_heading=True)
+            if marker:
+                return base_h + marker, base_h
+        return base_h, None
+
+    # 3. Non-heading list formatting
     if list_num_id is not None:
-        level = list_ilvl if list_ilvl is not None else 0
-        if part is None:
-            part = _get_part_safely(paragraph)
-        marker = get_list_marker(part, list_num_id, level)
-        return ("    " * level) + marker
+        tracker = numbering_tracker or NumberingTracker(part, style_cache=cache, resolve_numbering=resolve_numbering)
+        marker, level = tracker.next_marker(list_num_id, list_ilvl, style_id=style_id, is_heading=False)
+        indent = "    " * level
+        if marker == "* ":
+            return indent + "* ", None
+        canonical = indent + "1. "
+        if not marker:
+            return indent, canonical
+        return indent + marker, canonical
 
     # 4. Custom heading style name fallback.
     if style_name and style_name != "Normal":
         custom_level = _detect_heading_level_from_name(style_name)
         if custom_level is not None:
-            return "#" * custom_level + " "
+            return "#" * custom_level + " ", None
 
     # 5. Heuristic for "Normal" style headers
     if style_name is None or style_name == "Normal":
-        # Table cells must not be classified as heuristic headings
         ancestor = p_el.getparent()
         is_inside_table = False
         while ancestor is not None:
@@ -761,7 +1100,6 @@ def get_paragraph_prefix(
                 if style_info and style_info.get("bold"):
                     is_bold = True
                 else:
-                    # Check if the first visible run is explicitly bold in XML
                     runs = p_el.findall(f".//{QN_W_R}")
                     for r in runs:
                         t = r.find(f".//{QN_W_T}")
@@ -776,9 +1114,32 @@ def get_paragraph_prefix(
                             break
 
                 if is_all_caps and is_bold:
-                    return "## "
+                    return "## ", None
 
-    return ""
+    return "", None
+
+
+def get_paragraph_prefix(
+    paragraph: Any,
+    style_cache: Optional[dict] = None,
+    default_pstyle: Optional[str] = None,
+    part: Any = None,
+    numbering_tracker: Optional[NumberingTracker] = None,
+    resolve_numbering: bool = True,
+) -> str:
+    """
+    Returns the Markdown prefix for a paragraph based on its style and OOXML numbering.
+    Uses the Fast XML Cache to avoid python-docx performance penalties.
+    """
+    prefix, _ = get_paragraph_prefix_with_canonical(
+        paragraph,
+        style_cache=style_cache,
+        default_pstyle=default_pstyle,
+        part=part,
+        numbering_tracker=numbering_tracker,
+        resolve_numbering=resolve_numbering,
+    )
+    return prefix
 
 
 def get_run_style_markers(run: Run, is_heading: Optional[bool] = None) -> tuple[str, str]:

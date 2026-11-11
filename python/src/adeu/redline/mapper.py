@@ -35,9 +35,11 @@ from adeu.utils.docx import (
     QN_W_T,
     QN_W_TAB,
     DocxEvent,
+    NumberingTracker,
     ProjectedRun,
+    _get_style_cache,
     compute_change_pair_map,
-    get_paragraph_prefix,
+    get_paragraph_prefix_with_canonical,
     is_heading_paragraph,
     is_native_heading,
     iter_block_items,
@@ -90,6 +92,7 @@ class TextSpan:
     # appears in the text, enclosure decides which gates apply, and a
     # sdtContentLocked picture control is locked while projecting nothing.
     sdt_stack: Tuple[Any, ...] = ()
+    canonical_prefix: Optional[str] = None
 
 
 def _append_wrapped_run_part(
@@ -271,10 +274,17 @@ def _is_anchor_marker_syntax(span: "TextSpan") -> bool:
 
 
 class DocumentMapper:
-    def __init__(self, doc: DocumentObject, clean_view: bool = False, original_view: bool = False):
+    def __init__(
+        self,
+        doc: DocumentObject,
+        clean_view: bool = False,
+        original_view: bool = False,
+        resolve_numbering: bool = True,
+    ):
         self.doc = doc
         self.clean_view = clean_view
         self.original_view = original_view
+        self.resolve_numbering = resolve_numbering
         self.comments_mgr = CommentsManager(doc)
         self.comments_map = self.comments_mgr.extract_comments_data()
         self.full_text = ""
@@ -337,7 +347,19 @@ class DocumentMapper:
                 self._add_virtual_text("\n\n", current_offset, None)
                 current_offset += 2
             part_start = current_offset
-            current_offset = self._map_blocks(part, current_offset)
+            part_ref = getattr(part, "part", part)
+            style_cache, default_pstyle = _get_style_cache(part_ref)
+            numbering_tracker = NumberingTracker(
+                part_ref, style_cache=style_cache, resolve_numbering=self.resolve_numbering
+            )
+            current_offset = self._map_blocks(
+                part,
+                current_offset,
+                style_cache,
+                default_pstyle,
+                part=part_ref,
+                numbering_tracker=numbering_tracker,
+            )
             if current_offset == part_start:
                 # Empty part: drop the tentative separator and any
                 # zero-width anchor spans the walk added — the reader emits
@@ -470,21 +492,23 @@ class DocumentMapper:
     def _map_blocks(
         self,
         container,
-        offset: int,
+        start_offset: int,
         style_cache: Optional[dict] = None,
         default_pstyle: Optional[str] = None,
         part: Any = None,
         in_cell: bool = False,
+        numbering_tracker: Optional[NumberingTracker] = None,
     ) -> int:
-        current = offset
+        current = start_offset
         c_type = type(container).__name__
-
         if part is None:
             part = getattr(container, "part", container)
-        from adeu.utils.docx import _get_style_cache
-
         if style_cache is None:
             style_cache, default_pstyle = _get_style_cache(part)
+        if numbering_tracker is None:
+            numbering_tracker = NumberingTracker(
+                part, style_cache=style_cache, resolve_numbering=self.resolve_numbering
+            )
 
         # Block-join semantics mirror ingest._extract_blocks exactly:
         # "\n\n".join(blocks), where a Paragraph is ALWAYS a block (even when
@@ -548,6 +572,7 @@ class DocumentMapper:
                         default_pstyle,
                         part=part,
                         in_cell=in_cell,
+                        numbering_tracker=numbering_tracker,
                     )
                 finally:
                     if info is not None:
@@ -574,7 +599,14 @@ class DocumentMapper:
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
                 block_start = current
-                current = self._map_blocks(item, current, style_cache, default_pstyle)
+                current = self._map_blocks(
+                    item,
+                    current,
+                    style_cache,
+                    default_pstyle,
+                    part=part,
+                    numbering_tracker=numbering_tracker,
+                )
                 if current == block_start:
                     # Empty footnote entry: the reader drops the block, so
                     # roll back the separator and any zero-width spans.
@@ -587,42 +619,40 @@ class DocumentMapper:
                 spans_mark = len(self.spans)
                 chunks_mark = len(self._text_chunks)
                 offset_mark = current
+                num_snap = numbering_tracker.snapshot()
                 if emitted_any_block:
                     # Attach the newline to the previous paragraph so merges work correctly
                     prev_para = previous_item if isinstance(previous_item, Paragraph) else None
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
-                style_prefix = get_paragraph_prefix(item, style_cache, default_pstyle, part=part)
-                prefix = style_prefix
-                if is_first_para and c_type == "FootnoteItem":
-                    prefix = f"[^{container.note_type}-{container.id}]: " + prefix
-                if prefix:
-                    self._add_virtual_text(prefix, current, item)
-                    current += len(prefix)
-
-                content_start = current
-                # Undecorated style prefix — see ingest._extract_blocks.
-                current = self._map_paragraph_content(
+                style_prefix, canonical_prefix = get_paragraph_prefix_with_canonical(
                     item,
-                    current,
                     style_cache,
                     default_pstyle,
-                    paragraph_prefix=style_prefix,
                     part=part,
+                    numbering_tracker=numbering_tracker,
+                    resolve_numbering=self.resolve_numbering,
+                )
+                if is_first_para and c_type == "FootnoteItem":
+                    fn_label = f"[^{container.note_type}-{container.id}]: "
+                    self._add_virtual_text(fn_label, current, item)
+                    current += len(fn_label)
+                if style_prefix:
+                    self._add_virtual_text(style_prefix, current, item, canonical_prefix=canonical_prefix)
+                    current += len(style_prefix)
+
+                content_start = current
+                # Pass the UNDECORATED style prefix: the heading test is about
+                # the paragraph's own style, not the footnote label.
+                current = self._map_paragraph_content(
+                    item, current, style_cache, default_pstyle, paragraph_prefix=style_prefix, part=part
                 )
                 if self.clean_view and current == content_start and paragraph_mark_is_deleted(item._element):
-                    # Twin of the reader's skip in ingest._extract_blocks:
-                    # accepting a tracked paragraph-mark deletion merges the
-                    # paragraph away, so when nothing visible survives inside
-                    # it the accepted view renders no container at all (QA
-                    # round 3, finding 2.4). The reader drops the whole
-                    # `prefix + p_text` block, so the rollback must undo the
-                    # prefix and the separator too — and the paragraph must
-                    # NOT count as a block, or the next separator lands twice.
-                    # Without this the mapper ran 2 chars ahead of the reader
-                    # and caller-pinned _match_start_index offsets (bound to
-                    # clean_mapper) resolved mid-word with no error raised.
+                    # Mirror ingest: a deleted-mark paragraph with no surviving
+                    # visible content merges away in the accepted view; roll
+                    # back its separator, prefix, and any zero-width anchor spans.
+                    numbering_tracker.restore(num_snap)
                     del self.spans[spans_mark:]
                     del self._text_chunks[chunks_mark:]
                     current = offset_mark
@@ -631,18 +661,25 @@ class DocumentMapper:
                 is_first_para = False
                 emitted_any_block = True
                 previous_item = item
+
             elif isinstance(item, Table):
                 spans_mark = len(self.spans)
                 chunks_mark = len(self._text_chunks)
                 offset_mark = current
                 if emitted_any_block:
-                    # Attach the newline to the previous paragraph so merges work correctly
                     prev_para = previous_item if isinstance(previous_item, Paragraph) else None
                     self._add_virtual_text("\n\n", current, prev_para)
                     current += 2
 
                 block_start = current
-                current = self._map_table(item, current, style_cache, default_pstyle, part=part)
+                current = self._map_table(
+                    item,
+                    current,
+                    style_cache,
+                    default_pstyle,
+                    part=part,
+                    numbering_tracker=numbering_tracker,
+                )
                 if current == block_start:
                     # Empty table (e.g. every row skipped in this view): the
                     # reader drops the block AND its separator.
@@ -680,6 +717,7 @@ class DocumentMapper:
         style_cache: Optional[dict] = None,
         default_pstyle: Optional[str] = None,
         part: Any = None,
+        numbering_tracker: Optional[NumberingTracker] = None,
     ) -> int:
         current = offset
         rows_processed = 0
@@ -746,7 +784,15 @@ class DocumentMapper:
                 enclosing = [c for c in (row_control, cell_control) if c is not None]
                 self._current_block_sdt_stack.extend(enclosing)
                 try:
-                    current = self._map_blocks(tc, current, style_cache, default_pstyle, part=part, in_cell=True)
+                    current = self._map_blocks(
+                        tc,
+                        current,
+                        style_cache,
+                        default_pstyle,
+                        part=part,
+                        in_cell=True,
+                        numbering_tracker=numbering_tracker,
+                    )
                 finally:
                     for _ in enclosing:
                         self._current_block_sdt_stack.pop()
@@ -1362,6 +1408,7 @@ class DocumentMapper:
         context_paragraph: Optional[Paragraph],
         hyperlink_id: Optional[str] = None,
         is_image_marker: bool = False,
+        canonical_prefix: Optional[str] = None,
     ):
         span = TextSpan(
             start=offset,
@@ -1373,6 +1420,7 @@ class DocumentMapper:
             part_index=self._current_part_index,
             is_image_marker=is_image_marker,
             sdt_stack=self._span_sdt_stack(),
+            canonical_prefix=canonical_prefix,
         )
         self.spans.append(span)
         self._text_chunks.append(text)
@@ -1565,6 +1613,56 @@ class DocumentMapper:
             idx = haystack.find(needle, idx + 1)
         return -1
 
+    _CALLER_CLAUSE_PREFIX_RE = re.compile(
+        r"^([ \t]*(?:#+\s+)?(?:(?:§|Article|ARTICLE|Part|PART|Clause|CLAUSE|Section|SECTION|ust\.|pkt)\s+)?"
+        r"(?:\([a-zA-Z0-9]+\)|[0-9IVXLCDMa-zA-Z]+(?:\.[0-9a-zA-Z]+)*[.)]?)\s+)(.+)",
+        re.DOTALL,
+    )
+
+    def _find_list_prefix_matches(self, target_text: str, flags: int = 0) -> List[Tuple[int, int]]:
+        """
+        Matches a target whose leading list/heading number differs from the
+        paragraph's current virtual prefix (e.g. canonical '1. ' from `diff --json`
+        or a pre-insertion clause number in a sequential batch).
+        """
+        if not target_text:
+            return []
+        ignore_case = bool(flags & re.IGNORECASE)
+        norm_full = self._replace_smart_quotes(self.full_text)
+        if ignore_case:
+            norm_full = norm_full.lower()
+
+        parsed_clause = self._CALLER_CLAUSE_PREFIX_RE.match(target_text)
+        target_is_heading = target_text.lstrip().startswith("#")
+
+        results: List[Tuple[int, int]] = []
+        for s in self.spans:
+            if s.run is not None or s.canonical_prefix is None:
+                continue
+            span_is_heading = s.canonical_prefix.lstrip().startswith("#")
+            if target_is_heading != span_is_heading:
+                continue
+
+            caller_body: Optional[str] = None
+            if target_text.startswith(s.canonical_prefix):
+                caller_body = target_text[len(s.canonical_prefix) :]
+            elif parsed_clause is not None:
+                caller_body = parsed_clause.group(2)
+
+            if not caller_body:
+                continue
+
+            norm_body = self._replace_smart_quotes(caller_body)
+            if ignore_case:
+                norm_body = norm_body.lower()
+
+            end_pos = s.end + len(norm_body)
+            if end_pos <= len(norm_full) and norm_full[s.end : end_pos] == norm_body:
+                total_len = (s.end - s.start) + len(caller_body)
+                if not self.range_is_virtual_only(s.start, total_len):
+                    results.append((s.start, total_len))
+        return results
+
     def find_match_index(
         self, target_text: str, is_regex: bool = False, case_sensitive: bool = True
     ) -> Tuple[int, int]:
@@ -1623,6 +1721,11 @@ class DocumentMapper:
         except re.error:
             pass
 
+        # 5. Virtual clause/list prefix fallback (canonical '1. ' or shifted sequential numbers)
+        for start, length in self._find_list_prefix_matches(target_text, flags=flags):
+            if not self._range_in_deletion(start, length):
+                return start, length
+
         return -1, 0
 
     def find_all_match_indices(
@@ -1678,6 +1781,11 @@ class DocumentMapper:
                 return [(s, e - s) for s, e in matches]
         except re.error:
             pass
+
+        # 5. Virtual clause/list prefix fallback
+        prefix_matches = self._find_list_prefix_matches(target_text, flags=flags)
+        if prefix_matches:
+            return prefix_matches
 
         return []
 

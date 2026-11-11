@@ -22,9 +22,9 @@ review-heavy item 3 | Team 1 | Approved
 
 1. Evidence step 1 for review-heavy-01 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 2 for review-heavy-01 must remain readable and internally consistent after an automated edit.
+2. Evidence step 2 for review-heavy-01 must remain readable and internally consistent after an automated edit.
 
-1. Evidence step 3 for review-heavy-01 must remain readable and internally consistent after an automated edit.
+3. Evidence step 3 for review-heavy-01 must remain readable and internally consistent after an automated edit.
 
 Review point 2 for review-heavy-01 needs an independent answer.
 
