@@ -145,6 +145,7 @@ class TestAdeuFloor:
         import tomllib
         from pathlib import Path
 
+        from adeu.diff import format_word_patch_diff
         from adeu.mcp_components._response_builders import (
             build_budget_guard_message,
             build_changes_response,
@@ -153,6 +154,7 @@ class TestAdeuFloor:
         from adeu.pagination import parse_page_arg
         from adeu.redline.engine import RedlineEngine
 
+        assert callable(format_word_patch_diff)
         assert callable(parse_page_arg)
         assert callable(build_changes_response)
         assert callable(build_page_range_response)
@@ -163,4 +165,4 @@ class TestAdeuFloor:
         pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
         deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
         adeu_req = next(d for d in deps if d.startswith("adeu"))
-        assert adeu_req == "adeu>=2.4.0", f"stale adeu floor: {adeu_req}"
+        assert adeu_req == "adeu>=4.0.0", f"stale adeu floor: {adeu_req}"
