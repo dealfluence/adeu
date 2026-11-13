@@ -1,6 +1,6 @@
 [project]
 name = "langchain-adeu"
-version = "3.2.2"
+version = "4.0.0"
 description = "LangChain integration for Adeu — track-changes for DOCX in the LLM era"
 authors = [
     { name = "Mikko Korpela" },
@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "langchain-core>=0.3.0,<2.0.0",
-    "adeu>=2.4.0",
+    "adeu>=4.0.0",
     "pydantic>=2.0.0",
 ]
 
