@@ -54,7 +54,7 @@
     "@types/node": "^26.6.6",
     "@typescript-eslint/parser": "^8.72.2",
     "eslint": "9.29.0",
-    "n8n-workflow": "^2.44.0",
+    "n8n-workflow": "^3.2.0",
     "tsup": "^9.0.0",
     "typescript": "~6.0.3",
     "vitest": "^5.1.0"
