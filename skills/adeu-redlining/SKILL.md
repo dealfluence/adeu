@@ -6,7 +6,7 @@ compatibility: Requires either the Adeu MCP server (preferred — Node `@adeu/mc
 metadata:
   homepage: https://adeu.ai
   repository: https://github.com/dealfluence/adeu
-  version: "4.0.0"
+  version: "4.0.1"
 ---
 
 # Adeu — Tracked-Changes Redlining for .docx

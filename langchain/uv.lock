@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "adeu"
-version = "4.0.0"
+version = "4.0.1"
 source = { editable = "../python" }
 dependencies = [
     { name = "diff-match-patch" },
@@ -48,7 +48,7 @@ dev = [
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "mypy" },
     { name = "ooxml-integrity", specifier = "==0.10.0" },
-    { name = "pytest" },
+    { name = "pytest", specifier = "<9.2" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff" },
@@ -354,7 +354,7 @@ wheels = [
 
 [[package]]
 name = "langchain-adeu"
-version = "4.0.0"
+version = "4.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "adeu" },
