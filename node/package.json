@@ -30,10 +30,22 @@
     "See BUG_cli_test_encoding_and_n8n_lint_toolchain.md."
   ],
   "devDependencies": {
-    "@types/node": "^26.6.5",
-    "tsup": "^8.5.1",
+    "@types/node": "^26.6.6",
+    "tsup": "^9.0.0",
     "typescript": "~6.0.3",
-    "vitest": "^5.0.4",
+    "vitest": "^5.1.0",
     "zod": "4.6.7"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.1.8",
+    "axios": "^1.21.1",
+    "body-parser": "^2.4.0",
+    "brace-expansion": "^5.0.13",
+    "esbuild": "^0.28.2",
+    "fast-uri": "^3.1.9",
+    "follow-redirects": "^1.16.3",
+    "hono": "^4.13.18",
+    "minimatch": "^11.0.8",
+    "nanoid": "^3.3.18"
   }
 }

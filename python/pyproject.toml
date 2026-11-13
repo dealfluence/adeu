@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    "fastmcp[apps]>=3.4.7,<4",
+    "fastmcp[apps]>=3.4.10,<4",
     "jinja2>=3.1.6",
 ]
 all = [
@@ -55,15 +55,18 @@ build-backend = "hatchling.build"
 # Keep fastmcp[apps] and jinja2 mirrored with [project.optional-dependencies].mcp
 # (enforced by tests/test_optional_mcp.py) so plain `uv sync` installs the full suite.
 dev = [
-    "fastmcp[apps]>=3.4.7,<4",
+    "fastmcp[apps]>=3.4.10,<4",
     "jinja2>=3.1.6",
-    "pytest",
+    # pytest 9.2.0 renamed private Node._nodeid -> Node._id, which breaks
+    # pytest-xdist<=3.8.0's `--dist loadgroup` rewrite (`item._nodeid = ...@group`)
+    # and scatters win32 Live Word COM tests across parallel workers.
+    "pytest<9.2",
     "ruff",
     "mypy",
     "hypothesis",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ooxml-integrity==0.8.1",
+    "ooxml-integrity==0.10.0",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -30,7 +30,7 @@
   "main": "dist/nodes/Adeu/Adeu.node.js",
   "scripts": {
     "build": "tsup && npm run copy-assets",
-    "copy-assets": "copyfiles -u 1 \"nodes/**/*.svg\" \"nodes/**/*.json\" dist/nodes/",
+    "copy-assets": "node -e \"const fs=require('fs');fs.cpSync('nodes','dist/nodes',{recursive:true,filter:s=>fs.statSync(s).isDirectory()||/\\.(svg|json)$/.test(s)})\"",
     "dev": "tsup --watch",
     "lint": "eslint nodes/**/*.ts",
     "lintfix": "eslint nodes/**/*.ts --fix",
@@ -50,14 +50,13 @@
   },
   "devDependencies": {
     "@adeu/core": "^4.0.0",
-    "@n8n/eslint-plugin-community-nodes": "^0.36.0",
-    "@types/node": "^26.6.5",
-    "@typescript-eslint/parser": "^8.71.2",
-    "copyfiles": "^2.4.1",
-    "eslint": "^10.12.0",
+    "@n8n/eslint-plugin-community-nodes": "^0.40.0",
+    "@types/node": "^26.6.6",
+    "@typescript-eslint/parser": "^8.72.2",
+    "eslint": "9.29.0",
     "n8n-workflow": "^2.44.0",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "~6.0.3",
-    "vitest": "^5.0.4"
+    "vitest": "^5.1.0"
   }
 }

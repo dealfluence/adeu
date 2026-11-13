@@ -12,6 +12,10 @@ updates:
       # FastMCP 3 was deliberate (c443b15, see #131).
       - dependency-name: "fastmcp"
         update-types: ["version-update:semver-major"]
+      # pytest 9.2.0 renamed Node._nodeid -> Node._id, breaking pytest-xdist<=3.8.0
+      # `--dist loadgroup` serialization required by win32 Live Word COM tests.
+      - dependency-name: "pytest"
+        versions: [">= 9.2.0"]
     groups:
       python-minor-patch:
         applies-to: version-updates
@@ -46,6 +50,14 @@ updates:
       # arrives with a deliberate SDK v2 migration (see #152).
       - dependency-name: "@modelcontextprotocol/ext-apps"
         update-types: ["version-update:semver-major"]
+      # @n8n/eslint-plugin-community-nodes@0.40.0 declares exact peer
+      # `eslint: "9.29.0"`; bumping eslint to 10.x triggers npm ERESOLVE.
+      - dependency-name: "eslint"
+        versions: [">= 10.0.0"]
+      # Preserve the root ~6.0.3 split TypeScript pin until typescript-eslint
+      # supports TS 7 (see AGENTS.md).
+      - dependency-name: "typescript"
+        versions: [">= 6.1.0 < 7.0.0"]
     groups:
       node-minor-patch:
         applies-to: version-updates
