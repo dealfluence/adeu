@@ -67,10 +67,22 @@ jobs:
           .venv-core/bin/adeu extract ../shared/fixtures/golden.docx --page all > /dev/null
           .venv-core/bin/adeu diff ../shared/fixtures/golden.docx ../shared/fixtures/golden2.docx > /dev/null
           .venv-core/bin/adeu-server --version
-          if .venv-core/bin/adeu-server 2>err.txt; then
+          if .venv-core/bin/adeu-server < /dev/null 2>err.txt; then
             echo "adeu-server unexpectedly succeeded without [mcp]" && exit 1
           fi
           grep -q "adeu\[mcp\]" err.txt
+          .venv-core/bin/python -c "
+          import json, subprocess
+          reqs = '\n'.join([
+              json.dumps({'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'ci','version':'1.0'}}}),
+              json.dumps({'jsonrpc':'2.0','id':2,'method':'tools/call','params':{'name':'read_docx','arguments':{'file_path':'test.docx'}}}),
+          ]) + '\n'
+          p = subprocess.run(['.venv-core/bin/adeu-server'], input=reqs, capture_output=True, text=True, encoding='utf-8')
+          assert p.returncode == 0, p.stderr
+          msgs = [json.loads(line) for line in p.stdout.splitlines()]
+          assert msgs[1]['result']['isError'] is True
+          assert 'adeu[mcp]' in msgs[1]['result']['content'][0]['text']
+          "
           rm -rf .venv-core err.txt
 
   node-test:

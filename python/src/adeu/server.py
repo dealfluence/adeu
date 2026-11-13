@@ -1,6 +1,9 @@
 import argparse
+import json
 import logging
+import queue
 import sys
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,23 @@ _MISSING_MCP_MESSAGE = (
     '  * uv tool:     uv tool install "adeu[mcp]"\n'
     '  * pip / uv:    pip install "adeu[mcp]"   (or: uv add "adeu[mcp]")\n'
     "  * Claude App:  uvx adeu init             (updates claude_desktop_config.json)"
+)
+
+_MISSING_MCP_AGENT_MESSAGE = (
+    _MISSING_MCP_MESSAGE + "\n\nIf you have shell/CLI access, core `adeu` CLI is already available without `[mcp]`:\n"
+    "  * Read / inspect:  uvx adeu extract <file.docx> --page all  (or --mode outline / changes / fields)\n"
+    "  * Diff two files:  uvx adeu diff <orig.docx> <mod.docx>\n"
+    "  * Apply edits:     uvx adeu apply <file.docx> <changes.json> -o <out.docx>\n"
+    "  * Sanitize DOCX:   uvx adeu sanitize <file.docx> -o <out.docx>"
+)
+
+_DEGRADED_TOOL_NAMES: tuple[str, ...] = (
+    "accept_all_changes",
+    "apply_text_revision",
+    "diff_docx_files",
+    "process_document_batch",
+    "read_docx",
+    "sanitize_docx",
 )
 
 
@@ -147,15 +167,180 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _handle_degraded_rpc_message(msg: dict[str, Any], scope: str) -> dict[str, Any] | None:
+    """Minimal stdlib JSON-RPC 2.0 MCP responder used ONLY when `adeu[mcp]` is missing.
+
+    Completes the stdio handshake so GUI MCP hosts (Claude Desktop, Cursor, Windsurf)
+    keep the server visible instead of silently dropping it, and returns actionable
+    `adeu[mcp]` + CLI fallback instructions (`isError: True`) on any `tools/call`.
+    """
+    if "id" not in msg or msg["id"] is None:
+        return None  # JSON-RPC notification (e.g. notifications/initialized)
+
+    msg_id = msg["id"]
+    method = msg.get("method")
+    params_raw = msg.get("params")
+    params: dict[str, Any] = params_raw if isinstance(params_raw, dict) else {}
+
+    if method == "server/discover":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": ["2026-07-28", "2025-06-18", "2024-11-05"],
+                "protocolVersions": ["2026-07-28", "2025-06-18", "2024-11-05"],
+                "serverInfo": {"name": "adeu-redlining-service", "version": version},
+                "capabilities": {"tools": {}},
+            },
+        }
+
+    if method == "initialize":
+        meta_raw = params.get("_meta")
+        meta: dict[str, Any] = meta_raw if isinstance(meta_raw, dict) else {}
+        proto = params.get("protocolVersion") or meta.get("io.modelcontextprotocol/protocolVersion") or "2024-11-05"
+        if not isinstance(proto, str) or not proto.strip():
+            proto = "2024-11-05"
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "protocolVersion": proto,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "adeu-redlining-service", "version": version},
+                "instructions": _MISSING_MCP_AGENT_MESSAGE,
+            },
+        }
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
+    if method == "tools/list":
+        tool_names = list(_DEGRADED_TOOL_NAMES)
+        if sys.platform == "win32" and scope == "all":
+            tool_names.extend(["open_word_document", "save_active_word_document"])
+            tool_names.sort()
+        # Omit `$schema` and `additionalProperties: false` so Claude Desktop's
+        # 2020-12 Ajv accepts the tool definitions and forwards real arguments
+        # to `tools/call`, where the actionable setup message is returned.
+        tools = [
+            {
+                "name": name,
+                "description": (
+                    "[SETUP REQUIRED: `adeu[mcp]` extra not installed] "
+                    'Update MCP config to `--from "adeu[mcp]"` (or run `uvx adeu init`), '
+                    "or use `uvx adeu` CLI directly."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to DOCX file"},
+                    },
+                },
+            }
+            for name in tool_names
+        ]
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
+
+    if method == "tools/call":
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "content": [{"type": "text", "text": _MISSING_MCP_AGENT_MESSAGE}],
+                "isError": True,
+            },
+        }
+
+    if method == "resources/list":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"resources": []}}
+
+    if method == "prompts/list":
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"prompts": []}}
+
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+def _run_missing_mcp_fallback(scope: str) -> "None":
+    """Exit 1 with stderr instructions for interactive/CLI callers, or serve a
+    stdlib degraded-mode MCP loop if an MCP host sent a JSON-RPC handshake on stdin.
+    """
+    try:
+        is_tty = sys.stdin.isatty()
+    except Exception:
+        is_tty = True
+
+    if is_tty:
+        print(_MISSING_MCP_MESSAGE, file=sys.stderr)
+        sys.exit(1)
+
+    line_q: queue.Queue[str] = queue.Queue(maxsize=1)
+
+    def _read_first_line() -> None:
+        try:
+            line_q.put(sys.stdin.readline())
+        except Exception:
+            line_q.put("")
+
+    threading.Thread(target=_read_first_line, daemon=True).start()
+    try:
+        first_line = line_q.get(timeout=0.5)
+    except queue.Empty:
+        print(_MISSING_MCP_MESSAGE, file=sys.stderr)
+        sys.exit(1)
+
+    first_msg: dict[str, Any] | None = None
+    if first_line and first_line.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(first_line)
+            if isinstance(parsed, dict) and parsed.get("method") in {
+                "initialize",
+                "server/discover",
+                "ping",
+            }:
+                first_msg = parsed
+        except Exception:
+            first_msg = None
+
+    print(_MISSING_MCP_MESSAGE, file=sys.stderr, flush=True)
+    if first_msg is None:
+        sys.exit(1)
+
+    def _write_rpc(resp: dict[str, Any] | None) -> None:
+        if resp is None:
+            return
+        sys.stdout.write(json.dumps(resp, ensure_ascii=True) + "\n")
+        sys.stdout.flush()
+
+    _write_rpc(_handle_degraded_rpc_message(first_msg, scope))
+    while True:
+        raw = sys.stdin.readline()
+        if not raw:
+            break
+        stripped = raw.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            msg = json.loads(stripped)
+        except Exception:
+            continue
+        if isinstance(msg, dict):
+            _write_rpc(_handle_degraded_rpc_message(msg, scope))
+    sys.exit(0)
+
+
 def main():
     # --help/--version print and exit inside argparse here — before the stdio
     # transport ever starts (QA 2026-07-19 v8 F-06), even without fastmcp.
     global requested_scope
     args = _parse_server_args(sys.argv[1:])
-    if _MCP_IMPORT_ERROR is not None:
-        print(_MISSING_MCP_MESSAGE, file=sys.stderr)
-        sys.exit(1)
     requested_scope = (args.scope or "all").lower()
+    if _MCP_IMPORT_ERROR is not None:
+        _run_missing_mcp_fallback(requested_scope)
     mcp.run()
 
 

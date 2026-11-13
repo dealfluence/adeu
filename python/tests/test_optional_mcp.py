@@ -8,7 +8,7 @@ import sys
 from adeu.diff import generate_edits_from_text
 
 
-def _run_python_without_mcp(code: str) -> subprocess.CompletedProcess[str]:
+def _run_python_without_mcp(code: str, stdin_text: str | None = None) -> subprocess.CompletedProcess[str]:
     """Execute `code` in a subprocess where `fastmcp`, `mcp`, and `jinja2` fail to import."""
     blocker = (
         "import builtins\n"
@@ -23,6 +23,7 @@ def _run_python_without_mcp(code: str) -> subprocess.CompletedProcess[str]:
     )
     return subprocess.run(
         [sys.executable, "-c", blocker + "\n" + code],
+        input=stdin_text,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -112,10 +113,91 @@ class TestServerGracefulDegradationWithoutMcp:
             assert ("adeu-server" in proc.stdout) or ("usage" in proc.stdout.lower())
 
     def test_server_exits_cleanly_with_install_guidance_without_fastmcp(self):
-        proc = _run_python_without_mcp("import sys\nsys.argv = ['adeu-server']\nfrom adeu.server import main\nmain()\n")
+        proc = _run_python_without_mcp(
+            "import sys\nsys.argv = ['adeu-server']\nfrom adeu.server import main\nmain()\n",
+            stdin_text="",
+        )
         assert proc.returncode == 1
         assert "adeu[mcp]" in proc.stderr
         assert "Traceback" not in proc.stderr
+
+    def test_server_speaks_degraded_mcp_over_stdio_so_agents_get_actionable_next_steps(self):
+        import json
+
+        rpc_stream = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "clientInfo": {"name": "claude-desktop", "version": "1.0.0"},
+                            },
+                        }
+                    ),
+                    json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+                    json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 3,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "read_docx",
+                                "arguments": {"file_path": "contract.docx", "mode": "outline", "page": "all"},
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        proc = _run_python_without_mcp(
+            "import sys\nsys.argv = ['adeu-server']\nfrom adeu.server import main\nmain()\n",
+            stdin_text=rpc_stream,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "adeu[mcp]" in proc.stderr
+
+        lines = [json.loads(line) for line in proc.stdout.strip().splitlines() if line.strip()]
+        # Notification produces no response -> exactly 3 responses (ids 1, 2, 3)
+        assert [m["id"] for m in lines] == [1, 2, 3]
+
+        init_res = lines[0]["result"]
+        assert init_res["protocolVersion"] == "2025-06-18"
+        assert "adeu[mcp]" in init_res["instructions"]
+        assert "uvx adeu extract" in init_res["instructions"]
+
+        tools = lines[1]["result"]["tools"]
+        tool_names = {t["name"] for t in tools}
+        assert {"read_docx", "process_document_batch", "diff_docx_files", "sanitize_docx"}.issubset(tool_names)
+        for tool_def in tools:
+            assert "$schema" not in tool_def["inputSchema"]
+
+        call_res = lines[2]["result"]
+        assert call_res["isError"] is True
+        err_text = call_res["content"][0]["text"]
+        assert "adeu[mcp]" in err_text
+        assert "uvx adeu init" in err_text
+        assert "uvx adeu extract" in err_text
+
+    def test_server_handles_mcp_discover_probe_without_fastmcp(self):
+        import json
+
+        discover_line = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "server/discover", "params": {}}) + "\n"
+        proc = _run_python_without_mcp(
+            "import sys\nsys.argv = ['adeu-server']\nfrom adeu.server import main\nmain()\n",
+            stdin_text=discover_line,
+        )
+        assert proc.returncode == 0, proc.stderr
+        resp = json.loads(proc.stdout.strip())
+        assert resp["id"] == 7
+        assert "2026-07-28" in resp["result"]["supportedVersions"]
 
     def test_importing_mcp_symbol_from_server_raises_clean_importerror(self):
         proc = _run_python_without_mcp(
