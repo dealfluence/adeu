@@ -7,14 +7,40 @@ import sys
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated, Any, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Annotated, Any, List, Literal, Optional, Union
 
-from fastmcp import Context
-from fastmcp.exceptions import ToolError
-from fastmcp.tools import ToolResult, tool
 from pydantic import BeforeValidator, Field, TypeAdapter, WithJsonSchema
 
-from adeu.diff import generate_edits_from_text
+if TYPE_CHECKING:
+    from fastmcp import Context
+    from fastmcp.exceptions import ToolError
+    from fastmcp.tools import ToolResult, tool
+else:
+    try:
+        from fastmcp import Context
+        from fastmcp.exceptions import ToolError
+        from fastmcp.tools import ToolResult, tool
+    except ModuleNotFoundError:
+
+        class Context:
+            pass
+
+        class ToolError(RuntimeError):
+            pass
+
+        class ToolResult:
+            def __init__(self, content: Any = None, structured_content: Any = None) -> None:
+                self.content = content
+                self.structured_content = structured_content
+
+        def tool(*_args: Any, **_kwargs: Any) -> Any:
+            return lambda fn: fn
+
+
+from adeu.diff import (
+    format_word_patch_diff,
+    generate_edits_from_text,
+)
 from adeu.ingest import extract_text_from_stream
 from adeu.mcp_components._response_builders import (
     BuilderError,
@@ -1037,137 +1063,7 @@ async def diff_docx_files(
     return add_timing_if_debug(start_time, res)
 
 
-def _clamp_display_to_criticmarkup_blocks(
-    raw_target: str, raw_new: str, prefix_len: int, suffix_len: int
-) -> tuple[int, int]:
-    """
-    Backtracks trim_common_context's cut points so neither display string is
-    sliced INSIDE a CriticMarkup block: trimming the common `{--A ` prefix of
-    `{--A B--}` -> `{--A C--}` would emit the orphaned-delimiter payloads
-    `B--}` / `C--}` (QA 2026-07-23 F15). Cuts only ever move OUTWARD (prefix
-    shrinks to the block start, suffix shrinks to just past the block end), so
-    the display region stays a superset of the semantic change.
-    """
-    from adeu.diff import CRITICMARKUP_BLOCK_RE
-
-    span_cache = {s: [(m.start(), m.end()) for m in CRITICMARKUP_BLOCK_RE.finditer(s)] for s in (raw_target, raw_new)}
-
-    changed = True
-    while changed:
-        changed = False
-        for s in (raw_target, raw_new):
-            for b_start, b_end in span_cache[s]:
-                if b_start < prefix_len < b_end:
-                    prefix_len = b_start
-                    changed = True
-                suffix_cut = len(s) - suffix_len
-                if b_start < suffix_cut < b_end:
-                    suffix_len = max(0, len(s) - b_end)
-                    changed = True
-    return prefix_len, suffix_len
-
-
-def _escape_newlines_inside_blocks(s: str) -> str:
-    """
-    Keeps each CriticMarkup block on ONE diff payload line by escaping its
-    internal newlines — a multi-line {>>…<<} bubble otherwise ends a `+` line
-    mid-block and leaks bare closers onto continuation lines (F15).
-    """
-    from adeu.diff import CRITICMARKUP_BLOCK_RE
-
-    return CRITICMARKUP_BLOCK_RE.sub(lambda m: m.group(0).replace("\n", "\\n"), s)
-
-
-_CM_DELIMITER_RE = re.compile(r"\{--|\{\+\+|\{>>|\{==|--\}|\+\+\}|<<\}|==\}")
-
-
-def _balance_context_line(s: str) -> str:
-    """
-    Trims a display-only context window so every CriticMarkup delimiter on the
-    line is paired: the fixed-width window legally slices mid-block, leaving
-    an opener whose closer (or a closer whose opener) lies outside the window
-    (F15). Drops the line's head through the last opener-less closer and
-    truncates at the first closer-less opener.
-    """
-    # Head: drop through the LAST closer with no opener inside the window.
-    depth = 0
-    cut_start = 0
-    for m in _CM_DELIMITER_RE.finditer(s):
-        if m.group(0).startswith("{"):
-            depth += 1
-        elif depth == 0:
-            cut_start = m.end()
-        else:
-            depth -= 1
-    s = s[cut_start:]
-
-    # Tail: truncate at the FIRST opener whose closer is beyond the window.
-    stack: list[int] = []
-    for m in _CM_DELIMITER_RE.finditer(s):
-        if m.group(0).startswith("{"):
-            stack.append(m.start())
-        elif stack:
-            stack.pop()
-    if stack:
-        s = s[: stack[0]]
-    return s
-
-
-def _create_diff_output(original_path: str, modified_path: str, text_orig: str, edits: List[ModifyText]):
-    from adeu.diff import trim_common_context
-
-    output = [
-        f"--- {Path(original_path).name}",
-        f"+++ {Path(modified_path).name}",
-        "",
-    ]
-    CONTEXT_SIZE = 40
-
-    for edit in edits:
-        raw_start = getattr(edit, "_match_start_index", 0) or 0
-        raw_target = edit.target_text or ""
-        raw_new = edit.new_text or ""
-
-        # Compute the SEMANTIC change region by stripping common context that
-        # `generate_edits_from_text` baked into target_text/new_text (anchor for
-        # synthetic insertions, common prefix/suffix from coalesced edits).
-        prefix_len, suffix_len = trim_common_context(raw_target, raw_new)
-        # Never cut a display string inside a CriticMarkup block (F15).
-        prefix_len, suffix_len = _clamp_display_to_criticmarkup_blocks(raw_target, raw_new, prefix_len, suffix_len)
-
-        target_end_in_target = len(raw_target) - suffix_len
-        new_end_in_new = len(raw_new) - suffix_len
-
-        display_target = _escape_newlines_inside_blocks(raw_target[prefix_len:target_end_in_target])
-        display_new = _escape_newlines_inside_blocks(raw_new[prefix_len:new_end_in_new])
-
-        # Shift the anchor point in the original text by the stripped prefix.
-        change_start = raw_start + prefix_len
-        change_end = change_start + (target_end_in_target - prefix_len)
-
-        # Compute context windows around the SEMANTIC change region.
-        pre_start = max(0, change_start - CONTEXT_SIZE)
-        pre_context = text_orig[pre_start:change_start]
-        pre_context = _balance_context_line(pre_context.replace("\n", " ").replace("\r", ""))
-        if pre_start > 0:
-            pre_context = "..." + pre_context
-
-        post_end = min(len(text_orig), change_end + CONTEXT_SIZE)
-        post_context = text_orig[change_end:post_end]
-        post_context = _balance_context_line(post_context.replace("\n", " ").replace("\r", ""))
-        if post_end < len(text_orig):
-            post_context = post_context + "..."
-
-        output.append("@@ Word Patch @@")
-        output.append(f" {pre_context}")
-        if display_target:
-            output.append(f"- {display_target}")
-        if display_new:
-            output.append(f"+ {display_new}")
-        output.append(f" {post_context}")
-        output.append("")
-
-    return "\n".join(output)
+_create_diff_output = format_word_patch_diff
 
 
 @tool(

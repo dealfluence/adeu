@@ -20,17 +20,11 @@ from adeu.compare import ComparisonError, build_redline_comparison, refuse_input
 from adeu.diff import (
     collect_media_difference_warnings,
     create_unified_diff,
+    format_word_patch_diff,
     generate_edits_from_text,
     generate_structured_edits,
 )
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
-
-# Intentional import from a non-public path: `_create_diff_output` is the
-# canonical formatter for Adeu's word-patch diff and currently lives only
-# in the MCP tool module. We accept the coupling rather than duplicating
-# the formatter; in a future Adeu release this helper should be promoted
-# to `adeu.diff` proper. Track in the adeu monorepo when that happens.
-from adeu.mcp_components.tools.document import _create_diff_output
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
 from langchain_core.tools import BaseTool, ToolException
@@ -206,7 +200,7 @@ class AdeuDiffDocx(BaseTool):
         if not edits:
             return warning_prefix + _NO_DIFF_MESSAGE if warning_prefix else _NO_DIFF_MESSAGE
 
-        diff_output = _create_diff_output(str(orig), str(mod), text_orig, edits)
+        diff_output = format_word_patch_diff(str(orig), str(mod), text_orig, edits)
         return warning_prefix + diff_output
 
     @staticmethod

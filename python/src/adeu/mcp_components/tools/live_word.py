@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import os
 import re
@@ -6,9 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import structlog
-from fastmcp import Context
-from fastmcp.exceptions import ToolError
-from fastmcp.tools import ToolResult
 
 from adeu import RedlineEngine
 from adeu.mcp_components._response_builders import (
@@ -27,7 +26,8 @@ from adeu.utils.text import batch_details_header
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    pass
+    from fastmcp import Context
+    from fastmcp.tools import ToolResult
 
 
 def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
@@ -344,6 +344,9 @@ if sys.platform == "win32":
         match_offset: int = 0,
         full_paragraph: bool = False,
     ) -> ToolResult:
+        from fastmcp.exceptions import ToolError
+        from fastmcp.tools import ToolResult
+
         await ctx.info(
             f"Extracting live Word document via WordOpenXML "
             f"(clean_view={clean_view}, path={file_path}, mode={mode}, page={page}, "
@@ -1269,6 +1272,8 @@ if sys.platform == "win32":
         file_path: Optional[str] = None,
         gate_overrides: Optional[dict] = None,
     ) -> str:
+        from fastmcp.exceptions import ToolError
+
         if not changes:
             return "No changes provided."
 
@@ -1298,6 +1303,8 @@ if sys.platform == "win32":
             raise ToolError(str(e)) from e
 
     async def open_word_document_impl(ctx: Context, file_path: str, visible: bool = True) -> str:
+        from fastmcp.exceptions import ToolError
+
         await ctx.info(f"Opening {file_path} in Word...")
         pythoncom.CoInitialize()
         try:
@@ -1321,6 +1328,8 @@ if sys.platform == "win32":
     async def save_active_word_document_impl(
         ctx: Context, output_path: Optional[str] = None, close: bool = False
     ) -> str:
+        from fastmcp.exceptions import ToolError
+
         await ctx.info("Saving active Word document...")
         pythoncom.CoInitialize()
         try:

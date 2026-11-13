@@ -36,7 +36,7 @@ Adeu ships as a [Claude Code plugin](https://docs.claude.com/en/docs/claude-code
 /plugin install adeu-redlining@adeu-skills
 ```
 
-For best results, also connect either the Node MCP server (`npx -y @adeu/mcp-server`) or the Python MCP server (`uvx --from adeu adeu-server`). The plugin works without an MCP server too — it falls back to driving the `uvx adeu` CLI via Bash.
+For best results, also connect either the Node MCP server (`npx -y @adeu/mcp-server`) or the Python MCP server (`uvx --from "adeu[mcp]" adeu-server`). The plugin works without an MCP server too — it falls back to driving the `uvx adeu` CLI via Bash.
 
 ### Other Skills-Compatible Agents (Cursor, Windsurf, VS Code Copilot, etc.)
 Adeu's redlining skill follows the open [Agent Skills specification](https://agentskills.io) and works with any compatible agent:
@@ -81,7 +81,7 @@ For IDEs or clients that configure MCP servers via JSON, you can use either the 
   "mcpServers": {
     "adeu": {
       "command": "uvx",
-      "args": ["--from", "adeu", "adeu-server"]
+      "args": ["--from", "adeu[mcp]", "adeu-server"]
     }
   }
 }

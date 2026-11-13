@@ -2,7 +2,7 @@
 name: adeu-redlining
 description: Use this skill when reviewing, editing, redlining, or negotiating an existing Microsoft Word document (.docx) — including proposing edits as tracked changes, accepting or rejecting existing tracked changes, replying to comments, comparing two versions, sanitizing author metadata, or finalizing a contract for distribution. Use whenever the user mentions redlines, track changes, contract review, .docx editing, or a Word document they want changed, even if they don't name a specific tool. Do NOT use for creating a Word document from scratch with no source file — use the docx skill for that.
 license: MIT (see LICENSE.txt)
-compatibility: Requires either the Adeu MCP server (preferred — Node `@adeu/mcp-server` or Python `adeu`) OR `uvx` for the CLI fallback. Live MS Word integration requires Windows + the Python `adeu` server.
+compatibility: Requires either the Adeu MCP server (preferred — Node `@adeu/mcp-server` or Python `adeu[mcp]`) OR `uvx` for the CLI fallback. Live MS Word integration requires Windows + the Python `adeu[mcp]` server.
 metadata:
   homepage: https://adeu.ai
   repository: https://github.com/dealfluence/adeu
@@ -34,7 +34,7 @@ Adeu runs in two modes. Pick the first that applies and stop:
 3. **Neither available.** Tell the user. Suggested install lines, in this order:
    - Claude Code plugin (covers everything): `/plugin marketplace add dealfluence/adeu` then `/plugin install adeu-redlining@adeu-skills`
    - Node MCP server (recommended for most users, zero Python required): `npx -y @adeu/mcp-server`
-   - Python MCP server (required for Live MS Word integration on Windows, and for `protection_mode="encrypt"` on `finalize_document`): `uvx --from adeu adeu-server`
+   - Python MCP server (required for Live MS Word integration on Windows, and for `protection_mode="encrypt"` on `finalize_document`): `uvx --from "adeu[mcp]" adeu-server`
    - Python CLI only (for scripted/headless pipelines): `uv tool install adeu`
 
 Do not present these as options to the user mid-task. Pick the available path and proceed.

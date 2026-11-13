@@ -24,11 +24,18 @@ dependencies = [
     "pydantic>=2.12",
     "lxml>=5.0.0",
     "diff-match-patch>=20230430",
-    "fastmcp[apps]>=3.4.7,<4",
-    "jinja2>=3.1.6",
     "pywin32; sys_platform == 'win32'",
     "rapidfuzz>=3.14.5",
     "regex>=2024.11.6",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "fastmcp[apps]>=3.4.7,<4",
+    "jinja2>=3.1.6",
+]
+all = [
+    "adeu[mcp]",
 ]
 
 [project.urls]
@@ -45,7 +52,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+# Keep fastmcp[apps] and jinja2 mirrored with [project.optional-dependencies].mcp
+# (enforced by tests/test_optional_mcp.py) so plain `uv sync` installs the full suite.
 dev = [
+    "fastmcp[apps]>=3.4.7,<4",
+    "jinja2>=3.1.6",
     "pytest",
     "ruff",
     "mypy",

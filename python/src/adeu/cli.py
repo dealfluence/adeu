@@ -143,7 +143,7 @@ def handle_init(args: argparse.Namespace):
         # PyPI release, so the MCP server silently drifts away from the CLI
         # the user tested (QA 2026-07-19 F-16).
         version, _sha, _ = get_build_info()
-        package_ref = f"adeu=={version}" if version and version not in ("unknown", "0.0.0") else "adeu"
+        package_ref = f"adeu[mcp]=={version}" if version and version not in ("unknown", "0.0.0") else "adeu[mcp]"
 
         mcp_servers["adeu"] = {
             "command": uvx_path,  # absolute path, not bare "uvx"

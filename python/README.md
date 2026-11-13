@@ -133,7 +133,7 @@ The I/O contract (see `docs/cli-agent-spec.md` for the full specification):
 
 ## The Python SDK
 
-The SDK allows you to embed Adeu's Redline Engine directly into your own Python applications.
+The SDK allows you to embed Adeu's Redline Engine directly into your own Python applications without pulling in MCP server dependencies (`pip install adeu` or `uv add adeu`).
 
 ### Applying Tracked Changes
 The engine processes a flat list of `DocumentChange` objects (`ModifyText`, `SetField`, `AcceptChange`, `RejectChange`, `ReplyComment`, `InsertTableRow`, `DeleteTableRow`).
@@ -201,13 +201,14 @@ print(result.report_text)
 
 ## The MCP Server
 
-The Python backend exposes Adeu's capabilities to AI agents via the Model Context Protocol (MCP), powered by FastMCP.
+The Python backend exposes Adeu's capabilities to AI agents via the Model Context Protocol (MCP), powered by FastMCP (shipped in the optional `adeu[mcp]` extra so SDK and CLI installs stay slim).
 
 ### Running the Server
 You can boot the server over stdio for agent consumption:
 ```bash
-uvx --from adeu adeu-server
+uvx --from "adeu[mcp]" adeu-server
 ```
+Or install into an existing environment with `pip install "adeu[mcp]"` / `uv add "adeu[mcp]"`.
 
 ### Claude Desktop Integration
 Adeu provides an initialization command to automatically inject the MCP server into your local Claude Desktop configuration.

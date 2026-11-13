@@ -65,7 +65,7 @@ def test_init_creates_fresh_config(mock_config_path):
     # (QA 2026-07-19 F-16).
     import adeu
 
-    assert f"adeu=={adeu.__version__}" in cmd["args"]
+    assert f"adeu[mcp]=={adeu.__version__}" in cmd["args"]
     assert "--scope" in cmd["args"]
     assert "all" in cmd["args"]
 

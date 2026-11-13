@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import structlog
@@ -1635,3 +1636,131 @@ def create_unified_diff(
     b_lines = modified_text.splitlines(keepends=True)
     diff = difflib.unified_diff(a_lines, b_lines, fromfile=fromfile, tofile=tofile)
     return "".join(diff)
+
+
+_CM_DELIMITER_RE = re.compile(r"\{--|\{\+\+|\{>>|\{==|--\}|\+\+\}|<<\}|==\}")
+
+
+def _clamp_display_to_criticmarkup_blocks(
+    raw_target: str, raw_new: str, prefix_len: int, suffix_len: int
+) -> tuple[int, int]:
+    """
+    Backtracks trim_common_context's cut points so neither display string is
+    sliced INSIDE a CriticMarkup block: trimming the common `{--A ` prefix of
+    `{--A B--}` -> `{--A C--}` would emit the orphaned-delimiter payloads
+    `B--}` / `C--}` (QA 2026-07-23 F15). Cuts only ever move OUTWARD (prefix
+    shrinks to the block start, suffix shrinks to just past the block end), so
+    the display region stays a superset of the semantic change.
+    """
+    span_cache = {s: [(m.start(), m.end()) for m in CRITICMARKUP_BLOCK_RE.finditer(s)] for s in (raw_target, raw_new)}
+
+    changed = True
+    while changed:
+        changed = False
+        for s in (raw_target, raw_new):
+            for b_start, b_end in span_cache[s]:
+                if b_start < prefix_len < b_end:
+                    prefix_len = b_start
+                    changed = True
+                suffix_cut = len(s) - suffix_len
+                if b_start < suffix_cut < b_end:
+                    suffix_len = max(0, len(s) - b_end)
+                    changed = True
+    return prefix_len, suffix_len
+
+
+def _escape_newlines_inside_blocks(s: str) -> str:
+    """
+    Keeps each CriticMarkup block on ONE diff payload line by escaping its
+    internal newlines — a multi-line {>>…<<} bubble otherwise ends a `+` line
+    mid-block and leaks bare closers onto continuation lines (F15).
+    """
+    return CRITICMARKUP_BLOCK_RE.sub(lambda m: m.group(0).replace("\n", "\\n"), s)
+
+
+def _balance_context_line(s: str) -> str:
+    """
+    Trims a display-only context window so every CriticMarkup delimiter on the
+    line is paired: the fixed-width window legally slices mid-block, leaving
+    an opener whose closer (or a closer whose opener) lies outside the window
+    (F15). Drops the line's head through the last opener-less closer and
+    truncates at the first closer-less opener.
+    """
+    depth = 0
+    cut_start = 0
+    for m in _CM_DELIMITER_RE.finditer(s):
+        if m.group(0).startswith("{"):
+            depth += 1
+        elif depth == 0:
+            cut_start = m.end()
+        else:
+            depth -= 1
+    s = s[cut_start:]
+
+    stack: list[int] = []
+    for m in _CM_DELIMITER_RE.finditer(s):
+        if m.group(0).startswith("{"):
+            stack.append(m.start())
+        elif stack:
+            stack.pop()
+    if stack:
+        s = s[: stack[0]]
+    return s
+
+
+def format_word_patch_diff(
+    original_path: str,
+    modified_path: str,
+    text_orig: str,
+    edits: List[ModifyText],
+) -> str:
+    """Format precomputed `ModifyText` hunks into Adeu's `@@ Word Patch @@` view."""
+    output = [
+        f"--- {Path(original_path).name}",
+        f"+++ {Path(modified_path).name}",
+        "",
+    ]
+    context_size = 40
+
+    for edit in edits:
+        raw_start = getattr(edit, "_match_start_index", 0) or 0
+        raw_target = edit.target_text or ""
+        raw_new = edit.new_text or ""
+
+        prefix_len, suffix_len = trim_common_context(raw_target, raw_new)
+        prefix_len, suffix_len = _clamp_display_to_criticmarkup_blocks(raw_target, raw_new, prefix_len, suffix_len)
+
+        target_end_in_target = len(raw_target) - suffix_len
+        new_end_in_new = len(raw_new) - suffix_len
+
+        display_target = _escape_newlines_inside_blocks(raw_target[prefix_len:target_end_in_target])
+        display_new = _escape_newlines_inside_blocks(raw_new[prefix_len:new_end_in_new])
+
+        change_start = raw_start + prefix_len
+        change_end = change_start + (target_end_in_target - prefix_len)
+
+        pre_start = max(0, change_start - context_size)
+        pre_context = text_orig[pre_start:change_start]
+        pre_context = _balance_context_line(pre_context.replace("\n", " ").replace("\r", ""))
+        if pre_start > 0:
+            pre_context = "..." + pre_context
+
+        post_end = min(len(text_orig), change_end + context_size)
+        post_context = text_orig[change_end:post_end]
+        post_context = _balance_context_line(post_context.replace("\n", " ").replace("\r", ""))
+        if post_end < len(text_orig):
+            post_context = post_context + "..."
+
+        output.append("@@ Word Patch @@")
+        output.append(f" {pre_context}")
+        if display_target:
+            output.append(f"- {display_target}")
+        if display_new:
+            output.append(f"+ {display_new}")
+        output.append(f" {post_context}")
+        output.append("")
+
+    return "\n".join(output)
+
+
+_create_diff_output = format_word_patch_diff

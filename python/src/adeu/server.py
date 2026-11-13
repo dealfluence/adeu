@@ -3,16 +3,21 @@ import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import structlog
-from fastmcp import FastMCP
-from fastmcp.server.providers import FileSystemProvider
-from fastmcp.server.transforms import Transform
-from fastmcp.tools import Tool
-from fastmcp.utilities.types import Image
-from mcp.types import Icon
 
 from adeu.mcp_components.shared import get_build_info
+
+_MISSING_MCP_MESSAGE = (
+    "Error: Adeu's MCP server dependencies are not installed.\n"
+    "Core `adeu` installs only the DOCX engine and CLI; FastMCP lives in the `mcp` extra.\n\n"
+    "Install or launch with the `mcp` extra:\n"
+    '  * uvx:         uvx --from "adeu[mcp]" adeu-server\n'
+    '  * uv tool:     uv tool install "adeu[mcp]"\n'
+    '  * pip / uv:    pip install "adeu[mcp]"   (or: uv add "adeu[mcp]")\n'
+    "  * Claude App:  uvx adeu init             (updates claude_desktop_config.json)"
+)
 
 
 def _parse_server_args(argv: "list[str]") -> argparse.Namespace:
@@ -51,85 +56,105 @@ for i, arg in enumerate(sys.argv):
     if arg == "--scope" and i + 1 < len(sys.argv):
         requested_scope = sys.argv[i + 1].lower()
 
-logging.basicConfig(stream=sys.stderr, level=logging.INFO if requested_scope != "all" else logging.WARNING, force=True)
-
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer(),
-    ],
-    logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-)
-
-to_client_logger = logging.getLogger("fastmcp.server.context.to_client")
-to_client_logger.setLevel(level=logging.DEBUG)
-
-server_icons = []
-logo_path = Path(__file__).parent / "assets" / "logo.png"
-if logo_path.exists():
-    try:
-        img = Image(path=str(logo_path))
-        server_icons.append(Icon(src=img.to_data_uri(), mimeType="image/png"))
-    except Exception as e:
-        logging.warning(f"Failed to load server icon: {e}")
-
-# Set up the filesystem provider to auto-discover tools and resources
-mcp_dir = Path(__file__).parent / "mcp_components"
-provider = FileSystemProvider(root=mcp_dir)
-
 version, git_sha, _ = get_build_info()
+_MCP_IMPORT_ERROR: ModuleNotFoundError | None = None
+
+try:
+    from fastmcp import FastMCP
+    from fastmcp.server.providers import FileSystemProvider
+    from fastmcp.server.transforms import Transform
+    from fastmcp.tools import Tool
+    from fastmcp.utilities.types import Image
+    from mcp.types import Icon
+except ModuleNotFoundError as _exc:
+    _MCP_IMPORT_ERROR = _exc
+else:
+    logging.basicConfig(
+        stream=sys.stderr, level=logging.INFO if requested_scope != "all" else logging.WARNING, force=True
+    )
+
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+    to_client_logger = logging.getLogger("fastmcp.server.context.to_client")
+    to_client_logger.setLevel(level=logging.DEBUG)
+
+    server_icons = []
+    logo_path = Path(__file__).parent / "assets" / "logo.png"
+    if logo_path.exists():
+        try:
+            img = Image(path=str(logo_path))
+            server_icons.append(Icon(src=img.to_data_uri(), mimeType="image/png"))
+        except Exception as e:
+            logging.warning(f"Failed to load server icon: {e}")
+
+    # Set up the filesystem provider to auto-discover tools and resources
+    mcp_dir = Path(__file__).parent / "mcp_components"
+    provider = FileSystemProvider(root=mcp_dir)
+
+    class AdeuBuildTag(Transform):
+        """Appends the build stamp to every listed tool description and applies
+        the `--scope` tag filter.
+
+        `Transform` is FastMCP's supported seam for altering how components are
+        presented, and it exists on the 3.4 line as well as on 4.x: server-level
+        transforms are applied inside `Provider.list_tools()`, which
+        `FastMCP.list_tools()` calls, so both a real client and the internal
+        `list_tools()` see the tagged descriptions. It replaces the older
+        monkeypatching of `provider.list_tools` / `FastMCP.list_tools`.
+
+        `list_tools` is a pure function here, so tools are copied
+        (`model_copy`) rather than mutated in place.
+
+        Only `list_tools` is overridden, deliberately: the pre-transform code
+        filtered by scope on LISTING only, never on `get_tool`, so a scoped-out
+        tool stayed callable by name. Overriding `get_tool` here would silently
+        tighten that; scope is a presentation hint, not an access control.
+        """
+
+        async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
+            # `requested_scope` is read at call time (module global), because
+            # main() rewrites it after this module is imported.
+            if requested_scope != "all":
+                tools = [t for t in tools if requested_scope in (t.tags or set())]
+            build_tag = f" [Adeu v{version}+{git_sha}]"
+            out: list[Tool] = []
+            for t in tools:
+                desc = t.description
+                if desc and build_tag not in desc:
+                    t = t.model_copy(update={"description": desc.strip() + build_tag})
+                out.append(t)
+            return out
+
+    # Initialize MCP Server with the provider and transforms
+    mcp = FastMCP(
+        "Adeu Redlining Service",
+        version=version,
+        icons=server_icons if server_icons else None,
+        providers=[provider],
+        transforms=[AdeuBuildTag()],
+    )
 
 
-class AdeuBuildTag(Transform):
-    """Appends the build stamp to every listed tool description and applies
-    the `--scope` tag filter.
-
-    `Transform` is FastMCP's supported seam for altering how components are
-    presented, and it exists on the 3.4 line as well as on 4.x: server-level
-    transforms are applied inside `Provider.list_tools()`, which
-    `FastMCP.list_tools()` calls, so both a real client and the internal
-    `list_tools()` see the tagged descriptions. It replaces the older
-    monkeypatching of `provider.list_tools` / `FastMCP.list_tools`.
-
-    `list_tools` is a pure function here, so tools are copied
-    (`model_copy`) rather than mutated in place.
-
-    Only `list_tools` is overridden, deliberately: the pre-transform code
-    filtered by scope on LISTING only, never on `get_tool`, so a scoped-out
-    tool stayed callable by name. Overriding `get_tool` here would silently
-    tighten that; scope is a presentation hint, not an access control.
-    """
-
-    async def list_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
-        # `requested_scope` is read at call time (module global), because
-        # main() rewrites it after this module is imported.
-        if requested_scope != "all":
-            tools = [t for t in tools if requested_scope in (t.tags or set())]
-        build_tag = f" [Adeu v{version}+{git_sha}]"
-        out: list[Tool] = []
-        for t in tools:
-            desc = t.description
-            if desc and build_tag not in desc:
-                t = t.model_copy(update={"description": desc.strip() + build_tag})
-            out.append(t)
-        return out
-
-
-# Initialize MCP Server with the provider and transforms
-mcp = FastMCP(
-    "Adeu Redlining Service",
-    version=version,
-    icons=server_icons if server_icons else None,
-    providers=[provider],
-    transforms=[AdeuBuildTag()],
-)
+def __getattr__(name: str) -> Any:
+    if _MCP_IMPORT_ERROR is not None and name in {"mcp", "server_icons", "provider", "AdeuBuildTag"}:
+        raise ImportError(_MISSING_MCP_MESSAGE) from _MCP_IMPORT_ERROR
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main():
     # --help/--version print and exit inside argparse here — before the stdio
-    # transport ever starts (QA 2026-07-19 v8 F-06).
+    # transport ever starts (QA 2026-07-19 v8 F-06), even without fastmcp.
     global requested_scope
     args = _parse_server_args(sys.argv[1:])
+    if _MCP_IMPORT_ERROR is not None:
+        print(_MISSING_MCP_MESSAGE, file=sys.stderr)
+        sys.exit(1)
     requested_scope = (args.scope or "all").lower()
     mcp.run()
 

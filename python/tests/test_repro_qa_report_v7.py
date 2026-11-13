@@ -646,7 +646,7 @@ class TestF16InitPinsVersion:
 
         data = json.loads(config_path.read_text(encoding="utf-8"))
         args = data["mcpServers"]["adeu"]["args"]
-        assert f"adeu=={adeu.__version__}" in args, f"unpinned uvx args: {args}"
+        assert f"adeu[mcp]=={adeu.__version__}" in args, f"unpinned uvx args: {args}"
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,27 @@ jobs:
         working-directory: ./python
         run: uv run pytest
 
+      - name: Verify Core Install Without MCP Extra
+        working-directory: ./python
+        run: |
+          uv venv .venv-core --python ${{ matrix.python-version }}
+          uv pip install --python .venv-core/bin/python .
+          .venv-core/bin/python -c "
+          import importlib.util
+          assert importlib.util.find_spec('fastmcp') is None, 'fastmcp leaked into core install'
+          assert importlib.util.find_spec('jinja2') is None, 'jinja2 leaked into core install'
+          from adeu import RedlineEngine, ModifyText, extract_text_from_stream
+          from adeu.diff import format_word_patch_diff
+          "
+          .venv-core/bin/adeu extract ../shared/fixtures/golden.docx --page all > /dev/null
+          .venv-core/bin/adeu diff ../shared/fixtures/golden.docx ../shared/fixtures/golden2.docx > /dev/null
+          .venv-core/bin/adeu-server --version
+          if .venv-core/bin/adeu-server 2>err.txt; then
+            echo "adeu-server unexpectedly succeeded without [mcp]" && exit 1
+          fi
+          grep -q "adeu\[mcp\]" err.txt
+          rm -rf .venv-core err.txt
+
   node-test:
     runs-on: ubuntu-latest
     strategy:

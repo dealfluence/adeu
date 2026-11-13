@@ -5,8 +5,8 @@ WORKDIR /app
 # Copy the project files
 COPY . /app
 
-# Install dependencies using uv (frozen to lockfile, no dev dependencies)
-RUN uv sync --frozen --no-dev
+# Install dependencies including the optional `mcp` extra (frozen to lockfile, no dev dependencies)
+RUN uv sync --frozen --extra mcp --no-dev
 
 # Start the MCP server using the entrypoint defined in pyproject.toml
 ENTRYPOINT ["uv", "run", "adeu-server"]

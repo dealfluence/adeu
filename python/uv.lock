@@ -15,8 +15,6 @@ version = "3.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "diff-match-patch" },
-    { name = "fastmcp", extra = ["apps"] },
-    { name = "jinja2" },
     { name = "lxml" },
     { name = "pydantic" },
     { name = "python-docx" },
@@ -26,9 +24,21 @@ dependencies = [
     { name = "structlog" },
 ]
 
+[package.optional-dependencies]
+all = [
+    { name = "fastmcp", extra = ["apps"] },
+    { name = "jinja2" },
+]
+mcp = [
+    { name = "fastmcp", extra = ["apps"] },
+    { name = "jinja2" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "fastmcp", extra = ["apps"] },
     { name = "hypothesis" },
+    { name = "jinja2" },
     { name = "mypy" },
     { name = "ooxml-integrity" },
     { name = "pytest" },
@@ -39,9 +49,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "adeu", extras = ["mcp"], marker = "extra == 'all'" },
     { name = "diff-match-patch", specifier = ">=20230430" },
-    { name = "fastmcp", extras = ["apps"], specifier = ">=3.4.7,<4" },
-    { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "fastmcp", extras = ["apps"], marker = "extra == 'mcp'", specifier = ">=3.4.7,<4" },
+    { name = "jinja2", marker = "extra == 'mcp'", specifier = ">=3.1.6" },
     { name = "lxml", specifier = ">=5.0.0" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "python-docx", specifier = ">=1.1.0" },
@@ -50,10 +61,13 @@ requires-dist = [
     { name = "regex", specifier = ">=2024.11.6" },
     { name = "structlog", specifier = ">=24.0.0" },
 ]
+provides-extras = ["mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fastmcp", extras = ["apps"], specifier = ">=3.4.7,<4" },
     { name = "hypothesis" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "mypy" },
     { name = "ooxml-integrity", specifier = "==0.8.1" },
     { name = "pytest" },
