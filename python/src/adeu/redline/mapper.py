@@ -348,18 +348,22 @@ class DocumentMapper:
                 current_offset += 2
             part_start = current_offset
             part_ref = getattr(part, "part", part)
-            style_cache, default_pstyle = _get_style_cache(part_ref)
-            numbering_tracker = NumberingTracker(
-                part_ref, style_cache=style_cache, resolve_numbering=self.resolve_numbering
+            hidden_anchor = (self.clean_view and getattr(part, "in_deleted_anchor", False)) or (
+                self.original_view and getattr(part, "in_inserted_anchor", False)
             )
-            current_offset = self._map_blocks(
-                part,
-                current_offset,
-                style_cache,
-                default_pstyle,
-                part=part_ref,
-                numbering_tracker=numbering_tracker,
-            )
+            if not hidden_anchor:
+                style_cache, default_pstyle = _get_style_cache(part_ref)
+                numbering_tracker = NumberingTracker(
+                    part_ref, style_cache=style_cache, resolve_numbering=self.resolve_numbering
+                )
+                current_offset = self._map_blocks(
+                    part,
+                    current_offset,
+                    style_cache,
+                    default_pstyle,
+                    part=part_ref,
+                    numbering_tracker=numbering_tracker,
+                )
             if current_offset == part_start:
                 # Empty part: drop the tentative separator and any
                 # zero-width anchor spans the walk added — the reader emits

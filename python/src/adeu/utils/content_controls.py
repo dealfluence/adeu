@@ -339,17 +339,34 @@ def classify_sdt(sdt_element: Any, ordinal: int = 0) -> SdtInfo:
 
 
 def iter_sdt_elements_in_order(part_element: Any) -> Iterator[Any]:
-    """Yield every ``w:sdt`` under ``part_element`` in document order.
+    """Yield every ``w:sdt`` owned by ``part_element`` in projection order.
 
-    Document order is exactly projection order WITHIN a part, including nested
-    controls: lxml's ``.iter()`` is a pre-order walk, so a container is yielded
-    before the controls it wraps — which is what spec §1 requires ("1-based in
-    projection order across ALL classes").
+    Skips inactive ``mc:Fallback`` branches and stops at child ``w:txbxContent``
+    containers: each active text box is yielded as its own ``TextboxPart`` in
+    ``iter_document_parts_with_kind``, so scanning ``w:txbxContent`` there (and
+    only there) numbers every control 1..N once in exact projection order.
     """
     if part_element is None:
         return
-    for el in part_element.iter(QN_W_SDT):
-        yield el
+    from .docx import QN_MC_ALTERNATECONTENT, QN_W_TXBXCONTENT, active_alternate_content_branch
+
+    def _walk(el: Any) -> Iterator[Any]:
+        for child in el:
+            tag = child.tag
+            if not isinstance(tag, str):
+                continue
+            if tag == QN_MC_ALTERNATECONTENT:
+                branch = active_alternate_content_branch(child)
+                if branch is not None:
+                    yield from _walk(branch)
+                continue
+            if tag == QN_W_TXBXCONTENT:
+                continue
+            if tag == QN_W_SDT:
+                yield child
+            yield from _walk(child)
+
+    yield from _walk(part_element)
 
 
 def wrapping_sdt(element: Any) -> Any:

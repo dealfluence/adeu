@@ -28,7 +28,7 @@ Model each active `<w:txbxContent>` as a `TextboxPart` yielded with `kind = "tex
 ## Tasks
 
 ### Task 1: Python Projection, Mapping & Content-Control Ordinals for `w:txbxContent`
-Status: PENDING
+Status: DONE
 
 - **Goal:** Project and map full text-box contents (`w:txbxContent`) across headers, body, and footers in Python without 300-char truncation, preserving CriticMarkup, formatting, tables, and content-control ordinals while keeping `ingest` and `DocumentMapper` in exact Virtual Text sync.
 - **Files:**

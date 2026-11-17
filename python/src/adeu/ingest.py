@@ -185,6 +185,8 @@ def _extract_text_from_doc(
     cursor = 0
 
     for part, part_kind in iter_document_parts_with_kind(doc):
+        if clean_view and getattr(part, "in_deleted_anchor", False):
+            continue
         # part_cursor accounts for the \n\n separator that will precede this part
         # in the final join, ensuring internal offsets align exactly.
         part_cursor = cursor + 2 if full_text else cursor

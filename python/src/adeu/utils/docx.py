@@ -90,6 +90,7 @@ QN_W_PICT = qn("w:pict")
 QN_WP_DOCPR = qn("wp:docPr")
 QN_V_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
 QN_O_TITLE = "{urn:schemas-microsoft-com:office:office}title"
+QN_A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
 QN_W_TXBXCONTENT = qn("w:txbxContent")
 # python-docx's nsmap has no 'mc' prefix; use literal Clark notation like the
 # VML/office names above.
@@ -97,10 +98,7 @@ _MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 QN_MC_ALTERNATECONTENT = f"{{{_MC_NS}}}AlternateContent"
 QN_MC_CHOICE = f"{{{_MC_NS}}}Choice"
 QN_MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
-
-# Disclosure cap for text projected out of a floating text box marker — long
-# boxed content is truncated, the marker is a disclosure, not a full view.
-_TEXTBOX_DISCLOSURE_CAP = 300
+_GRAPHIC_PAYLOAD_TAGS = (QN_W_DRAWING, QN_W_OBJECT, QN_W_PICT)
 
 # Toggle-property "off" values: <w:b w:val="0|false|off"/> means NOT bold.
 # Any other value (including a missing w:val) means the toggle is on.
@@ -118,22 +116,19 @@ _PAGE_BREAK_TOKEN = "\f"
 PAGE_BREAK_TOKEN = _PAGE_BREAK_TOKEN
 
 
-def _textbox_text(graphic_el) -> str:
+def active_alternate_content_branch(ac_el):
+    """Return the active <mc:Choice> or <mc:Fallback> wrapper for `ac_el`.
+
+    Prefers the first <mc:Choice> carrying a graphic payload (w:drawing,
+    w:object, w:pict) so modern Word shapes resolve via DrawingML rather than
+    their VML fallback mirror; falls back to <mc:Fallback> when no <mc:Choice>
+    carries one.
     """
-    Concatenated, whitespace-normalized visible text of every w:txbxContent
-    under `graphic_el` (a w:drawing / w:object / w:pict), truncated to
-    _TEXTBOX_DISCLOSURE_CAP chars. Empty string when the shape holds no text
-    (plain images, watermark textpaths).
-    """
-    parts: list[str] = []
-    for tc in graphic_el.findall(f".//{QN_W_TXBXCONTENT}"):
-        for t in tc.iter(QN_W_T):
-            if t.text:
-                parts.append(t.text)
-    text = " ".join(" ".join(parts).split())
-    if len(text) > _TEXTBOX_DISCLOSURE_CAP:
-        text = text[:_TEXTBOX_DISCLOSURE_CAP].rstrip() + "…"
-    return text
+    for wrapper_tag in (QN_MC_CHOICE, QN_MC_FALLBACK):
+        for wrapper in ac_el.findall(wrapper_tag):
+            if any(g.tag in _GRAPHIC_PAYLOAD_TAGS for g in wrapper):
+                return wrapper
+    return None
 
 
 def _graphic_marker_events(child):
@@ -141,34 +136,34 @@ def _graphic_marker_events(child):
     Projects a read-only marker for a graphic run child (w:drawing, w:object
     or w:pict), rendered downstream as ![alt](docx-image:id).
 
-    Floating text boxes get their text quoted in the alt ("Text box: …") so
-    boxed obligations are DISCLOSED instead of silently invisible
-    (QA 2026-07-23 customer C4). Textpath-only VML shapes (watermarks) still
-    project nothing — sanitize's watermark audit reports those.
+    Text boxes (w:txbxContent) are projected in full as standalone TextboxPart
+    containers (issue #194), so pure text-box shapes emit no inline image
+    marker here. Textpath-only VML shapes (watermarks) also stay silent —
+    sanitize's watermark audit reports those.
     """
     tag = child.tag
-    if tag == QN_W_DRAWING or tag == QN_W_OBJECT:
-        # Inline image/object: project a read-only marker so the agent
-        # can see that a material element exists here (QA 2026-07-18 M5).
+    if tag == QN_W_DRAWING:
+        if child.find(f".//{QN_W_TXBXCONTENT}") is not None and child.find(f".//{QN_A_BLIP}") is None:
+            return
         doc_pr = child.find(f".//{QN_WP_DOCPR}")
         alt = ""
         img_id = "0"
         if doc_pr is not None:
             alt = doc_pr.get("descr") or doc_pr.get("title") or ""
             img_id = doc_pr.get("id") or "0"
-        boxed = _textbox_text(child)
-        if boxed:
-            alt = f"Text box ({alt}): {boxed}" if alt else f"Text box: {boxed}"
+        yield DocxEvent("image", img_id, date=alt)
+    elif tag == QN_W_OBJECT:
+        doc_pr = child.find(f".//{QN_WP_DOCPR}")
+        alt = ""
+        img_id = "0"
+        if doc_pr is not None:
+            alt = doc_pr.get("descr") or doc_pr.get("title") or ""
+            img_id = doc_pr.get("id") or "0"
         yield DocxEvent("image", img_id, date=alt)
     elif tag == QN_W_PICT:
-        # Legacy VML. Actual images (v:imagedata) and text boxes get a
-        # marker; textpath-only shapes (watermarks) stay silent.
         imagedata = child.find(f".//{QN_V_IMAGEDATA}")
-        alt = (imagedata.get(QN_O_TITLE) or "") if imagedata is not None else ""
-        boxed = _textbox_text(child)
-        if boxed:
-            alt = f"Text box ({alt}): {boxed}" if alt else f"Text box: {boxed}"
-        if boxed or imagedata is not None:
+        if imagedata is not None:
+            alt = imagedata.get(QN_O_TITLE) or ""
             yield DocxEvent("image", "vml", date=alt)
 
 
@@ -949,6 +944,49 @@ class FootnoteItem:
         self.note_type = note_type
 
 
+class TextboxPart:
+    """Wrapper around an active <w:txbxContent> story container (issue #194)."""
+
+    def __init__(self, element, part, *, in_deleted_anchor: bool = False, in_inserted_anchor: bool = False):
+        self._element = element
+        self.part = getattr(part, "part", part)
+        self.in_deleted_anchor = in_deleted_anchor
+        self.in_inserted_anchor = in_inserted_anchor
+
+
+def iter_textbox_contents(root_elm, _in_del: bool = False, _in_ins: bool = False):
+    """Yield `(txbx_content_el, in_deleted_anchor, in_inserted_anchor)` in document order.
+
+    Descends only the active branch of `<mc:AlternateContent>` (`<mc:Choice>`
+    when graphic-bearing, else `<mc:Fallback>`) so Word's dual DrawingML/VML
+    storage never projects or maps a text box twice.
+    """
+    if root_elm is None:
+        return
+
+    def _walk(el, in_del: bool, in_ins: bool, inside_txbx: bool):
+        for child in el:
+            tag = child.tag
+            if not isinstance(tag, str):
+                continue
+            if tag == QN_MC_ALTERNATECONTENT:
+                branch = active_alternate_content_branch(child)
+                if branch is not None:
+                    yield from _walk(branch, in_del, in_ins, inside_txbx)
+                continue
+            if tag == QN_W_TXBXCONTENT:
+                yield (child, in_del, in_ins)
+                # Scan inside for any nested floating text box; w:del/w:ins
+                # inside this box's own prose only affect a nested box's anchor.
+                yield from _walk(child, in_del, in_ins, True)
+                continue
+            child_del = in_del or tag == QN_W_DEL
+            child_ins = in_ins or tag == QN_W_INS
+            yield from _walk(child, child_del, child_ins, inside_txbx)
+
+    yield from _walk(root_elm, _in_del, _in_ins, False)
+
+
 def create_element(name: str):
     return OxmlElement(name)
 
@@ -1410,25 +1448,11 @@ def iter_paragraph_content(
                 # (QA 2026-07-18 M5, QA 2026-07-23 customer C4).
                 yield from _graphic_marker_events(child)
             elif tag == QN_MC_ALTERNATECONTENT:
-                # Modern floating shapes (Word 2010+ text boxes, images)
-                # arrive wrapped in mc:AlternateContent; without this branch
-                # they project NOTHING — not even a marker (QA 2026-07-23
-                # customer C4). Prefer the mc:Choice payload, fall back to
-                # mc:Fallback, and project exactly one marker through the
-                # same path as bare drawings/picts.
-                payload = None
-                for wrapper_tag in (QN_MC_CHOICE, QN_MC_FALLBACK):
-                    for wrapper in child.findall(wrapper_tag):
-                        payload = next(
-                            (g for g in wrapper if g.tag in (QN_W_DRAWING, QN_W_OBJECT, QN_W_PICT)),
-                            None,
-                        )
-                        if payload is not None:
-                            break
+                branch = active_alternate_content_branch(child)
+                if branch is not None:
+                    payload = next((g for g in branch if g.tag in _GRAPHIC_PAYLOAD_TAGS), None)
                     if payload is not None:
-                        break
-                if payload is not None:
-                    yield from _graphic_marker_events(payload)
+                        yield from _graphic_marker_events(payload)
             elif tag == QN_W_COMMENTREFERENCE:
                 ref_id = child.get(QN_W_ID)
                 if ref_id:
@@ -1974,18 +1998,24 @@ def iter_document_parts_with_kind(doc: DocumentObject):
     # wrapped in a content control (CC-17).
     sections = list(iter_sections_including_wrapped(doc))
 
-    # 1. Headers
+    # 1. Headers (+ any floating text boxes anchored in each header)
     for section in sections:
         for part in _iter_section_parts(section, "header"):
             yield part, "header"
+            for tc_el, in_del, in_ins in iter_textbox_contents(getattr(part, "_element", None)):
+                yield TextboxPart(tc_el, part, in_deleted_anchor=in_del, in_inserted_anchor=in_ins), "textbox"
 
-    # 2. Main Body (The Document object itself acts as the container)
+    # 2. Main Body (+ any floating text boxes anchored in the body)
     yield doc, "body"
+    for tc_el, in_del, in_ins in iter_textbox_contents(doc.element.body):
+        yield TextboxPart(tc_el, doc.part, in_deleted_anchor=in_del, in_inserted_anchor=in_ins), "textbox"
 
-    # 3. Footers
+    # 3. Footers (+ any floating text boxes anchored in each footer)
     for section in sections:
         for part in _iter_section_parts(section, "footer"):
             yield part, "footer"
+            for tc_el, in_del, in_ins in iter_textbox_contents(getattr(part, "_element", None)):
+                yield TextboxPart(tc_el, part, in_deleted_anchor=in_del, in_inserted_anchor=in_ins), "textbox"
 
     # 4. Footnotes & Endnotes (ordered)
     fn_part = None
