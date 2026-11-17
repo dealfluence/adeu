@@ -332,6 +332,9 @@ function sequential_context_hint(applied_so_far: number): string {
 // (QA 2026-07-17 F11; mirrors Python's clean per-edit error).
 const XML_ILLEGAL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 
+export const COMMENTED_CHANGE_GRANULARITIES = ["atomic", "word"] as const;
+export type CommentedChangeGranularity = (typeof COMMENTED_CHANGE_GRANULARITIES)[number];
+
 // Projection markers that stand for document STRUCTURE rather than text:
 // cross-references `[~2.1~](#_Ref1)`, images `![alt](docx-image:N)` and
 // hyperlinks `[label](url)`. Written into a run they become literal text, so an
@@ -737,6 +740,11 @@ export class RedlineEngine {
   public id_discovery_hint: string | null;
   public markup_mode: "track_changes" | "manual" = "track_changes";
   public resolve_numbering: boolean = true;
+  // "atomic": a commented modify is ONE tracked change wrapped by its comment
+  // (see _word_diff_sub_edits). "word": it fans out word by word like an
+  // uncommented modify, and its comment spans the first fragment to the last.
+  // Python twin: RedlineEngine.__init__.
+  public commented_change_granularity: CommentedChangeGranularity = "atomic";
   private _in_process_batch: boolean = false;
   /** Revision-element index for the review-action paths; self-invalidating on
    *  the document's mutation counter (see _getRevisionIndex). */
@@ -753,8 +761,16 @@ export class RedlineEngine {
       timestamp?: string | Date;
       markup_mode?: "track_changes" | "manual";
       resolve_numbering?: boolean;
+      commented_change_granularity?: CommentedChangeGranularity;
     },
   ) {
+    const granularity = opts?.commented_change_granularity ?? "atomic";
+    if (!COMMENTED_CHANGE_GRANULARITIES.includes(granularity)) {
+      throw new Error(
+        `commented_change_granularity must be one of ${COMMENTED_CHANGE_GRANULARITIES.join(", ")}, got ${JSON.stringify(granularity)}`,
+      );
+    }
+    this.commented_change_granularity = granularity;
     this.doc = doc;
     this.author = author;
     this.id_discovery_hint = opts?.id_discovery_hint ?? null;
@@ -973,7 +989,9 @@ export class RedlineEngine {
     // a single sub-edit over the minimal word-boundary-trimmed changed span so a
     // commented change is atomic: rejecting it reverts the entire edit, with no
     // orphaned "other half".
-    if (parent_comment !== null && parent_comment !== undefined) {
+    const word_mode =
+      parent_comment !== null && parent_comment !== undefined && this.commented_change_granularity === "word";
+    if (parent_comment !== null && parent_comment !== undefined && !word_mode) {
       return this._single_commented_sub_edit(
         target_str,
         new_str,
@@ -1056,7 +1074,7 @@ export class RedlineEngine {
     let comment_assigned = false;
     for (const raw_edit of raw_sub_edits) {
       const sub_start = base_offset + (raw_edit._match_start_index || 0);
-      const should_attach_comment = (parent_comment !== null) && !comment_assigned;
+      const should_attach_comment = (parent_comment !== null) && !comment_assigned && !word_mode;
       if (should_attach_comment) {
         comment_assigned = true;
       }
@@ -1067,6 +1085,12 @@ export class RedlineEngine {
         new_text: raw_edit.new_text,
         comment: should_attach_comment ? parent_comment : null,
       };
+      if (word_mode) {
+        // Attached once per group after the sweep, spanning every fragment
+        // (_attach_group_comments), so rejecting one fragment cannot take the
+        // comment's whole anchor with it.
+        sub_edit._group_comment = parent_comment;
+      }
       sub_edit._resolved_start_idx = sub_start;
       sub_edit._match_start_index = sub_start;
       sub_edit._active_mapper_ref = active_mapper;
@@ -2916,6 +2940,72 @@ export class RedlineEngine {
    * and the comment is open from start_element through end_element.
    * Ported from Python `RedlineEngine._attach_comment_spanning`.
    */
+  /**
+   * commented_change_granularity="word": anchors each commented edit's ONE
+   * comment from its first applied fragment to its last, in document order.
+   * The range markers go beside the outermost fragments, outside every
+   * w:ins/w:del, so rejecting any single fragment leaves the rest of the
+   * anchor — and the comment with its replies — in place. Revision ids are
+   * numbered per part (issue #114), so each group is looked up only in the
+   * part its edit resolved into. Python twin.
+   */
+  private _attach_group_comments(resolved_edits: any[]): void {
+    const groups = new Map<any, any[]>();
+    const comments = new Map<any, EditCommentValue>();
+    for (const [edit] of resolved_edits) {
+      if (!edit._applied_status) continue;
+      const key = edit._split_group_id ?? edit;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(edit);
+      if (edit._group_comment != null && !comments.has(key)) comments.set(key, edit._group_comment);
+    }
+    if (!comments.size) return;
+    const roots = new Map<string, Element>();
+    for (const [root, name] of this._story_roots()) roots.set(name, root);
+    for (const [key, comment] of comments) {
+      const members = groups.get(key)!;
+      const ids = new Set<string>();
+      for (const edit of members) {
+        for (const rid of [edit._reserved_del_id, edit._reserved_ins_id]) {
+          if (rid != null) ids.add(String(rid));
+        }
+      }
+      const mapper = members[0]._active_mapper_ref || this.mapper;
+      const part_path =
+        mapper.part_name_at(members[0]._resolved_start_idx || 0) || normalize_part_name(this.doc.part.partname);
+      const root = roots.get(part_path);
+      const marks: Element[] = [];
+      const walk = (el: Element) => {
+        for (let child = el.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType !== 1) continue;
+          const c = child as Element;
+          const is_mark = c.tagName === "w:ins" || c.tagName === "w:del";
+          // A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
+          // a range marker cannot sit beside it.
+          if (
+            is_mark &&
+            ids.has(c.getAttribute("w:id") || "") &&
+            (c.parentNode as Element | null)?.tagName !== "w:rPr" &&
+            !is_in_inactive_mc_fallback(c)
+          ) {
+            marks.push(c);
+          }
+          walk(c);
+        }
+      };
+      if (root) walk(root);
+      if (!marks.length) continue;
+      const first = marks[0];
+      const last = marks[marks.length - 1];
+      const paragraph_of = (el: Element): Element => {
+        let cur: Node | null = el.parentNode;
+        while (cur && (cur as Element).tagName !== "w:p") cur = cur.parentNode;
+        return cur as Element;
+      };
+      this._attach_comment_spanning(paragraph_of(first), first, paragraph_of(last), last, comment);
+    }
+  }
+
   private _attach_comment_spanning(
     start_p: Element,
     start_el: Element,
@@ -6687,6 +6777,8 @@ export class RedlineEngine {
         }
       }
     }
+
+    this._attach_group_comments(resolved_edits);
 
     // Return LOGICAL edit counts over the caller's input list: one
     // match_mode="all" edit over N occurrences is one applied edit (its
