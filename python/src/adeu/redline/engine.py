@@ -147,6 +147,8 @@ class BatchValidationError(Exception):
         self.failed = failed
 
 
+COMMENTED_CHANGE_GRANULARITIES = ("atomic", "word")
+
 # Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
 # lxml refuses to serialize them, so without an up-front check they surfaced
 # as a raw "All strings must be XML compatible" traceback from deep inside
@@ -529,7 +531,17 @@ class RedlineEngine:
         timestamp: Optional[Union[str, datetime.datetime]] = None,
         markup_mode: str = "track_changes",
         resolve_numbering: bool = True,
+        commented_change_granularity: str = "atomic",
     ):
+        if commented_change_granularity not in COMMENTED_CHANGE_GRANULARITIES:
+            raise ValueError(
+                f"commented_change_granularity must be one of {COMMENTED_CHANGE_GRANULARITIES}, "
+                f"got {commented_change_granularity!r}"
+            )
+        # "atomic": a commented modify is ONE tracked change wrapped by its comment
+        # (see _word_diff_sub_edits). "word": it fans out word by word like an
+        # uncommented modify, and its comment spans the first fragment to the last.
+        self.commented_change_granularity = commented_change_granularity
         self.terse_errors = terse_errors
         self.resolve_numbering = resolve_numbering
         self.markup_mode = markup_mode if markup_mode in ("track_changes", "manual") else "track_changes"
@@ -4966,6 +4978,8 @@ class RedlineEngine:
                         parent._applied_status = False
                         parent._error_msg = msg
 
+        self._attach_group_comments(resolved_edits)
+
         # Return LOGICAL edit counts over the caller's input list: one
         # match_mode="all" edit over N occurrences is one applied edit (its
         # occurrence count lives in _occurrences_modified / the report),
@@ -4985,6 +4999,60 @@ class RedlineEngine:
             self._convert_revisions_to_manual_markup()
             self._sync_fallbacks()
         return applied, skipped
+
+    def _attach_group_comments(self, resolved_edits: List[Tuple[Any, Any]]) -> None:
+        """
+        commented_change_granularity="word": anchors each commented edit's ONE
+        comment from its first applied fragment to its last, in document order.
+
+        The range markers go beside the outermost fragments, outside every
+        w:ins/w:del, so rejecting any single fragment leaves the rest of the
+        anchor — and the comment with its replies — in place. Fragments that
+        failed are simply not spanned; a group with none applied gets no
+        comment. Revision ids are numbered per part (issue #114), so each
+        group is looked up only in the part its edit resolved into.
+        """
+        groups: Dict[Any, List[Any]] = defaultdict(list)
+        comments: Dict[Any, Any] = {}
+        for edit, _orig_new in resolved_edits:
+            if not getattr(edit, "_applied_status", False):
+                continue
+            key = getattr(edit, "_split_group_id", None)
+            key = id(edit) if key is None else key
+            groups[key].append(edit)
+            if getattr(edit, "_group_comment", None) is not None:
+                comments.setdefault(key, edit._group_comment)
+        if not comments:
+            return
+        roots = dict((name, root) for root, name in self._story_roots())
+        for key, comment in comments.items():
+            members = groups[key]
+            ids = {
+                str(rid)
+                for edit in members
+                for rid in (getattr(edit, "_reserved_del_id", None), getattr(edit, "_reserved_ins_id", None))
+                if rid is not None
+            }
+            first_member = members[0]
+            mapper = first_member._active_mapper_ref or self.mapper
+            part_path = mapper.part_name_at(first_member._resolved_start_idx or 0)
+            root = roots.get(part_path or str(self.doc.part.partname).lstrip("/"))
+            marks = [
+                el
+                for el in (root.iter(qn("w:ins"), qn("w:del")) if root is not None else ())
+                # A deleted paragraph mark (w:rPr/w:del) is not a run-level
+                # anchor: a range marker cannot sit beside it.
+                if el.get(qn("w:id")) in ids
+                and el.getparent().tag != qn("w:rPr")
+                and not is_in_inactive_mc_fallback(el)
+            ]
+            if not marks:
+                logger.warning("Grouped comment has no applied fragment to anchor", group=key)
+                continue
+            first, last = marks[0], marks[-1]
+            self._attach_comment_spanning(
+                next(first.iterancestors(qn("w:p"))), first, next(last.iterancestors(qn("w:p"))), last, comment
+            )
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
         start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else edit._match_start_index
@@ -5803,7 +5871,7 @@ class RedlineEngine:
         # (QA 2026-07-22 bug #1). Emit a single sub-edit over the minimal
         # word-boundary-trimmed changed span so a commented change is atomic:
         # rejecting it reverts the entire edit, with no orphaned "other half".
-        if parent_comment is not None:
+        if parent_comment is not None and self.commented_change_granularity == "atomic":
             return self._single_commented_sub_edit(
                 target_str, new_str, base_offset, parent_comment, is_table, active_mapper
             )
@@ -5882,7 +5950,8 @@ class RedlineEngine:
         comment_assigned = False
         for raw_edit in raw_sub_edits:
             sub_start = base_offset + (raw_edit._match_start_index or 0)
-            should_attach_comment = (parent_comment is not None) and (not comment_assigned)
+            word_mode = parent_comment is not None and self.commented_change_granularity == "word"
+            should_attach_comment = (parent_comment is not None) and (not comment_assigned) and not word_mode
             if should_attach_comment:
                 comment_assigned = True
 
@@ -5892,6 +5961,11 @@ class RedlineEngine:
                 new_text=raw_edit.new_text,
                 comment=parent_comment if should_attach_comment else None,
             )
+            if word_mode:
+                # Attached once per group after the sweep, spanning every fragment
+                # (_attach_group_comments), so rejecting one fragment cannot take
+                # the comment's whole anchor with it.
+                sub_edit._group_comment = parent_comment
             sub_edit._resolved_start_idx = sub_start
             sub_edit._match_start_index = sub_start
             sub_edit._active_mapper_ref = active_mapper

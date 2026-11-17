@@ -73,6 +73,9 @@ class _EditState(BaseModel):
     # Sub-edits produced by splitting one balanced multi-paragraph modification
     # share this id so the batch report counts them as a single applied edit.
     _split_group_id: Optional[int] = PrivateAttr(default=None)
+    # commented_change_granularity="word": the parent edit's comment, carried by
+    # every fragment so it is attached ONCE per group after the apply sweep.
+    _group_comment: Optional[Any] = PrivateAttr(default=None)
     # True when any resolved sub-edit of this edit failed or was skipped, so
     # partially-applied fan-outs still count as skipped (all-or-nothing).
     _any_sub_failure: bool = PrivateAttr(default=False)
