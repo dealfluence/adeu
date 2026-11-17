@@ -4,6 +4,7 @@ Contains normalization logic ported from Open-Xml-PowerTools concepts.
 """
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, NamedTuple, Optional, Tuple, Union, cast
@@ -15,8 +16,10 @@ from docx.oxml.ns import qn
 from docx.table import Table, _Cell, _Row
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
+from lxml import etree
 
 from adeu.utils.content_controls import BALLOT_GLYPHS, BlockSdt, SdtEvent
+from adeu.utils.long_hex_number import generate_long_hex_number
 
 logger = structlog.get_logger(__name__)
 
@@ -182,10 +185,6 @@ def _txbx_shape_key(tc_el, stop_at) -> str:
 
 def _normalized_txbx_signature(tc_el) -> bytes:
     """Structural XML signature of `tc_el` ignoring per-branch revision/para IDs."""
-    from copy import deepcopy
-
-    from lxml import etree
-
     clone = deepcopy(tc_el)
     for node in clone.iter():
         if node.tag in _FALLBACK_REV_ID_TAGS:
@@ -204,10 +203,6 @@ def sync_alternate_content_fallbacks(roots, next_rev_id_fn) -> None:
     children are cloned into the paired <mc:Fallback> box with freshly minted
     revision w:ids and signed-int32 w14:paraId / w14:textId values.
     """
-    from copy import deepcopy
-
-    from .long_hex_number import generate_long_hex_number
-
     for root in roots:
         if root is None:
             continue
@@ -1118,7 +1113,7 @@ def iter_textbox_contents(root_elm, _in_del: bool = False, _in_ins: bool = False
     if root_elm is None:
         return
 
-    def _walk(el, in_del: bool, in_ins: bool, inside_txbx: bool):
+    def _walk(el, in_del: bool, in_ins: bool):
         for child in el:
             tag = child.tag
             if not isinstance(tag, str):
@@ -1126,19 +1121,17 @@ def iter_textbox_contents(root_elm, _in_del: bool = False, _in_ins: bool = False
             if tag == QN_MC_ALTERNATECONTENT:
                 branch = active_alternate_content_branch(child)
                 if branch is not None:
-                    yield from _walk(branch, in_del, in_ins, inside_txbx)
+                    yield from _walk(branch, in_del, in_ins)
                 continue
             if tag == QN_W_TXBXCONTENT:
                 yield (child, in_del, in_ins)
-                # Scan inside for any nested floating text box; w:del/w:ins
-                # inside this box's own prose only affect a nested box's anchor.
-                yield from _walk(child, in_del, in_ins, True)
+                yield from _walk(child, in_del, in_ins)
                 continue
             child_del = in_del or tag == QN_W_DEL
             child_ins = in_ins or tag == QN_W_INS
-            yield from _walk(child, child_del, child_ins, inside_txbx)
+            yield from _walk(child, child_del, child_ins)
 
-    yield from _walk(root_elm, _in_del, _in_ins, False)
+    yield from _walk(root_elm, _in_del, _in_ins)
 
 
 def create_element(name: str):

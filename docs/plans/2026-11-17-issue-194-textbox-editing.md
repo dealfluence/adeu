@@ -104,7 +104,7 @@ Status: DONE
 - **Done when:** All text-box editing, review, field, diff, and sanitize operations in `@adeu/core` match Python's output, diagnostics, revision counts, and `findDuplicateParaIds` / schema invariants with zero regressions across the full Node workspace test and lint suites.
 
 ### Task 5: Documentation & Full Monorepo Verification
-Status: PENDING
+Status: DONE
 
 - **Goal:** Align `docs/FIDELITY.md` and `AI_CONTEXT.md` with editable `w:txbxContent` support, finalize plan status, and verify Python, Node, and LangChain suites end-to-end.
 - **Files:**
