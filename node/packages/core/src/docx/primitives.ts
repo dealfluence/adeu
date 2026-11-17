@@ -91,6 +91,21 @@ export class NotesPart {
   }
 }
 
+export class TextboxPart {
+  public part: any;
+  public in_deleted_anchor: boolean;
+  public in_inserted_anchor: boolean;
+  constructor(
+    public _element: Element,
+    owner: any,
+    opts?: { in_deleted_anchor?: boolean; in_inserted_anchor?: boolean },
+  ) {
+    this.part = owner?.part || owner;
+    this.in_deleted_anchor = opts?.in_deleted_anchor ?? false;
+    this.in_inserted_anchor = opts?.in_inserted_anchor ?? false;
+  }
+}
+
 export class FootnoteItem {
   public id: string;
   public part: any;

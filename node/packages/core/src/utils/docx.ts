@@ -1,4 +1,10 @@
-import { qn, findChild, findChildren, findAllDescendants } from "../docx/dom.js";
+import {
+  qn,
+  findChild,
+  findChildren,
+  findAllDescendants,
+  activeAlternateContentBranch,
+} from "../docx/dom.js";
 import {
   BALLOT_GLYPHS,
   BlockSdt,
@@ -12,6 +18,7 @@ import {
   Table,
   Run,
   NotesPart,
+  TextboxPart,
   FootnoteItem,
   DocxEvent,
 } from "../docx/primitives.js";
@@ -73,49 +80,32 @@ export const QN_W_PICT = "w:pict";
 export const QN_WP_DOCPR = "wp:docPr";
 export const QN_V_IMAGEDATA = "v:imagedata";
 export const QN_O_TITLE = "o:title";
+export const QN_A_BLIP = "a:blip";
 export const QN_W_TXBXCONTENT = "w:txbxContent";
 export const QN_MC_ALTERNATECONTENT = "mc:AlternateContent";
 export const QN_MC_CHOICE = "mc:Choice";
 export const QN_MC_FALLBACK = "mc:Fallback";
 
-// Disclosure cap for text projected out of a floating text box marker — long
-// boxed content is truncated, the marker is a disclosure, not a full view.
-const _TEXTBOX_DISCLOSURE_CAP = 300;
-
-/**
- * Concatenated, whitespace-normalized visible text of every w:txbxContent
- * under `graphic_el` (a w:drawing / w:object / w:pict), truncated to
- * _TEXTBOX_DISCLOSURE_CAP chars. Empty string when the shape holds no text
- * (plain images, watermark textpaths).
- */
-function _textbox_text(graphic_el: Element): string {
-  const parts: string[] = [];
-  for (const tc of findAllDescendants(graphic_el, QN_W_TXBXCONTENT)) {
-    for (const t of findAllDescendants(tc, QN_W_T)) {
-      if (t.textContent) parts.push(t.textContent);
-    }
-  }
-  let text = parts.join(" ").split(/\s+/).filter(Boolean).join(" ");
-  if (text.length > _TEXTBOX_DISCLOSURE_CAP) {
-    text = text.slice(0, _TEXTBOX_DISCLOSURE_CAP).trimEnd() + "…";
-  }
-  return text;
-}
+export { activeAlternateContentBranch as active_alternate_content_branch, TextboxPart };
 
 /**
  * Projects a read-only marker for a graphic run child (w:drawing, w:object
  * or w:pict), rendered downstream as ![alt](docx-image:id).
  *
- * Floating text boxes get their text quoted in the alt ("Text box: …") so
- * boxed obligations are DISCLOSED instead of silently invisible
- * (QA 2026-07-23 customer C4). Textpath-only VML shapes (watermarks) still
- * project nothing — sanitize's watermark audit reports those.
+ * Text boxes (w:txbxContent) are projected in full as standalone TextboxPart
+ * containers (issue #194), so pure text-box shapes emit no inline image
+ * marker here. Textpath-only VML shapes (watermarks) also stay silent —
+ * sanitize's watermark audit reports those.
  */
 function* _graphic_marker_events(child: Element): Generator<DocxEvent> {
   const tag = child.tagName;
-  if (tag === QN_W_DRAWING || tag === QN_W_OBJECT) {
-    // Inline image/object: project a read-only marker so the agent can
-    // see that a material element exists here (QA 2026-07-18 M5).
+  if (tag === QN_W_DRAWING) {
+    if (
+      findAllDescendants(child, QN_W_TXBXCONTENT).length > 0 &&
+      findAllDescendants(child, QN_A_BLIP).length === 0
+    ) {
+      return;
+    }
     const doc_pr = findAllDescendants(child, QN_WP_DOCPR)[0] || null;
     let alt = "";
     let img_id = "0";
@@ -123,21 +113,20 @@ function* _graphic_marker_events(child: Element): Generator<DocxEvent> {
       alt = doc_pr.getAttribute("descr") || doc_pr.getAttribute("title") || "";
       img_id = doc_pr.getAttribute("id") || "0";
     }
-    const boxed = _textbox_text(child);
-    if (boxed) {
-      alt = alt ? `Text box (${alt}): ${boxed}` : `Text box: ${boxed}`;
+    yield { type: "image", id: img_id, date: alt };
+  } else if (tag === QN_W_OBJECT) {
+    const doc_pr = findAllDescendants(child, QN_WP_DOCPR)[0] || null;
+    let alt = "";
+    let img_id = "0";
+    if (doc_pr) {
+      alt = doc_pr.getAttribute("descr") || doc_pr.getAttribute("title") || "";
+      img_id = doc_pr.getAttribute("id") || "0";
     }
     yield { type: "image", id: img_id, date: alt };
   } else if (tag === QN_W_PICT) {
-    // Legacy VML. Actual images (v:imagedata) and text boxes get a marker;
-    // textpath-only shapes (watermarks) stay silent.
     const imagedata = findAllDescendants(child, QN_V_IMAGEDATA)[0] || null;
-    let alt = imagedata ? imagedata.getAttribute(QN_O_TITLE) || "" : "";
-    const boxed = _textbox_text(child);
-    if (boxed) {
-      alt = alt ? `Text box (${alt}): ${boxed}` : `Text box: ${boxed}`;
-    }
-    if (boxed || imagedata) {
+    if (imagedata) {
+      const alt = imagedata.getAttribute(QN_O_TITLE) || "";
       yield { type: "image", id: "vml", date: alt };
     }
   }
@@ -1508,17 +1497,83 @@ function* _iter_section_parts(
   }
 }
 
+export function* iter_textbox_contents(
+  rootElm: Element | null | undefined,
+): Generator<[Element, boolean, boolean]> {
+  if (!rootElm) return;
+
+  function* walk(
+    el: Element,
+    inDel: boolean,
+    inIns: boolean,
+  ): Generator<[Element, boolean, boolean]> {
+    for (let i = 0; i < el.childNodes.length; i++) {
+      const child = el.childNodes[i] as Element;
+      if (child.nodeType !== 1) continue;
+      const tag = child.tagName;
+      if (tag === QN_MC_ALTERNATECONTENT) {
+        const branch = activeAlternateContentBranch(child);
+        if (branch) yield* walk(branch, inDel, inIns);
+        continue;
+      }
+      if (tag === QN_W_TXBXCONTENT) {
+        yield [child, inDel, inIns];
+        yield* walk(child, inDel, inIns);
+        continue;
+      }
+      yield* walk(
+        child,
+        inDel || tag === "w:del",
+        inIns || tag === "w:ins",
+      );
+    }
+  }
+
+  yield* walk(rootElm, false, false);
+}
+
 export function* iter_document_parts_with_kind(
   doc: any,
 ): Generator<[any, string]> {
-  // 1. Headers
-  for (const h of _iter_section_parts(doc, "header")) yield [h, "header"];
+  // 1. Headers (+ any floating text boxes anchored in each header)
+  for (const h of _iter_section_parts(doc, "header")) {
+    yield [h, "header"];
+    for (const [tcEl, inDel, inIns] of iter_textbox_contents(h?._element)) {
+      yield [
+        new TextboxPart(tcEl, h, {
+          in_deleted_anchor: inDel,
+          in_inserted_anchor: inIns,
+        }),
+        "textbox",
+      ];
+    }
+  }
 
-  // 2. Main Document Body
+  // 2. Main Document Body (+ any floating text boxes anchored in the body)
   yield [doc, "body"];
+  for (const [tcEl, inDel, inIns] of iter_textbox_contents(doc.element)) {
+    yield [
+      new TextboxPart(tcEl, doc.part, {
+        in_deleted_anchor: inDel,
+        in_inserted_anchor: inIns,
+      }),
+      "textbox",
+    ];
+  }
 
-  // 3. Footers
-  for (const f of _iter_section_parts(doc, "footer")) yield [f, "footer"];
+  // 3. Footers (+ any floating text boxes anchored in each footer)
+  for (const f of _iter_section_parts(doc, "footer")) {
+    yield [f, "footer"];
+    for (const [tcEl, inDel, inIns] of iter_textbox_contents(f?._element)) {
+      yield [
+        new TextboxPart(tcEl, f, {
+          in_deleted_anchor: inDel,
+          in_inserted_anchor: inIns,
+        }),
+        "textbox",
+      ];
+    }
+  }
 
   // 4. Notes
   const fnPart = doc.pkg.getPartByPath("word/footnotes.xml");
@@ -1585,24 +1640,15 @@ export function* iter_paragraph_content(
         // (QA 2026-07-18 M5, QA 2026-07-23 customer C4).
         yield* _graphic_marker_events(child);
       } else if (tag === QN_MC_ALTERNATECONTENT) {
-        // Modern floating shapes (Word 2010+ text boxes, images) arrive
-        // wrapped in mc:AlternateContent; without this branch they project
-        // NOTHING — not even a marker (QA 2026-07-23 customer C4). Prefer
-        // the mc:Choice payload, fall back to mc:Fallback, and project
-        // exactly one marker through the same path as bare drawings/picts.
-        let payload: Element | null = null;
-        for (const wrapper_tag of [QN_MC_CHOICE, QN_MC_FALLBACK]) {
-          for (const wrapper of findChildren(child, wrapper_tag)) {
-            payload =
-              findChild(wrapper, QN_W_DRAWING) ||
-              findChild(wrapper, QN_W_OBJECT) ||
-              findChild(wrapper, QN_W_PICT);
-            if (payload) break;
+        const branch = activeAlternateContentBranch(child);
+        if (branch) {
+          const payload =
+            findChild(branch, QN_W_DRAWING) ||
+            findChild(branch, QN_W_OBJECT) ||
+            findChild(branch, QN_W_PICT);
+          if (payload) {
+            yield* _graphic_marker_events(payload);
           }
-          if (payload) break;
-        }
-        if (payload) {
-          yield* _graphic_marker_events(payload);
         }
       } else if (tag === QN_W_COMMENTREFERENCE) {
         const ref_id = child.getAttribute(QN_W_ID);

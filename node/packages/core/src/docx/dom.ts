@@ -161,3 +161,28 @@ export function serializeXml(node: Node): string {
 
   return xml;
 }
+
+const _GRAPHIC_PAYLOAD_TAGS: ReadonlySet<string> = new Set([
+  "w:drawing",
+  "w:object",
+  "w:pict",
+]);
+
+/**
+ * Active `<mc:Choice>` or `<mc:Fallback>` branch of an `<mc:AlternateContent>`.
+ * Prefers the first `<mc:Choice>` carrying a graphic payload (`w:drawing`,
+ * `w:object`, `w:pict`), falling back to `<mc:Fallback>` when none does.
+ */
+export function activeAlternateContentBranch(acEl: Element): Element | null {
+  for (const wrapperTag of ["mc:Choice", "mc:Fallback"]) {
+    for (const wrapper of findChildren(acEl, wrapperTag)) {
+      for (let i = 0; i < wrapper.childNodes.length; i++) {
+        const g = wrapper.childNodes[i] as Element;
+        if (g.nodeType === 1 && _GRAPHIC_PAYLOAD_TAGS.has(g.tagName)) {
+          return wrapper;
+        }
+      }
+    }
+  }
+  return null;
+}

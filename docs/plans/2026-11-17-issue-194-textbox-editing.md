@@ -66,7 +66,7 @@ Status: DONE
 - **Done when:** Users can modify text, split/merge/delete paragraphs, edit tables, set fields, diff/revise, sanitize, and accept/reject tracked changes inside body and header/footer text boxes; cross-boundary (`body → textbox`, `textbox → textbox`) and comment-only edits fail with clear diagnostics; both `mc:Choice` and `mc:Fallback` carry matching redlines/accepted text with zero duplicate `w:id` or `w14:paraId` values; untouched shapes stay byte-identical; and `ooxml_integrity.check()` passes with zero findings.
 
 ### Task 3: Node (`@adeu/core`) Projection, Mapping & Content-Control Ordinals for `w:txbxContent`
-Status: PENDING
+Status: DONE
 
 - **Goal:** Bring `@adeu/core` projection, `DocumentMapper`, and content-control ordinal assignment to full parity with Task 1 for `w:txbxContent`.
 - **Files:**

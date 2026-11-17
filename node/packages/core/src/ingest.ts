@@ -112,6 +112,9 @@ export function _extractTextFromDoc(
   );
 
   for (const [part, part_kind] of iter_document_parts_with_kind(doc)) {
+    if (cleanView && (part as any)?.in_deleted_anchor) {
+      continue;
+    }
     const part_cursor = full_text.length > 0 ? cursor + 2 : cursor;
     const partRef = (part as any).part || part;
     const [partStyleCache] = _get_style_cache(partRef);

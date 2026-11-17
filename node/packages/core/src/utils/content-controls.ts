@@ -16,7 +16,11 @@
  * side has to build `{uri}local` strings because lxml resolves prefixes.
  */
 
-import { findChild, findAllDescendants } from "../docx/dom.js";
+import {
+  activeAlternateContentBranch,
+  findChild,
+  findAllDescendants,
+} from "../docx/dom.js";
 
 export const QN_W_SDT = "w:sdt";
 export const QN_W_SDTPR = "w:sdtPr";
@@ -308,7 +312,30 @@ export function classifySdt(sdtElement: any, ordinal = 0): SdtInfo {
  */
 export function iterSdtElementsInOrder(partElement: any): any[] {
   if (!partElement) return [];
-  return findAllDescendants(partElement, QN_W_SDT);
+  const out: any[] = [];
+  const walk = (el: any): void => {
+    const children = el?.childNodes;
+    if (!children) return;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (!child || child.nodeType !== 1) continue;
+      const tag = child.tagName;
+      if (tag === "mc:AlternateContent") {
+        const branch = activeAlternateContentBranch(child);
+        if (branch) walk(branch);
+        continue;
+      }
+      if (tag === "w:txbxContent") {
+        continue;
+      }
+      if (tag === QN_W_SDT) {
+        out.push(child);
+      }
+      walk(child);
+    }
+  };
+  walk(partElement);
+  return out;
 }
 
 /**

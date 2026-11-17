@@ -295,19 +295,24 @@ export class DocumentMapper {
         current_offset += 2;
       }
       const part_start = current_offset;
-      const partRef = (part as any).part || part;
-      const [partStyleCache] = _get_style_cache(partRef);
-      const numberingTracker = new NumberingTracker(
-        partRef,
-        partStyleCache,
-        this.resolve_numbering,
-      );
-      current_offset = this._map_blocks(
-        part,
-        current_offset,
-        false,
-        numberingTracker,
-      );
+      const hiddenAnchor =
+        (this.clean_view && Boolean((part as any)?.in_deleted_anchor)) ||
+        (this.original_view && Boolean((part as any)?.in_inserted_anchor));
+      if (!hiddenAnchor) {
+        const partRef = (part as any).part || part;
+        const [partStyleCache] = _get_style_cache(partRef);
+        const numberingTracker = new NumberingTracker(
+          partRef,
+          partStyleCache,
+          this.resolve_numbering,
+        );
+        current_offset = this._map_blocks(
+          part,
+          current_offset,
+          false,
+          numberingTracker,
+        );
+      }
 
       if (current_offset === part_start) {
         this.spans.length = spans_mark;
@@ -1135,7 +1140,10 @@ export class DocumentMapper {
           }
         }
 
-        if (!this.clean_view && !this.original_view) {
+        // Meta handling mirrors ingest: run only when this run projected text
+        // (`if (seg)` in ingest.ts). An empty run inside a tracked change
+        // (e.g., a floating shape/textbox anchor) must not emit a meta bubble.
+        if (full_seg_text && !this.clean_view && !this.original_view) {
           const has_meta =
             Object.keys(active_ins).length > 0 ||
             Object.keys(active_del).length > 0 ||
