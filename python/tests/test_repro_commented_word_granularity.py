@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from ooxml_integrity import Severity, check
 
 from adeu.models import ModifyText, RejectChange
@@ -209,3 +211,52 @@ def test_word_mode_output_is_valid_ooxml(tmp_path: Path):
 
     errors = [f for f in check(output) if f.severity is Severity.ERROR]
     assert not errors, "\n".join(str(f) for f in errors)
+
+
+def _wrapped_clause(tag: str) -> io.BytesIO:
+    """A clause whose only run sits inside a w:hyperlink or another author's pending w:ins."""
+    doc = Document()
+    paragraph = doc.add_paragraph("terminate upon thirty (30) days written notice")
+    run = paragraph._p.findall(qn("w:r"))[0]
+    wrapper = OxmlElement(tag)
+    if tag == "w:hyperlink":
+        wrapper.set(qn("w:anchor"), "notice")
+    else:
+        wrapper.set(qn("w:id"), "900")
+        wrapper.set(qn("w:author"), "Counterparty")
+        wrapper.set(qn("w:date"), "2024-01-01T00:00:00Z")
+    run.addprevious(wrapper)
+    wrapper.append(run)
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out
+
+
+@pytest.mark.parametrize("tag", ["w:hyperlink", "w:ins"])
+def test_fragments_nested_in_a_wrapper_still_get_one_comment(tag: str):
+    """The range markers must climb to the paragraph's direct child, as every other anchor does."""
+    edited, result = _apply(
+        _wrapped_clause(tag),
+        [ModifyText(target_text="thirty (30) days written", new_text="sixty (60) days prior written", comment="why")],
+    )
+
+    assert result["edits_applied"] == 1
+    assert _comment_texts(edited) == ["why"]
+
+
+def test_the_report_names_the_group_comment():
+    """An agent replies to its own comment by the Com id the report gives it."""
+    _edited, result = _apply(
+        _docx(CLAUSE), [ModifyText(target_text="thirty (30) days'", new_text="sixty (60) days'", comment=COMMENT_TEXT)]
+    )
+
+    assert result["edits"][0].get("comment_ids") == ["Com:1"]
+
+
+def test_a_rollback_keeps_the_granularity():
+    engine = RedlineEngine(_docx(CLAUSE), author="Reviewer", commented_change_granularity=WORD)
+
+    engine._restore_from_snapshot(_docx(CLAUSE))
+
+    assert engine.commented_change_granularity == WORD

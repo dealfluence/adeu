@@ -159,3 +159,34 @@ describe("commented_change_granularity", () => {
     expect(commentTexts(doc)).toEqual(["Name change.", "Name change."]);
   });
 });
+
+describe("commented_change_granularity word: review fixes", () => {
+  for (const tag of ["w:hyperlink", "w:ins"] as const) {
+    it(`anchors one comment when the fragments sit inside a ${tag}`, async () => {
+      const { doc, res } = await applyTo(
+        (d) => {
+          const p = addParagraph(d, "terminate upon thirty (30) days written notice");
+          const run = p.getElementsByTagName("w:r")[0];
+          const wrapper = p.ownerDocument!.createElement(tag);
+          if (tag === "w:hyperlink") {
+            wrapper.setAttribute("w:anchor", "notice");
+          } else {
+            wrapper.setAttribute("w:id", "900");
+            wrapper.setAttribute("w:author", "Counterparty");
+            wrapper.setAttribute("w:date", "2024-01-01T00:00:00Z");
+          }
+          p.insertBefore(wrapper, run);
+          wrapper.appendChild(run);
+        },
+        [{ type: "modify", target_text: "thirty (30) days written", new_text: "sixty (60) days prior written", comment: "why" }],
+      );
+      expect(res.edits_applied).toBe(1);
+      expect(commentTexts(doc)).toEqual(["why"]);
+    });
+  }
+
+  it("names the group comment in the per-edit report", async () => {
+    const { res } = await commentedClause();
+    expect(res.edits[0].comment_ids).toEqual(["Com:1"]);
+  });
+});

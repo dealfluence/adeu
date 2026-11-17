@@ -1044,12 +1044,17 @@ export class RedlineEngine {
     }
 
     if (!raw_sub_edits || raw_sub_edits.length === 0) {
+      // A pure comment anchor mints no revision for a group comment to find, so
+      // it keeps its comment; any other fallback joins the group so a
+      // multi-paragraph edit still ends up with exactly one comment. Python twin.
+      const joins_group = word_mode && target_str !== new_str;
       const fallback_edit: any = {
         type: "modify",
         target_text: target_str,
         new_text: new_str,
-        comment: parent_comment,
+        comment: joins_group ? null : parent_comment,
       };
+      if (joins_group) fallback_edit._group_comment = parent_comment;
       fallback_edit._resolved_start_idx = base_offset;
       fallback_edit._match_start_index = base_offset;
       fallback_edit._active_mapper_ref = active_mapper;
@@ -2935,77 +2940,122 @@ export class RedlineEngine {
   }
 
   /**
-   * Attaches a comment that spans across two different paragraphs (or other block
-   * containers). start_element lives inside start_p, end_element lives inside end_p,
-   * and the comment is open from start_element through end_element.
-   * Ported from Python `RedlineEngine._attach_comment_spanning`.
-   */
-  /**
    * commented_change_granularity="word": anchors each commented edit's ONE
-   * comment from its first applied fragment to its last, in document order.
-   * The range markers go beside the outermost fragments, outside every
-   * w:ins/w:del, so rejecting any single fragment leaves the rest of the
-   * anchor — and the comment with its replies — in place. Revision ids are
-   * numbered per part (issue #114), so each group is looked up only in the
-   * part its edit resolved into. Python twin.
+   * comment from its first fragment to its last, in document order. The range
+   * markers go beside the outermost fragments, outside every w:ins/w:del, so
+   * rejecting any single fragment leaves the rest of the anchor — and the
+   * comment with its replies — in place. A group with any failed or skipped
+   * fragment gets no comment: that edit already reports as skipped. Revision
+   * ids are numbered per part (issue #114), so each group is looked up only in
+   * the part its edit resolved into, through one id index per part rather
+   * than one walk per group. Python twin.
    */
   private _attach_group_comments(resolved_edits: any[]): void {
-    const groups = new Map<any, any[]>();
-    const comments = new Map<any, EditCommentValue>();
+    const groups = new Map<string, any[]>();
+    const comments = new Map<string, EditCommentValue>();
+    const failed = new Set<string>();
+    const owner_ids = new Map<any, number>();
+    const owner_id = (o: any): number => {
+      if (!owner_ids.has(o)) owner_ids.set(o, owner_ids.size);
+      return owner_ids.get(o)!;
+    };
     for (const [edit] of resolved_edits) {
-      if (!edit._applied_status) continue;
-      const key = edit._split_group_id ?? edit;
+      const owner = edit._parent_edit_ref || edit;
+      // Offsets from the clean and raw mappers share one number space, so the
+      // owning edit disambiguates two edits starting at the same offset.
+      const key = `${owner_id(owner)}:${edit._split_group_id ?? `e${owner_id(edit)}`}`;
+      if (!edit._applied_status) {
+        failed.add(key);
+        continue;
+      }
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(edit);
       if (edit._group_comment != null && !comments.has(key)) comments.set(key, edit._group_comment);
     }
-    if (!comments.size) return;
     const roots = new Map<string, Element>();
     for (const [root, name] of this._story_roots()) roots.set(name, root);
+    const indexes = new Map<string, Map<string, [number, Element][]>>();
     for (const [key, comment] of comments) {
+      if (failed.has(key)) continue;
       const members = groups.get(key)!;
-      const ids = new Set<string>();
-      for (const edit of members) {
-        for (const rid of [edit._reserved_del_id, edit._reserved_ins_id]) {
-          if (rid != null) ids.add(String(rid));
-        }
-      }
       const mapper = members[0]._active_mapper_ref || this.mapper;
       const part_path =
         mapper.part_name_at(members[0]._resolved_start_idx || 0) || normalize_part_name(this.doc.part.partname);
-      const root = roots.get(part_path);
-      const marks: Element[] = [];
-      const walk = (el: Element) => {
-        for (let child = el.firstChild; child; child = child.nextSibling) {
-          if (child.nodeType !== 1) continue;
-          const c = child as Element;
-          const is_mark = c.tagName === "w:ins" || c.tagName === "w:del";
-          // A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
-          // a range marker cannot sit beside it.
-          if (
-            is_mark &&
-            ids.has(c.getAttribute("w:id") || "") &&
-            (c.parentNode as Element | null)?.tagName !== "w:rPr" &&
-            !is_in_inactive_mc_fallback(c)
-          ) {
-            marks.push(c);
-          }
-          walk(c);
+      if (!indexes.has(part_path)) indexes.set(part_path, RedlineEngine._revision_marks_by_id(roots.get(part_path)));
+      const index = indexes.get(part_path)!;
+      const marks: [number, Element][] = [];
+      for (const edit of members) {
+        for (const rid of [edit._reserved_del_id, edit._reserved_ins_id]) {
+          if (rid != null) marks.push(...(index.get(String(rid)) || []));
         }
-      };
-      if (root) walk(root);
-      if (!marks.length) continue;
-      const first = marks[0];
-      const last = marks[marks.length - 1];
+      }
+      marks.sort((a, b) => a[0] - b[0]);
+      if (!marks.length) {
+        const preview = (comment_text(comment) || "").substring(0, 60);
+        this.skipped_details.push(
+          `- Warning: the comment "${preview}" was NOT attached: none of its edit's tracked ` +
+            "changes could be located to anchor it. The tracked change itself was applied.",
+        );
+        continue;
+      }
       const paragraph_of = (el: Element): Element => {
         let cur: Node | null = el.parentNode;
         while (cur && (cur as Element).tagName !== "w:p") cur = cur.parentNode;
         return cur as Element;
       };
-      this._attach_comment_spanning(paragraph_of(first), first, paragraph_of(last), last, comment);
+      // The range markers must sit beside a direct child of the paragraph, not
+      // inside a w:hyperlink or another author's w:ins that wraps the fragment.
+      const ascend = (el: Element, p: Element): Element => {
+        let cur: Element = el;
+        while (cur.parentNode && cur.parentNode !== p) cur = cur.parentNode as Element;
+        return cur;
+      };
+      const first = marks[0][1];
+      const last = marks[marks.length - 1][1];
+      const first_p = paragraph_of(first);
+      const last_p = paragraph_of(last);
+      const comment_next_before = this.comments_manager.nextId;
+      this._attach_comment_spanning(first_p, ascend(first, first_p), last_p, ascend(last, last_p), comment);
+      const owner = members[0]._parent_edit_ref || members[0];
+      if (!Array.isArray(owner._minted_comment_ids)) owner._minted_comment_ids = [];
+      for (let n = comment_next_before; n < this.comments_manager.nextId; n++) {
+        if (!owner._minted_comment_ids.includes(String(n))) owner._minted_comment_ids.push(String(n));
+      }
     }
   }
 
+  /** Run-level w:ins/w:del of one part by w:id, with each element's document position. Python twin. */
+  private static _revision_marks_by_id(root: Element | undefined): Map<string, [number, Element][]> {
+    const index = new Map<string, [number, Element][]>();
+    if (!root) return index;
+    let position = 0;
+    const walk = (el: Element) => {
+      for (let child = el.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType !== 1) continue;
+        const c = child as Element;
+        if (c.tagName === "w:ins" || c.tagName === "w:del") {
+          position++;
+          // A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
+          // a range marker cannot sit beside it.
+          if ((c.parentNode as Element | null)?.tagName !== "w:rPr" && !is_in_inactive_mc_fallback(c)) {
+            const id = c.getAttribute("w:id") || "";
+            if (!index.has(id)) index.set(id, []);
+            index.get(id)!.push([position, c]);
+          }
+        }
+        walk(c);
+      }
+    };
+    walk(root);
+    return index;
+  }
+
+  /**
+   * Attaches a comment that spans across two different paragraphs (or other block
+   * containers). start_element lives inside start_p, end_element lives inside end_p,
+   * and the comment is open from start_element through end_element.
+   * Ported from Python `RedlineEngine._attach_comment_spanning`.
+   */
   private _attach_comment_spanning(
     start_p: Element,
     start_el: Element,

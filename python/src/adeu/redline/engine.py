@@ -28,6 +28,7 @@ from adeu.models import (
     SetField,
     comment_entries,
     comment_for_report,
+    comment_text,
 )
 from adeu.pagination import paginate, split_structural_appendix
 from adeu.redline.comments import CommentsManager, CommentThreadingError
@@ -3460,6 +3461,7 @@ class RedlineEngine:
             id_discovery_hint=self.id_discovery_hint,
             terse_errors=self.terse_errors,
             resolve_numbering=self.resolve_numbering,
+            commented_change_granularity=self.commented_change_granularity,
         )
 
     def _batch_fingerprint(self) -> str:
@@ -5003,56 +5005,85 @@ class RedlineEngine:
     def _attach_group_comments(self, resolved_edits: List[Tuple[Any, Any]]) -> None:
         """
         commented_change_granularity="word": anchors each commented edit's ONE
-        comment from its first applied fragment to its last, in document order.
+        comment from its first fragment to its last, in document order.
 
         The range markers go beside the outermost fragments, outside every
         w:ins/w:del, so rejecting any single fragment leaves the rest of the
-        anchor — and the comment with its replies — in place. Fragments that
-        failed are simply not spanned; a group with none applied gets no
-        comment. Revision ids are numbered per part (issue #114), so each
-        group is looked up only in the part its edit resolved into.
+        anchor — and the comment with its replies — in place. A group with any
+        failed or skipped fragment gets no comment: that edit already reports
+        as skipped, and a comment over half a change would contradict it.
+        Revision ids are numbered per part (issue #114), so each group is
+        looked up only in the part its edit resolved into, through one
+        id index per part rather than one walk per group.
         """
         groups: Dict[Any, List[Any]] = defaultdict(list)
         comments: Dict[Any, Any] = {}
+        failed: set = set()
         for edit, _orig_new in resolved_edits:
+            owner = getattr(edit, "_parent_edit_ref", None) or edit
+            split_id = getattr(edit, "_split_group_id", None)
+            # Offsets from the clean and raw mappers share one number space, so
+            # the owning edit disambiguates two edits starting at the same offset.
+            key = (id(owner), id(edit) if split_id is None else split_id)
             if not getattr(edit, "_applied_status", False):
+                failed.add(key)
                 continue
-            key = getattr(edit, "_split_group_id", None)
-            key = id(edit) if key is None else key
             groups[key].append(edit)
             if getattr(edit, "_group_comment", None) is not None:
                 comments.setdefault(key, edit._group_comment)
-        if not comments:
-            return
-        roots = dict((name, root) for root, name in self._story_roots())
+        roots = {name: root for root, name in self._story_roots()}
+        indexes: Dict[str, Dict[str, List[Tuple[int, Any]]]] = {}
         for key, comment in comments.items():
+            if key in failed:
+                continue
             members = groups[key]
-            ids = {
-                str(rid)
+            first_member = members[0]
+            mapper = first_member._active_mapper_ref or self.mapper
+            part_path = mapper.part_name_at(first_member._resolved_start_idx or 0) or str(
+                self.doc.part.partname
+            ).lstrip("/")
+            if part_path not in indexes:
+                indexes[part_path] = self._revision_marks_by_id(roots.get(part_path))
+            marks = sorted(
+                mark
                 for edit in members
                 for rid in (getattr(edit, "_reserved_del_id", None), getattr(edit, "_reserved_ins_id", None))
                 if rid is not None
-            }
-            first_member = members[0]
-            mapper = first_member._active_mapper_ref or self.mapper
-            part_path = mapper.part_name_at(first_member._resolved_start_idx or 0)
-            root = roots.get(part_path or str(self.doc.part.partname).lstrip("/"))
-            marks = [
-                el
-                for el in (root.iter(qn("w:ins"), qn("w:del")) if root is not None else ())
-                # A deleted paragraph mark (w:rPr/w:del) is not a run-level
-                # anchor: a range marker cannot sit beside it.
-                if el.get(qn("w:id")) in ids
-                and el.getparent().tag != qn("w:rPr")
-                and not is_in_inactive_mc_fallback(el)
-            ]
+                for mark in indexes[part_path].get(str(rid), [])
+            )
             if not marks:
-                logger.warning("Grouped comment has no applied fragment to anchor", group=key)
+                preview = (comment_text(comment) or "")[:60]
+                self.skipped_details.append(
+                    f'- Warning: the comment "{preview}" was NOT attached: none of its edit\'s tracked '
+                    "changes could be located to anchor it. The tracked change itself was applied."
+                )
+                logger.warning("Grouped comment has no applied fragment to anchor", part=part_path)
                 continue
-            first, last = marks[0], marks[-1]
+            first, last = marks[0][1], marks[-1][1]
+            comment_next_before = self.comments_manager.next_id
             self._attach_comment_spanning(
                 next(first.iterancestors(qn("w:p"))), first, next(last.iterancestors(qn("w:p"))), last, comment
             )
+            owner = getattr(first_member, "_parent_edit_ref", None) or first_member
+            minted = list(getattr(owner, "_minted_comment_ids", None) or [])
+            minted += [
+                str(n) for n in range(comment_next_before, self.comments_manager.next_id) if str(n) not in minted
+            ]
+            owner._minted_comment_ids = minted
+
+    @staticmethod
+    def _revision_marks_by_id(root: Any) -> Dict[str, List[Tuple[int, Any]]]:
+        """Run-level w:ins/w:del of one part by w:id, with each element's document position."""
+        index: Dict[str, List[Tuple[int, Any]]] = defaultdict(list)
+        if root is None:
+            return index
+        for position, el in enumerate(root.iter(qn("w:ins"), qn("w:del"))):
+            # A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
+            # a range marker cannot sit beside it.
+            if el.getparent().tag == qn("w:rPr") or is_in_inactive_mc_fallback(el):
+                continue
+            index[el.get(qn("w:id"))].append((position, el))
+        return index
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
         start_idx = edit._resolved_start_idx if edit._resolved_start_idx is not None else edit._match_start_index
@@ -5871,7 +5902,8 @@ class RedlineEngine:
         # (QA 2026-07-22 bug #1). Emit a single sub-edit over the minimal
         # word-boundary-trimmed changed span so a commented change is atomic:
         # rejecting it reverts the entire edit, with no orphaned "other half".
-        if parent_comment is not None and self.commented_change_granularity == "atomic":
+        word_mode = parent_comment is not None and self.commented_change_granularity == "word"
+        if parent_comment is not None and not word_mode:
             return self._single_commented_sub_edit(
                 target_str, new_str, base_offset, parent_comment, is_table, active_mapper
             )
@@ -5923,12 +5955,18 @@ class RedlineEngine:
                 hunk.target_text = ""
 
         if not raw_sub_edits:
+            # A pure comment anchor mints no revision for a group comment to find,
+            # so it keeps its comment; any other fallback joins the group so a
+            # multi-paragraph edit still ends up with exactly one comment.
+            joins_group = word_mode and target_str != new_str
             fallback_edit = ModifyText(
                 type="modify",
                 target_text=target_str,
                 new_text=new_str,
-                comment=parent_comment,
+                comment=None if joins_group else parent_comment,
             )
+            if joins_group:
+                fallback_edit._group_comment = parent_comment
             fallback_edit._resolved_start_idx = base_offset
             fallback_edit._match_start_index = base_offset
             fallback_edit._active_mapper_ref = active_mapper
@@ -5950,7 +5988,6 @@ class RedlineEngine:
         comment_assigned = False
         for raw_edit in raw_sub_edits:
             sub_start = base_offset + (raw_edit._match_start_index or 0)
-            word_mode = parent_comment is not None and self.commented_change_granularity == "word"
             should_attach_comment = (parent_comment is not None) and (not comment_assigned) and not word_mode
             if should_attach_comment:
                 comment_assigned = True
