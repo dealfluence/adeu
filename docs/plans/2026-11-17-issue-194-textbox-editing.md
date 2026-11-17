@@ -47,7 +47,7 @@ Status: DONE
 - **Done when:** Reading a DOCX with modern `mc:AlternateContent` or legacy VML text boxes (including >300-character prose, multiple paragraphs, tables, existing `<w:ins>`/`<w:del>` redlines, headers/footers, and content controls) returns the complete text with CriticMarkup in `clean_view=False`, clean text in `clean_view=True`, zero duplicate text or false image markers, and `DocumentMapper.full_text` matches `_extract_text_from_doc(..., include_appendix=False)` character-for-character.
 
 ### Task 2: Python RedlineEngine Editing, Container Guards, `mc:Fallback` Sync & Sanitize Parity
-Status: PENDING
+Status: DONE
 
 - **Goal:** Enable tracked editing, review actions, field writes, diffing, and sanitization inside `w:txbxContent` in Python while enforcing container boundaries, Word's comment restriction, `CT_TxbxContent` minimum-paragraph schema validity, and surgical `<mc:Fallback>` synchronization.
 - **Files:**

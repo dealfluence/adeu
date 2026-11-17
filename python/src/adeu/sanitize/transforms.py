@@ -142,21 +142,27 @@ def coalesce_runs(doc: DocumentObject) -> list[str]:
 
 def count_tracked_changes(doc: DocumentObject) -> tuple[int, int, int]:
     """Returns (insertion_count, deletion_count, format_count) of unresolved track changes."""
-    ins_count = len(doc.element.findall(f".//{qn('w:ins')}"))
-    del_count = len(doc.element.findall(f".//{qn('w:del')}"))
+    from adeu.utils.docx import is_in_inactive_mc_fallback
+
+    ins_count = sum(1 for el in doc.element.findall(f".//{qn('w:ins')}") if not is_in_inactive_mc_fallback(el))
+    del_count = sum(1 for el in doc.element.findall(f".//{qn('w:del')}") if not is_in_inactive_mc_fallback(el))
     fmt_count = (
-        len(doc.element.findall(f".//{qn('w:rPrChange')}"))
-        + len(doc.element.findall(f".//{qn('w:pPrChange')}"))
-        + len(doc.element.findall(f".//{qn('w:sectPrChange')}"))
+        sum(1 for el in doc.element.findall(f".//{qn('w:rPrChange')}") if not is_in_inactive_mc_fallback(el))
+        + sum(1 for el in doc.element.findall(f".//{qn('w:pPrChange')}") if not is_in_inactive_mc_fallback(el))
+        + sum(1 for el in doc.element.findall(f".//{qn('w:sectPrChange')}") if not is_in_inactive_mc_fallback(el))
     )
     return ins_count, del_count, fmt_count
 
 
 def get_track_change_authors(doc: DocumentObject) -> set[str]:
     """Return a set of all unique authors found in unresolved track changes."""
+    from adeu.utils.docx import is_in_inactive_mc_fallback
+
     authors = set()
     for tag in [qn("w:ins"), qn("w:del"), qn("w:rPrChange"), qn("w:pPrChange"), qn("w:sectPrChange")]:
         for el in doc.element.iter(tag):
+            if is_in_inactive_mc_fallback(el):
+                continue
             author = el.get(qn("w:author"))
             if author:
                 authors.add(author)
@@ -169,14 +175,16 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     Also strips w:rPrChange elements.
     Returns report lines listing each change that was accepted.
     """
+    from adeu.utils.docx import is_in_inactive_mc_fallback, sync_alternate_content_fallbacks
+
     lines = []
 
-    ins_els = doc.element.findall(f".//{qn('w:ins')}")
-    del_els = doc.element.findall(f".//{qn('w:del')}")
+    ins_els = [el for el in doc.element.findall(f".//{qn('w:ins')}") if not is_in_inactive_mc_fallback(el)]
+    del_els = [el for el in doc.element.findall(f".//{qn('w:del')}") if not is_in_inactive_mc_fallback(el)]
     fmt_els = (
-        doc.element.findall(f".//{qn('w:rPrChange')}")
-        + doc.element.findall(f".//{qn('w:pPrChange')}")
-        + doc.element.findall(f".//{qn('w:sectPrChange')}")
+        [el for el in doc.element.findall(f".//{qn('w:rPrChange')}") if not is_in_inactive_mc_fallback(el)]
+        + [el for el in doc.element.findall(f".//{qn('w:pPrChange')}") if not is_in_inactive_mc_fallback(el)]
+        + [el for el in doc.element.findall(f".//{qn('w:sectPrChange')}") if not is_in_inactive_mc_fallback(el)]
     )
 
     # Collect textual info before mutating. Every counted revision element is
@@ -237,6 +245,15 @@ def accept_all_tracked_changes(doc: DocumentObject) -> list[str]:
     for spc in doc.element.findall(f".//{qn('w:sectPrChange')}"):
         if spc.getparent() is not None:
             spc.getparent().remove(spc)
+
+    next_id = 0
+
+    def _next_id() -> int:
+        nonlocal next_id
+        next_id += 1
+        return next_id
+
+    sync_alternate_content_fallbacks([doc.element], _next_id)
 
     total = len(ins_els) + len(del_els) + len(fmt_els)
 

@@ -1,13 +1,23 @@
 import io
+import zipfile
 
+import ooxml_integrity
+import pytest
 from docx import Document
 from docx.document import Document as DocumentObject
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
+from lxml import etree
 
 from adeu.fields import collect_fields, field_summary
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
+from adeu.models import AcceptChange, InsertTableRow, ModifyText, RejectChange, SetField
+from adeu.redline.engine import BatchValidationError, RedlineEngine
 from adeu.redline.mapper import DocumentMapper
+from adeu.sanitize import sanitize_docx
+from adeu.sanitize.transforms import count_tracked_changes
+from adeu.text_revision import apply_text_revision_core
+from tests.utils import find_duplicate_para_ids
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -299,3 +309,318 @@ class TestTextboxProjectionAndMapping:
         orig_mapper = DocumentMapper(reloaded, original_view=True)
         assert "Deleted Box Text" in orig_mapper.full_text
         assert "Inserted Box Text" not in orig_mapper.full_text
+
+
+class TestTextboxEditingAndInvariants:
+    def test_modify_text_inside_textbox_creates_redline_and_syncs_fallback_surgically(self, tmp_path):
+        doc = Document()
+        host = doc.add_paragraph("Body anchor.")
+        box1 = make_ac_textbox_run_xml(
+            '<w:p w14:paraId="11111111" w14:textId="22222222">'
+            "<w:r><w:t>Notice: delivery obligations are suspended during force majeure.</w:t></w:r>"
+            "</w:p>",
+            inner_fallback_xml=(
+                '<w:p w14:paraId="11111112" w14:textId="22222223">'
+                "<w:r><w:t>Notice: delivery obligations are suspended during force majeure.</w:t></w:r>"
+                "</w:p>"
+            ),
+            doc_pr_id=7,
+            shape_name="Box One",
+        )
+        box2 = make_ac_textbox_run_xml(
+            '<w:p w14:paraId="33333333" w14:textId="44444444"><w:r><w:t>Untouched sidebar box.</w:t></w:r></w:p>',
+            inner_fallback_xml=(
+                '<w:p w14:paraId="33333334" w14:textId="44444445"><w:r><w:t>Untouched sidebar box.</w:t></w:r></w:p>'
+            ),
+            doc_pr_id=8,
+            shape_name="Box Two",
+        )
+        host._p.append(parse_xml(box1))
+        host._p.append(parse_xml(box2))
+        stream = _to_stream(doc)
+
+        eng = RedlineEngine(io.BytesIO(stream.getvalue()), author="Counsel")
+        edit = ModifyText(target_text="force majeure", new_text="severe weather")
+        stats = eng.process_batch([edit], partial=False)
+        assert stats["edits_applied"] == 1
+        assert stats["document_state"]["tracked_changes"] == 2
+        assert stats["edits"][0]["part"] == "textbox (word/document.xml)"
+
+        saved = eng.save_to_stream().getvalue()
+        assert find_duplicate_para_ids(saved) == []
+
+        out_path = tmp_path / "edited_box.docx"
+        out_path.write_bytes(saved)
+        assert ooxml_integrity.check(str(out_path)) == []
+
+        raw = extract_text_from_stream(io.BytesIO(saved), clean_view=False, include_appendix=False)
+        clean = extract_text_from_stream(io.BytesIO(saved), clean_view=True, include_appendix=False)
+        assert "{--force majeure--}{++severe weather++}" in raw
+        assert "Notice: delivery obligations are suspended during severe weather." in clean
+
+        with zipfile.ZipFile(io.BytesIO(saved)) as z:
+            root = etree.fromstring(z.read("word/document.xml"))
+        ns = {"mc": MC_NS, "w": W_NS, "v": V_NS, "w14": W14_NS}
+        acs = root.findall(".//mc:AlternateContent", ns)
+        assert len(acs) == 2
+
+        # Box 1: both Choice and Fallback carry the tracked replacement with distinct w:ids
+        c1_ins = acs[0].findall("mc:Choice//w:ins", ns)
+        c1_del = acs[0].findall("mc:Choice//w:del", ns)
+        f1_ins = acs[0].findall("mc:Fallback//w:ins", ns)
+        f1_del = acs[0].findall("mc:Fallback//w:del", ns)
+        assert len(c1_ins) == 1 and len(c1_del) == 1
+        assert len(f1_ins) == 1 and len(f1_del) == 1
+        choice_ids = {c1_ins[0].get(f"{{{W_NS}}}id"), c1_del[0].get(f"{{{W_NS}}}id")}
+        fallback_ids = {f1_ins[0].get(f"{{{W_NS}}}id"), f1_del[0].get(f"{{{W_NS}}}id")}
+        assert choice_ids.isdisjoint(fallback_ids)
+
+        # Box 2 (untouched): paraIds in Choice and Fallback stayed untouched
+        f2_p = acs[1].find("mc:Fallback//w:p", ns)
+        assert f2_p is not None
+        assert f2_p.get(f"{{{W14_NS}}}paraId") == "33333334"
+
+    def test_cross_boundary_and_comment_restrictions_on_textboxes(self, tmp_path):
+        doc = Document()
+        host = doc.add_paragraph("Body tail sentence.")
+        host._p.append(
+            parse_xml(
+                make_ac_textbox_run_xml(
+                    "<w:p><w:r><w:t>First box sentence.</w:t></w:r></w:p>",
+                    doc_pr_id=7,
+                    shape_name="Box A",
+                )
+            )
+        )
+        host._p.append(
+            parse_xml(
+                make_ac_textbox_run_xml(
+                    "<w:p><w:r><w:t>Second box sentence.</w:t></w:r></w:p>",
+                    doc_pr_id=8,
+                    shape_name="Box B",
+                )
+            )
+        )
+        raw_bytes = _to_stream(doc).getvalue()
+
+        # 1. Cross body -> textbox boundary refused
+        with pytest.raises(BatchValidationError, match=r"spans a structural document-part boundary \(body → textbox\)"):
+            RedlineEngine(io.BytesIO(raw_bytes), author="Counsel").process_batch(
+                [ModifyText(target_text="Body tail sentence.\n\nFirst box sentence.", new_text="Merged.")],
+                partial=False,
+            )
+
+        # 2. Cross textbox -> textbox boundary refused
+        with pytest.raises(
+            BatchValidationError, match=r"spans a structural document-part boundary \(textbox → textbox\)"
+        ):
+            RedlineEngine(io.BytesIO(raw_bytes), author="Counsel").process_batch(
+                [ModifyText(target_text="First box sentence.\n\nSecond box sentence.", new_text="Merged.")],
+                partial=False,
+            )
+
+        # 3. Comment-only edit inside textbox refused
+        with pytest.raises(BatchValidationError, match=r"comments cannot be anchored inside a textbox part"):
+            RedlineEngine(io.BytesIO(raw_bytes), author="Counsel").process_batch(
+                [
+                    ModifyText(
+                        target_text="First box sentence.",
+                        new_text="First box sentence.",
+                        comment="Cannot anchor here.",
+                    )
+                ],
+                partial=False,
+            )
+
+        # 4. Modify + comment inside textbox applies edit, drops comment with warning, keeps XML valid
+        eng = RedlineEngine(io.BytesIO(raw_bytes), author="Counsel")
+        stats = eng.process_batch(
+            [
+                ModifyText(
+                    target_text="First box sentence.",
+                    new_text="Revised box sentence.",
+                    comment="Dropped bubble.",
+                )
+            ],
+            partial=False,
+        )
+        assert stats["edits_applied"] == 1
+        assert any("comments inside a textbox part" in msg for msg in eng.skipped_details)
+        saved = eng.save_to_stream().getvalue()
+        p = tmp_path / "mod_comment_box.docx"
+        p.write_bytes(saved)
+        assert ooxml_integrity.check(str(p)) == []
+        with zipfile.ZipFile(io.BytesIO(saved)) as z:
+            xml_txt = z.read("word/document.xml").decode("utf-8")
+        assert "commentRangeStart" not in xml_txt
+
+    def test_paragraph_split_delete_last_paragraph_floor_and_review_actions(self, tmp_path):
+        doc = Document()
+        host = doc.add_paragraph("Body paragraph.")
+        host._p.append(
+            parse_xml(
+                make_ac_textbox_run_xml(
+                    "<w:p><w:r><w:t>Sole boxed paragraph.</w:t></w:r></w:p>",
+                    doc_pr_id=7,
+                    shape_name="Box Sole",
+                )
+            )
+        )
+        base_bytes = _to_stream(doc).getvalue()
+
+        # Split inside textbox -> 2 paragraphs, then accept single Chg id syncs Fallback too
+        eng_split = RedlineEngine(io.BytesIO(base_bytes), author="Counsel")
+        eng_split.process_batch(
+            [ModifyText(target_text="Sole boxed paragraph.", new_text="First line.\n\nSecond line.")],
+            partial=False,
+        )
+        split_bytes = eng_split.save_to_stream().getvalue()
+        assert find_duplicate_para_ids(split_bytes) == []
+
+        eng_review = RedlineEngine(io.BytesIO(split_bytes), author="Reviewer")
+        chg_ids = eng_review._existing_change_ids()
+        assert chg_ids
+        eng_review.process_batch([AcceptChange(target_id=f"Chg:{cid}") for cid in chg_ids], partial=False)
+        reviewed_bytes = eng_review.save_to_stream().getvalue()
+        p_rev = tmp_path / "reviewed.docx"
+        p_rev.write_bytes(reviewed_bytes)
+        assert ooxml_integrity.check(str(p_rev)) == []
+        with zipfile.ZipFile(io.BytesIO(reviewed_bytes)) as z:
+            rev_xml = etree.fromstring(z.read("word/document.xml"))
+        assert rev_xml.findall(f".//{{{W_NS}}}ins") == []
+        assert rev_xml.findall(f".//{{{W_NS}}}del") == []
+
+        # Delete all paragraphs in textbox (first line + pilcrow, then second line) and accept_all,
+        # plus verify a sole paragraph carrying a tracked pilcrow deletion <w:pPr><w:rPr><w:del/>:
+        # <w:txbxContent> must retain >= 1 <w:p> so CT_TxbxContent stays schema-valid.
+        sole_pilcrow_del_inner = (
+            "<w:p>"
+            '<w:pPr><w:rPr><w:del w:id="1" w:author="A" w:date="2026-11-17T09:00:00Z"/></w:rPr></w:pPr>'
+            '<w:del w:id="2" w:author="A" w:date="2026-11-17T09:00:00Z"><w:r><w:delText>Gone</w:delText></w:r></w:del>'
+            "</w:p>"
+        )
+        doc_pilcrow = Document()
+        p_pilcrow = doc_pilcrow.add_paragraph("Anchor.")
+        p_pilcrow._p.append(parse_xml(make_ac_textbox_run_xml(sole_pilcrow_del_inner)))
+        eng_acc = RedlineEngine(_to_stream(doc_pilcrow), author="Counsel")
+        counts = eng_acc.accept_all_revisions()
+        assert counts["accepted_deletions"] == 2
+        acc_bytes = eng_acc.save_to_stream().getvalue()
+        p_acc = tmp_path / "accepted_empty_box.docx"
+        p_acc.write_bytes(acc_bytes)
+        assert ooxml_integrity.check(str(p_acc)) == []
+        with zipfile.ZipFile(io.BytesIO(acc_bytes)) as z:
+            acc_root = etree.fromstring(z.read("word/document.xml"))
+        for tc in acc_root.findall(f".//{{{W_NS}}}txbxContent"):
+            assert len(tc.findall(f"{{{W_NS}}}p")) >= 1, "CT_TxbxContent must keep at least one <w:p>"
+
+        # RejectChange on a redlined textbox restores both Choice and Fallback cleanly
+        eng_rej_setup = RedlineEngine(io.BytesIO(base_bytes), author="Counsel")
+        eng_rej_setup.process_batch(
+            [ModifyText(target_text="Sole boxed paragraph.", new_text="Changed boxed paragraph.")],
+            partial=False,
+        )
+        rej_in = eng_rej_setup.save_to_stream().getvalue()
+        eng_rej = RedlineEngine(io.BytesIO(rej_in), author="Reviewer")
+        first_cid = eng_rej._existing_change_ids()[0]
+        eng_rej.process_batch([RejectChange(target_id=f"Chg:{first_cid}")], partial=False)
+        rej_out = eng_rej.save_to_stream().getvalue()
+        assert "Sole boxed paragraph." in extract_text_from_stream(io.BytesIO(rej_out), include_appendix=False)
+        with zipfile.ZipFile(io.BytesIO(rej_out)) as z:
+            rej_root = etree.fromstring(z.read("word/document.xml"))
+        assert rej_root.findall(f".//{{{W_NS}}}ins") == []
+        assert rej_root.findall(f".//{{{W_NS}}}del") == []
+
+    def test_accept_all_and_sanitize_do_not_double_count_fallback_revisions(self, tmp_path):
+        doc = Document()
+        host = doc.add_paragraph("Body clause.")
+        host._p.append(parse_xml(make_ac_textbox_run_xml("<w:p><w:r><w:t>10 Old Road</w:t></w:r></w:p>")))
+        eng = RedlineEngine(_to_stream(doc), author="Counsel")
+        eng.process_batch([ModifyText(target_text="10 Old Road", new_text="25 New Road")], partial=False)
+        redlined_bytes = eng.save_to_stream().getvalue()
+
+        # 1. RedlineEngine.accept_all_revisions counts 1 ins + 1 del (not 2 + 2)
+        eng_acc = RedlineEngine(io.BytesIO(redlined_bytes), author="Counsel")
+        res = eng_acc.accept_all_revisions()
+        assert res["accepted_insertions"] == 1
+        assert res["accepted_deletions"] == 1
+
+        # 2. sanitize_docx(accept_all=True) counts 2 tracked changes (not 4) and leaves zero revisions
+        in_file = tmp_path / "in_redlined.docx"
+        out_file = tmp_path / "out_sanitized.docx"
+        in_file.write_bytes(redlined_bytes)
+        san_res = sanitize_docx(str(in_file), str(out_file), accept_all=True)
+        assert san_res.status in ("clean", "clean_with_warnings")
+        assert san_res.tracked_changes_found == 2
+        assert san_res.tracked_changes_accepted == 2
+        san_doc = Document(str(out_file))
+        assert count_tracked_changes(san_doc) == (0, 0, 0)
+        with zipfile.ZipFile(out_file) as z:
+            san_root = etree.fromstring(z.read("word/document.xml"))
+        assert san_root.findall(f".//{{{W_NS}}}ins") == []
+        assert san_root.findall(f".//{{{W_NS}}}del") == []
+
+    def test_header_textbox_table_ops_set_field_and_text_revision(self, tmp_path):
+        doc = Document()
+        sec = doc.sections[0]
+        hdr_p = sec.header.paragraphs[0]
+        hdr_p.text = "Header Banner"
+        hdr_p._p.append(
+            parse_xml(
+                make_ac_textbox_run_xml(
+                    "<w:p><w:r><w:t>Suite 100, Old Tower</w:t></w:r></w:p>",
+                    doc_pr_id=31,
+                    shape_name="HeaderAddr",
+                )
+            )
+        )
+        body_p = doc.add_paragraph("Main body text.")
+        box_inner = (
+            "<w:sdt>"
+            '<w:sdtPr><w:alias w:val="SignerName"/><w:text/></w:sdtPr>'
+            "<w:sdtContent><w:p><w:r><w:t>Jane Doe</w:t></w:r></w:p></w:sdtContent>"
+            "</w:sdt>"
+            "<w:tbl>"
+            "<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>"
+            "<w:tr>"
+            "<w:tc><w:p><w:r><w:t>Item</w:t></w:r></w:p></w:tc>"
+            "<w:tc><w:p><w:r><w:t>Fee</w:t></w:r></w:p></w:tc>"
+            "</w:tr>"
+            "<w:tr>"
+            "<w:tc><w:p><w:r><w:t>Setup</w:t></w:r></w:p></w:tc>"
+            "<w:tc><w:p><w:r><w:t>$100</w:t></w:r></w:p></w:tc>"
+            "</w:tr>"
+            "</w:tbl>"
+        )
+        body_p._p.append(parse_xml(make_ac_textbox_run_xml(box_inner, doc_pr_id=32, shape_name="BodyTableBox")))
+        base_bytes = _to_stream(doc).getvalue()
+
+        eng = RedlineEngine(io.BytesIO(base_bytes), author="Counsel")
+        stats = eng.process_batch(
+            [
+                ModifyText(target_text="Suite 100, Old Tower", new_text="Suite 500, New Tower"),
+                SetField(field="CC:1", value="John Smith"),
+                InsertTableRow(target_text="Setup", position="below", cells=["Support", "$250"]),
+            ],
+            partial=False,
+        )
+        assert stats["edits_applied"] == 3
+        out_bytes = eng.save_to_stream().getvalue()
+        p_out = tmp_path / "header_table_field.docx"
+        p_out.write_bytes(out_bytes)
+        assert ooxml_integrity.check(str(p_out)) == []
+
+        clean = extract_text_from_stream(io.BytesIO(out_bytes), clean_view=True, include_appendix=False)
+        assert "Suite 500, New Tower" in clean
+        assert "John Smith" in clean
+        assert "Support | $250" in clean
+
+        # Whole-document apply_text_revision_core editing inside a textbox
+        rev_src = tmp_path / "rev_src.docx"
+        rev_dst = tmp_path / "rev_dst.docx"
+        rev_src.write_bytes(base_bytes)
+        orig_clean = extract_text_from_stream(io.BytesIO(base_bytes), clean_view=True, include_appendix=False)
+        revised_clean = orig_clean.replace("Suite 100, Old Tower", "Suite 900, Final Tower")
+        rev_stats, _ = apply_text_revision_core(str(rev_src), revised_clean, str(rev_dst), author="Counsel")
+        assert rev_stats["edits_applied"] >= 1
+        assert ooxml_integrity.check(str(rev_dst)) == []

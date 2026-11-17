@@ -49,7 +49,14 @@ from adeu.redline.gates import (
     segmentation_note,
 )
 from adeu.redline.mapper import ANCHOR_MARKER_RE, DocumentMapper, TextSpan
-from adeu.utils.docx import create_attribute, create_element, strip_bom_from_docx_bytes
+from adeu.utils.docx import (
+    QN_W_TXBXCONTENT,
+    create_attribute,
+    create_element,
+    is_in_inactive_mc_fallback,
+    strip_bom_from_docx_bytes,
+    sync_alternate_content_fallbacks,
+)
 from adeu.utils.opc import load_document as Document
 from adeu.utils.protection import read_document_protection
 from adeu.utils.safe_regex import RegexTimeoutError
@@ -1115,8 +1122,11 @@ class RedlineEngine:
         for root, name in self._story_roots():
             if part is not None and name != part:
                 continue
-            out.extend(root.findall(f".//{qn(tag)}"))
+            out.extend(n for n in root.findall(f".//{qn(tag)}") if not is_in_inactive_mc_fallback(n))
         return out
+
+    def _sync_fallbacks(self) -> None:
+        sync_alternate_content_fallbacks(self._revision_roots(), self._get_next_id)
 
     def _parts_holding_id(self, target_id: str) -> List[str]:
         """
@@ -1128,7 +1138,10 @@ class RedlineEngine:
         parts: List[str] = []
         for root, name in self._story_roots():
             for tag in ("w:ins", "w:del") + self._FORMAT_CHANGE_TAGS:
-                if any(n.get(qn("w:id")) == target_id for n in root.findall(f".//{qn(tag)}")):
+                if any(
+                    n.get(qn("w:id")) == target_id and not is_in_inactive_mc_fallback(n)
+                    for n in root.findall(f".//{qn(tag)}")
+                ):
                     parts.append(name)
                     break
         return parts
@@ -2440,9 +2453,13 @@ class RedlineEngine:
 
     def _comment_anchor_in_main_story(self, element) -> bool:
         root = element
-        while root.getparent() is not None:
+        while root is not None:
+            if root.tag == QN_W_TXBXCONTENT:
+                return False
+            if root.getparent() is None:
+                break
             root = root.getparent()
-        return root.tag == self._MAIN_STORY_ROOT
+        return root is not None and root.tag == self._MAIN_STORY_ROOT
 
     def _skip_comment_outside_main_story(self, element, text: str) -> bool:
         """
@@ -2452,15 +2469,22 @@ class RedlineEngine:
         """
         if self._comment_anchor_in_main_story(element):
             return False
+        story = None
         root = element
-        while root.getparent() is not None:
+        while root is not None:
+            if root.tag == QN_W_TXBXCONTENT:
+                story = "textbox"
+                break
+            if root.getparent() is None:
+                break
             root = root.getparent()
-        story = {
-            qn("w:ftr"): "footer",
-            qn("w:hdr"): "header",
-            qn("w:footnotes"): "footnote",
-            qn("w:endnotes"): "endnote",
-        }.get(root.tag, "non-body")
+        if story is None:
+            story = {
+                qn("w:ftr"): "footer",
+                qn("w:hdr"): "header",
+                qn("w:footnotes"): "footnote",
+                qn("w:endnotes"): "endnote",
+            }.get(root.tag if root is not None else "", "non-body")
         msg = (
             f'- Warning: the comment "{text[:60]}" was NOT attached: Word does not support '
             f"comments inside a {story} part, and writing one produces a document other "
@@ -4058,6 +4082,8 @@ class RedlineEngine:
         for root in self._revision_roots():
             for tag in ("w:ins", "w:del", "w:pPrChange", "w:rPrChange", "w:sectPrChange"):
                 for el in root.findall(f".//{qn(tag)}"):
+                    if is_in_inactive_mc_fallback(el):
+                        continue
                     rid = el.get(qn("w:id"))
                     if rid:
                         unique_ids.add(rid)
@@ -4953,8 +4979,11 @@ class RedlineEngine:
                 applied += 1
             else:
                 skipped += 1
+        if applied > 0:
+            self._sync_fallbacks()
         if self.markup_mode == "manual" and not self._in_process_batch:
             self._convert_revisions_to_manual_markup()
+            self._sync_fallbacks()
         return applied, skipped
 
     def _apply_insert_row(self, edit: InsertTableRow) -> bool:
@@ -6990,12 +7019,14 @@ class RedlineEngine:
         Paragraphs outside a table are unaffected: the body may legitimately
         end up with none.
         """
-        cell = p_elem.getparent()
-        while cell is not None and cell.tag != qn("w:tc"):
-            cell = cell.getparent()
-        if cell is None:
+        container = p_elem.getparent()
+        while container is not None and container.tag not in (qn("w:tc"), QN_W_TXBXCONTENT):
+            container = container.getparent()
+        if container is None:
             return False
-        return len(cell.findall(f".//{qn('w:p')}")) <= 1
+        if container.tag == QN_W_TXBXCONTENT:
+            return len(container.findall(qn("w:p"))) <= 1
+        return len(container.findall(f".//{qn('w:p')}")) <= 1
 
     def _get_next_run(self, run: Run) -> Optional[Run]:
         curr = run._element
@@ -7739,6 +7770,7 @@ class RedlineEngine:
                 el.attrib.pop("_adeu_unwrapped_end", None)
             # Once per batch, not per action (Node pins the scan budget).
             self._prune_empty_paragraph_properties()
+            self._sync_fallbacks()
         return applied, skipped, already_resolved
 
     def _clean_wrapping_comments(self, element, preserve_comments: bool = False):
@@ -8323,10 +8355,16 @@ class RedlineEngine:
         accepted_deletions = 0
         accepted_formatting = 0
         for root_element in parts_to_process:
-            accepted_insertions += len(root_element.findall(f".//{qn('w:ins')}"))
-            accepted_deletions += len(root_element.findall(f".//{qn('w:del')}"))
+            accepted_insertions += sum(
+                1 for el in root_element.findall(f".//{qn('w:ins')}") if not is_in_inactive_mc_fallback(el)
+            )
+            accepted_deletions += sum(
+                1 for el in root_element.findall(f".//{qn('w:del')}") if not is_in_inactive_mc_fallback(el)
+            )
             for tag in ("w:rPrChange", "w:pPrChange", "w:sectPrChange"):
-                accepted_formatting += len(root_element.findall(f".//{qn(tag)}"))
+                accepted_formatting += sum(
+                    1 for el in root_element.findall(f".//{qn(tag)}") if not is_in_inactive_mc_fallback(el)
+                )
 
         # Only claim comments were removed when they actually are — and count
         # EVERY body this call deletes, not just the ones a `remove_comments`
@@ -8340,7 +8378,17 @@ class RedlineEngine:
         self.removed_comment_notes = []
 
         for root_element in parts_to_process:
+            for pr_tag in ("w:rPrChange", "w:pPrChange", "w:sectPrChange"):
+                for el in root_element.findall(f".//{qn(pr_tag)}"):
+                    if is_in_inactive_mc_fallback(el):
+                        continue
+                    parent = el.getparent()
+                    if parent is not None:
+                        parent.remove(el)
+
             for ins in root_element.findall(f".//{qn('w:ins')}"):
+                if is_in_inactive_mc_fallback(ins):
+                    continue
                 self._clean_wrapping_comments(ins, preserve_comments=True)
                 parent = ins.getparent()
                 if parent is None:
@@ -8357,6 +8405,8 @@ class RedlineEngine:
                 parent.remove(ins)
 
             for p in root_element.findall(f".//{qn('w:p')}"):
+                if is_in_inactive_mc_fallback(p):
+                    continue
                 pPr = p.find(qn("w:pPr"))
                 if pPr is not None:
                     rPr = pPr.find(qn("w:rPr"))
@@ -8389,6 +8439,8 @@ class RedlineEngine:
                                 p.getparent().remove(p)
 
             for d in root_element.findall(f".//{qn('w:del')}"):
+                if is_in_inactive_mc_fallback(d):
+                    continue
                 self._clean_wrapping_comments(d, preserve_comments=False)
                 self._delete_comments_in_element(d)
                 parent = d.getparent()
@@ -8473,6 +8525,7 @@ class RedlineEngine:
             for cid in sorted(removed_ids, key=lambda x: (int(x) if x.isdigit() else 0, x))
         ]
         self._prune_empty_paragraph_properties()
+        self._sync_fallbacks()
 
         return {
             "accepted_insertions": accepted_insertions,
@@ -8525,6 +8578,8 @@ class RedlineEngine:
             #    whose later (no-op) processing is guarded by the parent check.
             rejected_mark_hosts = []
             for ins in root_element.findall(f".//{qn('w:ins')}"):
+                if is_in_inactive_mc_fallback(ins):
+                    continue
                 parent = ins.getparent()
                 if parent is None:
                     continue
@@ -8550,6 +8605,8 @@ class RedlineEngine:
 
             # 2. Reject paragraph-mark deletions: keep the paragraph break.
             for p in root_element.findall(f".//{qn('w:p')}"):
+                if is_in_inactive_mc_fallback(p):
+                    continue
                 pPr = p.find(qn("w:pPr"))
                 if pPr is not None:
                     rPr = pPr.find(qn("w:rPr"))
@@ -8585,6 +8642,8 @@ class RedlineEngine:
 
             # 3. Reject deletions: restore the original text.
             for d in root_element.findall(f".//{qn('w:del')}"):
+                if is_in_inactive_mc_fallback(d):
+                    continue
                 parent = d.getparent()
                 if parent is None:
                     continue
@@ -8601,3 +8660,4 @@ class RedlineEngine:
                 parent.remove(d)
 
         self._prune_empty_paragraph_properties()
+        self._sync_fallbacks()

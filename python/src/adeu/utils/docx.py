@@ -131,6 +131,160 @@ def active_alternate_content_branch(ac_el):
     return None
 
 
+def is_in_inactive_mc_fallback(el) -> bool:
+    """True when `el` sits inside an <mc:Fallback> superseded by <mc:Choice>."""
+    cur = el.getparent() if hasattr(el, "getparent") else None
+    while cur is not None:
+        if cur.tag == QN_MC_FALLBACK:
+            ac = cur.getparent()
+            if ac is not None and ac.tag == QN_MC_ALTERNATECONTENT:
+                active = active_alternate_content_branch(ac)
+                if active is not None and active is not cur:
+                    return True
+        cur = cur.getparent()
+    return False
+
+
+_FALLBACK_REV_ID_TAGS = frozenset(
+    qn(t)
+    for t in (
+        "w:ins",
+        "w:del",
+        "w:rPrChange",
+        "w:pPrChange",
+        "w:sectPrChange",
+        "w:tblPrChange",
+        "w:trPrChange",
+        "w:tcPrChange",
+    )
+)
+_QN_W14_PARA_ID = "{http://schemas.microsoft.com/office/word/2010/wordml}paraId"
+_QN_W14_TEXT_ID = "{http://schemas.microsoft.com/office/word/2010/wordml}textId"
+_QN_V_SHAPE = "{urn:schemas-microsoft-com:vml}shape"
+
+
+def _txbx_shape_key(tc_el, stop_at) -> str:
+    """Shape identifier (`wp:docPr/@name` or `v:shape/@id`) enclosing `tc_el`."""
+    cur = tc_el.getparent()
+    while cur is not None and cur is not stop_at:
+        if cur.tag == _QN_V_SHAPE:
+            vid = cur.get("id") or ""
+            if vid:
+                return vid
+        doc_pr = cur.find(QN_WP_DOCPR)
+        if doc_pr is not None:
+            name = doc_pr.get("name") or ""
+            if name:
+                return name
+        cur = cur.getparent()
+    return ""
+
+
+def _normalized_txbx_signature(tc_el) -> bytes:
+    """Structural XML signature of `tc_el` ignoring per-branch revision/para IDs."""
+    from copy import deepcopy
+
+    from lxml import etree
+
+    clone = deepcopy(tc_el)
+    for node in clone.iter():
+        if node.tag in _FALLBACK_REV_ID_TAGS:
+            node.attrib.pop(QN_W_ID, None)
+        node.attrib.pop(_QN_W14_PARA_ID, None)
+        node.attrib.pop(_QN_W14_TEXT_ID, None)
+    return etree.tostring(clone, encoding="utf-8")
+
+
+def sync_alternate_content_fallbacks(roots, next_rev_id_fn) -> None:
+    """Mirror mutated <mc:Choice> w:txbxContent trees into paired <mc:Fallback> boxes.
+
+    Untouched <mc:AlternateContent> elements (whose <mc:Choice> and <mc:Fallback>
+    w:txbxContent subtrees already match modulo w:id / w14:paraId / w14:textId)
+    are left byte-for-byte untouched. When a <mc:Choice> box was edited, its
+    children are cloned into the paired <mc:Fallback> box with freshly minted
+    revision w:ids and signed-int32 w14:paraId / w14:textId values.
+    """
+    from copy import deepcopy
+
+    from .long_hex_number import generate_long_hex_number
+
+    for root in roots:
+        if root is None:
+            continue
+        used_para_ids: set[str] | None = None
+        for ac in list(root.findall(f".//{QN_MC_ALTERNATECONTENT}")):
+            if is_in_inactive_mc_fallback(ac):
+                continue
+            active = active_alternate_content_branch(ac)
+            if active is None or active.tag != QN_MC_CHOICE:
+                continue
+            choice_boxes = [tc for tc in active.findall(f".//{QN_W_TXBXCONTENT}") if not is_in_inactive_mc_fallback(tc)]
+            for fb in list(ac.findall(QN_MC_FALLBACK)):
+                fb_boxes = fb.findall(f".//{QN_W_TXBXCONTENT}")
+                if not choice_boxes and not fb_boxes:
+                    continue
+
+                pairs: list[tuple] = []
+                choice_by_key: dict[str, list] = {}
+                for c_tc in choice_boxes:
+                    choice_by_key.setdefault(_txbx_shape_key(c_tc, active), []).append(c_tc)
+                matched_all_by_key = bool(fb_boxes)
+                used_choice: set[int] = set()
+                for f_tc in fb_boxes:
+                    fkey = _txbx_shape_key(f_tc, fb)
+                    candidates = choice_by_key.get(fkey, []) if fkey else []
+                    picked = next((c for c in candidates if id(c) not in used_choice), None)
+                    if picked is None:
+                        matched_all_by_key = False
+                        break
+                    used_choice.add(id(picked))
+                    pairs.append((picked, f_tc))
+
+                if not matched_all_by_key:
+                    if len(choice_boxes) == len(fb_boxes):
+                        pairs = list(zip(choice_boxes, fb_boxes, strict=True))
+                    else:
+                        ac.remove(fb)
+                        continue
+
+                for choice_tc, fb_tc in pairs:
+                    if _normalized_txbx_signature(choice_tc) == _normalized_txbx_signature(fb_tc):
+                        continue
+                    if used_para_ids is None:
+                        used_para_ids = {
+                            val.upper()
+                            for el in root.iter()
+                            if isinstance(el.tag, str) and (val := el.get(_QN_W14_PARA_ID))
+                        }
+                    for child in list(fb_tc):
+                        fb_tc.remove(child)
+                    fb_tc.text = choice_tc.text
+
+                    rev_id_map: dict[str, str] = {}
+                    for child in choice_tc:
+                        cloned = deepcopy(child)
+                        for node in cloned.iter():
+                            if not isinstance(node.tag, str):
+                                continue
+                            if node.tag in _FALLBACK_REV_ID_TAGS:
+                                old_id = node.get(QN_W_ID)
+                                if old_id is not None:
+                                    new_id = rev_id_map.get(old_id)
+                                    if new_id is None:
+                                        new_id = str(next_rev_id_fn())
+                                        rev_id_map[old_id] = new_id
+                                    node.set(QN_W_ID, new_id)
+                            if node.get(_QN_W14_PARA_ID) is not None:
+                                fresh_pid = generate_long_hex_number()
+                                while fresh_pid.upper() in used_para_ids:
+                                    fresh_pid = generate_long_hex_number()
+                                used_para_ids.add(fresh_pid.upper())
+                                node.set(_QN_W14_PARA_ID, fresh_pid)
+                                if node.get(_QN_W14_TEXT_ID) is not None:
+                                    node.set(_QN_W14_TEXT_ID, generate_long_hex_number())
+                        fb_tc.append(cloned)
+
+
 def _graphic_marker_events(child):
     """
     Projects a read-only marker for a graphic run child (w:drawing, w:object
