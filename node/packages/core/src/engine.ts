@@ -22,16 +22,26 @@ import {
   describe_invalid_comment,
 } from "./models.js";
 import { trim_common_context, generate_edits_from_text } from "./diff.js";
-import { findChild, findAllDescendants, serializeXml, parseXml } from "./docx/dom.js";
+import {
+  activeAlternateContentBranch,
+  findChild,
+  findChildren,
+  findAllDescendants,
+  serializeXml,
+  parseXml,
+} from "./docx/dom.js";
 import { isPartClean, markPartClean } from "./docx/cell-anchor.js";
 import { split_structural_appendix, paginate } from "./pagination.js";
 import {
+  QN_W_TXBXCONTENT,
   is_heading_paragraph,
+  is_in_inactive_mc_fallback,
   is_native_heading,
   _get_style_cache,
   get_run_style_markers,
   get_run_text,
   apply_formatting_to_segments,
+  sync_alternate_content_fallbacks,
 } from "./utils/docx.js";
 import { format_ambiguity_error } from "./markup.js";
 import {
@@ -1569,6 +1579,12 @@ export class RedlineEngine {
     return roots;
   }
 
+  private _sync_fallbacks(): void {
+    sync_alternate_content_fallbacks(this._revision_roots(), () =>
+      this._getNextId(),
+    );
+  }
+
   private _scan_existing_ids(): number {
     let maxId = 0;
     // w:pPrChange carries revision ids too (tracked paragraph restyles,
@@ -2095,10 +2111,16 @@ export class RedlineEngine {
     let accepted_deletions = 0;
     let accepted_formatting = 0;
     for (const root_element of parts_to_process) {
-      accepted_insertions += findAllDescendants(root_element, "w:ins").length;
-      accepted_deletions += findAllDescendants(root_element, "w:del").length;
+      accepted_insertions += findAllDescendants(root_element, "w:ins").filter(
+        (el) => !is_in_inactive_mc_fallback(el),
+      ).length;
+      accepted_deletions += findAllDescendants(root_element, "w:del").filter(
+        (el) => !is_in_inactive_mc_fallback(el),
+      ).length;
       for (const tag of ["w:rPrChange", "w:pPrChange", "w:sectPrChange"]) {
-        accepted_formatting += findAllDescendants(root_element, tag).length;
+        accepted_formatting += findAllDescendants(root_element, tag).filter(
+          (el) => !is_in_inactive_mc_fallback(el),
+        ).length;
       }
     }
 
@@ -2112,8 +2134,16 @@ export class RedlineEngine {
     this.removed_comment_notes = [];
 
     for (const root_element of parts_to_process) {
+      for (const tag of ["w:rPrChange", "w:sectPrChange"]) {
+        for (const el of findAllDescendants(root_element, tag)) {
+          if (is_in_inactive_mc_fallback(el)) continue;
+          el.parentNode?.removeChild(el);
+        }
+      }
+
       const insNodes = findAllDescendants(root_element, "w:ins");
       for (const ins of insNodes) {
+        if (is_in_inactive_mc_fallback(ins)) continue;
         this._clean_wrapping_comments(ins);
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
@@ -2131,6 +2161,7 @@ export class RedlineEngine {
 
       const pNodes = findAllDescendants(root_element, "w:p");
       for (const p of pNodes) {
+        if (is_in_inactive_mc_fallback(p)) continue;
         const pPr = findChild(p, "w:pPr");
         if (pPr) {
           const rPr = findChild(pPr, "w:rPr");
@@ -2174,6 +2205,7 @@ export class RedlineEngine {
 
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
+        if (is_in_inactive_mc_fallback(d)) continue;
         this._clean_wrapping_comments(d);
         this._delete_comments_in_element(d);
         const parent = d.parentNode as Element | null;
@@ -2193,6 +2225,7 @@ export class RedlineEngine {
       // w:pPrChange element recording the original properties
       // (QA 2026-07-23 F1a). Already pre-counted in accepted_formatting.
       for (const ppc of findAllDescendants(root_element, "w:pPrChange")) {
+        if (is_in_inactive_mc_fallback(ppc)) continue;
         ppc.parentNode?.removeChild(ppc);
       }
     }
@@ -2321,6 +2354,7 @@ export class RedlineEngine {
       (cid) => `Com:${cid} (by ${comment_authors_before[cid] ?? "Unknown"})`,
     );
     this._prune_empty_paragraph_properties();
+    this._sync_fallbacks();
 
     return {
       accepted_insertions,
@@ -2365,6 +2399,7 @@ export class RedlineEngine {
       // 0. Reject tracked paragraph restyles: restore the ORIGINAL pPr the
       //    w:pPrChange snapshot carries (QA 2026-07-23 F1a).
       for (const ppc of findAllDescendants(root_element, "w:pPrChange")) {
+        if (is_in_inactive_mc_fallback(ppc)) continue;
         this._revert_ppr_change(ppc);
       }
 
@@ -2374,6 +2409,7 @@ export class RedlineEngine {
       const insNodes = findAllDescendants(root_element, "w:ins");
       const rejected_mark_hosts: Element[] = [];
       for (const ins of insNodes) {
+        if (is_in_inactive_mc_fallback(ins)) continue;
         const parent = ins.parentNode as Element | null;
         if (!parent) continue;
         this._clean_wrapping_comments(ins);
@@ -2412,6 +2448,7 @@ export class RedlineEngine {
       // 2. Reject paragraph-mark deletions: keep the paragraph break.
       const pNodes = findAllDescendants(root_element, "w:p");
       for (const p of pNodes) {
+        if (is_in_inactive_mc_fallback(p)) continue;
         const pPr = findChild(p, "w:pPr");
         if (pPr) {
           const rPr = findChild(pPr, "w:rPr");
@@ -2463,6 +2500,7 @@ export class RedlineEngine {
       //    stays valid (Python-engine parity, QA round 3 finding 1.1).
       const delNodes = findAllDescendants(root_element, "w:del");
       for (const d of delNodes) {
+        if (is_in_inactive_mc_fallback(d)) continue;
         const parent = d.parentNode as Element | null;
         if (!parent) continue;
         if (parent.tagName === "w:trPr") {
@@ -2484,6 +2522,7 @@ export class RedlineEngine {
       }
     }
     this._prune_empty_paragraph_properties();
+    this._sync_fallbacks();
   }
 
   /**
@@ -2741,7 +2780,9 @@ export class RedlineEngine {
    */
   private _comment_anchor_in_main_story(element: Element): boolean {
     let root: Element = element;
-    while (root.parentNode && root.parentNode.nodeType === 1) {
+    while (root) {
+      if (root.tagName === QN_W_TXBXCONTENT) return false;
+      if (!root.parentNode || root.parentNode.nodeType !== 1) break;
       root = root.parentNode as Element;
     }
     return root.tagName === "w:document";
@@ -2757,19 +2798,27 @@ export class RedlineEngine {
     text: string,
   ): boolean {
     if (this._comment_anchor_in_main_story(element)) return false;
+    let story: string | undefined;
     let root: Element = element;
-    while (root.parentNode && root.parentNode.nodeType === 1) {
+    while (root) {
+      if (root.tagName === QN_W_TXBXCONTENT) {
+        story = "textbox";
+        break;
+      }
+      if (!root.parentNode || root.parentNode.nodeType !== 1) break;
       root = root.parentNode as Element;
     }
-    const story =
-      (
-        {
-          "w:ftr": "footer",
-          "w:hdr": "header",
-          "w:footnotes": "footnote",
-          "w:endnotes": "endnote",
-        } as Record<string, string>
-      )[root.tagName] || "non-body";
+    if (!story) {
+      story =
+        (
+          {
+            "w:ftr": "footer",
+            "w:hdr": "header",
+            "w:footnotes": "footnote",
+            "w:endnotes": "endnote",
+          } as Record<string, string>
+        )[root.tagName] || "non-body";
+    }
     const msg =
       `- Warning: the comment "${text.substring(0, 60)}" was NOT attached: Word does not support ` +
       `comments inside a ${story} part, and writing one produces a document other ` +
@@ -6657,6 +6706,9 @@ export class RedlineEngine {
         skipped_logical++;
       }
     }
+    if (applied_logical > 0) {
+      this._sync_fallbacks();
+    }
     if (this.markup_mode === "manual" && !this._in_process_batch) {
       this._convert_revisions_to_manual_markup();
     }
@@ -6796,6 +6848,7 @@ export class RedlineEngine {
         parent.removeChild(insEl);
       }
     }
+    this._sync_fallbacks();
   }
 
   /**
@@ -6839,12 +6892,19 @@ export class RedlineEngine {
    * up with none.
    */
   private _is_last_paragraph_in_cell(p_elem: Element): boolean {
-    let cell = p_elem.parentNode as Element | null;
-    while (cell && cell.tagName !== "w:tc") {
-      cell = cell.parentNode as Element | null;
+    let container = p_elem.parentNode as Element | null;
+    while (
+      container &&
+      container.tagName !== "w:tc" &&
+      container.tagName !== QN_W_TXBXCONTENT
+    ) {
+      container = container.parentNode as Element | null;
     }
-    if (!cell) return false;
-    return findAllDescendants(cell, "w:p").length <= 1;
+    if (!container) return false;
+    if (container.tagName === QN_W_TXBXCONTENT) {
+      return findChildren(container, "w:p").length <= 1;
+    }
+    return findAllDescendants(container, "w:p").length <= 1;
   }
 
   /**
@@ -7118,6 +7178,13 @@ export class RedlineEngine {
         }
         const child = children[cursors[top]++];
         if (child.nodeType !== 1) continue;
+        if (
+          child.tagName === "mc:Fallback" &&
+          nodes[top]?.tagName === "mc:AlternateContent" &&
+          activeAlternateContentBranch(nodes[top]) !== child
+        ) {
+          continue;
+        }
 
         const bucket = byTag.get(child.tagName);
         let entry: IndexedRevision | null = null;
@@ -8112,7 +8179,10 @@ export class RedlineEngine {
     }
     // Once per batch, not per action: lookups must stay off one index
     // (review_action_index.test.ts pins the scan budget).
-    if (applied > 0) this._prune_empty_paragraph_properties();
+    if (applied > 0) {
+      this._prune_empty_paragraph_properties();
+      this._sync_fallbacks();
+    }
     return [applied, skipped, already_resolved];
   }
 

@@ -2,6 +2,7 @@ import { DocumentObject, Part } from '../docx/bridge.js';
 import { findAllDescendants, findChild, findChildren } from '../docx/dom.js';
 import { extract_comments_data, CommentsManager } from '../comments.js';
 import { RedlineEngine } from '../engine.js';
+import { is_in_inactive_mc_fallback } from '../utils/docx.js';
 
 export function findDescendantsByLocalName(element: Element, localName: string): Element[] {
   const result: Element[] = [];
@@ -178,11 +179,12 @@ export function strip_hidden_text(doc: DocumentObject): string[] {
 }
 
 export function count_tracked_changes(doc: DocumentObject): [number, number, number] {
-  const ins = findAllDescendants(doc.element, 'w:ins').length;
-  const del = findAllDescendants(doc.element, 'w:del').length;
-  const fmt = findAllDescendants(doc.element, 'w:rPrChange').length +
-              findAllDescendants(doc.element, 'w:pPrChange').length +
-              findAllDescendants(doc.element, 'w:sectPrChange').length;
+  const ins = findAllDescendants(doc.element, 'w:ins').filter((el) => !is_in_inactive_mc_fallback(el)).length;
+  const del = findAllDescendants(doc.element, 'w:del').filter((el) => !is_in_inactive_mc_fallback(el)).length;
+  const fmt =
+    findAllDescendants(doc.element, 'w:rPrChange').filter((el) => !is_in_inactive_mc_fallback(el)).length +
+    findAllDescendants(doc.element, 'w:pPrChange').filter((el) => !is_in_inactive_mc_fallback(el)).length +
+    findAllDescendants(doc.element, 'w:sectPrChange').filter((el) => !is_in_inactive_mc_fallback(el)).length;
   return [ins, del, fmt];
 }
 
@@ -190,6 +192,7 @@ export function get_track_change_authors(doc: DocumentObject): Set<string> {
   const authors = new Set<string>();
   for (const tag of ['w:ins', 'w:del', 'w:rPrChange', 'w:pPrChange', 'w:sectPrChange']) {
     for (const el of findAllDescendants(doc.element, tag)) {
+      if (is_in_inactive_mc_fallback(el)) continue;
       const author = el.getAttribute('w:author');
       if (author) authors.add(author);
     }
@@ -231,8 +234,8 @@ function _describe_textless_revision(el: Element): string {
 
 export function accept_all_tracked_changes(doc: DocumentObject): string[] {
   const lines: string[] = [];
-  const insEls = findAllDescendants(doc.element, 'w:ins');
-  const delEls = findAllDescendants(doc.element, 'w:del');
+  const insEls = findAllDescendants(doc.element, 'w:ins').filter((el) => !is_in_inactive_mc_fallback(el));
+  const delEls = findAllDescendants(doc.element, 'w:del').filter((el) => !is_in_inactive_mc_fallback(el));
 
   for (const ins of insEls) {
     const text = _getElementText(ins).trim();

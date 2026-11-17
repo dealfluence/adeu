@@ -85,7 +85,7 @@ Status: DONE
 - **Done when:** `@adeu/core` extracts and maps `w:txbxContent` across modern `mc:AlternateContent`, bare `w:drawing`, legacy VML `w:pict`, headers/footers, redlines, tables, and content controls identically to Python, with `mapper.full_text === _extractTextFromDoc(doc, false, false)`.
 
 ### Task 4: Node (`@adeu/core`) RedlineEngine Editing, Container Guards, `mc:Fallback` Sync & Sanitize Parity
-Status: PENDING
+Status: DONE
 
 - **Goal:** Bring `@adeu/core` `RedlineEngine`, `diff`, and `sanitize` to full parity with Task 2 for `w:txbxContent`.
 - **Files:**

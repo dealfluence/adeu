@@ -3,8 +3,10 @@ import {
   findChild,
   findChildren,
   findAllDescendants,
+  serializeXml,
   activeAlternateContentBranch,
 } from "../docx/dom.js";
+import { generateLongHexNumber } from "../docx/long-hex-number.js";
 import {
   BALLOT_GLYPHS,
   BlockSdt,
@@ -87,6 +89,202 @@ export const QN_MC_CHOICE = "mc:Choice";
 export const QN_MC_FALLBACK = "mc:Fallback";
 
 export { activeAlternateContentBranch as active_alternate_content_branch, TextboxPart };
+
+export function is_in_inactive_mc_fallback(
+  el: Element | null | undefined,
+): boolean {
+  let cur: Element | null = (el?.parentNode as Element | null) ?? null;
+  while (cur) {
+    if (cur.nodeType === 1 && cur.tagName === QN_MC_FALLBACK) {
+      const ac = cur.parentNode as Element | null;
+      if (ac && ac.nodeType === 1 && ac.tagName === QN_MC_ALTERNATECONTENT) {
+        const active = activeAlternateContentBranch(ac);
+        if (active && active !== cur) return true;
+      }
+    }
+    cur = (cur.parentNode as Element | null) ?? null;
+  }
+  return false;
+}
+
+const _FALLBACK_REV_ID_TAGS: ReadonlySet<string> = new Set([
+  "w:ins",
+  "w:del",
+  "w:rPrChange",
+  "w:pPrChange",
+  "w:sectPrChange",
+  "w:tblPrChange",
+  "w:trPrChange",
+  "w:tcPrChange",
+]);
+
+function _txbx_shape_key(tcEl: Element, stopAt: Element): string {
+  let cur: Element | null = (tcEl.parentNode as Element | null) ?? null;
+  while (cur && cur !== stopAt) {
+    if (cur.nodeType === 1) {
+      if (cur.tagName === "v:shape") {
+        const vid = cur.getAttribute("id") || "";
+        if (vid) return vid;
+      }
+      const docPr = findChild(cur, QN_WP_DOCPR);
+      if (docPr) {
+        const name = docPr.getAttribute("name") || "";
+        if (name) return name;
+      }
+    }
+    cur = (cur.parentNode as Element | null) ?? null;
+  }
+  return "";
+}
+
+function _normalized_txbx_signature(tcEl: Element): string {
+  const clone = tcEl.cloneNode(true) as Element;
+  const stripNode = (node: any): void => {
+    if (!node || node.nodeType !== 1) return;
+    if (_FALLBACK_REV_ID_TAGS.has(node.tagName)) {
+      node.removeAttribute("w:id");
+    }
+    node.removeAttribute("w14:paraId");
+    node.removeAttribute("w14:textId");
+    if (node.childNodes) {
+      for (let i = 0; i < node.childNodes.length; i++) {
+        stripNode(node.childNodes[i]);
+      }
+    }
+  };
+  stripNode(clone);
+  return serializeXml(clone);
+}
+
+/**
+ * Mirror mutated `<mc:Choice>` `w:txbxContent` trees into paired `<mc:Fallback>`
+ * boxes with freshly minted revision `w:id`s and signed-int32 `w14:paraId` /
+ * `w14:textId` values. Untouched `<mc:AlternateContent>` blocks stay untouched.
+ */
+export function sync_alternate_content_fallbacks(
+  roots: Array<Element | null | undefined>,
+  nextRevIdFn: () => number | string,
+): void {
+  for (const root of roots) {
+    if (!root) continue;
+    // Climb to top-level part documentElement so paraId uniqueness spans the whole XML part
+    let partRoot: Element = root;
+    while (partRoot.parentNode && (partRoot.parentNode as Element).nodeType === 1) {
+      partRoot = partRoot.parentNode as Element;
+    }
+
+    let usedParaIds: Set<string> | null = null;
+    const collectParaIds = (): Set<string> => {
+      const seen = new Set<string>();
+      const walk = (n: any): void => {
+        if (!n || n.nodeType !== 1) return;
+        const pid = n.getAttribute("w14:paraId");
+        if (pid) seen.add(pid.toUpperCase());
+        if (n.childNodes) {
+          for (let i = 0; i < n.childNodes.length; i++) walk(n.childNodes[i]);
+        }
+      };
+      walk(partRoot);
+      return seen;
+    };
+
+    const acNodes = findAllDescendants(root, QN_MC_ALTERNATECONTENT);
+    for (const ac of acNodes) {
+      if (is_in_inactive_mc_fallback(ac)) continue;
+      const active = activeAlternateContentBranch(ac);
+      if (!active || active.tagName !== QN_MC_CHOICE) continue;
+
+      const choiceBoxes = findAllDescendants(active, QN_W_TXBXCONTENT).filter(
+        (tc) => !is_in_inactive_mc_fallback(tc),
+      );
+      for (const fb of findChildren(ac, QN_MC_FALLBACK)) {
+        const fbBoxes = findAllDescendants(fb, QN_W_TXBXCONTENT);
+        if (choiceBoxes.length === 0 && fbBoxes.length === 0) continue;
+
+        let pairs: Array<[Element, Element]> = [];
+        const choiceByKey = new Map<string, Element[]>();
+        for (const cTc of choiceBoxes) {
+          const key = _txbx_shape_key(cTc, active);
+          const list = choiceByKey.get(key) ?? [];
+          list.push(cTc);
+          choiceByKey.set(key, list);
+        }
+
+        let matchedAllByKey = fbBoxes.length > 0;
+        const usedChoice = new Set<Element>();
+        for (const fTc of fbBoxes) {
+          const fKey = _txbx_shape_key(fTc, fb);
+          const candidates = fKey ? (choiceByKey.get(fKey) ?? []) : [];
+          const picked = candidates.find((c) => !usedChoice.has(c)) ?? null;
+          if (!picked) {
+            matchedAllByKey = false;
+            break;
+          }
+          usedChoice.add(picked);
+          pairs.push([picked, fTc]);
+        }
+
+        if (!matchedAllByKey) {
+          if (choiceBoxes.length === fbBoxes.length) {
+            pairs = choiceBoxes.map((c, idx) => [c, fbBoxes[idx]]);
+          } else {
+            ac.removeChild(fb);
+            continue;
+          }
+        }
+
+        for (const [choiceTc, fbTc] of pairs) {
+          if (_normalized_txbx_signature(choiceTc) === _normalized_txbx_signature(fbTc)) {
+            continue;
+          }
+          if (!usedParaIds) usedParaIds = collectParaIds();
+
+          while (fbTc.firstChild) fbTc.removeChild(fbTc.firstChild);
+
+          const revIdMap = new Map<string, string>();
+          const rewriteSubtree = (node: any): void => {
+            node.ownerDocument = fbTc.ownerDocument;
+            if (node.nodeType === 1) {
+              if (_FALLBACK_REV_ID_TAGS.has(node.tagName)) {
+                const oldId = node.getAttribute("w:id");
+                if (oldId !== null) {
+                  let newId = revIdMap.get(oldId);
+                  if (newId === undefined) {
+                    newId = String(nextRevIdFn());
+                    revIdMap.set(oldId, newId);
+                  }
+                  node.setAttribute("w:id", newId);
+                }
+              }
+              if (node.getAttribute("w14:paraId") !== null) {
+                let freshPid = generateLongHexNumber();
+                while (usedParaIds!.has(freshPid.toUpperCase())) {
+                  freshPid = generateLongHexNumber();
+                }
+                usedParaIds!.add(freshPid.toUpperCase());
+                node.setAttribute("w14:paraId", freshPid);
+                if (node.getAttribute("w14:textId") !== null) {
+                  node.setAttribute("w14:textId", generateLongHexNumber());
+                }
+              }
+            }
+            if (node.childNodes) {
+              for (let i = 0; i < node.childNodes.length; i++) {
+                rewriteSubtree(node.childNodes[i]);
+              }
+            }
+          };
+
+          for (let i = 0; i < choiceTc.childNodes.length; i++) {
+            const cloned = choiceTc.childNodes[i].cloneNode(true);
+            rewriteSubtree(cloned);
+            fbTc.appendChild(cloned);
+          }
+        }
+      }
+    }
+  }
+}
 
 /**
  * Projects a read-only marker for a graphic run child (w:drawing, w:object
