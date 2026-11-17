@@ -5016,10 +5016,16 @@ class RedlineEngine:
         looked up only in the part its edit resolved into, through one
         id index per part rather than one walk per group.
         """
+        if self.commented_change_granularity != "word":
+            return
         groups: Dict[Any, List[Any]] = defaultdict(list)
         comments: Dict[Any, Any] = {}
         failed: set = set()
         for edit, _orig_new in resolved_edits:
+            # Only fragments that carry the comment form its group: a table edit
+            # shares one split id across cells, but its comment belongs to one cell.
+            if getattr(edit, "_group_comment", None) is None:
+                continue
             owner = getattr(edit, "_parent_edit_ref", None) or edit
             split_id = getattr(edit, "_split_group_id", None)
             # Offsets from the clean and raw mappers share one number space, so
@@ -5029,8 +5035,9 @@ class RedlineEngine:
                 failed.add(key)
                 continue
             groups[key].append(edit)
-            if getattr(edit, "_group_comment", None) is not None:
-                comments.setdefault(key, edit._group_comment)
+            comments.setdefault(key, edit._group_comment)
+        if not comments:
+            return
         roots = {name: root for root, name in self._story_roots()}
         indexes: Dict[str, Dict[str, List[Tuple[int, Any]]]] = {}
         for key, comment in comments.items():
@@ -5044,13 +5051,19 @@ class RedlineEngine:
             ).lstrip("/")
             if part_path not in indexes:
                 indexes[part_path] = self._revision_marks_by_id(roots.get(part_path))
-            marks = sorted(
-                mark
+            # Every id a fragment wrote, not only the reserved ones: a deletion
+            # split around a non-adjacent run gets a fresh id of its own.
+            ids = {
+                str(rid)
                 for edit in members
-                for rid in (getattr(edit, "_reserved_del_id", None), getattr(edit, "_reserved_ins_id", None))
-                if rid is not None
-                for mark in indexes[part_path].get(str(rid), [])
-            )
+                for rid in (
+                    getattr(edit, "_reserved_del_id", None),
+                    getattr(edit, "_reserved_ins_id", None),
+                    *(getattr(edit, "_used_revision_ids", None) or []),
+                )
+                if rid
+            }
+            marks = sorted(mark for rid in ids for mark in indexes[part_path].get(rid, []))
             if not marks:
                 preview = (comment_text(comment) or "")[:60]
                 self.skipped_details.append(
@@ -5078,9 +5091,12 @@ class RedlineEngine:
         if root is None:
             return index
         for position, el in enumerate(root.iter(qn("w:ins"), qn("w:del"))):
-            # A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
-            # a range marker cannot sit beside it.
-            if el.getparent().tag == qn("w:rPr") or is_in_inactive_mc_fallback(el):
+            # Only run-level marks inside a paragraph can sit beside a range
+            # marker: not a deleted paragraph mark (w:rPr/w:del) nor a tracked
+            # table row (w:trPr/w:ins).
+            if el.getparent().tag in (qn("w:rPr"), qn("w:trPr")) or is_in_inactive_mc_fallback(el):
+                continue
+            if next(el.iterancestors(qn("w:p")), None) is None:
                 continue
             index[el.get(qn("w:id"))].append((position, el))
         return index

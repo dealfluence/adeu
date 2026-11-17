@@ -2951,6 +2951,7 @@ export class RedlineEngine {
    * than one walk per group. Python twin.
    */
   private _attach_group_comments(resolved_edits: any[]): void {
+    if (this.commented_change_granularity !== "word") return;
     const groups = new Map<string, any[]>();
     const comments = new Map<string, EditCommentValue>();
     const failed = new Set<string>();
@@ -2960,6 +2961,9 @@ export class RedlineEngine {
       return owner_ids.get(o)!;
     };
     for (const [edit] of resolved_edits) {
+      // Only fragments that carry the comment form its group: a table edit
+      // shares one split id across cells, but its comment belongs to one cell.
+      if (edit._group_comment == null) continue;
       const owner = edit._parent_edit_ref || edit;
       // Offsets from the clean and raw mappers share one number space, so the
       // owning edit disambiguates two edits starting at the same offset.
@@ -2970,8 +2974,21 @@ export class RedlineEngine {
       }
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(edit);
-      if (edit._group_comment != null && !comments.has(key)) comments.set(key, edit._group_comment);
+      if (!comments.has(key)) comments.set(key, edit._group_comment);
     }
+    if (!comments.size) return;
+    const paragraph_of = (el: Element): Element => {
+      let cur: Node | null = el.parentNode;
+      while (cur && (cur as Element).tagName !== "w:p") cur = cur.parentNode;
+      return cur as Element;
+    };
+    // The range markers must sit beside a direct child of the paragraph, not
+    // inside a w:hyperlink or another author's w:ins that wraps the fragment.
+    const ascend = (el: Element, p: Element): Element => {
+      let cur: Element = el;
+      while (cur.parentNode && cur.parentNode !== p) cur = cur.parentNode as Element;
+      return cur;
+    };
     const roots = new Map<string, Element>();
     for (const [root, name] of this._story_roots()) roots.set(name, root);
     const indexes = new Map<string, Map<string, [number, Element][]>>();
@@ -2983,12 +3000,16 @@ export class RedlineEngine {
         mapper.part_name_at(members[0]._resolved_start_idx || 0) || normalize_part_name(this.doc.part.partname);
       if (!indexes.has(part_path)) indexes.set(part_path, RedlineEngine._revision_marks_by_id(roots.get(part_path)));
       const index = indexes.get(part_path)!;
-      const marks: [number, Element][] = [];
+      // Every id a fragment wrote, not only the reserved ones: a deletion
+      // split around a non-adjacent run gets a fresh id of its own.
+      const ids = new Set<string>();
       for (const edit of members) {
-        for (const rid of [edit._reserved_del_id, edit._reserved_ins_id]) {
-          if (rid != null) marks.push(...(index.get(String(rid)) || []));
+        for (const rid of [edit._reserved_del_id, edit._reserved_ins_id, ...(edit._written_revision_ids || [])]) {
+          if (rid != null && rid !== "") ids.add(String(rid));
         }
       }
+      const marks: [number, Element][] = [];
+      for (const rid of ids) marks.push(...(index.get(rid) || []));
       marks.sort((a, b) => a[0] - b[0]);
       if (!marks.length) {
         const preview = (comment_text(comment) || "").substring(0, 60);
@@ -2998,18 +3019,6 @@ export class RedlineEngine {
         );
         continue;
       }
-      const paragraph_of = (el: Element): Element => {
-        let cur: Node | null = el.parentNode;
-        while (cur && (cur as Element).tagName !== "w:p") cur = cur.parentNode;
-        return cur as Element;
-      };
-      // The range markers must sit beside a direct child of the paragraph, not
-      // inside a w:hyperlink or another author's w:ins that wraps the fragment.
-      const ascend = (el: Element, p: Element): Element => {
-        let cur: Element = el;
-        while (cur.parentNode && cur.parentNode !== p) cur = cur.parentNode as Element;
-        return cur;
-      };
       const first = marks[0][1];
       const last = marks[marks.length - 1][1];
       const first_p = paragraph_of(first);
@@ -3035,9 +3044,17 @@ export class RedlineEngine {
         const c = child as Element;
         if (c.tagName === "w:ins" || c.tagName === "w:del") {
           position++;
-          // A deleted paragraph mark (w:rPr/w:del) is not a run-level anchor:
-          // a range marker cannot sit beside it.
-          if ((c.parentNode as Element | null)?.tagName !== "w:rPr" && !is_in_inactive_mc_fallback(c)) {
+          // Only run-level marks inside a paragraph can sit beside a range
+          // marker: not a deleted paragraph mark (w:rPr/w:del) nor a tracked
+          // table row (w:trPr/w:ins).
+          const parent_tag = (c.parentNode as Element | null)?.tagName;
+          const in_paragraph = (() => {
+            for (let cur: Node | null = c.parentNode; cur; cur = cur.parentNode) {
+              if ((cur as Element).tagName === "w:p") return true;
+            }
+            return false;
+          })();
+          if (parent_tag !== "w:rPr" && parent_tag !== "w:trPr" && in_paragraph && !is_in_inactive_mc_fallback(c)) {
             const id = c.getAttribute("w:id") || "";
             if (!index.has(id)) index.set(id, []);
             index.get(id)!.push([position, c]);
@@ -6748,6 +6765,10 @@ export class RedlineEngine {
         for (let n = id_before + 1; n <= this.current_id; n++) {
           owner._minted_change_ids.push(String(n));
         }
+        // Per sub-edit too: a word-mode group comment anchors on every id its
+        // fragments wrote (_attach_group_comments), not only the reserved ones.
+        edit._written_revision_ids = [];
+        for (let n = id_before + 1; n <= this.current_id; n++) edit._written_revision_ids.push(String(n));
         if (!Array.isArray(owner._minted_comment_ids)) {
           owner._minted_comment_ids = [];
         }
