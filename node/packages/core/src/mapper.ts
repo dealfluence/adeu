@@ -423,6 +423,14 @@ export class DocumentMapper {
     return null;
   }
 
+  /** Package part name ("word/header1.xml") whose projected range contains `index`; "" when none does. Python twin. */
+  public part_name_at(index: number): string {
+    for (const [i, start, end] of this._nonempty_part_ranges()) {
+      if (start <= index && index <= end) return this.part_names[i] || "";
+    }
+    return "";
+  }
+
   /** `header (word/header1.xml)` for an offset outside the main story; "" in the body or nowhere. */
   public part_label_at(index: number): string {
     for (const [i, start, end, kind] of this._nonempty_part_ranges()) {

@@ -457,6 +457,13 @@ class DocumentMapper:
                 return kind
         return None
 
+    def part_name_at(self, index: int) -> str:
+        """Package part name ("word/header1.xml") whose projected range contains `index`; "" when none does."""
+        for i, start, end, _kind in self._nonempty_part_ranges():
+            if start <= index <= end:
+                return self.part_names[i] if i < len(self.part_names) else ""
+        return ""
+
     def part_label_at(self, index: int) -> str:
         """`header (word/header1.xml)` for an offset outside the main story; "" in the body or nowhere."""
         for i, start, end, kind in self._nonempty_part_ranges():

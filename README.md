@@ -166,6 +166,8 @@ with open("MSA_Redlined.docx", "wb") as f:
     f.write(engine.save_to_stream().getvalue())
 ```
 
+A commented edit lands by default as one tracked change wrapped by its comment, so rejecting it reverts the whole edit. Pass `commented_change_granularity="word"` to get the same word-level redline an uncommented edit gets (`New York` → `Delaware` rather than the whole changed span), with the comment spanning the first changed word to the last; rejecting any single word keeps the comment. The TypeScript engine takes the same option: `new RedlineEngine(doc, "AI Copilot", { commented_change_granularity: "word" })`.
+
 ### The TypeScript SDK
 The entire core parsing and diffing engine is also available in pure TypeScript.
 
