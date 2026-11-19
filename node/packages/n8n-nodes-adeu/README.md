@@ -113,6 +113,7 @@ Applies a JSON array of `DocumentChange` operations back to the Word document as
 - **Output**: A new redlined `.docx` binary + JSON application stats with per-edit reports (status, occurrences modified, heading path, pages affected, CriticMarkup context, post-accept preview).
 - **Atomic Batch Validation** (default): Adeu pre-validates the *entire* array of edits before touching the document. If even one edit is invalid (e.g., target text not found, ambiguous match), the engine safely rejects the entire batch to prevent partial or corrupted document states.
 - **Allow Partial Application** (opt-in salvage mode, default `false`): Set this boolean on the node to keep the edits that validate and report the ones that fail instead of rejecting the whole batch. See **Transactional Batches** below.
+- **Commented Change Granularity** (`"atomic"` default | `"word"`): Controls how `modify` edits carrying a comment are tracked. `"atomic"` writes a single `<w:del>`/`<w:ins>` replacement wrapping the whole edit; `"word"` writes minimal word-level `<w:del>`/`<w:ins>` fragments wrapped by one spanning Word comment so rejecting one fragment preserves the comment.
 
 #### 🆕 Targeted Multi-Occurrence Writes (`match_mode` + `regex`)
 The `modify` edit type now supports two optional fields:

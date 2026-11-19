@@ -42,6 +42,7 @@ Apply a list of edits to a `.docx`. Edits apply sequentially: each one evaluates
 - `output_path` (str, optional) — defaults to in-place when the stem already ends in `_processed`, `_redlined`, `.redline`, `-redline`, `_markup`, or `.marked`; otherwise `<original>_processed.docx`.
 - `partial` (bool, default `true`) — applies valid changes and reports invalid ones as skipped; pass `false` to reject the whole batch when any change fails.
 - `markup_mode` (`"track_changes"` | `"manual"`, default `"track_changes"`) — `"manual"` renders deletions as inline strikethrough and insertions as bold underlined red (`#C00000`) text, with each edit's comment as a native Word comment, instead of `<w:ins>`/`<w:del>` revisions.
+- `commented_change_granularity` (`"atomic"` | `"word"`, default `"atomic"`) — `"word"` word-splits commented `modify` edits into minimal `<w:del>`/`<w:ins>` fragments wrapped by one spanning Word comment (disk mode only).
 - `ignore_control_locks` (bool, default `false`) — permit writes to content-locked controls (`sdtContentLocked`).
 - `ignore_document_protection` (bool, default `false`) — permit writes to read-only or comments-protected documents.
 - `allow_untracked_writes` (bool, default `false`) — permit untracked fills in forms-protected documents where Word suppresses revision tracking.

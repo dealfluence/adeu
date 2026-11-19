@@ -35,7 +35,7 @@ from adeu.mcp_components.doc_cache import doc_cache
 from adeu.models import StrictBatchChanges
 from adeu.pagination import parse_page_arg
 from adeu.payloads import failure_envelope, shrink_batch_stats
-from adeu.redline.engine import BatchValidationError
+from adeu.redline.engine import COMMENTED_CHANGE_GRANULARITIES, BatchValidationError
 
 
 def _emit_json(data: Dict[str, Any]) -> None:
@@ -311,6 +311,13 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
     if markup_mode not in ("track_changes", "manual"):
         _emit_error("invalid_input", f"Invalid markup_mode: '{markup_mode}'. Expected 'track_changes' or 'manual'.")
         return
+    commented_change_granularity = req.get("commented_change_granularity", "atomic")
+    if commented_change_granularity not in COMMENTED_CHANGE_GRANULARITIES:
+        _emit_error(
+            "invalid_input",
+            f"Invalid commented_change_granularity: '{commented_change_granularity}'. Expected 'atomic' or 'word'.",
+        )
+        return
     # CC-4 write-gate overrides (spec-gates.md §1), default off like every
     # other surface.
     gate_overrides = {
@@ -350,6 +357,7 @@ def _handle_apply_command(req: Dict[str, Any]) -> None:
             terse_errors=terse_errors,
             gate_overrides=gate_overrides,
             markup_mode=markup_mode,
+            commented_change_granularity=commented_change_granularity,
         )
         stats = engine.process_batch(changes, partial=partial)
 

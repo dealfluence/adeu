@@ -11,8 +11,11 @@ the rest of the anchor, and the comment, in place. The default ("atomic")
 is unchanged and is pinned here too.
 """
 
+import asyncio
 import io
+import json
 import re
+import sys
 import zipfile
 from pathlib import Path
 
@@ -22,8 +25,11 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from ooxml_integrity import Severity, check
 
+import adeu
+from adeu.ingest import extract_text_from_stream
 from adeu.models import ModifyText, RejectChange
 from adeu.redline.engine import RedlineEngine
+from tests.utils import run_cli
 
 CLAUSE = "Either party may terminate this Agreement upon thirty (30) days' written notice to the other party."
 COMMENT_TEXT = "Client requested a longer notice period; please confirm with legal."
@@ -260,3 +266,181 @@ def test_a_rollback_keeps_the_granularity():
     engine._restore_from_snapshot(_docx(CLAUSE))
 
     assert engine.commented_change_granularity == WORD
+
+
+def test_package_root_exports_granularity_constants():
+    assert adeu.COMMENTED_CHANGE_GRANULARITIES == ("atomic", "word")
+    assert hasattr(adeu, "CommentedChangeGranularity")
+
+
+def test_word_mode_spans_comment_across_kept_cross_reference():
+    """Changes on both sides of a kept [~2.1~](#_Ref1) field share one comment that survives partial reject."""
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("See Section ")
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), " REF _Ref1 \\h ")
+    fld_run = OxmlElement("w:r")
+    fld_text = OxmlElement("w:t")
+    fld_text.text = "2.1"
+    fld_run.append(fld_text)
+    fld.append(fld_run)
+    p._p.append(fld)
+    p.add_run(" for New York governing law.")
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    edited, result = _apply(
+        buf,
+        [
+            ModifyText(
+                target_text="See Section [~2.1~](#_Ref1) for New York governing law.",
+                new_text="Under Section [~2.1~](#_Ref1) for Delaware governing law.",
+                comment=COMMENT_TEXT,
+            )
+        ],
+    )
+    assert result["edits_applied"] == 1
+    assert _comment_texts(edited) == [COMMENT_TEXT]
+    assert "w:fldSimple" in _document_xml(edited)
+
+    ins_ids, _ = _revision_ids(_document_xml(edited))
+    engine = RedlineEngine(io.BytesIO(edited.getvalue()), author="Reviewer")
+    reject_res = engine.process_batch([RejectChange(target_id=f"Chg:{ins_ids[0]}")])
+    after_reject = engine.save_to_stream()
+
+    assert reject_res["actions_applied"] == 1
+    assert _comment_texts(after_reject) == [COMMENT_TEXT]
+    clean = extract_text_from_stream(io.BytesIO(after_reject.getvalue()), clean_view=True)
+    assert "See Section" in clean
+    assert "Delaware governing law." in clean
+
+
+def test_cli_apply_commented_change_granularity_word(tmp_path: Path):
+    doc_path = tmp_path / "clause.docx"
+    edits_path = tmp_path / "edits.json"
+    out_path = tmp_path / "clause_word.docx"
+    doc_path.write_bytes(_docx(CLAUSE).getvalue())
+    edits_path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "modify",
+                    "target_text": "thirty (30) days'",
+                    "new_text": "sixty (60) days'",
+                    "comment": COMMENT_TEXT,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    res = run_cli(
+        "apply",
+        str(doc_path),
+        str(edits_path),
+        "--commented-change-granularity",
+        "word",
+        "-o",
+        str(out_path),
+    )
+    assert res.returncode == 0, res.stderr
+    saved = io.BytesIO(out_path.read_bytes())
+    ins_ids, del_ids = _revision_ids(_document_xml(saved))
+    assert len(ins_ids) >= 2 and len(del_ids) >= 2
+    assert _comment_texts(saved) == [COMMENT_TEXT]
+
+
+def test_cli_apply_live_refuses_word_granularity(tmp_path: Path):
+    edits_path = tmp_path / "edits.json"
+    edits_path.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "modify",
+                    "target_text": "thirty (30) days'",
+                    "new_text": "sixty (60) days'",
+                    "comment": COMMENT_TEXT,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    res = run_cli(
+        "apply",
+        "--live",
+        str(edits_path),
+        "--commented-change-granularity",
+        "word",
+        "--json",
+    )
+    assert res.returncode != 0
+    payload = json.loads(res.stdout)
+    assert payload["error"] == "unsupported"
+    assert "commented-change-granularity" in payload["message"] or "commented_change_granularity" in payload["message"]
+
+
+def test_mcp_process_document_batch_word_granularity(tmp_path: Path):
+    from fastmcp import Client
+
+    from adeu.server import mcp
+
+    doc_path = tmp_path / "mcp_clause.docx"
+    out_path = tmp_path / "mcp_clause_word.docx"
+    doc_path.write_bytes(_docx(CLAUSE).getvalue())
+
+    async def _call():
+        async with Client(mcp) as client:
+            return await client.call_tool(
+                "process_document_batch",
+                {
+                    "original_docx_path": str(doc_path),
+                    "author_name": "Reviewer",
+                    "output_path": str(out_path),
+                    "commented_change_granularity": "word",
+                    "changes": [
+                        {
+                            "type": "modify",
+                            "target_text": "thirty (30) days'",
+                            "new_text": "sixty (60) days'",
+                            "comment": COMMENT_TEXT,
+                        }
+                    ],
+                },
+            )
+
+    result = asyncio.run(_call())
+    assert out_path.exists(), result
+    saved = io.BytesIO(out_path.read_bytes())
+    ins_ids, del_ids = _revision_ids(_document_xml(saved))
+    assert len(ins_ids) >= 2 and len(del_ids) >= 2
+    assert _comment_texts(saved) == [COMMENT_TEXT]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Live Word path only registered on win32")
+def test_mcp_live_word_refuses_word_granularity():
+    from adeu.server import mcp
+
+    result = asyncio.run(
+        mcp.call_tool(
+            "process_document_batch",
+            {
+                "author_name": "Reviewer",
+                "commented_change_granularity": "word",
+                "changes": [
+                    {
+                        "type": "modify",
+                        "target_text": "thirty (30) days'",
+                        "new_text": "sixty (60) days'",
+                        "comment": COMMENT_TEXT,
+                    }
+                ],
+            },
+        )
+    )
+    text = result.content[0].text
+    assert "Error:" in text
+    assert "commented_change_granularity" in text
+    assert "Live Word" in text or "disk" in text

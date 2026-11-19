@@ -191,6 +191,27 @@ export const applyEditsDescription: INodeProperties[] = [
     ],
     displayOptions: applyEditsDisplayOptions,
   },
+  {
+    displayName: "Commented Change Granularity",
+    name: "commentedChangeGranularity",
+    type: "options",
+    default: "atomic",
+    description:
+      "How a modify edit carrying a comment is tracked. 'Atomic' (default) writes one single <w:del>/<w:ins> replacement wrapping the whole edit. 'Word' writes minimal word-level <w:del>/<w:ins> fragments wrapped by one spanning Word comment.",
+    options: [
+      {
+        name: "Atomic",
+        value: "atomic",
+        description: "One single <w:del>/<w:ins> replacement wrapping the whole commented edit",
+      },
+      {
+        name: "Word",
+        value: "word",
+        description: "Minimal word-level <w:del>/<w:ins> fragments wrapped by one spanning comment",
+      },
+    ],
+    displayOptions: applyEditsDisplayOptions,
+  },
   // CC-4 write-gate overrides (spec-gates.md §1). Three separate toggles
   // rather than one "force": they license different things, and a single
   // switch would make a user who wanted one silently accept all three.
@@ -272,6 +293,11 @@ export async function executeApplyEdits(
     itemIndex,
     "track_changes",
   ) as "track_changes" | "manual";
+  const commentedChangeGranularity = this.getNodeParameter(
+    "commentedChangeGranularity",
+    itemIndex,
+    "atomic",
+  ) as "atomic" | "word";
   const reasoning = this.getNodeParameter("reasoning", itemIndex, "") as string;
 
   // Resolve the changes array
@@ -336,6 +362,7 @@ export async function executeApplyEdits(
     ignore_document_protection: ignoreDocumentProtection,
     allow_untracked_writes: allowUntrackedWrites,
     markup_mode: markupMode,
+    commented_change_granularity: commentedChangeGranularity,
   });
   const stats = engine.process_batch(
     changes as Parameters<RedlineEngine["process_batch"]>[0],

@@ -331,3 +331,39 @@ class TestAdeuApplyChangesBehavior:
         assert "actions" in msg.artifact
         assert msg.artifact["occurrences_modified"] >= 1
         assert "actions_already_resolved" in msg.artifact
+
+    def test_commented_change_granularity_word_splits_under_one_comment(self, tmp_path: Path) -> None:
+        from docx import Document
+
+        src = tmp_path / "clause.docx"
+        out = tmp_path / "clause_word.docx"
+        doc = Document()
+        doc.add_paragraph("Either party may terminate this Agreement upon thirty (30) days' written notice.")
+        doc.save(str(src))
+
+        tool = AdeuApplyChanges()
+        msg = tool.invoke(
+            {
+                "name": "adeu_apply_changes",
+                "args": {
+                    "reasoning": "word granularity test",
+                    "file_path": str(src),
+                    "author_name": "AI Reviewer",
+                    "commented_change_granularity": "word",
+                    "changes": [
+                        {
+                            "type": "modify",
+                            "target_text": "thirty (30) days'",
+                            "new_text": "sixty (60) days'",
+                            "comment": "Extend notice period.",
+                        }
+                    ],
+                    "output_path": str(out),
+                },
+                "id": "test-word-granularity",
+                "type": "tool_call",
+            }
+        )
+        first = msg.artifact["edits"][0]
+        assert len(first["change_ids"]) >= 4
+        assert first["comment_ids"] == ["Com:1"]

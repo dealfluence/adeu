@@ -322,7 +322,7 @@ const READ_DOCX_TAIL =
 const PROCESS_BATCH_COMMON_DESC =
   "Applies a batch of edits and review actions to a DOCX.\n\nBatches apply SEQUENTIALLY: each change validates against state from prior changes. Valid changes apply when others fail (salvage default): response LEADS with `PARTIAL: applied K of N` listing unapplied changes. Pass partial=false for all-or-nothing.\n\n";
 const PROCESS_BATCH_OPERATIONS_DESC =
-  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', default) — add context or set `match_mode`:'first'/'all' or `regex`:true ($1, $2… in `new_text`). `new_text` supports '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' splits, and pipe tables (`| H1 | H2 |\\n|---|---|\\n| A | B |`). Omit `new_text` (with `comment`) to annotate; empty string deletes. Never write CriticMarkup — use `comment` (string or `[{text, author?}]`).\n   • EMPTY CELLS: blank cells carry `{#cell:<id>}` anchors — set `target_text` to the anchor and value in `new_text`.\n2. 'accept'/'reject': finalize or revert by `target_id` ('Chg:12'); add `part` ('word/header1.xml') when the id exists in several parts.\n3. 'reply': reply to `target_id` ('Com:5') with `text`.\n4. 'set_field': fill a form field — `field` is 'CC:<N>', tag or alias, `value` the text (list via `read_docx` `mode`:'fields'; checkboxes true/false, dates YYYY-MM-DD, dropdowns a listed option). Updates bound stores; locked/protected controls refuse and name the override.\n5. 'insert_row': add table row (`target_text` anchor, `cells` array left-to-right, `position` 'above'/'below'). 'delete_row': remove row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' shift between states — call `read_docx` before accept/reject/reply.\n\n`markup_mode`:'manual' writes strikethrough/underline + comments instead of Track Changes.\n`author_name` sets attribution; default 'Adeu AI (TS)'.";
+  "Each item in `changes` needs a `type`:\n1. 'modify': search-and-replace. `target_text` must match uniquely (`match_mode`:'strict', default) — add context or set `match_mode`:'first'/'all' or `regex`:true ($1, $2… in `new_text`). `new_text` supports '#'–'######' headings, '**bold**', '_italic_', '\\n\\n' splits, and pipe tables (`| H1 | H2 |\\n|---|---|\\n| A | B |`). Omit `new_text` (with `comment`) to annotate; empty string deletes. Never write CriticMarkup — use `comment` (string or `[{text, author?}]`).\n   • EMPTY CELLS: blank cells carry `{#cell:<id>}` anchors — set `target_text` to the anchor and value in `new_text`.\n2. 'accept'/'reject': finalize or revert by `target_id` ('Chg:12'); add `part` ('word/header1.xml') when the id exists in several parts.\n3. 'reply': reply to `target_id` ('Com:5') with `text`.\n4. 'set_field': fill a form field — `field` is 'CC:<N>', tag or alias, `value` the text (list via `read_docx` `mode`:'fields'; checkboxes true/false, dates YYYY-MM-DD, dropdowns a listed option). Updates bound stores; locked/protected controls refuse and name the override.\n5. 'insert_row': add table row (`target_text` anchor, `cells` array left-to-right, `position` 'above'/'below'). 'delete_row': remove row matching `target_text`. Disk mode only.\n\nID VOLATILITY: 'Chg:N'/'Com:N' shift between states — call `read_docx` before accept/reject/reply.\n\n`markup_mode`:'manual' writes strikethrough/underline + comments instead of Track Changes. `commented_change_granularity`:'word' word-splits commented edits under one spanning comment.\n`author_name` sets attribution; default 'Adeu AI (TS)'.";
 
 // `output_path` guidance lives HERE, not only on the parameter: clients drop
 // optional-parameter descriptions (AI_CONTEXT.md §7a), and in final-2 no
@@ -1059,6 +1059,12 @@ server.registerTool(
         .describe(
           "Markup mode: 'track_changes' (default, native Word w:ins/w:del) or 'manual' (inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments).",
         ),
+      commented_change_granularity: z
+        .enum(["atomic", "word"])
+        .default("atomic")
+        .describe(
+          "How a modify edit carrying a comment is tracked: 'atomic' (default, one single w:del/w:ins replacement wrapping the whole edit) or 'word' (minimal word-level w:del/w:ins fragments wrapped by one spanning Word comment).",
+        ),
     },
   },
   async ({
@@ -1072,6 +1078,7 @@ server.registerTool(
     ignore_document_protection,
     allow_untracked_writes,
     markup_mode,
+    commented_change_granularity,
   }) => {
     try {
       void reasoning;
@@ -1218,6 +1225,7 @@ server.registerTool(
         ignore_document_protection,
         allow_untracked_writes,
         markup_mode,
+        commented_change_granularity,
       });
 
       let stats;

@@ -114,6 +114,10 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
     const batch = allTools.find((t) => t.name === "process_document_batch")!;
     expect(batch.description).toContain("markup_mode");
     expect(batch.description).toContain("'manual'");
+    expect(batch.description).toContain("commented_change_granularity");
+    expect(batch.description).toContain("'word'");
+    expect(batch.inputSchema.properties.commented_change_granularity.enum).toEqual(["atomic", "word"]);
+    expect(batch.inputSchema.properties.commented_change_granularity.default).toBe("atomic");
     expect(batch.description).toContain("pipe tables");
     expect(batch.description).toContain("[{text, author?}]");
     const readDocx = allTools.find((t) => t.name === "read_docx")!;
@@ -215,5 +219,44 @@ describe("QA 2026-07-23 — client-compat constraints (real server over stdio)",
     }
     // Defaulting author_name (a clean success) is the other legitimate fix —
     // nothing to assert in that case.
+  });
+
+  it("process_document_batch honors commented_change_granularity='word' end-to-end", async () => {
+    const clauseDocPath = join(workDir, "clause_input.docx");
+    const clauseOutPath = join(workDir, "clause_word_out.docx");
+    writeFileSync(
+      clauseDocPath,
+      await buildDoc([
+        "Either party may terminate this Agreement upon thirty (30) days' written notice.",
+      ]),
+    );
+    const resp = await rpc("tools/call", {
+      name: "process_document_batch",
+      arguments: {
+        reasoning: "word granularity check",
+        original_docx_path: clauseDocPath,
+        output_path: clauseOutPath,
+        author_name: "Reviewer",
+        commented_change_granularity: "word",
+        changes: [
+          {
+            type: "modify",
+            target_text: "thirty (30) days'",
+            new_text: "sixty (60) days'",
+            comment: "Check notice period.",
+          },
+        ],
+      },
+    });
+    expect(resp.error).toBeUndefined();
+    expect(resp.result?.isError).toBeFalsy();
+    expect(existsSync(clauseOutPath)).toBe(true);
+
+    const reloaded = await DocumentObject.load(readFileSync(clauseOutPath));
+    const xml = reloaded.element.toString();
+    const insIds = new Set([...xml.matchAll(/<w:ins\b[^>]*\bw:id="(\d+)"/g)].map((m) => m[1]));
+    expect(insIds.size).toBeGreaterThanOrEqual(2);
+    expect(xml).toContain("commentRangeStart");
+    expect(xml).toContain("commentRangeEnd");
   });
 });

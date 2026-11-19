@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 from copy import deepcopy
 from io import BytesIO
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import lxml.etree as etree
 import structlog
@@ -149,6 +149,7 @@ class BatchValidationError(Exception):
 
 
 COMMENTED_CHANGE_GRANULARITIES = ("atomic", "word")
+CommentedChangeGranularity = Literal["atomic", "word"]
 
 # Characters XML 1.0 cannot represent: C0 controls except tab/newline/CR.
 # lxml refuses to serialize them, so without an up-front check they surfaced
@@ -6074,8 +6075,13 @@ class RedlineEngine:
         if not t_markers or [m.group(0) for m in t_markers] != [m.group(0) for m in n_markers]:
             return None
 
+        overlaps_virtual_pipe = active_mapper is not None and any(
+            s.text == " | " and s.run is None and s.start < start_idx + len(actual_doc_text) and s.end > start_idx
+            for s in active_mapper.spans
+        )
+        span_all_gaps = bool(edit.comment) and self.commented_change_granularity == "word" and not overlaps_virtual_pipe
         sub_edits: List[ModifyText] = []
-        comment = edit.comment
+        comment = None if span_all_gaps else edit.comment
         t_pos = n_pos = 0
         for t_m, n_m in zip([*t_markers, None], [*n_markers, None], strict=True):
             t_gap = actual_doc_text[t_pos : t_m.start() if t_m else len(actual_doc_text)]
@@ -6099,6 +6105,13 @@ class RedlineEngine:
             if t_m is not None and n_m is not None:
                 t_pos, n_pos = t_m.end(), n_m.end()
 
+        if span_all_gaps and sub_edits:
+            if all(getattr(se, "_internal_op", None) == "COMMENT_ONLY" for se in sub_edits):
+                sub_edits[0].comment = edit.comment
+            else:
+                for sub_edit in sub_edits:
+                    if getattr(sub_edit, "_internal_op", None) != "COMMENT_ONLY":
+                        sub_edit._group_comment = edit.comment
         for sub_edit in sub_edits:
             sub_edit._split_group_id = start_idx
         return sub_edits or None

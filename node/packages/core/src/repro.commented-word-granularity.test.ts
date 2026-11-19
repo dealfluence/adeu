@@ -3,6 +3,8 @@ import { describe, it, expect } from "vitest";
 import { createTestDocument, addParagraph, addTable, setCellText } from "./test-utils.js";
 import { DocumentObject } from "./docx/bridge.js";
 import { extract_comments_data } from "./comments.js";
+import { extractTextFromBuffer } from "./ingest.js";
+import * as core from "./index.js";
 import { RedlineEngine } from "./engine.js";
 
 /**
@@ -188,5 +190,56 @@ describe("commented_change_granularity word: review fixes", () => {
   it("names the group comment in the per-edit report", async () => {
     const { res } = await commentedClause();
     expect(res.edits[0].comment_ids).toEqual(["Com:1"]);
+  });
+
+  it("re-exports COMMENTED_CHANGE_GRANULARITIES from package root", () => {
+    expect((core as any).COMMENTED_CHANGE_GRANULARITIES).toEqual(["atomic", "word"]);
+  });
+
+  it("spans one comment across a kept cross-reference and survives partial reject", async () => {
+    const { doc, res } = await applyTo(
+      (d) => {
+        const p = addParagraph(d, "");
+        for (const r of Array.from(p.getElementsByTagName("w:r"))) p.removeChild(r);
+        const xmlDoc = p.ownerDocument!;
+        const makeRun = (txt: string) => {
+          const r = xmlDoc.createElement("w:r");
+          const t = xmlDoc.createElement("w:t");
+          if (txt.trim() !== txt) t.setAttribute("xml:space", "preserve");
+          t.textContent = txt;
+          r.appendChild(t);
+          return r;
+        };
+        p.appendChild(makeRun("See Section "));
+        const fld = xmlDoc.createElement("w:fldSimple");
+        fld.setAttribute("w:instr", " REF _Ref1 \\h ");
+        fld.appendChild(makeRun("2.1"));
+        p.appendChild(fld);
+        p.appendChild(makeRun(" for New York governing law."));
+      },
+      [
+        {
+          type: "modify",
+          target_text: "See Section [~2.1~](#_Ref1) for New York governing law.",
+          new_text: "Under Section [~2.1~](#_Ref1) for Delaware governing law.",
+          comment: COMMENT,
+        },
+      ],
+    );
+    expect(res.edits_applied).toBe(1);
+    expect(commentTexts(doc)).toEqual([COMMENT]);
+    const xml = doc.element.toString();
+    expect(xml).toContain("w:fldSimple");
+
+    const firstInsId = revisionIds(xml).ins[0];
+    const reloaded = await DocumentObject.load(await doc.save());
+    const rejectRes = new RedlineEngine(reloaded, "Reviewer").process_batch([
+      { type: "reject", target_id: `Chg:${firstInsId}` } as any,
+    ]);
+    expect(rejectRes.actions_applied).toBe(1);
+    expect(commentTexts(reloaded)).toEqual([COMMENT]);
+    const clean = await extractTextFromBuffer(await reloaded.save(), true);
+    expect(clean).toContain("See Section");
+    expect(clean).toContain("Delaware governing law.");
   });
 });

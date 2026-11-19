@@ -40,6 +40,8 @@ Returns Adeu's `@@ Word Patch @@` sub-word diff, or writes a redlined `.docx` of
 uvx adeu apply contract.docx edits.json --author "Review Bot" -o contract_redlined.docx
 # Manual / inline formatting markup (strikethrough + bold red underline instead of Track Changes):
 uvx adeu apply contract.docx edits.json --author "Review Bot" --manual -o contract_manual.docx
+# Word-level redlines on commented edits (under one spanning comment):
+uvx adeu apply contract.docx edits.json --author "Review Bot" --commented-change-granularity word -o contract_redlined.docx
 # Machine-readable stats on stdout (recommended — parse it to verify your batch):
 uvx adeu apply contract.docx edits.json --json
 ```

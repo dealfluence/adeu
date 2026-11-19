@@ -8931,8 +8931,22 @@ export class RedlineEngine {
       return null;
     }
 
+    const overlaps_virtual_pipe =
+      active_mapper &&
+      active_mapper.spans.some(
+        (s: any) =>
+          s.text === " | " &&
+          (s.run === null || s.run === undefined) &&
+          s.start < start_idx + actual_doc_text.length &&
+          s.end > start_idx,
+      );
+    const span_all_gaps =
+      Boolean(edit.comment) &&
+      this.commented_change_granularity === "word" &&
+      !overlaps_virtual_pipe;
+
     const sub_edits: any[] = [];
-    let comment = edit.comment;
+    let comment = span_all_gaps ? null : edit.comment;
     let t_pos = 0;
     let n_pos = 0;
     for (let k = 0; k <= t_markers.length; k++) {
@@ -8953,6 +8967,17 @@ export class RedlineEngine {
       }
     }
 
+    if (span_all_gaps && sub_edits.length > 0) {
+      if (sub_edits.every((se) => se._internal_op === "COMMENT_ONLY")) {
+        sub_edits[0].comment = edit.comment;
+      } else {
+        for (const sub_edit of sub_edits) {
+          if (sub_edit._internal_op !== "COMMENT_ONLY") {
+            sub_edit._group_comment = edit.comment;
+          }
+        }
+      }
+    }
     for (const sub_edit of sub_edits) sub_edit._split_group_id = start_idx;
     return sub_edits.length > 0 ? sub_edits : null;
   }

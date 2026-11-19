@@ -26,6 +26,11 @@ def test_batch_tool_teaches_manual_markup_and_states_the_real_partial_default():
     tool = _tools()["process_document_batch"]
     desc = tool.description or ""
     assert "markup_mode" in desc and "'manual'" in desc
+    assert "commented_change_granularity" in desc and "'word'" in desc
+    gran = tool.parameters["properties"]["commented_change_granularity"]
+    assert gran["default"] == "atomic"
+    assert set(gran["enum"]) == {"atomic", "word"}
+    assert "anyOf" not in gran and "oneOf" not in gran
     assert tool.parameters["properties"]["partial"]["default"] is True
     assert "transactionally" not in desc, "the description contradicts the salvage default"
     assert "partial=false" in desc

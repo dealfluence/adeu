@@ -64,6 +64,9 @@ uvx adeu apply original.docx edits.json --author "AI Reviewer" -o redlined.docx
 # Manual / inline formatting markup (strikethrough + bold red underline instead of Track Changes)
 uvx adeu apply original.docx edits.json --author "AI Reviewer" --manual -o manual.docx
 
+# Word-level redline fragments under one spanning comment for commented edits
+uvx adeu apply original.docx edits.json --author "AI Reviewer" --commented-change-granularity word -o redlined.docx
+
 # Emit the batch result as machine-readable JSON on stdout (for agents/scripts)
 uvx adeu apply original.docx edits.json --json
 

@@ -54,6 +54,8 @@ class TestAdeuApplyChangesSchema:
         assert data.ignore_control_locks is False
         assert data.ignore_document_protection is False
         assert data.allow_untracked_writes is False
+        assert data.commented_change_granularity == "atomic"
+        assert "commented_change_granularity" in AdeuApplyChanges().description
 
     def test_description_warns_about_batch_semantics(self) -> None:
         # Batches apply sequentially (chaining supported); if the contract is

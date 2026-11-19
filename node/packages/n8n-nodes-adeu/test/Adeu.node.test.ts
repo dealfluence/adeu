@@ -582,6 +582,58 @@ describe("Test Adeu n8n Node", () => {
       expect(stats.edits[0].comment_ids.length).toBe(1);
     });
 
+    it("should word-split commented edits under one comment when commentedChangeGranularity='word'", async () => {
+      const freshDoc = await DocumentObject.load(goldenBuffer);
+      const xmlDoc = freshDoc.element.ownerDocument!;
+      const p = xmlDoc.createElement("w:p");
+      const r = xmlDoc.createElement("w:r");
+      const t = xmlDoc.createElement("w:t");
+      t.setAttribute("xml:space", "preserve");
+      t.textContent = "Either party may terminate this Agreement upon thirty (30) days' written notice.";
+      r.appendChild(t);
+      p.appendChild(r);
+      freshDoc.element.appendChild(p);
+      const freshBuf = await freshDoc.save();
+
+      (
+        mockExecuteFunctions.helpers.getBinaryDataBuffer as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(freshBuf);
+      (
+        mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          json: {
+            changes: [
+              {
+                type: "modify",
+                target_text: "thirty (30) days'",
+                new_text: "sixty (60) days'",
+                comment: "Extend notice period.",
+              },
+            ],
+          },
+          binary: { data: { fileName: "contract.docx" } },
+        },
+      ]);
+      mockParams(mockExecuteFunctions, {
+        resource: "document",
+        operation: "applyEdits",
+        binaryPropertyName: "data",
+        outputBinaryPropertyName: "data",
+        author: "n8n AI",
+        editsSource: "fromInputJson",
+        editsJsonPath: "changes",
+        commentedChangeGranularity: "word",
+      });
+
+      const result = await node.execute.call(mockExecuteFunctions);
+      const item = result[0][0];
+      const stats = item.json.stats as Record<string, any>;
+      expect(stats.edits_applied).toBe(1);
+      expect(stats.edits[0].change_ids.length).toBeGreaterThanOrEqual(4);
+      expect(stats.edits[0].comment_ids).toHaveLength(1);
+    });
+
     it("should name the failing change index and the recovery protocol", async () => {
       (
         mockExecuteFunctions.getInputData as ReturnType<typeof vi.fn>

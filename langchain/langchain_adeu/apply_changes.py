@@ -139,6 +139,14 @@ class AdeuApplyChangesInput(BaseModel):
             "edit's comment as a Word comment, and no tracked revisions."
         ),
     )
+    commented_change_granularity: Literal["atomic", "word"] = Field(
+        default="atomic",
+        description=(
+            "How a modify edit carrying a comment is tracked: 'atomic' (default, one single "
+            "w:del/w:ins replacement wrapping the whole edit) or 'word' (minimal word-level "
+            "w:del/w:ins fragments wrapped by one spanning Word comment)."
+        ),
+    )
     ignore_control_locks: bool = Field(
         default=False,
         description=(
@@ -190,7 +198,9 @@ _DESCRIPTION = (
     "accept/reject/reply action to get fresh IDs — do not reuse IDs from "
     "earlier in the conversation.\n\n"
     "markup_mode='manual' writes strikethrough deletions and underlined "
-    "insertions with comments instead of Track Changes.\n\n"
+    "insertions with comments instead of Track Changes. "
+    "commented_change_granularity='word' word-splits commented edits under "
+    "one spanning comment.\n\n"
     "Edits can still be skipped for non-validation reasons at apply time — "
     "check artifact['edits_applied'] vs artifact['edits_skipped'], and "
     "artifact['status'] ('ok' or 'partial')."
@@ -215,6 +225,7 @@ class AdeuApplyChanges(BaseTool):
         output_path: str | None = None,
         partial: bool = True,
         markup_mode: Literal["track_changes", "manual"] = "track_changes",
+        commented_change_granularity: Literal["atomic", "word"] = "atomic",
         ignore_control_locks: bool = False,
         ignore_document_protection: bool = False,
         allow_untracked_writes: bool = False,
@@ -262,6 +273,7 @@ class AdeuApplyChanges(BaseTool):
             author=author_name,
             id_discovery_hint=LANGCHAIN_ID_DISCOVERY_HINT,
             markup_mode=markup_mode,
+            commented_change_granularity=commented_change_granularity,
             ignore_control_locks=ignore_control_locks,
             ignore_document_protection=ignore_document_protection,
             allow_untracked_writes=allow_untracked_writes,
@@ -311,6 +323,7 @@ class AdeuApplyChanges(BaseTool):
         output_path: str | None = None,
         partial: bool = True,
         markup_mode: Literal["track_changes", "manual"] = "track_changes",
+        commented_change_granularity: Literal["atomic", "word"] = "atomic",
         ignore_control_locks: bool = False,
         ignore_document_protection: bool = False,
         allow_untracked_writes: bool = False,
@@ -324,6 +337,7 @@ class AdeuApplyChanges(BaseTool):
             output_path,
             partial,
             markup_mode,
+            commented_change_granularity,
             ignore_control_locks,
             ignore_document_protection,
             allow_untracked_writes,

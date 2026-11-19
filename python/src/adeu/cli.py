@@ -25,7 +25,12 @@ from adeu.payloads import (
     has_fused_json_marker,
     shrink_batch_stats,
 )
-from adeu.redline.engine import BatchValidationError, RedlineEngine, validate_edit_strings
+from adeu.redline.engine import (
+    COMMENTED_CHANGE_GRANULARITIES,
+    BatchValidationError,
+    RedlineEngine,
+    validate_edit_strings,
+)
 from adeu.sanitize.core import SanitizeError, SanitizeResult, sanitize_docx
 from adeu.text_revision import (
     _CRITICMARKUP_TOKENS,
@@ -1167,6 +1172,7 @@ def _open_redline_engine_or_exit(
     terse_errors: bool = False,
     gate_overrides: "dict | None" = None,
     markup_mode: str = "track_changes",
+    commented_change_granularity: str = "atomic",
 ) -> RedlineEngine:
     """Opens a RedlineEngine on `path` through the single shared error path."""
     _require_input_file(path)
@@ -1177,8 +1183,21 @@ def _open_redline_engine_or_exit(
         with open(path, "rb") as f:
             stream = BytesIO(f.read())
         if author is not None:
-            return RedlineEngine(stream, author=author, terse_errors=terse_errors, markup_mode=markup_mode, **gates)
-        return RedlineEngine(stream, terse_errors=terse_errors, markup_mode=markup_mode, **gates)
+            return RedlineEngine(
+                stream,
+                author=author,
+                terse_errors=terse_errors,
+                markup_mode=markup_mode,
+                commented_change_granularity=commented_change_granularity,
+                **gates,
+            )
+        return RedlineEngine(
+            stream,
+            terse_errors=terse_errors,
+            markup_mode=markup_mode,
+            commented_change_granularity=commented_change_granularity,
+            **gates,
+        )
     except SystemExit:
         raise
     except Exception as e:
@@ -1385,6 +1404,12 @@ def handle_apply(args):
         # text-file input rejects it below.
         if getattr(args, "partial", False):
             _cli_error("invalid_input", "--partial is not supported for live Word mode", exit_code=2)
+        if getattr(args, "commented_change_granularity", "atomic") == "word":
+            _cli_error(
+                "unsupported",
+                "--commented-change-granularity=word is only supported for disk DOCX files, not live Word mode",
+                exit_code=2,
+            )
         if args.changes is None and args.original is not None:
             # Shift positional arguments if only one is provided
             args.changes = args.original
@@ -1488,6 +1513,7 @@ def handle_apply(args):
             "allow_untracked_writes": getattr(args, "allow_untracked_writes", False),
         },
         markup_mode="manual" if getattr(args, "manual", False) else "track_changes",
+        commented_change_granularity=getattr(args, "commented_change_granularity", "atomic"),
     )
     try:
         stats = engine.process_batch(changes, partial=getattr(args, "partial", False))
@@ -2336,6 +2362,16 @@ def _main_impl():
         help=(
             "Apply changes as manual inline formatting (strikethrough deletions and "
             "bold underlined red #C00000 insertions) instead of Word Track Changes"
+        ),
+    )
+    p_apply.add_argument(
+        "--commented-change-granularity",
+        choices=list(COMMENTED_CHANGE_GRANULARITIES),
+        default="atomic",
+        help=(
+            "How a modify edit carrying a comment is tracked: 'atomic' (default: one single "
+            "replacement wrapping the whole edit) or 'word' (word-level fragments wrapped by "
+            "one spanning Word comment)."
         ),
     )
     p_apply.add_argument("-o", "--output", type=Path, help="Output DOCX path")

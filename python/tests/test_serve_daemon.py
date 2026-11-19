@@ -518,3 +518,60 @@ def test_serve_extract_search_with_page_range(monkeypatch, capsys):
     res = json.loads(captured[0])
     assert res.get("status") != "error", res
     assert "Search Results" in res.get("markdown", "")
+
+
+def test_serve_apply_commented_change_granularity_word_and_invalid(tmp_path, monkeypatch, capsys):
+    import re
+    import zipfile
+
+    from docx import Document
+
+    doc_path = tmp_path / "clause.docx"
+    out_docx = tmp_path / "clause_word.docx"
+    d = Document()
+    d.add_paragraph("Either party may terminate this Agreement upon thirty (30) days' written notice.")
+    d.save(str(doc_path))
+
+    lines = [
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(doc_path),
+                "changes": [
+                    {
+                        "type": "modify",
+                        "target_text": "thirty (30) days'",
+                        "new_text": "sixty (60) days'",
+                        "comment": "Why.",
+                    }
+                ],
+                "commented_change_granularity": "word",
+                "output": str(out_docx),
+            }
+        ),
+        json.dumps(
+            {
+                "command": "apply",
+                "file_path": str(doc_path),
+                "changes": [],
+                "commented_change_granularity": "sentence",
+            }
+        ),
+        json.dumps({"command": "exit"}),
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(lines) + "\n"))
+
+    code = run_serve()
+    assert code == 0
+
+    captured = capsys.readouterr().out.strip().splitlines()
+    assert len(captured) == 2
+    ok_res = json.loads(captured[0])
+    err_res = json.loads(captured[1])
+
+    assert ok_res.get("edits_applied") == 1
+    body = zipfile.ZipFile(out_docx).read("word/document.xml").decode("utf-8")
+    ins_ids = set(re.findall(r'<w:ins\b[^>]*\bw:id="(\d+)"', body))
+    assert len(ins_ids) >= 2
+    assert err_res.get("status") == "error"
+    assert err_res.get("error") == "invalid_input"

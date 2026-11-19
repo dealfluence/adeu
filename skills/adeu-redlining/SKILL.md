@@ -53,6 +53,7 @@ Every redlining task follows the same tight loop:
    - **Sequential evaluation:** each edit in `changes` evaluates against the document state produced by preceding edits in the same batch.
    - **Output path:** pass `output_path` explicitly when requested. When `output_path` is omitted, files ending in `_processed`, `_redlined`, `.redline`, `-redline`, `_markup`, or `.marked` update in place; other files save to `<stem>_processed.docx`.
    - **Manual / inline formatting mode:** when the user asks for strikethrough deletions and underlined insertions instead of Word Track Changes, pass `markup_mode="manual"` on `process_document_batch` (or `--manual` on `adeu apply`). This mode produces the markup and its margin comments natively; it replaces scripting python-docx, which breaks the package.
+   - **Word-level redlines on commented edits:** pass `commented_change_granularity="word"` on `process_document_batch` (or `--commented-change-granularity word` on `adeu apply`) when minimal word-level Track Changes are preferred on commented `modify` edits (wrapped by one spanning comment).
 3. **Finish from the batch receipt.** `process_document_batch` returns per-edit `*Preview (CriticMarkup):*`, minted `**IDs:**` (`Chg:N`, `Com:N`), `**Part:**` when an edit landed in a header, footer or notes, `Applied Actions`, and `Document State` (remaining tracked changes and comments). Treat a clean batch receipt as final verification — skip any extra post-batch `read_docx` call unless you need to inspect surrounding prose not shown in the receipt.
 
 The MCP tool salvages by default (`partial=true`): valid edits apply, and the response LEADS with `PARTIAL: applied K of N` listing each failed edit with its diagnostics and nearest-match candidates. Fix only those and send them as a follow-up batch. Pass `partial=false` when a half-applied batch would be worse than none (dependent edits, a negotiated package). The CLI `adeu apply` is the reverse: all-or-nothing unless you pass `--partial`.
@@ -72,7 +73,7 @@ The MCP tool salvages by default (`partial=true`): valid edits apply, and the re
 
 ## Edit types — complete schema reference
 
-Pass `changes` as a list of objects to `process_document_batch(original_docx_path, author_name, changes, output_path?, partial?, markup_mode?)`:
+Pass `changes` as a list of objects to `process_document_batch(original_docx_path, author_name, changes, output_path?, partial?, markup_mode?, commented_change_granularity?)`:
 
 | `type`        | Purpose                                   | Fields                                                                                                                                      |
 | ------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |

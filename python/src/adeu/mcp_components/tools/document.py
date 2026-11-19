@@ -649,13 +649,14 @@ async def _process_document_batch_disk(
     author_name: str,
     ctx: Context,
     changes: List[DocumentChange],
-    output_path: Optional[str],
-    rejected_notes: Optional[RejectedNotes] = None,
-    partial: bool = True,
+    output_path: Optional[str] = None,
+    rejected_notes: Optional[List[str]] = None,
+    partial: bool = False,
     ignore_control_locks: bool = False,
     ignore_document_protection: bool = False,
     allow_untracked_writes: bool = False,
     markup_mode: str = "track_changes",
+    commented_change_granularity: str = "atomic",
 ) -> str:
     """Core logic for modifying a DOCX on disk."""
     # Batches are heavy CPU: let the projection cache's background fills see
@@ -720,6 +721,7 @@ async def _process_document_batch_disk(
             ignore_document_protection=ignore_document_protection,
             allow_untracked_writes=allow_untracked_writes,
             markup_mode=markup_mode,
+            commented_change_granularity=commented_change_granularity,
         )
 
         valid_indices = getattr(rejected_notes, "valid_indices", None)
@@ -1333,6 +1335,15 @@ AllowUntrackedWritesParam = Annotated[
     "concedes Adeu's own always-tracked guarantee rather than bypassing the author's restriction.",
 ]
 
+CommentedChangeGranularityParam = Annotated[
+    Literal["atomic", "word"],
+    (
+        "How a modify edit carrying a comment is tracked: 'atomic' (default, one single "
+        "w:del/w:ins replacement wrapping the whole edit) or 'word' (minimal word-level "
+        "w:del/w:ins fragments wrapped by one spanning Word comment). Disk mode only."
+    ),
+]
+
 PROCESS_BATCH_WIN32_EXTRA = (
     "If the file is open in Word, edits run live on the canvas. "
     "Leave original_docx_path empty to edit whatever document is currently active.\n\n"
@@ -1351,15 +1362,15 @@ PROCESS_BATCH_OPERATIONS_DESC = (
     "3. 'reply': Reply to `target_id` ('Com:5') with `text`.\n"
     "4. 'set_field': Fill a content control — `field` is 'CC:<N>', tag or alias, "
     "`value` the text (checkboxes true/false, dates YYYY-MM-DD, dropdowns a listed "
-    "option; list via `read_docx` mode='fields'). Data-bound controls update their "
-    "store; locked/protected controls refuse and name the override.\n"
-    "5. 'insert_row' / 'delete_row': Table edits. Disk mode only — not supported on Live Word canvas.\n\n"
+    "option; list via `read_docx` mode='fields'). Updates bound stores; "
+    "locked/protected controls refuse and name the override.\n"
+    "5. 'insert_row' / 'delete_row': Table row edits (disk mode only).\n\n"
     "ID VOLATILITY: 'Chg:N'/'Com:N' shift between document states — call "
     "`read_docx` before any accept/reject/reply; never reuse earlier ids.\n\n"
     "`markup_mode`='manual' writes strikethrough/underline with comments instead of "
-    "Track Changes.\n"
-    "`author_name` is used for attribution on all tracked changes and comments, "
-    "in both disk and Live Word modes."
+    "Track Changes. `commented_change_granularity`='word' word-splits commented "
+    "edits under one spanning comment (disk only).\n"
+    "`author_name` is used for attribution in disk and Live Word modes."
 )
 
 
@@ -1555,6 +1566,7 @@ if sys.platform == "win32":
                 "(inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments)."
             ),
         ] = "track_changes",
+        commented_change_granularity: CommentedChangeGranularityParam = "atomic",
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1583,6 +1595,13 @@ if sys.platform == "win32":
                 + json_block,
             )
         if not original_docx_path:
+            if commented_change_granularity == "word":
+                return add_timing_if_debug(
+                    start_time,
+                    "Error: commented_change_granularity='word' is only supported for disk-based DOCX files, "
+                    "not Live Word mode. Provide original_docx_path (closed in Word) or use "
+                    "commented_change_granularity='atomic'.",
+                )
             # Edit active document directly. No disk fallback available.
             res = await process_active_word_batch(
                 ctx,
@@ -1596,6 +1615,13 @@ if sys.platform == "win32":
                 },
             )
         elif is_document_open_in_word(original_docx_path):
+            if commented_change_granularity == "word":
+                return add_timing_if_debug(
+                    start_time,
+                    "Error: commented_change_granularity='word' is only supported for disk-based DOCX files, "
+                    "and this document is currently open in Live Word. Close it in Word first or use "
+                    "commented_change_granularity='atomic'.",
+                )
             # The file is open in Word: apply edits to the live canvas so the
             # agent's changes land where the user is looking. If the probe matched
             # but COM is actually unusable, fall back to editing the disk copy
@@ -1627,6 +1653,7 @@ if sys.platform == "win32":
                     ignore_document_protection=ignore_document_protection,
                     allow_untracked_writes=allow_untracked_writes,
                     markup_mode=markup_mode,
+                    commented_change_granularity=commented_change_granularity,
                 )
         else:
             # Not open in Word (or Word not running): the file on disk is
@@ -1643,6 +1670,7 @@ if sys.platform == "win32":
                 ignore_document_protection=ignore_document_protection,
                 allow_untracked_writes=allow_untracked_writes,
                 markup_mode=markup_mode,
+                commented_change_granularity=commented_change_granularity,
             )
         return add_timing_if_debug(start_time, res)
 
@@ -1905,6 +1933,7 @@ else:
                 "(inline strikethrough deletions and bold underlined red #C00000 insertions with native Word comments)."
             ),
         ] = "track_changes",
+        commented_change_granularity: CommentedChangeGranularityParam = "atomic",
         reasoning: Annotated[
             Optional[str],
             "Why do I need to apply these changes to the document? State this reason before any other parameter.",
@@ -1940,5 +1969,6 @@ else:
             ignore_document_protection=ignore_document_protection,
             allow_untracked_writes=allow_untracked_writes,
             markup_mode=markup_mode,
+            commented_change_granularity=commented_change_granularity,
         )
         return add_timing_if_debug(start_time, res)

@@ -34,6 +34,7 @@ Applies a list of edits and review actions to a DOCX. Edits apply **sequentially
 - `output_path` (optional): output `.docx` path; when omitted, files ending in `_processed`, `_redlined`, `.redline`, `-redline`, `_markup`, or `.marked` update in place, and other files save to `<stem>_processed.docx`
 - `partial=true` (default `true`): salvage mode — valid edits apply while failing edits return detailed error reports. Pass `partial=false` for transactional rollback if any edit fails validation.
 - `markup_mode="track_changes"` (default) or `"manual"`: `"manual"` writes deletions as strikethrough and insertions as bold underlined red (`#C00000`) runs with native Word comments and zero `<w:ins>`/`<w:del>` revisions
+- `commented_change_granularity="atomic"` (default) or `"word"`: `"word"` word-splits commented `modify` edits into minimal `<w:del>`/`<w:ins>` fragments wrapped by one spanning Word comment (disk mode only)
 - `ignore_control_locks=true`: permit writes to content-locked controls (`sdtContentLocked`)
 - `ignore_document_protection=true`: permit writes to read-only or comments-protected documents
 - `allow_untracked_writes=true`: permit writes in fill-in-forms protected documents (where Word suppresses change tracking)
