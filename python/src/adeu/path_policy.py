@@ -165,7 +165,9 @@ def _canonical_path(name: str, links: int = 0, *, require_existing: bool = False
             if require_existing:
                 raise FileNotFoundError(current)
             continue
-        if stat.S_ISLNK(info.st_mode) or (os.name == "nt" and info.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT):
+        if stat.S_ISLNK(info.st_mode) or (
+            sys.platform == "win32" and info.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+        ):
             if links >= 40:
                 raise PathPolicyError(f"Refused '{name}': too many symbolic links. Use a direct file path.")
             current = _canonical_path(
