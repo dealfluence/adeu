@@ -37,6 +37,7 @@ else:
             return lambda fn: fn
 
 
+from adeu import path_policy
 from adeu.diff import (
     format_word_patch_diff,
     generate_edits_from_text,
@@ -57,6 +58,7 @@ from adeu.mcp_components._response_builders import (
 from adeu.mcp_components.shared import (
     MARKDOWN_UI_URI,
     MCP_ID_DISCOVERY_HINT,
+    _not_found_error,
     add_timing_if_debug,
     read_file_bytes,
     save_stream,
@@ -75,6 +77,7 @@ from adeu.models import (
 from adeu.pagination import parse_page_arg
 from adeu.payloads import failure_envelope
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
+from adeu.utils.files import write_output_bytes
 from adeu.utils.text import batch_details_header
 
 
@@ -420,14 +423,11 @@ async def _read_docx_disk(
     )
 
     try:
-        if not Path(file_path).exists():
-            # Called only to raise: doc_cache reads its own bytes, so this
-            # keeps missing-file reporting in one place — shared's lean
-            # FileNotFoundError with close-match sibling suggestions and the
-            # relative-path hint, echoing the path exactly as the caller gave
-            # it (QA round 3, findings 3.11 and F16). The returned buffer is
-            # deliberately discarded.
-            read_file_bytes(file_path)
+        source = path_policy.resolved_input_path(file_path)
+        if not source.exists():
+            # Keep the original spelling and relative-path hint in read errors.
+            raise _not_found_error(file_path)
+        file_path = str(source)
 
         doc_cache.mark_activity()
         key = doc_cache.stat_key(file_path)
@@ -712,7 +712,16 @@ async def _process_document_batch_disk(
         )
 
     def _run_batch_sync() -> tuple[bool, Any, str, str]:
-        stream = read_file_bytes(original_docx_path)
+        source = path_policy.resolved_input_path(original_docx_path)
+        if output_path is None:
+            if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", source.stem, re.IGNORECASE):
+                target = source
+            else:
+                target = source.with_name(f"{source.stem}_processed{source.suffix}")
+        else:
+            target = Path(output_path)
+        final_output = str(path_policy.checked_output_path(target, source))
+        stream = read_file_bytes(str(source))
         engine = RedlineEngine(
             stream,
             author=author_name,
@@ -752,19 +761,11 @@ async def _process_document_batch_disk(
             )
             return False, env, "", ""
 
-        final_output = output_path
-        if not final_output:
-            p = Path(original_docx_path)
-            if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", p.stem, re.IGNORECASE):
-                final_output = str(p)
-            else:
-                final_output = str(p.parent / f"{p.stem}_processed{p.suffix}")
-
         result_stream = engine.save_to_stream()
         # Disclose overwrites BEFORE writing (QA 2026-07-23 F17): repeated
         # default-named runs, _processed-stem inputs saving in place, and
         # output_path == input all silently replaced an existing file.
-        overwrite_note = _overwrite_note(final_output, original_docx_path)
+        overwrite_note = _overwrite_note(final_output, str(source))
         save_stream(result_stream, final_output)
         return True, stats, final_output, overwrite_note
 
@@ -1004,26 +1005,31 @@ async def diff_docx_files(
     )
 
     def _diff_sync() -> str:
-        stream_orig = read_file_bytes(original_path)
-        stream_mod = read_file_bytes(modified_path)
+        original = path_policy.resolved_input_path(original_path)
+        modified = path_policy.resolved_input_path(modified_path)
+        out_file = None
+        if output_path is not None:
+            from adeu.compare import refuse_input_alias
+
+            out_file = path_policy.checked_output_path(output_path, original, modified)
+            refuse_input_alias(out_file, original, modified)
+
+        stream_orig = read_file_bytes(str(original))
+        stream_mod = read_file_bytes(str(modified))
 
         saved_header = ""
-        if output_path:
-            from adeu.compare import build_redline_comparison, refuse_input_alias
+        if out_file is not None:
+            from adeu.compare import build_redline_comparison
 
-            refuse_input_alias(output_path, original_path, modified_path)
             eff_author = (author_name or "").strip() or "Comparison"
             comparison = build_redline_comparison(
                 stream_orig.getvalue(), stream_mod.getvalue(), author=eff_author, compare_clean=compare_clean
             )
-            out_file = Path(output_path)
-            if out_file.parent:
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-            overwrite_note = _overwrite_note(output_path, original_path)
-            out_file.write_bytes(comparison.data)
+            overwrite_note = _overwrite_note(str(out_file), str(original))
+            write_output_bytes(out_file, comparison.data)
             warnings = "".join(f"⚠️  {w}\n" for w in comparison.warnings)
             saved_header = (
-                f"Redline saved to: {output_path} "
+                f"Redline saved to: {out_file} "
                 f"({comparison.applied} tracked change(s) applied, Author: {eff_author}).{overwrite_note}\n"
                 f"{warnings}\n"
             )
@@ -1103,7 +1109,10 @@ async def accept_all_changes(
     del reasoning  # reason-first UX; not used by the tool.
     await ctx.info(f"Accepting all changes for document: {Path(docx_path).name}")
     try:
-        stream = read_file_bytes(docx_path)
+        source = path_policy.resolved_input_path(docx_path)
+        target = source.with_name(f"{source.stem}_clean{source.suffix}") if output_path is None else output_path
+        output_path = str(path_policy.checked_output_path(target, source))
+        stream = read_file_bytes(str(source))
         engine = RedlineEngine(stream, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
         # This surface DELIBERATELY defaults to True while the library API
@@ -1119,11 +1128,7 @@ async def accept_all_changes(
         counts = engine.accept_all_revisions(remove_comments=remove_comments)
         removed_comment_notes = list(engine.removed_comment_notes)
 
-        if not output_path:
-            p = Path(docx_path)
-            output_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
-
-        overwrite_note = _overwrite_note(output_path, docx_path)
+        overwrite_note = _overwrite_note(output_path, str(source))
         save_stream(engine.save_to_stream(), output_path)
         await ctx.info("Clean document saved successfully", extra={"output_path": output_path})
 
@@ -1199,16 +1204,21 @@ async def apply_text_revision(
     from adeu.text_revision import (
         TextRevisionVerificationError,
         apply_text_revision_core,
+        default_revision_output,
     )
 
     try:
+        source = path_policy.resolved_input_path(file_path)
+        target = default_revision_output(source) if output_path is None else output_path
+        output, diagnostic = path_policy.checked_revision_paths(target, source)
         stats, out_path = await asyncio.to_thread(
             apply_text_revision_core,
-            file_path,
+            source,
             revised_text,
-            output_path,
+            output,
             author,
             allow_major_deletions,
+            unverified_output_path=diagnostic,
         )
         applied_count = stats.get("edits_applied", 0)
         res = f"Text revision complete. Saved to: {out_path}\nEdits: {applied_count} applied."
@@ -1237,12 +1247,12 @@ async def apply_text_revision(
 
 
 @tool(
-    description="Opens a local file in its native desktop application (e.g., Microsoft Word for DOCX files).",
+    description="Opens a Word document or template (.docx, .docm, .dotx, .dotm) in its native desktop application.",
     tags={"docx"},
     annotations={"openWorldHint": True},
 )
 async def open_local_file(
-    file_path: Annotated[str, "Absolute path to the file to open."],
+    file_path: Annotated[str, "Absolute path to the Word document or template to open."],
     ctx: Context,
     reasoning: Annotated[
         Optional[str],
@@ -1252,11 +1262,8 @@ async def open_local_file(
     start_time = time.perf_counter()
     del reasoning  # reason-first UX; not used by the tool.
     await ctx.info(f"Opening file in native app: {file_path}")
-    p = Path(file_path)
-    if not p.exists():
-        raise ToolError(f"File not found: {file_path}")
-
     try:
+        p = path_policy.checked_open_path(file_path)
         if sys.platform == "win32":
             os.startfile(p)
         elif sys.platform == "darwin":
@@ -1701,8 +1708,8 @@ if sys.platform == "win32":
             from adeu.utils.xml_debug import get_abstracted_xml_snapshot
 
             try:
-                xml_a = get_abstracted_xml_snapshot(file_a)
-                xml_b = get_abstracted_xml_snapshot(file_b)
+                xml_a = get_abstracted_xml_snapshot(str(path_policy.resolved_input_path(file_a)))
+                xml_b = get_abstracted_xml_snapshot(str(path_policy.resolved_input_path(file_b)))
 
                 # R6 Fix: Strip noisy rsid and paraId metadata to speed up difflib
                 import re

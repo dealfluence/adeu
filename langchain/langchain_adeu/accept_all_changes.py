@@ -20,10 +20,11 @@ from typing import Any, Literal
 
 from adeu import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.files import write_output_bytes
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
 
 
 class AdeuAcceptAllChangesInput(BaseModel):
@@ -111,9 +112,7 @@ class AdeuAcceptAllChanges(BaseTool):
         removed_comment_notes = list(engine.removed_comment_notes)
 
         result_stream = engine.save_to_stream()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "wb") as f:
-            f.write(result_stream.getvalue())
+        write_output_bytes(target, result_stream.getvalue())
 
         accepted_ins = counts.get("accepted_insertions", 0)
         accepted_del = counts.get("accepted_deletions", 0)
@@ -171,10 +170,8 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     source, raise — silently overwriting the input on an LLM-driven
     workflow is almost always a mistake.
     """
-    if requested is None:
-        return source.with_name(f"{source.stem}_clean{source.suffix}")
-
-    target = validate_docx_path(requested, must_exist=False, label="output path")
+    candidate = source.with_name(f"{source.stem}_clean{source.suffix}") if requested is None else requested
+    target = validate_output_path(candidate, source)
 
     if target == source:
         raise ToolException(

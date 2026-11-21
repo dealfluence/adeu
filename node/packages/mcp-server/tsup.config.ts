@@ -58,6 +58,10 @@ export default defineConfig([
     outExtension: () => ({ js: ".js" }),
     noExternal: [/(.*)/], // Bundle all NPM dependencies
     external: [/^node:/], // Leave Node.js native built-ins external
+    // The ZIP directory reader is CommonJS and loads Node built-ins with require().
+    banner: {
+      js: "import { createRequire as createBundleRequire } from 'node:module'; const require = createBundleRequire(import.meta.url);",
+    },
     outDir: "../../../desktop-extension",
     dts: false,
     sourcemap: false,

@@ -52,6 +52,7 @@ import type { ProgressFn } from "./doc-cache.js";
 
 import { MARKDOWN_UI_URI, MCP_ID_DISCOVERY_HINT, handleServerCliArgs } from "./shared.js";
 import { attachProtocolAdapter } from "./protocol-adapter.js";
+import { checkToolArguments, checkToolPath, writeToolDocument } from "./path-policy.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
 // (a missing `type` that's unambiguous from the key signature, or a non-canonical
@@ -351,7 +352,13 @@ server.registerTool = (name: string, schema: any, handler?: any) => {
       schema.description = schema.description.trim() + buildTag;
     }
   }
-  return originalRegisterTool(name, schema, handler);
+  return originalRegisterTool(name, schema, async (args: any, extra?: any) => {
+    try {
+      return await handler(await checkToolArguments(name, args), extra);
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: (error as Error).message }] };
+    }
+  });
 };
 
 // Wrap registerAppTool to inject buildTag into descriptions
@@ -1300,11 +1307,11 @@ server.registerTool(
       }
 
       let overwrite_note = "";
-      const existedBefore = fs.existsSync(outPath);
       const outBuf = await doc.save();
       try {
-        fs.mkdirSync(dirname(outPath), { recursive: true });
-        fs.writeFileSync(outPath, outBuf);
+        const written = await writeToolDocument(outPath, outBuf, [original_docx_path]);
+        outPath = written.path;
+        overwrite_note = overwriteNote(outPath, original_docx_path, written.existedBefore);
       } catch (e: any) {
         // Filesystem failures (name too long, missing directory, perms)
         // must surface as a clear, actionable error (QA H3 parity).
@@ -1318,7 +1325,6 @@ server.registerTool(
           ],
         };
       }
-      overwrite_note = overwriteNote(outPath, original_docx_path, existedBefore);
       // The in-memory document IS the state of the file just written:
       // adopt it as the output's cache (text products built in the
       // background; DOM pinned for a chained edit). The agent's
@@ -1427,11 +1433,9 @@ server.registerTool(
         counts.accepted_formatting +
         counts.removed_comments;
 
-      const existedBefore = fs.existsSync(outPath);
       const outBuf = await doc.save();
-
-      fs.mkdirSync(dirname(outPath), { recursive: true });
-      fs.writeFileSync(outPath, outBuf);
+      const written = await writeToolDocument(outPath, outBuf, [docx_path]);
+      outPath = written.path;
       // This tool rewrites a document the cache may already hold products
       // for (output_path defaults next to the input, and may BE the input).
       // Not priming from `doc` here is deliberate: the prime path's
@@ -1464,7 +1468,7 @@ server.registerTool(
           text += `\nComments kept (remove_comments=false).`;
         }
       }
-      text += overwriteNote(outPath, docx_path, existedBefore);
+      text += overwriteNote(outPath, docx_path, written.existedBefore);
 
       return {
         content: [{ type: "text", text }],
@@ -1557,12 +1561,7 @@ server.registerTool(
           }
           throw e;
         }
-        const outDir = dirname(output_path);
-        if (outDir && outDir !== "." && !existsSync(outDir)) {
-          fs.mkdirSync(outDir, { recursive: true });
-        }
-        const existedBefore = existsSync(output_path);
-        fs.writeFileSync(output_path, comparison.data);
+        const written = await writeToolDocument(output_path, comparison.data, [original_path, modified_path]);
         // Media warnings are printed with the text diff below; list only the
         // diff's own warnings here so none appears twice.
         const media = new Set(
@@ -1573,8 +1572,8 @@ server.registerTool(
           .map((w) => `⚠️  ${w}\n`)
           .join("");
         saved_header =
-          `Redline saved to: ${output_path} (${comparison.applied} tracked change(s) applied, Author: ${effAuthor}).` +
-          `${overwriteNote(output_path, original_path, existedBefore)}\n${warnings}\n`;
+          `Redline saved to: ${written.path} (${comparison.applied} tracked change(s) applied, Author: ${effAuthor}).` +
+          `${overwriteNote(written.path, original_path, written.existedBefore)}\n${warnings}\n`;
       }
 
       const origText = _extractTextFromDoc(origDoc, compare_clean, false, false, false, false) as string;
@@ -1698,13 +1697,12 @@ server.registerTool(
       });
 
       if (result.outBuffer) {
-        const existedBefore = fs.existsSync(outPath);
-        fs.mkdirSync(dirname(outPath), { recursive: true });
-        fs.writeFileSync(outPath, result.outBuffer);
+        const written = await writeToolDocument(outPath, result.outBuffer, [file_path]);
+        outPath = written.path;
         // Sanitize/finalize rewrites the package; drop any cached products
         // for this path so a later read cannot serve the pre-finalize text.
         docCache.invalidate(outPath);
-        const note = overwriteNote(outPath, file_path, existedBefore);
+        const note = overwriteNote(outPath, file_path, written.existedBefore);
         return {
           content: [
             {
@@ -1784,22 +1782,49 @@ server.registerTool(
   }) => {
     try {
       void reasoning;
+      // Preflight both possible writes before running the verification gate.
+      // Match the core's default naming when an output was omitted.
+      const name = basename(file_path);
+      const dot = name.lastIndexOf(".");
+      const stem = dot === -1 ? name : name.slice(0, dot);
+      output_path = await checkToolPath(output_path ?? (
+        stem.endsWith("_redlined") || stem.endsWith("_processed")
+          ? file_path
+          : join(dirname(file_path), `${stem}_redlined.docx`)
+      ), "write", [file_path]);
+      const diagnostic = await checkToolPath(
+        join(dirname(output_path), `${basename(output_path, extname(output_path))}.unverified.docx`),
+        "write", [file_path],
+      );
+      if (isSameFile(output_path, diagnostic) || isSameFile(file_path, diagnostic)) {
+        throw new Error(`Refused '${diagnostic}': the diagnostic would replace the source or requested output. Choose a different output filename.`);
+      }
       const buf = readFileBytesOrThrow(file_path);
       const doc = await loadDocxOrThrow(buf, file_path);
 
-      const result = await apply_text_revision_core({
-        doc,
-        input_path: file_path,
-        revised_text,
-        output_path,
-        author,
-        allow_major_deletions,
-      });
-      const outPath = result.output_path;
-
-      const existedBefore = fs.existsSync(outPath);
-      fs.mkdirSync(dirname(outPath), { recursive: true });
-      fs.writeFileSync(outPath, result.out_bytes);
+      let result;
+      try {
+        result = await apply_text_revision_core({
+          doc,
+          input_path: file_path,
+          revised_text,
+          output_path,
+          author,
+          allow_major_deletions,
+        });
+      } catch (error) {
+        if (!(error instanceof TextRevisionVerificationError)) throw error;
+        // Save only the diagnostic on a verification failure. The engine's
+        // message assumes it was saved, so only use that message after writing.
+        const written = await writeToolDocument(diagnostic, error.unverified_bytes, [file_path]);
+        return {
+          isError: true,
+          content: [{ type: "text", text: error.message.replace(error.unverified_path, () => written.path) }],
+        };
+      }
+      const { path: outPath, existedBefore } = await writeToolDocument(
+        result.output_path, result.out_bytes, [file_path],
+      );
       // Never primeFromDoc here: only the batch pipeline's byte-equality gate
       // is covered (see the comment on the batch tool's prime call), so the
       // correct-by-construction choice is to make the next read re-parse.
@@ -1816,22 +1841,6 @@ server.registerTool(
         ],
       };
     } catch (e: any) {
-      if (e instanceof TextRevisionVerificationError) {
-        // The gate refused the document: keep the copy it refused, next to the
-        // path the caller asked for, so a human can see what could not be
-        // realized — and say so in the SAME message that reports the failure.
-        let note = "";
-        try {
-          fs.mkdirSync(dirname(e.unverified_path), { recursive: true });
-          fs.writeFileSync(e.unverified_path, e.unverified_bytes);
-        } catch (werr: any) {
-          note = ` (the diagnostic copy could not be written: ${werr.message})`;
-        }
-        return {
-          isError: true,
-          content: [{ type: "text", text: e.message + note }],
-        };
-      }
       // A guard refusal is the agent's recovery instruction verbatim (parity
       // with Python's ToolError(str(e))); anything else keeps the "Error: "
       // shape the other tools use.

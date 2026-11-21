@@ -26,11 +26,12 @@ from adeu.diff import (
 )
 from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.files import write_output_bytes
 from docx import Document as load_document
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
 
 
 class AdeuDiffDocxInput(BaseModel):
@@ -205,7 +206,7 @@ class AdeuDiffDocx(BaseTool):
 
     @staticmethod
     def _write_redline(orig: Path, mod: Path, output_path: str, author_name: str | None, compare_clean: bool) -> str:
-        target = validate_docx_path(output_path, must_exist=False, label="output path")
+        target = validate_output_path(output_path, orig, mod)
         try:
             refuse_input_alias(target, orig, mod)
             author = (author_name or "").strip() or "Comparison"
@@ -218,8 +219,7 @@ class AdeuDiffDocx(BaseTool):
         except ComparisonError as e:
             raise ToolException("\n".join([str(e), *e.details])) from e
         replaced = target.exists()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(comparison.data)
+        write_output_bytes(target, comparison.data)
         lines = [f"Redline saved to {target} ({comparison.applied} tracked change(s), Author: {author})."]
         if replaced:
             lines.append(f"Note: replaced existing file {target}.")

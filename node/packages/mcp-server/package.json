@@ -9,6 +9,7 @@
     "adeu-mcp-server": "./dist/index.js"
   },
   "devDependencies": {
+    "@types/yauzl": "^3.4.0",
     "typescript": "^7.0.2"
   },
   "scripts": {
@@ -36,6 +37,7 @@
     "@adeu/core": "^4.1.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@modelcontextprotocol/ext-apps": "^1.7.4",
+    "yauzl": "^3.4.0",
     "zod": "4.6.7"
   }
 }

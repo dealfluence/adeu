@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import structlog
 
-from adeu import RedlineEngine
+from adeu import RedlineEngine, path_policy
 from adeu.mcp_components._response_builders import (
     BuilderError,
     build_appendix_response,
@@ -237,7 +237,7 @@ if sys.platform == "win32":
             # No running Word instance (the headless / benchmark case).
             return False
         try:
-            target = str(Path(file_path).resolve()).lower()
+            target = str(path_policy.resolved_input_path(file_path)).lower()
             for i in range(1, app.Documents.Count + 1):
                 doc = app.Documents(i)
                 full = getattr(doc, "FullName", None)
@@ -255,7 +255,7 @@ if sys.platform == "win32":
             except Exception as e:
                 raise RuntimeError("No active document found in Word.") from e
 
-        target_path = str(Path(file_path).resolve()).lower()
+        target_path = str(path_policy.resolved_input_path(file_path)).lower()
         for i in range(1, app.Documents.Count + 1):
             doc = app.Documents(i)
             if doc.FullName and str(Path(doc.FullName).resolve()).lower() == target_path:
@@ -1308,7 +1308,7 @@ if sys.platform == "win32":
         await ctx.info(f"Opening {file_path} in Word...")
         pythoncom.CoInitialize()
         try:
-            abs_path = str(Path(file_path).resolve())
+            abs_path = str(path_policy.checked_open_path(file_path))
 
             # Dispatch starts a new instance or connects to an existing one
             app = win32com.client.Dispatch("Word.Application")
@@ -1336,13 +1336,26 @@ if sys.platform == "win32":
             app = win32com.client.GetActiveObject("Word.Application")
             doc = app.ActiveDocument
 
-            if output_path:
-                abs_path = str(Path(output_path).resolve())
-                doc.SaveAs2(abs_path)
-                msg = f"Successfully saved active document as: {abs_path}"
-            else:
+            source = Path(doc.FullName) if doc.Path else None
+            if source is None and output_path is None:
+                raise ValueError("The active document has no file path. Provide a .docx output_path to save it.")
+            inputs = (source,) if source is not None else ()
+            requested = output_path if output_path is not None else doc.FullName
+            target = path_policy.checked_output_path(requested, *inputs)
+            # Word can also edit plain text and HTML. Select a Word file format
+            # explicitly when saving as a new file or converting such a buffer.
+            word_formats = {12, 13, 14, 15, 16, 24}  # packaged WdSaveFormat values
+            if output_path is None and source == target and doc.SaveFormat in word_formats:
                 doc.Save()
                 msg = "Successfully saved active document."
+            else:
+                package_format = doc.SaveFormat if doc.SaveFormat in word_formats else 16
+                save_format = {".docx": 16, ".docm": 13, ".dotx": 14, ".dotm": 15}.get(
+                    target.suffix.lower(), package_format
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                doc.SaveAs2(str(target), save_format)
+                msg = f"Successfully saved active document as: {target}"
 
             if close:
                 doc.Close(0)  # 0 = wdDoNotSaveChanges (since we just saved it)

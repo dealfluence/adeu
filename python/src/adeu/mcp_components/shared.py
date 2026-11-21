@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from adeu.utils.docx import suggest_sibling_docx
+from adeu.utils.files import write_output_bytes
 
 # Centralized MCP Configuration
 MARKDOWN_UI_URI = "ui://adeu/markdown-ui"
@@ -163,8 +164,4 @@ def add_timing_if_debug(start_time: float, result: Any) -> Any:
 
 
 def save_stream(stream: BytesIO, path: str):
-    p = Path(path)
-    if p.parent and str(p.parent) not in ("", "."):
-        p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "wb") as f:
-        f.write(stream.getvalue())
+    write_output_bytes(Path(path), stream.getvalue())

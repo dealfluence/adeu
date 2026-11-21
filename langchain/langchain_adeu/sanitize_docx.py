@@ -31,7 +31,7 @@ from adeu.sanitize.core import SanitizeError
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
 
 
 class AdeuSanitizeDocxInput(BaseModel):
@@ -214,10 +214,8 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     path is requested, default to '<stem>_sanitized.docx' next to the
     source; never silently overwrite the input.
     """
-    if requested is None:
-        return source.with_name(f"{source.stem}_sanitized{source.suffix}")
-
-    target = validate_docx_path(requested, must_exist=False, label="output path")
+    candidate = source.with_name(f"{source.stem}_sanitized{source.suffix}") if requested is None else requested
+    target = validate_output_path(candidate, source)
 
     if target == source:
         raise ToolException(

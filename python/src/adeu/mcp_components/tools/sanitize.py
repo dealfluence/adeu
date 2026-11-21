@@ -7,6 +7,7 @@ from fastmcp import Context
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import tool
 
+from adeu import path_policy
 from adeu.mcp_components.shared import add_timing_if_debug
 
 
@@ -78,19 +79,21 @@ async def sanitize_docx(
         },
     )
 
-    # Verify input file exists
-    p = Path(file_path)
-    if not p.exists():
-        raise ToolError(f"File not found: {file_path}")
-
-    if baseline_path and not Path(baseline_path).exists():
-        raise ToolError(f"Baseline file not found: {baseline_path}")
-
     try:
+        source = path_policy.resolved_input_path(file_path)
+        target = source.with_name(f"{source.stem}_sanitized{source.suffix}") if output_path is None else output_path
+        output_path = str(path_policy.checked_output_path(target, source))
+        if not source.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if baseline_path is not None:
+            baseline = path_policy.resolved_input_path(baseline_path)
+            if not baseline.exists():
+                raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
+            baseline_path = str(baseline)
         # Wrap the heavy synchronous sanitize operation in a thread to avoid blocking the MCP event loop
         result = await asyncio.to_thread(
             _sanitize,
-            file_path,
+            str(source),
             output_path=output_path,
             keep_markup=keep_markup,
             baseline_path=baseline_path,

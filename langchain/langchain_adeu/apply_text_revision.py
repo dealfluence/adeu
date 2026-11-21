@@ -37,13 +37,15 @@ blank `revised_text`, or CriticMarkup in `revised_text` — raise
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import os
 from typing import Any, Literal
 
+from adeu.path_policy import checked_revision_paths
 from adeu.text_revision import (
     TextRevisionVerificationError,
     apply_text_revision_core,
     check_criticmarkup,
+    default_revision_output,
 )
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field
@@ -167,21 +169,18 @@ class AdeuApplyTextRevision(BaseTool):
         except ValueError as e:
             raise ToolException(str(e)) from e
 
-        # No default is computed here: the engine owns the '<stem>_redlined.docx'
-        # convention, including updating an already-redlined input in place
-        # (python/src/adeu/text_revision.py:239-246).
-        target: Path | None = None
-        if output_path is not None:
-            target = validate_docx_path(output_path, must_exist=False, label="output path")
+        requested = default_revision_output(source) if output_path is None else os.path.expanduser(output_path)
+        target, diagnostic = checked_revision_paths(requested, source)
 
         try:
             # Returns (stats, output_path) — in that order (text_revision.py:215).
             stats, out_path = apply_text_revision_core(
                 str(source),
                 revised_text,
-                str(target) if target is not None else None,
+                str(target),
                 author,
                 allow_major_deletions,
+                unverified_output_path=diagnostic,
             )
         except TextRevisionVerificationError as e:
             # The engine wrote the '.unverified.docx' diagnostic copy and did NOT

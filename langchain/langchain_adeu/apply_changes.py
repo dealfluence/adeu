@@ -37,10 +37,16 @@ from typing import Any, Literal
 from adeu.models import BatchChanges
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.files import write_output_bytes
 from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from langchain_adeu._shared import LANGCHAIN_ID_DISCOVERY_HINT, validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import (
+    LANGCHAIN_ID_DISCOVERY_HINT,
+    validate_docx_path,
+    validate_output_path,
+    wrap_tool_errors,
+)
 
 
 class AdeuApplyChangesInput(BaseModel):
@@ -297,9 +303,7 @@ class AdeuApplyChanges(BaseTool):
 
         # Success path: write the output and return per-edit stats.
         result_stream = engine.save_to_stream()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "wb") as f:
-            f.write(result_stream.getvalue())
+        write_output_bytes(target, result_stream.getvalue())
 
         content_lines = _build_success_content(
             stats,
@@ -358,17 +362,14 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     source (the agent is iterating on its own output). Otherwise default
     to `<stem>_processed.docx` next to the source.
     """
-    if requested is None:
-        if _DERIVATIVE_STEM_RE.search(source.stem):
-            return source
-        return source.with_name(f"{source.stem}_processed{source.suffix}")
-
-    target = validate_docx_path(requested, must_exist=False, label="output path")
+    derivative = _DERIVATIVE_STEM_RE.search(source.stem)
+    default = source if derivative else source.with_name(f"{source.stem}_processed{source.suffix}")
+    target = validate_output_path(default if requested is None else requested, source)
 
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not _DERIVATIVE_STEM_RE.search(source.stem):
+    if target == source and not derivative:
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "

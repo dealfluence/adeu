@@ -9,6 +9,7 @@ from adeu.ingest import _extract_text_from_doc
 from adeu.models import DocumentChange
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
+from adeu.utils.files import write_output_bytes as _write_output_bytes
 from adeu.utils.opc import load_document as Document
 
 # Only the OPEN tokens: a bare closing token is ordinary prose far more often
@@ -233,23 +234,14 @@ def _load_docx_from_path(path: Union[str, Path]) -> Tuple[Any, bytes]:
     return doc, sanitized_bytes
 
 
-def _write_output_bytes(path: Path, data: bytes) -> None:
-    import tempfile
+def default_revision_output(input_path: Path) -> Path:
+    if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", input_path.stem, re.IGNORECASE):
+        return input_path
+    return input_path.with_name(f"{input_path.stem}_redlined.docx")
 
-    if path.parent and str(path.parent) not in ("", "."):
-        path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent or "."))
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as fb:
-            fb.write(data)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+
+def unverified_revision_output(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}.unverified.docx")
 
 
 def apply_text_revision_core(
@@ -258,6 +250,8 @@ def apply_text_revision_core(
     output_path: Optional[Union[str, Path]] = None,
     author: Optional[str] = None,
     allow_major_deletions: bool = False,
+    *,
+    unverified_output_path: Optional[Union[str, Path]] = None,
 ) -> Tuple[Dict[str, Any], Path]:
     """Core whole-text diff->tracked-changes primitive with clean-text verification gate."""
     p_input = Path(file_path)
@@ -283,19 +277,14 @@ def apply_text_revision_core(
     engine = RedlineEngine(BytesIO(doc_bytes), author=author_name)
     stats = engine.process_batch(changes)
 
-    target_output: Path
-    if output_path:
-        target_output = Path(output_path)
-    else:
-        if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", p_input.stem, re.IGNORECASE):
-            target_output = p_input
-        else:
-            target_output = p_input.with_name(f"{p_input.stem}_redlined.docx")
+    target_output = Path(output_path) if output_path else default_revision_output(p_input)
 
     verified, err_msg = verify_clean_text(engine.doc, text_clean_input)
 
     if not verified:
-        unverified_path = target_output.with_name(f"{target_output.stem}.unverified.docx")
+        unverified_path = (
+            Path(unverified_output_path) if unverified_output_path else unverified_revision_output(target_output)
+        )
         unverified_bytes = engine.save_to_stream().getvalue()
         _write_output_bytes(unverified_path, unverified_bytes)
 
