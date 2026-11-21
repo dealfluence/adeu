@@ -167,6 +167,66 @@ jobs:
         working-directory: ./langchain
         run: uv run pytest
 
+  windows-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install native xmllint
+        run: |
+          & C:\msys64\usr\bin\bash.exe -lc 'pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-libxml2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'C:\msys64\ucrt64\bin' >> $env:GITHUB_PATH
+      - name: Verify xmllint on PATH
+        run: xmllint.exe --version
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            python/uv.lock
+            langchain/uv.lock
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
+
+      - name: Install Python dependencies
+        working-directory: ./python
+        run: uv sync --locked --all-extras --dev
+      - name: Lint and type-check Python
+        working-directory: ./python
+        run: uv run --no-sync ruff check . && uv run --no-sync ruff format --check . && uv run --no-sync mypy src
+      - name: Run Python tests
+        working-directory: ./python
+        run: uv run --no-sync pytest -rs
+
+      - name: Install LangChain dependencies
+        working-directory: ./langchain
+        run: uv sync --locked --group dev --group test
+      - name: Lint and type-check LangChain
+        working-directory: ./langchain
+        run: uv run --no-sync ruff check . && uv run --no-sync ruff format --check . && uv run --no-sync mypy langchain_adeu
+      - name: Run LangChain tests
+        working-directory: ./langchain
+        run: uv run --no-sync pytest -rs
+
+      - name: Install and lint Node packages
+        working-directory: ./node
+        run: npm.cmd ci && npm.cmd run lint
+      - name: Build Node packages
+        working-directory: ./node
+        run: npm.cmd run build
+      - name: Run Node tests
+        working-directory: ./node
+        run: npm.cmd test
+
   # Optional: fetch the real-document corpus and run the A5 validation suite.
   #
   # Never part of the default gate. The corpus is a set of real government
@@ -235,11 +295,11 @@ jobs:
   # manual-only and deliberately not a dependency.
   ci-ok:
     if: always()
-    needs: [build, node-test, langchain-test]
+    needs: [build, node-test, langchain-test, windows-test]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gating job to succeed
-        if: needs.build.result != 'success' || needs.node-test.result != 'success' || needs.langchain-test.result != 'success'
+        if: needs.build.result != 'success' || needs.node-test.result != 'success' || needs.langchain-test.result != 'success' || needs.windows-test.result != 'success'
         run: |
-          echo "build=${{ needs.build.result }} node-test=${{ needs.node-test.result }} langchain-test=${{ needs.langchain-test.result }}"
+          echo "build=${{ needs.build.result }} node-test=${{ needs.node-test.result }} langchain-test=${{ needs.langchain-test.result }} windows-test=${{ needs.windows-test.result }}"
           exit 1
