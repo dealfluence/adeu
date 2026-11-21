@@ -139,11 +139,10 @@ def test_id_discovery_hint_names_the_langchain_tool() -> None:
 
 
 class TestAdeuFloor:
-    def test_declared_adeu_floor_covers_the_apis_we_call(self) -> None:
-        """The engine APIs this package needs, all added after adeu 1.17."""
+    def test_declared_adeu_floor_covers_the_apis_we_call(self, tmp_path: Path) -> None:
+        """Published installations need the path-policy and diagnostic-output APIs from Adeu 4.2."""
         import inspect
         import tomllib
-        from pathlib import Path
 
         from adeu.diff import format_word_patch_diff
         from adeu.mcp_components._response_builders import (
@@ -152,7 +151,9 @@ class TestAdeuFloor:
             build_page_range_response,
         )
         from adeu.pagination import parse_page_arg
+        from adeu.path_policy import AllowedDirectories, checked_revision_paths
         from adeu.redline.engine import RedlineEngine
+        from adeu.text_revision import apply_text_revision_core
 
         assert callable(format_word_patch_diff)
         assert callable(parse_page_arg)
@@ -161,8 +162,15 @@ class TestAdeuFloor:
         assert callable(build_budget_guard_message)
         assert "partial" in inspect.signature(RedlineEngine.process_batch).parameters
         assert "id_discovery_hint" in inspect.signature(RedlineEngine.__init__).parameters
+        folders = AllowedDirectories.from_value(str(tmp_path))
+        target = tmp_path / "redline.docx"
+        assert checked_revision_paths(target, tmp_path / "draft.docx", folders=folders) == (
+            target,
+            tmp_path / "redline.unverified.docx",
+        )
+        assert "unverified_output_path" in inspect.signature(apply_text_revision_core).parameters
 
         pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
         deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
         adeu_req = next(d for d in deps if d.startswith("adeu"))
-        assert adeu_req == "adeu>=4.0.0", f"stale adeu floor: {adeu_req}"
+        assert adeu_req == "adeu>=4.2.0", f"stale adeu floor: {adeu_req}"
