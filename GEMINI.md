@@ -2,6 +2,10 @@
 
 Adeu is your document redlining engine. It gives you a safe, token-efficient interface to read and edit `.docx` files, producing native Microsoft Word Track Changes rather than rewriting the file.
 
+## Choosing a file path
+
+Use an absolute path to the input document and choose a fresh `.docx` filename for a separate review copy. To export a comparison, choose an output distinct from both inputs. If the tool reports `File access refused. Allowed folders:`, use a document and destination within the listed folders. The tool follows symlinks and checks automatically named files, including the `.unverified.docx` diagnostic from `apply_text_revision`. [File access and overwrite rules](docs/spec.md#25-tool-file-access)
+
 ## Available Tools
 
 ### `read_docx`

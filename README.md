@@ -89,6 +89,12 @@ For IDEs or clients that configure MCP servers via JSON, you can use either the 
 
 ---
 
+## File access
+
+By default, the MCP servers and LangChain tools can work in any folder their process can access. To keep the original, choose a new `.docx` filename. An existing output must be an empty regular file or a Word package, with an exception for interrupted Word saves beside the input. Python’s desktop openers also check the package before launching it. [File types and overwrite rules](docs/spec.md#25-tool-file-access)
+
+To limit reads and writes to particular folders, set `ADEU_ALLOWED_DIRS` to existing absolute directory paths before starting the server or constructing LangChain tools. Separate folders with `;` on Windows or `:` on macOS and Linux. [Python MCP configuration](python/README.md#file-access) · [Node MCP configuration](node/packages/mcp-server/README.md#file-access) · [LangChain configuration](langchain/README.md#file-access)
+
 ## Agent Workflows
 
 Adeu provides agents with specific tools to read, review, and edit documents safely.

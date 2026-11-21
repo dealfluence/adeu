@@ -30,7 +30,30 @@ Add the following to your MCP configuration file (`claude_desktop_config.json`):
 
 ## File access
 
-By default, the server can read documents in any folder its account can access. Writes target Word documents. To restrict file access, set `ADEU_ALLOWED_DIRS` in your MCP host configuration. This Windows example allows two folders.
+By default, tools can read and save Word documents in any folder accessible to the server account. Reads parse the Word package inside the Node process.
+
+### Saving documents
+
+The same checks apply to an explicit `output_path` and to filenames the server chooses. These examples use `draft.docx` as the input.
+
+| Tool | Output when `output_path` is omitted |
+| --- | --- |
+| `process_document_batch` | `draft_processed.docx` |
+| `accept_all_changes` | `draft_clean.docx` |
+| `finalize_document` | `draft_final.docx` |
+| `apply_text_revision` | `draft_redlined.docx` |
+| `diff_docx_files` | Returns the text diff. Supply a path distinct from both inputs to save a redline. |
+
+Default files go beside the input. Batch edits and text revisions can update an existing processed or redlined document in place. A text revision also checks `<output stem>.unverified.docx` beside the resolved output. A failed verification saves the diagnostic copy there and leaves the requested output untouched.
+
+- Choose `.docx` or the input document’s ending, ignoring case. A comparison can match either input. Even an unusual ending such as `.bin` can be carried over from a Word package. Node writes Word packages and reserves `.pdf` for runtimes that support PDF export.
+- For `.docm`, `.dotm`, `.dotx`, or `.dot`, save beside an input with that same ending.
+- Choose a new filename, an empty regular file, or an existing Word package. The server checks the ZIP listing for `[Content_Types].xml` and `word/document.xml`. To recover an interrupted save, it can also replace a regular file with a Word ending beside the input if its bytes are not a readable ZIP. A readable ZIP missing either required entry is refused even there.
+- The checks use the resolved destination, including symbolic links, Windows junctions, and existing parents of new files. Missing folders are created only after the checks pass. Directories, devices, pipes, and sockets are refused as destinations. On Windows, use ordinary names without extra colons, trailing dots, or trailing spaces.
+
+### Restricting folders
+
+Set `ADEU_ALLOWED_DIRS` in your MCP host configuration to limit every input and output to the listed folders and their descendants. This includes both comparison inputs, default outputs, and diagnostic copies. A link inside an allowed folder must also resolve inside an allowed folder. This Windows example allows two folders.
 
 ```json
 {
@@ -44,7 +67,7 @@ By default, the server can read documents in any folder its account can access. 
 }
 ```
 
-On macOS or Linux, use a colon-separated value such as `/srv/contracts:/srv/reviewed`. Every listed folder must already exist and have an absolute path. Restart the server to apply changes. It logs the resolved folders to stderr and refuses to start on invalid configuration. Tools can access only the listed folders and their descendants, including when following links or choosing a default output name.
+Separate paths with a semicolon on Windows or a colon on macOS and Linux, for example `/srv/contracts:/srv/reviewed`. Each path must be absolute and point to an existing directory. Blank entries are ignored. An entirely blank list or an invalid directory prevents startup. Restart the server after changing the setting. It logs the resolved directories to stderr.
 
 ## Exposed Tools
 

@@ -226,7 +226,14 @@ uv run adeu init --local
 
 ### File access
 
-By default, the server can read documents in any folder its account can access. Writes and opens target Word documents. To restrict file access, set `ADEU_ALLOWED_DIRS` in your MCP host configuration. This Windows example allows two folders.
+By default, the Python MCP server can read and save documents in any folder its account can access. The following checks apply to MCP tool calls. The standalone `adeu` CLI and Python library use their own file handling.
+
+- **Saving a document.** Choose `.docx` or the input's extension, ignoring case and excluding `.pdf`. For `diff_docx_files`, either input's extension qualifies, and the output must be distinct from both inputs. Save `.docm`, `.dotm`, `.dotx` and `.dot` outputs beside the input with the matching extension.
+- **Replacing a file.** The destination may be new, an empty regular file, or a Word package. Adeu checks the ZIP listing for `[Content_Types].xml` and `word/document.xml`. To recover from an interrupted save, it also accepts a regular file with a Word extension beside the input if its ZIP directory is missing or malformed. Adeu refuses directories, special files such as pipes, and readable non-Word ZIPs.
+- **Opening a document.** `open_local_file` launches the native application only for a regular Word package ending in `.docx`, `.docm`, `.dotx` or `.dotm`. The same check applies to `open_word_document` when the Windows test tools are enabled.
+- **Resolving paths.** Adeu follows symbolic links and Windows junctions before checking and using the destination. For a new file it resolves the existing parent folders first. Default outputs and the `.unverified.docx` diagnostic copy go through the same checks before any missing output folders are created. On Windows, use ordinary file names. Reserved device names, colons after the drive prefix, and components ending in a dot or space are refused.
+
+To limit MCP file access to specific folders, set `ADEU_ALLOWED_DIRS` in your MCP host configuration. This Windows example allows two folders.
 
 ```json
 {
@@ -240,12 +247,15 @@ By default, the server can read documents in any folder its account can access. 
 }
 ```
 
-On macOS or Linux, use a colon-separated value such as `/srv/contracts:/srv/reviewed`. Every listed folder must already exist and have an absolute path. Restart the server to apply changes. It logs the resolved folders to stderr and refuses to start on invalid configuration. Tools can access only the listed folders and their descendants, including when following links or choosing a default output name. On Windows, this also applies to the active Word document. Save a new document in an allowed folder before using live tools on it.
+Use a semicolon-separated list on Windows and a colon-separated list on macOS or Linux (for example, `/srv/contracts:/srv/reviewed`). Every entry must be an absolute path to an existing folder. An empty list or invalid entry prevents startup. Restart the server to load changes, or unset the variable and restart to restore the default. At startup, the server logs the resolved folders to stderr.
+
+All input and output paths, including baselines and diagnostic copies, must resolve inside a listed folder. A folder-access refusal names the allowed folders.
 
 ### Live Word Interop (Windows COM)
-When the MCP server runs on Windows (`sys.platform == 'win32'`), it automatically enables the `live_word.py` tools. These tools utilize `pywin32` to hijack the active Microsoft Word COM object. 
 
-If an agent leaves the `file_path` argument empty when calling `read_docx` or `process_document_batch`, the server will automatically target the document that the user currently has open on their screen.
+On Windows, the MCP server uses `pywin32` to read or edit documents already open in Microsoft Word. Omit `file_path` in `read_docx` or `original_docx_path` in `process_document_batch` to work with the active document.
+
+With folder restrictions enabled, live tools check the open document's actual local path, including for Save As. Save an unsaved or cloud-only document from Word into an allowed folder before using these tools.
 
 ## Testing & Architectural Constraints
 
@@ -259,6 +269,7 @@ When developing inside the `python/` directory, please note the following invari
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| `ADEU_ALLOWED_DIRS` | Allowed folders for MCP tool file access. See [File access](#file-access). | Unset (all accessible folders) |
 | `ADEU_DOC_CACHE_ENTRIES` | Capacity for in-memory parsed document LRU cache | `3` |
 | `ADEU_NO_CACHE` | Set to `1` or `true` to disable disk-level projection caching | `0` |
 | `ADEU_CACHE_DIR` | Custom storage directory for disk projection cache | OS cache dir |

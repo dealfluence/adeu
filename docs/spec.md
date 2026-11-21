@@ -50,6 +50,22 @@ graph LR
 *   If an Agent rewrites a whole paragraph instead of providing specific edits, the Diff engine compares `Original Text` vs `New Text`.
 *   It uses `diff-match-patch` at a **word-level granularity** (encoding words as characters) to ensure changes are semantic (whole words) rather than character jumbles.
 
+### 2.5 Tool file access
+
+The Node and Python MCP servers enforce these rules at their tool boundaries. LangChain uses the Python policy and accepts `.docx` inputs and outputs. The CLI, core SDKs, and n8n node retain their own file-handling behavior.
+
+| Operation | Rule |
+| --- | --- |
+| Choose an MCP output name | Use `.docx` or the input document’s ending, ignoring case. A valid Word package named `draft.bin`, for example, can produce `review.bin`. A diff may use either input’s ending, and its output must be distinct from both inputs. The `.pdf` ending is reserved for tools that produce a PDF. |
+| Save a macro-enabled document or template | Outputs ending in `.docm`, `.dotm`, `.dotx`, or `.dot` must be in the folder of an input with the same ending. |
+| Write to an existing target | The destination may be absent, an empty regular file, or a regular Word package. Adeu identifies a Word package from its ZIP listing by the presence of `[Content_Types].xml` and `word/document.xml`. |
+| Recover an interrupted save | Beside the input, Adeu also accepts a regular file with an unreadable ZIP listing and a Word ending (`.doc`, `.docx`, `.docm`, `.dot`, `.dotx`, or `.dotm`). A readable ZIP missing either required entry is refused even there. |
+| Open a file on the desktop | Python’s `open_local_file` and Windows `open_word_document` require an existing regular Word package ending in `.docx`, `.docm`, `.dotx`, or `.dotm`. The interrupted-save exception applies only to writes. |
+
+Tools follow symlinks before checking the destination. For a new file, they resolve the deepest existing parent and create missing folders after validation. Windows checks also reject device names, alternate data streams, and names ending in a dot or space. A text revision checks both the requested document and its `<stem>.unverified.docx` diagnostic before writing.
+
+With `ADEU_ALLOWED_DIRS` unset, the process can work across folders. Setting it limits reads, writes, and desktop opens to the configured directories and their descendants after resolving links. This includes comparison inputs, default outputs, and diagnostic copies. [Configuration by integration](../README.md#file-access) · [Shared policy test cases](../shared/path_policy/cases.json)
+
 ## 3. Data Structures
 
 The system relies on the `DocumentEdit` schema defined in `src/adeu/models.py`.

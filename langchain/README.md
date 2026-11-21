@@ -45,6 +45,22 @@ tools = toolkit.get_tools()
 agent = create_agent(model=model, tools=tools)
 ```
 
+### File access
+
+By default, the tools can read and save `.docx` files in any folder your account can access. To limit an agent to particular folders and their subfolders, set `ADEU_ALLOWED_DIRS` before constructing the first `AdeuToolkit` or individual tool. Use absolute paths to existing folders. Separate paths with a colon on macOS or Linux and a semicolon on Windows.
+
+```bash
+export ADEU_ALLOWED_DIRS="/srv/contracts:/srv/reviewed"
+```
+
+```powershell
+$env:ADEU_ALLOWED_DIRS = 'C:\Contracts;D:\Reviewed'
+```
+
+The first construction freezes the setting for the Python process. Blank entries are ignored. A list with no folders, or an invalid folder, prevents construction. Restart Python after changing the setting. The tools follow symbolic links when checking inputs and outputs, including both documents in a diff, the sanitization baseline, and default output paths.
+
+The resolved output filename must end in `.docx` (case-insensitive). A target can be new, an empty regular file, or an existing Word package containing `[Content_Types].xml` and `word/document.xml`. To recover an interrupted save, a tool can also replace a regular `.docx` with unreadable ZIP contents beside the source document (either input for a diff). A readable ZIP belonging to another format is refused even there. The same checks apply to the `<stem>.unverified.docx` diagnostic before a text revision runs. The tools create missing parent folders only after the paths pass validation.
+
 ---
 
 ## Worked Example: Multi-Tool Review & Redline Flow
