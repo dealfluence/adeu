@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { readFileSync, existsSync } from "node:fs";
-import { basename, resolve, extname, dirname, isAbsolute, join } from "node:path";
+import { basename, resolve, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
   registerAppTool as origRegisterAppTool,
@@ -52,7 +52,14 @@ import type { ProgressFn } from "./doc-cache.js";
 
 import { MARKDOWN_UI_URI, MCP_ID_DISCOVERY_HINT, handleServerCliArgs } from "./shared.js";
 import { attachProtocolAdapter } from "./protocol-adapter.js";
-import { checkToolArguments, checkToolPath, writeToolDocument } from "./path-policy.js";
+import {
+  checkToolArguments,
+  checkToolPath,
+  defaultOutputPath,
+  diagnosticPath,
+  listDocumentSiblings,
+  writeToolDocument,
+} from "./path-policy.js";
 // Parity with Python models.py `_infer_type_in_place` + `_coerce_match_mode_in_place`.
 // The MCP boundary schema is permissive; these repairs let recoverable payloads
 // (a missing `type` that's unambiguous from the key signature, or a non-canonical
@@ -192,9 +199,7 @@ function readFileBytesOrThrow(filePath: string): Buffer {
       let available = "";
       try {
         const dir = dirname(filePath);
-        const docs = fs
-          .readdirSync(dir)
-          .filter((f) => f.toLowerCase().endsWith(".docx"));
+        const docs = listDocumentSiblings(dir);
         if (docs.length) {
           const shown = closestFilenames(basename(filePath), docs);
           available = ` available files: [${shown.join(", ")}]`;
@@ -1202,21 +1207,7 @@ server.registerTool(
         };
       }
 
-      let outPath = output_path;
-      if (!outPath) {
-        const ext = extname(original_docx_path);
-        const base = basename(original_docx_path, ext);
-        const dir = dirname(original_docx_path);
-        // Idempotency guard (parity with Python document.py): if the input is
-        // already a processed artifact, write back to it instead of compounding
-        // the suffix into contract_processed_processed.docx, which fragments the
-        // agent's document state across files.
-        if (/(?:_|-|\.)(processed|redlined|redline|markup|marked)$/i.test(base)) {
-          outPath = resolve(dir, `${base}${ext}`);
-        } else {
-          outPath = resolve(dir, `${base}_processed${ext}`);
-        }
-      }
+      let outPath = output_path || defaultOutputPath(original_docx_path, "processed");
 
       // Hot-DOM reuse (docs/PERFORMANCE.md §5): a read_docx of this same
       // file version usually preceded this call — take its parse instead of
@@ -1397,13 +1388,7 @@ server.registerTool(
   async ({ reasoning, docx_path, output_path, remove_comments }) => {
     try {
       void reasoning;
-      let outPath = output_path;
-      if (!outPath) {
-        const ext = extname(docx_path);
-        const base = basename(docx_path, ext);
-        const dir = dirname(docx_path);
-        outPath = resolve(dir, `${base}_clean${ext}`);
-      }
+      let outPath = output_path || defaultOutputPath(docx_path, "clean");
 
       const buf = readFileBytesOrThrow(docx_path);
       const doc = await loadDocxOrThrow(buf, docx_path);
@@ -1676,13 +1661,7 @@ server.registerTool(
   }) => {
     try {
       void reasoning;
-      let outPath = output_path;
-      if (!outPath) {
-        const ext = extname(file_path);
-        const base = basename(file_path, ext);
-        const dir = dirname(file_path);
-        outPath = resolve(dir, `${base}_final${ext}`);
-      }
+      let outPath = output_path || defaultOutputPath(file_path, "final");
 
       const buf = readFileBytesOrThrow(file_path);
       const doc = await loadDocxOrThrow(buf, file_path);
@@ -1783,17 +1762,11 @@ server.registerTool(
     try {
       void reasoning;
       // Preflight both possible writes before running the verification gate.
-      // Match the core's default naming when an output was omitted.
-      const name = basename(file_path);
-      const dot = name.lastIndexOf(".");
-      const stem = dot === -1 ? name : name.slice(0, dot);
-      output_path = await checkToolPath(output_path ?? (
-        stem.endsWith("_redlined") || stem.endsWith("_processed")
-          ? file_path
-          : join(dirname(file_path), `${stem}_redlined.docx`)
-      ), "write", [file_path]);
+      output_path = await checkToolPath(
+        output_path ?? defaultOutputPath(file_path, "redlined"), "write", [file_path],
+      );
       const diagnostic = await checkToolPath(
-        join(dirname(output_path), `${basename(output_path, extname(output_path))}.unverified.docx`),
+        diagnosticPath(output_path),
         "write", [file_path],
       );
       if (isSameFile(output_path, diagnostic) || isSameFile(file_path, diagnostic)) {

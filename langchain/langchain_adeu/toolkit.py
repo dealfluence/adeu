@@ -14,14 +14,15 @@ you a uniform `.get_tools()` method that composes cleanly with
         tools=AdeuToolkit().get_tools(),
     )
 
-The toolkit is intentionally configuration-free: every tool takes its
-parameters per-invocation, so there's nothing to configure at toolkit
-construction time. This may change in a future release if we add tools
-that share configuration (e.g., a default `author_name`).
+The first toolkit or tool constructed in this process captures any folder
+boundary supplied through the launcher's `ADEU_ALLOWED_DIRS` environment.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+from adeu.path_policy import get_allowed_directories
 from langchain_core.tools import BaseTool, BaseToolkit
 
 from langchain_adeu.accept_all_changes import AdeuAcceptAllChanges
@@ -47,6 +48,10 @@ class AdeuToolkit(BaseToolkit):
       - Live MS Word (Windows COM)
       - Adeu Cloud (email, multi-doc validation)
     """
+
+    def __init__(self, **kwargs: Any) -> None:
+        get_allowed_directories()
+        super().__init__(**kwargs)
 
     def get_tools(self) -> list[BaseTool]:
         """Instantiate one of each tool. Returns a fresh list per call.

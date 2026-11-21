@@ -46,11 +46,12 @@ from adeu.text_revision import (
     apply_text_revision_core,
     check_criticmarkup,
     default_revision_output,
+    unverified_revision_output,
 )
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, wrap_tool_errors
+from langchain_adeu._shared import AdeuFileTool, wrap_tool_errors
 
 
 class AdeuApplyTextRevisionInput(BaseModel):
@@ -133,7 +134,7 @@ _DESCRIPTION = (
 )
 
 
-class AdeuApplyTextRevision(BaseTool):
+class AdeuApplyTextRevision(AdeuFileTool):
     """LangChain tool: apply revised whole-document text as tracked changes."""
 
     name: str = "adeu_apply_text_revision"
@@ -151,7 +152,12 @@ class AdeuApplyTextRevision(BaseTool):
         author: str | None = None,
         allow_major_deletions: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        source = validate_docx_path(file_path, label="DOCX file")
+        source = self._input_document(
+            file_path,
+            output_path=output_path,
+            default_output=default_revision_output,
+            diagnostic_output=unverified_revision_output,
+        )
 
         if not revised_text or not revised_text.strip():
             raise ToolException(
@@ -170,7 +176,7 @@ class AdeuApplyTextRevision(BaseTool):
             raise ToolException(str(e)) from e
 
         requested = default_revision_output(source) if output_path is None else os.path.expanduser(output_path)
-        target, diagnostic = checked_revision_paths(requested, source)
+        target, diagnostic = checked_revision_paths(requested, source, folders=self._folders)
 
         try:
             # Returns (stats, output_path) — in that order (text_revision.py:215).

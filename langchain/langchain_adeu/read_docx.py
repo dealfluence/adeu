@@ -40,12 +40,12 @@ from adeu.payloads import response_budget_limit
 from adeu.redline.engine import RedlineEngine
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from docx import Document as load_document
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from langchain_adeu._shared import (
     LANGCHAIN_ID_DISCOVERY_HINT,
-    validate_docx_path,
+    AdeuFileTool,
     wrap_tool_errors,
 )
 
@@ -230,7 +230,7 @@ _DESCRIPTION = (
 )
 
 
-class AdeuReadDocx(BaseTool):
+class AdeuReadDocx(AdeuFileTool):
     """LangChain tool: read a .docx file into projected Markdown.
 
     Use this tool to inspect the contents of a Word document before
@@ -266,7 +266,7 @@ class AdeuReadDocx(BaseTool):
         changes_offset: int = 0,
         fields_offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
-        path = validate_docx_path(file_path, label="DOCX file")
+        path = self._input_document(file_path)
 
         if mode == "changes":
             if clean_view:

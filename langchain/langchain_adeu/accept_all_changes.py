@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from adeu import RedlineEngine
+from adeu.path_policy import AllowedDirectories
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from adeu.utils.files import write_output_bytes
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
+from langchain_adeu._shared import AdeuFileTool, validate_output_path, wrap_tool_errors
 
 
 class AdeuAcceptAllChangesInput(BaseModel):
@@ -83,7 +84,7 @@ _DESCRIPTION = (
 )
 
 
-class AdeuAcceptAllChanges(BaseTool):
+class AdeuAcceptAllChanges(AdeuFileTool):
     """LangChain tool: accept all tracked changes, producing a clean copy."""
 
     name: str = "adeu_accept_all_changes"
@@ -99,9 +100,9 @@ class AdeuAcceptAllChanges(BaseTool):
         output_path: str | None = None,
         remove_comments: bool = True,
     ) -> tuple[str, dict[str, Any]]:
-        source = validate_docx_path(file_path, label="DOCX file")
+        source = self._input_document(file_path, output_path=output_path, default_output=_default_output)
 
-        target = _resolve_output_path(source, output_path)
+        target = _resolve_output_path(source, output_path, self._folders)
 
         raw_bytes = source.read_bytes()
         sanitized_bytes = strip_bom_from_docx_bytes(raw_bytes)
@@ -162,7 +163,11 @@ class AdeuAcceptAllChanges(BaseTool):
         return await asyncio.to_thread(self._run, reasoning, file_path, output_path, remove_comments)
 
 
-def _resolve_output_path(source: Path, requested: str | None) -> Path:
+def _default_output(source: Path) -> Path:
+    return source.with_name(f"{source.stem}_clean{source.suffix}")
+
+
+def _resolve_output_path(source: Path, requested: str | None, folders: AllowedDirectories) -> Path:
     """Decide where the cleaned file should be written.
 
     When `requested` is None, default to `<stem>_clean.docx` next to the
@@ -170,8 +175,8 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     source, raise — silently overwriting the input on an LLM-driven
     workflow is almost always a mistake.
     """
-    candidate = source.with_name(f"{source.stem}_clean{source.suffix}") if requested is None else requested
-    target = validate_output_path(candidate, source)
+    candidate = _default_output(source) if requested is None else requested
+    target = validate_output_path(candidate, source, folders=folders)
 
     if target == source:
         raise ToolException(

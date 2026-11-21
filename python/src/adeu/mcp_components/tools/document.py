@@ -423,10 +423,12 @@ async def _read_docx_disk(
     )
 
     try:
-        source = path_policy.resolved_input_path(file_path)
+        folders = path_policy.get_allowed_directories()
+        source = path_policy.resolved_input_path(file_path, folders=folders)
         if not source.exists():
-            # Keep the original spelling and relative-path hint in read errors.
-            raise _not_found_error(file_path)
+            # Only enumerate the checked parent, even for a dangling link whose
+            # original spelling was outside the allowed folders.
+            raise _not_found_error(str(source) if folders.enabled else file_path)
         file_path = str(source)
 
         doc_cache.mark_activity()
@@ -631,8 +633,7 @@ async def _read_docx_disk(
             if was_cold and not clean_view and (time.perf_counter() - ingest_started) >= 2.0:
                 _schedule_background_fill(entry, clean_view=True)
 
-    except BuilderError as e:
-        # Builder validation failures are user-facing tool errors.
+    except (BuilderError, path_policy.FolderAccessError) as e:
         raise ToolError(str(e)) from None
     except ToolError:
         raise
@@ -642,6 +643,26 @@ async def _read_docx_disk(
     except Exception as e:
         await ctx.error("Failed to parse DOCX", extra={"error": str(e), "file_path": file_path})
         raise ToolError(f"Error reading file: {str(e)}") from e
+
+
+def _batch_target(source: Path, requested: str | None) -> Path:
+    if requested is not None:
+        return Path(requested)
+    if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", source.stem, re.IGNORECASE):
+        return source
+    return source.with_name(f"{source.stem}_processed{source.suffix}")
+
+
+def _check_batch_arguments(source: str | None, output: str | None) -> None:
+    folders = path_policy.get_allowed_directories()
+    if folders.enabled:
+        try:
+            if source:
+                folders.check(source)
+            if output is not None:
+                folders.check(output)
+        except path_policy.PathPolicyError as exc:
+            raise ToolError(str(exc)) from exc
 
 
 async def _process_document_batch_disk(
@@ -663,6 +684,13 @@ async def _process_document_batch_disk(
     # them as activity so they defer instead of contending.
     from adeu.mcp_components.doc_cache import doc_cache
 
+    folders = path_policy.get_allowed_directories()
+    if folders.enabled:
+        try:
+            source = folders.check(original_docx_path)
+            folders.check(_batch_target(source, output_path))
+        except path_policy.PathPolicyError as refusal:
+            raise ToolError(str(refusal)) from refusal
     doc_cache.mark_activity()
     await ctx.info(
         "Initializing atomic batch process",
@@ -712,15 +740,9 @@ async def _process_document_batch_disk(
         )
 
     def _run_batch_sync() -> tuple[bool, Any, str, str]:
-        source = path_policy.resolved_input_path(original_docx_path)
-        if output_path is None:
-            if re.search(r"(?:_|-|\.)(processed|redlined|redline|markup|marked)$", source.stem, re.IGNORECASE):
-                target = source
-            else:
-                target = source.with_name(f"{source.stem}_processed{source.suffix}")
-        else:
-            target = Path(output_path)
-        final_output = str(path_policy.checked_output_path(target, source))
+        source = path_policy.resolved_input_path(original_docx_path, folders=folders)
+        target = _batch_target(source, output_path)
+        final_output = str(path_policy.checked_output_path(target, source, folders=folders))
         stream = read_file_bytes(str(source))
         engine = RedlineEngine(
             stream,
@@ -950,6 +972,8 @@ async def _process_document_batch_disk(
             res += "\n\n" + batch_details_header(stats["skipped_details"]) + "\n" + "\n".join(stats["skipped_details"])
         return res
 
+    except path_policy.FolderAccessError as e:
+        raise ToolError(str(e)) from None
     except Exception as e:
         await ctx.error("Critical error during batch processing", extra={"error": str(e)})
         return f"Error processing batch: {str(e)}"
@@ -1005,13 +1029,14 @@ async def diff_docx_files(
     )
 
     def _diff_sync() -> str:
-        original = path_policy.resolved_input_path(original_path)
-        modified = path_policy.resolved_input_path(modified_path)
+        folders = path_policy.get_allowed_directories()
+        original = path_policy.resolved_input_path(original_path, folders=folders)
+        modified = path_policy.resolved_input_path(modified_path, folders=folders)
         out_file = None
         if output_path is not None:
             from adeu.compare import refuse_input_alias
 
-            out_file = path_policy.checked_output_path(output_path, original, modified)
+            out_file = path_policy.checked_output_path(output_path, original, modified, folders=folders)
             refuse_input_alias(out_file, original, modified)
 
         stream_orig = read_file_bytes(str(original))
@@ -1062,6 +1087,8 @@ async def diff_docx_files(
         # Extraction, diff, apply and save are CPU/disk bound: off the event
         # loop (AI_CONTEXT.md §12).
         res = await asyncio.to_thread(_diff_sync)
+    except path_policy.FolderAccessError as e:
+        raise ToolError(str(e)) from None
     except Exception as e:
         from adeu.compare import ComparisonError
 
@@ -1109,9 +1136,10 @@ async def accept_all_changes(
     del reasoning  # reason-first UX; not used by the tool.
     await ctx.info(f"Accepting all changes for document: {Path(docx_path).name}")
     try:
-        source = path_policy.resolved_input_path(docx_path)
+        folders = path_policy.get_allowed_directories()
+        source = path_policy.resolved_input_path(docx_path, folders=folders)
         target = source.with_name(f"{source.stem}_clean{source.suffix}") if output_path is None else output_path
-        output_path = str(path_policy.checked_output_path(target, source))
+        output_path = str(path_policy.checked_output_path(target, source, folders=folders))
         stream = read_file_bytes(str(source))
         engine = RedlineEngine(stream, id_discovery_hint=MCP_ID_DISCOVERY_HINT)
 
@@ -1166,6 +1194,8 @@ async def accept_all_changes(
                 res += "\nComments kept (remove_comments=false)."
             res += overwrite_note
         return add_timing_if_debug(start_time, res)
+    except path_policy.FolderAccessError as e:
+        raise ToolError(str(e)) from None
     except Exception as e:
         await ctx.error(
             "Failed to accept all changes",
@@ -1208,9 +1238,10 @@ async def apply_text_revision(
     )
 
     try:
-        source = path_policy.resolved_input_path(file_path)
+        folders = path_policy.get_allowed_directories()
+        source = path_policy.resolved_input_path(file_path, folders=folders)
         target = default_revision_output(source) if output_path is None else output_path
-        output, diagnostic = path_policy.checked_revision_paths(target, source)
+        output, diagnostic = path_policy.checked_revision_paths(target, source, folders=folders)
         stats, out_path = await asyncio.to_thread(
             apply_text_revision_core,
             source,
@@ -1263,7 +1294,7 @@ async def open_local_file(
     del reasoning  # reason-first UX; not used by the tool.
     await ctx.info(f"Opening file in native app: {file_path}")
     try:
-        p = path_policy.checked_open_path(file_path)
+        p = path_policy.checked_open_path(file_path, folders=path_policy.get_allowed_directories())
         if sys.platform == "win32":
             os.startfile(p)
         elif sys.platform == "darwin":
@@ -1271,6 +1302,8 @@ async def open_local_file(
         else:
             subprocess.run(["xdg-open", str(p)], check=True)
         return add_timing_if_debug(start_time, f"Successfully opened {p.name} in its native application.")
+    except path_policy.FolderAccessError as e:
+        raise ToolError(str(e)) from None
     except Exception as e:
         await ctx.error("Failed to open file", extra={"error": str(e)})
         raise ToolError(f"Failed to open file: {e}") from e
@@ -1388,6 +1421,7 @@ PROCESS_BATCH_OPERATIONS_DESC = (
 if sys.platform == "win32":
     from adeu.mcp_components.tools.live_word import (
         LiveWordUnavailableError,
+        check_active_document_location,
         is_document_open_in_word,
         open_word_document_impl,
         process_active_word_batch,
@@ -1517,6 +1551,12 @@ if sys.platform == "win32":
             # NO document extraction, and returns False when Word isn't running
             # — so a headless environment never pays the failed-extraction cost
             # or leaks a COM connection error to the model.
+            folders = path_policy.get_allowed_directories()
+            if folders.enabled:
+                try:
+                    file_path = str(folders.check(file_path))
+                except path_policy.PathPolicyError as exc:
+                    raise ToolError(str(exc)) from exc
             if is_document_open_in_word(file_path):
                 await ctx.debug("Document is open in live Word; reading from the canvas.")
                 try:
@@ -1586,6 +1626,9 @@ if sys.platform == "win32":
         # against the bare list type), so coerce here as a defensive second pass.
         # This is also what catches stringified-object lists emitted by some LLM
         # clients (notably Gemini under load).
+        _check_batch_arguments(original_docx_path, output_path)
+        if not original_docx_path:
+            check_active_document_location()
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:
             env = failure_envelope(
@@ -1708,8 +1751,11 @@ if sys.platform == "win32":
             from adeu.utils.xml_debug import get_abstracted_xml_snapshot
 
             try:
-                xml_a = get_abstracted_xml_snapshot(str(path_policy.resolved_input_path(file_a)))
-                xml_b = get_abstracted_xml_snapshot(str(path_policy.resolved_input_path(file_b)))
+                folders = path_policy.get_allowed_directories()
+                first = path_policy.resolved_input_path(file_a, folders=folders)
+                second = path_policy.resolved_input_path(file_b, folders=folders)
+                xml_a = get_abstracted_xml_snapshot(str(first))
+                xml_b = get_abstracted_xml_snapshot(str(second))
 
                 # R6 Fix: Strip noisy rsid and paraId metadata to speed up difflib
                 import re
@@ -1744,6 +1790,8 @@ if sys.platform == "win32":
 
                 # R5 Fix: Truncate inline diff and provide spill file
                 if len(res) > 150_000:
+                    if folders.enabled:
+                        return add_timing_if_debug(start_time, res[:150_000] + "\n\n... [Diff truncated to 150KB.]")
                     import tempfile
 
                     fd, path = tempfile.mkstemp(suffix=".diff", prefix="adeu_xml_diff_")
@@ -1751,6 +1799,8 @@ if sys.platform == "win32":
                         f.write(res)
                     res = res[:150_000] + f"\n\n... [Diff truncated to 150KB. Full diff saved to host at:\n{path}]"
                 return add_timing_if_debug(start_time, res)
+            except path_policy.FolderAccessError as e:
+                raise ToolError(str(e)) from None
             except Exception as e:
                 await ctx.error("Failed to generate XML diff", extra={"error": str(e)})
                 raise ToolError(f"Failed to generate XML diff: {e}") from e
@@ -1949,6 +1999,7 @@ else:
         start_time = time.perf_counter()
         del reasoning
         # See win32 branch above for why we re-coerce here.
+        _check_batch_arguments(original_docx_path, output_path)
         changes, rejected_notes = _normalize_changes(changes)
         if not changes and rejected_notes:
             env = failure_envelope(

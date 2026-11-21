@@ -35,15 +35,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 from adeu.models import BatchChanges
+from adeu.path_policy import AllowedDirectories
 from adeu.redline.engine import BatchValidationError, RedlineEngine, describe_illegal_control_chars
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from adeu.utils.files import write_output_bytes
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from langchain_adeu._shared import (
     LANGCHAIN_ID_DISCOVERY_HINT,
-    validate_docx_path,
+    AdeuFileTool,
     validate_output_path,
     wrap_tool_errors,
 )
@@ -213,7 +214,7 @@ _DESCRIPTION = (
 )
 
 
-class AdeuApplyChanges(BaseTool):
+class AdeuApplyChanges(AdeuFileTool):
     """LangChain tool: apply tracked-change edits to a .docx file."""
 
     name: str = "adeu_apply_changes"
@@ -254,7 +255,7 @@ class AdeuApplyChanges(BaseTool):
                 "(type: modify, set_field, accept, reject, reply, insert_row, or delete_row)."
             )
 
-        source = validate_docx_path(file_path, label="DOCX file")
+        source = self._input_document(file_path, output_path=output_path, default_output=_default_output)
 
         try:
             # Replaced list[DocumentChange] with BatchChanges to automatically
@@ -266,7 +267,7 @@ class AdeuApplyChanges(BaseTool):
                 source, output_path, author_name, [_format_pydantic_error(e)]
             )
 
-        target = _resolve_output_path(source, output_path)
+        target = _resolve_output_path(source, output_path, self._folders)
         source_overwritten = target == source
         existing_output_overwritten = not source_overwritten and target.exists()
 
@@ -354,7 +355,13 @@ _DERIVATIVE_STEM_RE = re.compile(
 )
 
 
-def _resolve_output_path(source: Path, requested: str | None) -> Path:
+def _default_output(source: Path) -> Path:
+    if _DERIVATIVE_STEM_RE.search(source.stem):
+        return source
+    return source.with_name(f"{source.stem}_processed{source.suffix}")
+
+
+def _resolve_output_path(source: Path, requested: str | None, folders: AllowedDirectories | None = None) -> Path:
     """Decide where the processed file should be written.
 
     Mirrors the MCP server's convention: if the source stem already ends
@@ -362,14 +369,12 @@ def _resolve_output_path(source: Path, requested: str | None) -> Path:
     source (the agent is iterating on its own output). Otherwise default
     to `<stem>_processed.docx` next to the source.
     """
-    derivative = _DERIVATIVE_STEM_RE.search(source.stem)
-    default = source if derivative else source.with_name(f"{source.stem}_processed{source.suffix}")
-    target = validate_output_path(default if requested is None else requested, source)
+    target = validate_output_path(_default_output(source) if requested is None else requested, source, folders=folders)
 
     # Allow overwrite only when the source is already a processed/redlined
     # iteration of the agent's own work. Refuse silent destruction of the
     # original draft.
-    if target == source and not derivative:
+    if target == source and not _DERIVATIVE_STEM_RE.search(source.stem):
         raise ToolException(
             f"Output path must differ from input path; refusing to overwrite "
             f"the source file at {source}. Pick a different output_path, or "

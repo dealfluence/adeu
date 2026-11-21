@@ -28,6 +28,24 @@ Add the following to your MCP configuration file (`claude_desktop_config.json`):
 }
 ```
 
+## File access
+
+By default, the server can read documents in any folder its account can access. Writes target Word documents. To restrict file access, set `ADEU_ALLOWED_DIRS` in your MCP host configuration. This Windows example allows two folders.
+
+```json
+{
+  "mcpServers": {
+    "adeu-node": {
+      "command": "npx",
+      "args": ["-y", "@adeu/mcp-server"],
+      "env": { "ADEU_ALLOWED_DIRS": "C:\\Projects\\Contracts;D:\\Reviewed" }
+    }
+  }
+}
+```
+
+On macOS or Linux, use a colon-separated value such as `/srv/contracts:/srv/reviewed`. Every listed folder must already exist and have an absolute path. Restart the server to apply changes. It logs the resolved folders to stderr and refuses to start on invalid configuration. Tools can access only the listed folders and their descendants, including when following links or choosing a default output name.
+
 ## Exposed Tools
 
 Once connected, your AI agent will have access to the following tools.

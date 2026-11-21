@@ -28,10 +28,10 @@ from adeu.ingest import _extract_text_from_doc, extract_text_from_stream
 from adeu.utils.docx import strip_bom_from_docx_bytes
 from adeu.utils.files import write_output_bytes
 from docx import Document as load_document
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
+from langchain_adeu._shared import AdeuFileTool, validate_docx_path, validate_output_path, wrap_tool_errors
 
 
 class AdeuDiffDocxInput(BaseModel):
@@ -98,7 +98,7 @@ _DESCRIPTION = (
 _NO_DIFF_MESSAGE = "No text differences found between the documents."
 
 
-class AdeuDiffDocx(BaseTool):
+class AdeuDiffDocx(AdeuFileTool):
     """LangChain tool: word-level diff between two .docx files.
 
     Use this tool to surface what changed between two versions of a
@@ -122,8 +122,10 @@ class AdeuDiffDocx(BaseTool):
         output_path: str | None = None,
         author_name: str | None = None,
     ) -> str:
-        orig = validate_docx_path(original_path, label="original document")
-        mod = validate_docx_path(modified_path, label="modified document")
+        orig = self._input_document(
+            original_path, label="original document", other_inputs=(modified_path,), output_path=output_path
+        )
+        mod = validate_docx_path(modified_path, label="modified document", folders=self._folders)
 
         if output_path is not None:
             return self._write_redline(orig, mod, output_path, author_name, compare_clean)
@@ -204,9 +206,10 @@ class AdeuDiffDocx(BaseTool):
         diff_output = format_word_patch_diff(str(orig), str(mod), text_orig, edits)
         return warning_prefix + diff_output
 
-    @staticmethod
-    def _write_redline(orig: Path, mod: Path, output_path: str, author_name: str | None, compare_clean: bool) -> str:
-        target = validate_output_path(output_path, orig, mod)
+    def _write_redline(
+        self, orig: Path, mod: Path, output_path: str, author_name: str | None, compare_clean: bool
+    ) -> str:
+        target = validate_output_path(output_path, orig, mod, folders=self._folders)
         try:
             refuse_input_alias(target, orig, mod)
             author = (author_name or "").strip() or "Comparison"

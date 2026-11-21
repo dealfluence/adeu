@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from adeu import path_policy
-from langchain_core.tools import ToolException
+from langchain_core.tools import BaseTool, ToolException
+from pydantic import PrivateAttr
 
 _DOCX_SUFFIX = ".docx"
 
@@ -17,12 +18,54 @@ LANGCHAIN_ID_DISCOVERY_HINT = (
 )
 
 
-def validate_path(path_str: str, *, must_exist: bool = True, label: str = "path") -> Path:
+class AdeuFileTool(BaseTool):
+    """Capture the launcher's directory policy when a tool is constructed."""
+
+    _folders: path_policy.AllowedDirectories = PrivateAttr()
+
+    def __init__(self, **kwargs: Any) -> None:
+        folders = path_policy.get_allowed_directories()
+        super().__init__(**kwargs)
+        self._folders = folders
+
+    def _input_document(
+        self,
+        path: str,
+        *,
+        label: str = "DOCX file",
+        other_inputs: tuple[str | None, ...] = (),
+        output_path: str | None = None,
+        default_output: Callable[[Path], Path] | None = None,
+        diagnostic_output: Callable[[Path], Path] | None = None,
+    ) -> Path:
+        source = validate_path(path, must_exist=False, label=label, folders=self._folders)
+        if self._folders.enabled:
+            # Authorize the whole request before reporting existence or inspecting an existing output.
+            for other in other_inputs:
+                if other is not None:
+                    self._folders.check(os.path.expanduser(other))
+            candidate: str | Path | None = os.path.expanduser(output_path) if output_path is not None else None
+            if candidate is None and default_output is not None:
+                candidate = default_output(source)
+            if candidate is not None:
+                target = self._folders.check(candidate)
+                if diagnostic_output is not None:
+                    self._folders.check(diagnostic_output(target))
+        return _require_docx_input(source, label)
+
+
+def validate_path(
+    path_str: str,
+    *,
+    must_exist: bool = True,
+    label: str = "path",
+    folders: path_policy.AllowedDirectories | None = None,
+) -> Path:
     if not path_str or not path_str.strip():
         raise ToolException(f"The {label} cannot be empty. Supply a file path.")
 
     try:
-        p = path_policy.resolved_input_path(os.path.expanduser(path_str))
+        p = path_policy.resolved_input_path(os.path.expanduser(path_str), folders=folders)
     except path_policy.PathPolicyError as e:
         raise ToolException(str(e)) from e
 
@@ -32,11 +75,22 @@ def validate_path(path_str: str, *, must_exist: bool = True, label: str = "path"
     return p
 
 
-def validate_docx_path(path_str: str, *, must_exist: bool = True, label: str = "DOCX file") -> Path:
+def validate_docx_path(
+    path_str: str,
+    *,
+    must_exist: bool = True,
+    label: str = "DOCX file",
+    folders: path_policy.AllowedDirectories | None = None,
+) -> Path:
     if not must_exist:
-        return validate_output_path(path_str)
+        return validate_output_path(path_str, folders=folders)
 
-    p = validate_path(path_str, label=label)
+    return _require_docx_input(validate_path(path_str, must_exist=False, label=label, folders=folders), label)
+
+
+def _require_docx_input(p: Path, label: str) -> Path:
+    if not p.exists():
+        raise ToolException(f"The {label} does not exist: {p}. Supply an existing file.")
 
     if p.suffix.lower() != _DOCX_SUFFIX:
         raise ToolException(
@@ -51,10 +105,12 @@ def validate_docx_path(path_str: str, *, must_exist: bool = True, label: str = "
     return p
 
 
-def validate_output_path(target: str | Path, *sources: Path) -> Path:
+def validate_output_path(
+    target: str | Path, *sources: Path, folders: path_policy.AllowedDirectories | None = None
+) -> Path:
     """Apply the engine's tool policy to the requested or derived output."""
     try:
-        return path_policy.checked_output_path(os.path.expanduser(target), *sources)
+        return path_policy.checked_output_path(os.path.expanduser(target), *sources, folders=folders)
     except path_policy.PathPolicyError as e:
         raise ToolException(str(e)) from e
 

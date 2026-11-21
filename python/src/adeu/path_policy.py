@@ -4,7 +4,10 @@ import ntpath
 import os
 import re
 import stat
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from zipfile import BadZipFile, ZipFile
 
 _OPEN_ENDINGS = {".docx", ".docm", ".dotx", ".dotm"}
@@ -16,6 +19,99 @@ _DEVICE = re.compile(r"^(?:con|prn|aux|nul|conin\$|conout\$|(?:com|lpt)[1-9¹²�
 
 class PathPolicyError(ValueError):
     """A tool path could not be used safely."""
+
+
+class FolderAccessError(PathPolicyError):
+    """Return the same public refusal at every tool boundary."""
+
+
+@dataclass(frozen=True)
+class AllowedDirectories:
+    """Directory names for display and their filesystem identities at launch."""
+
+    roots: tuple[Path, ...]
+    _identities: frozenset[tuple[int, int] | str]
+
+    @classmethod
+    def from_value(cls, value: str | None) -> "AllowedDirectories":
+        if value is None:
+            return cls((), frozenset())
+        entries = [entry for entry in value.split(os.pathsep) if entry.strip()]
+        if not entries:
+            raise PathPolicyError("ADEU_ALLOWED_DIRS is set but contains no folders.")
+        roots = []
+        identities: set[tuple[int, int] | str] = set()
+        for entry in entries:
+            prefix = f"ADEU_ALLOWED_DIRS entry '{entry}'"
+            folder = Path(entry)
+            if not folder.is_absolute():
+                raise PathPolicyError(f"{prefix} is relative. Use an absolute folder path.")
+            try:
+                root = _canonical_path(entry, require_existing=True)
+                info = root.stat()
+            except FileNotFoundError:
+                raise PathPolicyError(f"{prefix} does not exist.") from None
+            except NotADirectoryError:
+                raise PathPolicyError(f"{prefix} is not a folder.") from None
+            except (OSError, RuntimeError, ValueError):
+                raise PathPolicyError(f"{prefix} cannot be resolved.") from None
+            if not stat.S_ISDIR(info.st_mode):
+                raise PathPolicyError(f"{prefix} is not a folder.")
+            roots.append(root)
+            identities.add((info.st_dev, info.st_ino) if info.st_ino else str(root))
+        return cls(tuple(roots), frozenset(identities))
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.roots)
+
+    @property
+    def display(self) -> str:
+        return os.pathsep.join(map(str, self.roots))
+
+    @property
+    def refusal(self) -> str:
+        return f"File access refused. Allowed folders: {self.display}"
+
+    def check(self, target: str | Path) -> Path:
+        if not self.enabled:
+            return _resolve_tool_path(target)
+        try:
+            path = _resolve_tool_path(target)
+            for ancestor in (path, *path.parents):
+                info = _target_stat(ancestor)
+                if info is None or not stat.S_ISDIR(info.st_mode):
+                    continue
+                # On filesystems without IDs, compare whole canonical components
+                # exactly, without assuming their case or Unicode rules.
+                identity = (info.st_dev, info.st_ino) if info.st_ino else str(ancestor)
+                if identity in self._identities:
+                    return path
+        except (OSError, RuntimeError, ValueError):
+            pass
+        # Resolution failures and existing outside paths have one public error.
+        raise FolderAccessError(self.refusal)
+
+
+_folders_lock = Lock()
+_folders: AllowedDirectories | str | None = None
+
+
+def get_allowed_directories() -> AllowedDirectories:
+    """Take one snapshot, including invalid configuration, across server/tool constructors."""
+    global _folders
+    with _folders_lock:
+        if _folders is None:
+            try:
+                _folders = AllowedDirectories.from_value(os.environ.get("ADEU_ALLOWED_DIRS"))
+            except PathPolicyError as exc:
+                _folders = str(exc)
+            else:
+                if _folders.enabled:
+                    print(f"ADEU_ALLOWED_DIRS allowed folders: {_folders.display}", file=sys.stderr)
+        if isinstance(_folders, str):
+            raise PathPolicyError(_folders)
+        return _folders
 
 
 def _check_windows_name(raw: str) -> str:
@@ -53,7 +149,7 @@ def _target_stat(path: Path) -> os.stat_result | None:
         raise PathPolicyError(f"Refused '{path}': cannot inspect target. Choose an accessible file path.") from exc
 
 
-def _canonical_path(name: str, links: int = 0) -> Path:
+def _canonical_path(name: str, links: int = 0, *, require_existing: bool = False) -> Path:
     # Resolve links before "..", including when the link refers to a new file.
     # Win32 realpath alone normalizes ".." before following junctions.
     path = Path(_check_windows_name(name) if os.name == "nt" else name).absolute()
@@ -66,22 +162,27 @@ def _canonical_path(name: str, links: int = 0) -> Path:
         current /= part
         info = _target_stat(current)
         if info is None:
+            if require_existing:
+                raise FileNotFoundError(current)
             continue
         if stat.S_ISLNK(info.st_mode) or (os.name == "nt" and info.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT):
             if links >= 40:
                 raise PathPolicyError(f"Refused '{name}': too many symbolic links. Use a direct file path.")
-            current = _canonical_path(str(current.parent / current.readlink()), links + 1)
+            current = _canonical_path(
+                str(current.parent / current.readlink()), links + 1, require_existing=require_existing
+            )
             info = _target_stat(current)
         elif os.name == "nt" and (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
             # Expand 8.3 names and recover the on-disk spelling.
             current = Path(_check_windows_name(str(current.resolve(strict=True))))
         if index < len(parts) - 1 and info is not None and not stat.S_ISDIR(info.st_mode):
+            if require_existing:
+                raise NotADirectoryError(current)
             raise PathPolicyError(f"Refused '{name}': invalid parent folder. Choose an accessible folder.")
     return current
 
 
-def resolved_input_path(target: str | Path) -> Path:
-    """Resolve an input without imposing write or desktop-launch requirements."""
+def _resolve_tool_path(target: str | Path) -> Path:
     name = os.fspath(target)
     if not name or "\0" in name:
         raise PathPolicyError(f"Refused {name!r}: invalid path. Supply a file name.")
@@ -91,6 +192,11 @@ def resolved_input_path(target: str | Path) -> Path:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise PathPolicyError(f"Refused '{name}': cannot resolve path. Use an accessible file path.") from exc
+
+
+def resolved_input_path(target: str | Path, *, folders: AllowedDirectories | None = None) -> Path:
+    """Resolve an input without imposing write or desktop-launch requirements."""
+    return folders.check(target) if folders is not None else _resolve_tool_path(target)
 
 
 def _is_word_package(path: Path, *, allow_interrupted: bool = False) -> bool:
@@ -121,10 +227,12 @@ def _same_folder(first: Path, second: Path) -> bool:
         return False
 
 
-def checked_output_path(target: str | Path, *inputs: str | Path, pdf: bool = False) -> Path:
+def checked_output_path(
+    target: str | Path, *inputs: str | Path, pdf: bool = False, folders: AllowedDirectories | None = None
+) -> Path:
     """Return the canonical write destination. A PDF export also checks existing contents."""
-    path = resolved_input_path(target)
-    sources = [resolved_input_path(source) for source in inputs]
+    path = resolved_input_path(target, folders=folders)
+    sources = [resolved_input_path(source, folders=folders) for source in inputs]
     ending = path.suffix.lower()
     matching = [source for source in sources if source.suffix.lower() == ending]
     if pdf:
@@ -154,9 +262,9 @@ def checked_output_path(target: str | Path, *inputs: str | Path, pdf: bool = Fal
     return path
 
 
-def checked_open_path(target: str | Path) -> Path:
+def checked_open_path(target: str | Path, *, folders: AllowedDirectories | None = None) -> Path:
     """Return a canonical file safe to hand to the OS or Microsoft Word."""
-    path = resolved_input_path(target)
+    path = resolved_input_path(target, folders=folders)
     hint = "Choose an existing .docx, .docm, .dotx or .dotm Word document."
     if path.suffix.lower() not in _OPEN_ENDINGS:
         raise PathPolicyError(f"Refused to open '{path}': unsupported file ending. {hint}")
@@ -168,12 +276,19 @@ def checked_open_path(target: str | Path) -> Path:
     return path
 
 
-def checked_revision_paths(target: str | Path, source: str | Path) -> tuple[Path, Path]:
+def checked_revision_paths(
+    target: str | Path, source: str | Path, *, folders: AllowedDirectories | None = None
+) -> tuple[Path, Path]:
     from adeu.compare import _same_file
     from adeu.text_revision import unverified_revision_output
 
-    primary = checked_output_path(target, source)
-    diagnostic = checked_output_path(unverified_revision_output(primary), source)
+    if folders is not None and folders.enabled:
+        # An existing destination may be opened for ZIP validation. Authorize
+        # its derived diagnostic sibling before inspecting either file.
+        target = folders.check(target)
+        folders.check(unverified_revision_output(target))
+    primary = checked_output_path(target, source, folders=folders)
+    diagnostic = checked_output_path(unverified_revision_output(primary), source, folders=folders)
     if _same_file(diagnostic, primary) or _same_file(diagnostic, source):
         raise PathPolicyError(
             f"Refused '{diagnostic}': diagnostic copy would replace the input or requested output. "

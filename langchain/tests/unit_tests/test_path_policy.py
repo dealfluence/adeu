@@ -14,19 +14,21 @@ from adeu import path_policy
 from docx import Document
 from langchain_core.tools import ToolException
 
-from langchain_adeu import AdeuAcceptAllChanges, AdeuApplyTextRevision, get_tools
+from langchain_adeu import AdeuAcceptAllChanges, AdeuApplyTextRevision, AdeuReadDocx, AdeuToolkit, get_tools
 from langchain_adeu._shared import validate_docx_path, validate_output_path
 
 _SHARED = Path(__file__).resolve().parents[3] / "shared" / "path_policy"
 _CASES = json.loads((_SHARED / "cases.json").read_text(encoding="utf-8"))
-_prepare_case = runpy.run_path(str(_SHARED / "cases.py"))["prepare_case"]
+_fixtures = runpy.run_path(str(_SHARED / "cases.py"))
 
 
-@pytest.mark.parametrize("case", [c for c in _CASES if c["operation"] == "write"], ids=lambda c: c["id"])
+@pytest.mark.parametrize(
+    "case", [c for c in _CASES["safe_targets"] if c["operation"] == "write"], ids=lambda c: c["id"]
+)
 def test_shared_output_path_policy(tmp_path: Path, case: dict[str, Any]) -> None:
     if case.get("windows_only") and os.name != "nt":
         pytest.skip("Windows filename rule")
-    target, inputs = _prepare_case(tmp_path, case)
+    target, inputs = _fixtures["prepare_case"](tmp_path, case)
 
     def validate() -> Path:
         sources = [validate_docx_path(str(source)) for source in inputs]
@@ -40,7 +42,53 @@ def test_shared_output_path_policy(tmp_path: Path, case: dict[str, Any]) -> None
             validate()
 
 
-def test_registered_tool_schemas_route_every_path_to_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("case", _CASES["confinement"], ids=lambda c: c["id"])
+def test_shared_confinement(tmp_path: Path, case: dict[str, Any]) -> None:
+    _fixtures["check_confinement_case"](tmp_path, case)
+
+
+@pytest.mark.parametrize("case", _CASES["startup"], ids=lambda c: c["id"])
+def test_shared_startup(tmp_path: Path, case: dict[str, Any]) -> None:
+    _fixtures["check_startup_case"](tmp_path, case)
+
+
+@pytest.mark.parametrize("constructor", [AdeuReadDocx, AdeuToolkit])
+def test_first_construction_freezes_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, constructor: type) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setattr(path_policy, "_folders", None)
+    monkeypatch.setenv("ADEU_ALLOWED_DIRS", str(allowed))
+    first = constructor()
+    monkeypatch.setenv("ADEU_ALLOWED_DIRS", str(tmp_path))
+    tools = first.get_tools() if isinstance(first, AdeuToolkit) else [first]
+    for read_tool in (tools[0], AdeuReadDocx()):
+        with pytest.raises(ToolException) as error:
+            read_tool.invoke({"reasoning": "Read", "file_path": str(tmp_path / "outside.docx")})
+        assert str(error.value) == f"File access refused. Allowed folders: {allowed.resolve()}"
+
+
+@pytest.mark.parametrize("constructor", [AdeuReadDocx, AdeuToolkit])
+def test_invalid_configuration_fails_construction(monkeypatch: pytest.MonkeyPatch, constructor: type) -> None:
+    monkeypatch.setattr(path_policy, "_folders", None)
+    monkeypatch.setenv("ADEU_ALLOWED_DIRS", "relative-entry")
+    with pytest.raises(ValueError, match="relative-entry"):
+        constructor()
+    monkeypatch.delenv("ADEU_ALLOWED_DIRS")
+    with pytest.raises(ValueError, match="relative-entry"):
+        constructor()
+
+
+@pytest.mark.parametrize("confined", [False, True], ids=["unrestricted", "confined"])
+def test_registered_tool_schemas_route_every_path_to_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setattr(path_policy, "_folders", None)
+    if confined:
+        monkeypatch.setenv("ADEU_ALLOWED_DIRS", str(allowed))
+    else:
+        monkeypatch.delenv("ADEU_ALLOWED_DIRS", raising=False)
     path_words = {
         "path",
         "paths",
@@ -64,7 +112,7 @@ def test_registered_tool_schemas_route_every_path_to_policy(tmp_path: Path) -> N
         args = {name: value for name, value in sample.items() if name in properties}
         path_fields = [name for name in properties if path_words.intersection(name.split("_"))]
         for name in path_fields:
-            path = tmp_path / f"{tool.name}_{name}.docx"
+            path = allowed / f"{tool.name}_{name}.docx"
             if name != "output_path":
                 doc = Document()
                 doc.add_paragraph("final" if name == "modified_path" else "draft")
@@ -80,6 +128,55 @@ def test_registered_tool_schemas_route_every_path_to_policy(tmp_path: Path) -> N
             check = output_check if name == "output_path" else input_check
             checked_paths = [str(call.args[0]) for call in check.call_args_list]
             assert args[name] in checked_paths, f"{tool.name}.{name} bypassed the path policy"
+
+        if confined:
+            outside = tmp_path / "outside.docx"
+            outside.touch()
+            for name in path_fields:
+                for denied in (outside, tmp_path / "absent.docx"):
+                    with (
+                        patch.object(
+                            path_policy, "_is_word_package", side_effect=AssertionError("early ZIP inspection")
+                        ),
+                        patch.object(Path, "read_bytes", side_effect=AssertionError("early read")),
+                        pytest.raises(ToolException) as error,
+                    ):
+                        tool.invoke({**args, name: str(denied)})
+                    assert str(error.value) == f"File access refused. Allowed folders: {allowed.resolve()}", (
+                        f"{tool.name}.{name}"
+                    )
+
+
+@pytest.mark.parametrize(
+    ("name", "derived", "extra"),
+    [
+        ("adeu_accept_all_changes", "draft_clean.docx", {}),
+        ("adeu_sanitize_docx", "draft_sanitized.docx", {}),
+        ("adeu_apply_changes", "draft_processed.docx", {"author_name": "Editor", "changes": [{"type": "modify"}]}),
+        ("adeu_apply_text_revision", "draft_redlined.docx", {"revised_text": "Final"}),
+        ("adeu_apply_text_revision", "draft_redlined.unverified.docx", {"revised_text": "Final"}),
+    ],
+)
+def test_confines_derived_paths_before_inspecting_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, derived: str, extra: dict[str, Any]
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+    link = allowed / derived
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(outside), str(link))
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(path_policy, "_folders", None)
+    monkeypatch.setenv("ADEU_ALLOWED_DIRS", str(allowed))
+    tool = next(tool for tool in get_tools() if tool.name == name)
+    with pytest.raises(ToolException) as error:
+        tool.invoke({"reasoning": "Edit", "file_path": str(allowed / "draft.docx"), **extra})
+    assert str(error.value) == f"File access refused. Allowed folders: {allowed.resolve()}"
 
 
 def test_revision_refuses_unsafe_diagnostic_before_writing(tmp_path: Path) -> None:

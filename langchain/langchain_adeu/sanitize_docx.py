@@ -26,12 +26,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
+from adeu.path_policy import AllowedDirectories
 from adeu.sanitize import sanitize_docx as _sanitize_docx
 from adeu.sanitize.core import SanitizeError
-from langchain_core.tools import BaseTool, ToolException
+from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_adeu._shared import validate_docx_path, validate_output_path, wrap_tool_errors
+from langchain_adeu._shared import AdeuFileTool, validate_docx_path, validate_output_path, wrap_tool_errors
 
 
 class AdeuSanitizeDocxInput(BaseModel):
@@ -122,7 +123,7 @@ _DESCRIPTION = (
 )
 
 
-class AdeuSanitizeDocx(BaseTool):
+class AdeuSanitizeDocx(AdeuFileTool):
     """LangChain tool: sanitize a .docx for safe external distribution."""
 
     name: str = "adeu_sanitize_docx"
@@ -142,12 +143,14 @@ class AdeuSanitizeDocx(BaseTool):
         accept_all: bool = False,
         allow_low_similarity_baseline: bool = False,
     ) -> tuple[str, dict[str, Any]]:
-        source = validate_docx_path(file_path, label="DOCX file")
-        target = _resolve_output_path(source, output_path)
+        source = self._input_document(
+            file_path, other_inputs=(baseline_path,), output_path=output_path, default_output=_default_output
+        )
+        target = _resolve_output_path(source, output_path, self._folders)
 
         baseline_resolved: Path | None = None
         if baseline_path is not None:
-            baseline_resolved = validate_docx_path(baseline_path, label="baseline document")
+            baseline_resolved = validate_docx_path(baseline_path, label="baseline document", folders=self._folders)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -207,15 +210,19 @@ class AdeuSanitizeDocx(BaseTool):
         )
 
 
-def _resolve_output_path(source: Path, requested: str | None) -> Path:
+def _default_output(source: Path) -> Path:
+    return source.with_name(f"{source.stem}_sanitized{source.suffix}")
+
+
+def _resolve_output_path(source: Path, requested: str | None, folders: AllowedDirectories) -> Path:
     """Decide where the sanitized file should be written.
 
     Mirrors the convention from `AdeuAcceptAllChanges`: when no output
     path is requested, default to '<stem>_sanitized.docx' next to the
     source; never silently overwrite the input.
     """
-    candidate = source.with_name(f"{source.stem}_sanitized{source.suffix}") if requested is None else requested
-    target = validate_output_path(candidate, source)
+    candidate = _default_output(source) if requested is None else requested
+    target = validate_output_path(candidate, source, folders=folders)
 
     if target == source:
         raise ToolException(

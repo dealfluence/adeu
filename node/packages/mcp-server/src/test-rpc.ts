@@ -29,13 +29,13 @@ export interface TestServer {
 }
 
 /** Boots the built server (`dist/index.js`) and completes the MCP handshake. */
-export async function startTestServer(label: string): Promise<TestServer> {
+export async function startTestServer(label: string, env = process.env): Promise<TestServer> {
   const serverPath = resolve(__dirname, "../dist/index.js");
   if (!existsSync(serverPath)) {
     throw new Error("MCP server not built. Run 'npm run build' before tests.");
   }
 
-  const proc: ChildProcess = spawn("node", [serverPath]);
+  const proc: ChildProcess = spawn("node", [serverPath], { env });
   const pending = new Map<number, (msg: any) => void>();
   const tempPaths: string[] = [];
   let rpcId = 0;

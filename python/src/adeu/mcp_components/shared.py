@@ -1,9 +1,11 @@
+import difflib
 import os
 import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from adeu import path_policy
 from adeu.utils.docx import suggest_sibling_docx
 from adeu.utils.files import write_output_bytes
 
@@ -26,6 +28,25 @@ MCP_ID_DISCOVERY_HINT = (
 _NOT_FOUND_SUGGESTION_CAP = 10
 
 
+def _confined_suggestions(path: Path, folders: path_policy.AllowedDirectories) -> tuple[list[str], int]:
+    parent = folders.check(path.parent)
+    names: list[str] = []
+    try:
+        for candidate in parent.iterdir():
+            if candidate.suffix.lower() != ".docx":
+                continue
+            try:
+                resolved = folders.check(candidate)
+            except path_policy.FolderAccessError:
+                continue
+            if resolved.is_file():
+                names.append(candidate.name)
+    except OSError:
+        return [], 0
+    closest = difflib.get_close_matches(path.name, sorted(names), n=_NOT_FOUND_SUGGESTION_CAP, cutoff=0.0)
+    return closest, len(names)
+
+
 def _not_found_error(path: str) -> FileNotFoundError:
     """
     Lean, agent-appropriate missing-file error: state the fact, suggest the
@@ -34,9 +55,13 @@ def _not_found_error(path: str) -> FileNotFoundError:
     sandboxes and no CLI-migration essay for a plain ENOENT
     (QA round 3, finding 3.11).
     """
-    p = Path(path)
+    folders = path_policy.get_allowed_directories()
+    p = folders.check(path) if folders.enabled else Path(path)
     listing = ""
-    shown, total = suggest_sibling_docx(p, limit=_NOT_FOUND_SUGGESTION_CAP)
+    if folders.enabled:
+        shown, total = _confined_suggestions(p, folders)
+    else:
+        shown, total = suggest_sibling_docx(p, limit=_NOT_FOUND_SUGGESTION_CAP)
     if shown:
         listing = f" available files: [{', '.join(shown)}]"
         more = total - len(shown)
@@ -49,9 +74,10 @@ def _not_found_error(path: str) -> FileNotFoundError:
 
 
 def read_file_bytes(path: str) -> BytesIO:
-    p = Path(path)
+    folders = path_policy.get_allowed_directories()
+    p = folders.check(path) if folders.enabled else Path(path)
     if not p.exists():
-        raise _not_found_error(path)
+        raise _not_found_error(str(p) if folders.enabled else path)
     with open(p, "rb") as f:
         return BytesIO(f.read())
 

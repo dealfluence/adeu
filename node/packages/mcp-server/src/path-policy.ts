@@ -1,6 +1,15 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, extname, join, parse, resolve } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  parse,
+  resolve,
+} from "node:path";
 import { fromFdPromise } from "yauzl";
 
 const openEndings = [".docx", ".docm", ".dotx", ".dotm"];
@@ -65,25 +74,40 @@ function sameFolder(first: string, second: string): boolean {
 }
 
 /** Walk in filesystem order so a link followed by '..' uses its real parent.
- * Missing components stay in the result, including the referent of a dangling link. */
-function canonicalPath(path: string, base = process.cwd(), links = 0): string {
+ * Tool paths can be new. Configured roots must exist at every step. */
+function canonicalPath(
+  path: string,
+  strict = false,
+  base = process.cwd(),
+  links = 0,
+): string {
   path = ordinaryPath(path);
   if (links > 40) refuse(path, "too many symbolic links", "Use a direct path");
   const root = parse(path).root;
   let current = root ? resolve(base, root) : base;
   for (const part of path.slice(root.length).split(windows ? /[\\/]/ : "/")) {
     if (!part || part === ".") continue;
-    const parent = fs.lstatSync(current, { throwIfNoEntry: false });
-    if (parent && !parent.isDirectory())
+    const parent = fs.lstatSync(current, { throwIfNoEntry: strict });
+    if (parent && !parent.isDirectory()) {
+      if (strict)
+        throw Object.assign(new Error("Invalid parent folder"), {
+          code: "ENOTDIR",
+        });
       refuse(path, "invalid parent folder", "Choose an accessible folder");
+    }
     if (part === "..") {
       current = dirname(current);
       continue;
     }
     const child = join(current, part);
-    const stat = fs.lstatSync(child, { throwIfNoEntry: false });
+    const stat = fs.lstatSync(child, { throwIfNoEntry: strict });
     if (stat?.isSymbolicLink()) {
-      current = canonicalPath(fs.readlinkSync(child), current, links + 1);
+      current = canonicalPath(
+        fs.readlinkSync(child),
+        strict,
+        current,
+        links + 1,
+      );
     } else {
       // Also expand Windows short names and junction ancestors.
       current =
@@ -93,6 +117,93 @@ function canonicalPath(path: string, base = process.cwd(), links = 0): string {
     }
   }
   return ordinaryPath(current);
+}
+
+/** Capture directory identities at startup. Aliases, including short names
+ * and case/Unicode variants, are resolved by the host filesystem. */
+function readAllowedFolders(value: string) {
+  const entries = value.split(delimiter).filter((entry) => entry.trim());
+  if (!entries.length)
+    throw new Error("ADEU_ALLOWED_DIRS is set but contains no folders.");
+  const roots = entries.map((entry) => {
+    const prefix = `ADEU_ALLOWED_DIRS entry '${entry}'`;
+    if (!isAbsolute(entry) || (windows && parse(entry).root.length === 1))
+      throw new Error(`${prefix} is relative. Use an absolute folder path.`);
+    let path: string;
+    let stat: fs.BigIntStats;
+    try {
+      path = canonicalPath(entry, true);
+      stat = fs.statSync(path, { bigint: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") throw new Error(`${prefix} does not exist.`);
+      if (code === "ENOTDIR") throw new Error(`${prefix} is not a folder.`);
+      throw new Error(`${prefix} cannot be resolved.`);
+    }
+    if (!stat.isDirectory()) throw new Error(`${prefix} is not a folder.`);
+    return { path, ino: stat.ino, dev: stat.dev };
+  });
+  const listing = roots.map((root) => root.path).join(delimiter);
+  return {
+    listing,
+    resolve(path: string): string {
+      try {
+        const target = canonicalPath(path);
+        for (let dir = target; ; dir = dirname(dir)) {
+          const stat = fs.statSync(dir, {
+            bigint: true,
+            throwIfNoEntry: false,
+          });
+          if (
+            stat?.isDirectory() &&
+            roots.some((root) =>
+              root.ino
+                ? root.ino === stat.ino && root.dev === stat.dev
+                : stat.ino === 0n && root.path === dir,
+            )
+          )
+            return target;
+          if (dirname(dir) === dir) break;
+        }
+      } catch {
+        // An inaccessible or unresolvable candidate gets the same refusal.
+      }
+      throw new PathRefusal(`File access refused. Allowed folders: ${listing}`);
+    },
+  };
+}
+
+// This module belongs to the server, which loads it once before accepting
+// requests. Tool calls cannot change this snapshot.
+const allowedFolders = (() => {
+  const value = process.env.ADEU_ALLOWED_DIRS;
+  if (value === undefined) return undefined;
+  try {
+    const folders = readAllowedFolders(value);
+    console.error(`ADEU_ALLOWED_DIRS allowed folders: ${folders.listing}`);
+    return folders;
+  } catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
+  }
+})();
+
+export function listDocumentSiblings(dir: string): string[] {
+  const folder = allowedFolders ? allowedFolders.resolve(dir) : dir;
+  const names = fs
+    .readdirSync(folder)
+    .filter((name) => name.toLowerCase().endsWith(".docx"));
+  if (!allowedFolders) return names;
+  // A name in an allowed folder may itself point outside. Count and rank
+  // only names that the caller would be allowed to use.
+  return names.filter((name) => {
+    try {
+      allowedFolders.resolve(join(folder, name));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function packageKind(
@@ -137,11 +248,14 @@ export async function checkToolPath(
   inputs: string[] = [],
 ): Promise<string> {
   try {
-    const target = canonicalPath(path);
+    const target = allowedFolders
+      ? allowedFolders.resolve(path)
+      : canonicalPath(path);
     const stat = fs.lstatSync(target, { throwIfNoEntry: false });
     if (use === "source") {
-      // Preserve the reader's missing-file error, including the original spelling.
-      return stat ? target : path;
+      // An unconfined missing-file error retains the caller's spelling.
+      // Confined reads must also use the checked parent for filename hints.
+      return stat || allowedFolders ? target : path;
     }
     const ext = extname(target).toLowerCase();
     if (stat && !stat.isFile())
@@ -164,7 +278,9 @@ export async function checkToolPath(
       }
       return target;
     }
-    const sources = inputs.map((input) => canonicalPath(input));
+    const sources = inputs.map((input) =>
+      allowedFolders ? allowedFolders.resolve(input) : canonicalPath(input),
+    );
     const matching = sources.filter(
       (source) => extname(source).toLowerCase() === ext,
     );
@@ -215,21 +331,69 @@ export async function checkToolPath(
   }
 }
 
-/** Explicit tool parameters are checked by the registration wrapper. Derived
- * names and current destination contents are checked again at the write. */
-const toolPaths: Record<string, { inputs: string[]; output?: string }> = {
+type DefaultOutput = "processed" | "clean" | "final" | "redlined";
+
+export function defaultOutputPath(
+  source: string,
+  suffix: DefaultOutput,
+): string {
+  if (suffix === "redlined") {
+    // Match apply_text_revision's core naming, including dotfiles.
+    const name = basename(source);
+    const dot = name.lastIndexOf(".");
+    const stem = dot === -1 ? name : name.slice(0, dot);
+    return stem.endsWith("_redlined") || stem.endsWith("_processed")
+      ? source
+      : join(dirname(source), `${stem}_redlined.docx`);
+  }
+  const ext = extname(source);
+  const stem = basename(source, ext);
+  if (
+    suffix === "processed" &&
+    /(?:_|-|\.)(processed|redlined|redline|markup|marked)$/i.test(stem)
+  )
+    return resolve(dirname(source), `${stem}${ext}`);
+  return resolve(dirname(source), `${stem}_${suffix}${ext}`);
+}
+
+export function diagnosticPath(output: string): string {
+  return join(
+    dirname(output),
+    `${basename(output, extname(output))}.unverified.docx`,
+  );
+}
+
+/** The registration wrapper checks all arguments and confined derived names
+ * before invoking a handler. Writers check current destination contents again. */
+const toolPaths: Record<
+  string,
+  { inputs: string[]; output?: string; defaultOutput?: DefaultOutput }
+> = {
   read_docx: { inputs: ["file_path"] },
   process_document_batch: {
     inputs: ["original_docx_path"],
     output: "output_path",
+    defaultOutput: "processed",
   },
-  accept_all_changes: { inputs: ["docx_path"], output: "output_path" },
+  accept_all_changes: {
+    inputs: ["docx_path"],
+    output: "output_path",
+    defaultOutput: "clean",
+  },
   diff_docx_files: {
     inputs: ["original_path", "modified_path"],
     output: "output_path",
   },
-  finalize_document: { inputs: ["file_path"], output: "output_path" },
-  apply_text_revision: { inputs: ["file_path"], output: "output_path" },
+  finalize_document: {
+    inputs: ["file_path"],
+    output: "output_path",
+    defaultOutput: "final",
+  },
+  apply_text_revision: {
+    inputs: ["file_path"],
+    output: "output_path",
+    defaultOutput: "redlined",
+  },
 };
 
 export async function checkToolArguments(
@@ -245,12 +409,20 @@ export async function checkToolArguments(
     checked[key] = source;
     sources.push(source);
   }
-  if (policy.output && args[policy.output] !== undefined) {
-    checked[policy.output] = await checkToolPath(
-      args[policy.output] as string,
-      "write",
-      sources,
-    );
+  if (policy.output) {
+    let output = args[policy.output] as string | undefined;
+    if (allowedFolders) {
+      if (output === undefined && policy.defaultOutput)
+        output = defaultOutputPath(sources[0], policy.defaultOutput);
+      if (output !== undefined) {
+        output = allowedFolders.resolve(output);
+        // Preflight both outcomes before checking any ZIP contents.
+        if (policy.defaultOutput === "redlined")
+          allowedFolders.resolve(diagnosticPath(output));
+      }
+    }
+    if (output !== undefined)
+      checked[policy.output] = await checkToolPath(output, "write", sources);
   }
   return checked;
 }

@@ -80,13 +80,16 @@ async def sanitize_docx(
     )
 
     try:
-        source = path_policy.resolved_input_path(file_path)
+        folders = path_policy.get_allowed_directories()
+        source = path_policy.resolved_input_path(file_path, folders=folders)
+        if folders.enabled and baseline_path is not None:
+            baseline_path = str(folders.check(baseline_path))
         target = source.with_name(f"{source.stem}_sanitized{source.suffix}") if output_path is None else output_path
-        output_path = str(path_policy.checked_output_path(target, source))
+        output_path = str(path_policy.checked_output_path(target, source, folders=folders))
         if not source.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if baseline_path is not None:
-            baseline = path_policy.resolved_input_path(baseline_path)
+            baseline = path_policy.resolved_input_path(baseline_path, folders=folders)
             if not baseline.exists():
                 raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
             baseline_path = str(baseline)
@@ -125,6 +128,8 @@ async def sanitize_docx(
         }
         return add_timing_if_debug(start_time, res)
 
+    except path_policy.FolderAccessError as e:
+        raise ToolError(str(e)) from None
     except SanitizeError as e:
         await ctx.warning(
             "Sanitization blocked",

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from fastmcp.tools import ToolResult
 
 
-def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
+def _build_mock_docx_stream(word_open_xml: str, *, allow_debug_dump: bool = True) -> io.BytesIO:
     """
     Wraps an extracted Flat OPC XML string (doc.WordOpenXML) into a standard ZIP-based
     DOCX stream so python-docx can parse it natively.
@@ -161,7 +161,7 @@ def _build_mock_docx_stream(word_open_xml: str) -> io.BytesIO:
         f"{parts_skipped} malformed parts skipped, {size_bytes} bytes total."
     )
 
-    if os.environ.get("ADEU_DEBUG_FLATOPC"):
+    if allow_debug_dump and os.environ.get("ADEU_DEBUG_FLATOPC"):
         import tempfile
 
         dbg_path = Path(tempfile.gettempdir()) / "adeu_flatopc_debug.docx"
@@ -215,6 +215,19 @@ if sys.platform == "win32":
         SetField,
     )
 
+    def _matches_word_document(full_name: str | None, target: Path, folders: path_policy.AllowedDirectories | None):
+        if not full_name:
+            return False
+        if folders is None or not folders.enabled:
+            return str(Path(full_name).resolve()).lower() == str(target).lower()
+        if not Path(full_name).is_absolute():
+            return False
+        try:
+            actual = folders.check(full_name)
+            return str(actual) == str(target) or actual.samefile(target)
+        except (path_policy.PathPolicyError, OSError):
+            return False
+
     def is_document_open_in_word(file_path: Optional[str]) -> bool:
         """
         Cheap check: is `file_path` currently open in a running Word instance?
@@ -237,28 +250,56 @@ if sys.platform == "win32":
             # No running Word instance (the headless / benchmark case).
             return False
         try:
-            target = str(path_policy.resolved_input_path(file_path)).lower()
+            folders = path_policy.get_allowed_directories()
+            target = path_policy.resolved_input_path(file_path, folders=folders)
             for i in range(1, app.Documents.Count + 1):
                 doc = app.Documents(i)
                 full = getattr(doc, "FullName", None)
-                if full and str(Path(full).resolve()).lower() == target:
+                if _matches_word_document(full, target, folders):
                     return True
         except Exception:
             return False
         return False
 
-    def _get_word_doc(app: Any, file_path: Optional[str] = None) -> Any:
+    def _check_word_location(doc: Any, folders: path_policy.AllowedDirectories) -> Path:
+        # FullName on a new unsaved Word document is just "Document1".
+        # Word URLs and other locationless buffers have no local folder identity.
+        try:
+            full_name = doc.FullName
+            if doc.Path and isinstance(full_name, str) and Path(full_name).is_absolute():
+                return folders.check(full_name)
+        except Exception:
+            pass
+        raise path_policy.FolderAccessError(folders.refusal)
+
+    def check_active_document_location() -> None:
+        """Check implicit input even when argument validation later ends a batch early."""
+        from fastmcp.exceptions import ToolError
+
+        folders = path_policy.get_allowed_directories()
+        if folders.enabled:
+            pythoncom.CoInitialize()
+            try:
+                app = win32com.client.GetActiveObject("Word.Application")
+                _check_word_location(app.ActiveDocument, folders)
+            except Exception as exc:
+                raise ToolError(folders.refusal) from exc
+
+    def _get_word_doc(
+        app: Any, file_path: Optional[str] = None, folders: path_policy.AllowedDirectories | None = None
+    ) -> Any:
         """Gets the requested document from Word, or the ActiveDocument if no path provided."""
         if not file_path:
             try:
-                return app.ActiveDocument
+                doc = app.ActiveDocument
             except Exception as e:
                 raise RuntimeError("No active document found in Word.") from e
+            return doc
 
-        target_path = str(path_policy.resolved_input_path(file_path)).lower()
+        target_path = path_policy.resolved_input_path(file_path, folders=folders)
         for i in range(1, app.Documents.Count + 1):
             doc = app.Documents(i)
-            if doc.FullName and str(Path(doc.FullName).resolve()).lower() == target_path:
+            if _matches_word_document(doc.FullName, target_path, folders):
                 return doc
 
         raise LiveDocumentNotOpenError(f"Document {file_path} is not open in Word.")
@@ -268,6 +309,8 @@ if sys.platform == "win32":
         file_path: Optional[str] = None,
         include_appendix: bool = True,
         return_paragraph_offsets: bool = False,
+        *,
+        folders: path_policy.AllowedDirectories | None = None,
     ) -> Tuple:
         """
         Reads the live active Word document (or specific open file) by extracting its
@@ -298,10 +341,10 @@ if sys.platform == "win32":
         except Exception as e:  # Catch pywintypes.com_error
             raise LiveWordUnavailableError(f"Could not connect to active Word document. {e}") from e
 
-        word_doc = _get_word_doc(app, file_path)
+        word_doc = _get_word_doc(app, file_path, folders)
+        actual_path = str(_check_word_location(word_doc, folders)) if folders is not None else word_doc.FullName
         xml_str = word_doc.WordOpenXML
-        stream = _build_mock_docx_stream(xml_str)
-        actual_path = word_doc.FullName
+        stream = _build_mock_docx_stream(xml_str, allow_debug_dump=folders is None)
 
         py_doc = load_document(stream)
 
@@ -367,17 +410,16 @@ if sys.platform == "win32":
             # distinguish "Word doesn't have this doc open, try disk" from
             # "Live Word read it fine but the request was invalid (e.g. page OOR)".
             paragraph_offsets = None
+            folders = path_policy.get_allowed_directories()
+            read_options: dict[str, Any] = {"include_appendix": needs_appendix}
+            if folders.enabled:
+                read_options["folders"] = folders
             if needs_offsets:
                 final_text, actual_path, py_doc, paragraph_offsets = _read_active_word_document_core(
-                    clean_view,
-                    file_path,
-                    include_appendix=needs_appendix,
-                    return_paragraph_offsets=True,
+                    clean_view, file_path, return_paragraph_offsets=True, **read_options
                 )
             else:
-                final_text, actual_path, py_doc = _read_active_word_document_core(
-                    clean_view, file_path, include_appendix=needs_appendix
-                )
+                final_text, actual_path, py_doc = _read_active_word_document_core(clean_view, file_path, **read_options)
             await ctx.info(f"Live Word extraction successful: {len(final_text)} characters.")
 
             try:
@@ -542,7 +584,7 @@ if sys.platform == "win32":
                 raise ToolError(str(e)) from e
 
             return ToolResult(content=res.content, structured_content=res.structured_content)
-        except BuilderError as e:
+        except (BuilderError, path_policy.PathPolicyError) as e:
             # Builder validation failures are user-facing tool errors.
             raise ToolError(str(e)) from None
         except ToolError:
@@ -607,6 +649,8 @@ if sys.platform == "win32":
         author_name: str,
         file_path: Optional[str] = None,
         gate_overrides: Optional[dict] = None,
+        *,
+        folders: path_policy.AllowedDirectories | None = None,
     ) -> dict[str, Any]:
         stats: dict[str, Any] = {"applied": 0, "failed": 0, "skipped_details": []}
         if not changes:
@@ -621,7 +665,9 @@ if sys.platform == "win32":
         except Exception as e:
             raise LiveWordUnavailableError(f"Could not connect to active Word document. {e}") from e
 
-        doc = _get_word_doc(app, file_path)
+        doc = _get_word_doc(app, file_path, folders)
+        if folders is not None:
+            _check_word_location(doc, folders)
 
         original_track_revisions = doc.TrackRevisions
         doc.TrackRevisions = True
@@ -726,7 +772,7 @@ if sys.platform == "win32":
         if edits:
             try:
                 xml_str = doc.WordOpenXML
-                snapshot_stream = _build_mock_docx_stream(xml_str)
+                snapshot_stream = _build_mock_docx_stream(xml_str, allow_debug_dump=folders is None)
                 snapshot_engine = RedlineEngine(
                     snapshot_stream,
                     author=author_name,
@@ -755,7 +801,7 @@ if sys.platform == "win32":
             if actions:
                 # Build virtual map to translate the LLM's Chg:N IDs
                 xml_str = doc.WordOpenXML
-                stream = _build_mock_docx_stream(xml_str)
+                stream = _build_mock_docx_stream(xml_str, allow_debug_dump=folders is None)
                 py_doc = load_document(stream)
                 # Bug 5: renumber to the disk-style two-pool scheme so the
                 # agent's Chg:N / Com:N target_id values resolve to the same
@@ -1282,7 +1328,10 @@ if sys.platform == "win32":
 
         await ctx.info(f"Applying {len(changes)} changes to live Word document...")
         try:
-            stats = _process_active_word_batch_core(changes, author_name, file_path, gate_overrides)
+            folders = path_policy.get_allowed_directories()
+            stats = _process_active_word_batch_core(
+                changes, author_name, file_path, gate_overrides, folders=folders if folders.enabled else None
+            )
             await ctx.info(f"Live Word batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}.")
             res = f"[Live Word Mode] Batch complete. Applied: {stats['applied']}, Failed: {stats['failed']}."
             if "author_overridden_by_word" in stats:
@@ -1308,7 +1357,7 @@ if sys.platform == "win32":
         await ctx.info(f"Opening {file_path} in Word...")
         pythoncom.CoInitialize()
         try:
-            abs_path = str(path_policy.checked_open_path(file_path))
+            abs_path = str(path_policy.checked_open_path(file_path, folders=path_policy.get_allowed_directories()))
 
             # Dispatch starts a new instance or connects to an existing one
             app = win32com.client.Dispatch("Word.Application")
@@ -1322,6 +1371,8 @@ if sys.platform == "win32":
             app.Documents.Open(abs_path)
             await ctx.info(f"Opened {abs_path} successfully.")
             return f"Successfully opened {abs_path} in Microsoft Word."
+        except path_policy.FolderAccessError as e:
+            raise ToolError(str(e)) from None
         except Exception as e:
             raise ToolError(f"Failed to open document in Word. {e}") from e
 
@@ -1333,15 +1384,23 @@ if sys.platform == "win32":
         await ctx.info("Saving active Word document...")
         pythoncom.CoInitialize()
         try:
+            folders = path_policy.get_allowed_directories()
+            if folders.enabled and output_path is not None:
+                output_path = str(folders.check(output_path))
             app = win32com.client.GetActiveObject("Word.Application")
             doc = app.ActiveDocument
 
-            source = Path(doc.FullName) if doc.Path else None
+            source: Path | None
+            if folders.enabled:
+                source = _check_word_location(doc, folders)
+            else:
+                source = Path(doc.FullName) if doc.Path else None
             if source is None and output_path is None:
                 raise ValueError("The active document has no file path. Provide a .docx output_path to save it.")
             inputs = (source,) if source is not None else ()
-            requested = output_path if output_path is not None else doc.FullName
-            target = path_policy.checked_output_path(requested, *inputs)
+            requested = output_path if output_path is not None else source
+            assert requested is not None
+            target = path_policy.checked_output_path(requested, *inputs, folders=folders)
             # Word can also edit plain text and HTML. Select a Word file format
             # explicitly when saving as a new file or converting such a buffer.
             word_formats = {12, 13, 14, 15, 16, 24}  # packaged WdSaveFormat values
@@ -1363,6 +1422,8 @@ if sys.platform == "win32":
 
             await ctx.info(msg)
             return msg
+        except path_policy.FolderAccessError as e:
+            raise ToolError(str(e)) from None
         except Exception as e:
             raise ToolError(f"Failed to save active Word document. {e}") from e
 

@@ -10,7 +10,14 @@ from typing import Any
 
 import structlog
 
+from adeu import path_policy
 from adeu.mcp_components.shared import get_build_info
+
+# Take the launcher's snapshot before registering tools or starting either transport.
+try:
+    path_policy.get_allowed_directories()
+except path_policy.PathPolicyError as exc:
+    raise SystemExit(str(exc)) from None
 
 _MISSING_MCP_MESSAGE = (
     "Error: Adeu's MCP server dependencies are not installed.\n"

@@ -224,6 +224,24 @@ uvx adeu init
 uv run adeu init --local
 ```
 
+### File access
+
+By default, the server can read documents in any folder its account can access. Writes and opens target Word documents. To restrict file access, set `ADEU_ALLOWED_DIRS` in your MCP host configuration. This Windows example allows two folders.
+
+```json
+{
+  "mcpServers": {
+    "adeu": {
+      "command": "uvx",
+      "args": ["--from", "adeu[mcp]", "adeu-server"],
+      "env": { "ADEU_ALLOWED_DIRS": "C:\\Projects\\Contracts;D:\\Reviewed" }
+    }
+  }
+}
+```
+
+On macOS or Linux, use a colon-separated value such as `/srv/contracts:/srv/reviewed`. Every listed folder must already exist and have an absolute path. Restart the server to apply changes. It logs the resolved folders to stderr and refuses to start on invalid configuration. Tools can access only the listed folders and their descendants, including when following links or choosing a default output name. On Windows, this also applies to the active Word document. Save a new document in an allowed folder before using live tools on it.
+
 ### Live Word Interop (Windows COM)
 When the MCP server runs on Windows (`sys.platform == 'win32'`), it automatically enables the `live_word.py` tools. These tools utilize `pywin32` to hijack the active Microsoft Word COM object. 
 
