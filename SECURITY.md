@@ -1,11 +1,36 @@
-# Reporting a security issue
+# Security policy
 
-Email **security@adeu.ai** to report a suspected vulnerability privately to the Adeu maintainers.
+## Reporting
 
-Include the affected package or desktop bundle, its version, the operating system, and which tool or integration you were using. Describe what happened and the impact you observed. Please remove credentials, customer documents, and other confidential material from any example you share.
+Email **security@adeu.ai** to report a suspected vulnerability privately.
 
-If you would like public credit, include the name or handle you want us to use. We publish fixes and affected versions in the [Adeu security advisories](https://github.com/dealfluence/adeu/security/advisories).
+Include the affected package or desktop bundle and its version, the operating system and MCP host, the tool call or command, and what happened. Show the issue on a released version. Remove credentials, customer documents and other confidential material from anything you send.
 
-## Automated outreach
+## File access model
 
-We consider automated outreach based on scanner or AI output a predatory sales tactic when it gives no clear indication that the sender has used Adeu. Such outreach earns no public credit and will not lead to a purchase or business relationship with Adeu.
+Adeu has no project boundary by default. The tools read and save Word documents at any path the MCP host or agent supplies, in any folder the server's account can access, including network shares. These controls apply in every configuration:
+
+- An existing file is replaced only if it is empty or a Word document.
+- Outputs use `.docx` or the input's own ending, and a PDF export uses `.pdf`. Macro-enabled and template endings (`.docm`, `.dotm`, `.dotx`, `.dot`) are written only beside the input.
+- A file is opened in its desktop application only if it is a Word document.
+
+Operators who need a boundary set `ADEU_ALLOWED_DIRS`, which limits every read, write and open to the listed folders. See [File access](README.md#file-access).
+
+## Scope
+
+In scope: a way around one of the controls above, or around `ADEU_ALLOWED_DIRS`, shown on a released version.
+
+Not in scope:
+
+- The default described above, including reads, writes and network paths when `ADEU_ALLOWED_DIRS` is unset.
+- Error messages and resolved paths returned when `ADEU_ALLOWED_DIRS` is unset.
+- Issues that require control of the MCP host, the server's environment or its launch configuration.
+- Scanner or model output without a demonstration on a released version.
+
+Reports outside this scope receive no further reply.
+
+## Fixes and advisories
+
+Fixes go into the latest release. When the fixed version is released, Adeu publishes an advisory with the affected and fixed versions in [Adeu security advisories](https://github.com/dealfluence/adeu/security/advisories). The maintainers decide release timing; deadlines set by a reporter do not change it.
+
+Advisories record the issue and the versions. They carry no reporter credits, links or company names.
