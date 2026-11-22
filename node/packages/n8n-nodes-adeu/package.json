@@ -50,13 +50,13 @@
   },
   "devDependencies": {
     "@adeu/core": "^4.2.0",
-    "@n8n/eslint-plugin-community-nodes": "^0.40.0",
+    "@n8n/eslint-plugin-community-nodes": "^0.41.0",
     "@types/node": "^26.6.6",
-    "@typescript-eslint/parser": "^8.72.2",
+    "@typescript-eslint/parser": "^8.73.0",
     "eslint": "9.29.0",
-    "n8n-workflow": "^3.2.0",
+    "n8n-workflow": "^3.3.0",
     "tsup": "^9.0.0",
     "typescript": "~6.0.3",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
